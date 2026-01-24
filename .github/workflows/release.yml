@@ -200,7 +200,7 @@ jobs:
 
       - name: Install dependencies for main package
         working-directory: packages/node-client
-        run: pnpm install
+        run: pnpm install --no-frozen-lockfile
 
       - name: Build main package
         working-directory: packages/node-client
