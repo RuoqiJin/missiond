@@ -1,0 +1,52 @@
+{
+  "name": "@missiond/core",
+  "version": "0.1.0",
+  "description": "Node.js client for missiond - Claude Code multi-instance orchestration",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "bin"],
+  "bin": {
+    "missiond": "bin/missiond"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest",
+    "prepublishOnly": "pnpm build"
+  },
+  "keywords": ["missiond", "claude", "ai", "agent", "orchestration", "pty", "terminal"],
+  "author": "Ricky Jin",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rickyjim626/missiond"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^2.0.0"
+  },
+  "optionalDependencies": {
+    "@missiond/core-darwin-arm64": "0.1.0",
+    "@missiond/core-darwin-x64": "0.1.0",
+    "@missiond/core-linux-x64-gnu": "0.1.0",
+    "@missiond/core-linux-x64-musl": "0.1.0",
+    "@missiond/core-win32-x64": "0.1.0"
+  }
+}

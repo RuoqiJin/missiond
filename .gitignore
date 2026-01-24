@@ -2,14 +2,26 @@
 /target/
 **/*.rs.bk
 
+# Node.js
+node_modules/
+dist/
+*.tsbuildinfo
+.pnpm-debug.log
+
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+.cursor/
+.cursorindexingignore
+.specstory/
 
 # macOS
 .DS_Store
 
 # Logs
 *.log
+
+# Misc
+*.md.bak
