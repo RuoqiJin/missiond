@@ -68,6 +68,6 @@ dirs = "5.0"
 crossterm = "0.28"
 
 # Internal crates
-missiond-core = { path = "crates/missiond-core" }
-missiond-runner = { path = "crates/missiond-runner" }
-missiond-mcp = { path = "crates/missiond-mcp" }
+missiond-core = { version = "0.1.0", path = "crates/missiond-core" }
+missiond-runner = { version = "0.1.0", path = "crates/missiond-runner" }
+missiond-mcp = { version = "0.1.0", path = "crates/missiond-mcp" }
