@@ -1,0 +1,68 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/missiond-core",
+    "crates/missiond-runner",
+    "crates/missiond-mcp",
+    "crates/missiond-attach",
+    "crates/missiond-daemon",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Xiaojin Pro"]
+license = "MIT"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# PTY
+portable-pty = "0.8"
+
+# Terminal emulation
+alacritty_terminal = "0.25"
+vte = "0.14"
+
+# WebSocket
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+
+# File watching
+notify = "7.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Regex
+regex = "1.11"
+
+# Utilities
+uuid = { version = "1.11", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+
+# Terminal
+crossterm = "0.28"
+
+# Internal crates
+missiond-core = { path = "crates/missiond-core" }
+missiond-runner = { path = "crates/missiond-runner" }
+missiond-mcp = { path = "crates/missiond-mcp" }
