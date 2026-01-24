@@ -21,44 +21,57 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS ARM64
+          # macOS ARM64 (GitHub hosted)
           - os: macos-latest
             target: aarch64-apple-darwin
             platform: darwin-arm64
+            self-hosted: false
 
-          # macOS x64 (Intel)
+          # macOS x64 Intel (GitHub hosted)
           - os: macos-15
             target: x86_64-apple-darwin
             platform: darwin-x64
+            self-hosted: false
 
-          # Linux x64 GNU
-          - os: ubuntu-latest
+          # Linux x64 GNU (Self-hosted - XJP Private Cloud)
+          - os: [self-hosted, linux, x64, xjp]
             target: x86_64-unknown-linux-gnu
             platform: linux-x64-gnu
+            self-hosted: true
 
-          # Linux x64 MUSL (static)
-          - os: ubuntu-latest
+          # Linux x64 MUSL static (Self-hosted - XJP Private Cloud)
+          - os: [self-hosted, linux, x64, xjp]
             target: x86_64-unknown-linux-musl
             platform: linux-x64-musl
-
-          # Windows x64 - disabled: Unix sockets not supported
-          # - os: windows-latest
-          #   target: x86_64-pc-windows-msvc
-          #   platform: win32-x64
+            self-hosted: true
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
+      # Only install Rust on GitHub-hosted runners
+      - name: Install Rust toolchain (GitHub hosted)
+        if: ${{ !matrix.self-hosted }}
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install musl-tools (Linux MUSL)
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+      # For self-hosted, just ensure cargo is in PATH
+      - name: Setup Rust PATH (Self-hosted)
+        if: ${{ matrix.self-hosted }}
+        run: |
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          . "$HOME/.cargo/env"
+          rustc --version
+          cargo --version
+
+      # Only needed on GitHub-hosted Linux
+      - name: Install musl-tools (GitHub hosted)
+        if: matrix.target == 'x86_64-unknown-linux-musl' && !matrix.self-hosted
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: Setup Rust cache
+      # Skip cache on self-hosted (persistent cache)
+      - name: Setup Rust cache (GitHub hosted)
+        if: ${{ !matrix.self-hosted }}
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
@@ -68,21 +81,12 @@ jobs:
           cargo build --release --target ${{ matrix.target }} -p missiond-daemon
           cargo build --release --target ${{ matrix.target }} -p missiond-mcp
 
-      - name: Prepare artifacts (Unix)
-        if: runner.os != 'Windows'
+      - name: Prepare artifacts
         run: |
           mkdir -p artifacts/bin
           cp target/${{ matrix.target }}/release/missiond artifacts/bin/
           cp target/${{ matrix.target }}/release/mission-mcp artifacts/bin/
           chmod +x artifacts/bin/*
-
-      - name: Prepare artifacts (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path artifacts/bin
-          Copy-Item target/${{ matrix.target }}/release/missiond.exe artifacts/bin/
-          Copy-Item target/${{ matrix.target }}/release/mission-mcp.exe artifacts/bin/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -120,10 +124,6 @@ jobs:
           # linux-x64-musl
           mkdir -p packages/core-linux-x64-musl/bin
           cp artifacts/binaries-linux-x64-musl/* packages/core-linux-x64-musl/bin/
-
-          # win32-x64 - disabled: Unix sockets not supported
-          # mkdir -p packages/core-win32-x64/bin
-          # cp artifacts/binaries-win32-x64/* packages/core-win32-x64/bin/
 
       - name: Upload packaged artifacts
         uses: actions/upload-artifact@v4
