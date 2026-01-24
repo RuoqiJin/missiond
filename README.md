@@ -59,7 +59,8 @@ npm install @missiond/core
 The npm package includes pre-built binaries for:
 - macOS (ARM64, x64)
 - Linux (x64 glibc, x64 musl)
-- Windows (x64)
+
+> **Note:** Windows is not currently supported (requires Unix sockets).
 
 ## Quick Start
 
