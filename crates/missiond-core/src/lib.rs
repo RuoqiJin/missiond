@@ -14,6 +14,7 @@ pub mod core;
 pub mod db;
 pub mod pty;
 pub mod semantic;
+pub mod sync;
 pub mod types;
 pub mod ws;
 
@@ -58,3 +59,6 @@ pub use cc_tasks::{
 
 // Re-export WebSocket types
 pub use ws::{PTYWebSocketServer, WSServerOptions};
+
+// Re-export Sync types
+pub use sync::{SyncClient, SyncClientOptions, SyncEvent, SyncRelay, SyncRelayOptions};
