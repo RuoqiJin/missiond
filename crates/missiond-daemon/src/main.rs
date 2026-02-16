@@ -445,7 +445,18 @@ impl AppState {
                 } = serde_json::from_value(args)?;
                 let timeout_ms = timeout_ms.unwrap_or(300_000);
                 let res = self.pty.send(&slot_id, &message, timeout_ms).await?;
-                Ok(ToolResult::text(res.response))
+                let state = self
+                    .pty
+                    .get_status(&slot_id)
+                    .await
+                    .map(|s| format!("{:?}", s.state))
+                    .unwrap_or_else(|| "unknown".to_string());
+                Ok(ToolResult::json(&serde_json::json!({
+                    "delivered": true,
+                    "response": res.response,
+                    "durationMs": res.duration_ms,
+                    "state": state,
+                })))
             }
             "mission_pty_kill" => {
                 let PTYKillArgs { slot_id } = serde_json::from_value(args)?;
@@ -483,6 +494,9 @@ impl AppState {
             "mission_pty_confirm" => {
                 let PTYConfirmArgs { slot_id, response } = serde_json::from_value(args)?;
                 let response_echo = response.clone();
+
+                // Capture pending confirm info before confirming (for auto-allow recording)
+                let pending = self.pty.get_pending_confirm(&slot_id).await;
 
                 // Map Node-style response (boolean/number/string) to PTY confirm input.
                 let resp = match response {
@@ -526,7 +540,33 @@ impl AppState {
                     _ => missiond_core::ConfirmResponse::Yes,
                 };
 
+                // Determine if this is an approval (Yes, Option(1), Option(2))
+                let is_approval = matches!(
+                    resp,
+                    missiond_core::ConfirmResponse::Yes
+                        | missiond_core::ConfirmResponse::Option(1)
+                        | missiond_core::ConfirmResponse::Option(2)
+                );
+
                 self.pty.confirm(&slot_id, resp).await?;
+
+                // Auto-record permission for approved tool confirmations
+                if is_approval {
+                    if let Some(ref info) = pending {
+                        if let Some(ref tool) = info.tool {
+                            if let Some(status) = self.pty.get_status(&slot_id).await {
+                                self.permission.add_role_auto_allow(&status.role, &tool.name);
+                                info!(
+                                    role = %status.role,
+                                    pattern = %tool.name,
+                                    slot_id = %slot_id,
+                                    "Auto-allow recorded after confirm approval"
+                                );
+                            }
+                        }
+                    }
+                }
+
                 Ok(ToolResult::json(&serde_json::json!({
                     "success": true,
                     "slotId": slot_id,
