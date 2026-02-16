@@ -451,12 +451,16 @@ impl PTYSession {
         })?;
 
         // Build command: claude --add-dir "cwd"
-        // Platform-specific shell handling
+        // Use a login shell to ensure proper environment (nvm, homebrew, etc.)
         #[cfg(unix)]
         let mut cmd = {
-            let mut c = CommandBuilder::new("zsh");
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+            info!(shell = %shell, cwd = %self.cwd.display(), "Spawning claude via login shell");
+
+            let mut c = CommandBuilder::new(&shell);
             c.args([
-                "-l",
+                "-l",  // login shell (loads .zprofile, .zshrc)
+                "-i",  // interactive (needed for proper PTY behavior)
                 "-c",
                 &format!("claude --add-dir \"{}\"", self.cwd.display()),
             ]);
@@ -475,28 +479,16 @@ impl PTYSession {
 
         cmd.cwd(&self.cwd);
 
-        // Set environment (platform-specific)
-        #[cfg(unix)]
-        {
-            cmd.env("TERM", "xterm-256color");
-            if let Ok(path) = std::env::var("PATH") {
-                cmd.env("PATH", path);
-            }
-            if let Ok(home) = std::env::var("HOME") {
-                cmd.env("HOME", home);
-            }
+        // Inherit ALL environment variables from parent process.
+        // portable-pty's CommandBuilder starts with an empty env,
+        // so we must explicitly copy everything.
+        for (key, value) in std::env::vars() {
+            cmd.env(key, value);
         }
-
-        #[cfg(windows)]
-        {
-            cmd.env("TERM", "xterm-256color");
-            if let Ok(path) = std::env::var("PATH") {
-                cmd.env("PATH", path);
-            }
-            if let Ok(userprofile) = std::env::var("USERPROFILE") {
-                cmd.env("USERPROFILE", userprofile);
-            }
-        }
+        // Ensure TERM is set for proper terminal behavior
+        cmd.env("TERM", "xterm-256color");
+        // Remove CLAUDECODE env var so nested claude sessions can start
+        cmd.env_remove("CLAUDECODE");
 
         // Spawn child process
         let mut child = pty_pair.slave.spawn_command(cmd)?;
@@ -517,13 +509,20 @@ impl PTYSession {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         self.shutdown_tx = Some(shutdown_tx);
 
+        // Create channel for feeding PTY output to terminal emulator
+        let (term_feed_tx, term_feed_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+        // Spawn terminal feed task (bridges blocking read → async term mutex)
+        let term_for_feed = Arc::clone(&self.term);
+        tokio::spawn(Self::term_feed_loop(term_for_feed, term_feed_rx));
+
         // Spawn read task
         let term = Arc::clone(&self.term);
         let event_tx = self.event_tx.clone();
         let running = Arc::clone(&self.running);
 
         tokio::spawn(async move {
-            Self::read_loop(reader, term, event_tx, running, shutdown_rx).await;
+            Self::read_loop(reader, term, event_tx, running, shutdown_rx, term_feed_tx).await;
         });
 
         // Spawn state check task
@@ -587,11 +586,24 @@ impl PTYSession {
             info!(exit_code = exit_code, "PTY exited");
         });
 
-        // Wait for idle state (Claude ready)
-        self.wait_for_state(SessionState::Idle, Duration::from_secs(60))
-            .await?;
+        // NOTE: We no longer block here waiting for Idle state.
+        // The caller (PTYManager::spawn) decides whether to wait or return immediately.
 
         Ok(())
+    }
+
+    /// Feed loop - receives data from read_loop and feeds it into the terminal emulator
+    async fn term_feed_loop(
+        term: Arc<Mutex<Term<SessionEventListener>>>,
+        mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    ) {
+        use alacritty_terminal::vte::ansi::{self, Processor};
+        let mut processor: Processor = Processor::new();
+
+        while let Some(data) = rx.recv().await {
+            let mut term_guard = term.lock().await;
+            processor.advance(&mut *term_guard, &data);
+        }
     }
 
     /// Read loop - reads from PTY and feeds to terminal
@@ -601,6 +613,7 @@ impl PTYSession {
         event_tx: broadcast::Sender<SessionEvent>,
         running: Arc<AtomicBool>,
         _shutdown_rx: oneshot::Receiver<()>,
+        term_feed_tx: mpsc::UnboundedSender<Vec<u8>>,
     ) {
         // Move reader into a thread that will do blocking reads
         let running_clone = Arc::clone(&running);
@@ -614,9 +627,9 @@ impl PTYSession {
                     Ok(0) => break, // EOF
                     Ok(n) => {
                         let data = buf[..n].to_vec();
-                        // Note: We can't easily feed to terminal from here since Term is not Send
-                        // The terminal feeding should happen in the main async context
-                        // For now, just emit the data event
+                        // Feed to terminal emulator (for state detection + screen)
+                        let _ = term_feed_tx.send(data.clone());
+                        // Broadcast to WebSocket clients
                         let _ = event_tx.send(SessionEvent::Data(data));
                     }
                     Err(e) => {
@@ -666,16 +679,17 @@ impl PTYSession {
                 extractor_guard.extract(&*term_guard)
             };
 
-            // Get screen text for state detection
+            // Get screen text for state detection (read ALL visible lines)
             let last_lines = {
                 let term_guard = term.lock().await;
                 let grid = term_guard.grid();
                 let mut lines = Vec::new();
-                let total = grid.total_lines();
-                let start = if total > 20 { total - 20 } else { 0 };
-                for y in start..total {
+                let total_lines = grid.total_lines();
+                let rows = grid.screen_lines();
+                let start = if total_lines > rows { total_lines - rows } else { 0 };
+                for y in start..total_lines {
                     let line = alacritty_terminal::index::Line(y as i32);
-                    if y < total {
+                    if y < total_lines {
                         let row = &grid[line];
                         let text: String = row.into_iter().map(|cell| cell.c).collect();
                         lines.push(text.trim_end().to_string());

@@ -12,7 +12,7 @@ use anyhow::{anyhow, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use super::session::{
     ConfirmInfo, ConfirmResponse, PTYSession, PTYSessionOptions, PermissionDecision, SessionEvent,
@@ -42,6 +42,10 @@ pub struct PTYAgentInfo {
 pub struct PTYSpawnOptions {
     /// Automatically restart on crash
     pub auto_restart: bool,
+    /// Wait for Idle state before returning (default: false = async)
+    pub wait_for_idle: bool,
+    /// Timeout in seconds when waiting for Idle (default: 60)
+    pub timeout_secs: Option<u64>,
 }
 
 /// Result of executing a message
@@ -244,7 +248,7 @@ impl PTYManager {
             }
         });
 
-        // Start session
+        // Start session (launches process + background tasks, no longer blocks for Idle)
         session.start().await?;
 
         let pid = session.pid().await;
@@ -261,12 +265,68 @@ impl PTYManager {
         }
 
         // Store session
+        let session_arc = Arc::new(RwLock::new(session));
         {
             let mut sessions = self.sessions.write().await;
-            sessions.insert(slot.id.clone(), Arc::new(RwLock::new(session)));
+            sessions.insert(slot.id.clone(), Arc::clone(&session_arc));
         }
 
         info!(slot_id = %slot.id, pid = ?pid, "PTY session started");
+
+        // Optionally wait for Idle state
+        if options.wait_for_idle {
+            let timeout_secs = options.timeout_secs.unwrap_or(60);
+            let session_guard = session_arc.read().await;
+            match session_guard
+                .wait_for_state(SessionState::Idle, Duration::from_secs(timeout_secs))
+                .await
+            {
+                Ok(_) => {
+                    // Update state to Idle in agent_info
+                    drop(session_guard);
+                    let mut agent_info = self.agent_info.write().await;
+                    if let Some(info) = agent_info.get_mut(&slot.id) {
+                        info.state = SessionState::Idle;
+                    }
+                }
+                Err(e) => {
+                    // Don't kill the session - it's still running, just not idle yet
+                    let current_state = session_guard.state().await;
+                    let current_pid = session_guard.pid().await;
+                    warn!(
+                        slot_id = %slot.id,
+                        pid = ?current_pid,
+                        state = ?current_state,
+                        "Timed out waiting for Idle, session still running"
+                    );
+                    drop(session_guard);
+                    // Update agent_info with current state
+                    let mut agent_info = self.agent_info.write().await;
+                    if let Some(info) = agent_info.get_mut(&slot.id) {
+                        info.state = current_state;
+                    }
+                    return Err(e);
+                }
+            }
+        } else {
+            // Async mode: spawn background task to update state when Idle is reached
+            let session_for_idle = Arc::clone(&session_arc);
+            let agent_info_for_idle = Arc::clone(&self.agent_info);
+            let slot_id_for_idle = slot.id.clone();
+            tokio::spawn(async move {
+                let session_guard = session_for_idle.read().await;
+                if session_guard
+                    .wait_for_state(SessionState::Idle, Duration::from_secs(120))
+                    .await
+                    .is_ok()
+                {
+                    let mut agent_info = agent_info_for_idle.write().await;
+                    if let Some(info) = agent_info.get_mut(&slot_id_for_idle) {
+                        info.state = SessionState::Idle;
+                    }
+                }
+            });
+        }
         let _ = self.event_tx.send(ManagerEvent::Spawned {
             slot_id: slot.id.clone(),
         });
