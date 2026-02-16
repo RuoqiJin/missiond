@@ -156,6 +156,11 @@ impl MissionControl {
         Ok(())
     }
 
+    /// Get a reference to the database
+    pub fn db(&self) -> &MissionDB {
+        &self.db
+    }
+
     // ============ Task Operations ============
 
     /// Submit a task (async, returns immediately)

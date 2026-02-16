@@ -39,7 +39,7 @@ impl IpcClient {
                 "name": name,
                 "arguments": arguments,
             })),
-            id: RequestId::Number(id),
+            id: Some(RequestId::Number(id)),
         };
 
         let mut stream = IpcStream::connect(&self.endpoint)

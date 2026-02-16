@@ -282,6 +282,18 @@ struct CCTriggerSwarmArgs {
     timeout_ms: Option<u64>,
 }
 
+// Board tasks args
+#[derive(Deserialize)]
+struct BoardListArgs {
+    #[serde(default)]
+    status: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct BoardIdArgs {
+    id: String,
+}
+
 impl AppState {
     async fn call_tool(&self, name: &str, args: Value) -> ToolResult {
         match self.call_tool_inner(name, args).await {
@@ -730,6 +742,83 @@ impl AppState {
                 Ok(ToolResult::text(res.response))
             }
 
+            // ===== Board Tasks (Personal Task Board) =====
+            "mission_board_list" => {
+                let BoardListArgs { status } =
+                    serde_json::from_value(args).unwrap_or(BoardListArgs { status: None });
+                let tasks = self
+                    .mission
+                    .db()
+                    .list_board_tasks(status.as_deref())
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json_pretty(&tasks))
+            }
+            "mission_board_create" => {
+                let input: missiond_core::types::CreateBoardTaskInput =
+                    serde_json::from_value(args)?;
+                let task = self
+                    .mission
+                    .db()
+                    .create_board_task(&input)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json_pretty(&task))
+            }
+            "mission_board_update" => {
+                let args_val: Value = args;
+                let id = args_val
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("Missing 'id' field"))?
+                    .to_string();
+                let update: missiond_core::types::UpdateBoardTaskInput =
+                    serde_json::from_value(args_val)?;
+                let task = self
+                    .mission
+                    .db()
+                    .update_board_task(&id, &update)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                match task {
+                    Some(t) => Ok(ToolResult::json_pretty(&t)),
+                    None => Ok(ToolResult::error("Task not found")),
+                }
+            }
+            "mission_board_get" => {
+                let BoardIdArgs { id } = serde_json::from_value(args)?;
+                let task = self
+                    .mission
+                    .db()
+                    .get_board_task(&id)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                match task {
+                    Some(t) => Ok(ToolResult::json_pretty(&t)),
+                    None => Ok(ToolResult::error("Task not found")),
+                }
+            }
+            "mission_board_delete" => {
+                let BoardIdArgs { id } = serde_json::from_value(args)?;
+                let deleted = self
+                    .mission
+                    .db()
+                    .delete_board_task(&id)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json(&serde_json::json!({
+                    "deleted": deleted,
+                    "id": id,
+                })))
+            }
+            "mission_board_toggle" => {
+                let BoardIdArgs { id } = serde_json::from_value(args)?;
+                let task = self
+                    .mission
+                    .db()
+                    .toggle_board_task(&id)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                match task {
+                    Some(t) => Ok(ToolResult::json_pretty(&t)),
+                    None => Ok(ToolResult::error("Task not found")),
+                }
+            }
+
             _ => {
                 let mut res = ToolResult::text(format!("Unknown tool: {}", name));
                 res.is_error = Some(true);
@@ -772,7 +861,7 @@ async fn handle_ipc_connection(state: AppState, mut reader: BufReader<IpcStream>
 }
 
 async fn handle_ipc_request(state: AppState, request: Request) -> Response {
-    let id = request.id.clone();
+    let id = request.id.clone().unwrap_or(RequestId::Null);
     let method = request.method.as_str();
     let params = request.params.unwrap_or(Value::Null);
 

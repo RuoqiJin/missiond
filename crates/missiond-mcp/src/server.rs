@@ -103,40 +103,61 @@ impl<H: ToolHandler> McpServer<H> {
 
             debug!("Received: {}", line);
 
-            let response = self.handle_message(line).await;
-            let response_json = protocol::serialize_response_string(&response)?;
+            // handle_message returns None for notifications
+            if let Some(response) = self.handle_message(line).await {
+                let response_json = protocol::serialize_response_string(&response)?;
 
-            debug!("Sending: {}", response_json);
+                debug!("Sending: {}", response_json);
 
-            stdout.write_all(response_json.as_bytes()).await?;
-            stdout.write_all(b"\n").await?;
-            stdout.flush().await?;
+                stdout.write_all(response_json.as_bytes()).await?;
+                stdout.write_all(b"\n").await?;
+                stdout.flush().await?;
+            }
         }
 
         Ok(())
     }
 
     /// Handle a single JSON-RPC message
-    async fn handle_message(&mut self, message: &str) -> Response {
+    /// Returns None for notifications (which don't require a response)
+    async fn handle_message(&mut self, message: &str) -> Option<Response> {
         match protocol::parse_request_str(message) {
-            Ok(request) => self.handle_request(request).await,
-            Err(err) => Response::from_error(RequestId::Null, err),
+            Ok(request) => {
+                // Notifications have no id - don't respond
+                if request.id.is_none() {
+                    self.handle_notification(&request.method);
+                    return None;
+                }
+                Some(self.handle_request(request).await)
+            }
+            Err(err) => Some(Response::from_error(RequestId::Null, err)),
         }
     }
 
-    /// Handle a parsed request
+    /// Handle a notification (no response required)
+    fn handle_notification(&mut self, method: &str) {
+        match method {
+            "notifications/initialized" => {
+                debug!("Received initialized notification");
+            }
+            "notifications/cancelled" => {
+                debug!("Received cancelled notification");
+            }
+            _ => {
+                debug!("Received unknown notification: {}", method);
+            }
+        }
+    }
+
+    /// Handle a parsed request (guaranteed to have an id)
     async fn handle_request(&mut self, request: Request) -> Response {
-        let id = request.id.clone();
+        // Safe to unwrap: we only call this for requests with id
+        let id = request.id.clone().unwrap_or(RequestId::Null);
         let method = request.method.as_str();
         let params = request.params.unwrap_or(Value::Null);
 
         match method {
             "initialize" => self.handle_initialize(id, params),
-            "notifications/initialized" => {
-                // This is a notification, we don't need to respond
-                // But since we're treating everything as request/response, return success
-                Response::success(id, json!({}))
-            }
             "tools/list" => self.handle_tools_list(id),
             "tools/call" => self.handle_tools_call(id, params).await,
             "ping" => Response::success(id, json!({})),
@@ -233,7 +254,7 @@ mod tests {
             jsonrpc: "2.0".to_string(),
             method: "initialize".to_string(),
             params: Some(json!({})),
-            id: RequestId::Number(1),
+            id: Some(RequestId::Number(1)),
         };
 
         let response = server.handle_request(request).await;
@@ -277,7 +298,7 @@ mod tests {
             jsonrpc: "2.0".to_string(),
             method: "unknown/method".to_string(),
             params: None,
-            id: RequestId::Number(1),
+            id: Some(RequestId::Number(1)),
         };
 
         let response = server.handle_request(request).await;

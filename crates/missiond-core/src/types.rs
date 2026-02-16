@@ -185,6 +185,103 @@ pub struct TaskUpdate {
     pub finished_at: Option<i64>,
 }
 
+// ============ Board Task (Personal Task Board) ============
+
+/// Board task status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BoardTaskStatus {
+    Open,
+    Done,
+}
+
+impl BoardTaskStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BoardTaskStatus::Open => "open",
+            BoardTaskStatus::Done => "done",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "open" => Some(BoardTaskStatus::Open),
+            "done" => Some(BoardTaskStatus::Done),
+            _ => None,
+        }
+    }
+}
+
+/// A personal task on the board
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardTask {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub status: BoardTaskStatus,
+    pub priority: String,   // high, medium, low
+    pub category: String,   // deploy, dev, infra, test, other
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    pub order_idx: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Input for creating a board task
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateBoardTaskInput {
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub priority: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub server: Option<String>,
+    #[serde(default)]
+    pub due_date: Option<String>,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+}
+
+/// Partial update for a board task
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateBoardTaskInput {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub priority: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub server: Option<String>,
+    #[serde(default)]
+    pub due_date: Option<String>,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub order_idx: Option<i64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

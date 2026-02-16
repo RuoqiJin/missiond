@@ -19,8 +19,9 @@ pub struct Request {
     /// Request parameters (optional)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<Value>,
-    /// Request ID (can be string, number, or null)
-    pub id: RequestId,
+    /// Request ID (None for notifications, Some for requests)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<RequestId>,
 }
 
 /// JSON-RPC request ID
@@ -222,7 +223,7 @@ mod tests {
         let json = r#"{"jsonrpc":"2.0","method":"test","id":1}"#;
         let req = parse_request_str(json).unwrap();
         assert_eq!(req.method, "test");
-        assert_eq!(req.id, RequestId::Number(1));
+        assert_eq!(req.id, Some(RequestId::Number(1)));
     }
 
     #[test]
@@ -230,8 +231,17 @@ mod tests {
         let json = r#"{"jsonrpc":"2.0","method":"test","params":{"key":"value"},"id":"abc"}"#;
         let req = parse_request_str(json).unwrap();
         assert_eq!(req.method, "test");
-        assert_eq!(req.id, RequestId::String("abc".to_string()));
+        assert_eq!(req.id, Some(RequestId::String("abc".to_string())));
         assert!(req.params.is_some());
+    }
+
+    #[test]
+    fn test_parse_notification() {
+        // Notifications have no id field
+        let json = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        let req = parse_request_str(json).unwrap();
+        assert_eq!(req.method, "notifications/initialized");
+        assert_eq!(req.id, None);
     }
 
     #[test]
