@@ -16,6 +16,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Mutex};
 use tokio_tungstenite::tungstenite::handshake::server::{Request as WsRequest, Response as WsResponse};
@@ -190,12 +191,36 @@ impl PTYWebSocketServer {
         info!("PTY WebSocket server stopped");
     }
 
+    /// Handle HTTP health check (non-WebSocket request)
+    async fn handle_health(mut stream: TcpStream) -> anyhow::Result<()> {
+        let body = r#"{"status":"ok"}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).await?;
+        stream.shutdown().await?;
+        Ok(())
+    }
+
     async fn handle_connection(
         stream: TcpStream,
         addr: SocketAddr,
         pty_manager: Option<Arc<PTYManager>>,
         cc_tasks_watcher: Option<Arc<Mutex<CCTasksWatcher>>>,
     ) -> anyhow::Result<()> {
+        // Peek at first bytes to detect non-WebSocket HTTP requests (e.g. /health)
+        let mut peek_buf = [0u8; 512];
+        let n = stream.peek(&mut peek_buf).await.unwrap_or(0);
+        if n > 0 {
+            let request_line = String::from_utf8_lossy(&peek_buf[..n]);
+            // Check if it's a plain HTTP request to /health (no Upgrade header)
+            if request_line.starts_with("GET /health") && !request_line.contains("Upgrade:") {
+                return Self::handle_health(stream).await;
+            }
+        }
+
         // Capture path from handshake
         let path_cell = Arc::new(StdMutex::new(String::new()));
         let path_cell2 = Arc::clone(&path_cell);

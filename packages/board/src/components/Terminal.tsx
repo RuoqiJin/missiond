@@ -5,10 +5,9 @@ import 'xterm/css/xterm.css';
 
 interface TerminalProps {
   slotId: string;
-  wsPort?: number;
 }
 
-export function Terminal({ slotId, wsPort = 9120 }: TerminalProps) {
+export function Terminal({ slotId }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -22,7 +21,9 @@ export function Terminal({ slotId, wsPort = 9120 }: TerminalProps) {
     if (!term) return;
 
     setStatus('connecting');
-    const ws = new WebSocket(`ws://localhost:${wsPort}/pty/${slotId}`);
+    // Use Vite proxy: /ws/pty/... → ws://localhost:9120/pty/...
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${protocol}//${location.host}/ws/pty/${slotId}`);
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -58,7 +59,7 @@ export function Terminal({ slotId, wsPort = 9120 }: TerminalProps) {
     ws.onerror = () => {
       setStatus('disconnected');
     };
-  }, [slotId, wsPort]);
+  }, [slotId]);
 
   useEffect(() => {
     if (!containerRef.current) return;

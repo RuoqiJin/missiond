@@ -84,7 +84,8 @@ fn log_filter() -> tracing_subscriber::EnvFilter {
             other => other.to_string(),
         }
     } else {
-        "warn".to_string()
+        // Daemon default: info (need visibility into PTY spawns, IPC, etc.)
+        "info".to_string()
     };
 
     tracing_subscriber::EnvFilter::try_new(level)
@@ -176,6 +177,10 @@ struct InboxArgs {
 struct PTYSpawnArgs {
     #[serde(rename = "slotId")]
     slot_id: String,
+    #[serde(rename = "waitForIdle", default)]
+    wait_for_idle: Option<bool>,
+    #[serde(rename = "timeoutSecs", default)]
+    timeout_secs: Option<u64>,
     #[serde(rename = "autoRestart", default)]
     auto_restart: Option<bool>,
 }
@@ -402,6 +407,8 @@ impl AppState {
             "mission_pty_spawn" => {
                 let PTYSpawnArgs {
                     slot_id,
+                    wait_for_idle,
+                    timeout_secs,
                     auto_restart,
                 } = serde_json::from_value(args)?;
                 let slot = self
@@ -423,6 +430,8 @@ impl AppState {
                         &pty_slot,
                         PTYSpawnOptions {
                             auto_restart: auto_restart.unwrap_or(false),
+                            wait_for_idle: wait_for_idle.unwrap_or(false),
+                            timeout_secs,
                         },
                     )
                     .await?;
@@ -742,6 +751,32 @@ impl AppState {
                 Ok(ToolResult::text(res.response))
             }
 
+            // ===== Health =====
+            "mission_health" => {
+                let agents = self.pty.get_all_status().await;
+                let pty_status: Vec<Value> = agents
+                    .iter()
+                    .map(|a| {
+                        serde_json::json!({
+                            "slotId": a.slot_id,
+                            "state": a.state,
+                            "pid": a.pid,
+                        })
+                    })
+                    .collect();
+
+                Ok(ToolResult::json(&serde_json::json!({
+                    "status": "ok",
+                    "ipc": "connected",
+                    "wsPort": ws_port(),
+                    "pty": pty_status,
+                    "uptime": std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                })))
+            }
+
             // ===== Board Tasks (Personal Task Board) =====
             "mission_board_list" => {
                 let BoardListArgs { status } =
@@ -895,13 +930,30 @@ async fn bind_ipc_listener(endpoint: &str) -> Result<IpcListener> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(log_filter())
-        .with_writer(std::io::stderr)
-        .init();
-
     let home = default_mission_home();
     std::fs::create_dir_all(&home).ok();
+
+    // Dual-layer logging: stderr + file (daily rotation)
+    let log_dir = home.join("logs");
+    std::fs::create_dir_all(&log_dir).ok();
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "missiond.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    tracing_subscriber::registry()
+        .with(log_filter())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(non_blocking)
+                .with_ansi(false),
+        )
+        .init();
 
     let db_path = db_path();
     let slots_path = slots_config_path();

@@ -256,13 +256,21 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         // ===== PTY Interactive Sessions =====
         ToolDefinition::new(
             "mission_pty_spawn",
-            "启动 PTY 交互式会话（像人一样操作 Claude Code）",
+            "启动 PTY 交互式会话（像人一样操作 Claude Code）。默认异步返回，不等待 Idle",
             json!({
                 "type": "object",
                 "properties": {
                     "slotId": {
                         "type": "string",
                         "description": "工位 ID"
+                    },
+                    "waitForIdle": {
+                        "type": "boolean",
+                        "description": "是否等待 Claude 就绪 (默认 false，立即返回)"
+                    },
+                    "timeoutSecs": {
+                        "type": "number",
+                        "description": "等待 Idle 超时秒数 (默认 60，仅 waitForIdle=true 时生效)"
                     },
                     "autoRestart": {
                         "type": "boolean",
@@ -586,6 +594,16 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     }
                 },
                 "required": ["slotId", "tasks"]
+            }),
+        ),
+
+        // ===== Health =====
+        ToolDefinition::new(
+            "mission_health",
+            "检查 missiond 守护进程健康状态：IPC、WebSocket、PTY、数据库",
+            json!({
+                "type": "object",
+                "properties": {}
             }),
         ),
 
