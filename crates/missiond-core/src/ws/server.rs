@@ -306,6 +306,15 @@ impl PTYWebSocketServer {
             let _ = send_json(&mut ws_tx, &msg).await;
         }
 
+        // Send current state so new connections see the correct status immediately
+        if let Some(status) = pty_manager.get_status(slot_id).await {
+            let msg = PtyOutMessage::State {
+                state: status.state.clone(),
+                prev_state: status.state,
+            };
+            let _ = send_json(&mut ws_tx, &msg).await;
+        }
+
         // Subscribe to session events
         let mut session_rx = match pty_manager.subscribe_session(slot_id).await {
             Ok(rx) => rx,

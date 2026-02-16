@@ -35,6 +35,10 @@ static OPTION_LINE_PATTERN: Lazy<Regex> =
 static YN_CLEANUP_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\s*\[Y/n\].*|\s*\(yes/no\).*").unwrap());
 
+/// Skill confirmation pattern: Use skill "skill-name"
+static SKILL_CONFIRM_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)Use skill "([^"]+)""#).unwrap());
+
 /// Claude Code confirm parser
 ///
 /// Parses confirmation dialogs and formats responses:
@@ -78,34 +82,48 @@ impl ClaudeCodeConfirmParser {
     /// Supports formats:
     /// - `xjp-mcp - xjp_secret_get(key: "value")`
     /// - `xjp-mcp - xjp_secret_get(key: "value") (MCP)`
+    /// - `Use skill "skill-name"`
     fn parse_tool_info(&self, text: &str) -> Option<ToolInfo> {
-        let caps = TOOL_INFO_PATTERN.captures(text)?;
+        // Try standard MCP tool format first
+        if let Some(caps) = TOOL_INFO_PATTERN.captures(text) {
+            let mcp_server = caps.get(1)?.as_str().to_string();
+            let name = caps.get(2)?.as_str().to_string();
+            let params_str = caps.get(3)?.as_str();
 
-        let mcp_server = caps.get(1)?.as_str().to_string();
-        let name = caps.get(2)?.as_str().to_string();
-        let params_str = caps.get(3)?.as_str();
+            // Parse parameters
+            let mut params = HashMap::new();
+            for caps in PARAM_PATTERN.captures_iter(params_str) {
+                if let (Some(key), Some(value)) = (caps.get(1), caps.get(2)) {
+                    let key = key.as_str().to_string();
+                    let mut value = value.as_str().to_string();
 
-        // Parse parameters
-        let mut params = HashMap::new();
-        for caps in PARAM_PATTERN.captures_iter(params_str) {
-            if let (Some(key), Some(value)) = (caps.get(1), caps.get(2)) {
-                let key = key.as_str().to_string();
-                let mut value = value.as_str().to_string();
+                    // Remove quotes if present
+                    if value.starts_with('"') && value.ends_with('"') {
+                        value = value[1..value.len() - 1].to_string();
+                    }
 
-                // Remove quotes if present
-                if value.starts_with('"') && value.ends_with('"') {
-                    value = value[1..value.len() - 1].to_string();
+                    params.insert(key, value);
                 }
-
-                params.insert(key, value);
             }
+
+            return Some(ToolInfo {
+                name,
+                mcp_server: Some(mcp_server),
+                params,
+            });
         }
 
-        Some(ToolInfo {
-            name,
-            mcp_server: Some(mcp_server),
-            params,
-        })
+        // Try Skill confirmation format: Use skill "skill-name"
+        if let Some(caps) = SKILL_CONFIRM_PATTERN.captures(text) {
+            let skill_name = caps.get(1)?.as_str().to_string();
+            return Some(ToolInfo {
+                name: format!("Skill({})", skill_name),
+                mcp_server: None,
+                params: HashMap::new(),
+            });
+        }
+
+        None
     }
 
     /// Parse options from text

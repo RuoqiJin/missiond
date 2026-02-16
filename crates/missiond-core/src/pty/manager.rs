@@ -214,6 +214,7 @@ impl PTYManager {
         // Set up event forwarding
         let event_tx = self.event_tx.clone();
         let slot_id_for_events = slot.id.clone();
+        let agent_info_for_forward = Arc::clone(&self.agent_info);
         let mut session_rx = session.subscribe();
 
         tokio::spawn(async move {
@@ -223,6 +224,13 @@ impl PTYManager {
                         new_state,
                         prev_state,
                     } => {
+                        // Sync agent_info state
+                        {
+                            let mut info = agent_info_for_forward.write().await;
+                            if let Some(entry) = info.get_mut(&slot_id_for_events) {
+                                entry.state = new_state;
+                            }
+                        }
                         let _ = event_tx.send(ManagerEvent::StateChange {
                             slot_id: slot_id_for_events.clone(),
                             new_state,
@@ -237,6 +245,14 @@ impl PTYManager {
                         });
                     }
                     SessionEvent::Exit(code) => {
+                        // Update agent_info on exit
+                        {
+                            let mut info = agent_info_for_forward.write().await;
+                            if let Some(entry) = info.get_mut(&slot_id_for_events) {
+                                entry.state = SessionState::Exited;
+                                entry.pid = None;
+                            }
+                        }
                         let _ = event_tx.send(ManagerEvent::Exited {
                             slot_id: slot_id_for_events.clone(),
                             exit_code: code,
@@ -651,6 +667,16 @@ impl PTYManager {
     pub async fn restart(&self, slot: &Slot, options: PTYSpawnOptions) -> Result<PTYAgentInfo> {
         self.kill(&slot.id).await?;
         self.spawn(slot, options).await
+    }
+
+    /// Get pending confirmation info for a slot
+    pub async fn get_pending_confirm(&self, slot_id: &str) -> Option<ConfirmInfo> {
+        let session = {
+            let sessions = self.sessions.read().await;
+            sessions.get(slot_id).cloned()?
+        };
+        let session = session.read().await;
+        session.pending_tool_confirm().await
     }
 
     /// Get session status
