@@ -5,7 +5,10 @@
 use rusqlite::{params, Connection, Result as SqliteResult};
 use std::path::Path;
 
-use crate::types::{EventType, InboxMessage, Task, TaskEvent, TaskStatus, TaskUpdate};
+use crate::types::{
+    BoardTask, BoardTaskStatus, CreateBoardTaskInput, UpdateBoardTaskInput, EventType,
+    InboxMessage, Task, TaskEvent, TaskStatus, TaskUpdate,
+};
 
 const SCHEMA: &str = r#"
 -- Tasks table
@@ -55,6 +58,25 @@ CREATE TABLE IF NOT EXISTS slot_sessions (
   session_id TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 );
+
+-- Board tasks (personal task board)
+CREATE TABLE IF NOT EXISTS board_tasks (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'open',
+  priority TEXT NOT NULL DEFAULT 'medium',
+  category TEXT NOT NULL DEFAULT 'other',
+  project TEXT,
+  server TEXT,
+  due_date TEXT,
+  parent_id TEXT,
+  order_idx INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_board_tasks_status ON board_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_board_tasks_parent ON board_tasks(parent_id);
 "#;
 
 /// SQLite database operations class
@@ -398,6 +420,231 @@ impl MissionDB {
             sessions.push(session?);
         }
         Ok(sessions)
+    }
+
+    // ============ Board Tasks ============
+
+    /// Insert a new board task
+    pub fn insert_board_task(&self, task: &BoardTask) -> SqliteResult<()> {
+        self.conn.execute(
+            "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, order_idx, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                task.id,
+                task.title,
+                task.description,
+                task.status.as_str(),
+                task.priority,
+                task.category,
+                task.project,
+                task.server,
+                task.due_date,
+                task.parent_id,
+                task.order_idx,
+                task.created_at,
+                task.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Create a board task from input
+    pub fn create_board_task(&self, input: &CreateBoardTaskInput) -> SqliteResult<BoardTask> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let id = uuid::Uuid::new_v4().to_string();
+
+        // Get max order for siblings
+        let max_order: i64 = if let Some(ref pid) = input.parent_id {
+            self.conn
+                .query_row(
+                    "SELECT COALESCE(MAX(order_idx), -1) FROM board_tasks WHERE parent_id = ?1",
+                    params![pid],
+                    |row| row.get(0),
+                )
+                .unwrap_or(-1)
+        } else {
+            self.conn
+                .query_row(
+                    "SELECT COALESCE(MAX(order_idx), -1) FROM board_tasks WHERE parent_id IS NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(-1)
+        };
+
+        let task = BoardTask {
+            id,
+            title: input.title.clone(),
+            description: input.description.clone().unwrap_or_default(),
+            status: BoardTaskStatus::Open,
+            priority: input.priority.clone().unwrap_or_else(|| "medium".to_string()),
+            category: input.category.clone().unwrap_or_else(|| "other".to_string()),
+            project: input.project.clone(),
+            server: input.server.clone(),
+            due_date: input.due_date.clone(),
+            parent_id: input.parent_id.clone(),
+            order_idx: max_order + 1,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+
+        self.insert_board_task(&task)?;
+        Ok(task)
+    }
+
+    /// Get a board task by ID
+    pub fn get_board_task(&self, id: &str) -> SqliteResult<Option<BoardTask>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM board_tasks WHERE id = ?")?;
+        let mut rows = stmt.query(params![id])?;
+
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::row_to_board_task(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// List all board tasks (optionally filtered by status)
+    pub fn list_board_tasks(&self, status: Option<&str>) -> SqliteResult<Vec<BoardTask>> {
+        let mut tasks = Vec::new();
+
+        if let Some(s) = status {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT * FROM board_tasks WHERE status = ?1 ORDER BY order_idx ASC")?;
+            let rows = stmt.query_map(params![s], |row| Self::row_to_board_task(row))?;
+            for task in rows {
+                tasks.push(task?);
+            }
+        } else {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT * FROM board_tasks ORDER BY order_idx ASC")?;
+            let rows = stmt.query_map([], |row| Self::row_to_board_task(row))?;
+            for task in rows {
+                tasks.push(task?);
+            }
+        }
+
+        Ok(tasks)
+    }
+
+    /// Update a board task
+    pub fn update_board_task(&self, id: &str, update: &UpdateBoardTaskInput) -> SqliteResult<Option<BoardTask>> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut fields = vec!["updated_at = ?".to_string()];
+        let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now)];
+
+        macro_rules! push_field {
+            ($name:ident, $col:expr) => {
+                if let Some(ref v) = update.$name {
+                    fields.push(format!("{} = ?", $col));
+                    values.push(Box::new(v.clone()));
+                }
+            };
+        }
+
+        push_field!(title, "title");
+        push_field!(description, "description");
+        push_field!(status, "status");
+        push_field!(priority, "priority");
+        push_field!(category, "category");
+        push_field!(project, "project");
+        push_field!(server, "server");
+        push_field!(due_date, "due_date");
+        push_field!(parent_id, "parent_id");
+
+        if let Some(idx) = update.order_idx {
+            fields.push("order_idx = ?".to_string());
+            values.push(Box::new(idx));
+        }
+
+        let sql = format!(
+            "UPDATE board_tasks SET {} WHERE id = ?",
+            fields.join(", ")
+        );
+        values.push(Box::new(id.to_string()));
+
+        let params: Vec<&dyn rusqlite::ToSql> = values.iter().map(|v| v.as_ref()).collect();
+        self.conn.execute(&sql, params.as_slice())?;
+
+        self.get_board_task(id)
+    }
+
+    /// Delete a board task and all descendants
+    pub fn delete_board_task(&self, id: &str) -> SqliteResult<i64> {
+        // Collect all descendant IDs recursively
+        let mut to_delete = vec![id.to_string()];
+        let mut i = 0;
+        while i < to_delete.len() {
+            let current = to_delete[i].clone();
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id FROM board_tasks WHERE parent_id = ?")?;
+            let children: Vec<String> = stmt
+                .query_map(params![current], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            to_delete.extend(children);
+            i += 1;
+        }
+
+        let mut deleted = 0i64;
+        for tid in &to_delete {
+            let r = self
+                .conn
+                .execute("DELETE FROM board_tasks WHERE id = ?", params![tid])?;
+            deleted += r as i64;
+        }
+        Ok(deleted)
+    }
+
+    /// Toggle a board task status (open <-> done)
+    pub fn toggle_board_task(&self, id: &str) -> SqliteResult<Option<BoardTask>> {
+        if let Some(task) = self.get_board_task(id)? {
+            let new_status = match task.status {
+                BoardTaskStatus::Open => "done",
+                BoardTaskStatus::Done => "open",
+            };
+            let update = UpdateBoardTaskInput {
+                status: Some(new_status.to_string()),
+                ..Default::default()
+            };
+            self.update_board_task(id, &update)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Clear all done board tasks
+    pub fn clear_done_board_tasks(&self) -> SqliteResult<i64> {
+        let result = self
+            .conn
+            .execute("DELETE FROM board_tasks WHERE status = 'done'", [])?;
+        Ok(result as i64)
+    }
+
+    fn row_to_board_task(row: &rusqlite::Row) -> SqliteResult<BoardTask> {
+        let status_str: String = row.get("status")?;
+        let status = BoardTaskStatus::from_str(&status_str).unwrap_or(BoardTaskStatus::Open);
+
+        Ok(BoardTask {
+            id: row.get("id")?,
+            title: row.get("title")?,
+            description: row.get("description")?,
+            status,
+            priority: row.get("priority")?,
+            category: row.get("category")?,
+            project: row.get("project")?,
+            server: row.get("server")?,
+            due_date: row.get("due_date")?,
+            parent_id: row.get("parent_id")?,
+            order_idx: row.get("order_idx")?,
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+        })
     }
 }
 

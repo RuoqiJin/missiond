@@ -588,6 +588,155 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                 "required": ["slotId", "tasks"]
             }),
         ),
+
+        // ===== Board Tasks (Personal Task Board) =====
+        ToolDefinition::new(
+            "mission_board_list",
+            "列出个人任务板上的所有任务。返回树形结构（含子任务）。可按状态筛选。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "description": "按状态筛选: open, done (不传则返回全部)"
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_board_create",
+            "在个人任务板上创建新任务。支持子任务（通过 parentId）。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "任务标题"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "任务描述"
+                    },
+                    "priority": {
+                        "type": "string",
+                        "description": "优先级: high, medium, low (默认 medium)"
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "分类: deploy, dev, infra, test, other (默认 other)"
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "关联项目 (如 xiaojinpro-backend)"
+                    },
+                    "server": {
+                        "type": "string",
+                        "description": "关联服务器 (如 私有云, ECS, GCP)"
+                    },
+                    "dueDate": {
+                        "type": "string",
+                        "description": "截止日期 (YYYY-MM-DD)"
+                    },
+                    "parentId": {
+                        "type": "string",
+                        "description": "父任务 ID (创建子任务时使用)"
+                    }
+                },
+                "required": ["title"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_board_update",
+            "更新任务板上的任务。可修改标题、状态、优先级等任意字段。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "任务 ID"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "新标题"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "新描述"
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "新状态: open, done"
+                    },
+                    "priority": {
+                        "type": "string",
+                        "description": "新优先级: high, medium, low"
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "新分类: deploy, dev, infra, test, other"
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "新关联项目"
+                    },
+                    "server": {
+                        "type": "string",
+                        "description": "新关联服务器"
+                    },
+                    "dueDate": {
+                        "type": "string",
+                        "description": "新截止日期"
+                    },
+                    "parentId": {
+                        "type": "string",
+                        "description": "新父任务 ID"
+                    }
+                },
+                "required": ["id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_board_get",
+            "获取任务板上单个任务的详细信息",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "任务 ID"
+                    }
+                },
+                "required": ["id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_board_delete",
+            "删除任务板上的任务（级联删除所有子任务）",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "任务 ID"
+                    }
+                },
+                "required": ["id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_board_toggle",
+            "切换任务状态 (open ↔ done)",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "任务 ID"
+                    }
+                },
+                "required": ["id"]
+            }),
+        ),
     ]
 }
 
@@ -603,8 +752,8 @@ mod tests {
     #[test]
     fn test_all_tools_count() {
         let tools = all_tools();
-        // Task: 4, Process: 4, Query: 2, PTY: 9, Permission: 5, CC: 5 = 29
-        assert_eq!(tools.len(), 29);
+        // Task: 4, Process: 4, Query: 2, PTY: 9, Permission: 5, CC: 5, Board: 6 = 35
+        assert_eq!(tools.len(), 35);
     }
 
     #[test]
