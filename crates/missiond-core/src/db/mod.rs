@@ -7,8 +7,9 @@ use std::path::Path;
 
 use crate::types::{
     AddBoardTaskNoteInput, BoardNoteType, BoardTask, BoardTaskNote, BoardTaskStatus,
-    BoardTaskWithNotes, CreateBoardTaskInput, EventType, InboxMessage, KBRememberInput,
-    KnowledgeEntry, Task, TaskEvent, TaskStatus, TaskUpdate, UpdateBoardTaskInput,
+    BoardTaskWithNotes, Conversation, ConversationMessage, CreateBoardTaskInput, EventType,
+    InboxMessage, KBRememberInput, KnowledgeEntry, Task, TaskEvent, TaskStatus, TaskUpdate,
+    UpdateBoardTaskInput,
 };
 
 const SCHEMA: &str = r#"
@@ -120,6 +121,40 @@ CREATE TABLE IF NOT EXISTS credentials (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- Conversation sessions
+CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY,
+    project TEXT,
+    slot_id TEXT,
+    source TEXT NOT NULL DEFAULT 'claude_cli',
+    model TEXT,
+    git_branch TEXT,
+    jsonl_path TEXT,
+    message_count INTEGER DEFAULT 0,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    status TEXT DEFAULT 'active',
+    analyzed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_conv_status ON conversations(status);
+
+-- Conversation messages
+CREATE TABLE IF NOT EXISTS conversation_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    raw_content TEXT,
+    message_uuid TEXT,
+    parent_uuid TEXT,
+    model TEXT,
+    timestamp TEXT NOT NULL,
+    metadata TEXT,
+    FOREIGN KEY (session_id) REFERENCES conversations(id)
+);
+CREATE INDEX IF NOT EXISTS idx_conv_msg_session ON conversation_messages(session_id);
+CREATE INDEX IF NOT EXISTS idx_conv_msg_timestamp ON conversation_messages(timestamp);
 "#;
 
 /// SQLite database operations class
@@ -1151,6 +1186,186 @@ impl MissionDB {
         stats["categories"] = serde_json::json!(summary.into_iter().collect::<std::collections::HashMap<_, _>>());
 
         Ok(stats)
+    }
+
+    // ============ Conversations ============
+
+    /// Upsert a conversation session
+    pub fn upsert_conversation(&self, conv: &Conversation) -> SqliteResult<()> {
+        self.conn.execute(
+            "INSERT INTO conversations (id, project, slot_id, source, model, git_branch, jsonl_path, message_count, started_at, ended_at, status, analyzed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(id) DO UPDATE SET
+                model = COALESCE(?5, model),
+                git_branch = COALESCE(?6, git_branch),
+                message_count = ?8,
+                ended_at = ?10,
+                status = ?11",
+            params![
+                conv.id, conv.project, conv.slot_id, conv.source, conv.model,
+                conv.git_branch, conv.jsonl_path, conv.message_count,
+                conv.started_at, conv.ended_at, conv.status, conv.analyzed_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Insert a conversation message, returns the auto-increment ID
+    pub fn insert_conversation_message(&self, msg: &ConversationMessage) -> SqliteResult<i64> {
+        self.conn.execute(
+            "INSERT INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                msg.session_id, msg.role, msg.content, msg.raw_content,
+                msg.message_uuid, msg.parent_uuid, msg.model, msg.timestamp, msg.metadata,
+            ],
+        )?;
+        // Update conversation message count
+        self.conn.execute(
+            "UPDATE conversations SET message_count = (SELECT COUNT(*) FROM conversation_messages WHERE session_id = ?1) WHERE id = ?1",
+            params![msg.session_id],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Check if a message UUID already exists (for dedup)
+    pub fn conversation_message_exists(&self, message_uuid: &str) -> SqliteResult<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM conversation_messages WHERE message_uuid = ?1",
+            params![message_uuid],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Get a conversation by ID
+    pub fn get_conversation(&self, id: &str) -> SqliteResult<Option<Conversation>> {
+        let mut stmt = self.conn.prepare("SELECT * FROM conversations WHERE id = ?1")?;
+        let mut rows = stmt.query(params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::row_to_conversation(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// List conversations, optionally filtered by status
+    pub fn list_conversations(&self, status: Option<&str>, limit: i64) -> SqliteResult<Vec<Conversation>> {
+        let mut convs = Vec::new();
+        if let Some(s) = status {
+            let mut stmt = self.conn.prepare(
+                "SELECT * FROM conversations WHERE status = ?1 ORDER BY started_at DESC LIMIT ?2"
+            )?;
+            let rows = stmt.query_map(params![s, limit], |row| Self::row_to_conversation(row))?;
+            for c in rows { convs.push(c?); }
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT * FROM conversations ORDER BY started_at DESC LIMIT ?1"
+            )?;
+            let rows = stmt.query_map(params![limit], |row| Self::row_to_conversation(row))?;
+            for c in rows { convs.push(c?); }
+        }
+        Ok(convs)
+    }
+
+    /// Get conversation messages, optionally since a given ID
+    pub fn get_conversation_messages(
+        &self,
+        session_id: &str,
+        since_id: Option<i64>,
+        limit: i64,
+    ) -> SqliteResult<Vec<ConversationMessage>> {
+        let mut msgs = Vec::new();
+        if let Some(since) = since_id {
+            let mut stmt = self.conn.prepare(
+                "SELECT * FROM conversation_messages WHERE session_id = ?1 AND id > ?2 ORDER BY id ASC LIMIT ?3"
+            )?;
+            let rows = stmt.query_map(params![session_id, since, limit], |row| Self::row_to_conversation_message(row))?;
+            for m in rows { msgs.push(m?); }
+        } else {
+            // Return last N messages
+            let mut stmt = self.conn.prepare(
+                "SELECT * FROM (SELECT * FROM conversation_messages WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2) ORDER BY id ASC"
+            )?;
+            let rows = stmt.query_map(params![session_id, limit], |row| Self::row_to_conversation_message(row))?;
+            for m in rows { msgs.push(m?); }
+        }
+        Ok(msgs)
+    }
+
+    /// Search conversation messages by content
+    pub fn search_conversation_messages(&self, query: &str, limit: i64) -> SqliteResult<Vec<ConversationMessage>> {
+        let pattern = format!("%{}%", query);
+        let mut stmt = self.conn.prepare(
+            "SELECT * FROM conversation_messages WHERE content LIKE ?1 ORDER BY timestamp DESC LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(params![pattern, limit], |row| Self::row_to_conversation_message(row))?;
+        let mut msgs = Vec::new();
+        for m in rows { msgs.push(m?); }
+        Ok(msgs)
+    }
+
+    /// Mark a conversation as analyzed
+    pub fn mark_conversation_analyzed(&self, id: &str) -> SqliteResult<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE conversations SET analyzed_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Get conversations that are completed but not yet analyzed
+    pub fn get_unanalyzed_conversations(&self) -> SqliteResult<Vec<Conversation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT * FROM conversations WHERE status = 'completed' AND analyzed_at IS NULL ORDER BY started_at DESC"
+        )?;
+        let rows = stmt.query_map([], |row| Self::row_to_conversation(row))?;
+        let mut convs = Vec::new();
+        for c in rows { convs.push(c?); }
+        Ok(convs)
+    }
+
+    /// Mark a conversation as completed
+    pub fn complete_conversation(&self, id: &str) -> SqliteResult<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE conversations SET status = 'completed', ended_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    fn row_to_conversation(row: &rusqlite::Row) -> SqliteResult<Conversation> {
+        Ok(Conversation {
+            id: row.get("id")?,
+            project: row.get("project")?,
+            slot_id: row.get("slot_id")?,
+            source: row.get("source")?,
+            model: row.get("model")?,
+            git_branch: row.get("git_branch")?,
+            jsonl_path: row.get("jsonl_path")?,
+            message_count: row.get("message_count")?,
+            started_at: row.get("started_at")?,
+            ended_at: row.get("ended_at")?,
+            status: row.get("status")?,
+            analyzed_at: row.get("analyzed_at")?,
+        })
+    }
+
+    fn row_to_conversation_message(row: &rusqlite::Row) -> SqliteResult<ConversationMessage> {
+        Ok(ConversationMessage {
+            id: row.get("id")?,
+            session_id: row.get("session_id")?,
+            role: row.get("role")?,
+            content: row.get("content")?,
+            raw_content: row.get("raw_content")?,
+            message_uuid: row.get("message_uuid")?,
+            parent_uuid: row.get("parent_uuid")?,
+            model: row.get("model")?,
+            timestamp: row.get("timestamp")?,
+            metadata: row.get("metadata")?,
+        })
     }
 
     fn row_to_knowledge_entry(row: &rusqlite::Row) -> SqliteResult<KnowledgeEntry> {
