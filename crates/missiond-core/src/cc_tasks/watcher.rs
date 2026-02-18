@@ -311,7 +311,70 @@ impl CCTasksWatcher {
                     )
                     .await;
                 }
-                return;
+
+                // Re-check after index reload
+                let session_retry = {
+                    let sessions = sessions.read().await;
+                    sessions
+                        .values()
+                        .find(|s| s.full_path == file_path_str)
+                        .cloned()
+                };
+
+                match session_retry {
+                    Some(s) => s,
+                    None => {
+                        // Session not in index — synthesize from file path for conversation logging
+                        // Extract session_id from filename (e.g. "1bbf1a09-...jsonl")
+                        let session_id = file_path
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        if session_id.is_empty() {
+                            return;
+                        }
+
+                        let project_path = file_path
+                            .parent()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_default();
+
+                        // Still emit NewMessages even without a registered session
+                        let from_pos = {
+                            let positions = file_positions.read().await;
+                            positions.get(&file_path_str).copied().unwrap_or(0)
+                        };
+
+                        if let Ok((new_lines, new_pos)) =
+                            read_new_lines(file_path, from_pos).await
+                        {
+                            if new_pos > from_pos {
+                                file_positions
+                                    .write()
+                                    .await
+                                    .insert(file_path_str.clone(), new_pos);
+
+                                let messages: Vec<CCMessageLine> = new_lines
+                                    .into_iter()
+                                    .filter(|m| {
+                                        matches!(m.message_type.as_str(), "user" | "assistant")
+                                    })
+                                    .collect();
+
+                                if !messages.is_empty() {
+                                    let _ = event_tx.send(WatcherEvent::NewMessages {
+                                        session_id,
+                                        project_path,
+                                        jsonl_path: file_path_str,
+                                        messages,
+                                    });
+                                }
+                            }
+                        }
+
+                        return;
+                    }
+                }
             }
         };
 
