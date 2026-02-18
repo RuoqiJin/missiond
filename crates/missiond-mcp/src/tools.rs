@@ -803,6 +803,32 @@ pub fn all_tools() -> Vec<ToolDefinition> {
             }),
         ),
 
+        ToolDefinition::new(
+            "mission_kb_discover",
+            "Probe a remote host via SSH to discover its specs (OS, CPU, RAM, disk, docker containers, \
+             network). Call this PROACTIVELY after you SSH into a new server or when the user mentions \
+             a server you haven't profiled yet. Results are automatically saved to KB as category='infra'. \
+             Accepts host (user@ip or infra key), optional port and password. If no password, tries SSH key auth.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "host": {
+                        "type": "string",
+                        "description": "SSH target: user@ip, ip, or infra registry key (e.g. 'privatecloud', 'root@106.15.2.17')"
+                    },
+                    "port": {
+                        "type": "integer",
+                        "description": "SSH port (default 22)"
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "SSH password (if not provided, uses key-based auth)"
+                    }
+                },
+                "required": ["host"]
+            }),
+        ),
+
         // ===== Board Tasks (Personal Task Board) =====
         ToolDefinition::new(
             "mission_board_list",
@@ -1016,7 +1042,7 @@ mod tests {
     #[test]
     fn test_all_tools_count() {
         let tools = all_tools();
-        assert_eq!(tools.len(), 48);
+        assert_eq!(tools.len(), 49);
     }
 
     #[test]
