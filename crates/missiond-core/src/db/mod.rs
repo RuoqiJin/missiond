@@ -1051,6 +1051,17 @@ impl MissionDB {
         Ok(())
     }
 
+    /// Get KB category counts for summary string
+    pub fn kb_summary(&self) -> SqliteResult<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT category, COUNT(*) as cnt FROM knowledge GROUP BY category ORDER BY cnt DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        rows.collect()
+    }
+
     fn row_to_knowledge_entry(row: &rusqlite::Row) -> SqliteResult<KnowledgeEntry> {
         let detail_str: Option<String> = row.get("detail")?;
         let detail = detail_str.and_then(|s| serde_json::from_str(&s).ok());
