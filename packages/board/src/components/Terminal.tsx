@@ -1,34 +1,184 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
-import { Terminal as XTerm } from 'xterm';
-import { FitAddon } from '@xterm/addon-fit';
-import 'xterm/css/xterm.css';
+'use client';
+
+import { useEffect, useRef, useState, useCallback, Component, type ReactNode } from 'react';
+
+const WS_PORT = 9120;
 
 interface TerminalProps {
   slotId: string;
 }
 
-export function Terminal({ slotId }: TerminalProps) {
+type PTYState = 'unknown' | 'not_running' | 'starting' | 'idle' | 'thinking' | 'confirming' | 'error';
+
+// --- Error Boundary ---
+class TerminalErrorBoundary extends Component<
+  { children: ReactNode; onReset: () => void },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="flex flex-col items-center justify-center h-full gap-3 text-neutral-400">
+          <p className="text-red-400 text-sm font-mono">Terminal Error: {this.state.error.message}</p>
+          <button
+            onClick={() => { this.setState({ error: null }); this.props.onReset(); }}
+            className="text-xs px-3 py-1 rounded bg-neutral-800 hover:bg-neutral-700 transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// --- Terminal Inner ---
+function TerminalInner({ slotId }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const termRef = useRef<XTerm | null>(null);
+  const termRef = useRef<import('xterm').Terminal | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const fitRef = useRef<FitAddon | null>(null);
-  const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('disconnected');
+  const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'disconnected'>('disconnected');
+  const [ptyState, setPtyState] = useState<PTYState>('unknown');
+  const [spawning, setSpawning] = useState(false);
+  const [ready, setReady] = useState(false); // xterm initialized
 
-  const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+  // --- Init xterm (once) ---
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
 
+    let disposed = false;
+
+    (async () => {
+      // Wait for container to have dimensions
+      await new Promise<void>((resolve) => {
+        const check = () => {
+          if (disposed) return;
+          if (el.clientWidth > 0 && el.clientHeight > 0) resolve();
+          else requestAnimationFrame(check);
+        };
+        check();
+      });
+      if (disposed) return;
+
+      const [{ Terminal }, { FitAddon }] = await Promise.all([
+        import('xterm'),
+        import('@xterm/addon-fit'),
+      ]);
+      // CSS import - ignore TS error for CSS module
+      try { await import('xterm/css/xterm.css' as string); } catch { /* bundled separately */ }
+
+      if (disposed) return;
+
+      const term = new Terminal({
+        theme: {
+          background: '#0a0a0a', foreground: '#d4d4d4', cursor: '#d4d4d4',
+          selectionBackground: '#264f78',
+          black: '#1e1e1e', red: '#f44747', green: '#6a9955', yellow: '#dcdcaa',
+          blue: '#569cd6', magenta: '#c586c0', cyan: '#4ec9b0', white: '#d4d4d4',
+          brightBlack: '#808080', brightRed: '#f44747', brightGreen: '#6a9955',
+          brightYellow: '#dcdcaa', brightBlue: '#569cd6', brightMagenta: '#c586c0',
+          brightCyan: '#4ec9b0', brightWhite: '#e5e5e5',
+        },
+        fontSize: 13,
+        fontFamily: "'SF Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
+        cursorBlink: true,
+        scrollback: 10000,
+        convertEol: true,
+      });
+
+      const fit = new FitAddon();
+      term.loadAddon(fit);
+      term.open(el);
+      fit.fit();
+      termRef.current = term;
+
+      term.onData((data) => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'input', data }));
+        }
+      });
+
+      const observer = new ResizeObserver(() => {
+        try { fit.fit(); } catch { /* ignore */ }
+      });
+      observer.observe(el);
+
+      setReady(true);
+
+      // Cleanup stored for unmount
+      const cleanup = () => {
+        observer.disconnect();
+        term.dispose();
+      };
+      el.dataset.cleanup = 'true';
+      (el as any).__cleanup = cleanup;
+    })();
+
+    return () => {
+      disposed = true;
+      wsRef.current?.close();
+      wsRef.current = null;
+      if ((el as any).__cleanup) {
+        (el as any).__cleanup();
+        delete (el as any).__cleanup;
+      }
+      termRef.current = null;
+      setReady(false);
+    };
+  }, []); // Only init once
+
+  // --- Connect WS when slotId changes and xterm is ready ---
+  useEffect(() => {
+    if (!ready) return;
     const term = termRef.current;
     if (!term) return;
 
-    setStatus('connecting');
-    // Use Vite proxy: /ws/pty/... → ws://localhost:9120/pty/...
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${location.host}/ws/pty/${slotId}`);
+    // Close previous WS
+    wsRef.current?.close();
+    wsRef.current = null;
+    term.clear();
+    term.writeln('\x1b[90m● Checking PTY status...\x1b[0m');
+
+    let cancelled = false;
+
+    (async () => {
+      // Check PTY status
+      let running = false;
+      try {
+        const res = await fetch(`/api/pty/status?slotId=${slotId}`);
+        const data = await res.json();
+        running = !!data.running;
+        setPtyState(running ? (data.state || 'idle') : 'not_running');
+      } catch {
+        setPtyState('unknown');
+      }
+
+      if (cancelled) return;
+
+      if (running) {
+        connectWs(term, slotId);
+      } else {
+        term.writeln('\x1b[90m● No active session. Press Start to launch Claude Code.\x1b[0m');
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [slotId, ready]);
+
+  function connectWs(term: import('xterm').Terminal, slot: string) {
+    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+
+    setWsStatus('connecting');
+    const ws = new WebSocket(`ws://localhost:${WS_PORT}/pty/${slot}`);
     wsRef.current = ws;
 
     ws.onopen = () => {
-      setStatus('connected');
-      term.writeln(`\x1b[32m● Connected to ${slotId}\x1b[0m\r\n`);
+      setWsStatus('connected');
+      term.writeln(`\x1b[32m● Connected to ${slot}\x1b[0m\r\n`);
     };
 
     ws.onmessage = (event) => {
@@ -40,123 +190,142 @@ export function Terminal({ slotId }: TerminalProps) {
           term.clear();
           term.write(msg.data);
         } else if (msg.type === 'state') {
-          term.writeln(`\r\n\x1b[33m[state: ${msg.prevState} → ${msg.state}]\x1b[0m`);
+          setPtyState(msg.state || 'unknown');
         } else if (msg.type === 'exit') {
           term.writeln(`\r\n\x1b[31m[exited: code ${msg.code}]\x1b[0m`);
-          setStatus('disconnected');
+          setWsStatus('disconnected');
+          setPtyState('not_running');
         }
       } catch {
-        // Raw text data
         term.write(event.data);
       }
     };
 
     ws.onclose = () => {
-      setStatus('disconnected');
+      setWsStatus('disconnected');
       term.writeln(`\r\n\x1b[90m● Disconnected\x1b[0m`);
     };
 
     ws.onerror = () => {
-      setStatus('disconnected');
+      setWsStatus('disconnected');
     };
+  }
+
+  const handleConnect = useCallback(() => {
+    const term = termRef.current;
+    if (term) connectWs(term, slotId);
   }, [slotId]);
 
-  useEffect(() => {
-    if (!containerRef.current) return;
+  const handleSpawn = useCallback(async () => {
+    setSpawning(true);
+    const term = termRef.current;
+    try {
+      term?.writeln('\x1b[33m● Starting Claude Code...\x1b[0m');
+      let res = await fetch(`/api/pty/spawn?slotId=${slotId}`, { method: 'POST' });
+      let data = await res.json();
 
-    const term = new XTerm({
-      theme: {
-        background: '#0a0a0a',
-        foreground: '#d4d4d4',
-        cursor: '#d4d4d4',
-        selectionBackground: '#264f78',
-        black: '#1e1e1e',
-        red: '#f44747',
-        green: '#6a9955',
-        yellow: '#dcdcaa',
-        blue: '#569cd6',
-        magenta: '#c586c0',
-        cyan: '#4ec9b0',
-        white: '#d4d4d4',
-        brightBlack: '#808080',
-        brightRed: '#f44747',
-        brightGreen: '#6a9955',
-        brightYellow: '#dcdcaa',
-        brightBlue: '#569cd6',
-        brightMagenta: '#c586c0',
-        brightCyan: '#4ec9b0',
-        brightWhite: '#e5e5e5',
-      },
-      fontSize: 13,
-      fontFamily: "'SF Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
-      cursorBlink: true,
-      scrollback: 10000,
-      convertEol: true,
-    });
-
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-    term.open(containerRef.current);
-    fit.fit();
-
-    termRef.current = term;
-    fitRef.current = fit;
-
-    term.writeln('\x1b[90m● Ready. Waiting for connection...\x1b[0m');
-
-    // Handle input (send to PTY)
-    term.onData((data) => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: 'input', data }));
+      // If stale session exists, kill it and retry
+      if (data.error && /already running/i.test(String(data.error))) {
+        term?.writeln('\x1b[90m● Cleaning up stale session...\x1b[0m');
+        await fetch(`/api/pty/kill?slotId=${slotId}`, { method: 'POST' });
+        await new Promise((r) => setTimeout(r, 500));
+        res = await fetch(`/api/pty/spawn?slotId=${slotId}`, { method: 'POST' });
+        data = await res.json();
       }
-    });
 
-    // Auto-fit on resize
-    const observer = new ResizeObserver(() => {
-      try { fit.fit(); } catch { /* ignore */ }
-    });
-    observer.observe(containerRef.current);
+      if (data.error) {
+        term?.writeln(`\x1b[31m✗ ${data.error}\x1b[0m`);
+        return;
+      }
+      term?.writeln(`\x1b[32m● Spawned (pid: ${data.pid || '?'})\x1b[0m\r\n`);
+      setPtyState('starting');
+      setTimeout(() => { if (term) connectWs(term, slotId); }, 500);
+    } catch (err) {
+      term?.writeln(`\x1b[31m✗ Failed: ${err}\x1b[0m`);
+    } finally {
+      setSpawning(false);
+    }
+  }, [slotId]);
 
-    return () => {
-      observer.disconnect();
+  const handleKill = useCallback(async () => {
+    try {
+      await fetch(`/api/pty/kill?slotId=${slotId}`, { method: 'POST' });
+      setPtyState('not_running');
       wsRef.current?.close();
-      term.dispose();
-    };
-  }, []);
+      termRef.current?.writeln('\r\n\x1b[31m● Session killed\x1b[0m');
+    } catch { /* ignore */ }
+  }, [slotId]);
 
-  // Auto-connect when slotId changes
-  useEffect(() => {
-    // Close existing connection
-    wsRef.current?.close();
-    termRef.current?.clear();
-    connect();
-  }, [slotId, connect]);
+  const wsColor = wsStatus === 'connected' ? 'bg-green-500' : wsStatus === 'connecting' ? 'bg-yellow-500' : 'bg-neutral-600';
 
-  const statusColor = status === 'connected' ? 'bg-green-500' : status === 'connecting' ? 'bg-yellow-500' : 'bg-neutral-600';
+  const stateLabel: Record<PTYState, { text: string; color: string }> = {
+    unknown: { text: '...', color: 'text-neutral-500' },
+    not_running: { text: 'Stopped', color: 'text-neutral-500' },
+    starting: { text: 'Starting', color: 'text-yellow-400' },
+    idle: { text: 'Idle', color: 'text-green-400' },
+    thinking: { text: 'Thinking', color: 'text-blue-400' },
+    confirming: { text: 'Confirming', color: 'text-orange-400' },
+    error: { text: 'Error', color: 'text-red-400' },
+  };
+
+  const { text: stateText, color: stateColor } = stateLabel[ptyState];
+  const isRunning = ptyState !== 'not_running' && ptyState !== 'unknown';
 
   return (
     <div className="flex flex-col h-full">
-      {/* Toolbar */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-neutral-800 bg-neutral-900/50">
         <div className="flex items-center gap-2">
-          <span className={`w-2 h-2 rounded-full ${statusColor}`} />
+          <span className={`w-2 h-2 rounded-full ${wsColor}`} />
           <span className="text-xs text-neutral-400 font-mono">{slotId}</span>
-          <span className="text-[10px] text-neutral-600">{status}</span>
+          <span className={`text-[10px] font-medium ${stateColor}`}>{stateText}</span>
         </div>
         <div className="flex gap-1.5">
-          {status === 'disconnected' && (
-            <button
-              onClick={connect}
-              className="text-[10px] px-2 py-0.5 rounded bg-neutral-800 text-neutral-400 hover:text-white hover:bg-neutral-700 transition-colors"
-            >
+          {!isRunning && (
+            <button onClick={handleSpawn} disabled={spawning}
+              className="text-[10px] px-2 py-0.5 rounded bg-green-900/50 text-green-400 hover:bg-green-800/50 hover:text-green-300 transition-colors disabled:opacity-50">
+              {spawning ? 'Starting...' : 'Start'}
+            </button>
+          )}
+          {isRunning && wsStatus === 'disconnected' && (
+            <button onClick={handleConnect}
+              className="text-[10px] px-2 py-0.5 rounded bg-neutral-800 text-neutral-400 hover:text-white hover:bg-neutral-700 transition-colors">
               Reconnect
+            </button>
+          )}
+          {isRunning && (
+            <button onClick={handleKill}
+              className="text-[10px] px-2 py-0.5 rounded bg-red-900/30 text-red-400 hover:bg-red-800/40 hover:text-red-300 transition-colors">
+              Stop
             </button>
           )}
         </div>
       </div>
-
-      {/* Terminal */}
       <div ref={containerRef} className="flex-1 min-h-0" />
     </div>
+  );
+}
+
+// --- Export with SSR guard + error boundary ---
+export function Terminal({ slotId }: TerminalProps) {
+  const [key, setKey] = useState(0);
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
+
+  if (!mounted) {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="flex items-center px-3 py-2 border-b border-neutral-800 bg-neutral-900/50">
+          <span className="w-2 h-2 rounded-full bg-neutral-600" />
+          <span className="text-xs text-neutral-400 font-mono ml-2">{slotId}</span>
+        </div>
+        <div className="flex-1" />
+      </div>
+    );
+  }
+
+  return (
+    <TerminalErrorBoundary onReset={() => setKey((k) => k + 1)}>
+      <TerminalInner key={`${slotId}-${key}`} slotId={slotId} />
+    </TerminalErrorBoundary>
   );
 }

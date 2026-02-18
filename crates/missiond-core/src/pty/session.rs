@@ -6,7 +6,7 @@
 //! - alacritty_terminal: Parses ANSI sequences, maintains virtual screen
 //! - semantic: State detection and confirmation dialog parsing
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write as IoWrite};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -182,6 +182,8 @@ pub struct PTYSessionOptions {
     pub log_file: Option<PathBuf>,
     pub cols: u16,
     pub rows: u16,
+    /// Path to MCP config JSON file (passed as --mcp-config to claude)
+    pub mcp_config: Option<PathBuf>,
 }
 
 impl Default for PTYSessionOptions {
@@ -193,6 +195,7 @@ impl Default for PTYSessionOptions {
             log_file: None,
             cols: 120,
             rows: 30,
+            mcp_config: None,
         }
     }
 }
@@ -254,8 +257,15 @@ pub struct PTYSession {
     state_change_tx: broadcast::Sender<(SessionState, SessionState)>,
     shutdown_tx: Option<oneshot::Sender<()>>,
 
+    // MCP config
+    mcp_config: Option<PathBuf>,
+
     // Logging
     log_file: Option<PathBuf>,
+
+    // Raw output replay buffer (for WebSocket late-join)
+    raw_output_buffer: Arc<std::sync::Mutex<VecDeque<u8>>>,
+    raw_output_max: usize,
 }
 
 /// Events emitted by the session
@@ -346,7 +356,13 @@ impl PTYSession {
             event_tx,
             state_change_tx,
             shutdown_tx: None,
+            mcp_config: options.mcp_config,
             log_file: options.log_file,
+
+            raw_output_buffer: Arc::new(std::sync::Mutex::new(VecDeque::with_capacity(
+                512 * 1024,
+            ))),
+            raw_output_max: 512 * 1024,
         })
     }
 
@@ -410,6 +426,12 @@ impl PTYSession {
         lines.join("\n")
     }
 
+    /// Get raw output replay buffer for late-joining WebSocket clients
+    pub fn get_replay_buffer(&self) -> Vec<u8> {
+        let buf = self.raw_output_buffer.lock().unwrap_or_else(|e| e.into_inner());
+        buf.iter().copied().collect()
+    }
+
     /// Get last N lines
     pub async fn get_last_lines(&self, n: usize) -> Vec<String> {
         let term = self.term.lock().await;
@@ -450,8 +472,17 @@ impl PTYSession {
             pixel_height: 0,
         })?;
 
-        // Build command: claude --add-dir "cwd"
+        // Build command: claude --add-dir "cwd" [--mcp-config "path"]
         // Use a login shell to ensure proper environment (nvm, homebrew, etc.)
+        let claude_cmd = {
+            let mut parts = format!("claude --add-dir \"{}\"", self.cwd.display());
+            if let Some(ref mcp_config) = self.mcp_config {
+                parts.push_str(&format!(" --mcp-config \"{}\"", mcp_config.display()));
+                info!(mcp_config = %mcp_config.display(), "MCP config will be injected");
+            }
+            parts
+        };
+
         #[cfg(unix)]
         let mut cmd = {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
@@ -462,7 +493,7 @@ impl PTYSession {
                 "-l",  // login shell (loads .zprofile, .zshrc)
                 "-i",  // interactive (needed for proper PTY behavior)
                 "-c",
-                &format!("claude --add-dir \"{}\"", self.cwd.display()),
+                &claude_cmd,
             ]);
             c
         };
@@ -472,7 +503,7 @@ impl PTYSession {
             let mut c = CommandBuilder::new("cmd.exe");
             c.args([
                 "/C",
-                &format!("claude --add-dir \"{}\"", self.cwd.display()),
+                &claude_cmd,
             ]);
             c
         };
@@ -520,9 +551,11 @@ impl PTYSession {
         let term = Arc::clone(&self.term);
         let event_tx = self.event_tx.clone();
         let running = Arc::clone(&self.running);
+        let replay_buf = Arc::clone(&self.raw_output_buffer);
+        let replay_max = self.raw_output_max;
 
         tokio::spawn(async move {
-            Self::read_loop(reader, term, event_tx, running, shutdown_rx, term_feed_tx).await;
+            Self::read_loop(reader, term, event_tx, running, shutdown_rx, term_feed_tx, replay_buf, replay_max).await;
         });
 
         // Spawn state check task
@@ -614,6 +647,8 @@ impl PTYSession {
         running: Arc<AtomicBool>,
         _shutdown_rx: oneshot::Receiver<()>,
         term_feed_tx: mpsc::UnboundedSender<Vec<u8>>,
+        replay_buf: Arc<std::sync::Mutex<VecDeque<u8>>>,
+        replay_max: usize,
     ) {
         // Move reader into a thread that will do blocking reads
         let running_clone = Arc::clone(&running);
@@ -627,6 +662,14 @@ impl PTYSession {
                     Ok(0) => break, // EOF
                     Ok(n) => {
                         let data = buf[..n].to_vec();
+                        // Append to replay buffer for late-joining WS clients
+                        if let Ok(mut rb) = replay_buf.lock() {
+                            rb.extend(&data);
+                            if rb.len() > replay_max {
+                                let drain = rb.len() - replay_max;
+                                rb.drain(..drain);
+                            }
+                        }
                         // Feed to terminal emulator (for state detection + screen)
                         let _ = term_feed_tx.send(data.clone());
                         // Broadcast to WebSocket clients

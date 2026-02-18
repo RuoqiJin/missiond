@@ -23,5 +23,16 @@ dist/
 # Logs
 *.log
 
+# Claude Code (contains credentials and private config)
+.claude/
+
+# Next.js build output
+.next/
+
+# Private notes (may contain credentials)
+分析.md
+历史记录.md
+兼容 node.md
+
 # Misc
 *.md.bak

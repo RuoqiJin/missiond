@@ -46,6 +46,8 @@ pub struct PTYSpawnOptions {
     pub wait_for_idle: bool,
     /// Timeout in seconds when waiting for Idle (default: 60)
     pub timeout_secs: Option<u64>,
+    /// Path to MCP config JSON file (passed as --mcp-config to claude)
+    pub mcp_config: Option<PathBuf>,
 }
 
 /// Result of executing a message
@@ -192,6 +194,7 @@ impl PTYManager {
             log_file: Some(info.log_file.clone()),
             cols: 120,
             rows: 30,
+            mcp_config: options.mcp_config.clone(),
         })?;
 
         // Set up permission check
@@ -399,6 +402,7 @@ impl PTYManager {
                             log_file,
                             cols: 120,
                             rows: 30,
+                            mcp_config: None, // TODO: preserve mcp_config from original spawn
                         }) {
                             // Set up permission check
                             let policy = manager_policy.read().await.clone();
@@ -607,6 +611,20 @@ impl PTYManager {
 
         let session = session.read().await;
         Ok(session.get_screen_text().await)
+    }
+
+    /// Get raw output replay buffer for late-joining WebSocket clients
+    pub async fn get_replay_buffer(&self, slot_id: &str) -> Result<Vec<u8>> {
+        let session = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(slot_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("No PTY session for slot: {}", slot_id))?
+        };
+
+        let session = session.read().await;
+        Ok(session.get_replay_buffer())
     }
 
     /// Get last N lines
