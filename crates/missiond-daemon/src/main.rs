@@ -13,7 +13,7 @@ use missiond_core::{
     CorePermissionDecision, InfraConfig, MissionControl, MissionControlOptions, PermissionPolicy,
     PermissionRule, PTYManager, PTYSpawnOptions, PTYWebSocketServer, WSServerOptions, SkillIndex,
 };
-use missiond_core::{CCTasksWatcher, CCTasksWatcherOptions};
+use missiond_core::{CCTasksWatcher, CCTasksWatcherOptions, WatcherEvent};
 use missiond_mcp::protocol::{self, Request, RequestId, Response, RpcError};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
@@ -1173,6 +1173,58 @@ impl AppState {
                 }
             }
 
+            // ===== Conversation Logs =====
+            "mission_conversation_list" => {
+                #[derive(Deserialize)]
+                struct Args {
+                    status: Option<String>,
+                    limit: Option<i64>,
+                }
+                let Args { status, limit } =
+                    serde_json::from_value(args).unwrap_or(Args { status: None, limit: None });
+                let convs = self.mission.db()
+                    .list_conversations(status.as_deref(), limit.unwrap_or(20))
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json_pretty(&convs))
+            }
+            "mission_conversation_get" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Args {
+                    session_id: String,
+                    tail: Option<i64>,
+                    since_id: Option<i64>,
+                }
+                let Args { session_id, tail, since_id } = serde_json::from_value(args)?;
+                let conv = self.mission.db()
+                    .get_conversation(&session_id)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                let msgs = self.mission.db()
+                    .get_conversation_messages(&session_id, since_id, tail.unwrap_or(50))
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json(&serde_json::json!({
+                    "conversation": conv,
+                    "messages": msgs,
+                    "count": msgs.len(),
+                })))
+            }
+            "mission_conversation_search" => {
+                #[derive(Deserialize)]
+                struct Args {
+                    query: String,
+                    limit: Option<i64>,
+                }
+                let Args { query, limit } = serde_json::from_value(args)?;
+                let msgs = self.mission.db()
+                    .search_conversation_messages(&query, limit.unwrap_or(20))
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json(&serde_json::json!({
+                    "results": msgs,
+                    "count": msgs.len(),
+                    "query": query,
+                })))
+            }
+
             // ===== Board Tasks (Personal Task Board) =====
             "mission_board_list" => {
                 let BoardListArgs { status } =
@@ -1545,6 +1597,172 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
     Ok(())
 }
 
+/// Extract text content from a Claude Code message content field.
+/// Content can be a plain string or an array of content blocks.
+fn extract_text_content(content: &Value) -> String {
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(arr) => arr
+            .iter()
+            .filter_map(|item| {
+                if item.get("type")?.as_str()? == "text" {
+                    item.get("text")?.as_str().map(String::from)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// Handle a NewMessages watcher event: write conversation messages to DB.
+fn handle_new_messages(
+    state: &AppState,
+    session_id: String,
+    project_path: String,
+    jsonl_path: String,
+    messages: Vec<missiond_core::CCMessageLine>,
+) {
+    let db = state.mission.db();
+
+    // Ensure conversation exists
+    if db.get_conversation(&session_id).unwrap_or(None).is_none() {
+        let first = messages.first();
+        let conv = missiond_core::types::Conversation {
+            id: session_id.clone(),
+            project: Some(first.map(|m| m.cwd.clone()).unwrap_or(project_path)),
+            slot_id: None,
+            source: "claude_cli".to_string(),
+            model: first.and_then(|m| m.message.model.clone()),
+            git_branch: first.and_then(|m| m.git_branch.clone()),
+            jsonl_path: Some(jsonl_path),
+            message_count: 0,
+            started_at: first
+                .map(|m| m.timestamp.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            ended_at: None,
+            status: "active".to_string(),
+            analyzed_at: None,
+        };
+        if let Err(e) = db.upsert_conversation(&conv) {
+            error!(session = %session_id, error = %e, "Failed to create conversation");
+            return;
+        }
+    }
+
+    let mut inserted = 0u32;
+    for msg in &messages {
+        // Dedup by message UUID
+        if db.conversation_message_exists(&msg.uuid).unwrap_or(true) {
+            continue;
+        }
+
+        let text_content = extract_text_content(&msg.message.content);
+        if text_content.is_empty() {
+            continue;
+        }
+
+        let raw_content = serde_json::to_string(&msg.message.content).ok();
+
+        let conv_msg = missiond_core::types::ConversationMessage {
+            id: 0, // auto-increment
+            session_id: session_id.clone(),
+            role: msg.message.role.clone(),
+            content: text_content,
+            raw_content,
+            message_uuid: Some(msg.uuid.clone()),
+            parent_uuid: msg.parent_uuid.clone(),
+            model: msg.message.model.clone(),
+            timestamp: msg.timestamp.clone(),
+            metadata: None,
+        };
+
+        match db.insert_conversation_message(&conv_msg) {
+            Ok(_) => inserted += 1,
+            Err(e) => {
+                error!(uuid = %msg.uuid, error = %e, "Failed to insert conversation message");
+            }
+        }
+    }
+
+    if inserted > 0 {
+        info!(
+            session = %session_id,
+            count = inserted,
+            "Logged conversation messages"
+        );
+    }
+}
+
+fn handle_pty_text_complete(
+    state: &AppState,
+    slot_id: String,
+    turn_id: u64,
+    content: String,
+    timestamp: i64,
+) {
+    let db = state.mission.db();
+    let session_id = format!("pty-{}", slot_id);
+
+    // Ensure conversation exists for this PTY session
+    if db.get_conversation(&session_id).unwrap_or(None).is_none() {
+        let ts = chrono::DateTime::from_timestamp(timestamp, 0)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| timestamp.to_string());
+        let conv = missiond_core::types::Conversation {
+            id: session_id.clone(),
+            project: None,
+            slot_id: Some(slot_id.clone()),
+            source: "pty".to_string(),
+            model: None,
+            git_branch: None,
+            jsonl_path: None,
+            message_count: 0,
+            started_at: ts,
+            ended_at: None,
+            status: "active".to_string(),
+            analyzed_at: None,
+        };
+        if let Err(e) = db.upsert_conversation(&conv) {
+            error!(slot = %slot_id, error = %e, "Failed to create PTY conversation");
+            return;
+        }
+    }
+
+    let msg_uuid = format!("pty-{}-turn-{}", slot_id, turn_id);
+    if db.conversation_message_exists(&msg_uuid).unwrap_or(true) {
+        return;
+    }
+
+    let ts = chrono::DateTime::from_timestamp(timestamp, 0)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| timestamp.to_string());
+
+    let conv_msg = missiond_core::types::ConversationMessage {
+        id: 0,
+        session_id: session_id.clone(),
+        role: "assistant".to_string(),
+        content,
+        raw_content: None,
+        message_uuid: Some(msg_uuid),
+        parent_uuid: None,
+        model: None,
+        timestamp: ts,
+        metadata: Some(format!("{{\"turn_id\":{}}}", turn_id)),
+    };
+
+    match db.insert_conversation_message(&conv_msg) {
+        Ok(_) => {
+            info!(slot = %slot_id, turn = turn_id, "Logged PTY assistant output");
+        }
+        Err(e) => {
+            error!(slot = %slot_id, turn = turn_id, error = %e, "Failed to insert PTY message");
+        }
+    }
+}
+
 async fn bind_ipc_listener(endpoint: &str) -> Result<IpcListener> {
     IpcListener::bind(endpoint).await
 }
@@ -1624,6 +1842,11 @@ async fn main() -> Result<()> {
     cc.start().await?;
     let cc_tasks = Arc::new(Mutex::new(cc));
 
+    // Conversation logger: subscribe to watcher events (processed in main select loop)
+    let mut conv_logger_rx = cc_tasks.lock().await.subscribe();
+    // PTY conversation logger: subscribe to manager events
+    let mut pty_logger_rx = pty.subscribe();
+
     // WebSocket server (PTY attach + Tasks events)
     let ws_port = ws_port();
     let mut ws_server = PTYWebSocketServer::new(WSServerOptions {
@@ -1679,6 +1902,30 @@ async fn main() -> Result<()> {
             _ = autopilot_interval.tick() => {
                 if let Err(e) = autopilot_tick(&state).await {
                     warn!(error = %e, "Autopilot tick failed");
+                }
+            }
+            event = conv_logger_rx.recv() => {
+                match event {
+                    Ok(WatcherEvent::NewMessages { session_id, project_path, jsonl_path, messages }) => {
+                        handle_new_messages(&state, session_id, project_path, jsonl_path, messages);
+                    }
+                    Ok(_) => {} // Other events handled by WS server
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(skipped = n, "Conversation logger lagged");
+                    }
+                    Err(_) => {} // Channel closed, ignore
+                }
+            }
+            pty_event = pty_logger_rx.recv() => {
+                match pty_event {
+                    Ok(missiond_core::ManagerEvent::TextComplete { slot_id, turn_id, content, timestamp }) => {
+                        handle_pty_text_complete(&state, slot_id, turn_id, content, timestamp);
+                    }
+                    Ok(_) => {} // Other PTY events not needed for logging
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(skipped = n, "PTY logger lagged");
+                    }
+                    Err(_) => {}
                 }
             }
         }

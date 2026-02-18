@@ -850,6 +850,68 @@ pub fn all_tools() -> Vec<ToolDefinition> {
             }),
         ),
 
+        // ===== Conversation Log =====
+        ToolDefinition::new(
+            "mission_conversation_list",
+            "List conversation sessions stored in the database. Shows session ID, project, message count, \
+             start time, and analysis status. Use status filter to find active or completed sessions.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "description": "Filter by status: active, completed (omit for all)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of conversations to return (default 20)"
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_conversation_get",
+            "Get messages from a conversation session. Returns the conversation metadata and messages. \
+             Use tail parameter to control how many recent messages to return.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "sessionId": {
+                        "type": "string",
+                        "description": "Conversation session ID"
+                    },
+                    "tail": {
+                        "type": "integer",
+                        "description": "Number of recent messages to return (default 50)"
+                    },
+                    "sinceId": {
+                        "type": "integer",
+                        "description": "Return messages with ID greater than this (for incremental fetch)"
+                    }
+                },
+                "required": ["sessionId"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_conversation_search",
+            "Search conversation messages by content. Searches across all sessions. \
+             Returns matching messages with session context.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query (substring match)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results (default 20)"
+                    }
+                },
+                "required": ["query"]
+            }),
+        ),
+
         // ===== Board Tasks (Personal Task Board) =====
         ToolDefinition::new(
             "mission_board_list",
@@ -1063,7 +1125,7 @@ mod tests {
     #[test]
     fn test_all_tools_count() {
         let tools = all_tools();
-        assert_eq!(tools.len(), 50);
+        assert_eq!(tools.len(), 53);
     }
 
     #[test]

@@ -110,6 +110,13 @@ pub enum ManagerEvent {
     },
     /// Session exited
     Exited { slot_id: String, exit_code: i32 },
+    /// Text output completed (assistant turn)
+    TextComplete {
+        slot_id: String,
+        turn_id: u64,
+        content: String,
+        timestamp: i64,
+    },
 }
 
 impl PTYManager {
@@ -261,6 +268,18 @@ impl PTYManager {
                             exit_code: code,
                         });
                         break;
+                    }
+                    SessionEvent::TextOutput(crate::pty::TextOutputEvent::Complete {
+                        turn_id,
+                        content,
+                        timestamp,
+                    }) => {
+                        let _ = event_tx.send(ManagerEvent::TextComplete {
+                            slot_id: slot_id_for_events.clone(),
+                            turn_id,
+                            content,
+                            timestamp,
+                        });
                     }
                     _ => {}
                 }

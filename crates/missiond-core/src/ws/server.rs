@@ -470,6 +470,8 @@ impl PTYWebSocketServer {
                                 summary: None,
                             }
                         },
+                        // NewMessages are handled by the daemon, not the WS server
+                        WatcherEvent::NewMessages { .. } => continue,
                     };
 
                     if send_json(&mut ws_tx, &msg).await.is_err() {

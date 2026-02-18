@@ -40,6 +40,13 @@ pub enum WatcherEvent {
     TaskCompleted { session: CCSession, task: CCTask },
     SessionActive(CCSession),
     SessionInactive(CCSession),
+    /// New messages detected in a JSONL file (for conversation logging)
+    NewMessages {
+        session_id: String,
+        project_path: String,
+        jsonl_path: String,
+        messages: Vec<CCMessageLine>,
+    },
 }
 
 /// Claude Code Tasks Watcher
@@ -308,6 +315,37 @@ impl CCTasksWatcher {
             }
         };
 
+        // --- Incremental message reading for conversation logging ---
+        let from_pos = {
+            let positions = file_positions.read().await;
+            positions.get(&file_path_str).copied().unwrap_or(0)
+        };
+
+        if let Ok((new_lines, new_pos)) = read_new_lines(file_path, from_pos).await {
+            if new_pos > from_pos {
+                file_positions
+                    .write()
+                    .await
+                    .insert(file_path_str.clone(), new_pos);
+
+                // Filter to user/assistant messages and emit
+                let messages: Vec<CCMessageLine> = new_lines
+                    .into_iter()
+                    .filter(|m| matches!(m.message_type.as_str(), "user" | "assistant"))
+                    .collect();
+
+                if !messages.is_empty() {
+                    let _ = event_tx.send(WatcherEvent::NewMessages {
+                        session_id: session.session_id.clone(),
+                        project_path: session.project_path.clone(),
+                        jsonl_path: file_path_str.clone(),
+                        messages,
+                    });
+                }
+            }
+        }
+
+        // --- Existing: todos change detection ---
         // Get previous tasks
         let previous_tasks = session.tasks.clone();
 
