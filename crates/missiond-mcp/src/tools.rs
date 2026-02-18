@@ -256,7 +256,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         // ===== PTY Interactive Sessions =====
         ToolDefinition::new(
             "mission_pty_spawn",
-            "启动 PTY 交互式会话（像人一样操作 Claude Code）。默认异步返回，不等待 Idle",
+            "启动 PTY 交互式会话（像人一样操作 Claude Code）。默认异步返回，不等待 Idle。可通过 mcpConfigPath 注入 MCP 工具配置。",
             json!({
                 "type": "object",
                 "properties": {
@@ -275,6 +275,10 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     "autoRestart": {
                         "type": "boolean",
                         "description": "崩溃后自动重启"
+                    },
+                    "mcpConfigPath": {
+                        "type": "string",
+                        "description": "MCP 配置文件路径 (JSON)，传给 claude --mcp-config。不填则使用 slots.yaml 中的 mcpConfig"
                     }
                 },
                 "required": ["slotId"]
@@ -597,6 +601,77 @@ pub fn all_tools() -> Vec<ToolDefinition> {
             }),
         ),
 
+        // ===== Skill Knowledge Hub =====
+        ToolDefinition::new(
+            "mission_skill_list",
+            "列出所有已索引的 Skill（知识库条目）。返回 name、description、aka、路径。",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_skill_search",
+            "按关键词搜索 Skill。支持 name/aka/description 模糊匹配。返回匹配的 Skill 元数据。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索关键词 (如 deploy, auth, 部署)"
+                    }
+                },
+                "required": ["query"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_context_build",
+            "根据任务关键词自动匹配相关 Skill 并生成 [Context] 块。用于 Agent 派任务前自动注入上下文。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "任务关键词 (如 '部署 auth 服务')"
+                    }
+                },
+                "required": ["query"]
+            }),
+        ),
+
+        // ===== Infrastructure Registry =====
+        ToolDefinition::new(
+            "mission_infra_list",
+            "列出基础设施服务器。可按 role (build/deploy/gpu) 或 provider (gcp/aliyun) 筛选。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "role": {
+                        "type": "string",
+                        "description": "按角色筛选 (如 build, deploy, gpu, vpn, production)"
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "按云厂商筛选 (如 gcp, aliyun, self-hosted)"
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_infra_get",
+            "获取单个服务器详情 (按 ID)。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "服务器 ID (如 privatecloud, gcp, ecs)"
+                    }
+                },
+                "required": ["id"]
+            }),
+        ),
+
         // ===== Health =====
         ToolDefinition::new(
             "mission_health",
@@ -658,6 +733,18 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     "parentId": {
                         "type": "string",
                         "description": "父任务 ID (创建子任务时使用)"
+                    },
+                    "assignee": {
+                        "type": "string",
+                        "description": "分配的 PTY 工位 ID (如 slot-coder-1)，用于自动执行"
+                    },
+                    "autoExecute": {
+                        "type": "boolean",
+                        "description": "是否在 due_date 到达时自动执行 (需要 assignee)"
+                    },
+                    "promptTemplate": {
+                        "type": "string",
+                        "description": "自动执行时的 prompt 模板 (不填则用 title + description)"
                     }
                 },
                 "required": ["title"]
@@ -708,6 +795,18 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     "parentId": {
                         "type": "string",
                         "description": "新父任务 ID"
+                    },
+                    "assignee": {
+                        "type": "string",
+                        "description": "分配的 PTY 工位 ID"
+                    },
+                    "autoExecute": {
+                        "type": "boolean",
+                        "description": "是否自动执行"
+                    },
+                    "promptTemplate": {
+                        "type": "string",
+                        "description": "自动执行 prompt 模板"
                     }
                 },
                 "required": ["id"]
@@ -755,6 +854,32 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                 "required": ["id"]
             }),
         ),
+        ToolDefinition::new(
+            "mission_board_note_add",
+            "为任务添加进度笔记。用于记录阶段进度、完成摘要或一般备注。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "taskId": {
+                        "type": "string",
+                        "description": "任务 ID"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "笔记内容（支持 markdown）"
+                    },
+                    "noteType": {
+                        "type": "string",
+                        "description": "笔记类型: progress (进度更新), summary (完成摘要), note (一般备注)。默认 note"
+                    },
+                    "author": {
+                        "type": "string",
+                        "description": "作者标识 (如 claude-code, user)"
+                    }
+                },
+                "required": ["taskId", "content"]
+            }),
+        ),
     ]
 }
 
@@ -770,8 +895,8 @@ mod tests {
     #[test]
     fn test_all_tools_count() {
         let tools = all_tools();
-        // Task: 4, Process: 4, Query: 2, PTY: 9, Permission: 5, CC: 5, Board: 6 = 35
-        assert_eq!(tools.len(), 35);
+        // Task: 4, Process: 4, Query: 2, PTY: 9, Permission: 5, CC: 5, Skill: 3, Board: 6 = 38
+        assert_eq!(tools.len(), 40);
     }
 
     #[test]

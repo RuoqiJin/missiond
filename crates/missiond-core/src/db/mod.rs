@@ -6,8 +6,9 @@ use rusqlite::{params, Connection, Result as SqliteResult};
 use std::path::Path;
 
 use crate::types::{
-    BoardTask, BoardTaskStatus, CreateBoardTaskInput, UpdateBoardTaskInput, EventType,
-    InboxMessage, Task, TaskEvent, TaskStatus, TaskUpdate,
+    AddBoardTaskNoteInput, BoardNoteType, BoardTask, BoardTaskNote, BoardTaskStatus,
+    BoardTaskWithNotes, CreateBoardTaskInput, EventType, InboxMessage, Task, TaskEvent,
+    TaskStatus, TaskUpdate, UpdateBoardTaskInput,
 };
 
 const SCHEMA: &str = r#"
@@ -71,12 +72,27 @@ CREATE TABLE IF NOT EXISTS board_tasks (
   server TEXT,
   due_date TEXT,
   parent_id TEXT,
+  assignee TEXT,
+  auto_execute INTEGER NOT NULL DEFAULT 0,
+  prompt_template TEXT,
   order_idx INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_board_tasks_status ON board_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_board_tasks_parent ON board_tasks(parent_id);
+
+-- Board task notes (progress tracking)
+CREATE TABLE IF NOT EXISTS board_task_notes (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  content TEXT NOT NULL,
+  note_type TEXT NOT NULL DEFAULT 'note',
+  author TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (task_id) REFERENCES board_tasks(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_board_task_notes_task ON board_task_notes(task_id);
 "#;
 
 /// SQLite database operations class
@@ -89,6 +105,7 @@ impl MissionDB {
     pub fn new<P: AsRef<Path>>(db_path: P) -> SqliteResult<Self> {
         let conn = Connection::open(db_path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
         let db = Self { conn };
         db.init()?;
         Ok(db)
@@ -114,7 +131,28 @@ impl MissionDB {
     }
 
     fn init(&self) -> SqliteResult<()> {
-        self.conn.execute_batch(SCHEMA)
+        self.conn.execute_batch(SCHEMA)?;
+        self.migrate()?;
+        Ok(())
+    }
+
+    /// Run schema migrations for existing databases
+    fn migrate(&self) -> SqliteResult<()> {
+        // Phase D: Add autopilot columns to board_tasks
+        let columns: Vec<String> = self.conn
+            .prepare("PRAGMA table_info(board_tasks)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if !columns.iter().any(|c| c == "assignee") {
+            self.conn.execute_batch(
+                "ALTER TABLE board_tasks ADD COLUMN assignee TEXT;
+                 ALTER TABLE board_tasks ADD COLUMN auto_execute INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE board_tasks ADD COLUMN prompt_template TEXT;"
+            )?;
+        }
+        Ok(())
     }
 
     // ============ Tasks ============
@@ -427,8 +465,8 @@ impl MissionDB {
     /// Insert a new board task
     pub fn insert_board_task(&self, task: &BoardTask) -> SqliteResult<()> {
         self.conn.execute(
-            "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, order_idx, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, order_idx, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 task.id,
                 task.title,
@@ -440,6 +478,9 @@ impl MissionDB {
                 task.server,
                 task.due_date,
                 task.parent_id,
+                task.assignee,
+                task.auto_execute as i32,
+                task.prompt_template,
                 task.order_idx,
                 task.created_at,
                 task.updated_at,
@@ -483,6 +524,9 @@ impl MissionDB {
             server: input.server.clone(),
             due_date: input.due_date.clone(),
             parent_id: input.parent_id.clone(),
+            assignee: input.assignee.clone(),
+            auto_execute: input.auto_execute.unwrap_or(false),
+            prompt_template: input.prompt_template.clone(),
             order_idx: max_order + 1,
             created_at: now.clone(),
             updated_at: now,
@@ -555,6 +599,13 @@ impl MissionDB {
         push_field!(server, "server");
         push_field!(due_date, "due_date");
         push_field!(parent_id, "parent_id");
+        push_field!(assignee, "assignee");
+        push_field!(prompt_template, "prompt_template");
+
+        if let Some(auto_exec) = update.auto_execute {
+            fields.push("auto_execute = ?".to_string());
+            values.push(Box::new(auto_exec as i32));
+        }
 
         if let Some(idx) = update.order_idx {
             fields.push("order_idx = ?".to_string());
@@ -593,6 +644,8 @@ impl MissionDB {
 
         let mut deleted = 0i64;
         for tid in &to_delete {
+            self.conn
+                .execute("DELETE FROM board_task_notes WHERE task_id = ?", params![tid])?;
             let r = self
                 .conn
                 .execute("DELETE FROM board_tasks WHERE id = ?", params![tid])?;
@@ -618,6 +671,26 @@ impl MissionDB {
         }
     }
 
+    /// List board tasks eligible for autopilot execution
+    /// (auto_execute=true, status=open, due_date <= now, has assignee)
+    pub fn list_autopilot_tasks(&self) -> SqliteResult<Vec<BoardTask>> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT * FROM board_tasks
+             WHERE auto_execute = 1
+               AND status = 'open'
+               AND assignee IS NOT NULL
+               AND (due_date IS NULL OR due_date <= ?1)
+             ORDER BY order_idx ASC"
+        )?;
+        let rows = stmt.query_map(params![now], |row| Self::row_to_board_task(row))?;
+        let mut tasks = Vec::new();
+        for task in rows {
+            tasks.push(task?);
+        }
+        Ok(tasks)
+    }
+
     /// Clear all done board tasks
     pub fn clear_done_board_tasks(&self) -> SqliteResult<i64> {
         let result = self
@@ -629,6 +702,7 @@ impl MissionDB {
     fn row_to_board_task(row: &rusqlite::Row) -> SqliteResult<BoardTask> {
         let status_str: String = row.get("status")?;
         let status = BoardTaskStatus::from_str(&status_str).unwrap_or(BoardTaskStatus::Open);
+        let auto_execute: i32 = row.get("auto_execute").unwrap_or(0);
 
         Ok(BoardTask {
             id: row.get("id")?,
@@ -641,9 +715,92 @@ impl MissionDB {
             server: row.get("server")?,
             due_date: row.get("due_date")?,
             parent_id: row.get("parent_id")?,
+            assignee: row.get("assignee")?,
+            auto_execute: auto_execute != 0,
+            prompt_template: row.get("prompt_template")?,
             order_idx: row.get("order_idx")?,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
+        })
+    }
+
+    // ============ Board Task Notes ============
+
+    /// Add a note to a board task
+    pub fn add_board_task_note(
+        &self,
+        input: &AddBoardTaskNoteInput,
+    ) -> SqliteResult<BoardTaskNote> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let id = uuid::Uuid::new_v4().to_string();
+        let note_type_str = input.note_type.as_deref().unwrap_or("note");
+
+        // Verify task exists
+        let task_exists: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM board_tasks WHERE id = ?1",
+            params![input.task_id],
+            |row| row.get(0),
+        )?;
+        if !task_exists {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+
+        let note_type = BoardNoteType::from_str(note_type_str).unwrap_or(BoardNoteType::Note);
+
+        self.conn.execute(
+            "INSERT INTO board_task_notes (id, task_id, content, note_type, author, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, input.task_id, input.content, note_type.as_str(), input.author, now],
+        )?;
+
+        Ok(BoardTaskNote {
+            id,
+            task_id: input.task_id.clone(),
+            content: input.content.clone(),
+            note_type,
+            author: input.author.clone(),
+            created_at: now,
+        })
+    }
+
+    /// Get all notes for a board task (ordered by creation time ASC)
+    pub fn get_board_task_notes(&self, task_id: &str) -> SqliteResult<Vec<BoardTaskNote>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, content, note_type, author, created_at
+             FROM board_task_notes WHERE task_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![task_id], Self::row_to_board_task_note)?;
+        let mut notes = Vec::new();
+        for note in rows {
+            notes.push(note?);
+        }
+        Ok(notes)
+    }
+
+    /// Get a board task with its notes
+    pub fn get_board_task_with_notes(
+        &self,
+        id: &str,
+    ) -> SqliteResult<Option<BoardTaskWithNotes>> {
+        if let Some(task) = self.get_board_task(id)? {
+            let notes = self.get_board_task_notes(id)?;
+            Ok(Some(BoardTaskWithNotes { task, notes }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn row_to_board_task_note(row: &rusqlite::Row) -> SqliteResult<BoardTaskNote> {
+        let note_type_str: String = row.get("note_type")?;
+        let note_type = BoardNoteType::from_str(&note_type_str).unwrap_or(BoardNoteType::Note);
+
+        Ok(BoardTaskNote {
+            id: row.get("id")?,
+            task_id: row.get("task_id")?,
+            content: row.get("content")?,
+            note_type,
+            author: row.get("author")?,
+            created_at: row.get("created_at")?,
         })
     }
 }

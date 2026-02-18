@@ -230,6 +230,15 @@ pub struct BoardTask {
     pub due_date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
+    /// Assigned PTY slot ID (e.g., "slot-coder-1") for autopilot execution
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// Whether to auto-execute when due_date is reached
+    #[serde(default)]
+    pub auto_execute: bool,
+    /// Prompt template for autopilot (overrides title+description)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_template: Option<String>,
     pub order_idx: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -254,6 +263,12 @@ pub struct CreateBoardTaskInput {
     pub due_date: Option<String>,
     #[serde(default)]
     pub parent_id: Option<String>,
+    #[serde(default)]
+    pub assignee: Option<String>,
+    #[serde(default, rename = "autoExecute")]
+    pub auto_execute: Option<bool>,
+    #[serde(default, rename = "promptTemplate")]
+    pub prompt_template: Option<String>,
 }
 
 /// Partial update for a board task
@@ -279,7 +294,131 @@ pub struct UpdateBoardTaskInput {
     #[serde(default)]
     pub parent_id: Option<String>,
     #[serde(default)]
+    pub assignee: Option<String>,
+    #[serde(default, rename = "autoExecute")]
+    pub auto_execute: Option<bool>,
+    #[serde(default, rename = "promptTemplate")]
+    pub prompt_template: Option<String>,
+    #[serde(default)]
     pub order_idx: Option<i64>,
+}
+
+// ============ Board Task Notes ============
+
+/// Note type for board task progress tracking
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BoardNoteType {
+    Progress,
+    Summary,
+    Note,
+}
+
+impl BoardNoteType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BoardNoteType::Progress => "progress",
+            BoardNoteType::Summary => "summary",
+            BoardNoteType::Note => "note",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "progress" => Some(BoardNoteType::Progress),
+            "summary" => Some(BoardNoteType::Summary),
+            "note" => Some(BoardNoteType::Note),
+            _ => None,
+        }
+    }
+}
+
+/// A note attached to a board task
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardTaskNote {
+    pub id: String,
+    pub task_id: String,
+    pub content: String,
+    pub note_type: BoardNoteType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    pub created_at: String,
+}
+
+/// Input for adding a note to a board task
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddBoardTaskNoteInput {
+    pub task_id: String,
+    pub content: String,
+    #[serde(default)]
+    pub note_type: Option<String>,
+    #[serde(default)]
+    pub author: Option<String>,
+}
+
+/// A board task with its notes included
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardTaskWithNotes {
+    #[serde(flatten)]
+    pub task: BoardTask,
+    pub notes: Vec<BoardTaskNote>,
+}
+
+// ============ Infrastructure Server Registry ============
+
+/// A server in the infrastructure registry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InfraServer {
+    pub id: String,
+    pub name: String,
+    pub provider: String, // gcp, aliyun, self-hosted, bandwagon
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub roles: Vec<String>, // build, deploy, gpu, vpn, production
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Infrastructure configuration (loaded from servers.yaml)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InfraConfig {
+    #[serde(default)]
+    pub servers: Vec<InfraServer>,
+}
+
+impl InfraConfig {
+    /// Load from YAML file, returns empty config if file doesn't exist
+    pub fn load(path: &std::path::Path) -> Self {
+        if !path.exists() {
+            return Self { servers: Vec::new() };
+        }
+        match std::fs::read_to_string(path) {
+            Ok(content) => serde_yaml::from_str(&content).unwrap_or(Self { servers: Vec::new() }),
+            Err(_) => Self { servers: Vec::new() },
+        }
+    }
+
+    /// Get server by ID
+    pub fn get(&self, id: &str) -> Option<&InfraServer> {
+        self.servers.iter().find(|s| s.id == id)
+    }
+
+    /// Filter servers by role
+    pub fn by_role(&self, role: &str) -> Vec<&InfraServer> {
+        self.servers.iter().filter(|s| s.roles.iter().any(|r| r == role)).collect()
+    }
+
+    /// Filter servers by provider
+    pub fn by_provider(&self, provider: &str) -> Vec<&InfraServer> {
+        self.servers.iter().filter(|s| s.provider == provider).collect()
+    }
 }
 
 #[cfg(test)]

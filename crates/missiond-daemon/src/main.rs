@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use missiond_core::{
-    CorePermissionDecision, MissionControl, MissionControlOptions, PermissionPolicy, PermissionRule,
-    PTYManager, PTYSpawnOptions, PTYWebSocketServer, WSServerOptions,
+    CorePermissionDecision, InfraConfig, MissionControl, MissionControlOptions, PermissionPolicy,
+    PermissionRule, PTYManager, PTYSpawnOptions, PTYWebSocketServer, WSServerOptions, SkillIndex,
 };
 use missiond_core::{CCTasksWatcher, CCTasksWatcherOptions};
 use missiond_mcp::protocol::{self, Request, RequestId, Response, RpcError};
@@ -30,6 +30,8 @@ struct AppState {
     permission: Arc<PermissionPolicy>,
     pty: Arc<PTYManager>,
     cc_tasks: Arc<Mutex<CCTasksWatcher>>,
+    skills: Arc<SkillIndex>,
+    infra: Arc<InfraConfig>,
 }
 
 fn default_mission_home() -> PathBuf {
@@ -183,6 +185,8 @@ struct PTYSpawnArgs {
     timeout_secs: Option<u64>,
     #[serde(rename = "autoRestart", default)]
     auto_restart: Option<bool>,
+    #[serde(rename = "mcpConfigPath", default)]
+    mcp_config_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -299,6 +303,40 @@ struct BoardIdArgs {
     id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BoardNoteAddArgs {
+    task_id: String,
+    content: String,
+    #[serde(default)]
+    note_type: Option<String>,
+    #[serde(default)]
+    author: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SkillSearchArgs {
+    query: String,
+}
+
+#[derive(Deserialize)]
+struct ContextBuildArgs {
+    query: String,
+}
+
+#[derive(Deserialize)]
+struct InfraListArgs {
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct InfraGetArgs {
+    id: String,
+}
+
 impl AppState {
     async fn call_tool(&self, name: &str, args: Value) -> ToolResult {
         match self.call_tool_inner(name, args).await {
@@ -410,6 +448,7 @@ impl AppState {
                     wait_for_idle,
                     timeout_secs,
                     auto_restart,
+                    mcp_config_path,
                 } = serde_json::from_value(args)?;
                 let slot = self
                     .mission
@@ -424,6 +463,11 @@ impl AppState {
                     cwd: slot.config.cwd.as_deref().map(PathBuf::from),
                 };
 
+                // Resolve MCP config: arg > slot config > None
+                let mcp_config = mcp_config_path
+                    .or(slot.config.mcp_config.clone())
+                    .map(PathBuf::from);
+
                 let info = self
                     .pty
                     .spawn(
@@ -432,6 +476,7 @@ impl AppState {
                             auto_restart: auto_restart.unwrap_or(false),
                             wait_for_idle: wait_for_idle.unwrap_or(false),
                             timeout_secs,
+                            mcp_config,
                         },
                     )
                     .await?;
@@ -862,7 +907,7 @@ impl AppState {
                 let task = self
                     .mission
                     .db()
-                    .get_board_task(&id)
+                    .get_board_task_with_notes(&id)
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 match task {
                     Some(t) => Ok(ToolResult::json_pretty(&t)),
@@ -892,6 +937,82 @@ impl AppState {
                     Some(t) => Ok(ToolResult::json_pretty(&t)),
                     None => Ok(ToolResult::error("Task not found")),
                 }
+            }
+            // ===== Skill Knowledge Hub =====
+            "mission_skill_list" => {
+                let skills: Vec<Value> = self
+                    .skills
+                    .list()
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "name": s.name,
+                            "description": s.description,
+                            "aka": s.aka,
+                            "path": s.path,
+                        })
+                    })
+                    .collect();
+                Ok(ToolResult::json_pretty(&skills))
+            }
+            "mission_skill_search" => {
+                let SkillSearchArgs { query } = serde_json::from_value(args)?;
+                let results: Vec<Value> = self
+                    .skills
+                    .search(&query)
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "name": s.name,
+                            "description": s.description,
+                            "aka": s.aka,
+                            "path": s.path,
+                        })
+                    })
+                    .collect();
+                Ok(ToolResult::json_pretty(&results))
+            }
+            "mission_context_build" => {
+                let ContextBuildArgs { query } = serde_json::from_value(args)?;
+                let context = self.skills.build_context(&query);
+                Ok(ToolResult::text(context))
+            }
+
+            // ===== Infrastructure Registry =====
+            "mission_infra_list" => {
+                let InfraListArgs { role, provider } =
+                    serde_json::from_value(args).unwrap_or(InfraListArgs { role: None, provider: None });
+                let servers: Vec<&missiond_core::InfraServer> = if let Some(role) = role {
+                    self.infra.by_role(&role)
+                } else if let Some(provider) = provider {
+                    self.infra.by_provider(&provider)
+                } else {
+                    self.infra.servers.iter().collect()
+                };
+                Ok(ToolResult::json_pretty(&servers))
+            }
+            "mission_infra_get" => {
+                let InfraGetArgs { id } = serde_json::from_value(args)?;
+                match self.infra.get(&id) {
+                    Some(server) => Ok(ToolResult::json_pretty(&server)),
+                    None => Ok(ToolResult::error(format!("Server not found: {}", id))),
+                }
+            }
+
+            "mission_board_note_add" => {
+                let args: BoardNoteAddArgs = serde_json::from_value(args)?;
+                let input = missiond_core::types::AddBoardTaskNoteInput {
+                    task_id: args.task_id,
+                    content: args.content,
+                    note_type: args.note_type,
+                    author: args.author,
+                };
+                let note = self
+                    .mission
+                    .db()
+                    .add_board_task_note(&input)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json_pretty(&note))
             }
 
             _ => {
@@ -962,6 +1083,118 @@ async fn handle_ipc_request(state: AppState, request: Request) -> Response {
         }
         _ => Response::from_error(id, RpcError::MethodNotFound(method.to_string())),
     }
+}
+
+// =========================
+// Autopilot Scheduler
+// =========================
+
+async fn autopilot_tick(state: &AppState) -> Result<()> {
+    let tasks = state.mission.db().list_autopilot_tasks()
+        .map_err(|e| anyhow!("DB error: {}", e))?;
+
+    if tasks.is_empty() {
+        return Ok(());
+    }
+
+    info!(count = tasks.len(), "Autopilot: found executable tasks");
+
+    for task in tasks {
+        let slot_id = match &task.assignee {
+            Some(id) => id.clone(),
+            None => continue,
+        };
+
+        // Build prompt: template > "title\n\ndescription"
+        let prompt = if let Some(ref tmpl) = task.prompt_template {
+            tmpl.clone()
+        } else {
+            let mut p = task.title.clone();
+            if !task.description.is_empty() {
+                p.push_str("\n\n");
+                p.push_str(&task.description);
+            }
+            p
+        };
+
+        // Inject context from Phase B skills
+        let context = state.skills.build_context(&task.title);
+        let full_prompt = if context.contains("No matching skills") {
+            prompt
+        } else {
+            format!("{}\n\n{}", context, prompt)
+        };
+
+        info!(task_id = %task.id, slot_id = %slot_id, title = %task.title, "Autopilot: executing task");
+
+        // Check if PTY session exists, spawn if needed
+        let pty_status = state.pty.get_status(&slot_id).await;
+        if pty_status.is_none() {
+            // Try to find slot config and spawn
+            let slot = state.mission.list_slots().into_iter().find(|s| s.config.id == slot_id);
+            if let Some(slot) = slot {
+                let pty_slot = missiond_core::PTYSlot {
+                    id: slot.config.id.clone(),
+                    role: slot.config.role.clone(),
+                    cwd: slot.config.cwd.as_deref().map(PathBuf::from),
+                };
+                let mcp_config = slot.config.mcp_config.map(PathBuf::from);
+                if let Err(e) = state.pty.spawn(&pty_slot, PTYSpawnOptions {
+                    auto_restart: false,
+                    wait_for_idle: true,
+                    timeout_secs: Some(120),
+                    mcp_config,
+                }).await {
+                    warn!(task_id = %task.id, slot_id = %slot_id, error = %e, "Autopilot: failed to spawn PTY");
+                    continue;
+                }
+            } else {
+                warn!(task_id = %task.id, slot_id = %slot_id, "Autopilot: slot not found, skipping");
+                continue;
+            }
+        }
+
+        // Send prompt and wait for response
+        let timeout_ms = 600_000; // 10 minutes
+        match state.pty.send(&slot_id, &full_prompt, timeout_ms).await {
+            Ok(res) => {
+                // Record result as a board note
+                let note_content = format!("**Autopilot 执行完成** ({}ms)\n\n{}", res.duration_ms, res.response);
+                let _ = state.mission.db().add_board_task_note(
+                    &missiond_core::types::AddBoardTaskNoteInput {
+                        task_id: task.id.clone(),
+                        content: note_content,
+                        note_type: Some("summary".to_string()),
+                        author: Some("autopilot".to_string()),
+                    },
+                );
+                // Mark task as done
+                let _ = state.mission.db().update_board_task(
+                    &task.id,
+                    &missiond_core::types::UpdateBoardTaskInput {
+                        status: Some("done".to_string()),
+                        ..Default::default()
+                    },
+                );
+                info!(task_id = %task.id, duration_ms = res.duration_ms, "Autopilot: task completed");
+            }
+            Err(e) => {
+                // Record failure as a note
+                let note_content = format!("**Autopilot 执行失败**\n\n{}", e);
+                let _ = state.mission.db().add_board_task_note(
+                    &missiond_core::types::AddBoardTaskNoteInput {
+                        task_id: task.id.clone(),
+                        content: note_content,
+                        note_type: Some("note".to_string()),
+                        author: Some("autopilot".to_string()),
+                    },
+                );
+                warn!(task_id = %task.id, error = %e, "Autopilot: task execution failed");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn bind_ipc_listener(endpoint: &str) -> Result<IpcListener> {
@@ -1060,18 +1293,46 @@ async fn main() -> Result<()> {
     let listener = bind_ipc_listener(&endpoint).await?;
     info!(endpoint = %endpoint, "missiond IPC listening");
 
+    // Infrastructure registry
+    let servers_path = home.join("servers.yaml");
+    let infra = Arc::new(InfraConfig::load(&servers_path));
+    info!(count = infra.servers.len(), path = %servers_path.display(), "Infra registry loaded");
+
+    // Skill index (scan ~/.claude/skills/)
+    let skills_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".claude")
+        .join("skills");
+    let skills = Arc::new(SkillIndex::build(&skills_dir));
+    info!(count = skills.list().len(), "Skill index loaded");
+
     let state = AppState {
         mission,
         permission,
         pty,
         cc_tasks,
+        skills,
+        infra,
     };
 
+    // Autopilot scheduler + IPC server via select
+    let mut autopilot_interval = tokio::time::interval(std::time::Duration::from_secs(60));
+    info!("Autopilot scheduler started (60s interval)");
+
     loop {
-        let stream = listener.accept().await?;
-        let reader = BufReader::new(stream);
-        if let Err(e) = handle_ipc_connection(state.clone(), reader).await {
-            warn!(error = %e, "IPC connection error");
+        tokio::select! {
+            result = listener.accept() => {
+                let stream = result?;
+                let reader = BufReader::new(stream);
+                if let Err(e) = handle_ipc_connection(state.clone(), reader).await {
+                    warn!(error = %e, "IPC connection error");
+                }
+            }
+            _ = autopilot_interval.tick() => {
+                if let Err(e) = autopilot_tick(&state).await {
+                    warn!(error = %e, "Autopilot tick failed");
+                }
+            }
         }
     }
 }

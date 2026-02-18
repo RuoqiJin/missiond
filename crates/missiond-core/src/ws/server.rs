@@ -300,10 +300,13 @@ impl PTYWebSocketServer {
 
         info!(?addr, slot_id, "Client attached to PTY");
 
-        // Send current screen content first
-        if let Ok(screen) = pty_manager.get_screen(slot_id).await {
-            let msg = PtyOutMessage::Screen { data: screen };
-            let _ = send_json(&mut ws_tx, &msg).await;
+        // Send replay buffer (raw PTY output history) for late-joining clients
+        if let Ok(replay) = pty_manager.get_replay_buffer(slot_id).await {
+            if !replay.is_empty() {
+                let data = String::from_utf8_lossy(&replay).to_string();
+                let msg = PtyOutMessage::Screen { data };
+                let _ = send_json(&mut ws_tx, &msg).await;
+            }
         }
 
         // Send current state so new connections see the correct status immediately

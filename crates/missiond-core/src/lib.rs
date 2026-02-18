@@ -15,6 +15,7 @@ pub mod db;
 pub mod ipc;
 pub mod pty;
 pub mod semantic;
+pub mod skill;
 pub mod sync;
 pub mod types;
 pub mod ws;
@@ -28,8 +29,8 @@ pub use crate::core::{
 
 // Re-export core types
 pub use types::{
-    CreateTaskInput, EventType, InboxMessage, Slot, SlotConfig, SlotsConfig, Task, TaskEvent,
-    TaskStatus, TaskUpdate,
+    CreateTaskInput, EventType, InboxMessage, InfraConfig, InfraServer, Slot, SlotConfig,
+    SlotsConfig, Task, TaskEvent, TaskStatus, TaskUpdate,
 };
 
 // Re-export database
@@ -68,3 +69,6 @@ pub use sync::{SyncClient, SyncClientOptions, SyncEvent, SyncRelay, SyncRelayOpt
 pub use ipc::{
     default_ipc_endpoint, default_mission_home, ipc_endpoint, IpcListener, IpcStream,
 };
+
+// Re-export Skill types
+pub use skill::{SkillIndex, SkillMeta};
