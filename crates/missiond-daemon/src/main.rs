@@ -386,6 +386,13 @@ struct KBDiscoverArgs {
     password: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct KBGCArgs {
+    action: String,
+    #[serde(default)]
+    days: Option<i64>,
+}
+
 impl AppState {
     async fn call_tool(&self, name: &str, args: Value) -> ToolResult {
         match self.call_tool_inner(name, args).await {
@@ -1125,6 +1132,45 @@ impl AppState {
                     "summary": summary,
                     "detail": detail,
                 })))
+            }
+
+            "mission_kb_gc" => {
+                let KBGCArgs { action, days } = serde_json::from_value(args)?;
+                let db = self.mission.db();
+                match action.as_str() {
+                    "stats" => {
+                        let stats = db.kb_stats()
+                            .map_err(|e| anyhow!("DB error: {}", e))?;
+                        Ok(ToolResult::json_pretty(&stats))
+                    }
+                    "stale" => {
+                        let threshold = days.unwrap_or(30);
+                        let stale = db.kb_find_stale(threshold)
+                            .map_err(|e| anyhow!("DB error: {}", e))?;
+                        Ok(ToolResult::json(&serde_json::json!({
+                            "threshold_days": threshold,
+                            "count": stale.len(),
+                            "entries": stale.iter().map(|e| serde_json::json!({
+                                "category": e.category,
+                                "key": e.key,
+                                "summary": e.summary,
+                                "updatedAt": e.updated_at,
+                            })).collect::<Vec<_>>(),
+                        })))
+                    }
+                    "duplicates" => {
+                        let dups = db.kb_find_duplicates()
+                            .map_err(|e| anyhow!("DB error: {}", e))?;
+                        Ok(ToolResult::json(&serde_json::json!({
+                            "count": dups.len(),
+                            "pairs": dups.iter().map(|(a, b)| serde_json::json!({
+                                "a": {"category": a.category, "key": a.key, "summary": a.summary},
+                                "b": {"category": b.category, "key": b.key, "summary": b.summary},
+                            })).collect::<Vec<_>>(),
+                        })))
+                    }
+                    _ => Ok(ToolResult::error(format!("Unknown gc action: {}. Use: stats, stale, duplicates", action))),
+                }
             }
 
             // ===== Board Tasks (Personal Task Board) =====

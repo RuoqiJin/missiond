@@ -828,6 +828,27 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                 "required": ["host"]
             }),
         ),
+        ToolDefinition::new(
+            "mission_kb_gc",
+            "Knowledge governance: detect stale entries, duplicates, and show KB health stats. \
+             Use action='stats' for overview, 'stale' to find unused entries (default 30 days), \
+             'duplicates' to find potential duplicate keys within the same category. \
+             Call periodically to keep the knowledge base clean and accurate.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "Governance action: stats, stale, duplicates"
+                    },
+                    "days": {
+                        "type": "integer",
+                        "description": "For 'stale' action: number of days threshold (default 30)"
+                    }
+                },
+                "required": ["action"]
+            }),
+        ),
 
         // ===== Board Tasks (Personal Task Board) =====
         ToolDefinition::new(
@@ -1042,7 +1063,7 @@ mod tests {
     #[test]
     fn test_all_tools_count() {
         let tools = all_tools();
-        assert_eq!(tools.len(), 49);
+        assert_eq!(tools.len(), 50);
     }
 
     #[test]
