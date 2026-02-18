@@ -23,6 +23,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 dirs = { workspace = true }
+chrono = { workspace = true }
 
 missiond-core = { workspace = true }
 missiond-mcp = { workspace = true }

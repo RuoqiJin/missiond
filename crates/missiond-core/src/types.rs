@@ -415,6 +415,54 @@ pub struct Credential {
     pub updated_at: String,
 }
 
+// ============ Conversation Log ============
+
+/// A conversation session (maps to a Claude Code JSONL file)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Conversation {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slot_id: Option<String>,
+    pub source: String, // "claude_cli" | "pty"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jsonl_path: Option<String>,
+    pub message_count: i64,
+    pub started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+    pub status: String, // "active" | "completed"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analyzed_at: Option<String>,
+}
+
+/// A message within a conversation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationMessage {
+    pub id: i64,
+    pub session_id: String,
+    pub role: String, // "user" | "assistant" | "tool_use" | "tool_result"
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_uuid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_uuid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<String>,
+}
+
 // ============ Infrastructure Server Registry ============
 
 /// A server in the infrastructure registry
