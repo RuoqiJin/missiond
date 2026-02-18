@@ -1062,6 +1062,89 @@ impl MissionDB {
         rows.collect()
     }
 
+    /// Find stale entries: never accessed and older than N days
+    pub fn kb_find_stale(&self, days: i64) -> SqliteResult<Vec<KnowledgeEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT * FROM knowledge WHERE access_count = 0 \
+             AND last_accessed_at IS NULL \
+             AND julianday('now') - julianday(updated_at) > ?1 \
+             ORDER BY updated_at ASC",
+        )?;
+        let rows = stmt.query_map(params![days], |row| Self::row_to_knowledge_entry(row))?;
+        rows.collect()
+    }
+
+    /// Find potential duplicates: entries with similar keys in the same category
+    pub fn kb_find_duplicates(&self) -> SqliteResult<Vec<(KnowledgeEntry, KnowledgeEntry)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT a.*, b.id as b_id, b.category as b_category, b.key as b_key, \
+             b.summary as b_summary, b.detail as b_detail, b.source as b_source, \
+             b.confidence as b_confidence, b.access_count as b_access_count, \
+             b.created_at as b_created_at, b.updated_at as b_updated_at, \
+             b.last_accessed_at as b_last_accessed_at \
+             FROM knowledge a JOIN knowledge b \
+             ON a.category = b.category AND a.id < b.id \
+             AND (a.key LIKE '%' || b.key || '%' OR b.key LIKE '%' || a.key || '%') \
+             ORDER BY a.category, a.key",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let a = Self::row_to_knowledge_entry(row)?;
+            let detail_str: Option<String> = row.get("b_detail")?;
+            let detail = detail_str.and_then(|s| serde_json::from_str(&s).ok());
+            let b = KnowledgeEntry {
+                id: row.get("b_id")?,
+                category: row.get("b_category")?,
+                key: row.get("b_key")?,
+                summary: row.get("b_summary")?,
+                detail,
+                source: row.get("b_source")?,
+                confidence: row.get("b_confidence")?,
+                access_count: row.get("b_access_count")?,
+                created_at: row.get("b_created_at")?,
+                updated_at: row.get("b_updated_at")?,
+                last_accessed_at: row.get("b_last_accessed_at")?,
+            };
+            Ok((a, b))
+        })?;
+        rows.collect()
+    }
+
+    /// Get KB statistics for governance
+    pub fn kb_stats(&self) -> SqliteResult<serde_json::Value> {
+        let total: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM knowledge", [], |row| row.get(0)
+        )?;
+        let never_accessed: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM knowledge WHERE access_count = 0 AND last_accessed_at IS NULL",
+            [], |row| row.get(0),
+        )?;
+        let most_accessed: Option<(String, String, i64)> = self.conn.query_row(
+            "SELECT category, key, access_count FROM knowledge ORDER BY access_count DESC LIMIT 1",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).ok();
+        let oldest: Option<(String, String, String)> = self.conn.query_row(
+            "SELECT category, key, updated_at FROM knowledge ORDER BY updated_at ASC LIMIT 1",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).ok();
+
+        let mut stats = serde_json::json!({
+            "total": total,
+            "neverAccessed": never_accessed,
+        });
+        if let Some((cat, key, count)) = most_accessed {
+            stats["mostAccessed"] = serde_json::json!({"category": cat, "key": key, "accessCount": count});
+        }
+        if let Some((cat, key, updated)) = oldest {
+            stats["oldest"] = serde_json::json!({"category": cat, "key": key, "updatedAt": updated});
+        }
+
+        // Category breakdown
+        let summary = self.kb_summary()?;
+        stats["categories"] = serde_json::json!(summary.into_iter().collect::<std::collections::HashMap<_, _>>());
+
+        Ok(stats)
+    }
+
     fn row_to_knowledge_entry(row: &rusqlite::Row) -> SqliteResult<KnowledgeEntry> {
         let detail_str: Option<String> = row.get("detail")?;
         let detail = detail_str.and_then(|s| serde_json::from_str(&s).ok());
