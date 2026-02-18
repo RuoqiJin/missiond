@@ -367,6 +367,54 @@ pub struct BoardTaskWithNotes {
     pub notes: Vec<BoardTaskNote>,
 }
 
+// ============ Knowledge Base (Jarvis Memory) ============
+
+/// A knowledge entry in the KB
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeEntry {
+    pub id: String,
+    pub category: String,
+    pub key: String,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
+    pub source: String,
+    pub confidence: f64,
+    pub access_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_accessed_at: Option<String>,
+}
+
+/// Input for remembering (upserting) knowledge
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KBRememberInput {
+    pub category: String,
+    pub key: String,
+    pub summary: String,
+    #[serde(default)]
+    pub detail: Option<serde_json::Value>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub confidence: Option<f64>,
+}
+
+/// A credential stored alongside a knowledge entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Credential {
+    pub id: String,
+    pub knowledge_id: String,
+    pub name: String,
+    pub value_encrypted: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 // ============ Infrastructure Server Registry ============
 
 /// A server in the infrastructure registry
@@ -378,6 +426,10 @@ pub struct InfraServer {
     pub provider: String, // gcp, aliyun, self-hosted, bandwagon
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lan: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
     #[serde(default)]
     pub roles: Vec<String>, // build, deploy, gpu, vpn, production
     #[serde(default)]

@@ -682,6 +682,127 @@ pub fn all_tools() -> Vec<ToolDefinition> {
             }),
         ),
 
+        // ===== Knowledge Base (Jarvis Memory) =====
+        ToolDefinition::new(
+            "mission_kb_remember",
+            "Record knowledge discovered during conversation. Call PROACTIVELY when you learn: \
+             server IPs, user preferences, project structures, procedures, decisions. \
+             Do NOT ask permission — just record. If the key already exists, it will be updated. \
+             Examples: user mentions a server → category 'infra'; user corrects your approach → 'preference'; \
+             you SSH into a machine → 'discovery'; deployment succeeds → 'procedure'; \
+             a key decision is made → 'memory'.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "description": "Knowledge category (open-ended): infra, project, preference, memory, procedure, credential, relation, ..."
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "Unique key within category (e.g. 'privatecloud', 'commit-style', 'wss-migration-2026-02')"
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "One-line human-readable summary"
+                    },
+                    "detail": {
+                        "type": "object",
+                        "description": "Structured detail as JSON (optional). For relations: {from, to, type}"
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "How this was learned: conversation, discovery, import (default: conversation)"
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": "Confidence 0.0-1.0 (default: 1.0). Lower for inferred knowledge."
+                    }
+                },
+                "required": ["category", "key", "summary"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_kb_forget",
+            "Delete a knowledge entry by key. Use when information is confirmed outdated or wrong.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "The key to delete"
+                    }
+                },
+                "required": ["key"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_kb_search",
+            "Search the knowledge base BEFORE guessing or asking the user. \
+             If the user mentions a server, project, or concept — search here first. \
+             This is your long-term memory across all conversations.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Full-text search query"
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Filter by category (optional)"
+                    }
+                },
+                "required": ["query"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_kb_get",
+            "Get a single knowledge entry by exact key.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "The exact key to look up"
+                    }
+                },
+                "required": ["key"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_kb_list",
+            "List all knowledge entries, optionally filtered by category. Use to see what's known.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "description": "Filter by category (e.g. infra, project, preference)"
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_kb_import",
+            "Import knowledge from external sources. Currently supports 'servers_yaml' format \
+             to migrate servers.yaml into KB entries.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "format": {
+                        "type": "string",
+                        "description": "Import format: servers_yaml, json"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "File path (optional, uses default location if omitted)"
+                    }
+                },
+                "required": ["format"]
+            }),
+        ),
+
         // ===== Board Tasks (Personal Task Board) =====
         ToolDefinition::new(
             "mission_board_list",
@@ -895,8 +1016,7 @@ mod tests {
     #[test]
     fn test_all_tools_count() {
         let tools = all_tools();
-        // Task: 4, Process: 4, Query: 2, PTY: 9, Permission: 5, CC: 5, Skill: 3, Board: 6 = 38
-        assert_eq!(tools.len(), 40);
+        assert_eq!(tools.len(), 48);
     }
 
     #[test]
