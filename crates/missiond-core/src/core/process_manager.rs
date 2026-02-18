@@ -648,6 +648,7 @@ mod tests {
                 cwd: None,
                 mcp_config: None,
                 auto_start: None,
+                dangerously_skip_permissions: None,
             },
             session_id: None,
         }
@@ -681,6 +682,7 @@ mod tests {
                 cwd: None,
                 mcp_config: None,
                 auto_start: None,
+                dangerously_skip_permissions: None,
             },
             session_id: None,
         };
@@ -693,6 +695,7 @@ mod tests {
                 cwd: None,
                 mcp_config: None,
                 auto_start: None,
+                dangerously_skip_permissions: None,
             },
             session_id: None,
         };

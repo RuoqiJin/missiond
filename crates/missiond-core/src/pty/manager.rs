@@ -48,6 +48,8 @@ pub struct PTYSpawnOptions {
     pub timeout_secs: Option<u64>,
     /// Path to MCP config JSON file (passed as --mcp-config to claude)
     pub mcp_config: Option<PathBuf>,
+    /// Skip all permission prompts and trust dialogs
+    pub dangerously_skip_permissions: bool,
 }
 
 /// Result of executing a message
@@ -202,6 +204,7 @@ impl PTYManager {
             cols: 120,
             rows: 30,
             mcp_config: options.mcp_config.clone(),
+            dangerously_skip_permissions: options.dangerously_skip_permissions,
         })?;
 
         // Set up permission check
@@ -422,6 +425,7 @@ impl PTYManager {
                             cols: 120,
                             rows: 30,
                             mcp_config: None, // TODO: preserve mcp_config from original spawn
+                            dangerously_skip_permissions: false, // TODO: preserve from original
                         }) {
                             // Set up permission check
                             let policy = manager_policy.read().await.clone();

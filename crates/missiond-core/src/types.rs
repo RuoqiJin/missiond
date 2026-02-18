@@ -19,6 +19,9 @@ pub struct SlotConfig {
     pub mcp_config: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_start: Option<bool>,
+    /// Skip all permission prompts and trust dialogs (--dangerously-skip-permissions)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dangerously_skip_permissions: Option<bool>,
 }
 
 /// Slot = Config + session (process state managed by ProcessManager)
@@ -593,6 +596,7 @@ mod tests {
             cwd: Some("/path/to/work".to_string()),
             mcp_config: None,
             auto_start: Some(true),
+            dangerously_skip_permissions: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
