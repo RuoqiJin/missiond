@@ -29,6 +29,42 @@ struct IpcClient {
 }
 
 impl IpcClient {
+    /// Send a raw IPC request and return the result value
+    async fn call_method(&self, method: &str, params: Option<Value>) -> Result<Value> {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let request = Request {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            method: method.to_string(),
+            params,
+            id: Some(RequestId::Number(id)),
+        };
+
+        let mut stream = IpcStream::connect(&self.endpoint)
+            .await
+            .with_context(|| format!("Failed to connect to daemon: {}", self.endpoint))?;
+
+        let request_json = serde_json::to_string(&request)?;
+        debug!(%method, "IPC -> {}", request_json);
+        stream.write_all(request_json.as_bytes()).await?;
+        stream.write_all(b"\n").await?;
+        stream.flush().await?;
+
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        let bytes = reader.read_line(&mut line).await?;
+        if bytes == 0 {
+            return Err(anyhow!("Daemon closed connection without response"));
+        }
+        let line = line.trim();
+        debug!(%method, "IPC <- {}", line);
+
+        let response: Response = serde_json::from_str(line)?;
+        if let Some(err) = response.error {
+            return Err(anyhow!("IPC error: {}", err.message));
+        }
+        response.result.ok_or_else(|| anyhow!("Missing result"))
+    }
+
     async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolResult> {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
 
@@ -187,10 +223,24 @@ async fn main() -> Result<()> {
     let endpoint = ipc_endpoint_from_env();
     ensure_daemon(&endpoint).await?;
 
-    let handler = ProxyHandler {
-        client: IpcClient { endpoint },
+    let client = IpcClient { endpoint };
+
+    // Fetch KB summary from daemon for instructions injection
+    let instructions = match client.call_method("kb/summary", None).await {
+        Ok(val) => val.get("instructions").and_then(|v| v.as_str()).map(String::from),
+        Err(e) => {
+            warn!("Failed to fetch KB summary: {}", e);
+            None
+        }
     };
+
+    let handler = ProxyHandler { client };
     let mut server = McpServer::new(handler);
+    if let Some(instructions) = instructions {
+        if !instructions.is_empty() {
+            server.set_instructions(instructions);
+        }
+    }
     server.run().await?;
     Ok(())
 }

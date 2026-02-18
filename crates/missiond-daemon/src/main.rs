@@ -1104,7 +1104,23 @@ impl AppState {
             }
             "mission_context_build" => {
                 let ContextBuildArgs { query } = serde_json::from_value(args)?;
-                let context = self.skills.build_context(&query);
+                let mut context = self.skills.build_context(&query);
+
+                // Also search KB for matching knowledge
+                let db = self.mission.db();
+                if let Ok(entries) = db.kb_search(&query, None) {
+                    let entries: Vec<_> = entries.into_iter().take(5).collect();
+                    if !entries.is_empty() {
+                        context.push_str("\n[Knowledge Base]\n");
+                        for entry in &entries {
+                            context.push_str(&format!(
+                                "- [{}] {}: {}\n",
+                                entry.category, entry.key, entry.summary
+                            ));
+                        }
+                    }
+                }
+
                 Ok(ToolResult::text(context))
             }
 
@@ -1193,6 +1209,27 @@ async fn handle_ipc_request(state: AppState, request: Request) -> Response {
 
     match method {
         "ping" => Response::success(id, serde_json::json!({})),
+        "kb/summary" => {
+            let db = state.mission.db();
+            let instructions = match db.kb_summary() {
+                Ok(counts) => {
+                    if counts.is_empty() {
+                        "MissionD KB is empty. Use mission_kb_remember when you learn new facts. Use mission_kb_search before guessing.".to_string()
+                    } else {
+                        let parts: Vec<String> = counts
+                            .iter()
+                            .map(|(cat, n)| format!("{} {}", n, cat))
+                            .collect();
+                        format!(
+                            "[MissionD] KB: {}. Use mission_kb_search before guessing. Use mission_kb_remember when learning.",
+                            parts.join(", ")
+                        )
+                    }
+                }
+                Err(_) => String::new(),
+            };
+            Response::success(id, serde_json::json!({ "instructions": instructions }))
+        }
         "tools/call" => {
             let name = match params.get("name").and_then(|v| v.as_str()) {
                 Some(n) => n.to_string(),

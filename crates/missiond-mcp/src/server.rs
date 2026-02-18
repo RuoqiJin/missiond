@@ -56,6 +56,7 @@ impl ToolHandler for PlaceholderHandler {
 pub struct McpServer<H: ToolHandler> {
     handler: Arc<H>,
     capabilities: ServerCapabilities,
+    instructions: Option<String>,
     initialized: bool,
 }
 
@@ -65,6 +66,7 @@ impl<H: ToolHandler> McpServer<H> {
         McpServer {
             handler: Arc::new(handler),
             capabilities: ServerCapabilities::default(),
+            instructions: None,
             initialized: false,
         }
     }
@@ -74,8 +76,14 @@ impl<H: ToolHandler> McpServer<H> {
         McpServer {
             handler: Arc::new(handler),
             capabilities,
+            instructions: None,
             initialized: false,
         }
+    }
+
+    /// Set server instructions (injected into initialize response)
+    pub fn set_instructions(&mut self, instructions: String) {
+        self.instructions = Some(instructions);
     }
 
     /// Run the server on stdio
@@ -173,7 +181,7 @@ impl<H: ToolHandler> McpServer<H> {
         self.initialized = true;
         info!("MCP server initialized");
 
-        let result = json!({
+        let mut result = json!({
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {
                 "tools": if self.capabilities.tools { json!({}) } else { Value::Null },
@@ -183,6 +191,10 @@ impl<H: ToolHandler> McpServer<H> {
                 "version": SERVER_VERSION,
             }
         });
+
+        if let Some(ref instructions) = self.instructions {
+            result["instructions"] = json!(instructions);
+        }
 
         Response::success(id, result)
     }
