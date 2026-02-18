@@ -7,8 +7,8 @@ use std::path::Path;
 
 use crate::types::{
     AddBoardTaskNoteInput, BoardNoteType, BoardTask, BoardTaskNote, BoardTaskStatus,
-    BoardTaskWithNotes, CreateBoardTaskInput, EventType, InboxMessage, Task, TaskEvent,
-    TaskStatus, TaskUpdate, UpdateBoardTaskInput,
+    BoardTaskWithNotes, CreateBoardTaskInput, EventType, InboxMessage, KBRememberInput,
+    KnowledgeEntry, Task, TaskEvent, TaskStatus, TaskUpdate, UpdateBoardTaskInput,
 };
 
 const SCHEMA: &str = r#"
@@ -93,6 +93,33 @@ CREATE TABLE IF NOT EXISTS board_task_notes (
   FOREIGN KEY (task_id) REFERENCES board_tasks(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_board_task_notes_task ON board_task_notes(task_id);
+
+-- Knowledge base (Jarvis Memory)
+CREATE TABLE IF NOT EXISTS knowledge (
+    id TEXT PRIMARY KEY,
+    category TEXT NOT NULL,
+    key TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    detail TEXT,
+    source TEXT DEFAULT 'conversation',
+    confidence REAL DEFAULT 1.0,
+    access_count INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_accessed_at TEXT,
+    UNIQUE(category, key)
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_category ON knowledge(category);
+
+-- Knowledge credentials
+CREATE TABLE IF NOT EXISTS credentials (
+    id TEXT PRIMARY KEY,
+    knowledge_id TEXT REFERENCES knowledge(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    value_encrypted TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 "#;
 
 /// SQLite database operations class
@@ -152,6 +179,32 @@ impl MissionDB {
                  ALTER TABLE board_tasks ADD COLUMN prompt_template TEXT;"
             )?;
         }
+
+        // Knowledge Base: create FTS index if knowledge table exists but FTS doesn't
+        let has_knowledge: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='knowledge'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_knowledge {
+            let has_fts: bool = self.conn.query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='knowledge_fts'",
+                [],
+                |row| row.get(0),
+            )?;
+            if !has_fts {
+                self.conn.execute_batch(
+                    "CREATE VIRTUAL TABLE knowledge_fts USING fts5(
+                        key, summary, detail, category,
+                        content='knowledge', content_rowid='rowid'
+                    );
+                    -- Populate FTS from existing data
+                    INSERT INTO knowledge_fts(rowid, key, summary, detail, category)
+                        SELECT rowid, key, summary, COALESCE(detail, ''), category FROM knowledge;"
+                )?;
+            }
+        }
+
         Ok(())
     }
 
@@ -801,6 +854,219 @@ impl MissionDB {
             note_type,
             author: row.get("author")?,
             created_at: row.get("created_at")?,
+        })
+    }
+
+    // ============ Knowledge Base ============
+
+    /// Remember (upsert) a knowledge entry
+    pub fn kb_remember(&self, input: &KBRememberInput) -> SqliteResult<KnowledgeEntry> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let source = input.source.as_deref().unwrap_or("conversation");
+        let confidence = input.confidence.unwrap_or(1.0);
+        let detail_str = input.detail.as_ref().map(|d| serde_json::to_string(d).unwrap_or_default());
+
+        // Try update first
+        let updated = self.conn.execute(
+            "UPDATE knowledge SET summary = ?1, detail = ?2, source = ?3, confidence = ?4, updated_at = ?5
+             WHERE category = ?6 AND key = ?7",
+            params![input.summary, detail_str, source, confidence, now, input.category, input.key],
+        )?;
+
+        if updated > 0 {
+            // Update FTS
+            let entry = self.kb_get_by_category_key(&input.category, &input.key)?;
+            if let Some(ref e) = entry {
+                self.kb_sync_fts(e)?;
+            }
+            return Ok(entry.unwrap());
+        }
+
+        // Insert new
+        let id = uuid::Uuid::new_v4().to_string();
+        self.conn.execute(
+            "INSERT INTO knowledge (id, category, key, summary, detail, source, confidence, access_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9)",
+            params![id, input.category, input.key, input.summary, detail_str, source, confidence, now, now],
+        )?;
+
+        let entry = KnowledgeEntry {
+            id: id.clone(),
+            category: input.category.clone(),
+            key: input.key.clone(),
+            summary: input.summary.clone(),
+            detail: input.detail.clone(),
+            source: source.to_string(),
+            confidence,
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+        };
+
+        // Insert into FTS
+        self.kb_sync_fts(&entry)?;
+
+        Ok(entry)
+    }
+
+    /// Get a knowledge entry by key
+    pub fn kb_get(&self, key: &str) -> SqliteResult<Option<KnowledgeEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT * FROM knowledge WHERE key = ?1"
+        )?;
+        let mut rows = stmt.query(params![key])?;
+        if let Some(row) = rows.next()? {
+            let mut entry = Self::row_to_knowledge_entry(row)?;
+            // Bump access count
+            let now = chrono::Utc::now().to_rfc3339();
+            self.conn.execute(
+                "UPDATE knowledge SET access_count = access_count + 1, last_accessed_at = ?1 WHERE id = ?2",
+                params![now, entry.id],
+            )?;
+            entry.access_count += 1;
+            entry.last_accessed_at = Some(now);
+            Ok(Some(entry))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get by category + key (internal, no access bump)
+    fn kb_get_by_category_key(&self, category: &str, key: &str) -> SqliteResult<Option<KnowledgeEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT * FROM knowledge WHERE category = ?1 AND key = ?2"
+        )?;
+        let mut rows = stmt.query(params![category, key])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::row_to_knowledge_entry(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Search knowledge via FTS
+    pub fn kb_search(&self, query: &str, category: Option<&str>) -> SqliteResult<Vec<KnowledgeEntry>> {
+        let fts_query = query.split_whitespace()
+            .map(|w| format!("\"{}\"", w.replace('"', "")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+
+        let mut results = Vec::new();
+
+        if let Some(cat) = category {
+            let mut stmt = self.conn.prepare(
+                "SELECT k.* FROM knowledge k
+                 JOIN knowledge_fts f ON k.rowid = f.rowid
+                 WHERE knowledge_fts MATCH ?1 AND k.category = ?2
+                 ORDER BY rank"
+            )?;
+            let rows = stmt.query_map(params![fts_query, cat], |row| Self::row_to_knowledge_entry(row))?;
+            for entry in rows {
+                results.push(entry?);
+            }
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT k.* FROM knowledge k
+                 JOIN knowledge_fts f ON k.rowid = f.rowid
+                 WHERE knowledge_fts MATCH ?1
+                 ORDER BY rank"
+            )?;
+            let rows = stmt.query_map(params![fts_query], |row| Self::row_to_knowledge_entry(row))?;
+            for entry in rows {
+                results.push(entry?);
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// List knowledge entries, optionally filtered by category
+    pub fn kb_list(&self, category: Option<&str>) -> SqliteResult<Vec<KnowledgeEntry>> {
+        let mut entries = Vec::new();
+        if let Some(cat) = category {
+            let mut stmt = self.conn.prepare(
+                "SELECT * FROM knowledge WHERE category = ?1 ORDER BY updated_at DESC"
+            )?;
+            let rows = stmt.query_map(params![cat], |row| Self::row_to_knowledge_entry(row))?;
+            for entry in rows {
+                entries.push(entry?);
+            }
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT * FROM knowledge ORDER BY category, updated_at DESC"
+            )?;
+            let rows = stmt.query_map([], |row| Self::row_to_knowledge_entry(row))?;
+            for entry in rows {
+                entries.push(entry?);
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Forget (delete) a knowledge entry by key
+    pub fn kb_forget(&self, key: &str) -> SqliteResult<bool> {
+        // Get rowid for FTS cleanup
+        let rowid: Option<i64> = self.conn.query_row(
+            "SELECT rowid FROM knowledge WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        ).ok();
+
+        if let Some(rowid) = rowid {
+            // Remove from FTS first
+            self.conn.execute(
+                "INSERT INTO knowledge_fts(knowledge_fts, rowid, key, summary, detail, category) VALUES('delete', ?1, '', '', '', '')",
+                params![rowid],
+            ).ok(); // FTS delete may fail if entry wasn't indexed
+        }
+
+        let deleted = self.conn.execute(
+            "DELETE FROM knowledge WHERE key = ?1",
+            params![key],
+        )?;
+        Ok(deleted > 0)
+    }
+
+    /// Sync FTS index for a knowledge entry
+    fn kb_sync_fts(&self, entry: &KnowledgeEntry) -> SqliteResult<()> {
+        let rowid: i64 = self.conn.query_row(
+            "SELECT rowid FROM knowledge WHERE id = ?1",
+            params![entry.id],
+            |row| row.get(0),
+        )?;
+        let detail_str = entry.detail.as_ref()
+            .map(|d| serde_json::to_string(d).unwrap_or_default())
+            .unwrap_or_default();
+
+        // Delete old FTS entry, then insert new
+        self.conn.execute(
+            "INSERT INTO knowledge_fts(knowledge_fts, rowid, key, summary, detail, category) VALUES('delete', ?1, '', '', '', '')",
+            params![rowid],
+        ).ok();
+        self.conn.execute(
+            "INSERT INTO knowledge_fts(rowid, key, summary, detail, category) VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![rowid, entry.key, entry.summary, detail_str, entry.category],
+        )?;
+        Ok(())
+    }
+
+    fn row_to_knowledge_entry(row: &rusqlite::Row) -> SqliteResult<KnowledgeEntry> {
+        let detail_str: Option<String> = row.get("detail")?;
+        let detail = detail_str.and_then(|s| serde_json::from_str(&s).ok());
+
+        Ok(KnowledgeEntry {
+            id: row.get("id")?,
+            category: row.get("category")?,
+            key: row.get("key")?,
+            summary: row.get("summary")?,
+            detail,
+            source: row.get("source")?,
+            confidence: row.get("confidence")?,
+            access_count: row.get("access_count")?,
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+            last_accessed_at: row.get("last_accessed_at")?,
         })
     }
 }
