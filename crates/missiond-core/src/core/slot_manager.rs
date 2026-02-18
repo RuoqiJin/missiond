@@ -140,6 +140,7 @@ mod tests {
                 cwd: None,
                 mcp_config: None,
                 auto_start: None,
+                dangerously_skip_permissions: None,
             },
             SlotConfig {
                 id: "slot-2".to_string(),
@@ -148,6 +149,7 @@ mod tests {
                 cwd: None,
                 mcp_config: None,
                 auto_start: None,
+                dangerously_skip_permissions: None,
             },
             SlotConfig {
                 id: "slot-3".to_string(),
@@ -156,6 +158,7 @@ mod tests {
                 cwd: None,
                 mcp_config: None,
                 auto_start: None,
+                dangerously_skip_permissions: None,
             },
         ];
 
@@ -190,6 +193,7 @@ mod tests {
             cwd: None,
             mcp_config: None,
             auto_start: None,
+            dangerously_skip_permissions: None,
         }];
 
         manager.load_slots(configs);
@@ -222,6 +226,7 @@ mod tests {
                 cwd: None,
                 mcp_config: None,
                 auto_start: None,
+                dangerously_skip_permissions: None,
             },
             SlotConfig {
                 id: "slot-2".to_string(),
@@ -230,6 +235,7 @@ mod tests {
                 cwd: None,
                 mcp_config: None,
                 auto_start: None,
+                dangerously_skip_permissions: None,
             },
             SlotConfig {
                 id: "slot-3".to_string(),
@@ -238,6 +244,7 @@ mod tests {
                 cwd: None,
                 mcp_config: None,
                 auto_start: None,
+                dangerously_skip_permissions: None,
             },
         ];
 

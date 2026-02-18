@@ -184,6 +184,8 @@ pub struct PTYSessionOptions {
     pub rows: u16,
     /// Path to MCP config JSON file (passed as --mcp-config to claude)
     pub mcp_config: Option<PathBuf>,
+    /// Skip all permission prompts and trust dialogs
+    pub dangerously_skip_permissions: bool,
 }
 
 impl Default for PTYSessionOptions {
@@ -196,6 +198,7 @@ impl Default for PTYSessionOptions {
             cols: 120,
             rows: 30,
             mcp_config: None,
+            dangerously_skip_permissions: false,
         }
     }
 }
@@ -259,6 +262,9 @@ pub struct PTYSession {
 
     // MCP config
     mcp_config: Option<PathBuf>,
+
+    // Permission bypass
+    dangerously_skip_permissions: bool,
 
     // Logging
     log_file: Option<PathBuf>,
@@ -357,6 +363,7 @@ impl PTYSession {
             state_change_tx,
             shutdown_tx: None,
             mcp_config: options.mcp_config,
+            dangerously_skip_permissions: options.dangerously_skip_permissions,
             log_file: options.log_file,
 
             raw_output_buffer: Arc::new(std::sync::Mutex::new(VecDeque::with_capacity(
@@ -479,6 +486,10 @@ impl PTYSession {
             if let Some(ref mcp_config) = self.mcp_config {
                 parts.push_str(&format!(" --mcp-config \"{}\"", mcp_config.display()));
                 info!(mcp_config = %mcp_config.display(), "MCP config will be injected");
+            }
+            if self.dangerously_skip_permissions {
+                parts.push_str(" --dangerously-skip-permissions");
+                info!("Dangerous mode: skipping all permission prompts");
             }
             parts
         };
