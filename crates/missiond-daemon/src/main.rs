@@ -533,6 +533,7 @@ impl AppState {
                             wait_for_idle: wait_for_idle.unwrap_or(false),
                             timeout_secs,
                             mcp_config,
+                            dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
                         },
                     )
                     .await?;
@@ -1547,6 +1548,7 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
                     wait_for_idle: true,
                     timeout_secs: Some(120),
                     mcp_config,
+                    dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
                 }).await {
                     warn!(task_id = %task.id, slot_id = %slot_id, error = %e, "Autopilot: failed to spawn PTY");
                     continue;
@@ -1628,6 +1630,7 @@ async fn ensure_memory_slot(state: &AppState) -> bool {
         wait_for_idle: true,
         timeout_secs: Some(120),
         mcp_config,
+        dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
     }).await {
         Ok(_) => {
             info!("Memory slot spawned");
