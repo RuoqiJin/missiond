@@ -1490,6 +1490,9 @@ async fn handle_ipc_request(state: AppState, request: Request) -> Response {
 // =========================
 
 async fn autopilot_tick(state: &AppState) -> Result<()> {
+    // Deep analysis: review completed conversations
+    check_deep_analysis(state).await;
+
     let tasks = state.mission.db().list_autopilot_tasks()
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
@@ -1595,6 +1598,199 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
     }
 
     Ok(())
+}
+
+const MEMORY_SLOT_ID: &str = "slot-memory";
+
+/// Ensure slot-memory PTY session is running, spawn if needed.
+/// Returns true if the session is available.
+async fn ensure_memory_slot(state: &AppState) -> bool {
+    if state.pty.get_status(MEMORY_SLOT_ID).await.is_some() {
+        return true;
+    }
+    let slot = state
+        .mission
+        .list_slots()
+        .into_iter()
+        .find(|s| s.config.id == MEMORY_SLOT_ID);
+    let Some(slot) = slot else {
+        warn!("Memory slot not configured in slots.yaml");
+        return false;
+    };
+    let pty_slot = missiond_core::PTYSlot {
+        id: slot.config.id.clone(),
+        role: slot.config.role.clone(),
+        cwd: slot.config.cwd.as_deref().map(PathBuf::from),
+    };
+    let mcp_config = slot.config.mcp_config.map(PathBuf::from);
+    match state.pty.spawn(&pty_slot, PTYSpawnOptions {
+        auto_restart: false,
+        wait_for_idle: true,
+        timeout_secs: Some(120),
+        mcp_config,
+    }).await {
+        Ok(_) => {
+            info!("Memory slot spawned");
+            true
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to spawn memory slot");
+            false
+        }
+    }
+}
+
+/// Format conversation messages for memory agent prompts.
+fn format_messages_for_memory(messages: &[missiond_core::types::ConversationMessage]) -> String {
+    messages
+        .iter()
+        .map(|m| format!("[{}] {}: {}", m.timestamp, m.role, m.content))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Realtime memory forwarding: after new messages are logged, forward to slot-memory.
+/// Fire-and-forget — spawns a background task, never blocks the caller.
+fn maybe_forward_to_memory(
+    state: &AppState,
+    session_id: &str,
+    messages: &[missiond_core::CCMessageLine],
+) {
+    // Don't forward memory agent's own sessions
+    if session_id.starts_with("pty-") && session_id.contains(MEMORY_SLOT_ID) {
+        return;
+    }
+
+    // Only forward when the batch contains an assistant message (turn complete)
+    let has_assistant = messages.iter().any(|m| m.message.role == "assistant");
+    if !has_assistant {
+        return;
+    }
+
+    // Build content from the batch
+    let formatted: Vec<String> = messages
+        .iter()
+        .filter(|m| matches!(m.message.role.as_str(), "user" | "assistant"))
+        .map(|m| {
+            let text = extract_text_content(&m.message.content);
+            if text.len() < 50 {
+                return String::new();
+            }
+            format!("[{}] {}: {}", m.timestamp, m.message.role, text)
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if formatted.is_empty() {
+        return;
+    }
+
+    let prompt = format!(
+        "[realtime-extract]\n\
+         以下是一段对话的最新轮次。提取值得长期记忆的事实，\
+         用 mission_kb_remember 存入。不要存显而易见的事实。\
+         只存：架构决策、bug 修复经验、用户偏好、关键发现。\n\n\
+         {}",
+        formatted.join("\n\n")
+    );
+
+    // Fire-and-forget: only capture PTY (which is Send+Sync), not the full state
+    let pty = Arc::clone(&state.pty);
+    tokio::spawn(async move {
+        // Check if memory slot is running (can't auto-spawn without state, just skip)
+        if pty.get_status(MEMORY_SLOT_ID).await.is_none() {
+            return;
+        }
+        match pty.send(MEMORY_SLOT_ID, &prompt, 120_000).await {
+            Ok(res) => {
+                info!(duration_ms = res.duration_ms, "Realtime memory extraction done");
+            }
+            Err(e) => {
+                warn!(error = %e, "Realtime memory extraction failed");
+            }
+        }
+    });
+}
+
+/// Deep analysis: review completed but unanalyzed conversations.
+/// Called from autopilot_tick.
+async fn check_deep_analysis(state: &AppState) {
+    let db = state.mission.db();
+    let unanalyzed = match db.get_unanalyzed_conversations() {
+        Ok(convs) => convs,
+        Err(_) => return,
+    };
+
+    if unanalyzed.is_empty() {
+        return;
+    }
+
+    for conv in &unanalyzed {
+        // Only analyze conversations ended >= 5 minutes ago
+        if let Some(ref ended) = conv.ended_at {
+            if let Ok(ended_dt) = chrono::DateTime::parse_from_rfc3339(ended) {
+                let age = chrono::Utc::now().signed_duration_since(ended_dt.with_timezone(&chrono::Utc));
+                if age < chrono::TimeDelta::minutes(5) {
+                    continue;
+                }
+            }
+        } else {
+            continue; // Not yet ended
+        }
+
+        // Don't analyze memory agent's own conversations
+        if conv.slot_id.as_deref() == Some(MEMORY_SLOT_ID) {
+            let _ = db.mark_conversation_analyzed(&conv.id);
+            continue;
+        }
+
+        let messages = db
+            .get_conversation_messages(&conv.id, None, 1000)
+            .unwrap_or_default();
+        if messages.is_empty() {
+            let _ = db.mark_conversation_analyzed(&conv.id);
+            continue;
+        }
+
+        if !ensure_memory_slot(state).await {
+            break; // Can't proceed without memory slot
+        }
+
+        // Build KB context for deeper analysis
+        let kb_entries = db.kb_list(None).unwrap_or_default();
+        let kb_section = if kb_entries.is_empty() {
+            "（KB 暂无条目）".to_string()
+        } else {
+            kb_entries
+                .iter()
+                .map(|e| format!("- [{}] {}: {}", e.category, e.key, e.summary))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let prompt = format!(
+            "[deep-analysis]\n\
+             以下是一个完整的对话会话。请结合已有 KB 知识，分析出更深层的洞察。\n\
+             关注: 跨会话的模式、反复出现的主题、隐含的用户偏好、可以抽象成工具/服务的操作。\n\n\
+             ## 已有 KB 近期条目\n{}\n\n\
+             ## 完整会话 (项目: {})\n{}",
+            kb_section,
+            conv.project.as_deref().unwrap_or("unknown"),
+            format_messages_for_memory(&messages)
+        );
+
+        info!(conv_id = %conv.id, messages = messages.len(), "Deep analysis: sending to memory agent");
+
+        match state.pty.send(MEMORY_SLOT_ID, &prompt, 300_000).await {
+            Ok(res) => {
+                info!(conv_id = %conv.id, duration_ms = res.duration_ms, "Deep analysis completed");
+            }
+            Err(e) => {
+                warn!(conv_id = %conv.id, error = %e, "Deep analysis failed");
+            }
+        }
+        let _ = db.mark_conversation_analyzed(&conv.id);
+    }
 }
 
 /// Extract text content from a Claude Code message content field.
@@ -1907,7 +2103,8 @@ async fn main() -> Result<()> {
             event = conv_logger_rx.recv() => {
                 match event {
                     Ok(WatcherEvent::NewMessages { session_id, project_path, jsonl_path, messages }) => {
-                        handle_new_messages(&state, session_id, project_path, jsonl_path, messages);
+                        handle_new_messages(&state, session_id.clone(), project_path, jsonl_path, messages.clone());
+                        maybe_forward_to_memory(&state, &session_id, &messages);
                     }
                     Ok(_) => {} // Other events handled by WS server
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
