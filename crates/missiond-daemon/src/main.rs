@@ -377,6 +377,15 @@ struct KBImportArgs {
     path: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct KBDiscoverArgs {
+    host: String,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    password: Option<String>,
+}
+
 impl AppState {
     async fn call_tool(&self, name: &str, args: Value) -> ToolResult {
         match self.call_tool_inner(name, args).await {
@@ -990,6 +999,132 @@ impl AppState {
                     }
                     _ => Ok(ToolResult::error(format!("Unsupported import format: {}", format))),
                 }
+            }
+
+            "mission_kb_discover" => {
+                let KBDiscoverArgs { host, port, password } = serde_json::from_value(args)?;
+
+                // Resolve host: if it looks like an infra key (no @ or .), try infra registry
+                let (ssh_user, ssh_host, ssh_port, ssh_pass) = if !host.contains('@') && !host.contains('.') {
+                    // Try infra registry lookup
+                    let server = self.infra.get(&host);
+                    let ip = server.and_then(|s| s.host.as_deref()).unwrap_or(&host);
+                    // Look up credentials from KB
+                    let db = self.mission.db();
+                    let cred_pass = db.kb_search(&format!("{} password", host), Some("credential"))
+                        .ok()
+                        .and_then(|entries| entries.into_iter().next())
+                        .and_then(|e| e.detail.as_ref().and_then(|d| d.get("password").and_then(|v| v.as_str().map(String::from))));
+                    ("root".to_string(), ip.to_string(), port.unwrap_or(22), password.or(cred_pass))
+                } else if host.contains('@') {
+                    let parts: Vec<&str> = host.splitn(2, '@').collect();
+                    (parts[0].to_string(), parts[1].to_string(), port.unwrap_or(22), password)
+                } else {
+                    ("root".to_string(), host.clone(), port.unwrap_or(22), password)
+                };
+
+                // Build probe script (piped to remote bash to avoid quoting issues)
+                let probe_script = concat!(
+                    "echo \"HOSTNAME=$(hostname)\"\n",
+                    "echo \"UNAME=$(uname -a)\"\n",
+                    "echo \"OS=$(. /etc/os-release 2>/dev/null && echo \"$PRETTY_NAME\" || echo unknown)\"\n",
+                    "echo \"CPU=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo unknown)\"\n",
+                    "MEM=$(LANG=C free -h 2>/dev/null | awk '/Mem:/{print $2}'); echo \"MEM=${MEM:-unknown}\"\n",
+                    "DISK=$(LANG=C df -h / 2>/dev/null | awk 'NR==2{print $2}'); echo \"DISK=${DISK:-unknown}\"\n",
+                    "echo \"UPTIME=$(uptime -p 2>/dev/null || uptime || echo unknown)\"\n",
+                    "DOCKER=$(docker ps --format '{{.Names}}:{{.Image}}' 2>/dev/null | tr '\\n' ','); echo \"DOCKER=${DOCKER:-none}\"\n",
+                    "LISTEN=$(LANG=C ss -tlnp 2>/dev/null | awk 'NR>1{print $4}' | tr '\\n' ','); echo \"LISTEN=${LISTEN:-unknown}\"\n",
+                );
+
+                // Build SSH command args (pipe probe_script to stdin)
+                let mut ssh_args: Vec<String> = Vec::new();
+                if let Some(ref pass) = ssh_pass {
+                    ssh_args.extend(["sshpass".into(), "-p".into(), pass.clone(), "ssh".into()]);
+                } else {
+                    ssh_args.push("ssh".into());
+                    ssh_args.extend(["-o".into(), "BatchMode=yes".into()]);
+                }
+                ssh_args.extend([
+                    "-o".into(), "StrictHostKeyChecking=no".into(),
+                    "-o".into(), "ConnectTimeout=10".into(),
+                    "-p".into(), ssh_port.to_string(),
+                    format!("{}@{}", ssh_user, ssh_host),
+                    "bash".into(),
+                ]);
+
+                let program = ssh_args.remove(0);
+                let mut cmd = tokio::process::Command::new(&program);
+                cmd.args(&ssh_args);
+                cmd.stdin(std::process::Stdio::piped());
+                cmd.stdout(std::process::Stdio::piped());
+                cmd.stderr(std::process::Stdio::piped());
+
+                let mut child = cmd.spawn()
+                    .map_err(|e| anyhow!("Failed to spawn SSH: {}", e))?;
+
+                // Write probe script to stdin
+                if let Some(mut stdin) = child.stdin.take() {
+                    use tokio::io::AsyncWriteExt;
+                    stdin.write_all(probe_script.as_bytes()).await.ok();
+                    drop(stdin);
+                }
+
+                let output = child.wait_with_output().await
+                    .map_err(|e| anyhow!("SSH failed: {}", e))?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Ok(ToolResult::error(format!("SSH probe failed: {}", stderr.trim())));
+                }
+
+                // Parse key=value output
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut detail = serde_json::Map::new();
+                for line in stdout.lines() {
+                    if let Some((k, v)) = line.split_once('=') {
+                        let key = k.trim().to_lowercase();
+                        let val = v.trim().to_string();
+                        if !val.is_empty() && val != "unknown" && val != "none" {
+                            detail.insert(key, serde_json::Value::String(val));
+                        }
+                    }
+                }
+
+                // Add connection info
+                detail.insert("ssh_user".to_string(), serde_json::Value::String(ssh_user.clone()));
+                detail.insert("ssh_host".to_string(), serde_json::Value::String(ssh_host.clone()));
+                if ssh_port != 22 {
+                    detail.insert("ssh_port".to_string(), serde_json::Value::Number(ssh_port.into()));
+                }
+
+                // Build summary
+                let hostname = detail.get("hostname").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let os = detail.get("os").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let cpu = detail.get("cpu").and_then(|v| v.as_str()).unwrap_or("?");
+                let mem = detail.get("mem").and_then(|v| v.as_str()).unwrap_or("?");
+                let summary = format!("{} — {} ({}C, {})", hostname, os, cpu, mem);
+
+                // Derive a key from hostname or host
+                let key = hostname.to_lowercase().replace(' ', "-");
+
+                let input = missiond_core::types::KBRememberInput {
+                    category: "infra".to_string(),
+                    key: key.clone(),
+                    summary: summary.clone(),
+                    detail: Some(serde_json::Value::Object(detail.clone())),
+                    source: Some("discovery".to_string()),
+                    confidence: Some(1.0),
+                };
+                self.mission.db()
+                    .kb_remember(&input)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+
+                Ok(ToolResult::json(&serde_json::json!({
+                    "status": "discovered",
+                    "key": key,
+                    "summary": summary,
+                    "detail": detail,
+                })))
             }
 
             // ===== Board Tasks (Personal Task Board) =====
