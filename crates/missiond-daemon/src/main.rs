@@ -2106,6 +2106,14 @@ async fn main() -> Result<()> {
                         handle_new_messages(&state, session_id.clone(), project_path, jsonl_path, messages.clone());
                         maybe_forward_to_memory(&state, &session_id, &messages);
                     }
+                    Ok(WatcherEvent::SessionInactive(session)) => {
+                        // Mark conversation as completed so deep analysis can pick it up
+                        if let Err(e) = state.mission.db().complete_conversation(&session.session_id) {
+                            warn!(session = %session.session_id, error = %e, "Failed to complete conversation");
+                        } else {
+                            info!(session = %session.session_id, "Conversation marked completed");
+                        }
+                    }
                     Ok(_) => {} // Other events handled by WS server
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         warn!(skipped = n, "Conversation logger lagged");
