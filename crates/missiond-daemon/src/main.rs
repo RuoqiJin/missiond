@@ -337,6 +337,46 @@ struct InfraGetArgs {
     id: String,
 }
 
+// Knowledge Base args
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KBRememberArgs {
+    category: String,
+    key: String,
+    summary: String,
+    #[serde(default)]
+    detail: Option<Value>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    confidence: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct KBKeyArgs {
+    key: String,
+}
+
+#[derive(Deserialize)]
+struct KBSearchArgs {
+    query: String,
+    #[serde(default)]
+    category: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct KBListArgs {
+    #[serde(default)]
+    category: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct KBImportArgs {
+    format: String,
+    #[serde(default)]
+    path: Option<String>,
+}
+
 impl AppState {
     async fn call_tool(&self, name: &str, args: Value) -> ToolResult {
         match self.call_tool_inner(name, args).await {
@@ -860,6 +900,96 @@ impl AppState {
                         .map(|d| d.as_secs())
                         .unwrap_or(0),
                 })))
+            }
+
+            // ===== Knowledge Base (Jarvis Memory) =====
+            "mission_kb_remember" => {
+                let args: KBRememberArgs = serde_json::from_value(args)?;
+                let input = missiond_core::types::KBRememberInput {
+                    category: args.category,
+                    key: args.key,
+                    summary: args.summary,
+                    detail: args.detail,
+                    source: args.source,
+                    confidence: args.confidence,
+                };
+                let entry = self.mission.db()
+                    .kb_remember(&input)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json_pretty(&entry))
+            }
+            "mission_kb_forget" => {
+                let KBKeyArgs { key } = serde_json::from_value(args)?;
+                let deleted = self.mission.db()
+                    .kb_forget(&key)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json(&serde_json::json!({
+                    "deleted": deleted,
+                    "key": key,
+                })))
+            }
+            "mission_kb_search" => {
+                let KBSearchArgs { query, category } = serde_json::from_value(args)?;
+                let results = self.mission.db()
+                    .kb_search(&query, category.as_deref())
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json_pretty(&results))
+            }
+            "mission_kb_get" => {
+                let KBKeyArgs { key } = serde_json::from_value(args)?;
+                let entry = self.mission.db()
+                    .kb_get(&key)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                match entry {
+                    Some(e) => Ok(ToolResult::json_pretty(&e)),
+                    None => Ok(ToolResult::error(format!("Key not found: {}", key))),
+                }
+            }
+            "mission_kb_list" => {
+                let KBListArgs { category } =
+                    serde_json::from_value(args).unwrap_or(KBListArgs { category: None });
+                let entries = self.mission.db()
+                    .kb_list(category.as_deref())
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json_pretty(&entries))
+            }
+            "mission_kb_import" => {
+                let KBImportArgs { format, path } = serde_json::from_value(args)?;
+                match format.as_str() {
+                    "servers_yaml" => {
+                        let yaml_path = path
+                            .map(std::path::PathBuf::from)
+                            .unwrap_or_else(|| default_mission_home().join("servers.yaml"));
+                        let infra = missiond_core::InfraConfig::load(&yaml_path);
+                        let mut imported = 0;
+                        for server in &infra.servers {
+                            let detail = serde_json::to_value(server).ok();
+                            let summary = format!(
+                                "{} ({}) — {}",
+                                server.name,
+                                server.provider,
+                                server.roles.join(", ")
+                            );
+                            let input = missiond_core::types::KBRememberInput {
+                                category: "infra".to_string(),
+                                key: server.id.clone(),
+                                summary,
+                                detail,
+                                source: Some("import".to_string()),
+                                confidence: Some(1.0),
+                            };
+                            self.mission.db()
+                                .kb_remember(&input)
+                                .map_err(|e| anyhow!("DB error: {}", e))?;
+                            imported += 1;
+                        }
+                        Ok(ToolResult::json(&serde_json::json!({
+                            "imported": imported,
+                            "source": yaml_path.display().to_string(),
+                        })))
+                    }
+                    _ => Ok(ToolResult::error(format!("Unsupported import format: {}", format))),
+                }
             }
 
             // ===== Board Tasks (Personal Task Board) =====

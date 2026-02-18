@@ -29,8 +29,9 @@ pub use crate::core::{
 
 // Re-export core types
 pub use types::{
-    CreateTaskInput, EventType, InboxMessage, InfraConfig, InfraServer, Slot, SlotConfig,
-    SlotsConfig, Task, TaskEvent, TaskStatus, TaskUpdate,
+    CreateTaskInput, Credential, EventType, InboxMessage, InfraConfig, InfraServer,
+    KBRememberInput, KnowledgeEntry, Slot, SlotConfig, SlotsConfig, Task, TaskEvent,
+    TaskStatus, TaskUpdate,
 };
 
 // Re-export database
