@@ -1006,19 +1006,19 @@ impl MissionDB {
 
     /// Forget (delete) a knowledge entry by key
     pub fn kb_forget(&self, key: &str) -> SqliteResult<bool> {
-        // Get rowid for FTS cleanup
-        let rowid: Option<i64> = self.conn.query_row(
-            "SELECT rowid FROM knowledge WHERE key = ?1",
+        // Read entry values for FTS cleanup (external content FTS requires actual values)
+        let entry: Option<(i64, String, String, String, String)> = self.conn.query_row(
+            "SELECT rowid, key, summary, COALESCE(detail, ''), category FROM knowledge WHERE key = ?1",
             params![key],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         ).ok();
 
-        if let Some(rowid) = rowid {
-            // Remove from FTS first
+        if let Some((rowid, k, summary, detail, category)) = entry {
+            // Remove from FTS first (must provide actual indexed values)
             self.conn.execute(
-                "INSERT INTO knowledge_fts(knowledge_fts, rowid, key, summary, detail, category) VALUES('delete', ?1, '', '', '', '')",
-                params![rowid],
-            ).ok(); // FTS delete may fail if entry wasn't indexed
+                "INSERT INTO knowledge_fts(knowledge_fts, rowid, key, summary, detail, category) VALUES('delete', ?1, ?2, ?3, ?4, ?5)",
+                params![rowid, k, summary, detail, category],
+            ).ok();
         }
 
         let deleted = self.conn.execute(
@@ -1039,11 +1039,19 @@ impl MissionDB {
             .map(|d| serde_json::to_string(d).unwrap_or_default())
             .unwrap_or_default();
 
-        // Delete old FTS entry, then insert new
-        self.conn.execute(
-            "INSERT INTO knowledge_fts(knowledge_fts, rowid, key, summary, detail, category) VALUES('delete', ?1, '', '', '', '')",
-            params![rowid],
+        // Delete old FTS entry (must provide actual indexed values for external content)
+        let old_values: Option<(String, String, String, String)> = self.conn.query_row(
+            "SELECT key, summary, COALESCE(detail, ''), category FROM knowledge WHERE id = ?1",
+            params![entry.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ).ok();
+        if let Some((old_key, old_summary, old_detail, old_category)) = old_values {
+            self.conn.execute(
+                "INSERT INTO knowledge_fts(knowledge_fts, rowid, key, summary, detail, category) VALUES('delete', ?1, ?2, ?3, ?4, ?5)",
+                params![rowid, old_key, old_summary, old_detail, old_category],
+            ).ok();
+        }
+
         self.conn.execute(
             "INSERT INTO knowledge_fts(rowid, key, summary, detail, category) VALUES(?1, ?2, ?3, ?4, ?5)",
             params![rowid, entry.key, entry.summary, detail_str, entry.category],
