@@ -39,6 +39,8 @@ struct AppState {
     pty_session_uuids: Arc<tokio::sync::RwLock<HashSet<String>>>,
     /// Whether memory extraction is currently in progress (set by autopilot_tick).
     memory_extracting: Arc<std::sync::atomic::AtomicBool>,
+    /// Hash of last synced CLAUDE.md managed section (to avoid unnecessary writes).
+    claude_md_hash: Arc<std::sync::atomic::AtomicU64>,
 }
 
 fn default_mission_home() -> PathBuf {
@@ -1393,18 +1395,28 @@ impl AppState {
                 let ContextBuildArgs { query } = serde_json::from_value(args)?;
                 let mut context = self.skills.build_context(&query);
 
-                // Also search KB for matching knowledge
+                // Also search KB for matching knowledge (multi-factor sort + token budget)
                 let db = self.mission.db();
-                if let Ok(entries) = db.kb_search(&query, None) {
-                    let entries: Vec<_> = entries.into_iter().take(5).collect();
-                    if !entries.is_empty() {
+                if let Ok(mut entries) = db.kb_search(&query, None) {
+                    // Sort by confidence × log(access_count + 1) descending
+                    entries.sort_by(|a, b| {
+                        let score_a = a.confidence * (a.access_count as f64 + 1.0).ln();
+                        let score_b = b.confidence * (b.access_count as f64 + 1.0).ln();
+                        score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+
+                    // Token budget: ~800 chars instead of fixed top-5
+                    let mut budget: i32 = 800;
+                    let mut kb_block = String::new();
+                    for entry in &entries {
+                        let line = format!("- [{}] {}: {}\n", entry.category, entry.key, entry.summary);
+                        budget -= line.len() as i32;
+                        if budget < 0 { break; }
+                        kb_block.push_str(&line);
+                    }
+                    if !kb_block.is_empty() {
                         context.push_str("\n[Knowledge Base]\n");
-                        for entry in &entries {
-                            context.push_str(&format!(
-                                "- [{}] {}: {}\n",
-                                entry.category, entry.key, entry.summary
-                            ));
-                        }
+                        context.push_str(&kb_block);
                     }
                 }
 
@@ -1507,25 +1519,12 @@ async fn handle_ipc_request(state: AppState, request: Request) -> Response {
                             .iter()
                             .map(|(cat, n)| format!("{} {}", n, cat))
                             .collect();
-                        let mut instr = format!("[MissionD] KB: {}.", parts.join(", "));
-
-                        // Inject hot topics so Claude knows what to search for
-                        if let Ok(hot_keys) = db.kb_hot_keys(20) {
-                            if !hot_keys.is_empty() {
-                                instr.push_str(&format!("\nTopics: {}.", hot_keys.join(", ")));
-                            }
-                        }
-
-                        // Inject preferences so they are always active
-                        if let Ok(prefs) = db.kb_list(Some("preference")) {
-                            if !prefs.is_empty() {
-                                let pref_summaries: Vec<&str> = prefs.iter().map(|e| e.summary.as_str()).collect();
-                                instr.push_str(&format!("\nPreferences: {}.", pref_summaries.join(" | ")));
-                            }
-                        }
-
-                        instr.push_str("\nUse mission_kb_search before guessing. Use mission_kb_remember when learning.");
-                        instr
+                        // Preferences + hot topics are synced to CLAUDE.md (always visible).
+                        // Instructions only carry KB stats + behavioral nudges.
+                        format!(
+                            "[MissionD] KB: {}. Use mission_kb_search before guessing. Use mission_kb_remember when learning.",
+                            parts.join(", ")
+                        )
                     }
                 }
                 Err(_) => String::new(),
@@ -1646,6 +1645,9 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
 
     // Deep analysis: review completed conversations
     check_deep_analysis(state).await;
+
+    // Sync KB preferences + hot topics into CLAUDE.md
+    sync_claude_md(state);
 
     let tasks = state.mission.db().list_autopilot_tasks()
         .map_err(|e| anyhow!("DB error: {}", e))?;
@@ -1931,20 +1933,24 @@ async fn check_memory_extraction(state: &AppState) {
         return;
     }
 
-    // Send trigger
+    // Fire trigger in background — don't block autopilot tick
     let prompt = "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，然后提取记忆。";
     info!("Triggering memory extraction via MCP pull");
     state.memory_extracting.store(true, std::sync::atomic::Ordering::SeqCst);
 
-    match state.pty.send(MEMORY_SLOT_ID, prompt, 300_000).await {
-        Ok(res) => {
-            info!(duration_ms = res.duration_ms, "Memory extraction trigger sent");
+    let pty = Arc::clone(&state.pty);
+    let extracting = Arc::clone(&state.memory_extracting);
+    tokio::spawn(async move {
+        match pty.send(MEMORY_SLOT_ID, prompt, 300_000).await {
+            Ok(res) => {
+                info!(duration_ms = res.duration_ms, "Memory extraction trigger sent");
+            }
+            Err(e) => {
+                warn!(error = %e, "Memory extraction trigger failed");
+                extracting.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
         }
-        Err(e) => {
-            warn!(error = %e, "Memory extraction trigger failed");
-            state.memory_extracting.store(false, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
+    });
 }
 
 /// Deep analysis: review completed but unanalyzed conversations.
@@ -1983,7 +1989,8 @@ async fn check_deep_analysis(state: &AppState) {
         let messages = db
             .get_conversation_messages(&conv.id, None, 1000)
             .unwrap_or_default();
-        if messages.is_empty() {
+        // Skip conversations with too few messages — not worth deep analysis
+        if messages.len() < 6 {
             let _ = db.mark_conversation_analyzed(&conv.id);
             continue;
         }
@@ -2031,6 +2038,103 @@ async fn check_deep_analysis(state: &AppState) {
             }
         }
         let _ = db.mark_conversation_analyzed(&conv.id);
+    }
+}
+
+// ===== CLAUDE.md sync =====
+
+const MANAGED_START: &str = "<!-- missiond:managed:start -->";
+const MANAGED_END: &str = "<!-- missiond:managed:end -->";
+
+/// Sync KB preferences + hot topics into ~/.claude/CLAUDE.md managed section.
+/// Only writes when content actually changes (hash-based detection).
+fn sync_claude_md(state: &AppState) {
+    let db = state.mission.db();
+
+    let preferences = db.kb_list(Some("preference")).unwrap_or_default();
+    let hot_keys = db.kb_hot_keys(20).unwrap_or_default();
+
+    // Nothing to sync
+    if preferences.is_empty() && hot_keys.is_empty() {
+        return;
+    }
+
+    // Hash-based change detection
+    let new_hash = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for p in &preferences { p.summary.hash(&mut hasher); }
+        for k in &hot_keys { k.hash(&mut hasher); }
+        hasher.finish()
+    };
+    let last_hash = state.claude_md_hash.load(std::sync::atomic::Ordering::Relaxed);
+    if new_hash == last_hash && last_hash != 0 {
+        return;
+    }
+
+    // Build managed section
+    let mut managed = String::new();
+    managed.push_str(MANAGED_START);
+    managed.push_str("\n# MissionD Managed\n");
+
+    if !preferences.is_empty() {
+        managed.push_str("\n## Preferences\n");
+        for p in &preferences {
+            managed.push_str(&format!("- {}\n", p.summary));
+        }
+    }
+
+    if !hot_keys.is_empty() {
+        managed.push_str(&format!("\n## Hot Topics\n{}\n", hot_keys.join(", ")));
+    }
+
+    managed.push_str(MANAGED_END);
+
+    // Read existing file
+    let claude_md_path = match dirs::home_dir() {
+        Some(home) => home.join(".claude/CLAUDE.md"),
+        None => {
+            warn!("Cannot determine home directory for CLAUDE.md sync");
+            return;
+        }
+    };
+
+    let existing = std::fs::read_to_string(&claude_md_path).unwrap_or_default();
+
+    // Replace or append managed section
+    let new_content = if let (Some(start), Some(end_pos)) = (
+        existing.find(MANAGED_START),
+        existing.find(MANAGED_END),
+    ) {
+        let before = &existing[..start];
+        let after_marker = end_pos + MANAGED_END.len();
+        let after = &existing[after_marker..];
+        format!("{}{}{}", before, managed, after)
+    } else {
+        // Append to end
+        if existing.trim().is_empty() {
+            managed
+        } else {
+            format!("{}\n\n{}\n", existing.trim_end(), managed)
+        }
+    };
+
+    // Only write if content actually differs
+    if new_content == existing {
+        state.claude_md_hash.store(new_hash, std::sync::atomic::Ordering::Relaxed);
+        return;
+    }
+
+    match std::fs::write(&claude_md_path, &new_content) {
+        Ok(_) => {
+            info!(
+                prefs = preferences.len(),
+                topics = hot_keys.len(),
+                "CLAUDE.md managed section synced"
+            );
+            state.claude_md_hash.store(new_hash, std::sync::atomic::Ordering::Relaxed);
+        }
+        Err(e) => warn!(error = %e, "Failed to write CLAUDE.md"),
     }
 }
 
@@ -2353,6 +2457,7 @@ async fn main() -> Result<()> {
         infra,
         pty_session_uuids: Arc::new(tokio::sync::RwLock::new(pty_uuids)),
         memory_extracting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        claude_md_hash: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     // Autopilot scheduler + IPC server via select
