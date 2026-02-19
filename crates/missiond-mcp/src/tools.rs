@@ -861,6 +861,16 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                 "properties": {}
             }),
         ),
+        ToolDefinition::new(
+            "mission_memory_pending_user",
+            "获取待分析的用户消息（仅 role=user）。独立于 mission_memory_pending，\
+             用于从用户原话中提取偏好、纠正、决策等高价值记忆。\
+             调用后自动更新 user_voice 转发时间戳。仅供 memory slot 使用。",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+        ),
 
         // ===== Conversation Log =====
         ToolDefinition::new(

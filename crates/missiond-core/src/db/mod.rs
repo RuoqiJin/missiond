@@ -2,7 +2,7 @@
 //!
 //! Mirrors the TypeScript implementation in packages/missiond/src/db/index.ts
 
-use rusqlite::{params, Connection, Result as SqliteResult};
+use rusqlite::{params, Connection, OptionalExtension, Result as SqliteResult};
 use std::path::Path;
 
 use crate::types::{
@@ -251,6 +251,17 @@ impl MissionDB {
                 "ALTER TABLE conversations ADD COLUMN memory_forwarded_at TEXT;"
             )?;
         }
+        if !conv_columns.iter().any(|c| c == "user_voice_forwarded_at") {
+            self.conn.execute_batch(
+                "ALTER TABLE conversations ADD COLUMN user_voice_forwarded_at TEXT;"
+            )?;
+        }
+
+        // Performance indexes for conversation messages
+        self.conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_msg_uuid ON conversation_messages(message_uuid);
+             CREATE INDEX IF NOT EXISTS idx_conv_memory_pending ON conversations(slot_id, memory_forwarded_at);"
+        )?;
 
         Ok(())
     }
@@ -558,6 +569,15 @@ impl MissionDB {
             sessions.push(session?);
         }
         Ok(sessions)
+    }
+
+    /// Get slot_id for a given session_id (reverse lookup)
+    pub fn get_slot_for_session(&self, session_id: &str) -> SqliteResult<Option<String>> {
+        self.conn.query_row(
+            "SELECT slot_id FROM slot_sessions WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        ).optional()
     }
 
     // ============ Board Tasks ============
@@ -992,12 +1012,28 @@ impl MissionDB {
         }
     }
 
-    /// Search knowledge via FTS
+    /// Search knowledge via FTS, with LIKE fallback for Chinese text
     pub fn kb_search(&self, query: &str, category: Option<&str>) -> SqliteResult<Vec<KnowledgeEntry>> {
+        // Phase 1: FTS5 search (works well for English / space-separated tokens)
+        let results = self.kb_search_fts(query, category)?;
+        if !results.is_empty() {
+            return Ok(results);
+        }
+
+        // Phase 2: LIKE fallback (works for Chinese and partial matches)
+        self.kb_search_like(query, category)
+    }
+
+    /// FTS5-based search
+    fn kb_search_fts(&self, query: &str, category: Option<&str>) -> SqliteResult<Vec<KnowledgeEntry>> {
         let fts_query = query.split_whitespace()
             .map(|w| format!("\"{}\"", w.replace('"', "")))
             .collect::<Vec<_>>()
             .join(" OR ");
+
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let mut results = Vec::new();
 
@@ -1025,6 +1061,65 @@ impl MissionDB {
             }
         }
 
+        Ok(results)
+    }
+
+    /// LIKE-based fallback search for Chinese and partial matches
+    fn kb_search_like(&self, query: &str, category: Option<&str>) -> SqliteResult<Vec<KnowledgeEntry>> {
+        let keywords: Vec<String> = {
+            let mut kw: Vec<String> = query.split_whitespace()
+                .map(|w| w.to_string())
+                .collect();
+            // Add the full query as a keyword if it contains non-ASCII (Chinese)
+            let trimmed = query.trim();
+            if !trimmed.is_empty() && trimmed.chars().any(|c| !c.is_ascii()) && !kw.contains(&trimmed.to_string()) {
+                kw.insert(0, trimmed.to_string());
+            }
+            kw
+        };
+
+        if keywords.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Build dynamic SQL with per-keyword LIKE parameters
+        let mut sql = String::from("SELECT * FROM knowledge WHERE (");
+        let mut like_parts: Vec<String> = Vec::new();
+        for (i, _kw) in keywords.iter().enumerate() {
+            let p = i + 1; // 1-indexed
+            like_parts.push(format!(
+                "(key LIKE ?{p} OR summary LIKE ?{p} OR COALESCE(detail,'') LIKE ?{p})"
+            ));
+        }
+        sql.push_str(&like_parts.join(" OR "));
+        sql.push(')');
+
+        if category.is_some() {
+            sql.push_str(&format!(" AND category = ?{}", keywords.len() + 1));
+        }
+        sql.push_str(" ORDER BY access_count DESC, updated_at DESC LIMIT 20");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        // Bind parameters: %keyword% for each, then optional category
+        let like_params: Vec<String> = keywords.iter().map(|kw| format!("%{}%", kw)).collect();
+        let mut param_values: Vec<&dyn rusqlite::types::ToSql> = like_params.iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        let cat_owned: String;
+        if let Some(cat) = category {
+            cat_owned = cat.to_string();
+            param_values.push(&cat_owned);
+        }
+
+        let rows = stmt.query_map(rusqlite::params_from_iter(param_values.iter()), |row| {
+            Self::row_to_knowledge_entry(row)
+        })?;
+
+        let mut results = Vec::new();
+        for entry in rows {
+            results.push(entry?);
+        }
         Ok(results)
     }
 
@@ -1114,6 +1209,15 @@ impl MissionDB {
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
+        rows.collect()
+    }
+
+    /// Get top N hot keys by access_count (for instructions injection)
+    pub fn kb_hot_keys(&self, limit: i64) -> SqliteResult<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT key FROM knowledge ORDER BY access_count DESC, updated_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |row| row.get::<_, String>(0))?;
         rows.collect()
     }
 
@@ -1222,32 +1326,51 @@ impl MissionDB {
         Ok(())
     }
 
-    /// Insert a conversation message, returns the auto-increment ID
+    /// Insert a conversation message, returns the auto-increment ID.
+    /// Dedup via UNIQUE index on message_uuid — duplicate inserts are silently ignored.
     pub fn insert_conversation_message(&self, msg: &ConversationMessage) -> SqliteResult<i64> {
         self.conn.execute(
-            "INSERT INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata)
+            "INSERT OR IGNORE INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 msg.session_id, msg.role, msg.content, msg.raw_content,
                 msg.message_uuid, msg.parent_uuid, msg.model, msg.timestamp, msg.metadata,
             ],
         )?;
-        // Update conversation message count
-        self.conn.execute(
-            "UPDATE conversations SET message_count = (SELECT COUNT(*) FROM conversation_messages WHERE session_id = ?1) WHERE id = ?1",
-            params![msg.session_id],
-        )?;
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Check if a message UUID already exists (for dedup)
-    pub fn conversation_message_exists(&self, message_uuid: &str) -> SqliteResult<bool> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM conversation_messages WHERE message_uuid = ?1",
-            params![message_uuid],
-            |row| row.get(0),
-        )?;
-        Ok(count > 0)
+    /// Batch insert conversation messages within a transaction.
+    /// Returns number of actually inserted rows (dedup via UNIQUE index).
+    pub fn insert_conversation_messages_batch(&self, messages: &[ConversationMessage]) -> SqliteResult<u32> {
+        if messages.is_empty() {
+            return Ok(0);
+        }
+        let session_id = &messages[0].session_id;
+        let tx = self.conn.unchecked_transaction()?;
+        let mut inserted = 0u32;
+        for msg in messages {
+            tx.execute(
+                "INSERT OR IGNORE INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    msg.session_id, msg.role, msg.content, msg.raw_content,
+                    msg.message_uuid, msg.parent_uuid, msg.model, msg.timestamp, msg.metadata,
+                ],
+            )?;
+            if tx.changes() > 0 {
+                inserted += 1;
+            }
+        }
+        if inserted > 0 {
+            // Update message count once at the end
+            tx.execute(
+                "UPDATE conversations SET message_count = (SELECT COUNT(*) FROM conversation_messages WHERE session_id = ?1) WHERE id = ?1",
+                params![session_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(inserted)
     }
 
     /// Get a conversation by ID
@@ -1348,45 +1471,62 @@ impl MissionDB {
         Ok(())
     }
 
-    /// Get conversation messages not yet forwarded to memory analysis.
-    /// Returns messages from today (UTC) for non-PTY sessions, newer than memory_forwarded_at.
-    pub fn get_pending_memory_messages(&self, today: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
-        // Get CLI conversations (no slot_id) that have messages from today
+    /// Complete stale active conversations whose last message is older than the given cutoff.
+    /// Returns the number of conversations marked completed.
+    pub fn complete_stale_conversations(&self, cutoff: &str) -> SqliteResult<usize> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT c.id, COALESCE(c.project, '') as project, c.memory_forwarded_at
-             FROM conversations c
-             JOIN conversation_messages m ON m.session_id = c.id
-             WHERE c.slot_id IS NULL
-               AND m.timestamp >= ?1
-               AND m.role IN ('user', 'assistant')
-             ORDER BY c.started_at DESC"
+            "SELECT c.id FROM conversations c
+             WHERE c.status = 'active'
+               AND (SELECT MAX(m.timestamp) FROM conversation_messages m WHERE m.session_id = c.id) < ?1"
         )?;
+        let ids: Vec<String> = stmt.query_map(params![cutoff], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        let now = chrono::Utc::now().to_rfc3339();
+        for id in &ids {
+            self.conn.execute(
+                "UPDATE conversations SET status = 'completed', ended_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )?;
+        }
+        Ok(ids.len())
+    }
+
+    /// Get conversation messages not yet forwarded to memory analysis.
+    /// Returns messages from today (UTC) for user CLI sessions only (no PTY, no subagents).
+    pub fn get_pending_memory_messages(&self, today: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
+        // Single JOIN query: get all pending messages at once
+        // Excludes: PTY sessions (slot_id IS NOT NULL), subagent sessions (id LIKE 'agent-%')
+        let mut stmt = self.conn.prepare(
+            "SELECT m.*, COALESCE(c.project, '') as c_project, c.memory_forwarded_at
+             FROM conversation_messages m
+             JOIN conversations c ON c.id = m.session_id
+             WHERE c.slot_id IS NULL
+               AND c.id NOT LIKE 'agent-%'
+               AND m.timestamp >= ?1
+               AND m.timestamp > COALESCE(c.memory_forwarded_at, ?1)
+               AND m.role IN ('user', 'assistant')
+             ORDER BY c.started_at DESC, m.id ASC"
+        )?;
+
+        let mut results: Vec<(String, String, Vec<ConversationMessage>)> = Vec::new();
+
         let rows = stmt.query_map(params![today], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
+            let msg = Self::row_to_conversation_message(row)?;
+            let project: String = row.get("c_project")?;
+            Ok((msg, project))
         })?;
 
-        let mut results = Vec::new();
         for row in rows {
-            let (session_id, project, forwarded_at) = row?;
-            // Get messages newer than last forwarded time, from today, user/assistant only
-            let since = forwarded_at.unwrap_or_else(|| today.to_string());
-            let mut msg_stmt = self.conn.prepare(
-                "SELECT * FROM conversation_messages
-                 WHERE session_id = ?1 AND timestamp > ?2 AND role IN ('user', 'assistant')
-                 ORDER BY id ASC"
-            )?;
-            let msgs: Vec<ConversationMessage> = msg_stmt
-                .query_map(params![session_id, since], |row| Self::row_to_conversation_message(row))?
-                .filter_map(|r| r.ok())
-                .collect();
-            if !msgs.is_empty() {
-                results.push((session_id, project, msgs));
+            let (msg, project) = row?;
+            let session_id = msg.session_id.clone();
+            if let Some(entry) = results.iter_mut().find(|(id, _, _)| id == &session_id) {
+                entry.2.push(msg);
+            } else {
+                results.push((session_id, project, vec![msg]));
             }
         }
+
         Ok(results)
     }
 
@@ -1394,6 +1534,51 @@ impl MissionDB {
     pub fn update_memory_forwarded_at(&self, session_id: &str, timestamp: &str) -> SqliteResult<()> {
         self.conn.execute(
             "UPDATE conversations SET memory_forwarded_at = ?1 WHERE id = ?2",
+            params![timestamp, session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get pending USER-ONLY messages for user-voice extraction.
+    /// Same logic as get_pending_memory_messages but only returns role='user'.
+    pub fn get_pending_user_voice_messages(&self, today: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.*, COALESCE(c.project, '') as c_project, c.user_voice_forwarded_at
+             FROM conversation_messages m
+             JOIN conversations c ON c.id = m.session_id
+             WHERE c.slot_id IS NULL
+               AND c.id NOT LIKE 'agent-%'
+               AND m.timestamp >= ?1
+               AND m.timestamp > COALESCE(c.user_voice_forwarded_at, ?1)
+               AND m.role = 'user'
+             ORDER BY c.started_at DESC, m.id ASC"
+        )?;
+
+        let mut results: Vec<(String, String, Vec<ConversationMessage>)> = Vec::new();
+
+        let rows = stmt.query_map(params![today], |row| {
+            let msg = Self::row_to_conversation_message(row)?;
+            let project: String = row.get("c_project")?;
+            Ok((msg, project))
+        })?;
+
+        for row in rows {
+            let (msg, project) = row?;
+            let session_id = msg.session_id.clone();
+            if let Some(entry) = results.iter_mut().find(|(id, _, _)| id == &session_id) {
+                entry.2.push(msg);
+            } else {
+                results.push((session_id, project, vec![msg]));
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Update user_voice_forwarded_at for a conversation
+    pub fn update_user_voice_forwarded_at(&self, session_id: &str, timestamp: &str) -> SqliteResult<()> {
+        self.conn.execute(
+            "UPDATE conversations SET user_voice_forwarded_at = ?1 WHERE id = ?2",
             params![timestamp, session_id],
         )?;
         Ok(())

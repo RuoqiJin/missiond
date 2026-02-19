@@ -39,6 +39,8 @@ struct AppState {
     pty_session_uuids: Arc<tokio::sync::RwLock<HashSet<String>>>,
     /// Whether memory extraction is currently in progress (set by autopilot_tick).
     memory_extracting: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether user-voice extraction is currently in progress (set by autopilot_tick).
+    user_voice_extracting: Arc<std::sync::atomic::AtomicBool>,
     /// Hash of last synced CLAUDE.md managed section (to avoid unnecessary writes).
     claude_md_hash: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -1229,6 +1231,55 @@ impl AppState {
                 Ok(ToolResult::text(&format!("{}{}", header, output)))
             }
 
+            "mission_memory_pending_user" => {
+                let db = self.mission.db();
+                let today = chrono::Utc::now().format("%Y-%m-%dT00:00:00").to_string();
+                let pending = db.get_pending_user_voice_messages(&today)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+
+                if pending.is_empty() {
+                    return Ok(ToolResult::text("没有待分析的用户消息。"));
+                }
+
+                let mut output = String::new();
+                let now = chrono::Utc::now().to_rfc3339();
+                for (session_id, project, msgs) in &pending {
+                    output.push_str(&format!("## session: {} (project: {})\n\n", session_id, project));
+                    for msg in msgs {
+                        output.push_str(&format!("[{}] {}\n\n", msg.timestamp, msg.content));
+                    }
+                    let _ = db.update_user_voice_forwarded_at(session_id, &now);
+                }
+
+                let session_count = pending.len();
+                let msg_count: usize = pending.iter().map(|(_, _, m)| m.len()).sum();
+                let header = format!(
+                    "[user-voice-extract] {} 个会话, {} 条用户消息\n\n\
+                     你正在分析「用户本人」发出的原始消息，不含 AI 助手的回复。\n\
+                     用户说的每句话都是刻意的。请提取：\n\n\
+                     1. 偏好/原则 → category: preference\n\
+                        \"不要引入外部依赖\" → key: no-external-deps-principle\n\n\
+                     2. 纠正/否定 → category: preference\n\
+                        \"先别修复，先调查\" → key: investigate-before-fix\n\n\
+                     3. 决策 → category: memory\n\
+                        \"用方案A\" → key: chose-plan-a-for-xxx\n\n\
+                     4. 上下文知识 → category: memory\n\
+                        \"ECS 从本地直连不通\" → key: ecs-direct-unreachable\n\n\
+                     规则：\n\
+                     - 「好」「行」等确认词 = 用户认可了 AI 上一轮方案，也值得记录为决策\n\
+                     - 「别...」「不要...」「先...」= 高价值偏好\n\
+                     - 重复出现的指令 = 极重要，提升 confidence\n\
+                     - 不要存: 纯粹的任务指令(\"帮我改这个文件\")，除非包含偏好信息\n\n\
+                     ⚠️ 上下文提示：用户的回答 98% 是针对 AI 助手上一条消息的回应。\n\
+                     如果某条用户消息含义模糊（如「好」「不要」「用第二种」），\n\
+                     调用 mission_conversation_get(sessionId: \"<session_id>\", tail: 5) \n\
+                     查看该会话的近几轮对话来理解用户在回应什么，再决定是否提取记忆。\n\n",
+                    session_count, msg_count
+                );
+
+                Ok(ToolResult::text(&format!("{}{}", header, output)))
+            }
+
             // ===== Conversation Logs =====
             "mission_conversation_list" => {
                 #[derive(Deserialize)]
@@ -1640,6 +1691,18 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
     // Check PTY slots for low context — restart if < 10%
     check_slot_context_levels(state).await;
 
+    // Complete stale active conversations (no messages for > 10 minutes)
+    let cutoff = (chrono::Utc::now() - chrono::TimeDelta::minutes(10))
+        .to_rfc3339();
+    match state.mission.db().complete_stale_conversations(&cutoff) {
+        Ok(n) if n > 0 => info!(count = n, "Completed stale conversations"),
+        Err(e) => warn!(error = %e, "Failed to complete stale conversations"),
+        _ => {}
+    }
+
+    // User-voice extraction: extract memories from user-only messages (highest priority)
+    check_user_voice_extraction(state).await;
+
     // Memory extraction: check pending messages and trigger if slot is idle
     check_memory_extraction(state).await;
 
@@ -1897,9 +1960,71 @@ fn format_messages_for_memory(messages: &[missiond_core::types::ConversationMess
         .join("\n\n")
 }
 
+/// Check if user-voice extraction should be triggered. Called from autopilot_tick.
+/// Extracts memories from user-only messages (preferences, corrections, decisions).
+/// Has priority over general memory extraction — runs first, shares slot-memory.
+async fn check_user_voice_extraction(state: &AppState) {
+    // Skip if already extracting (user-voice or memory)
+    if state.user_voice_extracting.load(std::sync::atomic::Ordering::SeqCst) {
+        let status = state.pty.get_status(MEMORY_SLOT_ID).await;
+        match status {
+            Some(s) if s.state == SessionState::Idle => {
+                info!("User-voice extraction cycle complete");
+                state.user_voice_extracting.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            None => {
+                state.user_voice_extracting.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            _ => return,
+        }
+    }
+    if state.memory_extracting.load(std::sync::atomic::Ordering::SeqCst) {
+        return; // Memory extraction is using the slot, wait
+    }
+
+    // Check slot is running and idle
+    let status = state.pty.get_status(MEMORY_SLOT_ID).await;
+    match status {
+        Some(s) if s.state == SessionState::Idle => {}
+        _ => return,
+    }
+
+    // Check DB for pending user messages
+    let today = chrono::Utc::now().format("%Y-%m-%dT00:00:00").to_string();
+    let has_pending = match state.mission.db().get_pending_user_voice_messages(&today) {
+        Ok(pending) => !pending.is_empty(),
+        Err(_) => false,
+    };
+    if !has_pending {
+        return;
+    }
+
+    let prompt = "有新的用户消息待分析。调用 mission_memory_pending_user 获取用户原话，提取用户偏好、纠正和决策。";
+    info!("Triggering user-voice extraction via MCP pull");
+    state.user_voice_extracting.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let pty = Arc::clone(&state.pty);
+    let extracting = Arc::clone(&state.user_voice_extracting);
+    tokio::spawn(async move {
+        match pty.send(MEMORY_SLOT_ID, prompt, 300_000).await {
+            Ok(res) => {
+                info!(duration_ms = res.duration_ms, "User-voice extraction trigger sent");
+            }
+            Err(e) => {
+                warn!(error = %e, "User-voice extraction trigger failed");
+                extracting.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    });
+}
+
 /// Check if memory extraction should be triggered. Called from autopilot_tick.
 /// Conditions: memory slot is idle + DB has pending messages + no extraction in progress.
 async fn check_memory_extraction(state: &AppState) {
+    // Skip if user-voice extraction is using the slot
+    if state.user_voice_extracting.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     // Skip if already extracting
     if state.memory_extracting.load(std::sync::atomic::Ordering::SeqCst) {
         // Check if slot finished (back to idle or gone)
@@ -2029,15 +2154,23 @@ async fn check_deep_analysis(state: &AppState) {
 
         info!(conv_id = %conv.id, messages = messages.len(), "Deep analysis: sending to memory agent");
 
-        match state.pty.send(MEMORY_SLOT_ID, &prompt, 300_000).await {
-            Ok(res) => {
-                info!(conv_id = %conv.id, duration_ms = res.duration_ms, "Deep analysis completed");
-            }
-            Err(e) => {
-                warn!(conv_id = %conv.id, error = %e, "Deep analysis failed");
-            }
-        }
+        // Mark analyzed optimistically (original behavior: marked regardless of send result)
         let _ = db.mark_conversation_analyzed(&conv.id);
+
+        let conv_id = conv.id.clone();
+        let pty = Arc::clone(&state.pty);
+        tokio::spawn(async move {
+            match pty.send(MEMORY_SLOT_ID, &prompt, 300_000).await {
+                Ok(res) => {
+                    info!(conv_id = %conv_id, duration_ms = res.duration_ms, "Deep analysis completed");
+                }
+                Err(e) => {
+                    warn!(conv_id = %conv_id, error = %e, "Deep analysis failed");
+                }
+            }
+        });
+        // Only process one conversation per tick to avoid overloading the memory slot
+        break;
     }
 }
 
@@ -2171,11 +2304,7 @@ fn handle_new_messages(
 
     // Determine slot_id if this session belongs to a PTY slot
     let slot_id = if is_pty {
-        db.get_all_slot_sessions()
-            .unwrap_or_default()
-            .into_iter()
-            .find(|(_, sid)| sid == &session_id)
-            .map(|(slot, _)| slot)
+        db.get_slot_for_session(&session_id).unwrap_or(None)
     } else {
         None
     };
@@ -2206,47 +2335,36 @@ fn handle_new_messages(
         }
     }
 
-    let mut inserted = 0u32;
-    for msg in &messages {
-        // Dedup by message UUID
-        if db.conversation_message_exists(&msg.uuid).unwrap_or(true) {
-            continue;
-        }
-
-        let text_content = extract_text_content(&msg.message.content);
-        if text_content.is_empty() {
-            continue;
-        }
-
-        let raw_content = serde_json::to_string(&msg.message.content).ok();
-
-        let conv_msg = missiond_core::types::ConversationMessage {
-            id: 0, // auto-increment
-            session_id: session_id.clone(),
-            role: msg.message.role.clone(),
-            content: text_content,
-            raw_content,
-            message_uuid: Some(msg.uuid.clone()),
-            parent_uuid: msg.parent_uuid.clone(),
-            model: msg.message.model.clone(),
-            timestamp: msg.timestamp.clone(),
-            metadata: None,
-        };
-
-        match db.insert_conversation_message(&conv_msg) {
-            Ok(_) => inserted += 1,
-            Err(e) => {
-                error!(uuid = %msg.uuid, error = %e, "Failed to insert conversation message");
+    let batch: Vec<missiond_core::types::ConversationMessage> = messages.iter()
+        .filter_map(|msg| {
+            let text_content = extract_text_content(&msg.message.content);
+            if text_content.is_empty() {
+                return None;
             }
-        }
-    }
+            let raw_content = serde_json::to_string(&msg.message.content).ok();
+            Some(missiond_core::types::ConversationMessage {
+                id: 0,
+                session_id: session_id.clone(),
+                role: msg.message.role.clone(),
+                content: text_content,
+                raw_content,
+                message_uuid: Some(msg.uuid.clone()),
+                parent_uuid: msg.parent_uuid.clone(),
+                model: msg.message.model.clone(),
+                timestamp: msg.timestamp.clone(),
+                metadata: None,
+            })
+        })
+        .collect();
 
-    if inserted > 0 {
-        info!(
-            session = %session_id,
-            count = inserted,
-            "Logged conversation messages"
-        );
+    match db.insert_conversation_messages_batch(&batch) {
+        Ok(inserted) if inserted > 0 => {
+            info!(session = %session_id, count = inserted, "Logged conversation messages");
+        }
+        Err(e) => {
+            error!(session = %session_id, error = %e, "Failed to insert conversation messages");
+        }
+        _ => {}
     }
 }
 
@@ -2293,9 +2411,6 @@ fn handle_pty_text_complete(
     }
 
     let msg_uuid = format!("pty-{}-turn-{}", slot_id, turn_id);
-    if db.conversation_message_exists(&msg_uuid).unwrap_or(true) {
-        return;
-    }
 
     let ts = chrono::DateTime::from_timestamp(timestamp, 0)
         .map(|dt| dt.to_rfc3339())
@@ -2314,6 +2429,7 @@ fn handle_pty_text_complete(
         metadata: Some(format!("{{\"turn_id\":{}}}", turn_id)),
     };
 
+    // INSERT OR IGNORE handles dedup via UNIQUE index on message_uuid
     match db.insert_conversation_message(&conv_msg) {
         Ok(_) => {
             info!(slot = %slot_id, turn = turn_id, "Logged PTY assistant output");
@@ -2457,6 +2573,7 @@ async fn main() -> Result<()> {
         infra,
         pty_session_uuids: Arc::new(tokio::sync::RwLock::new(pty_uuids)),
         memory_extracting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        user_voice_extracting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         claude_md_hash: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
