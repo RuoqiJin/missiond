@@ -2090,6 +2090,20 @@ async fn check_memory_extraction(state: &AppState) {
 /// Deep analysis: review completed but unanalyzed conversations.
 /// Called from autopilot_tick.
 async fn check_deep_analysis(state: &AppState) {
+    // Skip if user-voice or memory extraction is in progress (shares same slot)
+    if state.user_voice_extracting.load(std::sync::atomic::Ordering::SeqCst)
+        || state.memory_extracting.load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
+
+    // Ensure slot is idle before proceeding
+    let status = state.pty.get_status(MEMORY_SLOT_ID).await;
+    match status {
+        Some(s) if s.state == SessionState::Idle => {}
+        _ => return,
+    }
+
     let db = state.mission.db();
     let unanalyzed = match db.get_unanalyzed_conversations() {
         Ok(convs) => convs,
