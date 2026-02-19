@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Plus, ClipboardList, Loader2, MonitorUp } from 'lucide-react';
+import { Plus, ClipboardList, Loader2, MonitorUp, Brain } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
@@ -11,8 +11,9 @@ import { TaskFilters } from './components/TaskFilters';
 import { TaskListView } from './components/TaskListView';
 import { TaskDialog } from './components/TaskDialog';
 import { Terminal } from './components/Terminal';
+import { KnowledgeBase } from './components/KnowledgeBase';
 
-type Tab = 'board' | 'terminal';
+type Tab = 'board' | 'terminal' | 'knowledge';
 
 const SLOTS = [
   { id: 'slot-deploy-1', label: 'Deploy', role: 'deploy' },
@@ -87,6 +88,16 @@ export default function App() {
               <MonitorUp className="w-3 h-3" />
               Terminal
             </button>
+            <button
+              onClick={() => setTab('knowledge')}
+              className={cn(
+                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
+                tab === 'knowledge' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
+              )}
+            >
+              <Brain className="w-3 h-3" />
+              Knowledge
+            </button>
           </div>
         </div>
 
@@ -128,10 +139,12 @@ export default function App() {
           <TaskListView />
           <TaskDialog />
         </div>
-      ) : (
+      ) : tab === 'terminal' ? (
         <div className="flex-1 min-h-0 mx-4 sm:mx-8 mb-4 rounded-lg border border-neutral-800 overflow-hidden">
           <Terminal key={activeSlot} slotId={activeSlot} />
         </div>
+      ) : (
+        <KnowledgeBase />
       )}
     </div>
   );
