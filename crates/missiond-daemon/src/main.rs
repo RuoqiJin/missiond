@@ -14,6 +14,7 @@ use missiond_core::{
     CorePermissionDecision, InfraConfig, MissionControl, MissionControlOptions, PermissionPolicy,
     PermissionRule, PTYManager, PTYSpawnOptions, PTYWebSocketServer, WSServerOptions, SkillIndex,
 };
+use missiond_core::SessionState;
 use missiond_core::{CCTasksWatcher, CCTasksWatcherOptions, WatcherEvent};
 use missiond_mcp::protocol::{self, Request, RequestId, Response, RpcError};
 use missiond_mcp::tools::ToolResult;
@@ -21,7 +22,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use missiond_core::ipc::{self, IpcListener, IpcStream};
 
@@ -1835,23 +1836,45 @@ async fn drain_memory_queue(
     pty: &PTYManager,
     queue: &std::sync::Mutex<Vec<MemoryQueueEntry>>,
 ) {
+    let mut retry_count = 0u32;
     loop {
-        // Brief coalescing delay — let more messages accumulate
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        // Coalescing delay — let more messages accumulate (longer when retrying)
+        let delay = if retry_count == 0 { 3 } else { 15.min(5 * retry_count as u64) };
+        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
 
-        // Take all entries
+        // Peek: is there anything to drain?
+        let is_empty = queue.lock().unwrap().is_empty();
+        if is_empty {
+            break;
+        }
+
+        // Check if memory slot is running
+        let status = pty.get_status(MEMORY_SLOT_ID).await;
+        if status.is_none() {
+            info!("Memory slot not running, keeping queue for later");
+            break;
+        }
+
+        // Check if slot is busy (thinking) — wait and retry instead of failing
+        if let Some(ref s) = status {
+            if s.state != SessionState::Idle {
+                retry_count += 1;
+                if retry_count > 20 {
+                    warn!("Memory slot busy for too long ({} retries), giving up this drain cycle", retry_count);
+                    break;
+                }
+                debug!(state = ?s.state, retry = retry_count, "Memory slot busy, waiting to retry");
+                continue;
+            }
+        }
+
+        // Slot is idle — take entries and send
         let entries: Vec<MemoryQueueEntry> = {
             let mut q = queue.lock().unwrap();
             std::mem::take(&mut *q)
         };
 
         if entries.is_empty() {
-            break;
-        }
-
-        // Check if memory slot is running
-        if pty.get_status(MEMORY_SLOT_ID).await.is_none() {
-            info!("Memory slot not running, discarding {} queued entries", entries.len());
             break;
         }
 
@@ -1906,11 +1929,17 @@ async fn drain_memory_queue(
         match pty.send(MEMORY_SLOT_ID, &prompt, 180_000).await {
             Ok(res) => {
                 info!(duration_ms = res.duration_ms, turns = turn_count, "Realtime memory extraction done");
+                retry_count = 0;
             }
             Err(e) => {
                 warn!(error = %e, "Realtime memory extraction failed");
-                // Don't retry immediately — let the next drain cycle handle it
-                break;
+                // Don't break — loop back, the coalescing delay with retry backoff will handle it
+                retry_count += 1;
+                if retry_count > 5 {
+                    warn!("Too many send failures, stopping drain cycle");
+                    break;
+                }
+                continue;
             }
         }
         // Loop back to check if more messages accumulated during processing
