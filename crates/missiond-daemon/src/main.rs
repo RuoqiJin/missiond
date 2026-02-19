@@ -1966,23 +1966,16 @@ fn format_messages_for_memory(messages: &[missiond_core::types::ConversationMess
 /// Check if user-voice extraction should be triggered. Called from autopilot_tick.
 /// Extracts memories from user-only messages (preferences, corrections, decisions).
 /// Has priority over general memory extraction — runs first, shares slot-memory.
+///
+/// Flag semantics: `user_voice_extracting` is true only during the send() call
+/// (prevents concurrent sends). After send() returns, the flag is reset and the
+/// "is slot idle?" check naturally gates subsequent triggers.
 async fn check_user_voice_extraction(state: &AppState) {
-    // Skip if already extracting (user-voice or memory)
-    if state.user_voice_extracting.load(std::sync::atomic::Ordering::SeqCst) {
-        let status = state.pty.get_status(MEMORY_SLOT_ID).await;
-        match status {
-            Some(s) if s.state == SessionState::Idle => {
-                info!("User-voice extraction cycle complete");
-                state.user_voice_extracting.store(false, std::sync::atomic::Ordering::SeqCst);
-            }
-            None => {
-                state.user_voice_extracting.store(false, std::sync::atomic::Ordering::SeqCst);
-            }
-            _ => return,
-        }
-    }
-    if state.memory_extracting.load(std::sync::atomic::Ordering::SeqCst) {
-        return; // Memory extraction is using the slot, wait
+    // Skip if any extraction send() is in flight
+    if state.user_voice_extracting.load(std::sync::atomic::Ordering::SeqCst)
+        || state.memory_extracting.load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
     }
 
     // Check DB for pending user messages first (cheap check before spawning slot)
@@ -2018,33 +2011,20 @@ async fn check_user_voice_extraction(state: &AppState) {
             }
             Err(e) => {
                 warn!(error = %e, "User-voice extraction trigger failed");
-                extracting.store(false, std::sync::atomic::Ordering::SeqCst);
             }
         }
+        extracting.store(false, std::sync::atomic::Ordering::SeqCst);
     });
 }
 
 /// Check if memory extraction should be triggered. Called from autopilot_tick.
-/// Conditions: memory slot is idle + DB has pending messages + no extraction in progress.
+/// Conditions: memory slot is idle + DB has pending messages + no extraction in flight.
 async fn check_memory_extraction(state: &AppState) {
-    // Skip if user-voice extraction is using the slot
-    if state.user_voice_extracting.load(std::sync::atomic::Ordering::SeqCst) {
+    // Skip if any extraction send() is in flight
+    if state.user_voice_extracting.load(std::sync::atomic::Ordering::SeqCst)
+        || state.memory_extracting.load(std::sync::atomic::Ordering::SeqCst)
+    {
         return;
-    }
-    // Skip if already extracting
-    if state.memory_extracting.load(std::sync::atomic::Ordering::SeqCst) {
-        // Check if slot finished (back to idle or gone)
-        let status = state.pty.get_status(MEMORY_SLOT_ID).await;
-        match status {
-            Some(s) if s.state == SessionState::Idle => {
-                info!("Memory extraction cycle complete");
-                state.memory_extracting.store(false, std::sync::atomic::Ordering::SeqCst);
-            }
-            None => {
-                state.memory_extracting.store(false, std::sync::atomic::Ordering::SeqCst);
-            }
-            _ => return, // Still processing, skip this tick
-        }
     }
 
     // Check DB for pending messages first (cheap check before spawning slot)
@@ -2081,9 +2061,9 @@ async fn check_memory_extraction(state: &AppState) {
             }
             Err(e) => {
                 warn!(error = %e, "Memory extraction trigger failed");
-                extracting.store(false, std::sync::atomic::Ordering::SeqCst);
             }
         }
+        extracting.store(false, std::sync::atomic::Ordering::SeqCst);
     });
 }
 
