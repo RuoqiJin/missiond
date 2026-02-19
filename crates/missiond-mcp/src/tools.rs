@@ -850,6 +850,18 @@ pub fn all_tools() -> Vec<ToolDefinition> {
             }),
         ),
 
+        // ===== Memory Extraction =====
+        ToolDefinition::new(
+            "mission_memory_pending",
+            "获取待分析的对话内容。返回自上次分析后积累的用户 CLI 对话（非 PTY），\
+             按 session 分组。调用后自动更新转发时间戳，避免重复分析。\
+             仅供 memory slot 使用。",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+        ),
+
         // ===== Conversation Log =====
         ToolDefinition::new(
             "mission_conversation_list",
@@ -1125,7 +1137,7 @@ mod tests {
     #[test]
     fn test_all_tools_count() {
         let tools = all_tools();
-        assert_eq!(tools.len(), 53);
+        assert_eq!(tools.len(), 54);
     }
 
     #[test]

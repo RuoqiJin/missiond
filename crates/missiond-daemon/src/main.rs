@@ -37,17 +37,10 @@ struct AppState {
     /// JSONL session UUIDs belonging to PTY-managed slots.
     /// White-list: any session_id NOT in this set is a user CLI session.
     pty_session_uuids: Arc<tokio::sync::RwLock<HashSet<String>>>,
-    /// Queue for memory forwarding. Accumulated while memory slot is busy.
-    memory_queue: Arc<std::sync::Mutex<Vec<MemoryQueueEntry>>>,
+    /// Signal queue for memory forwarding. Entries are just flags; actual content pulled via MCP.
+    memory_queue: Arc<std::sync::Mutex<Vec<bool>>>,
     /// Whether a drain task is already running for the memory queue.
     memory_draining: Arc<std::sync::atomic::AtomicBool>,
-}
-
-/// A pending memory extraction entry, queued until the memory slot is idle.
-struct MemoryQueueEntry {
-    session_id: String,
-    project: String,
-    formatted: Vec<String>,
 }
 
 fn default_mission_home() -> PathBuf {
@@ -1198,6 +1191,44 @@ impl AppState {
                 }
             }
 
+            // ===== Memory Extraction =====
+            "mission_memory_pending" => {
+                let db = self.mission.db();
+                let today = chrono::Utc::now().format("%Y-%m-%dT00:00:00").to_string();
+                let pending = db.get_pending_memory_messages(&today)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+
+                if pending.is_empty() {
+                    return Ok(ToolResult::text("没有待分析的新对话内容。"));
+                }
+
+                let mut output = String::new();
+                let now = chrono::Utc::now().to_rfc3339();
+                for (session_id, project, msgs) in &pending {
+                    output.push_str(&format!("## session: {} (project: {})\n\n", session_id, project));
+                    for msg in msgs {
+                        // Only include user/assistant with meaningful content
+                        if msg.role == "assistant" && msg.content.len() < 50 {
+                            continue;
+                        }
+                        output.push_str(&format!("[{}] {}: {}\n\n", msg.timestamp, msg.role, msg.content));
+                    }
+                    // Mark as forwarded
+                    let _ = db.update_memory_forwarded_at(session_id, &now);
+                }
+
+                let session_count = pending.len();
+                let msg_count: usize = pending.iter().map(|(_, _, m)| m.len()).sum();
+                let header = format!(
+                    "[realtime-extract] {} 个会话, {} 条消息\n\
+                     提取值得长期记忆的事实，用 mission_kb_remember 存入。\n\
+                     不要存显而易见的事实。只存：架构决策、bug 修复经验、用户偏好、关键发现。\n\n",
+                    session_count, msg_count
+                );
+
+                Ok(ToolResult::text(&format!("{}{}", header, output)))
+            }
+
             // ===== Conversation Logs =====
             "mission_conversation_list" => {
                 #[derive(Deserialize)]
@@ -1766,58 +1797,24 @@ fn format_messages_for_memory(messages: &[missiond_core::types::ConversationMess
         .join("\n\n")
 }
 
-/// Realtime memory forwarding: queue messages for the memory slot.
-/// Messages accumulate while the slot is busy; a drain task sends them
-/// in batches once the previous extraction completes.
+/// Realtime memory forwarding: signal that new messages arrived for memory extraction.
+/// The actual content is pulled by the memory slot via mission_memory_pending MCP tool.
 /// NOTE: Caller must pre-filter — only user CLI sessions should reach here.
 fn maybe_forward_to_memory(
     state: &AppState,
-    session_id: &str,
+    _session_id: &str,
     messages: &[missiond_core::CCMessageLine],
 ) {
-    // Only forward when the batch contains an assistant message (turn complete)
+    // Only trigger when the batch contains an assistant message (turn complete)
     let has_assistant = messages.iter().any(|m| m.message.role == "assistant");
     if !has_assistant {
         return;
     }
 
-    // Only forward today's messages — don't queue stale history
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    let formatted: Vec<String> = messages
-        .iter()
-        .filter(|m| matches!(m.message.role.as_str(), "user" | "assistant"))
-        .filter(|m| m.timestamp.starts_with(&today))
-        .map(|m| {
-            let text = extract_text_content(&m.message.content);
-            // Only skip very short assistant messages (tool noise). Always keep user messages.
-            if m.message.role == "assistant" && text.len() < 50 {
-                return String::new();
-            }
-            if text.is_empty() {
-                return String::new();
-            }
-            format!("[{}] {}: {}", m.timestamp, m.message.role, text)
-        })
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    if formatted.is_empty() {
-        return;
-    }
-
-    let project = messages
-        .first()
-        .map(|m| m.cwd.clone())
-        .unwrap_or_default();
-
-    // Push to queue
+    // Signal that there are new messages
     {
         let mut queue = state.memory_queue.lock().unwrap();
-        queue.push(MemoryQueueEntry {
-            session_id: session_id.to_string(),
-            project,
-            formatted,
-        });
+        queue.push(true); // just a signal flag
     }
 
     // Spawn drain task if not already running
@@ -1836,7 +1833,7 @@ fn maybe_forward_to_memory(
 /// wait for completion, repeat until queue is empty.
 async fn drain_memory_queue(
     pty: &PTYManager,
-    queue: &std::sync::Mutex<Vec<MemoryQueueEntry>>,
+    queue: &std::sync::Mutex<Vec<bool>>,
 ) {
     let mut retry_count = 0u32;
     loop {
@@ -1870,87 +1867,26 @@ async fn drain_memory_queue(
             }
         }
 
-        // Slot is idle — take entries and send
-        let entries: Vec<MemoryQueueEntry> = {
+        // Clear the queue — content will be pulled by memory slot via MCP tool
+        {
             let mut q = queue.lock().unwrap();
-            std::mem::take(&mut *q)
-        };
-
-        if entries.is_empty() {
-            break;
+            q.clear();
         }
 
-        // Group by session_id, preserving order
-        let mut groups: Vec<(String, String, Vec<String>)> = Vec::new();
-        for entry in entries {
-            if let Some(last) = groups.last_mut() {
-                if last.0 == entry.session_id {
-                    last.2.extend(entry.formatted);
-                    continue;
-                }
-            }
-            groups.push((entry.session_id, entry.project, entry.formatted));
-        }
+        // Send short trigger — memory slot pulls content via mission_memory_pending MCP tool
+        let prompt = "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，然后提取记忆。";
+        info!("Triggering memory extraction via MCP pull");
 
-        // Build prompt content and write to file (avoids PTY paste issues with large text)
-        let content = if groups.len() == 1 {
-            let (sid, proj, msgs) = &groups[0];
-            format!(
-                "[realtime-extract]\n\
-                 session_id: {sid}\n\
-                 project: {proj}\n\
-                 以下是自上次分析后积累的对话轮次。提取值得长期记忆的事实，\
-                 用 mission_kb_remember 存入。不要存显而易见的事实。\
-                 只存：架构决策、bug 修复经验、用户偏好、关键发现。\n\
-                 如需完整上下文，用 mission_conversation_get(sessionId: \"{sid}\") 获取。\n\n\
-                 {}",
-                msgs.join("\n\n")
-            )
-        } else {
-            let mut sections = String::new();
-            for (sid, proj, msgs) in &groups {
-                sections.push_str(&format!(
-                    "### session: {} (project: {})\n{}\n\n",
-                    sid, proj, msgs.join("\n\n")
-                ));
-            }
-            format!(
-                "[realtime-extract]\n\
-                 以下是自上次分析后积累的多个会话的对话轮次。提取值得长期记忆的事实，\
-                 用 mission_kb_remember 存入。不要存显而易见的事实。\
-                 只存：架构决策、bug 修复经验、用户偏好、关键发现。\n\
-                 如需查看某会话完整上下文，用 mission_conversation_get(sessionId: \"<id>\") 获取。\n\n\
-                 {}",
-                sections
-            )
-        };
-
-        let turn_count: usize = groups.iter().map(|(_, _, m)| m.len()).sum();
-
-        // Write to temp file — large text pastes into Claude Code can get truncated or hang
-        let batch_file = PathBuf::from(format!("/tmp/missiond-memory-batch-{}.md", std::process::id()));
-        if let Err(e) = std::fs::write(&batch_file, &content) {
-            warn!(error = %e, "Failed to write memory batch file");
-            break;
-        }
-
-        let prompt = format!(
-            "读取以下文件中的 realtime-extract 指令并执行: {}",
-            batch_file.display()
-        );
-        info!(turns = turn_count, sessions = groups.len(), file = %batch_file.display(), "Sending batched memory extraction");
-
-        match pty.send(MEMORY_SLOT_ID, &prompt, 180_000).await {
+        match pty.send(MEMORY_SLOT_ID, prompt, 180_000).await {
             Ok(res) => {
-                info!(duration_ms = res.duration_ms, turns = turn_count, "Realtime memory extraction done");
+                info!(duration_ms = res.duration_ms, "Memory extraction trigger done");
                 retry_count = 0;
             }
             Err(e) => {
-                warn!(error = %e, "Realtime memory extraction failed");
-                // Don't break — loop back, the coalescing delay with retry backoff will handle it
+                warn!(error = %e, "Memory extraction trigger failed");
                 retry_count += 1;
                 if retry_count > 5 {
-                    warn!("Too many send failures, stopping drain cycle");
+                    warn!("Too many trigger failures, stopping drain cycle");
                     break;
                 }
                 continue;
