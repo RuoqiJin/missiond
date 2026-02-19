@@ -37,10 +37,8 @@ struct AppState {
     /// JSONL session UUIDs belonging to PTY-managed slots.
     /// White-list: any session_id NOT in this set is a user CLI session.
     pty_session_uuids: Arc<tokio::sync::RwLock<HashSet<String>>>,
-    /// Signal queue for memory forwarding. Entries are just flags; actual content pulled via MCP.
-    memory_queue: Arc<std::sync::Mutex<Vec<bool>>>,
-    /// Whether a drain task is already running for the memory queue.
-    memory_draining: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether memory extraction is currently in progress (set by autopilot_tick).
+    memory_extracting: Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn default_mission_home() -> PathBuf {
@@ -1509,10 +1507,25 @@ async fn handle_ipc_request(state: AppState, request: Request) -> Response {
                             .iter()
                             .map(|(cat, n)| format!("{} {}", n, cat))
                             .collect();
-                        format!(
-                            "[MissionD] KB: {}. Use mission_kb_search before guessing. Use mission_kb_remember when learning.",
-                            parts.join(", ")
-                        )
+                        let mut instr = format!("[MissionD] KB: {}.", parts.join(", "));
+
+                        // Inject hot topics so Claude knows what to search for
+                        if let Ok(hot_keys) = db.kb_hot_keys(20) {
+                            if !hot_keys.is_empty() {
+                                instr.push_str(&format!("\nTopics: {}.", hot_keys.join(", ")));
+                            }
+                        }
+
+                        // Inject preferences so they are always active
+                        if let Ok(prefs) = db.kb_list(Some("preference")) {
+                            if !prefs.is_empty() {
+                                let pref_summaries: Vec<&str> = prefs.iter().map(|e| e.summary.as_str()).collect();
+                                instr.push_str(&format!("\nPreferences: {}.", pref_summaries.join(" | ")));
+                            }
+                        }
+
+                        instr.push_str("\nUse mission_kb_search before guessing. Use mission_kb_remember when learning.");
+                        instr
                     }
                 }
                 Err(_) => String::new(),
@@ -1627,6 +1640,9 @@ fn extract_context_percentage(screen: &str) -> Option<u32> {
 async fn autopilot_tick(state: &AppState) -> Result<()> {
     // Check PTY slots for low context — restart if < 10%
     check_slot_context_levels(state).await;
+
+    // Memory extraction: check pending messages and trigger if slot is idle
+    check_memory_extraction(state).await;
 
     // Deep analysis: review completed conversations
     check_deep_analysis(state).await;
@@ -1879,97 +1895,56 @@ fn format_messages_for_memory(messages: &[missiond_core::types::ConversationMess
         .join("\n\n")
 }
 
-/// Realtime memory forwarding: signal that new messages arrived for memory extraction.
-/// The actual content is pulled by the memory slot via mission_memory_pending MCP tool.
-/// NOTE: Caller must pre-filter — only user CLI sessions should reach here.
-fn maybe_forward_to_memory(
-    state: &AppState,
-    _session_id: &str,
-    messages: &[missiond_core::CCMessageLine],
-) {
-    // Only trigger when the batch contains an assistant message (turn complete)
-    let has_assistant = messages.iter().any(|m| m.message.role == "assistant");
-    if !has_assistant {
+/// Check if memory extraction should be triggered. Called from autopilot_tick.
+/// Conditions: memory slot is idle + DB has pending messages + no extraction in progress.
+async fn check_memory_extraction(state: &AppState) {
+    // Skip if already extracting
+    if state.memory_extracting.load(std::sync::atomic::Ordering::SeqCst) {
+        // Check if slot finished (back to idle or gone)
+        let status = state.pty.get_status(MEMORY_SLOT_ID).await;
+        match status {
+            Some(s) if s.state == SessionState::Idle => {
+                info!("Memory extraction cycle complete");
+                state.memory_extracting.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            None => {
+                state.memory_extracting.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            _ => return, // Still processing, skip this tick
+        }
+    }
+
+    // Check slot is running and idle
+    let status = state.pty.get_status(MEMORY_SLOT_ID).await;
+    match status {
+        Some(s) if s.state == SessionState::Idle => {}
+        _ => return, // Not running or busy
+    }
+
+    // Check DB for pending messages
+    let today = chrono::Utc::now().format("%Y-%m-%dT00:00:00").to_string();
+    let has_pending = match state.mission.db().get_pending_memory_messages(&today) {
+        Ok(pending) => !pending.is_empty(),
+        Err(_) => false,
+    };
+    if !has_pending {
         return;
     }
 
-    // Signal that there are new messages
-    {
-        let mut queue = state.memory_queue.lock().unwrap();
-        queue.push(true); // just a signal flag
-    }
-
-    // Spawn drain task if not already running
-    if !state.memory_draining.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        let pty = Arc::clone(&state.pty);
-        let queue = Arc::clone(&state.memory_queue);
-        let draining = Arc::clone(&state.memory_draining);
-        tokio::spawn(async move {
-            drain_memory_queue(&pty, &queue).await;
-            draining.store(false, std::sync::atomic::Ordering::SeqCst);
-        });
-    }
-}
-
-/// Drain the memory queue: batch all accumulated entries, send to memory slot,
-/// wait for completion, repeat until queue is empty.
-async fn drain_memory_queue(
-    pty: &PTYManager,
-    queue: &std::sync::Mutex<Vec<bool>>,
-) {
-    // Initial coalescing delay — let messages accumulate
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
-    // Clear the queue — we'll send one trigger for everything accumulated
-    {
-        let mut q = queue.lock().unwrap();
-        q.clear();
-    }
-
-    // Wait for slot to be idle before sending
-    for attempt in 0..30 {
-        let status = pty.get_status(MEMORY_SLOT_ID).await;
-        if status.is_none() {
-            info!("Memory slot not running, skipping trigger");
-            return;
-        }
-        if let Some(ref s) = status {
-            if s.state == SessionState::Idle {
-                break;
-            }
-        }
-        if attempt == 29 {
-            warn!("Memory slot busy for too long, skipping trigger");
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-    }
-
-    // Send ONE trigger — memory slot pulls content via mission_memory_pending MCP tool
+    // Send trigger
     let prompt = "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，然后提取记忆。";
     info!("Triggering memory extraction via MCP pull");
+    state.memory_extracting.store(true, std::sync::atomic::Ordering::SeqCst);
 
-    match pty.send(MEMORY_SLOT_ID, prompt, 300_000).await {
+    match state.pty.send(MEMORY_SLOT_ID, prompt, 300_000).await {
         Ok(res) => {
             info!(duration_ms = res.duration_ms, "Memory extraction trigger sent");
         }
         Err(e) => {
             warn!(error = %e, "Memory extraction trigger failed");
-            return;
+            state.memory_extracting.store(false, std::sync::atomic::Ordering::SeqCst);
         }
     }
-
-    // Wait for slot to finish processing before allowing new triggers
-    for _ in 0..120 {
-        let status = pty.get_status(MEMORY_SLOT_ID).await;
-        match status {
-            Some(s) if s.state == SessionState::Idle => break,
-            None => break,
-            _ => {}
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    }
-    info!("Memory extraction cycle complete");
 }
 
 /// Deep analysis: review completed but unanalyzed conversations.
@@ -2377,8 +2352,7 @@ async fn main() -> Result<()> {
         skills,
         infra,
         pty_session_uuids: Arc::new(tokio::sync::RwLock::new(pty_uuids)),
-        memory_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
-        memory_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        memory_extracting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     // Autopilot scheduler + IPC server via select
@@ -2404,9 +2378,6 @@ async fn main() -> Result<()> {
                     Ok(WatcherEvent::NewMessages { session_id, project_path, jsonl_path, messages }) => {
                         let is_pty = state.pty_session_uuids.read().await.contains(&session_id);
                         handle_new_messages(&state, session_id.clone(), project_path, jsonl_path, messages.clone(), is_pty);
-                        if !is_pty {
-                            maybe_forward_to_memory(&state, &session_id, &messages);
-                        }
                     }
                     Ok(WatcherEvent::SessionInactive(session)) => {
                         // Mark conversation as completed so deep analysis can pick it up
