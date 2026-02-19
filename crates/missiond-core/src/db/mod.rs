@@ -240,6 +240,18 @@ impl MissionDB {
             }
         }
 
+        // Add memory_forwarded_at to conversations if missing
+        let conv_columns: Vec<String> = self.conn
+            .prepare("PRAGMA table_info(conversations)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        if !conv_columns.iter().any(|c| c == "memory_forwarded_at") {
+            self.conn.execute_batch(
+                "ALTER TABLE conversations ADD COLUMN memory_forwarded_at TEXT;"
+            )?;
+        }
+
         Ok(())
     }
 
@@ -1332,6 +1344,57 @@ impl MissionDB {
         self.conn.execute(
             "UPDATE conversations SET status = 'completed', ended_at = ?1 WHERE id = ?2",
             params![now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Get conversation messages not yet forwarded to memory analysis.
+    /// Returns messages from today (UTC) for non-PTY sessions, newer than memory_forwarded_at.
+    pub fn get_pending_memory_messages(&self, today: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
+        // Get CLI conversations (no slot_id) that have messages from today
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT c.id, COALESCE(c.project, '') as project, c.memory_forwarded_at
+             FROM conversations c
+             JOIN conversation_messages m ON m.session_id = c.id
+             WHERE c.slot_id IS NULL
+               AND m.timestamp >= ?1
+               AND m.role IN ('user', 'assistant')
+             ORDER BY c.started_at DESC"
+        )?;
+        let rows = stmt.query_map(params![today], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            let (session_id, project, forwarded_at) = row?;
+            // Get messages newer than last forwarded time, from today, user/assistant only
+            let since = forwarded_at.unwrap_or_else(|| today.to_string());
+            let mut msg_stmt = self.conn.prepare(
+                "SELECT * FROM conversation_messages
+                 WHERE session_id = ?1 AND timestamp > ?2 AND role IN ('user', 'assistant')
+                 ORDER BY id ASC"
+            )?;
+            let msgs: Vec<ConversationMessage> = msg_stmt
+                .query_map(params![session_id, since], |row| Self::row_to_conversation_message(row))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !msgs.is_empty() {
+                results.push((session_id, project, msgs));
+            }
+        }
+        Ok(results)
+    }
+
+    /// Update memory_forwarded_at for a conversation
+    pub fn update_memory_forwarded_at(&self, session_id: &str, timestamp: &str) -> SqliteResult<()> {
+        self.conn.execute(
+            "UPDATE conversations SET memory_forwarded_at = ?1 WHERE id = ?2",
+            params![timestamp, session_id],
         )?;
         Ok(())
     }
