@@ -37,10 +37,11 @@ struct AppState {
     /// JSONL session UUIDs belonging to PTY-managed slots.
     /// White-list: any session_id NOT in this set is a user CLI session.
     pty_session_uuids: Arc<tokio::sync::RwLock<HashSet<String>>>,
-    /// Whether memory extraction is currently in progress (set by autopilot_tick).
-    memory_extracting: Arc<std::sync::atomic::AtomicBool>,
-    /// Whether user-voice extraction is currently in progress (set by autopilot_tick).
-    user_voice_extracting: Arc<std::sync::atomic::AtomicBool>,
+    /// Timestamp (epoch secs) of last memory extraction trigger. Cooldown prevents re-trigger
+    /// while the slot is still processing MCP calls from the previous extraction.
+    memory_last_trigger: Arc<std::sync::atomic::AtomicI64>,
+    /// Timestamp (epoch secs) of last user-voice extraction trigger.
+    user_voice_last_trigger: Arc<std::sync::atomic::AtomicI64>,
     /// Hash of last synced CLAUDE.md managed section (to avoid unnecessary writes).
     claude_md_hash: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -1963,18 +1964,19 @@ fn format_messages_for_memory(messages: &[missiond_core::types::ConversationMess
         .join("\n\n")
 }
 
+/// Extraction cooldown in seconds. After triggering, no re-trigger until this period
+/// elapses. Gives the memory slot time to finish its MCP calls (send() returns on
+/// first TextComplete, but the slot continues working for minutes).
+const EXTRACTION_COOLDOWN_SECS: i64 = 120;
+
 /// Check if user-voice extraction should be triggered. Called from autopilot_tick.
-/// Extracts memories from user-only messages (preferences, corrections, decisions).
-/// Has priority over general memory extraction — runs first, shares slot-memory.
-///
-/// Flag semantics: `user_voice_extracting` is true only during the send() call
-/// (prevents concurrent sends). After send() returns, the flag is reset and the
-/// "is slot idle?" check naturally gates subsequent triggers.
 async fn check_user_voice_extraction(state: &AppState) {
-    // Skip if any extraction send() is in flight
-    if state.user_voice_extracting.load(std::sync::atomic::Ordering::SeqCst)
-        || state.memory_extracting.load(std::sync::atomic::Ordering::SeqCst)
-    {
+    let now = chrono::Utc::now().timestamp();
+
+    // Cooldown: skip if either extraction was triggered recently
+    let uv_last = state.user_voice_last_trigger.load(std::sync::atomic::Ordering::SeqCst);
+    let mem_last = state.memory_last_trigger.load(std::sync::atomic::Ordering::SeqCst);
+    if (now - uv_last) < EXTRACTION_COOLDOWN_SECS || (now - mem_last) < EXTRACTION_COOLDOWN_SECS {
         return;
     }
 
@@ -2000,10 +2002,9 @@ async fn check_user_voice_extraction(state: &AppState) {
 
     let prompt = "有新的用户消息待分析。调用 mission_memory_pending_user 获取用户原话，提取用户偏好、纠正和决策。";
     info!("Triggering user-voice extraction via MCP pull");
-    state.user_voice_extracting.store(true, std::sync::atomic::Ordering::SeqCst);
+    state.user_voice_last_trigger.store(now, std::sync::atomic::Ordering::SeqCst);
 
     let pty = Arc::clone(&state.pty);
-    let extracting = Arc::clone(&state.user_voice_extracting);
     tokio::spawn(async move {
         match pty.send(MEMORY_SLOT_ID, prompt, 300_000).await {
             Ok(res) => {
@@ -2013,17 +2014,17 @@ async fn check_user_voice_extraction(state: &AppState) {
                 warn!(error = %e, "User-voice extraction trigger failed");
             }
         }
-        extracting.store(false, std::sync::atomic::Ordering::SeqCst);
     });
 }
 
 /// Check if memory extraction should be triggered. Called from autopilot_tick.
-/// Conditions: memory slot is idle + DB has pending messages + no extraction in flight.
 async fn check_memory_extraction(state: &AppState) {
-    // Skip if any extraction send() is in flight
-    if state.user_voice_extracting.load(std::sync::atomic::Ordering::SeqCst)
-        || state.memory_extracting.load(std::sync::atomic::Ordering::SeqCst)
-    {
+    let now = chrono::Utc::now().timestamp();
+
+    // Cooldown: skip if either extraction was triggered recently
+    let uv_last = state.user_voice_last_trigger.load(std::sync::atomic::Ordering::SeqCst);
+    let mem_last = state.memory_last_trigger.load(std::sync::atomic::Ordering::SeqCst);
+    if (now - uv_last) < EXTRACTION_COOLDOWN_SECS || (now - mem_last) < EXTRACTION_COOLDOWN_SECS {
         return;
     }
 
@@ -2050,10 +2051,9 @@ async fn check_memory_extraction(state: &AppState) {
     // Fire trigger in background — don't block autopilot tick
     let prompt = "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，然后提取记忆。";
     info!("Triggering memory extraction via MCP pull");
-    state.memory_extracting.store(true, std::sync::atomic::Ordering::SeqCst);
+    state.memory_last_trigger.store(now, std::sync::atomic::Ordering::SeqCst);
 
     let pty = Arc::clone(&state.pty);
-    let extracting = Arc::clone(&state.memory_extracting);
     tokio::spawn(async move {
         match pty.send(MEMORY_SLOT_ID, prompt, 300_000).await {
             Ok(res) => {
@@ -2063,17 +2063,17 @@ async fn check_memory_extraction(state: &AppState) {
                 warn!(error = %e, "Memory extraction trigger failed");
             }
         }
-        extracting.store(false, std::sync::atomic::Ordering::SeqCst);
     });
 }
 
 /// Deep analysis: review completed but unanalyzed conversations.
 /// Called from autopilot_tick.
 async fn check_deep_analysis(state: &AppState) {
-    // Skip if user-voice or memory extraction is in progress (shares same slot)
-    if state.user_voice_extracting.load(std::sync::atomic::Ordering::SeqCst)
-        || state.memory_extracting.load(std::sync::atomic::Ordering::SeqCst)
-    {
+    let now = chrono::Utc::now().timestamp();
+    // Skip if any extraction was triggered recently (cooldown)
+    let uv_last = state.user_voice_last_trigger.load(std::sync::atomic::Ordering::SeqCst);
+    let mem_last = state.memory_last_trigger.load(std::sync::atomic::Ordering::SeqCst);
+    if (now - uv_last) < EXTRACTION_COOLDOWN_SECS || (now - mem_last) < EXTRACTION_COOLDOWN_SECS {
         return;
     }
 
@@ -2575,8 +2575,8 @@ async fn main() -> Result<()> {
         skills,
         infra,
         pty_session_uuids: Arc::new(tokio::sync::RwLock::new(pty_uuids)),
-        memory_extracting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        user_voice_extracting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        memory_last_trigger: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        user_voice_last_trigger: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         claude_md_hash: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
