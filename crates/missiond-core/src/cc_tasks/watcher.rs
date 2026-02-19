@@ -170,11 +170,15 @@ impl CCTasksWatcher {
             }
         });
 
-        // Spawn inactive check timer
+        // Spawn inactive check + rescan timer
         let sessions = self.sessions.clone();
+        let file_positions = self.file_positions.clone();
+        let recent_changes = self.recent_changes.clone();
+        let max_recent_changes = self.max_recent_changes;
         let event_tx = self.event_tx.clone();
         let inactive_check_interval = self.inactive_check_interval_ms;
         let started = self.started.clone();
+        let projects_dir = self.projects_dir.clone();
 
         tokio::spawn(async move {
             let mut interval =
@@ -188,6 +192,16 @@ impl CCTasksWatcher {
                 }
 
                 Self::check_inactive_sessions_static(&sessions, &event_tx).await;
+
+                // Rescan active sessions as safety net for missed FSEvents (e.g., after sleep)
+                Self::rescan_active_sessions(
+                    &sessions,
+                    &file_positions,
+                    &recent_changes,
+                    max_recent_changes,
+                    &event_tx,
+                    &projects_dir,
+                ).await;
             }
         });
 
@@ -498,6 +512,53 @@ impl CCTasksWatcher {
             if session.is_active && session.modified < five_minutes_ago {
                 session.is_active = false;
                 let _ = event_tx.send(WatcherEvent::SessionInactive(session.clone()));
+            }
+        }
+    }
+
+    /// Rescan active sessions to catch missed file events (e.g., after laptop sleep).
+    /// Only checks file metadata (size), not content. If file grew since last tracked
+    /// position, delegates to check_session_for_changes_static for actual parsing.
+    async fn rescan_active_sessions(
+        sessions: &Arc<RwLock<HashMap<String, CCSession>>>,
+        file_positions: &Arc<RwLock<HashMap<String, u64>>>,
+        recent_changes: &Arc<RwLock<Vec<CCTaskChangeEvent>>>,
+        max_recent_changes: usize,
+        event_tx: &broadcast::Sender<WatcherEvent>,
+        projects_dir: &Path,
+    ) {
+        // Collect active session file paths (release read lock before processing)
+        let paths: Vec<String> = {
+            let sessions = sessions.read().await;
+            sessions.values()
+                .filter(|s| s.is_active)
+                .map(|s| s.full_path.clone())
+                .collect()
+        };
+
+        for full_path in &paths {
+            let file_path = Path::new(full_path);
+            let current_size = match tokio::fs::metadata(file_path).await {
+                Ok(m) => m.len(),
+                Err(_) => continue,
+            };
+            let tracked_size = file_positions.read().await.get(full_path).copied().unwrap_or(0);
+            if current_size > tracked_size {
+                debug!(
+                    path = %full_path,
+                    tracked = tracked_size,
+                    current = current_size,
+                    "Rescan: detected missed file growth"
+                );
+                Self::check_session_for_changes_static(
+                    file_path,
+                    sessions,
+                    recent_changes,
+                    max_recent_changes,
+                    event_tx,
+                    projects_dir,
+                    file_positions,
+                ).await;
             }
         }
     }

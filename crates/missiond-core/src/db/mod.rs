@@ -1492,6 +1492,14 @@ impl MissionDB {
         Ok(ids.len())
     }
 
+    /// Re-activate a completed conversation when new messages arrive.
+    pub fn reactivate_conversation(&self, id: &str) -> SqliteResult<usize> {
+        self.conn.execute(
+            "UPDATE conversations SET status = 'active', ended_at = NULL WHERE id = ?1 AND status = 'completed'",
+            params![id],
+        )
+    }
+
     /// Get conversation messages not yet forwarded to memory analysis.
     /// Returns messages from today (UTC) for user CLI sessions only (no PTY, no subagents).
     pub fn get_pending_memory_messages(&self, today: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {

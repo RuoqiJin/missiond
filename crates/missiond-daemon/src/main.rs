@@ -22,9 +22,33 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use missiond_core::ipc::{self, IpcListener, IpcStream};
+
+/// Extraction phase state machine. Replaces rigid 120s cooldown with
+/// event-driven completion detection.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ExtractionPhase {
+    /// Ready for next extraction trigger.
+    Idle,
+    /// send() is in flight (waiting for TextComplete).
+    Sending,
+    /// send() returned but slot is still processing MCP calls.
+    /// Will transition to Idle when slot's SessionState becomes Idle.
+    WaitingForSlotIdle,
+}
+
+struct ExtractionState {
+    phase: ExtractionPhase,
+    /// Which extraction type is active: "user_voice", "memory", "deep_analysis"
+    active_type: Option<&'static str>,
+    /// When current phase started (epoch secs), for timeout detection.
+    phase_started_at: i64,
+}
+
+/// Safety valve: max time to wait for slot to return to Idle after send() returns.
+const MAX_WAIT_FOR_IDLE_SECS: i64 = 300;
 
 #[derive(Clone)]
 struct AppState {
@@ -37,11 +61,10 @@ struct AppState {
     /// JSONL session UUIDs belonging to PTY-managed slots.
     /// White-list: any session_id NOT in this set is a user CLI session.
     pty_session_uuids: Arc<tokio::sync::RwLock<HashSet<String>>>,
-    /// Timestamp (epoch secs) of last memory extraction trigger. Cooldown prevents re-trigger
-    /// while the slot is still processing MCP calls from the previous extraction.
-    memory_last_trigger: Arc<std::sync::atomic::AtomicI64>,
-    /// Timestamp (epoch secs) of last user-voice extraction trigger.
-    user_voice_last_trigger: Arc<std::sync::atomic::AtomicI64>,
+    /// State machine for memory extraction cooldown. Shared by user_voice, memory, deep_analysis.
+    extraction_state: Arc<tokio::sync::RwLock<ExtractionState>>,
+    /// Timestamp when slot-memory entered its current non-Idle state. 0 = idle.
+    memory_slot_busy_since: Arc<std::sync::atomic::AtomicI64>,
     /// Hash of last synced CLAUDE.md managed section (to avoid unnecessary writes).
     claude_md_hash: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -1701,6 +1724,9 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
         _ => {}
     }
 
+    // Check if memory slot is stuck in non-Idle state for too long
+    check_memory_slot_stuck(state).await;
+
     // User-voice extraction: extract memories from user-only messages (highest priority)
     check_user_voice_extraction(state).await;
 
@@ -1712,6 +1738,22 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
 
     // Sync KB preferences + hot topics into CLAUDE.md
     sync_claude_md(state);
+
+    // Extraction status summary (debug)
+    {
+        let es = state.extraction_state.read().await;
+        let slot_state = state.pty.get_status(MEMORY_SLOT_ID).await
+            .map(|s| format!("{:?}", s.state))
+            .unwrap_or_else(|| "not_spawned".to_string());
+        let age = chrono::Utc::now().timestamp() - es.phase_started_at;
+        debug!(
+            slot = %slot_state,
+            extraction_phase = ?es.phase,
+            extraction_type = ?es.active_type,
+            phase_age = age,
+            "autopilot: extraction status"
+        );
+    }
 
     let tasks = state.mission.db().list_autopilot_tasks()
         .map_err(|e| anyhow!("DB error: {}", e))?;
@@ -1964,19 +2006,113 @@ fn format_messages_for_memory(messages: &[missiond_core::types::ConversationMess
         .join("\n\n")
 }
 
-/// Extraction cooldown in seconds. After triggering, no re-trigger until this period
-/// elapses. Gives the memory slot time to finish its MCP calls (send() returns on
-/// first TextComplete, but the slot continues working for minutes).
-const EXTRACTION_COOLDOWN_SECS: i64 = 120;
+/// Threshold for considering the memory slot stuck (10 minutes).
+const STUCK_THRESHOLD_SECS: i64 = 600;
+
+/// Detect and recover from memory slot stuck in non-Idle state.
+async fn check_memory_slot_stuck(state: &AppState) {
+    let busy_since = state.memory_slot_busy_since.load(std::sync::atomic::Ordering::SeqCst);
+    if busy_since == 0 {
+        return; // Idle or not tracked
+    }
+    let now = chrono::Utc::now().timestamp();
+    let stuck_duration = now - busy_since;
+    if stuck_duration < STUCK_THRESHOLD_SECS {
+        return;
+    }
+
+    let current_state = state.pty.get_status(MEMORY_SLOT_ID).await
+        .map(|s| format!("{:?}", s.state))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    warn!(
+        state = %current_state,
+        stuck_secs = stuck_duration,
+        "Memory slot stuck, sending Ctrl+C to recover"
+    );
+
+    if let Err(e) = state.pty.interrupt(MEMORY_SLOT_ID).await {
+        warn!(error = %e, "Failed to interrupt stuck memory slot");
+    }
+
+    // Reset extraction state so next tick can trigger
+    {
+        let mut es = state.extraction_state.write().await;
+        es.phase = ExtractionPhase::Idle;
+        es.active_type = None;
+    }
+    state.memory_slot_busy_since.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Check extraction state gate: returns true if extraction is allowed.
+/// Handles safety-valve timeout for WaitingForSlotIdle phase.
+async fn check_extraction_gate(state: &AppState, label: &str) -> bool {
+    let now = chrono::Utc::now().timestamp();
+    let es = state.extraction_state.read().await;
+    if es.phase == ExtractionPhase::Idle {
+        return true;
+    }
+    let age = now - es.phase_started_at;
+    // Safety valve: force reset if WaitingForSlotIdle exceeds MAX_WAIT_FOR_IDLE_SECS
+    if es.phase == ExtractionPhase::WaitingForSlotIdle && age > MAX_WAIT_FOR_IDLE_SECS {
+        drop(es);
+        let mut es = state.extraction_state.write().await;
+        if es.phase == ExtractionPhase::WaitingForSlotIdle {
+            warn!(age_secs = age, "{}: extraction stuck in WaitingForSlotIdle, forcing reset", label);
+            es.phase = ExtractionPhase::Idle;
+            es.active_type = None;
+            return true;
+        }
+    } else {
+        debug!(
+            phase = ?es.phase,
+            active_type = ?es.active_type,
+            age_secs = age,
+            "{}: skipped (extraction in progress)", label
+        );
+    }
+    false
+}
+
+/// Begin an extraction: set state to Sending and spawn the background send().
+async fn begin_extraction(state: &AppState, label: &'static str, prompt: &'static str) {
+    let now = chrono::Utc::now().timestamp();
+    {
+        let mut es = state.extraction_state.write().await;
+        es.phase = ExtractionPhase::Sending;
+        es.active_type = Some(label);
+        es.phase_started_at = now;
+    }
+
+    info!("Triggering {} extraction via MCP pull", label);
+
+    let pty = Arc::clone(&state.pty);
+    let extraction_state = Arc::clone(&state.extraction_state);
+    tokio::spawn(async move {
+        match pty.send(MEMORY_SLOT_ID, prompt, 300_000).await {
+            Ok(res) => {
+                info!(duration_ms = res.duration_ms, "{} extraction send() returned", label);
+                // Transition to WaitingForSlotIdle — slot continues MCP processing
+                let mut es = extraction_state.write().await;
+                if es.phase == ExtractionPhase::Sending {
+                    es.phase = ExtractionPhase::WaitingForSlotIdle;
+                    es.phase_started_at = chrono::Utc::now().timestamp();
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "{} extraction trigger failed", label);
+                // Reset to Idle on failure — allow immediate retry
+                let mut es = extraction_state.write().await;
+                es.phase = ExtractionPhase::Idle;
+                es.active_type = None;
+            }
+        }
+    });
+}
 
 /// Check if user-voice extraction should be triggered. Called from autopilot_tick.
 async fn check_user_voice_extraction(state: &AppState) {
-    let now = chrono::Utc::now().timestamp();
-
-    // Cooldown: skip if either extraction was triggered recently
-    let uv_last = state.user_voice_last_trigger.load(std::sync::atomic::Ordering::SeqCst);
-    let mem_last = state.memory_last_trigger.load(std::sync::atomic::Ordering::SeqCst);
-    if (now - uv_last) < EXTRACTION_COOLDOWN_SECS || (now - mem_last) < EXTRACTION_COOLDOWN_SECS {
+    if !check_extraction_gate(state, "user_voice").await {
         return;
     }
 
@@ -1987,44 +2123,35 @@ async fn check_user_voice_extraction(state: &AppState) {
         Err(_) => false,
     };
     if !has_pending {
+        debug!("user_voice: no pending messages");
         return;
     }
 
     // Ensure memory slot is spawned, then check it's idle
     if !ensure_memory_slot(state).await {
+        debug!("user_voice: memory slot not available");
         return;
     }
     let status = state.pty.get_status(MEMORY_SLOT_ID).await;
     match status {
         Some(s) if s.state == SessionState::Idle => {}
-        _ => return,
+        Some(s) => {
+            debug!(state = ?s.state, "user_voice: memory slot not idle");
+            return;
+        }
+        None => {
+            debug!("user_voice: memory slot status unavailable");
+            return;
+        }
     }
 
-    let prompt = "有新的用户消息待分析。调用 mission_memory_pending_user 获取用户原话，提取用户偏好、纠正和决策。";
-    info!("Triggering user-voice extraction via MCP pull");
-    state.user_voice_last_trigger.store(now, std::sync::atomic::Ordering::SeqCst);
-
-    let pty = Arc::clone(&state.pty);
-    tokio::spawn(async move {
-        match pty.send(MEMORY_SLOT_ID, prompt, 300_000).await {
-            Ok(res) => {
-                info!(duration_ms = res.duration_ms, "User-voice extraction trigger sent");
-            }
-            Err(e) => {
-                warn!(error = %e, "User-voice extraction trigger failed");
-            }
-        }
-    });
+    begin_extraction(state, "user_voice",
+        "有新的用户消息待分析。调用 mission_memory_pending_user 获取用户原话，提取用户偏好、纠正和决策。").await;
 }
 
 /// Check if memory extraction should be triggered. Called from autopilot_tick.
 async fn check_memory_extraction(state: &AppState) {
-    let now = chrono::Utc::now().timestamp();
-
-    // Cooldown: skip if either extraction was triggered recently
-    let uv_last = state.user_voice_last_trigger.load(std::sync::atomic::Ordering::SeqCst);
-    let mem_last = state.memory_last_trigger.load(std::sync::atomic::Ordering::SeqCst);
-    if (now - uv_last) < EXTRACTION_COOLDOWN_SECS || (now - mem_last) < EXTRACTION_COOLDOWN_SECS {
+    if !check_extraction_gate(state, "memory").await {
         return;
     }
 
@@ -2035,45 +2162,36 @@ async fn check_memory_extraction(state: &AppState) {
         Err(_) => false,
     };
     if !has_pending {
+        debug!("memory: no pending messages");
         return;
     }
 
     // Ensure memory slot is spawned, then check it's idle
     if !ensure_memory_slot(state).await {
+        debug!("memory: memory slot not available");
         return;
     }
     let status = state.pty.get_status(MEMORY_SLOT_ID).await;
     match status {
         Some(s) if s.state == SessionState::Idle => {}
-        _ => return, // Not idle yet (still starting or busy)
+        Some(s) => {
+            debug!(state = ?s.state, "memory: slot not idle");
+            return;
+        }
+        None => {
+            debug!("memory: slot status unavailable");
+            return;
+        }
     }
 
-    // Fire trigger in background — don't block autopilot tick
-    let prompt = "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，然后提取记忆。";
-    info!("Triggering memory extraction via MCP pull");
-    state.memory_last_trigger.store(now, std::sync::atomic::Ordering::SeqCst);
-
-    let pty = Arc::clone(&state.pty);
-    tokio::spawn(async move {
-        match pty.send(MEMORY_SLOT_ID, prompt, 300_000).await {
-            Ok(res) => {
-                info!(duration_ms = res.duration_ms, "Memory extraction trigger sent");
-            }
-            Err(e) => {
-                warn!(error = %e, "Memory extraction trigger failed");
-            }
-        }
-    });
+    begin_extraction(state, "memory",
+        "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，然后提取记忆。").await;
 }
 
 /// Deep analysis: review completed but unanalyzed conversations.
 /// Called from autopilot_tick.
 async fn check_deep_analysis(state: &AppState) {
-    let now = chrono::Utc::now().timestamp();
-    // Skip if any extraction was triggered recently (cooldown)
-    let uv_last = state.user_voice_last_trigger.load(std::sync::atomic::Ordering::SeqCst);
-    let mem_last = state.memory_last_trigger.load(std::sync::atomic::Ordering::SeqCst);
-    if (now - uv_last) < EXTRACTION_COOLDOWN_SECS || (now - mem_last) < EXTRACTION_COOLDOWN_SECS {
+    if !check_extraction_gate(state, "deep_analysis").await {
         return;
     }
 
@@ -2081,7 +2199,14 @@ async fn check_deep_analysis(state: &AppState) {
     let status = state.pty.get_status(MEMORY_SLOT_ID).await;
     match status {
         Some(s) if s.state == SessionState::Idle => {}
-        _ => return,
+        Some(s) => {
+            debug!(state = ?s.state, "deep_analysis: slot not idle");
+            return;
+        }
+        None => {
+            debug!("deep_analysis: slot status unavailable");
+            return;
+        }
     }
 
     let db = state.mission.db();
@@ -2160,15 +2285,33 @@ async fn check_deep_analysis(state: &AppState) {
         // Mark analyzed optimistically (original behavior: marked regardless of send result)
         let _ = db.mark_conversation_analyzed(&conv.id);
 
+        // Set extraction state before spawning
+        {
+            let now = chrono::Utc::now().timestamp();
+            let mut es = state.extraction_state.write().await;
+            es.phase = ExtractionPhase::Sending;
+            es.active_type = Some("deep_analysis");
+            es.phase_started_at = now;
+        }
+
         let conv_id = conv.id.clone();
         let pty = Arc::clone(&state.pty);
+        let extraction_state = Arc::clone(&state.extraction_state);
         tokio::spawn(async move {
             match pty.send(MEMORY_SLOT_ID, &prompt, 300_000).await {
                 Ok(res) => {
-                    info!(conv_id = %conv_id, duration_ms = res.duration_ms, "Deep analysis completed");
+                    info!(conv_id = %conv_id, duration_ms = res.duration_ms, "Deep analysis send() returned");
+                    let mut es = extraction_state.write().await;
+                    if es.phase == ExtractionPhase::Sending {
+                        es.phase = ExtractionPhase::WaitingForSlotIdle;
+                        es.phase_started_at = chrono::Utc::now().timestamp();
+                    }
                 }
                 Err(e) => {
                     warn!(conv_id = %conv_id, error = %e, "Deep analysis failed");
+                    let mut es = extraction_state.write().await;
+                    es.phase = ExtractionPhase::Idle;
+                    es.active_type = None;
                 }
             }
         });
@@ -2313,8 +2456,18 @@ fn handle_new_messages(
     };
     let source = if is_pty { "pty_jsonl" } else { "claude_cli" };
 
-    // Ensure conversation exists
-    if db.get_conversation(&session_id).unwrap_or(None).is_none() {
+    // Ensure conversation exists; re-activate if completed
+    let existing_conv = db.get_conversation(&session_id).unwrap_or(None);
+    if let Some(ref conv) = existing_conv {
+        if conv.status == "completed" {
+            if let Err(e) = db.reactivate_conversation(&session_id) {
+                warn!(session = %session_id, error = %e, "Failed to re-activate conversation");
+            } else {
+                info!(session = %session_id, "Re-activated completed conversation");
+            }
+        }
+    }
+    if existing_conv.is_none() {
         let first = messages.first();
         let conv = missiond_core::types::Conversation {
             id: session_id.clone(),
@@ -2575,8 +2728,12 @@ async fn main() -> Result<()> {
         skills,
         infra,
         pty_session_uuids: Arc::new(tokio::sync::RwLock::new(pty_uuids)),
-        memory_last_trigger: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-        user_voice_last_trigger: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        extraction_state: Arc::new(tokio::sync::RwLock::new(ExtractionState {
+            phase: ExtractionPhase::Idle,
+            active_type: None,
+            phase_started_at: 0,
+        })),
+        memory_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         claude_md_hash: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
@@ -2633,6 +2790,30 @@ async fn main() -> Result<()> {
                             state.pty_session_uuids.write().await.remove(uuid);
                         }
                         state.mission.db().clear_slot_session(&slot_id);
+                    }
+                    Ok(missiond_core::ManagerEvent::StateChange { ref slot_id, new_state, prev_state }) => {
+                        if slot_id == MEMORY_SLOT_ID {
+                            // Track busy-since for stuck detection (Phase 3)
+                            if new_state == SessionState::Idle {
+                                state.memory_slot_busy_since.store(0, std::sync::atomic::Ordering::SeqCst);
+                                // Release extraction gate when slot returns to Idle
+                                let mut es = state.extraction_state.write().await;
+                                if es.phase == ExtractionPhase::WaitingForSlotIdle || es.phase == ExtractionPhase::Sending {
+                                    info!(
+                                        extraction_type = ?es.active_type,
+                                        phase_age = chrono::Utc::now().timestamp() - es.phase_started_at,
+                                        "Extraction complete: slot returned to Idle"
+                                    );
+                                    es.phase = ExtractionPhase::Idle;
+                                    es.active_type = None;
+                                }
+                            } else if prev_state == SessionState::Idle {
+                                state.memory_slot_busy_since.store(
+                                    chrono::Utc::now().timestamp(),
+                                    std::sync::atomic::Ordering::SeqCst,
+                                );
+                            }
+                        }
                     }
                     Ok(_) => {} // Other PTY events not needed for logging
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
