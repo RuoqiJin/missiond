@@ -524,6 +524,14 @@ impl PTYManager {
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
+        // Restore agent_info state to Idle after send completes
+        {
+            let mut agent_info = self.agent_info.write().await;
+            if let Some(info) = agent_info.get_mut(slot_id) {
+                info.state = SessionState::Idle;
+            }
+        }
+
         info!(
             slot_id = slot_id,
             message_len = message.len(),
