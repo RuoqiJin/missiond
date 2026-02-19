@@ -1545,7 +1545,89 @@ async fn handle_ipc_request(state: AppState, request: Request) -> Response {
 // Autopilot Scheduler
 // =========================
 
+/// Check all running PTY slots for low context warnings.
+/// When "Context left until auto-compact: X%" is detected and X < 10,
+/// kill and restart the slot to avoid degraded performance from context compression.
+async fn check_slot_context_levels(state: &AppState) {
+    let slots = state.mission.list_slots();
+    for slot in &slots {
+        let status = state.pty.get_status(&slot.config.id).await;
+        let Some(info) = status else { continue };
+        // Only check running slots
+        if info.state == SessionState::Exited {
+            continue;
+        }
+
+        let screen = match state.pty.get_screen(&slot.config.id).await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        // Look for "Context left until auto-compact: XX%"
+        if let Some(pct) = extract_context_percentage(&screen) {
+            if pct < 10 {
+                warn!(
+                    slot_id = %slot.config.id,
+                    context_pct = pct,
+                    "Slot context critically low, restarting"
+                );
+                // Kill the slot
+                if let Err(e) = state.pty.kill(&slot.config.id).await {
+                    warn!(error = %e, slot_id = %slot.config.id, "Failed to kill low-context slot");
+                    continue;
+                }
+                // Wait for exit
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+                // Respawn
+                let pty_slot = missiond_core::PTYSlot {
+                    id: slot.config.id.clone(),
+                    role: slot.config.role.clone(),
+                    cwd: slot.config.cwd.as_deref().map(PathBuf::from),
+                };
+                let mcp_config = slot.config.mcp_config.clone().map(PathBuf::from);
+                let (extra_env, session_file) = build_slot_tracking_env(&slot.config.id);
+                match state.pty.spawn(&pty_slot, PTYSpawnOptions {
+                    auto_restart: false,
+                    wait_for_idle: true,
+                    timeout_secs: Some(120),
+                    mcp_config,
+                    dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+                    extra_env,
+                }).await {
+                    Ok(_) => {
+                        capture_slot_session_uuid(state, &slot.config.id, &session_file).await;
+                        info!(slot_id = %slot.config.id, "Slot restarted due to low context");
+                    }
+                    Err(e) => {
+                        warn!(error = %e, slot_id = %slot.config.id, "Failed to respawn slot after context kill");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Extract context percentage from PTY screen text.
+/// Looks for "Context left until auto-compact: XX%" pattern.
+fn extract_context_percentage(screen: &str) -> Option<u32> {
+    // The status bar text: "Context left until auto-compact: 12%"
+    for line in screen.lines().rev() {
+        if let Some(pos) = line.find("Context left until auto-compact:") {
+            let after = &line[pos + "Context left until auto-compact:".len()..];
+            let trimmed = after.trim().trim_end_matches('%');
+            if let Ok(pct) = trimmed.parse::<u32>() {
+                return Some(pct);
+            }
+        }
+    }
+    None
+}
+
 async fn autopilot_tick(state: &AppState) -> Result<()> {
+    // Check PTY slots for low context — restart if < 10%
+    check_slot_context_levels(state).await;
+
     // Deep analysis: review completed conversations
     check_deep_analysis(state).await;
 
