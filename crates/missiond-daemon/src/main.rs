@@ -1912,8 +1912,11 @@ async fn capture_slot_session_uuid(
 /// Ensure slot-memory PTY session is running, spawn if needed.
 /// Returns true if the session is available.
 async fn ensure_memory_slot(state: &AppState) -> bool {
-    if state.pty.get_status(MEMORY_SLOT_ID).await.is_some() {
-        return true;
+    // Check if session is actually running (not just initialized/exited)
+    if let Some(info) = state.pty.get_status(MEMORY_SLOT_ID).await {
+        if info.state != SessionState::Exited {
+            return true;
+        }
     }
     let slot = state
         .mission
@@ -2110,9 +2113,9 @@ async fn check_deep_analysis(state: &AppState) {
             continue; // Not yet ended
         }
 
-        // Only analyze user CLI conversations (slot_id=None).
-        // PTY-managed sessions (coder slots, memory slot) are excluded.
-        if conv.slot_id.is_some() {
+        // Only analyze user CLI conversations (slot_id=None, not subagent).
+        // PTY-managed sessions and subagent sessions are excluded.
+        if conv.slot_id.is_some() || conv.id.starts_with("agent-") {
             let _ = db.mark_conversation_analyzed(&conv.id);
             continue;
         }
