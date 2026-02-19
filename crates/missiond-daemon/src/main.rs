@@ -22,7 +22,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use missiond_core::ipc::{self, IpcListener, IpcStream};
 
@@ -1835,65 +1835,47 @@ async fn drain_memory_queue(
     pty: &PTYManager,
     queue: &std::sync::Mutex<Vec<bool>>,
 ) {
-    let mut retry_count = 0u32;
-    loop {
-        // Coalescing delay — let more messages accumulate (longer when retrying)
-        let delay = if retry_count == 0 { 3 } else { 15.min(5 * retry_count as u64) };
-        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+    // Initial coalescing delay — let messages accumulate
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-        // Peek: is there anything to drain?
-        let is_empty = queue.lock().unwrap().is_empty();
-        if is_empty {
-            break;
-        }
+    // Clear the queue — we'll send one trigger for everything accumulated
+    {
+        let mut q = queue.lock().unwrap();
+        q.clear();
+    }
 
-        // Check if memory slot is running
+    // Wait for slot to be idle before sending
+    for attempt in 0..30 {
         let status = pty.get_status(MEMORY_SLOT_ID).await;
         if status.is_none() {
-            info!("Memory slot not running, keeping queue for later");
-            break;
+            info!("Memory slot not running, skipping trigger");
+            return;
         }
-
-        // Check if slot is busy (thinking) — wait and retry instead of failing
         if let Some(ref s) = status {
-            if s.state != SessionState::Idle {
-                retry_count += 1;
-                if retry_count > 20 {
-                    warn!("Memory slot busy for too long ({} retries), giving up this drain cycle", retry_count);
-                    break;
-                }
-                debug!(state = ?s.state, retry = retry_count, "Memory slot busy, waiting to retry");
-                continue;
+            if s.state == SessionState::Idle {
+                break;
             }
         }
-
-        // Clear the queue — content will be pulled by memory slot via MCP tool
-        {
-            let mut q = queue.lock().unwrap();
-            q.clear();
+        if attempt == 29 {
+            warn!("Memory slot busy for too long, skipping trigger");
+            return;
         }
-
-        // Send short trigger — memory slot pulls content via mission_memory_pending MCP tool
-        let prompt = "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，然后提取记忆。";
-        info!("Triggering memory extraction via MCP pull");
-
-        match pty.send(MEMORY_SLOT_ID, prompt, 180_000).await {
-            Ok(res) => {
-                info!(duration_ms = res.duration_ms, "Memory extraction trigger done");
-                retry_count = 0;
-            }
-            Err(e) => {
-                warn!(error = %e, "Memory extraction trigger failed");
-                retry_count += 1;
-                if retry_count > 5 {
-                    warn!("Too many trigger failures, stopping drain cycle");
-                    break;
-                }
-                continue;
-            }
-        }
-        // Loop back to check if more messages accumulated during processing
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
     }
+
+    // Send ONE trigger — memory slot pulls content via mission_memory_pending MCP tool
+    let prompt = "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，然后提取记忆。";
+    info!("Triggering memory extraction via MCP pull");
+
+    match pty.send(MEMORY_SLOT_ID, prompt, 300_000).await {
+        Ok(res) => {
+            info!(duration_ms = res.duration_ms, "Memory extraction trigger done");
+        }
+        Err(e) => {
+            warn!(error = %e, "Memory extraction trigger failed");
+        }
+    }
+    // Drain task ends. If new messages arrive later, a NEW drain task will be spawned.
 }
 
 /// Deep analysis: review completed but unanalyzed conversations.
