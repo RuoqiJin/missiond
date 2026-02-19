@@ -1786,7 +1786,11 @@ fn maybe_forward_to_memory(
         .filter(|m| matches!(m.message.role.as_str(), "user" | "assistant"))
         .map(|m| {
             let text = extract_text_content(&m.message.content);
-            if text.len() < 50 {
+            // Only skip very short assistant messages (tool noise). Always keep user messages.
+            if m.message.role == "assistant" && text.len() < 50 {
+                return String::new();
+            }
+            if text.is_empty() {
                 return String::new();
             }
             format!("[{}] {}: {}", m.timestamp, m.message.role, text)
