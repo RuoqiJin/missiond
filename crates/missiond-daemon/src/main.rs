@@ -1982,14 +1982,7 @@ async fn check_user_voice_extraction(state: &AppState) {
         return; // Memory extraction is using the slot, wait
     }
 
-    // Check slot is running and idle
-    let status = state.pty.get_status(MEMORY_SLOT_ID).await;
-    match status {
-        Some(s) if s.state == SessionState::Idle => {}
-        _ => return,
-    }
-
-    // Check DB for pending user messages
+    // Check DB for pending user messages first (cheap check before spawning slot)
     let today = chrono::Utc::now().format("%Y-%m-%dT00:00:00").to_string();
     let has_pending = match state.mission.db().get_pending_user_voice_messages(&today) {
         Ok(pending) => !pending.is_empty(),
@@ -1997,6 +1990,16 @@ async fn check_user_voice_extraction(state: &AppState) {
     };
     if !has_pending {
         return;
+    }
+
+    // Ensure memory slot is spawned, then check it's idle
+    if !ensure_memory_slot(state).await {
+        return;
+    }
+    let status = state.pty.get_status(MEMORY_SLOT_ID).await;
+    match status {
+        Some(s) if s.state == SessionState::Idle => {}
+        _ => return,
     }
 
     let prompt = "有新的用户消息待分析。调用 mission_memory_pending_user 获取用户原话，提取用户偏好、纠正和决策。";
@@ -2041,14 +2044,7 @@ async fn check_memory_extraction(state: &AppState) {
         }
     }
 
-    // Check slot is running and idle
-    let status = state.pty.get_status(MEMORY_SLOT_ID).await;
-    match status {
-        Some(s) if s.state == SessionState::Idle => {}
-        _ => return, // Not running or busy
-    }
-
-    // Check DB for pending messages
+    // Check DB for pending messages first (cheap check before spawning slot)
     let today = chrono::Utc::now().format("%Y-%m-%dT00:00:00").to_string();
     let has_pending = match state.mission.db().get_pending_memory_messages(&today) {
         Ok(pending) => !pending.is_empty(),
@@ -2056,6 +2052,16 @@ async fn check_memory_extraction(state: &AppState) {
     };
     if !has_pending {
         return;
+    }
+
+    // Ensure memory slot is spawned, then check it's idle
+    if !ensure_memory_slot(state).await {
+        return;
+    }
+    let status = state.pty.get_status(MEMORY_SLOT_ID).await;
+    match status {
+        Some(s) if s.state == SessionState::Idle => {}
+        _ => return, // Not idle yet (still starting or busy)
     }
 
     // Fire trigger in background — don't block autopilot tick
