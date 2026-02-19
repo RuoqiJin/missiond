@@ -1951,13 +1951,25 @@ async fn drain_memory_queue(
 
     match pty.send(MEMORY_SLOT_ID, prompt, 300_000).await {
         Ok(res) => {
-            info!(duration_ms = res.duration_ms, "Memory extraction trigger done");
+            info!(duration_ms = res.duration_ms, "Memory extraction trigger sent");
         }
         Err(e) => {
             warn!(error = %e, "Memory extraction trigger failed");
+            return;
         }
     }
-    // Drain task ends. If new messages arrive later, a NEW drain task will be spawned.
+
+    // Wait for slot to finish processing before allowing new triggers
+    for _ in 0..120 {
+        let status = pty.get_status(MEMORY_SLOT_ID).await;
+        match status {
+            Some(s) if s.state == SessionState::Idle => break,
+            None => break,
+            _ => {}
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+    info!("Memory extraction cycle complete");
 }
 
 /// Deep analysis: review completed but unanalyzed conversations.
