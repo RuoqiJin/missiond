@@ -5,6 +5,7 @@
 //! - Provide a stable WebSocket endpoint for attach + tasks events
 //! - Expose an IPC JSON-RPC endpoint for MCP proxy processes
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -32,6 +33,9 @@ struct AppState {
     cc_tasks: Arc<Mutex<CCTasksWatcher>>,
     skills: Arc<SkillIndex>,
     infra: Arc<InfraConfig>,
+    /// JSONL session UUIDs belonging to PTY-managed slots.
+    /// White-list: any session_id NOT in this set is a user CLI session.
+    pty_session_uuids: Arc<tokio::sync::RwLock<HashSet<String>>>,
 }
 
 fn default_mission_home() -> PathBuf {
@@ -524,19 +528,27 @@ impl AppState {
                     .or(slot.config.mcp_config.clone())
                     .map(PathBuf::from);
 
+                let (extra_env, session_file) = build_slot_tracking_env(&slot_id);
+                let wait = wait_for_idle.unwrap_or(false);
                 let info = self
                     .pty
                     .spawn(
                         &pty_slot,
                         PTYSpawnOptions {
                             auto_restart: auto_restart.unwrap_or(false),
-                            wait_for_idle: wait_for_idle.unwrap_or(false),
+                            wait_for_idle: wait,
                             timeout_secs,
                             mcp_config,
                             dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+                            extra_env,
                         },
                     )
                     .await?;
+
+                // Capture UUID after spawn (only reliable when we waited for idle)
+                if wait {
+                    capture_slot_session_uuid(self, &slot_id, &session_file).await;
+                }
                 Ok(ToolResult::json(&info))
             }
             "mission_pty_send" => {
@@ -1543,16 +1555,19 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
                     cwd: slot.config.cwd.as_deref().map(PathBuf::from),
                 };
                 let mcp_config = slot.config.mcp_config.map(PathBuf::from);
+                let (extra_env, session_file) = build_slot_tracking_env(&slot_id);
                 if let Err(e) = state.pty.spawn(&pty_slot, PTYSpawnOptions {
                     auto_restart: false,
                     wait_for_idle: true,
                     timeout_secs: Some(120),
                     mcp_config,
                     dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+                    extra_env,
                 }).await {
                     warn!(task_id = %task.id, slot_id = %slot_id, error = %e, "Autopilot: failed to spawn PTY");
                     continue;
                 }
+                capture_slot_session_uuid(state, &slot_id, &session_file).await;
             } else {
                 warn!(task_id = %task.id, slot_id = %slot_id, "Autopilot: slot not found, skipping");
                 continue;
@@ -1604,6 +1619,90 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
 
 const MEMORY_SLOT_ID: &str = "slot-memory";
 
+/// Build env vars for PTY spawn that enable UUID capture via SessionStart hook.
+/// Returns (extra_env, session_file_path).
+fn build_slot_tracking_env(slot_id: &str) -> (HashMap<String, String>, PathBuf) {
+    let session_file = std::env::temp_dir().join(format!("missiond-session-{}.txt", slot_id));
+    // Remove stale file from previous spawn
+    let _ = std::fs::remove_file(&session_file);
+
+    let mut extra_env = HashMap::new();
+    extra_env.insert("MISSIOND_SLOT_ID".to_string(), slot_id.to_string());
+    extra_env.insert(
+        "MISSIOND_SESSION_FILE".to_string(),
+        session_file.to_string_lossy().to_string(),
+    );
+
+    (extra_env, session_file)
+}
+
+/// After a PTY spawn with wait_for_idle, read the session UUID
+/// written by the SessionStart hook and register it in DB + cache.
+async fn capture_slot_session_uuid(
+    state: &AppState,
+    slot_id: &str,
+    session_file: &Path,
+) {
+    let mut uuid = None;
+
+    // The hook writes during Claude's SessionStart, which happens
+    // before idle. So by the time wait_for_idle returns, the file
+    // should exist. Retry as safety net.
+    for attempt in 0..5u32 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        match tokio::fs::read_to_string(session_file).await {
+            Ok(content) => {
+                let trimmed = content.trim().to_string();
+                if !trimmed.is_empty() {
+                    uuid = Some(trimmed);
+                    break;
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+
+    // Clean up temp file
+    let _ = tokio::fs::remove_file(session_file).await;
+
+    match uuid {
+        Some(session_uuid) => {
+            info!(
+                slot_id = %slot_id,
+                session_uuid = %session_uuid,
+                "Captured PTY session UUID via hook"
+            );
+
+            // Persist in DB (activates the previously-orphaned slot_sessions table)
+            if let Err(e) = state.mission.db().set_slot_session(slot_id, &session_uuid) {
+                warn!(slot_id = %slot_id, error = %e, "Failed to persist slot session mapping");
+            }
+
+            // Update in-memory cache
+            state.pty_session_uuids.write().await.insert(session_uuid.clone());
+
+            // Retroactive fix: if conversation already exists with slot_id=None, tag it
+            if let Ok(Some(conv)) = state.mission.db().get_conversation(&session_uuid) {
+                if conv.slot_id.is_none() {
+                    let mut updated = conv;
+                    updated.slot_id = Some(slot_id.to_string());
+                    updated.source = "pty_jsonl".to_string();
+                    let _ = state.mission.db().upsert_conversation(&updated);
+                    info!(session = %session_uuid, "Retroactively tagged conversation with slot_id");
+                }
+            }
+        }
+        None => {
+            warn!(
+                slot_id = %slot_id,
+                "Failed to capture session UUID - hook may not be installed"
+            );
+        }
+    }
+}
+
 /// Ensure slot-memory PTY session is running, spawn if needed.
 /// Returns true if the session is available.
 async fn ensure_memory_slot(state: &AppState) -> bool {
@@ -1625,14 +1724,17 @@ async fn ensure_memory_slot(state: &AppState) -> bool {
         cwd: slot.config.cwd.as_deref().map(PathBuf::from),
     };
     let mcp_config = slot.config.mcp_config.map(PathBuf::from);
+    let (extra_env, session_file) = build_slot_tracking_env(MEMORY_SLOT_ID);
     match state.pty.spawn(&pty_slot, PTYSpawnOptions {
         auto_restart: false,
         wait_for_idle: true,
         timeout_secs: Some(120),
         mcp_config,
         dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+        extra_env,
     }).await {
         Ok(_) => {
+            capture_slot_session_uuid(state, MEMORY_SLOT_ID, &session_file).await;
             info!("Memory slot spawned");
             true
         }
@@ -1654,16 +1756,12 @@ fn format_messages_for_memory(messages: &[missiond_core::types::ConversationMess
 
 /// Realtime memory forwarding: after new messages are logged, forward to slot-memory.
 /// Fire-and-forget — spawns a background task, never blocks the caller.
+/// NOTE: Caller must pre-filter — only user CLI sessions should reach here.
 fn maybe_forward_to_memory(
     state: &AppState,
     session_id: &str,
     messages: &[missiond_core::CCMessageLine],
 ) {
-    // Don't forward memory agent's own sessions
-    if session_id.starts_with("pty-") && session_id.contains(MEMORY_SLOT_ID) {
-        return;
-    }
-
     // Only forward when the batch contains an assistant message (turn complete)
     let has_assistant = messages.iter().any(|m| m.message.role == "assistant");
     if !has_assistant {
@@ -1688,12 +1786,24 @@ fn maybe_forward_to_memory(
         return;
     }
 
+    // Extract project from first message
+    let project = messages
+        .first()
+        .map(|m| m.cwd.clone())
+        .unwrap_or_default();
+
     let prompt = format!(
         "[realtime-extract]\n\
+         session_id: {}\n\
+         project: {}\n\
          以下是一段对话的最新轮次。提取值得长期记忆的事实，\
          用 mission_kb_remember 存入。不要存显而易见的事实。\
-         只存：架构决策、bug 修复经验、用户偏好、关键发现。\n\n\
+         只存：架构决策、bug 修复经验、用户偏好、关键发现。\n\
+         如需完整上下文，用 mission_conversation_get(sessionId: \"{}\") 获取。\n\n\
          {}",
+        session_id,
+        project,
+        session_id,
         formatted.join("\n\n")
     );
 
@@ -1741,8 +1851,9 @@ async fn check_deep_analysis(state: &AppState) {
             continue; // Not yet ended
         }
 
-        // Don't analyze memory agent's own conversations
-        if conv.slot_id.as_deref() == Some(MEMORY_SLOT_ID) {
+        // Only analyze user CLI conversations (slot_id=None).
+        // PTY-managed sessions (coder slots, memory slot) are excluded.
+        if conv.slot_id.is_some() {
             let _ = db.mark_conversation_analyzed(&conv.id);
             continue;
         }
@@ -1773,13 +1884,18 @@ async fn check_deep_analysis(state: &AppState) {
 
         let prompt = format!(
             "[deep-analysis]\n\
+             session_id: {session_id}\n\
+             project: {project}\n\
              以下是一个完整的对话会话。请结合已有 KB 知识，分析出更深层的洞察。\n\
-             关注: 跨会话的模式、反复出现的主题、隐含的用户偏好、可以抽象成工具/服务的操作。\n\n\
-             ## 已有 KB 近期条目\n{}\n\n\
-             ## 完整会话 (项目: {})\n{}",
-            kb_section,
-            conv.project.as_deref().unwrap_or("unknown"),
-            format_messages_for_memory(&messages)
+             关注: 跨会话的模式、反复出现的主题、隐含的用户偏好、可以抽象成工具/服务的操作。\n\
+             如发现与其他会话主题相关，用 mission_conversation_search(query) 搜索关联会话。\n\
+             如需查看某会话完整内容，用 mission_conversation_get(sessionId: \"<id>\") 获取。\n\n\
+             ## 已有 KB 近期条目\n{kb}\n\n\
+             ## 完整会话 (项目: {project})\n{messages}",
+            session_id = conv.id,
+            project = conv.project.as_deref().unwrap_or("unknown"),
+            kb = kb_section,
+            messages = format_messages_for_memory(&messages)
         );
 
         info!(conv_id = %conv.id, messages = messages.len(), "Deep analysis: sending to memory agent");
@@ -1823,8 +1939,21 @@ fn handle_new_messages(
     project_path: String,
     jsonl_path: String,
     messages: Vec<missiond_core::CCMessageLine>,
+    is_pty: bool,
 ) {
     let db = state.mission.db();
+
+    // Determine slot_id if this session belongs to a PTY slot
+    let slot_id = if is_pty {
+        db.get_all_slot_sessions()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|(_, sid)| sid == &session_id)
+            .map(|(slot, _)| slot)
+    } else {
+        None
+    };
+    let source = if is_pty { "pty_jsonl" } else { "claude_cli" };
 
     // Ensure conversation exists
     if db.get_conversation(&session_id).unwrap_or(None).is_none() {
@@ -1832,8 +1961,8 @@ fn handle_new_messages(
         let conv = missiond_core::types::Conversation {
             id: session_id.clone(),
             project: Some(first.map(|m| m.cwd.clone()).unwrap_or(project_path)),
-            slot_id: None,
-            source: "claude_cli".to_string(),
+            slot_id,
+            source: source.to_string(),
             model: first.and_then(|m| m.message.model.clone()),
             git_branch: first.and_then(|m| m.git_branch.clone()),
             jsonl_path: Some(jsonl_path),
@@ -1903,6 +2032,13 @@ fn handle_pty_text_complete(
     timestamp: i64,
 ) {
     let db = state.mission.db();
+
+    // If this slot has a captured JSONL session UUID, JSONL provides richer data.
+    // Skip inferior PTY TextComplete logging to avoid dual-write.
+    if db.get_slot_session(&slot_id).unwrap_or(None).is_some() {
+        return;
+    }
+
     let session_id = format!("pty-{}", slot_id);
 
     // Ensure conversation exists for this PTY session
@@ -2076,6 +2212,16 @@ async fn main() -> Result<()> {
     let skills = Arc::new(SkillIndex::build(&skills_dir));
     info!(count = skills.list().len(), "Skill index loaded");
 
+    // Warm PTY session UUID cache from DB (activates slot_sessions table)
+    let existing_slot_sessions = mission.db().get_all_slot_sessions().unwrap_or_default();
+    let pty_uuids: HashSet<String> = existing_slot_sessions
+        .iter()
+        .map(|(_, session_id)| session_id.clone())
+        .collect();
+    if !pty_uuids.is_empty() {
+        info!(count = pty_uuids.len(), "Loaded PTY session UUIDs from DB");
+    }
+
     let state = AppState {
         mission,
         permission,
@@ -2083,6 +2229,7 @@ async fn main() -> Result<()> {
         cc_tasks,
         skills,
         infra,
+        pty_session_uuids: Arc::new(tokio::sync::RwLock::new(pty_uuids)),
     };
 
     // Autopilot scheduler + IPC server via select
@@ -2106,8 +2253,11 @@ async fn main() -> Result<()> {
             event = conv_logger_rx.recv() => {
                 match event {
                     Ok(WatcherEvent::NewMessages { session_id, project_path, jsonl_path, messages }) => {
-                        handle_new_messages(&state, session_id.clone(), project_path, jsonl_path, messages.clone());
-                        maybe_forward_to_memory(&state, &session_id, &messages);
+                        let is_pty = state.pty_session_uuids.read().await.contains(&session_id);
+                        handle_new_messages(&state, session_id.clone(), project_path, jsonl_path, messages.clone(), is_pty);
+                        if !is_pty {
+                            maybe_forward_to_memory(&state, &session_id, &messages);
+                        }
                     }
                     Ok(WatcherEvent::SessionInactive(session)) => {
                         // Mark conversation as completed so deep analysis can pick it up
@@ -2128,6 +2278,16 @@ async fn main() -> Result<()> {
                 match pty_event {
                     Ok(missiond_core::ManagerEvent::TextComplete { slot_id, turn_id, content, timestamp }) => {
                         handle_pty_text_complete(&state, slot_id, turn_id, content, timestamp);
+                    }
+                    Ok(missiond_core::ManagerEvent::Exited { slot_id, exit_code }) => {
+                        info!(slot_id = %slot_id, exit_code = exit_code, "PTY session exited");
+                        // Clean up UUID mapping for exited slot
+                        let old_uuid = state.mission.db().get_slot_session(&slot_id).unwrap_or(None);
+                        if let Some(ref uuid) = old_uuid {
+                            let _ = state.mission.db().complete_conversation(uuid);
+                            state.pty_session_uuids.write().await.remove(uuid);
+                        }
+                        state.mission.db().clear_slot_session(&slot_id);
                     }
                     Ok(_) => {} // Other PTY events not needed for logging
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
