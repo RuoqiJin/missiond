@@ -266,6 +266,9 @@ pub struct PTYSession {
     // Permission bypass
     dangerously_skip_permissions: bool,
 
+    // Extra environment variables (slot tracking, etc.)
+    env: Option<HashMap<String, String>>,
+
     // Logging
     log_file: Option<PathBuf>,
 
@@ -364,6 +367,7 @@ impl PTYSession {
             shutdown_tx: None,
             mcp_config: options.mcp_config,
             dangerously_skip_permissions: options.dangerously_skip_permissions,
+            env: options.env,
             log_file: options.log_file,
 
             raw_output_buffer: Arc::new(std::sync::Mutex::new(VecDeque::with_capacity(
@@ -531,6 +535,12 @@ impl PTYSession {
         cmd.env("TERM", "xterm-256color");
         // Remove CLAUDECODE env var so nested claude sessions can start
         cmd.env_remove("CLAUDECODE");
+        // Inject extra environment variables (slot tracking, etc.)
+        if let Some(ref extra) = self.env {
+            for (key, value) in extra {
+                cmd.env(key, value);
+            }
+        }
 
         // Spawn child process
         let mut child = pty_pair.slave.spawn_command(cmd)?;
