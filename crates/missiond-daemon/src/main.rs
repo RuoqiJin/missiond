@@ -36,6 +36,17 @@ struct AppState {
     /// JSONL session UUIDs belonging to PTY-managed slots.
     /// White-list: any session_id NOT in this set is a user CLI session.
     pty_session_uuids: Arc<tokio::sync::RwLock<HashSet<String>>>,
+    /// Queue for memory forwarding. Accumulated while memory slot is busy.
+    memory_queue: Arc<std::sync::Mutex<Vec<MemoryQueueEntry>>>,
+    /// Whether a drain task is already running for the memory queue.
+    memory_draining: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// A pending memory extraction entry, queued until the memory slot is idle.
+struct MemoryQueueEntry {
+    session_id: String,
+    project: String,
+    formatted: Vec<String>,
 }
 
 fn default_mission_home() -> PathBuf {
@@ -1754,8 +1765,9 @@ fn format_messages_for_memory(messages: &[missiond_core::types::ConversationMess
         .join("\n\n")
 }
 
-/// Realtime memory forwarding: after new messages are logged, forward to slot-memory.
-/// Fire-and-forget — spawns a background task, never blocks the caller.
+/// Realtime memory forwarding: queue messages for the memory slot.
+/// Messages accumulate while the slot is busy; a drain task sends them
+/// in batches once the previous extraction completes.
 /// NOTE: Caller must pre-filter — only user CLI sessions should reach here.
 fn maybe_forward_to_memory(
     state: &AppState,
@@ -1786,43 +1798,119 @@ fn maybe_forward_to_memory(
         return;
     }
 
-    // Extract project from first message
     let project = messages
         .first()
         .map(|m| m.cwd.clone())
         .unwrap_or_default();
 
-    let prompt = format!(
-        "[realtime-extract]\n\
-         session_id: {}\n\
-         project: {}\n\
-         以下是一段对话的最新轮次。提取值得长期记忆的事实，\
-         用 mission_kb_remember 存入。不要存显而易见的事实。\
-         只存：架构决策、bug 修复经验、用户偏好、关键发现。\n\
-         如需完整上下文，用 mission_conversation_get(sessionId: \"{}\") 获取。\n\n\
-         {}",
-        session_id,
-        project,
-        session_id,
-        formatted.join("\n\n")
-    );
+    // Push to queue
+    {
+        let mut queue = state.memory_queue.lock().unwrap();
+        queue.push(MemoryQueueEntry {
+            session_id: session_id.to_string(),
+            project,
+            formatted,
+        });
+    }
 
-    // Fire-and-forget: only capture PTY (which is Send+Sync), not the full state
-    let pty = Arc::clone(&state.pty);
-    tokio::spawn(async move {
-        // Check if memory slot is running (can't auto-spawn without state, just skip)
-        if pty.get_status(MEMORY_SLOT_ID).await.is_none() {
-            return;
+    // Spawn drain task if not already running
+    if !state.memory_draining.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        let pty = Arc::clone(&state.pty);
+        let queue = Arc::clone(&state.memory_queue);
+        let draining = Arc::clone(&state.memory_draining);
+        tokio::spawn(async move {
+            drain_memory_queue(&pty, &queue).await;
+            draining.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+}
+
+/// Drain the memory queue: batch all accumulated entries, send to memory slot,
+/// wait for completion, repeat until queue is empty.
+async fn drain_memory_queue(
+    pty: &PTYManager,
+    queue: &std::sync::Mutex<Vec<MemoryQueueEntry>>,
+) {
+    loop {
+        // Brief coalescing delay — let more messages accumulate
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        // Take all entries
+        let entries: Vec<MemoryQueueEntry> = {
+            let mut q = queue.lock().unwrap();
+            std::mem::take(&mut *q)
+        };
+
+        if entries.is_empty() {
+            break;
         }
-        match pty.send(MEMORY_SLOT_ID, &prompt, 120_000).await {
+
+        // Check if memory slot is running
+        if pty.get_status(MEMORY_SLOT_ID).await.is_none() {
+            info!("Memory slot not running, discarding {} queued entries", entries.len());
+            break;
+        }
+
+        // Group by session_id, preserving order
+        let mut groups: Vec<(String, String, Vec<String>)> = Vec::new();
+        for entry in entries {
+            if let Some(last) = groups.last_mut() {
+                if last.0 == entry.session_id {
+                    last.2.extend(entry.formatted);
+                    continue;
+                }
+            }
+            groups.push((entry.session_id, entry.project, entry.formatted));
+        }
+
+        // Build prompt
+        let prompt = if groups.len() == 1 {
+            let (sid, proj, msgs) = &groups[0];
+            format!(
+                "[realtime-extract]\n\
+                 session_id: {sid}\n\
+                 project: {proj}\n\
+                 以下是自上次分析后积累的对话轮次。提取值得长期记忆的事实，\
+                 用 mission_kb_remember 存入。不要存显而易见的事实。\
+                 只存：架构决策、bug 修复经验、用户偏好、关键发现。\n\
+                 如需完整上下文，用 mission_conversation_get(sessionId: \"{sid}\") 获取。\n\n\
+                 {}",
+                msgs.join("\n\n")
+            )
+        } else {
+            let mut sections = String::new();
+            for (sid, proj, msgs) in &groups {
+                sections.push_str(&format!(
+                    "### session: {} (project: {})\n{}\n\n",
+                    sid, proj, msgs.join("\n\n")
+                ));
+            }
+            format!(
+                "[realtime-extract]\n\
+                 以下是自上次分析后积累的多个会话的对话轮次。提取值得长期记忆的事实，\
+                 用 mission_kb_remember 存入。不要存显而易见的事实。\
+                 只存：架构决策、bug 修复经验、用户偏好、关键发现。\n\
+                 如需查看某会话完整上下文，用 mission_conversation_get(sessionId: \"<id>\") 获取。\n\n\
+                 {}",
+                sections
+            )
+        };
+
+        let turn_count: usize = groups.iter().map(|(_, _, m)| m.len()).sum();
+        info!(turns = turn_count, sessions = groups.len(), "Sending batched memory extraction");
+
+        match pty.send(MEMORY_SLOT_ID, &prompt, 180_000).await {
             Ok(res) => {
-                info!(duration_ms = res.duration_ms, "Realtime memory extraction done");
+                info!(duration_ms = res.duration_ms, turns = turn_count, "Realtime memory extraction done");
             }
             Err(e) => {
                 warn!(error = %e, "Realtime memory extraction failed");
+                // Don't retry immediately — let the next drain cycle handle it
+                break;
             }
         }
-    });
+        // Loop back to check if more messages accumulated during processing
+    }
 }
 
 /// Deep analysis: review completed but unanalyzed conversations.
@@ -2230,6 +2318,8 @@ async fn main() -> Result<()> {
         skills,
         infra,
         pty_session_uuids: Arc::new(tokio::sync::RwLock::new(pty_uuids)),
+        memory_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
+        memory_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     // Autopilot scheduler + IPC server via select
