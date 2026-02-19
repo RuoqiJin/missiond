@@ -1781,10 +1781,12 @@ fn maybe_forward_to_memory(
         return;
     }
 
-    // Build content from the batch
+    // Only forward today's messages — don't queue stale history
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let formatted: Vec<String> = messages
         .iter()
         .filter(|m| matches!(m.message.role.as_str(), "user" | "assistant"))
+        .filter(|m| m.timestamp.starts_with(&today))
         .map(|m| {
             let text = extract_text_content(&m.message.content);
             // Only skip very short assistant messages (tool noise). Always keep user messages.
@@ -1890,8 +1892,8 @@ async fn drain_memory_queue(
             groups.push((entry.session_id, entry.project, entry.formatted));
         }
 
-        // Build prompt
-        let prompt = if groups.len() == 1 {
+        // Build prompt content and write to file (avoids PTY paste issues with large text)
+        let content = if groups.len() == 1 {
             let (sid, proj, msgs) = &groups[0];
             format!(
                 "[realtime-extract]\n\
@@ -1924,7 +1926,19 @@ async fn drain_memory_queue(
         };
 
         let turn_count: usize = groups.iter().map(|(_, _, m)| m.len()).sum();
-        info!(turns = turn_count, sessions = groups.len(), "Sending batched memory extraction");
+
+        // Write to temp file — large text pastes into Claude Code can get truncated or hang
+        let batch_file = PathBuf::from(format!("/tmp/missiond-memory-batch-{}.md", std::process::id()));
+        if let Err(e) = std::fs::write(&batch_file, &content) {
+            warn!(error = %e, "Failed to write memory batch file");
+            break;
+        }
+
+        let prompt = format!(
+            "读取以下文件中的 realtime-extract 指令并执行: {}",
+            batch_file.display()
+        );
+        info!(turns = turn_count, sessions = groups.len(), file = %batch_file.display(), "Sending batched memory extraction");
 
         match pty.send(MEMORY_SLOT_ID, &prompt, 180_000).await {
             Ok(res) => {
