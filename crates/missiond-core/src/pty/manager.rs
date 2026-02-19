@@ -50,6 +50,9 @@ pub struct PTYSpawnOptions {
     pub mcp_config: Option<PathBuf>,
     /// Skip all permission prompts and trust dialogs
     pub dangerously_skip_permissions: bool,
+    /// Extra environment variables to inject into the PTY child process
+    /// Used for slot tracking (MISSIOND_SLOT_ID, MISSIOND_SESSION_FILE)
+    pub extra_env: HashMap<String, String>,
 }
 
 /// Result of executing a message
@@ -199,7 +202,7 @@ impl PTYManager {
         let mut session = PTYSession::new(PTYSessionOptions {
             slot_id: slot.id.clone(),
             cwd,
-            env: None,
+            env: if options.extra_env.is_empty() { None } else { Some(options.extra_env.clone()) },
             log_file: Some(info.log_file.clone()),
             cols: 120,
             rows: 30,
