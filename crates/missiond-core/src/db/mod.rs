@@ -80,6 +80,8 @@ CREATE TABLE IF NOT EXISTS board_tasks (
   auto_execute INTEGER NOT NULL DEFAULT 0,
   prompt_template TEXT,
   hidden INTEGER NOT NULL DEFAULT 0,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  max_retries INTEGER NOT NULL DEFAULT 2,
   order_idx INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -269,6 +271,13 @@ impl MissionDB {
         if !columns.iter().any(|c| c == "hidden") {
             conn.execute_batch(
                 "ALTER TABLE board_tasks ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;"
+            )?;
+        }
+
+        if !columns.iter().any(|c| c == "retry_count") {
+            conn.execute_batch(
+                "ALTER TABLE board_tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE board_tasks ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 2;"
             )?;
         }
 
@@ -717,8 +726,8 @@ impl MissionDB {
     pub fn insert_board_task(&self, task: &BoardTask) -> SqliteResult<()> {
         let conn = self.conn();
         conn.execute(
-            "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, hidden, order_idx, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, hidden, retry_count, max_retries, order_idx, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 task.id,
                 task.title,
@@ -734,6 +743,8 @@ impl MissionDB {
                 task.auto_execute as i32,
                 task.prompt_template,
                 task.hidden as i32,
+                task.retry_count,
+                task.max_retries,
                 task.order_idx,
                 task.created_at,
                 task.updated_at,
@@ -781,6 +792,8 @@ impl MissionDB {
             auto_execute: input.auto_execute.unwrap_or(false),
             prompt_template: input.prompt_template.clone(),
             hidden: input.hidden.unwrap_or(false),
+            retry_count: 0,
+            max_retries: 2,
             order_idx: max_order + 1,
             created_at: now.clone(),
             updated_at: now,
@@ -922,8 +935,8 @@ impl MissionDB {
     pub fn toggle_board_task(&self, id: &str) -> SqliteResult<Option<BoardTask>> {
         if let Some(task) = self.get_board_task(id)? {
             let new_status = match task.status {
-                BoardTaskStatus::Open => "done",
                 BoardTaskStatus::Done => "open",
+                _ => "done",
             };
             let update = UpdateBoardTaskInput {
                 status: Some(new_status.to_string()),
@@ -985,6 +998,8 @@ impl MissionDB {
             auto_execute: auto_execute != 0,
             prompt_template: row.get("prompt_template")?,
             hidden: hidden != 0,
+            retry_count: row.get("retry_count").unwrap_or(0),
+            max_retries: row.get("max_retries").unwrap_or(2),
             order_idx: row.get("order_idx")?,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
@@ -1104,6 +1119,16 @@ impl MissionDB {
                 q.answer, q.created_at, q.updated_at,
             ],
         )?;
+
+        // Auto-block: if question is linked to a board task, mark task as blocked
+        if let Some(ref tid) = q.task_id {
+            conn.execute(
+                "UPDATE board_tasks SET status = 'blocked', updated_at = ?1 WHERE id = ?2 AND status IN ('open', 'running')",
+                params![q.created_at, tid],
+            )?;
+            tracing::info!(task_id = %tid, question_id = %q.id, "Question created → task auto-blocked");
+        }
+
         Ok(q)
     }
 
@@ -1145,6 +1170,27 @@ impl MissionDB {
         Ok(questions)
     }
 
+    /// List answered questions linked to a specific board task
+    pub fn list_questions_for_task(&self, task_id: &str) -> SqliteResult<Vec<AgentQuestion>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM agent_questions WHERE task_id = ?1 AND status = 'answered' ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![task_id], |row| Self::row_to_agent_question(row))?;
+        rows.collect()
+    }
+
+    /// Increment retry_count and set status back to open for retry
+    pub fn increment_board_task_retry(&self, task_id: &str, new_retry: i64) -> SqliteResult<()> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE board_tasks SET retry_count = ?1, status = 'open', updated_at = ?2 WHERE id = ?3",
+            params![new_retry, now, task_id],
+        )?;
+        Ok(())
+    }
+
     pub fn answer_agent_question(
         &self,
         id: &str,
@@ -1157,6 +1203,31 @@ impl MissionDB {
                 "UPDATE agent_questions SET answer = ?1, status = 'answered', updated_at = ?2 WHERE id = ?3",
                 params![answer, now, id],
             )?;
+
+            // Auto-unblock: if all questions for the linked task are resolved, unblock the task
+            // First get the task_id from this question
+            let task_id: Option<String> = conn.query_row(
+                "SELECT task_id FROM agent_questions WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            ).ok().flatten();
+
+            if let Some(ref tid) = task_id {
+                // Check if any pending questions remain for this task
+                let pending_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM agent_questions WHERE task_id = ?1 AND status = 'pending'",
+                    params![tid],
+                    |row| row.get(0),
+                ).unwrap_or(0);
+
+                if pending_count == 0 {
+                    conn.execute(
+                        "UPDATE board_tasks SET status = 'open', updated_at = ?1 WHERE id = ?2 AND status = 'blocked'",
+                        params![now, tid],
+                    )?;
+                    tracing::info!(task_id = %tid, "All questions answered → task auto-unblocked");
+                }
+            }
         }
         self.get_agent_question(id)
     }
