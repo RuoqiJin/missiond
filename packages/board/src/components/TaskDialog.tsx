@@ -54,6 +54,7 @@ export function TaskDialog() {
         project: editingTask.project || '',
         server: editingTask.server,
         dueDate: editingTask.dueDate,
+        hidden: editingTask.hidden,
       });
     } else {
       setForm(defaultForm);
@@ -67,6 +68,7 @@ export function TaskDialog() {
       project: form.project?.trim() || undefined,
       server: form.server || undefined,
       dueDate: form.dueDate || undefined,
+      hidden: form.hidden || undefined,
     };
     if (isEditing) {
       updateTask(editingTask.id, data);
@@ -180,6 +182,16 @@ export function TaskDialog() {
               className="bg-neutral-800 border-neutral-700 text-white"
             />
           </div>
+
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={form.hidden || false}
+              onChange={(e) => setForm({ ...form, hidden: e.target.checked })}
+              className="rounded border-neutral-700 bg-neutral-800 text-orange-500 focus:ring-orange-500/20"
+            />
+            <span className="text-xs text-neutral-400">隐藏任务（手动处理项，不在默认列表显示）</span>
+          </label>
         </div>
 
         <DialogFooter className="flex-row justify-between sm:justify-between">

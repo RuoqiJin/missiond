@@ -37,6 +37,8 @@ interface TaskCenterState {
   setFilters: (filters: Partial<TaskFiltersState>) => void;
   setGroupBy: (groupBy: GroupBy) => void;
   setShowDone: (show: boolean) => void;
+  showHidden: boolean;
+  setShowHidden: (show: boolean) => void;
   openAddDialog: (parentId?: string) => void;
   openEditDialog: (task: Task) => void;
   closeDialog: () => void;
@@ -50,6 +52,7 @@ export const useTaskCenterStore = create<TaskCenterState>()(
     filters: { search: '', category: 'all', priority: 'all' },
     groupBy: 'category',
     showDone: false,
+    showHidden: false,
     editingTask: null,
     isDialogOpen: false,
     _addDialogParentId: undefined,
@@ -229,6 +232,7 @@ export const useTaskCenterStore = create<TaskCenterState>()(
     setFilters: (partial) => set({ filters: { ...get().filters, ...partial } }),
     setGroupBy: (groupBy) => set({ groupBy }),
     setShowDone: (showDone) => set({ showDone }),
+    setShowHidden: (showHidden) => set({ showHidden }),
     openAddDialog: (parentId) => set({ isDialogOpen: true, editingTask: null, _addDialogParentId: parentId }),
     openEditDialog: (task) => set({ isDialogOpen: true, editingTask: task, _addDialogParentId: undefined }),
     closeDialog: () => set({ isDialogOpen: false, editingTask: null, _addDialogParentId: undefined }),

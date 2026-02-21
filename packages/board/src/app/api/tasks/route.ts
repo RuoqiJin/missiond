@@ -15,7 +15,7 @@ function mapToBackend(data: Record<string, unknown>): Record<string, unknown> {
 export async function GET(req: NextRequest) {
   try {
     const status = req.nextUrl.searchParams.get('status') || undefined;
-    const args: Record<string, unknown> = {};
+    const args: Record<string, unknown> = { includeHidden: true };
     if (status) args.status = status;
     const tasks = await callTool('mission_board_list', args) as Record<string, unknown>[];
     return NextResponse.json(tasks.map(mapToFrontend));
@@ -35,7 +35,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'clear-done') {
-      const result = await callTool('mission_board_list', { status: 'done' }) as Record<string, unknown>[];
+      const result = await callTool('mission_board_list', { status: 'done', includeHidden: true }) as Record<string, unknown>[];
       for (const task of result) {
         await callTool('mission_board_delete', { id: task.id });
       }
