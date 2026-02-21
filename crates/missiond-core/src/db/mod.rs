@@ -948,6 +948,22 @@ impl MissionDB {
         }
     }
 
+    /// Recover stale running tasks: if a task has been 'running' for > N minutes,
+    /// reset it to 'open' (daemon may have restarted mid-execution).
+    pub fn recover_stale_running_tasks(&self, stale_minutes: i64) -> SqliteResult<usize> {
+        let conn = self.conn();
+        let count = conn.execute(
+            "UPDATE board_tasks SET status = 'open', updated_at = ?1
+             WHERE status = 'running'
+               AND julianday('now') - julianday(updated_at) > ?2 / 1440.0",
+            params![chrono::Utc::now().to_rfc3339(), stale_minutes as f64],
+        )?;
+        if count > 0 {
+            tracing::warn!(count, stale_minutes, "Recovered stale running tasks");
+        }
+        Ok(count)
+    }
+
     /// List board tasks eligible for autopilot execution
     /// (auto_execute=true, status=open, due_date <= now, has assignee)
     pub fn list_autopilot_tasks(&self) -> SqliteResult<Vec<BoardTask>> {
@@ -967,6 +983,46 @@ impl MissionDB {
             tasks.push(task?);
         }
         Ok(tasks)
+    }
+
+    /// Board summary: status counts + pending questions + recent activity
+    pub fn board_summary(&self, since: Option<&str>) -> SqliteResult<serde_json::Value> {
+        let conn = self.conn();
+        let since_clause = since.unwrap_or("2000-01-01T00:00:00Z");
+
+        // Status counts (since timestamp for completed/failed, all-time for open/running/blocked)
+        let open: i64 = conn.query_row("SELECT COUNT(*) FROM board_tasks WHERE status = 'open'", [], |r| r.get(0))?;
+        let running: i64 = conn.query_row("SELECT COUNT(*) FROM board_tasks WHERE status = 'running'", [], |r| r.get(0))?;
+        let blocked: i64 = conn.query_row("SELECT COUNT(*) FROM board_tasks WHERE status = 'blocked'", [], |r| r.get(0))?;
+        let completed: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM board_tasks WHERE status = 'done' AND updated_at >= ?1",
+            params![since_clause], |r| r.get(0),
+        )?;
+        let failed: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM board_tasks WHERE status = 'failed' AND updated_at >= ?1",
+            params![since_clause], |r| r.get(0),
+        )?;
+
+        // Pending questions
+        let pending_questions: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM agent_questions WHERE status = 'pending'", [], |r| r.get(0),
+        )?;
+
+        // Recent KB entries (since timestamp)
+        let new_kb: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM knowledge WHERE created_at >= ?1",
+            params![since_clause], |r| r.get(0),
+        ).unwrap_or(0);
+
+        Ok(serde_json::json!({
+            "open": open,
+            "running": running,
+            "blocked": blocked,
+            "completed": completed,
+            "failed": failed,
+            "pendingQuestions": pending_questions,
+            "newKBEntries": new_kb,
+        }))
     }
 
     /// Clear all done board tasks

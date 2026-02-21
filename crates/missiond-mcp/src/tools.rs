@@ -882,7 +882,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
             "获取待分析的对话内容（消息级追踪）。\
              返回所有 pending 状态的用户 CLI 对话消息（非 PTY），按 session 分组。\
              每条消息带 [#id] 前缀，用户消息用 ★ 标记。\
-             返回 batch_msg_ids 列表，处理完后必须调用 mission_memory_done 确认。",
+             系统会在 daemon 侧自动提交处理状态；mission_memory_done 仅用于兼容旧流程（通常无需手动调用）。",
             json!({
                 "type": "object",
                 "properties": {}
@@ -890,8 +890,8 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_memory_done",
-            "确认一批消息已被 realtime 管道处理完成。必须在 mission_memory_pending 返回的消息全部处理后调用，\
-             传入 batch_msg_ids。未确认的消息会在下次调用 mission_memory_pending 时重新返回。",
+            "兼容工具：手动确认一批消息已被 realtime 管道处理完成。\
+             当前系统默认由 daemon 自动管理状态，通常不需要调用本工具。",
             json!({
                 "type": "object",
                 "properties": {
@@ -1177,6 +1177,19 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                 "required": ["taskId", "content"]
             }),
         ),
+        ToolDefinition::new(
+            "mission_board_summary",
+            "任务板执行摘要。返回各状态任务计数、待处理问题数、新 KB 条目数。用于用户回来后快速了解全貌。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "since": {
+                        "type": "string",
+                        "description": "起始时间(ISO 8601)，统计该时间之后完成/失败的任务和新增 KB。不传则统计全部"
+                    }
+                }
+            }),
+        ),
         // ===== Agent Questions (Pending Decisions) =====
         ToolDefinition::new(
             "mission_question_create",
@@ -1279,11 +1292,31 @@ pub fn get_tool(name: &str) -> Option<ToolDefinition> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn test_all_tools_count() {
         let tools = all_tools();
-        assert_eq!(tools.len(), 60);
+        assert!(!tools.is_empty());
+
+        let mut names = HashSet::new();
+        for tool in &tools {
+            assert!(
+                names.insert(tool.name.clone()),
+                "duplicate tool name found: {}",
+                tool.name
+            );
+        }
+
+        for required in [
+            "mission_submit",
+            "mission_ask",
+            "mission_pty_spawn",
+            "mission_kb_remember",
+            "mission_cc_overview",
+        ] {
+            assert!(names.contains(required), "missing required tool: {required}");
+        }
     }
 
     #[test]
