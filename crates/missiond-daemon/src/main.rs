@@ -76,6 +76,8 @@ struct AppState {
     extraction_notify: Arc<tokio::sync::Notify>,
     /// Last KB auto-GC timestamp (epoch secs). 0 = never run.
     last_auto_gc_at: Arc<std::sync::atomic::AtomicI64>,
+    /// Per-slot consecutive failure count for autopilot throttling.
+    slot_fail_counts: Arc<std::sync::Mutex<HashMap<String, (i32, i64)>>>,  // (count, last_fail_at)
 }
 
 fn default_mission_home() -> PathBuf {
@@ -1748,6 +1750,20 @@ impl AppState {
                 Ok(ToolResult::json_pretty(&note))
             }
 
+            "mission_board_summary" => {
+                #[derive(Deserialize)]
+                struct SummaryArgs {
+                    since: Option<String>,
+                }
+                let args: SummaryArgs = serde_json::from_value(args)?;
+                let summary = self
+                    .mission
+                    .db()
+                    .board_summary(args.since.as_deref())
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json_pretty(&summary))
+            }
+
             // ===== Agent Questions (Pending Decisions) =====
             "mission_question_create" => {
                 let args: QuestionCreateArgs = serde_json::from_value(args)?;
@@ -2032,6 +2048,9 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
         );
     }
 
+    // Recover stale running tasks (daemon restart or PTY crash)
+    let _ = state.mission.db().recover_stale_running_tasks(15);
+
     let tasks = state.mission.db().list_autopilot_tasks()
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
@@ -2066,6 +2085,18 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
         } else {
             format!("{}\n\n{}", context, prompt)
         };
+
+        // Slot throttling: skip if slot has 3+ consecutive failures within 30 min
+        {
+            let fail_map = state.slot_fail_counts.lock().unwrap();
+            if let Some(&(count, last_fail)) = fail_map.get(&slot_id) {
+                let now = chrono::Utc::now().timestamp();
+                if count >= 3 && now - last_fail < 1800 {
+                    debug!(slot_id = %slot_id, failures = count, "Autopilot: slot throttled, skipping");
+                    continue;
+                }
+            }
+        }
 
         info!(task_id = %task.id, slot_id = %slot_id, title = %task.title, "Autopilot: executing task");
 
@@ -2165,6 +2196,11 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
                         ..Default::default()
                     },
                 );
+                // Reset slot failure count on success
+                {
+                    let mut fail_map = state.slot_fail_counts.lock().unwrap();
+                    fail_map.remove(&slot_id);
+                }
                 info!(task_id = %task.id, duration_ms = res.duration_ms, "Autopilot: task completed");
             }
             Err(e) => {
@@ -2178,6 +2214,17 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
                         author: Some("autopilot".to_string()),
                     },
                 );
+
+                // Track slot consecutive failures
+                {
+                    let mut fail_map = state.slot_fail_counts.lock().unwrap();
+                    let entry = fail_map.entry(slot_id.clone()).or_insert((0, 0));
+                    entry.0 += 1;
+                    entry.1 = chrono::Utc::now().timestamp();
+                    if entry.0 >= 3 {
+                        warn!(slot_id = %slot_id, failures = entry.0, "Slot throttled for 30 min due to consecutive failures");
+                    }
+                }
 
                 // Retry logic: increment count, mark failed if exhausted
                 let new_retry = task.retry_count + 1;
@@ -3097,6 +3144,7 @@ async fn main() -> Result<()> {
         claude_md_hash: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         extraction_notify: Arc::new(tokio::sync::Notify::new()),
         last_auto_gc_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        slot_fail_counts: Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
 
     // Autopilot scheduler + IPC server via select
