@@ -377,6 +377,74 @@ pub struct BoardTaskWithNotes {
     pub notes: Vec<BoardTaskNote>,
 }
 
+// ============ Agent Questions (Pending Decisions) ============
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentQuestionStatus {
+    Pending,
+    Answered,
+    Dismissed,
+}
+
+impl AgentQuestionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Answered => "answered",
+            Self::Dismissed => "dismissed",
+        }
+    }
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(Self::Pending),
+            "answered" => Some(Self::Answered),
+            "dismissed" => Some(Self::Dismissed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentQuestion {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slot_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub question: String,
+    pub context: String,
+    pub status: AgentQuestionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAgentQuestionInput {
+    pub question: String,
+    #[serde(default)]
+    pub context: Option<String>,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub slot_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnswerAgentQuestionInput {
+    pub id: String,
+    pub answer: String,
+}
+
 // ============ Knowledge Base (Jarvis Memory) ============
 
 /// A knowledge entry in the KB
@@ -411,6 +479,21 @@ pub struct KBRememberInput {
     pub source: Option<String>,
     #[serde(default)]
     pub confidence: Option<f64>,
+}
+
+/// Result of a kb_remember operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KBRememberResult {
+    pub entry: KnowledgeEntry,
+    /// "created", "updated", "merged"
+    pub action: String,
+    /// If merged, the key of the entry that was merged into
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_key: Option<String>,
+    /// Similarity score if merged
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<f64>,
 }
 
 /// A credential stored alongside a knowledge entry

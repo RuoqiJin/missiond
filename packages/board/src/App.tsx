@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Plus, ClipboardList, Loader2, MonitorUp, Brain } from 'lucide-react';
+import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
@@ -12,8 +12,10 @@ import { TaskListView } from './components/TaskListView';
 import { TaskDialog } from './components/TaskDialog';
 import { Terminal } from './components/Terminal';
 import { KnowledgeBase } from './components/KnowledgeBase';
+import { Conversations } from './components/Conversations';
+import { PendingQuestions } from './components/PendingQuestions';
 
-type Tab = 'board' | 'terminal' | 'knowledge';
+type Tab = 'board' | 'terminal' | 'knowledge' | 'conversations';
 
 const SLOTS = [
   { id: 'slot-deploy-1', label: 'Deploy', role: 'deploy' },
@@ -98,6 +100,16 @@ export default function App() {
               <Brain className="w-3 h-3" />
               Knowledge
             </button>
+            <button
+              onClick={() => setTab('conversations')}
+              className={cn(
+                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
+                tab === 'conversations' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
+              )}
+            >
+              <MessageSquareText className="w-3 h-3" />
+              Logs
+            </button>
           </div>
         </div>
 
@@ -132,6 +144,7 @@ export default function App() {
       {/* Content */}
       {tab === 'board' ? (
         <div className="flex-1 overflow-auto px-4 sm:px-8 pb-8 max-w-4xl">
+          <PendingQuestions />
           <div className="mb-4">
             <QuickAdd />
           </div>
@@ -143,8 +156,10 @@ export default function App() {
         <div className="flex-1 min-h-0 mx-4 sm:mx-8 mb-4 rounded-lg border border-neutral-800 overflow-hidden">
           <Terminal key={activeSlot} slotId={activeSlot} />
         </div>
-      ) : (
+      ) : tab === 'knowledge' ? (
         <KnowledgeBase />
+      ) : (
+        <Conversations />
       )}
     </div>
   );
