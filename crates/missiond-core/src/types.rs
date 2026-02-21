@@ -195,21 +195,33 @@ pub struct TaskUpdate {
 #[serde(rename_all = "lowercase")]
 pub enum BoardTaskStatus {
     Open,
+    Running,
+    Verifying,
     Done,
+    Blocked,
+    Failed,
 }
 
 impl BoardTaskStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             BoardTaskStatus::Open => "open",
+            BoardTaskStatus::Running => "running",
+            BoardTaskStatus::Verifying => "verifying",
             BoardTaskStatus::Done => "done",
+            BoardTaskStatus::Blocked => "blocked",
+            BoardTaskStatus::Failed => "failed",
         }
     }
 
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "open" => Some(BoardTaskStatus::Open),
+            "running" => Some(BoardTaskStatus::Running),
+            "verifying" => Some(BoardTaskStatus::Verifying),
             "done" => Some(BoardTaskStatus::Done),
+            "blocked" => Some(BoardTaskStatus::Blocked),
+            "failed" => Some(BoardTaskStatus::Failed),
             _ => None,
         }
     }
@@ -245,10 +257,18 @@ pub struct BoardTask {
     /// Hidden from default list view (e.g. renewal/manual tasks)
     #[serde(default)]
     pub hidden: bool,
+    /// Retry count for autopilot execution failures
+    #[serde(default)]
+    pub retry_count: i64,
+    /// Max retries before marking as failed (default 2)
+    #[serde(default = "default_max_retries")]
+    pub max_retries: i64,
     pub order_idx: i64,
     pub created_at: String,
     pub updated_at: String,
 }
+
+fn default_max_retries() -> i64 { 2 }
 
 /// Input for creating a board task
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -2069,6 +2069,15 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
 
         info!(task_id = %task.id, slot_id = %slot_id, title = %task.title, "Autopilot: executing task");
 
+        // Mark task as running before sending
+        let _ = state.mission.db().update_board_task(
+            &task.id,
+            &missiond_core::types::UpdateBoardTaskInput {
+                status: Some("running".to_string()),
+                ..Default::default()
+            },
+        );
+
         // Check if PTY session exists, spawn if needed
         let pty_status = state.pty.get_status(&slot_id).await;
         if pty_status.is_none() {
@@ -2091,14 +2100,48 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
                     extra_env,
                 }).await {
                     warn!(task_id = %task.id, slot_id = %slot_id, error = %e, "Autopilot: failed to spawn PTY");
+                    // Revert to open for retry
+                    let _ = state.mission.db().update_board_task(
+                        &task.id,
+                        &missiond_core::types::UpdateBoardTaskInput {
+                            status: Some("open".to_string()),
+                            ..Default::default()
+                        },
+                    );
                     continue;
                 }
                 capture_slot_session_uuid(state, &slot_id, &session_file).await;
             } else {
                 warn!(task_id = %task.id, slot_id = %slot_id, "Autopilot: slot not found, skipping");
+                let _ = state.mission.db().update_board_task(
+                    &task.id,
+                    &missiond_core::types::UpdateBoardTaskInput {
+                        status: Some("open".to_string()),
+                        ..Default::default()
+                    },
+                );
                 continue;
             }
         }
+
+        // Inject answered questions as context (Phase 2 linkage)
+        let full_prompt = {
+            let answered = state.mission.db().list_questions_for_task(&task.id).unwrap_or_default();
+            if answered.is_empty() {
+                full_prompt
+            } else {
+                let qa_block: String = answered.iter()
+                    .filter(|q| q.answer.is_some())
+                    .map(|q| format!("Q: {}\nA: {}", q.question, q.answer.as_deref().unwrap_or("")))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                if qa_block.is_empty() {
+                    full_prompt
+                } else {
+                    format!("[用户已回答的问题]\n{}\n\n{}", qa_block, full_prompt)
+                }
+            }
+        };
 
         // Send prompt and wait for response
         let timeout_ms = 600_000; // 10 minutes
@@ -2126,7 +2169,7 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
             }
             Err(e) => {
                 // Record failure as a note
-                let note_content = format!("**Autopilot 执行失败**\n\n{}", e);
+                let note_content = format!("**Autopilot 执行失败** (retry {}/{})\n\n{}", task.retry_count + 1, task.max_retries, e);
                 let _ = state.mission.db().add_board_task_note(
                     &missiond_core::types::AddBoardTaskNoteInput {
                         task_id: task.id.clone(),
@@ -2135,7 +2178,23 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
                         author: Some("autopilot".to_string()),
                     },
                 );
-                warn!(task_id = %task.id, error = %e, "Autopilot: task execution failed");
+
+                // Retry logic: increment count, mark failed if exhausted
+                let new_retry = task.retry_count + 1;
+                if new_retry >= task.max_retries {
+                    let _ = state.mission.db().update_board_task(
+                        &task.id,
+                        &missiond_core::types::UpdateBoardTaskInput {
+                            status: Some("failed".to_string()),
+                            ..Default::default()
+                        },
+                    );
+                    warn!(task_id = %task.id, retries = new_retry, "Autopilot: task failed after max retries");
+                } else {
+                    // Back to open for retry, increment retry_count
+                    let _ = state.mission.db().increment_board_task_retry(&task.id, new_retry);
+                    warn!(task_id = %task.id, retry = new_retry, max = task.max_retries, error = %e, "Autopilot: task failed, will retry");
+                }
             }
         }
     }
