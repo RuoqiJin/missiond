@@ -36,3 +36,20 @@ export interface TaskFiltersState {
   category: TaskCategory | 'all';
   priority: TaskPriority | 'all';
 }
+
+// ============ Agent Questions (Pending Decisions) ============
+
+export type QuestionStatus = 'pending' | 'answered' | 'dismissed';
+
+export interface AgentQuestion {
+  id: string;
+  taskId?: string;
+  slotId?: string;
+  sessionId?: string;
+  question: string;
+  context: string;
+  status: QuestionStatus;
+  answer?: string;
+  createdAt: string;
+  updatedAt: string;
+}

@@ -850,25 +850,57 @@ pub fn all_tools() -> Vec<ToolDefinition> {
             }),
         ),
 
+        // ===== KB Analysis (via external AI) =====
+        ToolDefinition::new(
+            "mission_kb_analyze",
+            "Send all KB entries to Gemini for deep analysis. Returns quality assessment, \
+             duplicate detection, security risks, and optimization suggestions. \
+             Uses the AI router (auth.xiaojinpro.com) with Gemini 3.1 Pro.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Custom analysis prompt (optional). If not provided, uses default comprehensive analysis prompt."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model to use (default: gemini-3.1-pro)"
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "Max response tokens (default: 8192)"
+                    }
+                }
+            }),
+        ),
+
         // ===== Memory Extraction =====
         ToolDefinition::new(
             "mission_memory_pending",
-            "获取待分析的对话内容。返回自上次分析后积累的用户 CLI 对话（非 PTY），\
-             按 session 分组。调用后自动更新转发时间戳，避免重复分析。\
-             仅供 memory slot 使用。",
+            "获取待分析的对话内容（消息级追踪）。\
+             返回所有 pending 状态的用户 CLI 对话消息（非 PTY），按 session 分组。\
+             每条消息带 [#id] 前缀，用户消息用 ★ 标记。\
+             返回 batch_msg_ids 列表，处理完后必须调用 mission_memory_done 确认。",
             json!({
                 "type": "object",
                 "properties": {}
             }),
         ),
         ToolDefinition::new(
-            "mission_memory_pending_user",
-            "获取待分析的用户消息（仅 role=user）。独立于 mission_memory_pending，\
-             用于从用户原话中提取偏好、纠正、决策等高价值记忆。\
-             调用后自动更新 user_voice 转发时间戳。仅供 memory slot 使用。",
+            "mission_memory_done",
+            "确认一批消息已被 realtime 管道处理完成。必须在 mission_memory_pending 返回的消息全部处理后调用，\
+             传入 batch_msg_ids。未确认的消息会在下次调用 mission_memory_pending 时重新返回。",
             json!({
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "message_ids": {
+                        "type": "array",
+                        "items": { "type": "integer" },
+                        "description": "已处理完成的消息 ID 列表 (来自 mission_memory_pending 的 batch_msg_ids)"
+                    }
+                },
+                "required": ["message_ids"]
             }),
         ),
 
@@ -1144,6 +1176,97 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                 "required": ["taskId", "content"]
             }),
         ),
+        // ===== Agent Questions (Pending Decisions) =====
+        ToolDefinition::new(
+            "mission_question_create",
+            "Agent 遇到阻断问题时登记待决策项。持久化到 DB，显示在用户 Board UI。\
+             Agent 可稍后用 mission_question_list 检查是否已回答。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "问题描述（简洁明确）"
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "补充上下文（已尝试方案、可选项、证据等）"
+                    },
+                    "taskId": {
+                        "type": "string",
+                        "description": "关联的 Board 任务 ID（可选）"
+                    },
+                    "slotId": {
+                        "type": "string",
+                        "description": "提问的工位 ID（可选）"
+                    },
+                    "sessionId": {
+                        "type": "string",
+                        "description": "提问的会话 ID（可选）"
+                    }
+                },
+                "required": ["question"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_question_list",
+            "列出待决策问题。默认返回全部，可按 status 筛选（pending/answered/dismissed）。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "description": "按状态筛选: pending, answered, dismissed"
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_question_get",
+            "获取单个待决策问题详情（含回答）",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "问题 ID"
+                    }
+                },
+                "required": ["id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_question_answer",
+            "回答 Agent 提出的待决策问题",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "问题 ID"
+                    },
+                    "answer": {
+                        "type": "string",
+                        "description": "回答/指示"
+                    }
+                },
+                "required": ["id", "answer"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_question_dismiss",
+            "忽略/关闭一个待决策问题",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "问题 ID"
+                    }
+                },
+                "required": ["id"]
+            }),
+        ),
     ]
 }
 
@@ -1159,7 +1282,7 @@ mod tests {
     #[test]
     fn test_all_tools_count() {
         let tools = all_tools();
-        assert_eq!(tools.len(), 54);
+        assert_eq!(tools.len(), 60);
     }
 
     #[test]

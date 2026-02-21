@@ -41,13 +41,15 @@ enum ExtractionPhase {
 
 struct ExtractionState {
     phase: ExtractionPhase,
-    /// Which extraction type is active: "user_voice", "memory", "deep_analysis"
+    /// Which extraction type is active: "realtime", "deep_analysis"
     active_type: Option<&'static str>,
     /// When current phase started (epoch secs), for timeout detection.
     phase_started_at: i64,
-    /// When the last realtime extraction (user_voice/memory) completed.
+    /// When the last realtime extraction completed.
     /// Used to give deep_analysis a window to run.
     last_realtime_completed_at: i64,
+    /// Message IDs in the current deep_analysis batch, for marking done on completion.
+    current_batch_msg_ids: Vec<i64>,
 }
 
 /// Safety valve: max time to wait for slot to return to Idle after send() returns.
@@ -391,6 +393,38 @@ struct BoardNoteAddArgs {
     note_type: Option<String>,
     #[serde(default)]
     author: Option<String>,
+}
+
+// Agent questions args
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QuestionCreateArgs {
+    question: String,
+    #[serde(default)]
+    context: Option<String>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    slot_id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct QuestionListArgs {
+    #[serde(default)]
+    status: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct QuestionAnswerArgs {
+    id: String,
+    answer: String,
+}
+
+#[derive(Deserialize)]
+struct QuestionIdArgs {
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -1261,11 +1295,119 @@ impl AppState {
                 }
             }
 
+            // ===== KB Analysis (via external AI) =====
+            "mission_kb_analyze" => {
+                let prompt_arg: Option<String> = serde_json::from_value::<serde_json::Value>(args.clone())
+                    .ok()
+                    .and_then(|v| v.get("prompt").and_then(|p| p.as_str()).map(String::from));
+                let model: String = serde_json::from_value::<serde_json::Value>(args.clone())
+                    .ok()
+                    .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(String::from))
+                    .unwrap_or_else(|| "gemini-3.1-pro".to_string());
+                let max_tokens: u32 = serde_json::from_value::<serde_json::Value>(args)
+                    .ok()
+                    .and_then(|v| v.get("max_tokens").and_then(|m| m.as_u64()).map(|n| n as u32))
+                    .unwrap_or(8192);
+
+                // 1. Read all KB entries
+                let entries = self.mission.db()
+                    .kb_list(None)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+
+                if entries.is_empty() {
+                    return Ok(ToolResult::error("KB is empty, nothing to analyze."));
+                }
+
+                // 2. Build compact KB text
+                let mut kb_lines = Vec::with_capacity(entries.len());
+                for e in &entries {
+                    let summary = e.summary.replace('\n', " ");
+                    kb_lines.push(format!("[{}] {}: {}", e.category, e.key, summary));
+                }
+                let kb_text = kb_lines.join("\n");
+
+                // 3. Build the analysis prompt
+                let analysis_prompt = if let Some(custom) = prompt_arg {
+                    format!("{}\n\n知识库内容（{}条）：\n{}", custom, entries.len(), kb_text)
+                } else {
+                    format!(
+                        "你是一个AI知识管理专家。以下是一个AI Agent编排系统（MissionD）的知识库完整内容，共{}条记忆。\n\n\
+                        请分析并提供：\n\
+                        1. **知识图谱概览**：这些记忆反映了什么样的系统生态？\n\
+                        2. **质量评估**：高价值记忆、过时/冗余记忆、重复/矛盾项\n\
+                        3. **组织建议**：分类是否合理、缺少哪些关键知识\n\
+                        4. **偏好分析**：从preference类总结用户核心开发理念\n\
+                        5. **风险提示**：敏感信息（密码、密钥）是否不应存在KB中\n\n\
+                        知识库内容：\n{}",
+                        entries.len(), kb_text
+                    )
+                };
+
+                // 4. Read JWT from ~/.xjp/credentials.json
+                let cred_path = dirs::home_dir()
+                    .ok_or_else(|| anyhow!("Cannot determine home directory"))?
+                    .join(".xjp")
+                    .join("credentials.json");
+                let cred_content = tokio::fs::read_to_string(&cred_path).await
+                    .map_err(|e| anyhow!("Failed to read credentials: {}", e))?;
+                let creds: serde_json::Value = serde_json::from_str(&cred_content)
+                    .map_err(|e| anyhow!("Failed to parse credentials: {}", e))?;
+                let jwt = creds.get("jwt_token")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("No jwt_token in credentials.json. Run 'xjp login' first."))?;
+                let base_url = creds.get("auth_url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("https://auth.xiaojinpro.com");
+
+                // 5. Call router API
+                let url = format!("{}/v1/chat/completions", base_url);
+                let body = serde_json::json!({
+                    "model": model,
+                    "messages": [{"role": "user", "content": analysis_prompt}],
+                    "max_tokens": max_tokens,
+                });
+
+                info!("KB analyze: sending {} entries ({} chars) to {} via {}", entries.len(), kb_text.len(), model, url);
+
+                let client = reqwest::Client::new();
+                let resp = client.post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", format!("Bearer {}", jwt))
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow!("Router request failed: {}", e))?;
+
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let err_body = resp.text().await.unwrap_or_default();
+                    return Ok(ToolResult::error(format!("Router returned {}: {}", status, err_body)));
+                }
+
+                let result: serde_json::Value = resp.json().await
+                    .map_err(|e| anyhow!("Failed to parse router response: {}", e))?;
+
+                let content = result
+                    .pointer("/choices/0/message/content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(empty response)");
+                let usage = result.get("usage");
+                let resp_model = result.get("model").and_then(|v| v.as_str()).unwrap_or(&model);
+
+                Ok(ToolResult::json_pretty(&serde_json::json!({
+                    "model": resp_model,
+                    "kb_entries_count": entries.len(),
+                    "analysis": content,
+                    "usage": usage,
+                })))
+            }
+
             // ===== Memory Extraction =====
-            "mission_memory_pending" => {
+            // Message-level pipeline tracking: returns pending messages with IDs.
+            // Agent must call mission_memory_done after processing.
+            "mission_memory_pending" | "mission_memory_pending_user" => {
                 let db = self.mission.db();
-                let today = chrono::Utc::now().format("%Y-%m-%dT00:00:00").to_string();
-                let pending = db.get_pending_memory_messages(&today)
+                let pending = db.get_pending_pipeline_messages("realtime")
                     .map_err(|e| anyhow!("DB error: {}", e))?;
 
                 if pending.is_empty() {
@@ -1273,79 +1415,53 @@ impl AppState {
                 }
 
                 let mut output = String::new();
-                let now = chrono::Utc::now().to_rfc3339();
+                let mut all_msg_ids: Vec<i64> = Vec::new();
+                let mut user_count = 0usize;
                 for (session_id, project, msgs) in &pending {
                     output.push_str(&format!("## session: {} (project: {})\n\n", session_id, project));
                     for msg in msgs {
-                        // Only include user/assistant with meaningful content
+                        all_msg_ids.push(msg.id);
                         if msg.role == "assistant" && msg.content.len() < 50 {
                             continue;
                         }
-                        output.push_str(&format!("[{}] {}: {}\n\n", msg.timestamp, msg.role, msg.content));
+                        let prefix = if msg.role == "user" { "★ " } else { "" };
+                        output.push_str(&format!("[#{}][{}] {}{}: {}\n\n", msg.id, msg.timestamp, prefix, msg.role, msg.content));
+                        if msg.role == "user" { user_count += 1; }
                     }
-                    // Mark as forwarded
-                    let _ = db.update_memory_forwarded_at(session_id, &now);
                 }
 
                 let session_count = pending.len();
-                let msg_count: usize = pending.iter().map(|(_, _, m)| m.len()).sum();
+                let msg_count = all_msg_ids.len();
+                let msg_ids_str = all_msg_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", ");
                 let header = format!(
-                    "[realtime-extract] {} 个会话, {} 条消息\n\
+                    "[realtime-extract] {} 个会话, {} 条消息 (其中 {} 条用户消息)\n\
+                     batch_msg_ids: [{}]\n\n\
                      提取值得长期记忆的事实，用 mission_kb_remember 存入。\n\
-                     不要存显而易见的事实。只存：架构决策、bug 修复经验、用户偏好、关键发现。\n\n",
-                    session_count, msg_count
+                     ★ 标记的是用户原话，优先级最高。用户的每句话都是刻意的。\n\n\
+                     提取规则:\n\
+                     - 用户偏好/纠正/否定 → category: preference (最高优先)\n\
+                     - 架构决策/技术事实 → category: memory\n\
+                     - 「好」「行」= 用户认可 AI 方案，记录为决策\n\
+                     - 「别...」「不要...」= 高价值偏好\n\
+                     - 不存: 纯任务指令、当天工作日志、代码提交记录\n\
+                     - 模糊用户消息 → 调 mission_conversation_get 看上下文再判断\n\n\
+                     ⚠️ 处理完成后必须调用 mission_memory_done(message_ids: [{}]) 确认。\n\n",
+                    session_count, msg_count, user_count, msg_ids_str, msg_ids_str
                 );
 
                 Ok(ToolResult::text(&format!("{}{}", header, output)))
             }
 
-            "mission_memory_pending_user" => {
+            "mission_memory_done" => {
+                #[derive(Deserialize)]
+                struct Args {
+                    message_ids: Vec<i64>,
+                }
+                let Args { message_ids } = serde_json::from_value(args)?;
                 let db = self.mission.db();
-                let today = chrono::Utc::now().format("%Y-%m-%dT00:00:00").to_string();
-                let pending = db.get_pending_user_voice_messages(&today)
+                let count = db.mark_pipeline_done(&message_ids, "realtime")
                     .map_err(|e| anyhow!("DB error: {}", e))?;
-
-                if pending.is_empty() {
-                    return Ok(ToolResult::text("没有待分析的用户消息。"));
-                }
-
-                let mut output = String::new();
-                let now = chrono::Utc::now().to_rfc3339();
-                for (session_id, project, msgs) in &pending {
-                    output.push_str(&format!("## session: {} (project: {})\n\n", session_id, project));
-                    for msg in msgs {
-                        output.push_str(&format!("[{}] {}\n\n", msg.timestamp, msg.content));
-                    }
-                    let _ = db.update_user_voice_forwarded_at(session_id, &now);
-                }
-
-                let session_count = pending.len();
-                let msg_count: usize = pending.iter().map(|(_, _, m)| m.len()).sum();
-                let header = format!(
-                    "[user-voice-extract] {} 个会话, {} 条用户消息\n\n\
-                     你正在分析「用户本人」发出的原始消息，不含 AI 助手的回复。\n\
-                     用户说的每句话都是刻意的。请提取：\n\n\
-                     1. 偏好/原则 → category: preference\n\
-                        \"不要引入外部依赖\" → key: no-external-deps-principle\n\n\
-                     2. 纠正/否定 → category: preference\n\
-                        \"先别修复，先调查\" → key: investigate-before-fix\n\n\
-                     3. 决策 → category: memory\n\
-                        \"用方案A\" → key: chose-plan-a-for-xxx\n\n\
-                     4. 上下文知识 → category: memory\n\
-                        \"ECS 从本地直连不通\" → key: ecs-direct-unreachable\n\n\
-                     规则：\n\
-                     - 「好」「行」等确认词 = 用户认可了 AI 上一轮方案，也值得记录为决策\n\
-                     - 「别...」「不要...」「先...」= 高价值偏好\n\
-                     - 重复出现的指令 = 极重要，提升 confidence\n\
-                     - 不要存: 纯粹的任务指令(\"帮我改这个文件\")，除非包含偏好信息\n\n\
-                     ⚠️ 上下文提示：用户的回答 98% 是针对 AI 助手上一条消息的回应。\n\
-                     如果某条用户消息含义模糊（如「好」「不要」「用第二种」），\n\
-                     调用 mission_conversation_get(sessionId: \"<session_id>\", tail: 5) \n\
-                     查看该会话的近几轮对话来理解用户在回应什么，再决定是否提取记忆。\n\n",
-                    session_count, msg_count
-                );
-
-                Ok(ToolResult::text(&format!("{}{}", header, output)))
+                Ok(ToolResult::text(&format!("已确认 {} 条消息处理完成 (realtime)。", count)))
             }
 
             // ===== Conversation Logs =====
@@ -1579,6 +1695,70 @@ impl AppState {
                 Ok(ToolResult::json_pretty(&note))
             }
 
+            // ===== Agent Questions (Pending Decisions) =====
+            "mission_question_create" => {
+                let args: QuestionCreateArgs = serde_json::from_value(args)?;
+                let input = missiond_core::types::CreateAgentQuestionInput {
+                    question: args.question,
+                    context: args.context,
+                    task_id: args.task_id,
+                    slot_id: args.slot_id,
+                    session_id: args.session_id,
+                };
+                let q = self
+                    .mission
+                    .db()
+                    .create_agent_question(&input)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json_pretty(&q))
+            }
+            "mission_question_list" => {
+                let QuestionListArgs { status } =
+                    serde_json::from_value(args).unwrap_or(QuestionListArgs { status: None });
+                let questions = self
+                    .mission
+                    .db()
+                    .list_agent_questions(status.as_deref())
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json_pretty(&questions))
+            }
+            "mission_question_get" => {
+                let QuestionIdArgs { id } = serde_json::from_value(args)?;
+                match self
+                    .mission
+                    .db()
+                    .get_agent_question(&id)
+                    .map_err(|e| anyhow!("DB error: {}", e))?
+                {
+                    Some(q) => Ok(ToolResult::json_pretty(&q)),
+                    None => Ok(ToolResult::error("Question not found")),
+                }
+            }
+            "mission_question_answer" => {
+                let QuestionAnswerArgs { id, answer } = serde_json::from_value(args)?;
+                match self
+                    .mission
+                    .db()
+                    .answer_agent_question(&id, &answer)
+                    .map_err(|e| anyhow!("DB error: {}", e))?
+                {
+                    Some(q) => Ok(ToolResult::json_pretty(&q)),
+                    None => Ok(ToolResult::error("Question not found")),
+                }
+            }
+            "mission_question_dismiss" => {
+                let QuestionIdArgs { id } = serde_json::from_value(args)?;
+                match self
+                    .mission
+                    .db()
+                    .dismiss_agent_question(&id)
+                    .map_err(|e| anyhow!("DB error: {}", e))?
+                {
+                    Some(q) => Ok(ToolResult::json_pretty(&q)),
+                    None => Ok(ToolResult::error("Question not found")),
+                }
+            }
+
             _ => {
                 let mut res = ToolResult::text(format!("Unknown tool: {}", name));
                 res.is_error = Some(true);
@@ -1771,13 +1951,10 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
     // Check if memory slot is stuck in non-Idle state for too long
     check_memory_slot_stuck(state).await;
 
-    // User-voice extraction: extract memories from user-only messages (highest priority)
-    check_user_voice_extraction(state).await;
+    // Realtime extraction: unified pipeline for user preferences + conversation knowledge
+    check_realtime_extraction(state).await;
 
-    // Memory extraction: check pending messages and trigger if slot is idle
-    check_memory_extraction(state).await;
-
-    // Deep analysis: review completed conversations
+    // Deep analysis: cross-session pattern discovery (no message-level extraction)
     check_deep_analysis(state).await;
 
     // Sync KB preferences + hot topics into CLAUDE.md
@@ -2097,6 +2274,7 @@ async fn check_memory_slot_stuck(state: &AppState) {
         let mut es = state.extraction_state.write().await;
         es.phase = ExtractionPhase::Idle;
         es.active_type = None;
+        es.current_batch_msg_ids.clear();
     }
     // Don't reset to 0 — set to now so we can detect if respawn also gets stuck
     state.memory_slot_busy_since.store(now, std::sync::atomic::Ordering::SeqCst);
@@ -2119,6 +2297,7 @@ async fn check_extraction_gate(state: &AppState, label: &str) -> bool {
             warn!(age_secs = age, "{}: extraction stuck in WaitingForSlotIdle, forcing reset", label);
             es.phase = ExtractionPhase::Idle;
             es.active_type = None;
+            es.current_batch_msg_ids.clear();
             return true;
         }
     } else {
@@ -2172,9 +2351,10 @@ async fn begin_extraction(state: &AppState, label: &'static str, prompt: &'stati
 /// giving deep_analysis a window to run.
 const REALTIME_EXTRACTION_COOLDOWN_SECS: i64 = 30;
 
-/// Check if user-voice extraction should be triggered. Called from autopilot_tick.
-async fn check_user_voice_extraction(state: &AppState) {
-    if !check_extraction_gate(state, "user_voice").await {
+/// Unified realtime extraction: user preferences + conversation knowledge in one pass.
+/// Replaces separate check_user_voice_extraction + check_memory_extraction.
+async fn check_realtime_extraction(state: &AppState) {
+    if !check_extraction_gate(state, "realtime").await {
         return;
     }
 
@@ -2183,109 +2363,58 @@ async fn check_user_voice_extraction(state: &AppState) {
         let es = state.extraction_state.read().await;
         let since_last = chrono::Utc::now().timestamp() - es.last_realtime_completed_at;
         if es.last_realtime_completed_at > 0 && since_last < REALTIME_EXTRACTION_COOLDOWN_SECS {
-            // Check if deep_analysis has pending work — if so, yield
-            let has_unanalyzed = state.mission.db().get_unanalyzed_conversations()
+            let has_deep_pending = state.mission.db().get_conversations_with_pending_pipeline("deep_analysis")
                 .map(|c| !c.is_empty()).unwrap_or(false);
-            if has_unanalyzed {
-                debug!(since_last, "user_voice: cooldown, yielding to deep_analysis");
+            if has_deep_pending {
+                debug!(since_last, "realtime: cooldown, yielding to deep_analysis");
                 return;
             }
         }
     }
 
-    // Check DB for pending user messages first (cheap check before spawning slot)
-    let today = chrono::Utc::now().format("%Y-%m-%dT00:00:00").to_string();
-    let has_pending = match state.mission.db().get_pending_user_voice_messages(&today) {
-        Ok(pending) => !pending.is_empty(),
+    // Check for pending messages (message-level pipeline tracking)
+    let has_pending = match state.mission.db().has_pending_pipeline_messages("realtime") {
+        Ok(v) => v,
         Err(_) => false,
     };
     if !has_pending {
-        debug!("user_voice: no pending messages");
+        debug!("realtime: no pending messages");
         return;
     }
 
     // Ensure memory slot is spawned, then check it's idle
     if !ensure_memory_slot(state).await {
-        debug!("user_voice: memory slot not available");
+        debug!("realtime: memory slot not available");
         return;
     }
     let status = state.pty.get_status(MEMORY_SLOT_ID).await;
     match status {
         Some(s) if s.state == SessionState::Idle => {}
         Some(s) => {
-            debug!(state = ?s.state, "user_voice: memory slot not idle");
+            debug!(state = ?s.state, "realtime: slot not idle");
             return;
         }
         None => {
-            debug!("user_voice: memory slot status unavailable");
+            debug!("realtime: slot status unavailable");
             return;
         }
     }
 
-    begin_extraction(state, "user_voice",
-        "有新的用户消息待分析。调用 mission_memory_pending_user 获取用户原话，提取用户偏好、纠正和决策。\n\
-         去重: 记忆前先用 mission_kb_search 检查是否已有相同知识，已有的跳过或更新（不要重复创建）。\n\
-         过滤: 不记录当天工作日志（today-focus/batch-completed）、代码提交记录、一次性升级操作。只记录长期有效的知识。\n\
-         完成后不要退出，等待下一个指令。").await;
+    begin_extraction(state, "realtime",
+        "有新的对话内容待分析。\n\
+         步骤:\n\
+         1. 调用 mission_memory_pending 获取待分析内容和 batch_msg_ids\n\
+         2. 提取知识，用 mission_kb_remember 存入\n\
+         3. 完成后调用 mission_memory_done(message_ids: batch_msg_ids) 确认\n\n\
+         提取目标（按优先级）:\n\
+         - 用户偏好/原则/纠正 → category: preference\n\
+         - 架构决策/技术事实 → category: memory\n\
+         - 基础设施变更 → category: infra\n\
+         过滤: 不记录当天工作日志、代码提交记录、一次性操作。只记录长期有效的知识。\n\
+         问题上报: 如发现 bug、需要代码修复的问题，调用 mission_board_create 创建任务。").await;
 }
 
-/// Check if memory extraction should be triggered. Called from autopilot_tick.
-async fn check_memory_extraction(state: &AppState) {
-    if !check_extraction_gate(state, "memory").await {
-        return;
-    }
-
-    // Cooldown: yield to deep_analysis if we recently completed a realtime extraction
-    {
-        let es = state.extraction_state.read().await;
-        let since_last = chrono::Utc::now().timestamp() - es.last_realtime_completed_at;
-        if es.last_realtime_completed_at > 0 && since_last < REALTIME_EXTRACTION_COOLDOWN_SECS {
-            let has_unanalyzed = state.mission.db().get_unanalyzed_conversations()
-                .map(|c| !c.is_empty()).unwrap_or(false);
-            if has_unanalyzed {
-                debug!(since_last, "memory: cooldown, yielding to deep_analysis");
-                return;
-            }
-        }
-    }
-
-    // Check DB for pending messages first (cheap check before spawning slot)
-    let today = chrono::Utc::now().format("%Y-%m-%dT00:00:00").to_string();
-    let has_pending = match state.mission.db().get_pending_memory_messages(&today) {
-        Ok(pending) => !pending.is_empty(),
-        Err(_) => false,
-    };
-    if !has_pending {
-        debug!("memory: no pending messages");
-        return;
-    }
-
-    // Ensure memory slot is spawned, then check it's idle
-    if !ensure_memory_slot(state).await {
-        debug!("memory: memory slot not available");
-        return;
-    }
-    let status = state.pty.get_status(MEMORY_SLOT_ID).await;
-    match status {
-        Some(s) if s.state == SessionState::Idle => {}
-        Some(s) => {
-            debug!(state = ?s.state, "memory: slot not idle");
-            return;
-        }
-        None => {
-            debug!("memory: slot status unavailable");
-            return;
-        }
-    }
-
-    begin_extraction(state, "memory",
-        "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，然后提取记忆。\n\
-         去重: 记忆前先用 mission_kb_search 检查是否已有相同知识，已有的跳过或更新（不要重复创建）。\n\
-         过滤: 不记录当天工作日志（today-focus/batch-completed）、代码提交记录、一次性升级操作。只记录长期有效的知识。\n\
-         完成后不要退出，等待下一个指令。").await;
-}
-
-/// Deep analysis: review completed but unanalyzed conversations.
+/// Deep analysis: review completed conversations with pending deep_analysis messages.
 /// Called from autopilot_tick.
 async fn check_deep_analysis(state: &AppState) {
     if !check_extraction_gate(state, "deep_analysis").await {
@@ -2307,16 +2436,16 @@ async fn check_deep_analysis(state: &AppState) {
     }
 
     let db = state.mission.db();
-    let unanalyzed = match db.get_unanalyzed_conversations() {
+    let pending_convs = match db.get_conversations_with_pending_pipeline("deep_analysis") {
         Ok(convs) => convs,
         Err(_) => return,
     };
 
-    if unanalyzed.is_empty() {
+    if pending_convs.is_empty() {
         return;
     }
 
-    for conv in &unanalyzed {
+    for conv in &pending_convs {
         // Only analyze conversations ended >= 5 minutes ago
         if let Some(ref ended) = conv.ended_at {
             if let Ok(ended_dt) = chrono::DateTime::parse_from_rfc3339(ended) {
@@ -2329,58 +2458,53 @@ async fn check_deep_analysis(state: &AppState) {
             continue; // Not yet ended
         }
 
-        // Only analyze user CLI conversations (slot_id=None, not subagent).
-        // PTY-managed sessions and subagent sessions are excluded.
-        if conv.slot_id.is_some() || conv.id.starts_with("agent-") {
-            let _ = db.mark_conversation_analyzed(&conv.id);
-            continue;
-        }
-
         let msg_count = db
             .get_conversation_messages(&conv.id, None, 1000)
             .map(|m| m.len())
             .unwrap_or(0);
-        // Skip conversations with too few messages — not worth deep analysis
+        // Skip conversations with too few messages — mark done and move on
         if msg_count < 6 {
-            let _ = db.mark_conversation_analyzed(&conv.id);
+            let msg_ids = db.get_pipeline_message_ids_for_session(&conv.id).unwrap_or_default();
+            let _ = db.mark_pipeline_done(&msg_ids, "deep_analysis");
             continue;
         }
 
         if !ensure_memory_slot(state).await {
-            break; // Can't proceed without memory slot
+            break;
         }
 
-        // MCP pull pattern: send short prompt, agent fetches data via MCP tools.
-        // Never paste large content into PTY — causes terminal buffer issues.
+        // Get message IDs for this conversation (for marking done after completion)
+        let msg_ids = db.get_pipeline_message_ids_for_session(&conv.id).unwrap_or_default();
+
         let prompt = format!(
             "[deep-analysis]\n\
              session_id: {session_id}\n\
              project: {project}\n\
              消息数: {msg_count}\n\
-             调用 mission_conversation_get(sessionId: \"{session_id}\") 获取完整会话内容。\n\
-             请结合已有 KB 知识（用 mission_kb_list 查看），分析出更深层的洞察。\n\
-             关注: 跨会话的模式、反复出现的主题、隐含的用户偏好、可以抽象成工具/服务的操作。\n\
-             如发现与其他会话主题相关，用 mission_conversation_search(query) 搜索关联会话。\n\
-             去重: 记忆前先用 mission_kb_search 检查是否已有相同知识，已有的跳过或更新（不要重复创建）。\n\
-             过滤: 不记录当天工作日志、代码提交记录、一次性操作。只记录长期有效的知识。版本特定 bug 只记模式/根因，不记版本号细节。\n\
-             完成后不要退出，等待下一个指令。",
+             调用 mission_conversation_get(sessionId: \"{session_id}\") 获取完整会话内容。\n\n\
+             ⚠️ 重要: 消息级知识（偏好/决策/事实）已由 realtime 管道提取，不要重复提取。\n\
+             你的任务仅限于:\n\
+             1. 跨会话模式 — 用 mission_conversation_search 搜索相关会话，发现反复出现的主题\n\
+             2. 工作流抽象 — 可以固化为工具/服务的重复操作\n\
+             3. 知识关联 — 不同会话之间的隐含联系\n\
+             4. 趋势发现 — 用户行为/需求的演变方向\n\
+             5. 问题上报 — 发现 bug/资源浪费/反复出错等需要代码修复的问题时，调用 mission_board_create 创建任务\n\n\
+             不要提取: 单条消息的偏好/决策/事实（realtime 已处理）、当天工作日志、版本细节。",
             session_id = conv.id,
             project = conv.project.as_deref().unwrap_or("unknown"),
             msg_count = msg_count,
         );
 
-        info!(conv_id = %conv.id, msg_count, "Deep analysis: sending to memory agent (MCP pull)");
+        info!(conv_id = %conv.id, msg_count, batch_size = msg_ids.len(), "Deep analysis: sending to memory agent");
 
-        // Mark analyzed optimistically (original behavior: marked regardless of send result)
-        let _ = db.mark_conversation_analyzed(&conv.id);
-
-        // Set extraction state before spawning
+        // Set extraction state with batch msg_ids for marking done on completion
         {
             let now = chrono::Utc::now().timestamp();
             let mut es = state.extraction_state.write().await;
             es.phase = ExtractionPhase::Sending;
             es.active_type = Some("deep_analysis");
             es.phase_started_at = now;
+            es.current_batch_msg_ids = msg_ids;
         }
 
         let conv_id = conv.id.clone();
@@ -2401,10 +2525,10 @@ async fn check_deep_analysis(state: &AppState) {
                     let mut es = extraction_state.write().await;
                     es.phase = ExtractionPhase::Idle;
                     es.active_type = None;
+                    es.current_batch_msg_ids.clear();
                 }
             }
         });
-        // Only process one conversation per tick to avoid overloading the memory slot
         break;
     }
 }
@@ -2603,8 +2727,15 @@ fn handle_new_messages(
         .collect();
 
     match db.insert_conversation_messages_batch(&batch) {
-        Ok(inserted) if inserted > 0 => {
-            info!(session = %session_id, count = inserted, "Logged conversation messages");
+        Ok(inserted_ids) if !inserted_ids.is_empty() => {
+            info!(session = %session_id, count = inserted_ids.len(), "Logged conversation messages");
+
+            // Enqueue for pipeline processing (only user CLI sessions)
+            if !is_pty && !session_id.starts_with("agent-") {
+                if let Err(e) = db.enqueue_messages_for_pipelines(&inserted_ids, &["realtime", "deep_analysis"]) {
+                    warn!(session = %session_id, error = %e, "Failed to enqueue messages for pipelines");
+                }
+            }
         }
         Err(e) => {
             error!(session = %session_id, error = %e, "Failed to insert conversation messages");
@@ -2826,6 +2957,7 @@ async fn main() -> Result<()> {
             active_type: None,
             phase_started_at: 0,
             last_realtime_completed_at: 0,
+            current_batch_msg_ids: Vec::new(),
         })),
         memory_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         claude_md_hash: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -2853,8 +2985,7 @@ async fn main() -> Result<()> {
             _ = state.extraction_notify.notified() => {
                 // Event-driven: extraction just completed, immediately check for more pending work
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                check_user_voice_extraction(&state).await;
-                check_memory_extraction(&state).await;
+                check_realtime_extraction(&state).await;
                 check_deep_analysis(&state).await;
             }
             event = conv_logger_rx.recv() => {
@@ -2906,7 +3037,7 @@ async fn main() -> Result<()> {
                                     if phase_age < 3 {
                                         debug!(phase_age, "Ignoring early Idle transition (likely spawn init)");
                                     } else {
-                                        let is_realtime = matches!(es.active_type, Some("user_voice") | Some("memory"));
+                                        let is_realtime = matches!(es.active_type, Some("realtime"));
                                         info!(
                                             extraction_type = ?es.active_type,
                                             phase_age,
@@ -2915,10 +3046,15 @@ async fn main() -> Result<()> {
                                         if is_realtime {
                                             es.last_realtime_completed_at = chrono::Utc::now().timestamp();
                                         }
+                                        // Mark deep_analysis batch as done
+                                        if matches!(es.active_type, Some("deep_analysis")) && !es.current_batch_msg_ids.is_empty() {
+                                            let _ = state.mission.db().mark_pipeline_done(&es.current_batch_msg_ids, "deep_analysis");
+                                            info!(count = es.current_batch_msg_ids.len(), "Marked deep_analysis batch done");
+                                            es.current_batch_msg_ids.clear();
+                                        }
                                         es.phase = ExtractionPhase::Idle;
                                         es.active_type = None;
                                         // Event-driven: signal main loop to re-check extractions
-                                        // instead of waiting for next 60s autopilot tick
                                         state.extraction_notify.notify_one();
                                     }
                                 }
