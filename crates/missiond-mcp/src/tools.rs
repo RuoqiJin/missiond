@@ -870,9 +870,49 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     },
                     "max_tokens": {
                         "type": "integer",
-                        "description": "Max response tokens (default: 8192)"
+                        "description": "Max response tokens (default: 16384)"
                     }
                 }
+            }),
+        ),
+
+        // ===== Router Chat =====
+        ToolDefinition::new(
+            "mission_router_chat",
+            "Multi-turn chat with AI models via the XiaojinPro router. \
+             Supports conversation history (messages array) and optional auto-context injection (board/KB data). \
+             Use this to have extended conversations with Gemini or other models. \
+             The caller manages conversation history — pass the full messages array each time.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "messages": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "role": { "type": "string", "enum": ["user", "assistant", "system"] },
+                                "content": { "type": "string" }
+                            },
+                            "required": ["role", "content"]
+                        },
+                        "description": "Conversation messages array. Include full history for multi-turn."
+                    },
+                    "context": {
+                        "type": "string",
+                        "enum": ["board", "kb", "both", "none"],
+                        "description": "Auto-inject context into the first user message: 'board' (task board), 'kb' (knowledge base), 'both', or 'none' (default: none)"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model to use (default: gemini-3.1-pro)"
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "Max response tokens (default: 16384)"
+                    }
+                },
+                "required": ["messages"]
             }),
         ),
 

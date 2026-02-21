@@ -1362,7 +1362,7 @@ impl AppState {
                 let max_tokens: u32 = serde_json::from_value::<serde_json::Value>(args)
                     .ok()
                     .and_then(|v| v.get("max_tokens").and_then(|m| m.as_u64()).map(|n| n as u32))
-                    .unwrap_or(8192);
+                    .unwrap_or(16384);
 
                 // 1. Read all KB entries
                 let entries = self.mission.db()
@@ -1455,6 +1455,133 @@ impl AppState {
                     "model": resp_model,
                     "kb_entries_count": entries.len(),
                     "analysis": content,
+                    "usage": usage,
+                })))
+            }
+
+            // ===== Router Chat =====
+            "mission_router_chat" => {
+                let params: serde_json::Value = serde_json::from_value(args)
+                    .map_err(|e| anyhow!("Invalid params: {}", e))?;
+
+                let mut messages: Vec<serde_json::Value> = params.get("messages")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .ok_or_else(|| anyhow!("'messages' array is required"))?;
+
+                let context_mode = params.get("context")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("none");
+                let model = params.get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("gemini-3.1-pro")
+                    .to_string();
+                let max_tokens: u32 = params.get("max_tokens")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32)
+                    .unwrap_or(16384);
+
+                // Auto-inject context into first user message if requested
+                if context_mode != "none" {
+                    let mut context_parts: Vec<String> = Vec::new();
+
+                    if context_mode == "kb" || context_mode == "both" {
+                        let entries = self.mission.db()
+                            .kb_list(None)
+                            .map_err(|e| anyhow!("DB error: {}", e))?;
+                        let kb_lines: Vec<String> = entries.iter()
+                            .filter(|e| e.category != "credential")
+                            .map(|e| format!("[{}] {}: {}", e.category, e.key, e.summary.replace('\n', " ")))
+                            .collect();
+                        context_parts.push(format!("\n\n[Knowledge Base ({} entries)]\n{}", entries.len(), kb_lines.join("\n")));
+                    }
+
+                    if context_mode == "board" || context_mode == "both" {
+                        let tasks = self.mission.db()
+                            .list_board_tasks(None, false)
+                            .map_err(|e| anyhow!("DB error: {}", e))?;
+                        let task_lines: Vec<String> = tasks.iter()
+                            .map(|t| {
+                                let desc_preview: String = t.description.chars().take(300).collect();
+                                let project = t.project.as_deref().unwrap_or("");
+                                let mut line = format!("[{}|{}|{}] {}",
+                                    t.status.as_str(), t.priority, t.category, t.title);
+                                if !project.is_empty() { line.push_str(&format!(" (project: {})", project)); }
+                                if !desc_preview.is_empty() { line.push_str(&format!(" -- {}", desc_preview)); }
+                                line
+                            })
+                            .collect();
+                        context_parts.push(format!("\n\n[Mission Board ({} tasks)]\n{}", tasks.len(), task_lines.join("\n")));
+                    }
+
+                    if !context_parts.is_empty() {
+                        // Append context to the first user message
+                        if let Some(first_user) = messages.iter_mut().find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user")) {
+                            let original = first_user.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                            let enriched = format!("{}{}", original, context_parts.join(""));
+                            first_user["content"] = serde_json::Value::String(enriched);
+                        }
+                    }
+                }
+
+                // Read JWT
+                let cred_path = dirs::home_dir()
+                    .ok_or_else(|| anyhow!("Cannot determine home directory"))?
+                    .join(".xjp")
+                    .join("credentials.json");
+                let cred_content = tokio::fs::read_to_string(&cred_path).await
+                    .map_err(|e| anyhow!("Failed to read credentials: {}", e))?;
+                let creds: serde_json::Value = serde_json::from_str(&cred_content)
+                    .map_err(|e| anyhow!("Failed to parse credentials: {}", e))?;
+                let jwt = creds.get("jwt_token")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("No jwt_token in credentials.json. Run 'xjp login' first."))?;
+                let base_url = creds.get("auth_url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("https://auth.xiaojinpro.com");
+
+                // Call router API
+                let url = format!("{}/v1/chat/completions", base_url);
+                let body = serde_json::json!({
+                    "model": model,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                });
+
+                let total_chars: usize = messages.iter()
+                    .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+                    .map(|s| s.len())
+                    .sum();
+                info!("Router chat: {} messages ({} chars) to {} via {}", messages.len(), total_chars, model, url);
+
+                let client = reqwest::Client::new();
+                let resp = client.post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", format!("Bearer {}", jwt))
+                    .timeout(std::time::Duration::from_secs(180))
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow!("Router request failed: {}", e))?;
+
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let err_body = resp.text().await.unwrap_or_default();
+                    return Ok(ToolResult::error(format!("Router returned {}: {}", status, err_body)));
+                }
+
+                let result: serde_json::Value = resp.json().await
+                    .map_err(|e| anyhow!("Failed to parse router response: {}", e))?;
+
+                let content = result
+                    .pointer("/choices/0/message/content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(empty response)");
+                let usage = result.get("usage");
+                let resp_model = result.get("model").and_then(|v| v.as_str()).unwrap_or(&model);
+
+                Ok(ToolResult::json_pretty(&serde_json::json!({
+                    "model": resp_model,
+                    "response": content,
                     "usage": usage,
                 })))
             }
@@ -2621,15 +2748,30 @@ async fn check_deep_analysis(state: &AppState) {
             continue; // Not yet ended
         }
 
-        let msg_count = db
+        let msgs = db
             .get_conversation_messages(&conv.id, None, 1000)
-            .map(|m| m.len())
-            .unwrap_or(0);
+            .unwrap_or_default();
+        let msg_count = msgs.len();
         // Skip conversations with too few messages — mark done and move on
         if msg_count < 6 {
             let msg_ids = db.get_pipeline_message_ids_for_session(&conv.id).unwrap_or_default();
             let _ = db.mark_pipeline_done(&msg_ids, "deep_analysis");
             continue;
+        }
+
+        // Skip extraction meta-sessions (memory agent's own work)
+        if let Some(first_user) = msgs.iter().find(|m| m.role == "user") {
+            let text = &first_user.content;
+            if text.contains("mission_memory_pending")
+                || text.contains("mission_kb_remember")
+                || text.starts_with("[realtime-extract]")
+                || text.starts_with("[deep-analysis]")
+            {
+                let msg_ids = db.get_pipeline_message_ids_for_session(&conv.id).unwrap_or_default();
+                let _ = db.mark_pipeline_done(&msg_ids, "deep_analysis");
+                debug!(conv_id = %conv.id, "deep_analysis: skipping extraction meta-session");
+                continue;
+            }
         }
 
         if !ensure_memory_slot(state).await {
