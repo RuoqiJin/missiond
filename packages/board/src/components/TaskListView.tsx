@@ -12,7 +12,7 @@ import {
   type DragEndEvent,
 } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy, sortableKeyboardCoordinates } from '@dnd-kit/sortable';
-import { ChevronDown, ChevronRight, CheckCircle2, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, CheckCircle2, Trash2, EyeOff } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useTaskCenterStore } from '../store';
 import { CATEGORY_CONFIG, PRIORITY_CONFIG } from '../constants';
@@ -167,6 +167,8 @@ export function TaskListView() {
   const openEditDialog = useTaskCenterStore((s) => s.openEditDialog);
   const quickAddSub = useTaskCenterStore((s) => s.quickAddSub);
   const setShowDone = useTaskCenterStore((s) => s.setShowDone);
+  const showHidden = useTaskCenterStore((s) => s.showHidden);
+  const setShowHidden = useTaskCenterStore((s) => s.setShowHidden);
   const clearDoneTasks = useTaskCenterStore((s) => s.clearDoneTasks);
 
   const [activeTask, setActiveTask] = useState<Task | null>(null);
@@ -180,8 +182,9 @@ export function TaskListView() {
   );
 
   const filtered = useMemo(() => {
-    if (!filters.search && filters.category === 'all' && filters.priority === 'all') return tasks;
     return tasks.filter((task) => {
+      // Exclude hidden tasks from main view
+      if (task.hidden) return false;
       if (filters.search) {
         const q = filters.search.toLowerCase();
         if (!task.title.toLowerCase().includes(q) && !task.description.toLowerCase().includes(q)) return false;
@@ -191,6 +194,11 @@ export function TaskListView() {
       return true;
     });
   }, [tasks, filters]);
+
+  const hiddenTasks = useMemo(() =>
+    tasks.filter((t) => t.hidden && t.status === 'open'),
+    [tasks],
+  );
 
   const { roots, childrenMap, doneCountMap } = useMemo(() => buildTree(filtered), [filtered]);
 
@@ -325,6 +333,38 @@ export function TaskListView() {
                 onClickTask={openEditDialog}
                 onAddSub={quickAddSub}
               />
+            </div>
+          )}
+        </div>
+      )}
+
+      {hiddenTasks.length > 0 && (
+        <div className="mt-6 border-t border-neutral-800/50 pt-4">
+          <button
+            onClick={() => setShowHidden(!showHidden)}
+            className="flex items-center gap-2 px-3 text-xs text-neutral-600 hover:text-neutral-500 transition-colors"
+          >
+            <EyeOff className="w-3.5 h-3.5" />
+            <span>手动处理 ({hiddenTasks.length})</span>
+            {showHidden ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+          </button>
+
+          {showHidden && (
+            <div className="mt-2 space-y-0.5">
+              {hiddenTasks.sort((a, b) => a.order - b.order).map((task) => (
+                <TaskItem
+                  key={task.id}
+                  task={task}
+                  depth={0}
+                  childCount={0}
+                  doneChildCount={0}
+                  isExpanded={false}
+                  onToggle={() => toggleTask(task.id)}
+                  onClick={() => openEditDialog(task)}
+                  onExpand={() => {}}
+                  onAddSub={() => {}}
+                />
+              ))}
             </div>
           )}
         </div>

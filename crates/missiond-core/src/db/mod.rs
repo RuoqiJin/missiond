@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS board_tasks (
   assignee TEXT,
   auto_execute INTEGER NOT NULL DEFAULT 0,
   prompt_template TEXT,
+  hidden INTEGER NOT NULL DEFAULT 0,
   order_idx INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -212,6 +213,12 @@ impl MissionDB {
                 "ALTER TABLE board_tasks ADD COLUMN assignee TEXT;
                  ALTER TABLE board_tasks ADD COLUMN auto_execute INTEGER NOT NULL DEFAULT 0;
                  ALTER TABLE board_tasks ADD COLUMN prompt_template TEXT;"
+            )?;
+        }
+
+        if !columns.iter().any(|c| c == "hidden") {
+            self.conn.execute_batch(
+                "ALTER TABLE board_tasks ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;"
             )?;
         }
 
@@ -585,8 +592,8 @@ impl MissionDB {
     /// Insert a new board task
     pub fn insert_board_task(&self, task: &BoardTask) -> SqliteResult<()> {
         self.conn.execute(
-            "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, order_idx, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, hidden, order_idx, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 task.id,
                 task.title,
@@ -601,6 +608,7 @@ impl MissionDB {
                 task.assignee,
                 task.auto_execute as i32,
                 task.prompt_template,
+                task.hidden as i32,
                 task.order_idx,
                 task.created_at,
                 task.updated_at,
@@ -647,6 +655,7 @@ impl MissionDB {
             assignee: input.assignee.clone(),
             auto_execute: input.auto_execute.unwrap_or(false),
             prompt_template: input.prompt_template.clone(),
+            hidden: input.hidden.unwrap_or(false),
             order_idx: max_order + 1,
             created_at: now.clone(),
             updated_at: now,
@@ -670,22 +679,25 @@ impl MissionDB {
         }
     }
 
-    /// List all board tasks (optionally filtered by status)
-    pub fn list_board_tasks(&self, status: Option<&str>) -> SqliteResult<Vec<BoardTask>> {
+    /// List all board tasks (optionally filtered by status, hidden excluded by default)
+    pub fn list_board_tasks(&self, status: Option<&str>, include_hidden: bool) -> SqliteResult<Vec<BoardTask>> {
         let mut tasks = Vec::new();
+        let hidden_clause = if include_hidden { "" } else { " AND hidden = 0" };
 
         if let Some(s) = status {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT * FROM board_tasks WHERE status = ?1 ORDER BY order_idx ASC")?;
+            let sql = format!("SELECT * FROM board_tasks WHERE status = ?1{} ORDER BY order_idx ASC", hidden_clause);
+            let mut stmt = self.conn.prepare(&sql)?;
             let rows = stmt.query_map(params![s], |row| Self::row_to_board_task(row))?;
             for task in rows {
                 tasks.push(task?);
             }
         } else {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT * FROM board_tasks ORDER BY order_idx ASC")?;
+            let sql = if include_hidden {
+                "SELECT * FROM board_tasks ORDER BY order_idx ASC".to_string()
+            } else {
+                "SELECT * FROM board_tasks WHERE hidden = 0 ORDER BY order_idx ASC".to_string()
+            };
+            let mut stmt = self.conn.prepare(&sql)?;
             let rows = stmt.query_map([], |row| Self::row_to_board_task(row))?;
             for task in rows {
                 tasks.push(task?);
@@ -725,6 +737,11 @@ impl MissionDB {
         if let Some(auto_exec) = update.auto_execute {
             fields.push("auto_execute = ?".to_string());
             values.push(Box::new(auto_exec as i32));
+        }
+
+        if let Some(hidden) = update.hidden {
+            fields.push("hidden = ?".to_string());
+            values.push(Box::new(hidden as i32));
         }
 
         if let Some(idx) = update.order_idx {
@@ -823,6 +840,7 @@ impl MissionDB {
         let status_str: String = row.get("status")?;
         let status = BoardTaskStatus::from_str(&status_str).unwrap_or(BoardTaskStatus::Open);
         let auto_execute: i32 = row.get("auto_execute").unwrap_or(0);
+        let hidden: i32 = row.get("hidden").unwrap_or(0);
 
         Ok(BoardTask {
             id: row.get("id")?,
@@ -838,6 +856,7 @@ impl MissionDB {
             assignee: row.get("assignee")?,
             auto_execute: auto_execute != 0,
             prompt_template: row.get("prompt_template")?,
+            hidden: hidden != 0,
             order_idx: row.get("order_idx")?,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,

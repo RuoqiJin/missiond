@@ -242,6 +242,9 @@ pub struct BoardTask {
     /// Prompt template for autopilot (overrides title+description)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_template: Option<String>,
+    /// Hidden from default list view (e.g. renewal/manual tasks)
+    #[serde(default)]
+    pub hidden: bool,
     pub order_idx: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -272,6 +275,8 @@ pub struct CreateBoardTaskInput {
     pub auto_execute: Option<bool>,
     #[serde(default, rename = "promptTemplate")]
     pub prompt_template: Option<String>,
+    #[serde(default)]
+    pub hidden: Option<bool>,
 }
 
 /// Partial update for a board task
@@ -302,6 +307,8 @@ pub struct UpdateBoardTaskInput {
     pub auto_execute: Option<bool>,
     #[serde(default, rename = "promptTemplate")]
     pub prompt_template: Option<String>,
+    #[serde(default)]
+    pub hidden: Option<bool>,
     #[serde(default)]
     pub order_idx: Option<i64>,
 }

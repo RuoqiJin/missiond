@@ -937,13 +937,17 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         // ===== Board Tasks (Personal Task Board) =====
         ToolDefinition::new(
             "mission_board_list",
-            "列出个人任务板上的所有任务。返回树形结构（含子任务）。可按状态筛选。",
+            "列出个人任务板上的所有任务。返回树形结构（含子任务）。可按状态筛选。默认隐藏 hidden 任务（续费等手动处理项）。",
             json!({
                 "type": "object",
                 "properties": {
                     "status": {
                         "type": "string",
                         "description": "按状态筛选: open, done (不传则返回全部)"
+                    },
+                    "includeHidden": {
+                        "type": "boolean",
+                        "description": "是否包含隐藏任务（续费等手动处理项）。默认 false"
                     }
                 }
             }),
@@ -997,6 +1001,10 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     "promptTemplate": {
                         "type": "string",
                         "description": "自动执行时的 prompt 模板 (不填则用 title + description)"
+                    },
+                    "hidden": {
+                        "type": "boolean",
+                        "description": "隐藏任务（续费等手动处理项），不在默认列表中显示"
                     }
                 },
                 "required": ["title"]
@@ -1059,6 +1067,10 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     "promptTemplate": {
                         "type": "string",
                         "description": "自动执行 prompt 模板"
+                    },
+                    "hidden": {
+                        "type": "boolean",
+                        "description": "隐藏任务（续费等手动处理项）"
                     }
                 },
                 "required": ["id"]
