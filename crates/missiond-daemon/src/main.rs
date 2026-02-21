@@ -116,6 +116,43 @@ fn logs_dir(db_path: &Path) -> PathBuf {
         .join("logs")
 }
 
+/// Ensure sensitive config files have restrictive permissions (owner-only read/write).
+/// Automatically fixes permissions and logs a warning if they're too open.
+#[cfg(unix)]
+fn ensure_config_permissions(home: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let files = [
+        "servers.yaml",
+        "slots.yaml",
+        "xjp-mcp-config.json",
+        "config/permissions.yaml",
+        "mission.db",
+    ];
+
+    for name in &files {
+        let path = home.join(name);
+        if !path.exists() {
+            continue;
+        }
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let mode = meta.permissions().mode();
+            if mode & 0o077 != 0 {
+                warn!(
+                    file = %path.display(),
+                    old_mode = format!("{:o}", mode),
+                    "Config file too permissive, fixing to 600"
+                );
+                std::fs::set_permissions(
+                    &path,
+                    std::fs::Permissions::from_mode(0o600),
+                )
+                .ok();
+            }
+        }
+    }
+}
+
 fn log_filter() -> tracing_subscriber::EnvFilter {
     let level = if let Ok(v) = std::env::var("RUST_LOG") {
         v
@@ -2242,7 +2279,10 @@ async fn check_memory_extraction(state: &AppState) {
     }
 
     begin_extraction(state, "memory",
-        "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，然后提取记忆。完成后不要退出，等待下一个指令。").await;
+        "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，然后提取记忆。\n\
+         去重: 记忆前先用 mission_kb_search 检查是否已有相同知识，已有的跳过或更新（不要重复创建）。\n\
+         过滤: 不记录当天工作日志（today-focus/batch-completed）、代码提交记录、一次性升级操作。只记录长期有效的知识。\n\
+         完成后不要退出，等待下一个指令。").await;
 }
 
 /// Deep analysis: review completed but unanalyzed conversations.
@@ -2321,6 +2361,8 @@ async fn check_deep_analysis(state: &AppState) {
              请结合已有 KB 知识（用 mission_kb_list 查看），分析出更深层的洞察。\n\
              关注: 跨会话的模式、反复出现的主题、隐含的用户偏好、可以抽象成工具/服务的操作。\n\
              如发现与其他会话主题相关，用 mission_conversation_search(query) 搜索关联会话。\n\
+             去重: 记忆前先用 mission_kb_search 检查是否已有相同知识，已有的跳过或更新（不要重复创建）。\n\
+             过滤: 不记录当天工作日志、代码提交记录、一次性操作。只记录长期有效的知识。版本特定 bug 只记模式/根因，不记版本号细节。\n\
              完成后不要退出，等待下一个指令。",
             session_id = conv.id,
             project = conv.project.as_deref().unwrap_or("unknown"),
@@ -2673,6 +2715,10 @@ async fn main() -> Result<()> {
                 .with_ansi(false),
         )
         .init();
+
+    // Ensure config files have restrictive permissions
+    #[cfg(unix)]
+    ensure_config_permissions(&home);
 
     let db_path = db_path();
     let slots_path = slots_config_path();

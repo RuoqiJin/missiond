@@ -814,7 +814,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                 "properties": {
                     "host": {
                         "type": "string",
-                        "description": "SSH target: user@ip, ip, or infra registry key (e.g. 'privatecloud', 'root@106.15.2.17')"
+                        "description": "SSH target: user@ip, ip, or infra registry key (e.g. 'privatecloud', 'root@10.0.0.1')"
                     },
                     "port": {
                         "type": "integer",
