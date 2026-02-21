@@ -1137,12 +1137,54 @@ impl MissionDB {
 
     // ============ Knowledge Base ============
 
+    /// Redact sensitive patterns from text before sending to external APIs
+    pub fn redact_sensitive(text: &str) -> String {
+        use once_cell::sync::Lazy;
+        static REDACTIONS: Lazy<Vec<(regex::Regex, &'static str)>> = Lazy::new(|| {
+            vec![
+                (regex::Regex::new(r"(?i)sshpass\s+-p\s+'[^']*'").unwrap(), "sshpass -p '[REDACTED]'"),
+                (regex::Regex::new(r"(?i)(password|passwd|pwd|secret_key)\s*[:=]\s*\S+").unwrap(), "$1=[REDACTED]"),
+                (regex::Regex::new(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?\b").unwrap(), "[IP_REDACTED]"),
+            ]
+        });
+        let mut result = text.to_string();
+        for (re, replacement) in REDACTIONS.iter() {
+            result = re.replace_all(&result, *replacement).to_string();
+        }
+        result
+    }
+
+    /// Check if text contains sensitive data patterns (passwords, API keys, etc.)
+    fn contains_sensitive_data(text: &str) -> bool {
+        use once_cell::sync::Lazy;
+        static PATTERNS: Lazy<Vec<regex::Regex>> = Lazy::new(|| {
+            [
+                r"(?i)(password|passwd|pwd|secret_key)\s*[:=]\s*\S+",
+                r"(?i)sshpass\s+-p\s+",
+                r#"(?i)(api[_-]?key|token|secret)\s*[:=]\s*['"]?[A-Za-z0-9_\-]{20,}"#,
+                r"(?i)ssh\s+\S+@\S+.*-p\s+'\S+'",
+            ]
+            .iter()
+            .filter_map(|p| regex::Regex::new(p).ok())
+            .collect()
+        });
+        PATTERNS.iter().any(|re| re.is_match(text))
+    }
+
     /// Remember (upsert) a knowledge entry, with FTS similarity dedup
     pub fn kb_remember(&self, input: &KBRememberInput) -> SqliteResult<KBRememberResult> {
         let now = chrono::Utc::now().to_rfc3339();
         let source = input.source.as_deref().unwrap_or("conversation");
-        let confidence = input.confidence.unwrap_or(1.0);
+        let mut confidence = input.confidence.unwrap_or(1.0);
         let detail_str = input.detail.as_ref().map(|d| serde_json::to_string(d).unwrap_or_default());
+
+        // Sensitive data detection: warn and lower confidence
+        let check_text = format!("{} {} {}", input.summary, detail_str.as_deref().unwrap_or(""), input.key);
+        if Self::contains_sensitive_data(&check_text) {
+            tracing::warn!(key = %input.key, category = %input.category,
+                "KB entry may contain sensitive data (password/API key/credentials)");
+            confidence = confidence.min(0.5);
+        }
 
         // 1. Exact match by (category, key) → update
         let updated = self.conn.execute(
@@ -1308,13 +1350,14 @@ impl MissionDB {
         let mut results = Vec::new();
 
         if let Some(cat) = category {
+            let like_pattern = format!("{}:%", cat);
             let mut stmt = self.conn.prepare(
                 "SELECT k.* FROM knowledge k
                  JOIN knowledge_fts f ON k.rowid = f.rowid
-                 WHERE knowledge_fts MATCH ?1 AND k.category = ?2
+                 WHERE knowledge_fts MATCH ?1 AND (k.category = ?2 OR k.category LIKE ?3)
                  ORDER BY rank"
             )?;
-            let rows = stmt.query_map(params![fts_query, cat], |row| Self::row_to_knowledge_entry(row))?;
+            let rows = stmt.query_map(params![fts_query, cat, like_pattern], |row| Self::row_to_knowledge_entry(row))?;
             for entry in rows {
                 results.push(entry?);
             }
@@ -1365,21 +1408,26 @@ impl MissionDB {
         sql.push(')');
 
         if category.is_some() {
-            sql.push_str(&format!(" AND category = ?{}", keywords.len() + 1));
+            let p_cat = keywords.len() + 1;
+            let p_like = keywords.len() + 2;
+            sql.push_str(&format!(" AND (category = ?{} OR category LIKE ?{})", p_cat, p_like));
         }
         sql.push_str(" ORDER BY access_count DESC, updated_at DESC LIMIT 20");
 
         let mut stmt = self.conn.prepare(&sql)?;
 
-        // Bind parameters: %keyword% for each, then optional category
+        // Bind parameters: %keyword% for each, then optional category + like pattern
         let like_params: Vec<String> = keywords.iter().map(|kw| format!("%{}%", kw)).collect();
         let mut param_values: Vec<&dyn rusqlite::types::ToSql> = like_params.iter()
             .map(|s| s as &dyn rusqlite::types::ToSql)
             .collect();
         let cat_owned: String;
+        let cat_like: String;
         if let Some(cat) = category {
             cat_owned = cat.to_string();
+            cat_like = format!("{}:%", cat);
             param_values.push(&cat_owned);
+            param_values.push(&cat_like);
         }
 
         let rows = stmt.query_map(rusqlite::params_from_iter(param_values.iter()), |row| {
@@ -1393,14 +1441,16 @@ impl MissionDB {
         Ok(results)
     }
 
-    /// List knowledge entries, optionally filtered by category
+    /// List knowledge entries, optionally filtered by category.
+    /// Supports composite categories: querying "memory" also returns "memory:architecture" etc.
     pub fn kb_list(&self, category: Option<&str>) -> SqliteResult<Vec<KnowledgeEntry>> {
         let mut entries = Vec::new();
         if let Some(cat) = category {
+            let like_pattern = format!("{}:%", cat);
             let mut stmt = self.conn.prepare(
-                "SELECT * FROM knowledge WHERE category = ?1 ORDER BY updated_at DESC"
+                "SELECT * FROM knowledge WHERE category = ?1 OR category LIKE ?2 ORDER BY updated_at DESC"
             )?;
-            let rows = stmt.query_map(params![cat], |row| Self::row_to_knowledge_entry(row))?;
+            let rows = stmt.query_map(params![cat, like_pattern], |row| Self::row_to_knowledge_entry(row))?;
             for entry in rows {
                 entries.push(entry?);
             }
@@ -1438,6 +1488,17 @@ impl MissionDB {
             params![key],
         )?;
         Ok(deleted > 0)
+    }
+
+    /// Batch delete multiple knowledge entries by keys. Returns count of deleted entries.
+    pub fn kb_batch_forget(&self, keys: &[String]) -> SqliteResult<usize> {
+        let mut deleted = 0;
+        for key in keys {
+            if self.kb_forget(key)? {
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
     }
 
     /// Sync FTS index for a knowledge entry
@@ -1503,39 +1564,35 @@ impl MissionDB {
         rows.collect()
     }
 
-    /// Find potential duplicates: entries with similar keys in the same category
-    pub fn kb_find_duplicates(&self) -> SqliteResult<Vec<(KnowledgeEntry, KnowledgeEntry)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT a.*, b.id as b_id, b.category as b_category, b.key as b_key, \
-             b.summary as b_summary, b.detail as b_detail, b.source as b_source, \
-             b.confidence as b_confidence, b.access_count as b_access_count, \
-             b.created_at as b_created_at, b.updated_at as b_updated_at, \
-             b.last_accessed_at as b_last_accessed_at \
-             FROM knowledge a JOIN knowledge b \
-             ON a.category = b.category AND a.id < b.id \
-             AND (a.key LIKE '%' || b.key || '%' OR b.key LIKE '%' || a.key || '%') \
-             ORDER BY a.category, a.key",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let a = Self::row_to_knowledge_entry(row)?;
-            let detail_str: Option<String> = row.get("b_detail")?;
-            let detail = detail_str.and_then(|s| serde_json::from_str(&s).ok());
-            let b = KnowledgeEntry {
-                id: row.get("b_id")?,
-                category: row.get("b_category")?,
-                key: row.get("b_key")?,
-                summary: row.get("b_summary")?,
-                detail,
-                source: row.get("b_source")?,
-                confidence: row.get("b_confidence")?,
-                access_count: row.get("b_access_count")?,
-                created_at: row.get("b_created_at")?,
-                updated_at: row.get("b_updated_at")?,
-                last_accessed_at: row.get("b_last_accessed_at")?,
-            };
-            Ok((a, b))
-        })?;
-        rows.collect()
+    /// Find potential duplicates using Jaccard similarity on key+summary text.
+    /// Returns pairs with similarity score (threshold: 0.6).
+    pub fn kb_find_duplicates(&self) -> SqliteResult<Vec<(KnowledgeEntry, KnowledgeEntry, f64)>> {
+        const DUP_THRESHOLD: f64 = 0.6;
+        let entries = self.kb_list(None)?;
+        let mut duplicates = Vec::new();
+
+        // Group by category for O(n²) within each category (not globally)
+        let mut by_cat: std::collections::HashMap<String, Vec<&KnowledgeEntry>> = std::collections::HashMap::new();
+        for e in &entries {
+            by_cat.entry(e.category.clone()).or_default().push(e);
+        }
+
+        for (_cat, group) in &by_cat {
+            for i in 0..group.len() {
+                let text_a = format!("{} {}", group[i].key, group[i].summary);
+                for j in (i + 1)..group.len() {
+                    let text_b = format!("{} {}", group[j].key, group[j].summary);
+                    let sim = token_jaccard_similarity(&text_a, &text_b);
+                    if sim >= DUP_THRESHOLD {
+                        duplicates.push((group[i].clone(), group[j].clone(), sim));
+                    }
+                }
+            }
+        }
+
+        // Sort by similarity descending
+        duplicates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(duplicates)
     }
 
     /// Get KB statistics for governance
@@ -1567,9 +1624,21 @@ impl MissionDB {
             stats["oldest"] = serde_json::json!({"category": cat, "key": key, "updatedAt": updated});
         }
 
-        // Category breakdown
+        // Category breakdown (raw subcategories + parent rollup)
         let summary = self.kb_summary()?;
-        stats["categories"] = serde_json::json!(summary.into_iter().collect::<std::collections::HashMap<_, _>>());
+        let raw: std::collections::HashMap<String, i64> = summary.into_iter().collect();
+        stats["categories"] = serde_json::json!(raw);
+
+        // Parent category rollup: "memory:architecture" counts toward "memory" total
+        let mut parents: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for (cat, count) in &raw {
+            let parent = cat.split(':').next().unwrap_or(cat);
+            *parents.entry(parent.to_string()).or_default() += count;
+        }
+        // Only include rollup if there are subcategories
+        if parents.len() < raw.len() {
+            stats["categoryRollup"] = serde_json::json!(parents);
+        }
 
         Ok(stats)
     }
@@ -1641,6 +1710,18 @@ impl MissionDB {
             )?;
         }
         Ok(count)
+    }
+
+    /// Get all pending message IDs for a pipeline (lightweight, no full message content)
+    pub fn get_pending_pipeline_msg_ids(&self, pipeline: &str) -> SqliteResult<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT message_id FROM message_pipeline_state WHERE pipeline = ?1 AND status = 'pending' ORDER BY message_id ASC",
+        )?;
+        let ids = stmt
+            .query_map(params![pipeline], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(ids)
     }
 
     /// Get completed conversations that still have pending messages for a pipeline

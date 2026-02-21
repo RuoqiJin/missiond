@@ -25,6 +25,8 @@ tracing-appender = { workspace = true }
 dirs = { workspace = true }
 chrono = { workspace = true }
 
+reqwest = { workspace = true }
+
 missiond-core = { workspace = true }
 missiond-mcp = { workspace = true }
 

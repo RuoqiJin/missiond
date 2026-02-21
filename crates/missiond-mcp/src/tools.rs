@@ -772,13 +772,14 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_kb_list",
-            "List all knowledge entries, optionally filtered by category. Use to see what's known.",
+            "List all knowledge entries, optionally filtered by category. Supports composite categories: \
+             querying 'memory' also returns 'memory:architecture', 'memory:changelog', etc.",
             json!({
                 "type": "object",
                 "properties": {
                     "category": {
                         "type": "string",
-                        "description": "Filter by category (e.g. infra, project, preference)"
+                        "description": "Filter by category (e.g. infra, project, preference, memory, memory:architecture)"
                     }
                 }
             }),
@@ -831,15 +832,15 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ToolDefinition::new(
             "mission_kb_gc",
             "Knowledge governance: detect stale entries, duplicates, and show KB health stats. \
-             Use action='stats' for overview, 'stale' to find unused entries (default 30 days), \
-             'duplicates' to find potential duplicate keys within the same category. \
+             Actions: 'stats' = overview, 'stale' = find unused entries, 'duplicates' = find similar entries (Jaccard ≥0.6), \
+             'clean_stale' = auto-delete stale entries, 'clean_duplicates' = auto-delete lower-value duplicate. \
              Call periodically to keep the knowledge base clean and accurate.",
             json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "description": "Governance action: stats, stale, duplicates"
+                        "description": "Governance action: stats, stale, duplicates, clean_stale, clean_duplicates"
                     },
                     "days": {
                         "type": "integer",
