@@ -5,10 +5,13 @@
 use rusqlite::{params, Connection, OptionalExtension, Result as SqliteResult};
 use std::path::Path;
 
+use std::collections::HashSet;
+
 use crate::types::{
-    AddBoardTaskNoteInput, BoardNoteType, BoardTask, BoardTaskNote, BoardTaskStatus,
-    BoardTaskWithNotes, Conversation, ConversationMessage, CreateBoardTaskInput, EventType,
-    InboxMessage, KBRememberInput, KnowledgeEntry, Task, TaskEvent, TaskStatus, TaskUpdate,
+    AddBoardTaskNoteInput, AgentQuestion, AgentQuestionStatus, BoardNoteType, BoardTask,
+    BoardTaskNote, BoardTaskStatus, BoardTaskWithNotes, Conversation, ConversationMessage,
+    CreateAgentQuestionInput, CreateBoardTaskInput, EventType, InboxMessage, KBRememberInput,
+    KBRememberResult, KnowledgeEntry, Task, TaskEvent, TaskStatus, TaskUpdate,
     UpdateBoardTaskInput,
 };
 
@@ -95,6 +98,21 @@ CREATE TABLE IF NOT EXISTS board_task_notes (
   FOREIGN KEY (task_id) REFERENCES board_tasks(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_board_task_notes_task ON board_task_notes(task_id);
+
+-- Agent questions (pending decisions for user)
+CREATE TABLE IF NOT EXISTS agent_questions (
+    id TEXT PRIMARY KEY,
+    task_id TEXT,
+    slot_id TEXT,
+    session_id TEXT,
+    question TEXT NOT NULL,
+    context TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    answer TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_questions_status ON agent_questions(status);
 
 -- Knowledge base (Jarvis Memory)
 CREATE TABLE IF NOT EXISTS knowledge (
@@ -263,12 +281,77 @@ impl MissionDB {
                 "ALTER TABLE conversations ADD COLUMN user_voice_forwarded_at TEXT;"
             )?;
         }
+        // Unified realtime watermark (replaces memory_forwarded_at + user_voice_forwarded_at)
+        if !conv_columns.iter().any(|c| c == "realtime_forwarded_at") {
+            self.conn.execute_batch(
+                "ALTER TABLE conversations ADD COLUMN realtime_forwarded_at TEXT;"
+            )?;
+            // Migrate: set realtime watermark to max of old watermarks
+            self.conn.execute_batch(
+                "UPDATE conversations SET realtime_forwarded_at = MAX(
+                    COALESCE(memory_forwarded_at, ''),
+                    COALESCE(user_voice_forwarded_at, '')
+                ) WHERE memory_forwarded_at IS NOT NULL OR user_voice_forwarded_at IS NOT NULL;"
+            )?;
+        }
 
         // Performance indexes for conversation messages
         self.conn.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_msg_uuid ON conversation_messages(message_uuid);
-             CREATE INDEX IF NOT EXISTS idx_conv_memory_pending ON conversations(slot_id, memory_forwarded_at);"
+             CREATE INDEX IF NOT EXISTS idx_conv_memory_pending ON conversations(slot_id, memory_forwarded_at);
+             CREATE INDEX IF NOT EXISTS idx_conv_realtime_pending ON conversations(slot_id, realtime_forwarded_at);"
         )?;
+
+        // Message-level pipeline tracking (replaces conversation-level watermarks)
+        let has_mps: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='message_pipeline_state'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        if !has_mps {
+            self.conn.execute_batch(
+                "CREATE TABLE message_pipeline_state (
+                    message_id INTEGER NOT NULL,
+                    pipeline TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    done_at TEXT,
+                    PRIMARY KEY (message_id, pipeline),
+                    FOREIGN KEY (message_id) REFERENCES conversation_messages(id)
+                );
+                CREATE INDEX idx_mps_pipeline_status ON message_pipeline_state(pipeline, status);"
+            )?;
+
+            // Migrate from old watermarks: messages before realtime_forwarded_at → done
+            self.conn.execute_batch(
+                "INSERT OR IGNORE INTO message_pipeline_state (message_id, pipeline, status, done_at)
+                 SELECT m.id, 'realtime',
+                     CASE WHEN c.realtime_forwarded_at IS NOT NULL
+                               AND m.timestamp <= c.realtime_forwarded_at
+                          THEN 'done' ELSE 'pending' END,
+                     CASE WHEN c.realtime_forwarded_at IS NOT NULL
+                               AND m.timestamp <= c.realtime_forwarded_at
+                          THEN c.realtime_forwarded_at ELSE NULL END
+                 FROM conversation_messages m
+                 JOIN conversations c ON c.id = m.session_id
+                 WHERE m.role IN ('user', 'assistant')
+                   AND c.slot_id IS NULL
+                   AND c.id NOT LIKE 'agent-%';"
+            )?;
+
+            // Migrate deep_analysis: analyzed conversations → done
+            self.conn.execute_batch(
+                "INSERT OR IGNORE INTO message_pipeline_state (message_id, pipeline, status, done_at)
+                 SELECT m.id, 'deep_analysis',
+                     CASE WHEN c.analyzed_at IS NOT NULL THEN 'done' ELSE 'pending' END,
+                     c.analyzed_at
+                 FROM conversation_messages m
+                 JOIN conversations c ON c.id = m.session_id
+                 WHERE m.role IN ('user', 'assistant')
+                   AND c.slot_id IS NULL
+                   AND c.id NOT LIKE 'agent-%';"
+            )?;
+        }
 
         Ok(())
     }
@@ -943,16 +1026,125 @@ impl MissionDB {
         })
     }
 
+    // ============ Agent Questions (Pending Decisions) ============
+
+    pub fn create_agent_question(
+        &self,
+        input: &CreateAgentQuestionInput,
+    ) -> SqliteResult<AgentQuestion> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let id = uuid::Uuid::new_v4().to_string();
+        let q = AgentQuestion {
+            id: id.clone(),
+            task_id: input.task_id.clone(),
+            slot_id: input.slot_id.clone(),
+            session_id: input.session_id.clone(),
+            question: input.question.clone(),
+            context: input.context.clone().unwrap_or_default(),
+            status: AgentQuestionStatus::Pending,
+            answer: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        self.conn.execute(
+            "INSERT INTO agent_questions (id, task_id, slot_id, session_id, question, context, status, answer, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                q.id, q.task_id, q.slot_id, q.session_id,
+                q.question, q.context, q.status.as_str(),
+                q.answer, q.created_at, q.updated_at,
+            ],
+        )?;
+        Ok(q)
+    }
+
+    pub fn get_agent_question(&self, id: &str) -> SqliteResult<Option<AgentQuestion>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM agent_questions WHERE id = ?1")?;
+        let mut rows = stmt.query(params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::row_to_agent_question(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn list_agent_questions(
+        &self,
+        status: Option<&str>,
+    ) -> SqliteResult<Vec<AgentQuestion>> {
+        let mut questions = Vec::new();
+        if let Some(s) = status {
+            let mut stmt = self.conn.prepare(
+                "SELECT * FROM agent_questions WHERE status = ?1 ORDER BY created_at DESC",
+            )?;
+            let rows = stmt.query_map(params![s], |row| Self::row_to_agent_question(row))?;
+            for q in rows {
+                questions.push(q?);
+            }
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT * FROM agent_questions ORDER BY created_at DESC",
+            )?;
+            let rows = stmt.query_map([], |row| Self::row_to_agent_question(row))?;
+            for q in rows {
+                questions.push(q?);
+            }
+        }
+        Ok(questions)
+    }
+
+    pub fn answer_agent_question(
+        &self,
+        id: &str,
+        answer: &str,
+    ) -> SqliteResult<Option<AgentQuestion>> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE agent_questions SET answer = ?1, status = 'answered', updated_at = ?2 WHERE id = ?3",
+            params![answer, now, id],
+        )?;
+        self.get_agent_question(id)
+    }
+
+    pub fn dismiss_agent_question(&self, id: &str) -> SqliteResult<Option<AgentQuestion>> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE agent_questions SET status = 'dismissed', updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        self.get_agent_question(id)
+    }
+
+    fn row_to_agent_question(row: &rusqlite::Row) -> SqliteResult<AgentQuestion> {
+        let status_str: String = row.get("status")?;
+        let status =
+            AgentQuestionStatus::from_str(&status_str).unwrap_or(AgentQuestionStatus::Pending);
+        Ok(AgentQuestion {
+            id: row.get("id")?,
+            task_id: row.get("task_id")?,
+            slot_id: row.get("slot_id")?,
+            session_id: row.get("session_id")?,
+            question: row.get("question")?,
+            context: row.get("context")?,
+            status,
+            answer: row.get("answer")?,
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+        })
+    }
+
     // ============ Knowledge Base ============
 
-    /// Remember (upsert) a knowledge entry
-    pub fn kb_remember(&self, input: &KBRememberInput) -> SqliteResult<KnowledgeEntry> {
+    /// Remember (upsert) a knowledge entry, with FTS similarity dedup
+    pub fn kb_remember(&self, input: &KBRememberInput) -> SqliteResult<KBRememberResult> {
         let now = chrono::Utc::now().to_rfc3339();
         let source = input.source.as_deref().unwrap_or("conversation");
         let confidence = input.confidence.unwrap_or(1.0);
         let detail_str = input.detail.as_ref().map(|d| serde_json::to_string(d).unwrap_or_default());
 
-        // Try update first
+        // 1. Exact match by (category, key) → update
         let updated = self.conn.execute(
             "UPDATE knowledge SET summary = ?1, detail = ?2, source = ?3, confidence = ?4, updated_at = ?5
              WHERE category = ?6 AND key = ?7",
@@ -960,15 +1152,45 @@ impl MissionDB {
         )?;
 
         if updated > 0 {
-            // Update FTS
             let entry = self.kb_get_by_category_key(&input.category, &input.key)?;
             if let Some(ref e) = entry {
                 self.kb_sync_fts(e)?;
             }
-            return Ok(entry.unwrap());
+            return Ok(KBRememberResult {
+                entry: entry.unwrap(),
+                action: "updated".to_string(),
+                merged_key: None,
+                similarity: None,
+            });
         }
 
-        // Insert new
+        // 2. Fuzzy dedup: check for similar entries in same category
+        const SIMILARITY_THRESHOLD: f64 = 0.5;
+        if let Some((sim, existing)) = self.kb_find_similar(
+            &input.category,
+            &format!("{} {}", input.key, input.summary),
+            SIMILARITY_THRESHOLD,
+        )? {
+            // Merge: update the existing entry with new summary
+            self.conn.execute(
+                "UPDATE knowledge SET summary = ?1, detail = ?2, source = ?3, confidence = ?4, updated_at = ?5
+                 WHERE id = ?6",
+                params![input.summary, detail_str, source, confidence, now, existing.id],
+            )?;
+            let merged_key = existing.key.clone();
+            let entry = self.kb_get_by_category_key(&existing.category, &existing.key)?;
+            if let Some(ref e) = entry {
+                self.kb_sync_fts(e)?;
+            }
+            return Ok(KBRememberResult {
+                entry: entry.unwrap(),
+                action: "merged".to_string(),
+                merged_key: Some(merged_key),
+                similarity: Some(sim),
+            });
+        }
+
+        // 3. Insert new
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
             "INSERT INTO knowledge (id, category, key, summary, detail, source, confidence, access_count, created_at, updated_at)
@@ -990,10 +1212,39 @@ impl MissionDB {
             last_accessed_at: None,
         };
 
-        // Insert into FTS
         self.kb_sync_fts(&entry)?;
 
-        Ok(entry)
+        Ok(KBRememberResult {
+            entry,
+            action: "created".to_string(),
+            merged_key: None,
+            similarity: None,
+        })
+    }
+
+    /// Find the most similar entry in the same category
+    fn kb_find_similar(
+        &self,
+        category: &str,
+        new_text: &str,
+        threshold: f64,
+    ) -> SqliteResult<Option<(f64, KnowledgeEntry)>> {
+        let entries = self.kb_list(Some(category))?;
+
+        let mut best: Option<(f64, KnowledgeEntry)> = None;
+        for entry in entries {
+            let existing_text = format!("{} {}", entry.key, entry.summary);
+            let sim = token_jaccard_similarity(new_text, &existing_text);
+            if sim >= threshold {
+                match &best {
+                    None => best = Some((sim, entry)),
+                    Some((best_sim, _)) if sim > *best_sim => best = Some((sim, entry)),
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(best)
     }
 
     /// Get a knowledge entry by key
@@ -1323,6 +1574,102 @@ impl MissionDB {
         Ok(stats)
     }
 
+    // ============ Message Pipeline Tracking ============
+
+    /// Enqueue messages for pipeline processing (status = pending)
+    pub fn enqueue_messages_for_pipelines(&self, msg_ids: &[i64], pipelines: &[&str]) -> SqliteResult<()> {
+        if msg_ids.is_empty() || pipelines.is_empty() {
+            return Ok(());
+        }
+        for &msg_id in msg_ids {
+            for &pipeline in pipelines {
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO message_pipeline_state (message_id, pipeline, status) VALUES (?1, ?2, 'pending')",
+                    params![msg_id, pipeline],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Check if any pending messages exist for a pipeline (lightweight)
+    pub fn has_pending_pipeline_messages(&self, pipeline: &str) -> SqliteResult<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM message_pipeline_state WHERE pipeline = ?1 AND status = 'pending')",
+            params![pipeline],
+            |row| row.get(0),
+        )
+    }
+
+    /// Get pending messages for a pipeline, grouped by session
+    pub fn get_pending_pipeline_messages(&self, pipeline: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.*, COALESCE(c.project, '') as c_project
+             FROM conversation_messages m
+             JOIN message_pipeline_state mps ON mps.message_id = m.id
+             JOIN conversations c ON c.id = m.session_id
+             WHERE mps.pipeline = ?1 AND mps.status = 'pending'
+             ORDER BY c.started_at DESC, m.id ASC"
+        )?;
+
+        let mut groups: Vec<(String, String, Vec<ConversationMessage>)> = Vec::new();
+        let mut rows = stmt.query(params![pipeline])?;
+        while let Some(row) = rows.next()? {
+            let msg = Self::row_to_conversation_message(row)?;
+            let project: String = row.get("c_project")?;
+            let sid = msg.session_id.clone();
+            if let Some(group) = groups.iter_mut().find(|(s, _, _)| s == &sid) {
+                group.2.push(msg);
+            } else {
+                groups.push((sid, project, vec![msg]));
+            }
+        }
+        Ok(groups)
+    }
+
+    /// Mark messages as done for a pipeline
+    pub fn mark_pipeline_done(&self, msg_ids: &[i64], pipeline: &str) -> SqliteResult<usize> {
+        if msg_ids.is_empty() {
+            return Ok(0);
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut count = 0usize;
+        for &msg_id in msg_ids {
+            count += self.conn.execute(
+                "UPDATE message_pipeline_state SET status = 'done', done_at = ?1 WHERE message_id = ?2 AND pipeline = ?3 AND status = 'pending'",
+                params![now, msg_id, pipeline],
+            )?;
+        }
+        Ok(count)
+    }
+
+    /// Get completed conversations that still have pending messages for a pipeline
+    pub fn get_conversations_with_pending_pipeline(&self, pipeline: &str) -> SqliteResult<Vec<Conversation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT c.* FROM conversations c
+             JOIN conversation_messages m ON m.session_id = c.id
+             JOIN message_pipeline_state mps ON mps.message_id = m.id
+             WHERE c.status = 'completed'
+               AND mps.pipeline = ?1 AND mps.status = 'pending'
+             ORDER BY c.started_at DESC"
+        )?;
+        let rows = stmt.query_map(params![pipeline], |row| Self::row_to_conversation(row))?;
+        let mut convs = Vec::new();
+        for c in rows { convs.push(c?); }
+        Ok(convs)
+    }
+
+    /// Get all user/assistant message IDs for a session
+    pub fn get_pipeline_message_ids_for_session(&self, session_id: &str) -> SqliteResult<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM conversation_messages WHERE session_id = ?1 AND role IN ('user', 'assistant') ORDER BY id ASC"
+        )?;
+        let ids = stmt.query_map(params![session_id], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(ids)
+    }
+
     // ============ Conversations ============
 
     /// Upsert a conversation session
@@ -1360,14 +1707,14 @@ impl MissionDB {
     }
 
     /// Batch insert conversation messages within a transaction.
-    /// Returns number of actually inserted rows (dedup via UNIQUE index).
-    pub fn insert_conversation_messages_batch(&self, messages: &[ConversationMessage]) -> SqliteResult<u32> {
+    /// Returns IDs of actually inserted rows (dedup via UNIQUE index).
+    pub fn insert_conversation_messages_batch(&self, messages: &[ConversationMessage]) -> SqliteResult<Vec<i64>> {
         if messages.is_empty() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
         let session_id = &messages[0].session_id;
         let tx = self.conn.unchecked_transaction()?;
-        let mut inserted = 0u32;
+        let mut inserted_ids = Vec::new();
         for msg in messages {
             tx.execute(
                 "INSERT OR IGNORE INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata)
@@ -1378,10 +1725,10 @@ impl MissionDB {
                 ],
             )?;
             if tx.changes() > 0 {
-                inserted += 1;
+                inserted_ids.push(tx.last_insert_rowid());
             }
         }
-        if inserted > 0 {
+        if !inserted_ids.is_empty() {
             // Update message count once at the end
             tx.execute(
                 "UPDATE conversations SET message_count = (SELECT COUNT(*) FROM conversation_messages WHERE session_id = ?1) WHERE id = ?1",
@@ -1389,7 +1736,7 @@ impl MissionDB {
             )?;
         }
         tx.commit()?;
-        Ok(inserted)
+        Ok(inserted_ids)
     }
 
     /// Get a conversation by ID
@@ -1611,6 +1958,51 @@ impl MissionDB {
         Ok(())
     }
 
+    /// Get pending messages for unified realtime extraction (replaces separate user_voice + memory).
+    /// Returns all user+assistant messages since realtime_forwarded_at watermark.
+    pub fn get_pending_realtime_messages(&self, today: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.*, COALESCE(c.project, '') as c_project
+             FROM conversation_messages m
+             JOIN conversations c ON c.id = m.session_id
+             WHERE c.slot_id IS NULL
+               AND c.id NOT LIKE 'agent-%'
+               AND m.timestamp >= ?1
+               AND m.timestamp > COALESCE(c.realtime_forwarded_at, ?1)
+               AND m.role IN ('user', 'assistant')
+             ORDER BY c.started_at DESC, m.id ASC"
+        )?;
+
+        let mut results: Vec<(String, String, Vec<ConversationMessage>)> = Vec::new();
+
+        let rows = stmt.query_map(params![today], |row| {
+            let msg = Self::row_to_conversation_message(row)?;
+            let project: String = row.get("c_project")?;
+            Ok((msg, project))
+        })?;
+
+        for row in rows {
+            let (msg, project) = row?;
+            let session_id = msg.session_id.clone();
+            if let Some(entry) = results.iter_mut().find(|(id, _, _)| id == &session_id) {
+                entry.2.push(msg);
+            } else {
+                results.push((session_id, project, vec![msg]));
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Update realtime_forwarded_at watermark for a conversation.
+    pub fn update_realtime_forwarded_at(&self, session_id: &str, timestamp: &str) -> SqliteResult<()> {
+        self.conn.execute(
+            "UPDATE conversations SET realtime_forwarded_at = ?1 WHERE id = ?2",
+            params![timestamp, session_id],
+        )?;
+        Ok(())
+    }
+
     fn row_to_conversation(row: &rusqlite::Row) -> SqliteResult<Conversation> {
         Ok(Conversation {
             id: row.get("id")?,
@@ -1661,6 +2053,44 @@ impl MissionDB {
             last_accessed_at: row.get("last_accessed_at")?,
         })
     }
+}
+
+/// Tokenize text for similarity comparison.
+/// Chinese: character-level unigrams. English: lowercase words (len >= 2).
+fn tokenize_for_similarity(text: &str) -> HashSet<String> {
+    let mut tokens = HashSet::new();
+    let mut ascii_word = String::new();
+
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            ascii_word.push(ch.to_ascii_lowercase());
+        } else {
+            if ascii_word.len() >= 2 {
+                tokens.insert(ascii_word.clone());
+            }
+            ascii_word.clear();
+            // CJK character → insert as unigram
+            if ch as u32 > 0x2E80 {
+                tokens.insert(ch.to_string());
+            }
+        }
+    }
+    if ascii_word.len() >= 2 {
+        tokens.insert(ascii_word);
+    }
+    tokens
+}
+
+/// Token-level Jaccard similarity (supports Chinese + English mixed text)
+fn token_jaccard_similarity(a: &str, b: &str) -> f64 {
+    let ta = tokenize_for_similarity(a);
+    let tb = tokenize_for_similarity(b);
+    if ta.is_empty() && tb.is_empty() {
+        return 0.0;
+    }
+    let intersection = ta.intersection(&tb).count();
+    let union = ta.union(&tb).count();
+    if union == 0 { 0.0 } else { intersection as f64 / union as f64 }
 }
 
 #[cfg(test)]
