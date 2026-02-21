@@ -14,6 +14,7 @@ export interface Task {
   server?: string;
   dueDate?: string;
   parentId?: string;
+  hidden?: boolean;
   createdAt: string;
   updatedAt: string;
   order: number;
@@ -27,6 +28,7 @@ export interface TaskFormData {
   project?: string;
   server?: string;
   dueDate?: string;
+  hidden?: boolean;
 }
 
 export interface TaskFiltersState {
