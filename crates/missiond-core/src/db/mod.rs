@@ -178,7 +178,7 @@ CREATE INDEX IF NOT EXISTS idx_conv_msg_timestamp ON conversation_messages(times
 
 /// SQLite database operations class
 pub struct MissionDB {
-    conn: Connection,
+    conn: std::sync::Mutex<Connection>,
 }
 
 impl MissionDB {
@@ -187,7 +187,9 @@ impl MissionDB {
         let conn = Connection::open(db_path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        let db = Self { conn };
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        let db = Self { conn: std::sync::Mutex::new(conn) };
         db.init()?;
         Ok(db)
     }
@@ -199,35 +201,70 @@ impl MissionDB {
 
     /// Close the database connection
     pub fn close(self) {
-        // Connection is automatically closed when dropped
+        // Connection is automatically closed when Mutex is dropped
         drop(self.conn);
     }
 
     /// Create an in-memory database (for testing)
     pub fn in_memory() -> SqliteResult<Self> {
         let conn = Connection::open_in_memory()?;
-        let db = Self { conn };
+        let db = Self { conn: std::sync::Mutex::new(conn) };
         db.init()?;
         Ok(db)
     }
 
+    /// Get a lock on the database connection
+    fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().expect("MissionDB mutex poisoned")
+    }
+
     fn init(&self) -> SqliteResult<()> {
-        self.conn.execute_batch(SCHEMA)?;
+        {
+            let conn = self.conn();
+            conn.execute_batch(SCHEMA)?;
+        }
         self.migrate()?;
+        self.check_fts_integrity()?;
+        Ok(())
+    }
+
+    /// Check FTS5 index integrity on startup, rebuild if corrupted
+    fn check_fts_integrity(&self) -> SqliteResult<()> {
+        let conn = self.conn();
+        // Only check if knowledge_fts exists
+        let has_fts: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='knowledge_fts'",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(false);
+        if !has_fts {
+            return Ok(());
+        }
+        if let Err(e) = conn.execute_batch(
+            "INSERT INTO knowledge_fts(knowledge_fts) VALUES('integrity-check')"
+        ) {
+            tracing::warn!(error = %e, "FTS5 integrity check failed, rebuilding index");
+            conn.execute_batch(
+                "INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild')"
+            )?;
+            tracing::info!("FTS5 index rebuilt successfully");
+        }
         Ok(())
     }
 
     /// Run schema migrations for existing databases
     fn migrate(&self) -> SqliteResult<()> {
+        let conn = self.conn();
+
         // Phase D: Add autopilot columns to board_tasks
-        let columns: Vec<String> = self.conn
+        let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(board_tasks)")?
             .query_map([], |row| row.get::<_, String>(1))?
             .filter_map(|r| r.ok())
             .collect();
 
         if !columns.iter().any(|c| c == "assignee") {
-            self.conn.execute_batch(
+            conn.execute_batch(
                 "ALTER TABLE board_tasks ADD COLUMN assignee TEXT;
                  ALTER TABLE board_tasks ADD COLUMN auto_execute INTEGER NOT NULL DEFAULT 0;
                  ALTER TABLE board_tasks ADD COLUMN prompt_template TEXT;"
@@ -235,25 +272,25 @@ impl MissionDB {
         }
 
         if !columns.iter().any(|c| c == "hidden") {
-            self.conn.execute_batch(
+            conn.execute_batch(
                 "ALTER TABLE board_tasks ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;"
             )?;
         }
 
         // Knowledge Base: create FTS index if knowledge table exists but FTS doesn't
-        let has_knowledge: bool = self.conn.query_row(
+        let has_knowledge: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='knowledge'",
             [],
             |row| row.get(0),
         )?;
         if has_knowledge {
-            let has_fts: bool = self.conn.query_row(
+            let has_fts: bool = conn.query_row(
                 "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='knowledge_fts'",
                 [],
                 |row| row.get(0),
             )?;
             if !has_fts {
-                self.conn.execute_batch(
+                conn.execute_batch(
                     "CREATE VIRTUAL TABLE knowledge_fts USING fts5(
                         key, summary, detail, category,
                         content='knowledge', content_rowid='rowid'
@@ -266,28 +303,28 @@ impl MissionDB {
         }
 
         // Add memory_forwarded_at to conversations if missing
-        let conv_columns: Vec<String> = self.conn
+        let conv_columns: Vec<String> = conn
             .prepare("PRAGMA table_info(conversations)")?
             .query_map([], |row| row.get::<_, String>(1))?
             .filter_map(|r| r.ok())
             .collect();
         if !conv_columns.iter().any(|c| c == "memory_forwarded_at") {
-            self.conn.execute_batch(
+            conn.execute_batch(
                 "ALTER TABLE conversations ADD COLUMN memory_forwarded_at TEXT;"
             )?;
         }
         if !conv_columns.iter().any(|c| c == "user_voice_forwarded_at") {
-            self.conn.execute_batch(
+            conn.execute_batch(
                 "ALTER TABLE conversations ADD COLUMN user_voice_forwarded_at TEXT;"
             )?;
         }
         // Unified realtime watermark (replaces memory_forwarded_at + user_voice_forwarded_at)
         if !conv_columns.iter().any(|c| c == "realtime_forwarded_at") {
-            self.conn.execute_batch(
+            conn.execute_batch(
                 "ALTER TABLE conversations ADD COLUMN realtime_forwarded_at TEXT;"
             )?;
             // Migrate: set realtime watermark to max of old watermarks
-            self.conn.execute_batch(
+            conn.execute_batch(
                 "UPDATE conversations SET realtime_forwarded_at = MAX(
                     COALESCE(memory_forwarded_at, ''),
                     COALESCE(user_voice_forwarded_at, '')
@@ -296,21 +333,21 @@ impl MissionDB {
         }
 
         // Performance indexes for conversation messages
-        self.conn.execute_batch(
+        conn.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_msg_uuid ON conversation_messages(message_uuid);
              CREATE INDEX IF NOT EXISTS idx_conv_memory_pending ON conversations(slot_id, memory_forwarded_at);
              CREATE INDEX IF NOT EXISTS idx_conv_realtime_pending ON conversations(slot_id, realtime_forwarded_at);"
         )?;
 
         // Message-level pipeline tracking (replaces conversation-level watermarks)
-        let has_mps: bool = self.conn.query_row(
+        let has_mps: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='message_pipeline_state'",
             [],
             |row| row.get(0),
         )?;
 
         if !has_mps {
-            self.conn.execute_batch(
+            conn.execute_batch(
                 "CREATE TABLE message_pipeline_state (
                     message_id INTEGER NOT NULL,
                     pipeline TEXT NOT NULL,
@@ -323,7 +360,7 @@ impl MissionDB {
             )?;
 
             // Migrate from old watermarks: messages before realtime_forwarded_at → done
-            self.conn.execute_batch(
+            conn.execute_batch(
                 "INSERT OR IGNORE INTO message_pipeline_state (message_id, pipeline, status, done_at)
                  SELECT m.id, 'realtime',
                      CASE WHEN c.realtime_forwarded_at IS NOT NULL
@@ -340,7 +377,7 @@ impl MissionDB {
             )?;
 
             // Migrate deep_analysis: analyzed conversations → done
-            self.conn.execute_batch(
+            conn.execute_batch(
                 "INSERT OR IGNORE INTO message_pipeline_state (message_id, pipeline, status, done_at)
                  SELECT m.id, 'deep_analysis',
                      CASE WHEN c.analyzed_at IS NOT NULL THEN 'done' ELSE 'pending' END,
@@ -360,7 +397,8 @@ impl MissionDB {
 
     /// Insert a new task
     pub fn insert_task(&self, task: &Task) -> SqliteResult<()> {
-        self.conn.execute(
+        let conn = self.conn();
+        conn.execute(
             "INSERT INTO tasks (id, role, prompt, status, slot_id, session_id, result, error, created_at, started_at, finished_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
@@ -422,13 +460,15 @@ impl MissionDB {
         values.push(Box::new(id.to_string()));
 
         let params: Vec<&dyn rusqlite::ToSql> = values.iter().map(|v| v.as_ref()).collect();
-        self.conn.execute(&sql, params.as_slice())?;
+        let conn = self.conn();
+        conn.execute(&sql, params.as_slice())?;
         Ok(())
     }
 
     /// Get a task by ID
     pub fn get_task(&self, id: &str) -> SqliteResult<Option<Task>> {
-        let mut stmt = self.conn.prepare("SELECT * FROM tasks WHERE id = ?")?;
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT * FROM tasks WHERE id = ?")?;
         let mut rows = stmt.query(params![id])?;
 
         if let Some(row) = rows.next()? {
@@ -440,8 +480,8 @@ impl MissionDB {
 
     /// Get all tasks by status
     pub fn get_tasks_by_status(&self, status: TaskStatus) -> SqliteResult<Vec<Task>> {
-        let mut stmt = self
-            .conn
+        let conn = self.conn();
+        let mut stmt = conn
             .prepare("SELECT * FROM tasks WHERE status = ? ORDER BY created_at ASC")?;
         let rows = stmt.query_map(params![status.as_str()], |row| Self::row_to_task(row))?;
 
@@ -454,7 +494,8 @@ impl MissionDB {
 
     /// Get queued tasks by role
     pub fn get_queued_tasks_by_role(&self, role: &str) -> SqliteResult<Vec<Task>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT * FROM tasks WHERE status = 'queued' AND role = ? ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![role], |row| Self::row_to_task(row))?;
@@ -468,8 +509,8 @@ impl MissionDB {
 
     /// Get all tasks (for listing)
     pub fn get_all_tasks(&self, limit: i64) -> SqliteResult<Vec<Task>> {
-        let mut stmt = self
-            .conn
+        let conn = self.conn();
+        let mut stmt = conn
             .prepare("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?")?;
         let rows = stmt.query_map(params![limit], |row| Self::row_to_task(row))?;
 
@@ -503,7 +544,8 @@ impl MissionDB {
 
     /// Insert an inbox message
     pub fn insert_inbox_message(&self, msg: &InboxMessage) -> SqliteResult<()> {
-        self.conn.execute(
+        let conn = self.conn();
+        conn.execute(
             "INSERT INTO inbox (id, task_id, from_role, content, read, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
@@ -526,7 +568,8 @@ impl MissionDB {
             "SELECT * FROM inbox ORDER BY created_at DESC LIMIT ?"
         };
 
-        let mut stmt = self.conn.prepare(sql)?;
+        let conn = self.conn();
+        let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map(params![limit], |row| Self::row_to_inbox_message(row))?;
 
         let mut messages = Vec::new();
@@ -538,8 +581,8 @@ impl MissionDB {
 
     /// Mark an inbox message as read
     pub fn mark_inbox_read(&self, id: &str) -> SqliteResult<()> {
-        self.conn
-            .execute("UPDATE inbox SET read = 1 WHERE id = ?", params![id])?;
+        let conn = self.conn();
+        conn.execute("UPDATE inbox SET read = 1 WHERE id = ?", params![id])?;
         Ok(())
     }
 
@@ -567,19 +610,20 @@ impl MissionDB {
     ) -> SqliteResult<i64> {
         let data_str = data.map(|d| serde_json::to_string(d).unwrap_or_default());
 
-        self.conn.execute(
+        let conn = self.conn();
+        conn.execute(
             "INSERT INTO events (task_id, type, data, timestamp)
              VALUES (?1, ?2, ?3, ?4)",
             params![task_id, event_type.as_str(), data_str, timestamp],
         )?;
 
-        Ok(self.conn.last_insert_rowid())
+        Ok(conn.last_insert_rowid())
     }
 
     /// Get events by task ID
     pub fn get_events_by_task(&self, task_id: &str) -> SqliteResult<Vec<TaskEvent>> {
-        let mut stmt = self
-            .conn
+        let conn = self.conn();
+        let mut stmt = conn
             .prepare("SELECT * FROM events WHERE task_id = ? ORDER BY id ASC")?;
         let rows = stmt.query_map(params![task_id], |row| Self::row_to_event(row))?;
 
@@ -609,8 +653,8 @@ impl MissionDB {
 
     /// Get session ID for a slot
     pub fn get_slot_session(&self, slot_id: &str) -> SqliteResult<Option<String>> {
-        let mut stmt = self
-            .conn
+        let conn = self.conn();
+        let mut stmt = conn
             .prepare("SELECT session_id FROM slot_sessions WHERE slot_id = ?")?;
         let mut rows = stmt.query(params![slot_id])?;
 
@@ -624,7 +668,8 @@ impl MissionDB {
     /// Set session ID for a slot (upsert)
     pub fn set_slot_session(&self, slot_id: &str, session_id: &str) -> SqliteResult<()> {
         let now = chrono::Utc::now().timestamp_millis();
-        self.conn.execute(
+        let conn = self.conn();
+        conn.execute(
             "INSERT INTO slot_sessions (slot_id, session_id, updated_at)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(slot_id) DO UPDATE SET session_id = ?2, updated_at = ?3",
@@ -635,8 +680,8 @@ impl MissionDB {
 
     /// Delete a slot session
     pub fn delete_slot_session(&self, slot_id: &str) -> SqliteResult<()> {
-        self.conn
-            .execute("DELETE FROM slot_sessions WHERE slot_id = ?", params![slot_id])?;
+        let conn = self.conn();
+        conn.execute("DELETE FROM slot_sessions WHERE slot_id = ?", params![slot_id])?;
         Ok(())
     }
 
@@ -647,8 +692,8 @@ impl MissionDB {
 
     /// Get all slot sessions
     pub fn get_all_slot_sessions(&self) -> SqliteResult<Vec<(String, String)>> {
-        let mut stmt = self
-            .conn
+        let conn = self.conn();
+        let mut stmt = conn
             .prepare("SELECT slot_id, session_id FROM slot_sessions")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -663,7 +708,8 @@ impl MissionDB {
 
     /// Get slot_id for a given session_id (reverse lookup)
     pub fn get_slot_for_session(&self, session_id: &str) -> SqliteResult<Option<String>> {
-        self.conn.query_row(
+        let conn = self.conn();
+        conn.query_row(
             "SELECT slot_id FROM slot_sessions WHERE session_id = ?1",
             params![session_id],
             |row| row.get(0),
@@ -674,7 +720,8 @@ impl MissionDB {
 
     /// Insert a new board task
     pub fn insert_board_task(&self, task: &BoardTask) -> SqliteResult<()> {
-        self.conn.execute(
+        let conn = self.conn();
+        conn.execute(
             "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, hidden, order_idx, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
@@ -706,23 +753,23 @@ impl MissionDB {
         let id = uuid::Uuid::new_v4().to_string();
 
         // Get max order for siblings
+        let conn = self.conn();
         let max_order: i64 = if let Some(ref pid) = input.parent_id {
-            self.conn
-                .query_row(
-                    "SELECT COALESCE(MAX(order_idx), -1) FROM board_tasks WHERE parent_id = ?1",
-                    params![pid],
-                    |row| row.get(0),
-                )
-                .unwrap_or(-1)
+            conn.query_row(
+                "SELECT COALESCE(MAX(order_idx), -1) FROM board_tasks WHERE parent_id = ?1",
+                params![pid],
+                |row| row.get(0),
+            )
+            .unwrap_or(-1)
         } else {
-            self.conn
-                .query_row(
-                    "SELECT COALESCE(MAX(order_idx), -1) FROM board_tasks WHERE parent_id IS NULL",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or(-1)
+            conn.query_row(
+                "SELECT COALESCE(MAX(order_idx), -1) FROM board_tasks WHERE parent_id IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(-1)
         };
+        drop(conn);
 
         let task = BoardTask {
             id,
@@ -750,8 +797,8 @@ impl MissionDB {
 
     /// Get a board task by ID
     pub fn get_board_task(&self, id: &str) -> SqliteResult<Option<BoardTask>> {
-        let mut stmt = self
-            .conn
+        let conn = self.conn();
+        let mut stmt = conn
             .prepare("SELECT * FROM board_tasks WHERE id = ?")?;
         let mut rows = stmt.query(params![id])?;
 
@@ -764,12 +811,13 @@ impl MissionDB {
 
     /// List all board tasks (optionally filtered by status, hidden excluded by default)
     pub fn list_board_tasks(&self, status: Option<&str>, include_hidden: bool) -> SqliteResult<Vec<BoardTask>> {
+        let conn = self.conn();
         let mut tasks = Vec::new();
         let hidden_clause = if include_hidden { "" } else { " AND hidden = 0" };
 
         if let Some(s) = status {
             let sql = format!("SELECT * FROM board_tasks WHERE status = ?1{} ORDER BY order_idx ASC", hidden_clause);
-            let mut stmt = self.conn.prepare(&sql)?;
+            let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map(params![s], |row| Self::row_to_board_task(row))?;
             for task in rows {
                 tasks.push(task?);
@@ -780,7 +828,7 @@ impl MissionDB {
             } else {
                 "SELECT * FROM board_tasks WHERE hidden = 0 ORDER BY order_idx ASC".to_string()
             };
-            let mut stmt = self.conn.prepare(&sql)?;
+            let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map([], |row| Self::row_to_board_task(row))?;
             for task in rows {
                 tasks.push(task?);
@@ -839,20 +887,23 @@ impl MissionDB {
         values.push(Box::new(id.to_string()));
 
         let params: Vec<&dyn rusqlite::ToSql> = values.iter().map(|v| v.as_ref()).collect();
-        self.conn.execute(&sql, params.as_slice())?;
+        {
+            let conn = self.conn();
+            conn.execute(&sql, params.as_slice())?;
+        }
 
         self.get_board_task(id)
     }
 
     /// Delete a board task and all descendants
     pub fn delete_board_task(&self, id: &str) -> SqliteResult<i64> {
+        let conn = self.conn();
         // Collect all descendant IDs recursively
         let mut to_delete = vec![id.to_string()];
         let mut i = 0;
         while i < to_delete.len() {
             let current = to_delete[i].clone();
-            let mut stmt = self
-                .conn
+            let mut stmt = conn
                 .prepare("SELECT id FROM board_tasks WHERE parent_id = ?")?;
             let children: Vec<String> = stmt
                 .query_map(params![current], |row| row.get(0))?
@@ -864,10 +915,8 @@ impl MissionDB {
 
         let mut deleted = 0i64;
         for tid in &to_delete {
-            self.conn
-                .execute("DELETE FROM board_task_notes WHERE task_id = ?", params![tid])?;
-            let r = self
-                .conn
+            conn.execute("DELETE FROM board_task_notes WHERE task_id = ?", params![tid])?;
+            let r = conn
                 .execute("DELETE FROM board_tasks WHERE id = ?", params![tid])?;
             deleted += r as i64;
         }
@@ -895,7 +944,8 @@ impl MissionDB {
     /// (auto_execute=true, status=open, due_date <= now, has assignee)
     pub fn list_autopilot_tasks(&self) -> SqliteResult<Vec<BoardTask>> {
         let now = chrono::Utc::now().to_rfc3339();
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT * FROM board_tasks
              WHERE auto_execute = 1
                AND status = 'open'
@@ -913,8 +963,8 @@ impl MissionDB {
 
     /// Clear all done board tasks
     pub fn clear_done_board_tasks(&self) -> SqliteResult<i64> {
-        let result = self
-            .conn
+        let conn = self.conn();
+        let result = conn
             .execute("DELETE FROM board_tasks WHERE status = 'done'", [])?;
         Ok(result as i64)
     }
@@ -957,8 +1007,10 @@ impl MissionDB {
         let id = uuid::Uuid::new_v4().to_string();
         let note_type_str = input.note_type.as_deref().unwrap_or("note");
 
+        let conn = self.conn();
+
         // Verify task exists
-        let task_exists: bool = self.conn.query_row(
+        let task_exists: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM board_tasks WHERE id = ?1",
             params![input.task_id],
             |row| row.get(0),
@@ -969,7 +1021,7 @@ impl MissionDB {
 
         let note_type = BoardNoteType::from_str(note_type_str).unwrap_or(BoardNoteType::Note);
 
-        self.conn.execute(
+        conn.execute(
             "INSERT INTO board_task_notes (id, task_id, content, note_type, author, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![id, input.task_id, input.content, note_type.as_str(), input.author, now],
@@ -987,7 +1039,8 @@ impl MissionDB {
 
     /// Get all notes for a board task (ordered by creation time ASC)
     pub fn get_board_task_notes(&self, task_id: &str) -> SqliteResult<Vec<BoardTaskNote>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT id, task_id, content, note_type, author, created_at
              FROM board_task_notes WHERE task_id = ?1 ORDER BY created_at ASC",
         )?;
@@ -1046,7 +1099,8 @@ impl MissionDB {
             created_at: now.clone(),
             updated_at: now,
         };
-        self.conn.execute(
+        let conn = self.conn();
+        conn.execute(
             "INSERT INTO agent_questions (id, task_id, slot_id, session_id, question, context, status, answer, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
@@ -1059,8 +1113,8 @@ impl MissionDB {
     }
 
     pub fn get_agent_question(&self, id: &str) -> SqliteResult<Option<AgentQuestion>> {
-        let mut stmt = self
-            .conn
+        let conn = self.conn();
+        let mut stmt = conn
             .prepare("SELECT * FROM agent_questions WHERE id = ?1")?;
         let mut rows = stmt.query(params![id])?;
         if let Some(row) = rows.next()? {
@@ -1074,9 +1128,10 @@ impl MissionDB {
         &self,
         status: Option<&str>,
     ) -> SqliteResult<Vec<AgentQuestion>> {
+        let conn = self.conn();
         let mut questions = Vec::new();
         if let Some(s) = status {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = conn.prepare(
                 "SELECT * FROM agent_questions WHERE status = ?1 ORDER BY created_at DESC",
             )?;
             let rows = stmt.query_map(params![s], |row| Self::row_to_agent_question(row))?;
@@ -1084,7 +1139,7 @@ impl MissionDB {
                 questions.push(q?);
             }
         } else {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = conn.prepare(
                 "SELECT * FROM agent_questions ORDER BY created_at DESC",
             )?;
             let rows = stmt.query_map([], |row| Self::row_to_agent_question(row))?;
@@ -1101,19 +1156,25 @@ impl MissionDB {
         answer: &str,
     ) -> SqliteResult<Option<AgentQuestion>> {
         let now = chrono::Utc::now().to_rfc3339();
-        self.conn.execute(
-            "UPDATE agent_questions SET answer = ?1, status = 'answered', updated_at = ?2 WHERE id = ?3",
-            params![answer, now, id],
-        )?;
+        {
+            let conn = self.conn();
+            conn.execute(
+                "UPDATE agent_questions SET answer = ?1, status = 'answered', updated_at = ?2 WHERE id = ?3",
+                params![answer, now, id],
+            )?;
+        }
         self.get_agent_question(id)
     }
 
     pub fn dismiss_agent_question(&self, id: &str) -> SqliteResult<Option<AgentQuestion>> {
         let now = chrono::Utc::now().to_rfc3339();
-        self.conn.execute(
-            "UPDATE agent_questions SET status = 'dismissed', updated_at = ?1 WHERE id = ?2",
-            params![now, id],
-        )?;
+        {
+            let conn = self.conn();
+            conn.execute(
+                "UPDATE agent_questions SET status = 'dismissed', updated_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )?;
+        }
         self.get_agent_question(id)
     }
 
@@ -1186,18 +1247,50 @@ impl MissionDB {
             confidence = confidence.min(0.5);
         }
 
+        let conn = self.conn();
+
         // 1. Exact match by (category, key) → update
-        let updated = self.conn.execute(
+        let updated = conn.execute(
             "UPDATE knowledge SET summary = ?1, detail = ?2, source = ?3, confidence = ?4, updated_at = ?5
              WHERE category = ?6 AND key = ?7",
             params![input.summary, detail_str, source, confidence, now, input.category, input.key],
         )?;
 
         if updated > 0 {
-            let entry = self.kb_get_by_category_key(&input.category, &input.key)?;
+            let entry = Self::kb_get_by_category_key_with_conn(&conn, &input.category, &input.key)?;
             if let Some(ref e) = entry {
-                self.kb_sync_fts(e)?;
+                Self::kb_sync_fts_with_conn(&conn, e)?;
             }
+            return Ok(KBRememberResult {
+                entry: entry.unwrap(),
+                action: "updated".to_string(),
+                merged_key: None,
+                similarity: None,
+            });
+        }
+
+        // 1b. Same key, different category → update in-place (re-categorize)
+        let existing_by_key: Option<KnowledgeEntry> = {
+            let mut stmt = conn.prepare("SELECT * FROM knowledge WHERE key = ?1")?;
+            let mut rows = stmt.query(params![input.key])?;
+            if let Some(row) = rows.next()? {
+                Some(Self::row_to_knowledge_entry(row)?)
+            } else {
+                None
+            }
+        };
+        if let Some(existing) = existing_by_key {
+            let old_category = existing.category.clone();
+            conn.execute(
+                "UPDATE knowledge SET category = ?1, summary = ?2, detail = ?3, source = ?4, confidence = ?5, updated_at = ?6
+                 WHERE id = ?7",
+                params![input.category, input.summary, detail_str, source, confidence, now, existing.id],
+            )?;
+            let entry = Self::kb_get_by_category_key_with_conn(&conn, &input.category, &input.key)?;
+            if let Some(ref e) = entry {
+                Self::kb_sync_fts_with_conn(&conn, e)?;
+            }
+            tracing::info!(key = %input.key, from = %old_category, to = %input.category, "KB entry re-categorized");
             return Ok(KBRememberResult {
                 entry: entry.unwrap(),
                 action: "updated".to_string(),
@@ -1208,21 +1301,22 @@ impl MissionDB {
 
         // 2. Fuzzy dedup: check for similar entries in same category
         const SIMILARITY_THRESHOLD: f64 = 0.5;
-        if let Some((sim, existing)) = self.kb_find_similar(
+        if let Some((sim, existing)) = Self::kb_find_similar_with_conn(
+            &conn,
             &input.category,
             &format!("{} {}", input.key, input.summary),
             SIMILARITY_THRESHOLD,
         )? {
             // Merge: update the existing entry with new summary
-            self.conn.execute(
+            conn.execute(
                 "UPDATE knowledge SET summary = ?1, detail = ?2, source = ?3, confidence = ?4, updated_at = ?5
                  WHERE id = ?6",
                 params![input.summary, detail_str, source, confidence, now, existing.id],
             )?;
             let merged_key = existing.key.clone();
-            let entry = self.kb_get_by_category_key(&existing.category, &existing.key)?;
+            let entry = Self::kb_get_by_category_key_with_conn(&conn, &existing.category, &existing.key)?;
             if let Some(ref e) = entry {
-                self.kb_sync_fts(e)?;
+                Self::kb_sync_fts_with_conn(&conn, e)?;
             }
             return Ok(KBRememberResult {
                 entry: entry.unwrap(),
@@ -1234,7 +1328,7 @@ impl MissionDB {
 
         // 3. Insert new
         let id = uuid::Uuid::new_v4().to_string();
-        self.conn.execute(
+        conn.execute(
             "INSERT INTO knowledge (id, category, key, summary, detail, source, confidence, access_count, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9)",
             params![id, input.category, input.key, input.summary, detail_str, source, confidence, now, now],
@@ -1254,7 +1348,7 @@ impl MissionDB {
             last_accessed_at: None,
         };
 
-        self.kb_sync_fts(&entry)?;
+        Self::kb_sync_fts_with_conn(&conn, &entry)?;
 
         Ok(KBRememberResult {
             entry,
@@ -1264,14 +1358,14 @@ impl MissionDB {
         })
     }
 
-    /// Find the most similar entry in the same category
-    fn kb_find_similar(
-        &self,
+    /// Find the most similar entry in the same category (uses existing connection)
+    fn kb_find_similar_with_conn(
+        conn: &Connection,
         category: &str,
         new_text: &str,
         threshold: f64,
     ) -> SqliteResult<Option<(f64, KnowledgeEntry)>> {
-        let entries = self.kb_list(Some(category))?;
+        let entries = Self::kb_list_with_conn(conn, Some(category))?;
 
         let mut best: Option<(f64, KnowledgeEntry)> = None;
         for entry in entries {
@@ -1291,7 +1385,8 @@ impl MissionDB {
 
     /// Get a knowledge entry by key
     pub fn kb_get(&self, key: &str) -> SqliteResult<Option<KnowledgeEntry>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT * FROM knowledge WHERE key = ?1"
         )?;
         let mut rows = stmt.query(params![key])?;
@@ -1299,7 +1394,7 @@ impl MissionDB {
             let mut entry = Self::row_to_knowledge_entry(row)?;
             // Bump access count
             let now = chrono::Utc::now().to_rfc3339();
-            self.conn.execute(
+            conn.execute(
                 "UPDATE knowledge SET access_count = access_count + 1, last_accessed_at = ?1 WHERE id = ?2",
                 params![now, entry.id],
             )?;
@@ -1311,9 +1406,9 @@ impl MissionDB {
         }
     }
 
-    /// Get by category + key (internal, no access bump)
-    fn kb_get_by_category_key(&self, category: &str, key: &str) -> SqliteResult<Option<KnowledgeEntry>> {
-        let mut stmt = self.conn.prepare(
+    /// Get by category + key (internal, no access bump, uses existing connection)
+    fn kb_get_by_category_key_with_conn(conn: &Connection, category: &str, key: &str) -> SqliteResult<Option<KnowledgeEntry>> {
+        let mut stmt = conn.prepare(
             "SELECT * FROM knowledge WHERE category = ?1 AND key = ?2"
         )?;
         let mut rows = stmt.query(params![category, key])?;
@@ -1328,12 +1423,32 @@ impl MissionDB {
     pub fn kb_search(&self, query: &str, category: Option<&str>) -> SqliteResult<Vec<KnowledgeEntry>> {
         // Phase 1: FTS5 search (works well for English / space-separated tokens)
         let results = self.kb_search_fts(query, category)?;
+        let results = if results.is_empty() {
+            // Phase 2: LIKE fallback (works for Chinese and partial matches)
+            self.kb_search_like(query, category)?
+        } else {
+            results
+        };
+
+        // Update access_count + last_accessed_at for all matched entries
         if !results.is_empty() {
-            return Ok(results);
+            self.kb_update_access_stats(&results)?;
         }
 
-        // Phase 2: LIKE fallback (works for Chinese and partial matches)
-        self.kb_search_like(query, category)
+        Ok(results)
+    }
+
+    /// Batch update access_count and last_accessed_at for search hits
+    fn kb_update_access_stats(&self, entries: &[KnowledgeEntry]) -> SqliteResult<()> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut stmt = conn.prepare(
+            "UPDATE knowledge SET access_count = access_count + 1, last_accessed_at = ?1 WHERE id = ?2"
+        )?;
+        for entry in entries {
+            stmt.execute(params![now, entry.id])?;
+        }
+        Ok(())
     }
 
     /// FTS5-based search
@@ -1347,11 +1462,12 @@ impl MissionDB {
             return Ok(Vec::new());
         }
 
+        let conn = self.conn();
         let mut results = Vec::new();
 
         if let Some(cat) = category {
             let like_pattern = format!("{}:%", cat);
-            let mut stmt = self.conn.prepare(
+            let mut stmt = conn.prepare(
                 "SELECT k.* FROM knowledge k
                  JOIN knowledge_fts f ON k.rowid = f.rowid
                  WHERE knowledge_fts MATCH ?1 AND (k.category = ?2 OR k.category LIKE ?3)
@@ -1362,7 +1478,7 @@ impl MissionDB {
                 results.push(entry?);
             }
         } else {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = conn.prepare(
                 "SELECT k.* FROM knowledge k
                  JOIN knowledge_fts f ON k.rowid = f.rowid
                  WHERE knowledge_fts MATCH ?1
@@ -1414,7 +1530,8 @@ impl MissionDB {
         }
         sql.push_str(" ORDER BY access_count DESC, updated_at DESC LIMIT 20");
 
-        let mut stmt = self.conn.prepare(&sql)?;
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&sql)?;
 
         // Bind parameters: %keyword% for each, then optional category + like pattern
         let like_params: Vec<String> = keywords.iter().map(|kw| format!("%{}%", kw)).collect();
@@ -1444,10 +1561,16 @@ impl MissionDB {
     /// List knowledge entries, optionally filtered by category.
     /// Supports composite categories: querying "memory" also returns "memory:architecture" etc.
     pub fn kb_list(&self, category: Option<&str>) -> SqliteResult<Vec<KnowledgeEntry>> {
+        let conn = self.conn();
+        Self::kb_list_with_conn(&conn, category)
+    }
+
+    /// List knowledge entries using an existing connection (no lock)
+    fn kb_list_with_conn(conn: &Connection, category: Option<&str>) -> SqliteResult<Vec<KnowledgeEntry>> {
         let mut entries = Vec::new();
         if let Some(cat) = category {
             let like_pattern = format!("{}:%", cat);
-            let mut stmt = self.conn.prepare(
+            let mut stmt = conn.prepare(
                 "SELECT * FROM knowledge WHERE category = ?1 OR category LIKE ?2 ORDER BY updated_at DESC"
             )?;
             let rows = stmt.query_map(params![cat, like_pattern], |row| Self::row_to_knowledge_entry(row))?;
@@ -1455,7 +1578,7 @@ impl MissionDB {
                 entries.push(entry?);
             }
         } else {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = conn.prepare(
                 "SELECT * FROM knowledge ORDER BY category, updated_at DESC"
             )?;
             let rows = stmt.query_map([], |row| Self::row_to_knowledge_entry(row))?;
@@ -1468,8 +1591,14 @@ impl MissionDB {
 
     /// Forget (delete) a knowledge entry by key
     pub fn kb_forget(&self, key: &str) -> SqliteResult<bool> {
+        let conn = self.conn();
+        Self::kb_forget_with_conn(&conn, key)
+    }
+
+    /// Forget using an existing connection (no lock)
+    fn kb_forget_with_conn(conn: &Connection, key: &str) -> SqliteResult<bool> {
         // Read entry values for FTS cleanup (external content FTS requires actual values)
-        let entry: Option<(i64, String, String, String, String)> = self.conn.query_row(
+        let entry: Option<(i64, String, String, String, String)> = conn.query_row(
             "SELECT rowid, key, summary, COALESCE(detail, ''), category FROM knowledge WHERE key = ?1",
             params![key],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
@@ -1477,13 +1606,13 @@ impl MissionDB {
 
         if let Some((rowid, k, summary, detail, category)) = entry {
             // Remove from FTS first (must provide actual indexed values)
-            self.conn.execute(
+            conn.execute(
                 "INSERT INTO knowledge_fts(knowledge_fts, rowid, key, summary, detail, category) VALUES('delete', ?1, ?2, ?3, ?4, ?5)",
                 params![rowid, k, summary, detail, category],
             ).ok();
         }
 
-        let deleted = self.conn.execute(
+        let deleted = conn.execute(
             "DELETE FROM knowledge WHERE key = ?1",
             params![key],
         )?;
@@ -1492,18 +1621,19 @@ impl MissionDB {
 
     /// Batch delete multiple knowledge entries by keys. Returns count of deleted entries.
     pub fn kb_batch_forget(&self, keys: &[String]) -> SqliteResult<usize> {
+        let conn = self.conn();
         let mut deleted = 0;
         for key in keys {
-            if self.kb_forget(key)? {
+            if Self::kb_forget_with_conn(&conn, key)? {
                 deleted += 1;
             }
         }
         Ok(deleted)
     }
 
-    /// Sync FTS index for a knowledge entry
-    fn kb_sync_fts(&self, entry: &KnowledgeEntry) -> SqliteResult<()> {
-        let rowid: i64 = self.conn.query_row(
+    /// Sync FTS index for a knowledge entry (uses existing connection)
+    fn kb_sync_fts_with_conn(conn: &Connection, entry: &KnowledgeEntry) -> SqliteResult<()> {
+        let rowid: i64 = conn.query_row(
             "SELECT rowid FROM knowledge WHERE id = ?1",
             params![entry.id],
             |row| row.get(0),
@@ -1513,19 +1643,19 @@ impl MissionDB {
             .unwrap_or_default();
 
         // Delete old FTS entry (must provide actual indexed values for external content)
-        let old_values: Option<(String, String, String, String)> = self.conn.query_row(
+        let old_values: Option<(String, String, String, String)> = conn.query_row(
             "SELECT key, summary, COALESCE(detail, ''), category FROM knowledge WHERE id = ?1",
             params![entry.id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ).ok();
         if let Some((old_key, old_summary, old_detail, old_category)) = old_values {
-            self.conn.execute(
+            conn.execute(
                 "INSERT INTO knowledge_fts(knowledge_fts, rowid, key, summary, detail, category) VALUES('delete', ?1, ?2, ?3, ?4, ?5)",
                 params![rowid, old_key, old_summary, old_detail, old_category],
             ).ok();
         }
 
-        self.conn.execute(
+        conn.execute(
             "INSERT INTO knowledge_fts(rowid, key, summary, detail, category) VALUES(?1, ?2, ?3, ?4, ?5)",
             params![rowid, entry.key, entry.summary, detail_str, entry.category],
         )?;
@@ -1534,7 +1664,8 @@ impl MissionDB {
 
     /// Get KB category counts for summary string
     pub fn kb_summary(&self) -> SqliteResult<Vec<(String, i64)>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT category, COUNT(*) as cnt FROM knowledge GROUP BY category ORDER BY cnt DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1545,7 +1676,8 @@ impl MissionDB {
 
     /// Get top N hot keys by access_count (for instructions injection)
     pub fn kb_hot_keys(&self, limit: i64) -> SqliteResult<Vec<String>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT key FROM knowledge ORDER BY access_count DESC, updated_at DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit], |row| row.get::<_, String>(0))?;
@@ -1554,7 +1686,8 @@ impl MissionDB {
 
     /// Find stale entries: never accessed and older than N days
     pub fn kb_find_stale(&self, days: i64) -> SqliteResult<Vec<KnowledgeEntry>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT * FROM knowledge WHERE access_count = 0 \
              AND last_accessed_at IS NULL \
              AND julianday('now') - julianday(updated_at) > ?1 \
@@ -1597,21 +1730,23 @@ impl MissionDB {
 
     /// Get KB statistics for governance
     pub fn kb_stats(&self) -> SqliteResult<serde_json::Value> {
-        let total: i64 = self.conn.query_row(
+        let conn = self.conn();
+        let total: i64 = conn.query_row(
             "SELECT COUNT(*) FROM knowledge", [], |row| row.get(0)
         )?;
-        let never_accessed: i64 = self.conn.query_row(
+        let never_accessed: i64 = conn.query_row(
             "SELECT COUNT(*) FROM knowledge WHERE access_count = 0 AND last_accessed_at IS NULL",
             [], |row| row.get(0),
         )?;
-        let most_accessed: Option<(String, String, i64)> = self.conn.query_row(
+        let most_accessed: Option<(String, String, i64)> = conn.query_row(
             "SELECT category, key, access_count FROM knowledge ORDER BY access_count DESC LIMIT 1",
             [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).ok();
-        let oldest: Option<(String, String, String)> = self.conn.query_row(
+        let oldest: Option<(String, String, String)> = conn.query_row(
             "SELECT category, key, updated_at FROM knowledge ORDER BY updated_at ASC LIMIT 1",
             [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).ok();
+        drop(conn);
 
         let mut stats = serde_json::json!({
             "total": total,
@@ -1650,9 +1785,10 @@ impl MissionDB {
         if msg_ids.is_empty() || pipelines.is_empty() {
             return Ok(());
         }
+        let conn = self.conn();
         for &msg_id in msg_ids {
             for &pipeline in pipelines {
-                self.conn.execute(
+                conn.execute(
                     "INSERT OR IGNORE INTO message_pipeline_state (message_id, pipeline, status) VALUES (?1, ?2, 'pending')",
                     params![msg_id, pipeline],
                 )?;
@@ -1663,7 +1799,8 @@ impl MissionDB {
 
     /// Check if any pending messages exist for a pipeline (lightweight)
     pub fn has_pending_pipeline_messages(&self, pipeline: &str) -> SqliteResult<bool> {
-        self.conn.query_row(
+        let conn = self.conn();
+        conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM message_pipeline_state WHERE pipeline = ?1 AND status = 'pending')",
             params![pipeline],
             |row| row.get(0),
@@ -1672,7 +1809,8 @@ impl MissionDB {
 
     /// Get pending messages for a pipeline, grouped by session
     pub fn get_pending_pipeline_messages(&self, pipeline: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT m.*, COALESCE(c.project, '') as c_project
              FROM conversation_messages m
              JOIN message_pipeline_state mps ON mps.message_id = m.id
@@ -1702,9 +1840,10 @@ impl MissionDB {
             return Ok(0);
         }
         let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn();
         let mut count = 0usize;
         for &msg_id in msg_ids {
-            count += self.conn.execute(
+            count += conn.execute(
                 "UPDATE message_pipeline_state SET status = 'done', done_at = ?1 WHERE message_id = ?2 AND pipeline = ?3 AND status = 'pending'",
                 params![now, msg_id, pipeline],
             )?;
@@ -1714,7 +1853,8 @@ impl MissionDB {
 
     /// Get all pending message IDs for a pipeline (lightweight, no full message content)
     pub fn get_pending_pipeline_msg_ids(&self, pipeline: &str) -> SqliteResult<Vec<i64>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT message_id FROM message_pipeline_state WHERE pipeline = ?1 AND status = 'pending' ORDER BY message_id ASC",
         )?;
         let ids = stmt
@@ -1726,12 +1866,15 @@ impl MissionDB {
 
     /// Get completed conversations that still have pending messages for a pipeline
     pub fn get_conversations_with_pending_pipeline(&self, pipeline: &str) -> SqliteResult<Vec<Conversation>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT DISTINCT c.* FROM conversations c
              JOIN conversation_messages m ON m.session_id = c.id
              JOIN message_pipeline_state mps ON mps.message_id = m.id
              WHERE c.status = 'completed'
                AND mps.pipeline = ?1 AND mps.status = 'pending'
+               AND c.slot_id IS NULL
+               AND c.id NOT LIKE 'agent-%'
              ORDER BY c.started_at DESC"
         )?;
         let rows = stmt.query_map(params![pipeline], |row| Self::row_to_conversation(row))?;
@@ -1742,7 +1885,8 @@ impl MissionDB {
 
     /// Get all user/assistant message IDs for a session
     pub fn get_pipeline_message_ids_for_session(&self, session_id: &str) -> SqliteResult<Vec<i64>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT id FROM conversation_messages WHERE session_id = ?1 AND role IN ('user', 'assistant') ORDER BY id ASC"
         )?;
         let ids = stmt.query_map(params![session_id], |row| row.get(0))?
@@ -1755,7 +1899,8 @@ impl MissionDB {
 
     /// Upsert a conversation session
     pub fn upsert_conversation(&self, conv: &Conversation) -> SqliteResult<()> {
-        self.conn.execute(
+        let conn = self.conn();
+        conn.execute(
             "INSERT INTO conversations (id, project, slot_id, source, model, git_branch, jsonl_path, message_count, started_at, ended_at, status, analyzed_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
@@ -1776,7 +1921,8 @@ impl MissionDB {
     /// Insert a conversation message, returns the auto-increment ID.
     /// Dedup via UNIQUE index on message_uuid — duplicate inserts are silently ignored.
     pub fn insert_conversation_message(&self, msg: &ConversationMessage) -> SqliteResult<i64> {
-        self.conn.execute(
+        let conn = self.conn();
+        conn.execute(
             "INSERT OR IGNORE INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
@@ -1784,7 +1930,7 @@ impl MissionDB {
                 msg.message_uuid, msg.parent_uuid, msg.model, msg.timestamp, msg.metadata,
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        Ok(conn.last_insert_rowid())
     }
 
     /// Batch insert conversation messages within a transaction.
@@ -1794,7 +1940,8 @@ impl MissionDB {
             return Ok(Vec::new());
         }
         let session_id = &messages[0].session_id;
-        let tx = self.conn.unchecked_transaction()?;
+        let conn = self.conn();
+        let tx = conn.unchecked_transaction()?;
         let mut inserted_ids = Vec::new();
         for msg in messages {
             tx.execute(
@@ -1822,7 +1969,8 @@ impl MissionDB {
 
     /// Get a conversation by ID
     pub fn get_conversation(&self, id: &str) -> SqliteResult<Option<Conversation>> {
-        let mut stmt = self.conn.prepare("SELECT * FROM conversations WHERE id = ?1")?;
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT * FROM conversations WHERE id = ?1")?;
         let mut rows = stmt.query(params![id])?;
         if let Some(row) = rows.next()? {
             Ok(Some(Self::row_to_conversation(row)?))
@@ -1833,15 +1981,16 @@ impl MissionDB {
 
     /// List conversations, optionally filtered by status
     pub fn list_conversations(&self, status: Option<&str>, limit: i64) -> SqliteResult<Vec<Conversation>> {
+        let conn = self.conn();
         let mut convs = Vec::new();
         if let Some(s) = status {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = conn.prepare(
                 "SELECT * FROM conversations WHERE status = ?1 ORDER BY started_at DESC LIMIT ?2"
             )?;
             let rows = stmt.query_map(params![s, limit], |row| Self::row_to_conversation(row))?;
             for c in rows { convs.push(c?); }
         } else {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = conn.prepare(
                 "SELECT * FROM conversations ORDER BY started_at DESC LIMIT ?1"
             )?;
             let rows = stmt.query_map(params![limit], |row| Self::row_to_conversation(row))?;
@@ -1857,16 +2006,17 @@ impl MissionDB {
         since_id: Option<i64>,
         limit: i64,
     ) -> SqliteResult<Vec<ConversationMessage>> {
+        let conn = self.conn();
         let mut msgs = Vec::new();
         if let Some(since) = since_id {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = conn.prepare(
                 "SELECT * FROM conversation_messages WHERE session_id = ?1 AND id > ?2 ORDER BY id ASC LIMIT ?3"
             )?;
             let rows = stmt.query_map(params![session_id, since, limit], |row| Self::row_to_conversation_message(row))?;
             for m in rows { msgs.push(m?); }
         } else {
             // Return last N messages
-            let mut stmt = self.conn.prepare(
+            let mut stmt = conn.prepare(
                 "SELECT * FROM (SELECT * FROM conversation_messages WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2) ORDER BY id ASC"
             )?;
             let rows = stmt.query_map(params![session_id, limit], |row| Self::row_to_conversation_message(row))?;
@@ -1878,7 +2028,8 @@ impl MissionDB {
     /// Search conversation messages by content
     pub fn search_conversation_messages(&self, query: &str, limit: i64) -> SqliteResult<Vec<ConversationMessage>> {
         let pattern = format!("%{}%", query);
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT * FROM conversation_messages WHERE content LIKE ?1 ORDER BY timestamp DESC LIMIT ?2"
         )?;
         let rows = stmt.query_map(params![pattern, limit], |row| Self::row_to_conversation_message(row))?;
@@ -1890,7 +2041,8 @@ impl MissionDB {
     /// Mark a conversation as analyzed
     pub fn mark_conversation_analyzed(&self, id: &str) -> SqliteResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        self.conn.execute(
+        let conn = self.conn();
+        conn.execute(
             "UPDATE conversations SET analyzed_at = ?1 WHERE id = ?2",
             params![now, id],
         )?;
@@ -1899,7 +2051,8 @@ impl MissionDB {
 
     /// Get conversations that are completed but not yet analyzed
     pub fn get_unanalyzed_conversations(&self) -> SqliteResult<Vec<Conversation>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT * FROM conversations WHERE status = 'completed' AND analyzed_at IS NULL ORDER BY started_at DESC"
         )?;
         let rows = stmt.query_map([], |row| Self::row_to_conversation(row))?;
@@ -1911,7 +2064,8 @@ impl MissionDB {
     /// Mark a conversation as completed
     pub fn complete_conversation(&self, id: &str) -> SqliteResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        self.conn.execute(
+        let conn = self.conn();
+        conn.execute(
             "UPDATE conversations SET status = 'completed', ended_at = ?1 WHERE id = ?2",
             params![now, id],
         )?;
@@ -1921,7 +2075,8 @@ impl MissionDB {
     /// Complete stale active conversations whose last message is older than the given cutoff.
     /// Returns the number of conversations marked completed.
     pub fn complete_stale_conversations(&self, cutoff: &str) -> SqliteResult<usize> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT c.id FROM conversations c
              WHERE c.status = 'active'
                AND (SELECT MAX(m.timestamp) FROM conversation_messages m WHERE m.session_id = c.id) < ?1"
@@ -1931,7 +2086,7 @@ impl MissionDB {
             .collect();
         let now = chrono::Utc::now().to_rfc3339();
         for id in &ids {
-            self.conn.execute(
+            conn.execute(
                 "UPDATE conversations SET status = 'completed', ended_at = ?1 WHERE id = ?2",
                 params![now, id],
             )?;
@@ -1941,7 +2096,8 @@ impl MissionDB {
 
     /// Re-activate a completed conversation when new messages arrive.
     pub fn reactivate_conversation(&self, id: &str) -> SqliteResult<usize> {
-        self.conn.execute(
+        let conn = self.conn();
+        conn.execute(
             "UPDATE conversations SET status = 'active', ended_at = NULL WHERE id = ?1 AND status = 'completed'",
             params![id],
         )
@@ -1952,7 +2108,8 @@ impl MissionDB {
     pub fn get_pending_memory_messages(&self, today: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
         // Single JOIN query: get all pending messages at once
         // Excludes: PTY sessions (slot_id IS NOT NULL), subagent sessions (id LIKE 'agent-%')
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT m.*, COALESCE(c.project, '') as c_project, c.memory_forwarded_at
              FROM conversation_messages m
              JOIN conversations c ON c.id = m.session_id
@@ -1987,7 +2144,8 @@ impl MissionDB {
 
     /// Update memory_forwarded_at for a conversation
     pub fn update_memory_forwarded_at(&self, session_id: &str, timestamp: &str) -> SqliteResult<()> {
-        self.conn.execute(
+        let conn = self.conn();
+        conn.execute(
             "UPDATE conversations SET memory_forwarded_at = ?1 WHERE id = ?2",
             params![timestamp, session_id],
         )?;
@@ -1997,7 +2155,8 @@ impl MissionDB {
     /// Get pending USER-ONLY messages for user-voice extraction.
     /// Same logic as get_pending_memory_messages but only returns role='user'.
     pub fn get_pending_user_voice_messages(&self, today: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT m.*, COALESCE(c.project, '') as c_project, c.user_voice_forwarded_at
              FROM conversation_messages m
              JOIN conversations c ON c.id = m.session_id
@@ -2032,7 +2191,8 @@ impl MissionDB {
 
     /// Update user_voice_forwarded_at for a conversation
     pub fn update_user_voice_forwarded_at(&self, session_id: &str, timestamp: &str) -> SqliteResult<()> {
-        self.conn.execute(
+        let conn = self.conn();
+        conn.execute(
             "UPDATE conversations SET user_voice_forwarded_at = ?1 WHERE id = ?2",
             params![timestamp, session_id],
         )?;
@@ -2042,7 +2202,8 @@ impl MissionDB {
     /// Get pending messages for unified realtime extraction (replaces separate user_voice + memory).
     /// Returns all user+assistant messages since realtime_forwarded_at watermark.
     pub fn get_pending_realtime_messages(&self, today: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT m.*, COALESCE(c.project, '') as c_project
              FROM conversation_messages m
              JOIN conversations c ON c.id = m.session_id
@@ -2077,7 +2238,8 @@ impl MissionDB {
 
     /// Update realtime_forwarded_at watermark for a conversation.
     pub fn update_realtime_forwarded_at(&self, session_id: &str, timestamp: &str) -> SqliteResult<()> {
-        self.conn.execute(
+        let conn = self.conn();
+        conn.execute(
             "UPDATE conversations SET realtime_forwarded_at = ?1 WHERE id = ?2",
             params![timestamp, session_id],
         )?;
