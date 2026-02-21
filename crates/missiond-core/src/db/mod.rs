@@ -228,10 +228,10 @@ impl MissionDB {
         Ok(())
     }
 
-    /// Check FTS5 index integrity on startup, rebuild if corrupted
+    /// Rebuild FTS5 index on startup to ensure consistency.
+    /// integrity-check only validates structure, not data consistency after concurrent writes.
     fn check_fts_integrity(&self) -> SqliteResult<()> {
         let conn = self.conn();
-        // Only check if knowledge_fts exists
         let has_fts: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='knowledge_fts'",
             [],
@@ -240,15 +240,10 @@ impl MissionDB {
         if !has_fts {
             return Ok(());
         }
-        if let Err(e) = conn.execute_batch(
-            "INSERT INTO knowledge_fts(knowledge_fts) VALUES('integrity-check')"
-        ) {
-            tracing::warn!(error = %e, "FTS5 integrity check failed, rebuilding index");
-            conn.execute_batch(
-                "INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild')"
-            )?;
-            tracing::info!("FTS5 index rebuilt successfully");
-        }
+        conn.execute_batch(
+            "INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild')"
+        )?;
+        tracing::info!("FTS5 index rebuilt on startup");
         Ok(())
     }
 
