@@ -1285,13 +1285,64 @@ impl AppState {
                             .map_err(|e| anyhow!("DB error: {}", e))?;
                         Ok(ToolResult::json(&serde_json::json!({
                             "count": dups.len(),
-                            "pairs": dups.iter().map(|(a, b)| serde_json::json!({
-                                "a": {"category": a.category, "key": a.key, "summary": a.summary},
-                                "b": {"category": b.category, "key": b.key, "summary": b.summary},
+                            "pairs": dups.iter().map(|(a, b, sim)| serde_json::json!({
+                                "similarity": format!("{:.2}", sim),
+                                "a": {"category": a.category, "key": a.key, "summary": a.summary, "accessCount": a.access_count},
+                                "b": {"category": b.category, "key": b.key, "summary": b.summary, "accessCount": b.access_count},
                             })).collect::<Vec<_>>(),
                         })))
                     }
-                    _ => Ok(ToolResult::error(format!("Unknown gc action: {}. Use: stats, stale, duplicates", action))),
+                    "clean_stale" => {
+                        let threshold = days.unwrap_or(30);
+                        let stale = db.kb_find_stale(threshold)
+                            .map_err(|e| anyhow!("DB error: {}", e))?;
+                        let keys: Vec<String> = stale.iter().map(|e| e.key.clone()).collect();
+                        let count = db.kb_batch_forget(&keys)
+                            .map_err(|e| anyhow!("DB error: {}", e))?;
+                        Ok(ToolResult::json(&serde_json::json!({
+                            "action": "clean_stale",
+                            "threshold_days": threshold,
+                            "deleted": count,
+                            "keys": keys,
+                        })))
+                    }
+                    "clean_duplicates" => {
+                        let dups = db.kb_find_duplicates()
+                            .map_err(|e| anyhow!("DB error: {}", e))?;
+                        // Keep entry with higher access_count (or newer updated_at), delete the other
+                        let mut to_delete = Vec::new();
+                        let mut seen = std::collections::HashSet::new();
+                        for (a, b, sim) in &dups {
+                            // Skip if either already marked for deletion
+                            if seen.contains(&a.key) || seen.contains(&b.key) { continue; }
+                            let loser = if a.access_count > b.access_count {
+                                &b.key
+                            } else if b.access_count > a.access_count {
+                                &a.key
+                            } else if a.updated_at >= b.updated_at {
+                                &b.key
+                            } else {
+                                &a.key
+                            };
+                            to_delete.push(serde_json::json!({
+                                "deleted_key": loser,
+                                "kept_key": if loser == &a.key { &b.key } else { &a.key },
+                                "similarity": format!("{:.2}", sim),
+                            }));
+                            seen.insert(loser.clone());
+                        }
+                        let keys: Vec<String> = to_delete.iter()
+                            .filter_map(|d| d["deleted_key"].as_str().map(String::from))
+                            .collect();
+                        let count = db.kb_batch_forget(&keys)
+                            .map_err(|e| anyhow!("DB error: {}", e))?;
+                        Ok(ToolResult::json(&serde_json::json!({
+                            "action": "clean_duplicates",
+                            "deleted": count,
+                            "details": to_delete,
+                        })))
+                    }
+                    _ => Ok(ToolResult::error(format!("Unknown gc action: {}. Use: stats, stale, duplicates, clean_stale, clean_duplicates", action))),
                 }
             }
 
@@ -1318,11 +1369,13 @@ impl AppState {
                     return Ok(ToolResult::error("KB is empty, nothing to analyze."));
                 }
 
-                // 2. Build compact KB text
+                // 2. Build compact KB text (with sensitive data redaction)
                 let mut kb_lines = Vec::with_capacity(entries.len());
                 for e in &entries {
+                    if e.category == "credential" { continue; }
                     let summary = e.summary.replace('\n', " ");
-                    kb_lines.push(format!("[{}] {}: {}", e.category, e.key, summary));
+                    let sanitized = missiond_core::db::MissionDB::redact_sensitive(&summary);
+                    kb_lines.push(format!("[{}] {}: {}", e.category, e.key, sanitized));
                 }
                 let kb_text = kb_lines.join("\n");
 
@@ -1404,7 +1457,7 @@ impl AppState {
 
             // ===== Memory Extraction =====
             // Message-level pipeline tracking: returns pending messages with IDs.
-            // Agent must call mission_memory_done after processing.
+            // State auto-committed by Daemon on extraction completion — no manual done() needed.
             "mission_memory_pending" | "mission_memory_pending_user" => {
                 let db = self.mission.db();
                 let pending = db.get_pending_pipeline_messages("realtime")
@@ -1432,10 +1485,8 @@ impl AppState {
 
                 let session_count = pending.len();
                 let msg_count = all_msg_ids.len();
-                let msg_ids_str = all_msg_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", ");
                 let header = format!(
-                    "[realtime-extract] {} 个会话, {} 条消息 (其中 {} 条用户消息)\n\
-                     batch_msg_ids: [{}]\n\n\
+                    "[realtime-extract] {} 个会话, {} 条消息 (其中 {} 条用户消息)\n\n\
                      提取值得长期记忆的事实，用 mission_kb_remember 存入。\n\
                      ★ 标记的是用户原话，优先级最高。用户的每句话都是刻意的。\n\n\
                      提取规则:\n\
@@ -1444,14 +1495,14 @@ impl AppState {
                      - 「好」「行」= 用户认可 AI 方案，记录为决策\n\
                      - 「别...」「不要...」= 高价值偏好\n\
                      - 不存: 纯任务指令、当天工作日志、代码提交记录\n\
-                     - 模糊用户消息 → 调 mission_conversation_get 看上下文再判断\n\n\
-                     ⚠️ 处理完成后必须调用 mission_memory_done(message_ids: [{}]) 确认。\n\n",
-                    session_count, msg_count, user_count, msg_ids_str, msg_ids_str
+                     - 模糊用户消息 → 调 mission_conversation_get 看上下文再判断\n\n",
+                    session_count, msg_count, user_count,
                 );
 
                 Ok(ToolResult::text(&format!("{}{}", header, output)))
             }
 
+            // Legacy: kept for backward compatibility. State is now auto-committed by Daemon.
             "mission_memory_done" => {
                 #[derive(Deserialize)]
                 struct Args {
@@ -1461,7 +1512,7 @@ impl AppState {
                 let db = self.mission.db();
                 let count = db.mark_pipeline_done(&message_ids, "realtime")
                     .map_err(|e| anyhow!("DB error: {}", e))?;
-                Ok(ToolResult::text(&format!("已确认 {} 条消息处理完成 (realtime)。", count)))
+                Ok(ToolResult::text(&format!("已确认 {} 条消息处理完成 (realtime)。注意：系统已自动管理状态，无需手动调用。", count)))
             }
 
             // ===== Conversation Logs =====
@@ -2311,42 +2362,6 @@ async fn check_extraction_gate(state: &AppState, label: &str) -> bool {
     false
 }
 
-/// Begin an extraction: set state to Sending and spawn the background send().
-async fn begin_extraction(state: &AppState, label: &'static str, prompt: &'static str) {
-    let now = chrono::Utc::now().timestamp();
-    {
-        let mut es = state.extraction_state.write().await;
-        es.phase = ExtractionPhase::Sending;
-        es.active_type = Some(label);
-        es.phase_started_at = now;
-    }
-
-    info!("Triggering {} extraction via MCP pull", label);
-
-    let pty = Arc::clone(&state.pty);
-    let extraction_state = Arc::clone(&state.extraction_state);
-    tokio::spawn(async move {
-        match pty.send(MEMORY_SLOT_ID, prompt, 300_000).await {
-            Ok(res) => {
-                info!(duration_ms = res.duration_ms, "{} extraction send() returned", label);
-                // Transition to WaitingForSlotIdle — slot continues MCP processing
-                let mut es = extraction_state.write().await;
-                if es.phase == ExtractionPhase::Sending {
-                    es.phase = ExtractionPhase::WaitingForSlotIdle;
-                    es.phase_started_at = chrono::Utc::now().timestamp();
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "{} extraction trigger failed", label);
-                // Reset to Idle on failure — allow immediate retry
-                let mut es = extraction_state.write().await;
-                es.phase = ExtractionPhase::Idle;
-                es.active_type = None;
-            }
-        }
-    });
-}
-
 /// Cooldown: skip realtime extraction if the last one completed < 3 minutes ago,
 /// giving deep_analysis a window to run.
 const REALTIME_EXTRACTION_COOLDOWN_SECS: i64 = 30;
@@ -2372,15 +2387,15 @@ async fn check_realtime_extraction(state: &AppState) {
         }
     }
 
-    // Check for pending messages (message-level pipeline tracking)
-    let has_pending = match state.mission.db().has_pending_pipeline_messages("realtime") {
-        Ok(v) => v,
-        Err(_) => false,
+    // Check for pending messages and get their IDs (for auto-commit on completion)
+    let msg_ids = match state.mission.db().get_pending_pipeline_msg_ids("realtime") {
+        Ok(ids) if !ids.is_empty() => ids,
+        Ok(_) => {
+            debug!("realtime: no pending messages");
+            return;
+        }
+        Err(_) => return,
     };
-    if !has_pending {
-        debug!("realtime: no pending messages");
-        return;
-    }
 
     // Ensure memory slot is spawned, then check it's idle
     if !ensure_memory_slot(state).await {
@@ -2400,18 +2415,51 @@ async fn check_realtime_extraction(state: &AppState) {
         }
     }
 
-    begin_extraction(state, "realtime",
-        "有新的对话内容待分析。\n\
-         步骤:\n\
-         1. 调用 mission_memory_pending 获取待分析内容和 batch_msg_ids\n\
-         2. 提取知识，用 mission_kb_remember 存入\n\
-         3. 完成后调用 mission_memory_done(message_ids: batch_msg_ids) 确认\n\n\
+    info!(batch_size = msg_ids.len(), "Realtime extraction: locking batch");
+
+    // Store msg_ids in ExtractionState for auto-commit on completion (like deep_analysis)
+    {
+        let now = chrono::Utc::now().timestamp();
+        let mut es = state.extraction_state.write().await;
+        es.phase = ExtractionPhase::Sending;
+        es.active_type = Some("realtime");
+        es.phase_started_at = now;
+        es.current_batch_msg_ids = msg_ids;
+    }
+
+    let prompt = "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，提取知识存入 KB。\n\
          提取目标（按优先级）:\n\
          - 用户偏好/原则/纠正 → category: preference\n\
          - 架构决策/技术事实 → category: memory\n\
          - 基础设施变更 → category: infra\n\
          过滤: 不记录当天工作日志、代码提交记录、一次性操作。只记录长期有效的知识。\n\
-         问题上报: 如发现 bug、需要代码修复的问题，调用 mission_board_create 创建任务。").await;
+         问题上报: 如发现 bug、需要代码修复的问题，调用 mission_board_create 创建任务。\n\
+         完成后不要退出，等待下一个指令。";
+
+    info!("Triggering realtime extraction via MCP pull");
+
+    let pty = Arc::clone(&state.pty);
+    let extraction_state = Arc::clone(&state.extraction_state);
+    tokio::spawn(async move {
+        match pty.send(MEMORY_SLOT_ID, prompt, 300_000).await {
+            Ok(res) => {
+                info!(duration_ms = res.duration_ms, "realtime extraction send() returned");
+                let mut es = extraction_state.write().await;
+                if es.phase == ExtractionPhase::Sending {
+                    es.phase = ExtractionPhase::WaitingForSlotIdle;
+                    es.phase_started_at = chrono::Utc::now().timestamp();
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "realtime extraction trigger failed");
+                let mut es = extraction_state.write().await;
+                es.phase = ExtractionPhase::Idle;
+                es.active_type = None;
+                // Don't clear msg_ids on failure — they stay pending for retry
+                es.current_batch_msg_ids.clear();
+            }
+        }
+    });
 }
 
 /// Deep analysis: review completed conversations with pending deep_analysis messages.
@@ -3046,10 +3094,11 @@ async fn main() -> Result<()> {
                                         if is_realtime {
                                             es.last_realtime_completed_at = chrono::Utc::now().timestamp();
                                         }
-                                        // Mark deep_analysis batch as done
-                                        if matches!(es.active_type, Some("deep_analysis")) && !es.current_batch_msg_ids.is_empty() {
-                                            let _ = state.mission.db().mark_pipeline_done(&es.current_batch_msg_ids, "deep_analysis");
-                                            info!(count = es.current_batch_msg_ids.len(), "Marked deep_analysis batch done");
+                                        // Auto-commit: mark batch messages as done (both realtime and deep_analysis)
+                                        if !es.current_batch_msg_ids.is_empty() {
+                                            let pipeline = if is_realtime { "realtime" } else { "deep_analysis" };
+                                            let _ = state.mission.db().mark_pipeline_done(&es.current_batch_msg_ids, pipeline);
+                                            info!(count = es.current_batch_msg_ids.len(), pipeline, "Auto-committed batch done");
                                             es.current_batch_msg_ids.clear();
                                         }
                                         es.phase = ExtractionPhase::Idle;
