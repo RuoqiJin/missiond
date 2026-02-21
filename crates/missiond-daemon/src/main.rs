@@ -74,6 +74,8 @@ struct AppState {
     claude_md_hash: Arc<std::sync::atomic::AtomicU64>,
     /// Signal to re-check extractions immediately (event-driven, not waiting for 60s tick).
     extraction_notify: Arc<tokio::sync::Notify>,
+    /// Last KB auto-GC timestamp (epoch secs). 0 = never run.
+    last_auto_gc_at: Arc<std::sync::atomic::AtomicI64>,
 }
 
 fn default_mission_home() -> PathBuf {
@@ -2011,6 +2013,9 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
     // Sync KB preferences + hot topics into CLAUDE.md
     sync_claude_md(state);
 
+    // KB auto-GC: every hour
+    check_kb_auto_gc(state);
+
     // Extraction status summary (debug)
     {
         let es = state.extraction_state.read().await;
@@ -2362,7 +2367,7 @@ async fn check_extraction_gate(state: &AppState, label: &str) -> bool {
     false
 }
 
-/// Cooldown: skip realtime extraction if the last one completed < 3 minutes ago,
+/// Cooldown: skip realtime extraction if the last one completed < 30 seconds ago,
 /// giving deep_analysis a window to run.
 const REALTIME_EXTRACTION_COOLDOWN_SECS: i64 = 30;
 
@@ -2430,11 +2435,15 @@ async fn check_realtime_extraction(state: &AppState) {
     let prompt = "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，提取知识存入 KB。\n\
          提取目标（按优先级）:\n\
          - 用户偏好/原则/纠正 → category: preference\n\
-         - 架构决策/技术事实 → category: memory\n\
-         - 基础设施变更 → category: infra\n\
+         - 架构决策/技术事实 → category: memory 或 memory:architecture/memory:decision\n\
+         - 已修 bug 的根因 → category: memory:bugfix\n\
+         禁止提取:\n\
+         - 基础设施信息（IP/端口/凭据/服务器配置）→ 已有 servers.yaml + mission_infra_get\n\
+         - API 参数/代码实现细节 → 属于代码层，不进 KB\n\
+         - 版本号/commit hash/构建事件 → 临时信息\n\
+         - 通用技术知识（Rust 语法等）→ AI 已知\n\
          过滤: 不记录当天工作日志、代码提交记录、一次性操作。只记录长期有效的知识。\n\
-         问题上报: 如发现 bug、需要代码修复的问题，调用 mission_board_create 创建任务。\n\
-         完成后不要退出，等待下一个指令。";
+         问题上报: 如发现 bug、需要代码修复的问题，调用 mission_board_create 创建任务。";
 
     info!("Triggering realtime extraction via MCP pull");
 
@@ -2537,7 +2546,8 @@ async fn check_deep_analysis(state: &AppState) {
              3. 知识关联 — 不同会话之间的隐含联系\n\
              4. 趋势发现 — 用户行为/需求的演变方向\n\
              5. 问题上报 — 发现 bug/资源浪费/反复出错等需要代码修复的问题时，调用 mission_board_create 创建任务\n\n\
-             不要提取: 单条消息的偏好/决策/事实（realtime 已处理）、当天工作日志、版本细节。",
+             不要提取: 单条消息的偏好/决策/事实（realtime 已处理）、当天工作日志、版本细节。\n\
+             绝对禁止写入 category: infra（基础设施由 servers.yaml 管理）。",
             session_id = conv.id,
             project = conv.project.as_deref().unwrap_or("unknown"),
             msg_count = msg_count,
@@ -2585,6 +2595,23 @@ async fn check_deep_analysis(state: &AppState) {
 
 const MANAGED_START: &str = "<!-- missiond:managed:start -->";
 const MANAGED_END: &str = "<!-- missiond:managed:end -->";
+
+/// KB auto-GC: delete infra, expired bugfix, stale zero-access entries. Runs hourly.
+fn check_kb_auto_gc(state: &AppState) {
+    use std::sync::atomic::Ordering;
+    let now = chrono::Utc::now().timestamp();
+    let last = state.last_auto_gc_at.load(Ordering::Relaxed);
+    if now - last < 3600 {
+        return;
+    }
+
+    match state.mission.db().kb_auto_gc() {
+        Ok(n) if n > 0 => info!(deleted = n, "KB auto-GC completed"),
+        Ok(_) => debug!("KB auto-GC: nothing to clean"),
+        Err(e) => warn!(error = %e, "KB auto-GC failed"),
+    }
+    state.last_auto_gc_at.store(now, Ordering::Relaxed);
+}
 
 /// Sync KB preferences + hot topics into ~/.claude/CLAUDE.md managed section.
 /// Only writes when content actually changes (hash-based detection).
@@ -3010,6 +3037,7 @@ async fn main() -> Result<()> {
         memory_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         claude_md_hash: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         extraction_notify: Arc::new(tokio::sync::Notify::new()),
+        last_auto_gc_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
     };
 
     // Autopilot scheduler + IPC server via select

@@ -1234,6 +1234,29 @@ impl MissionDB {
         let mut confidence = input.confidence.unwrap_or(1.0);
         let detail_str = input.detail.as_ref().map(|d| serde_json::to_string(d).unwrap_or_default());
 
+        // Guard: reject infra category (servers.yaml + mission_infra_get already covers this)
+        if input.category == "infra" {
+            tracing::warn!(key = %input.key, "kb_remember: rejected infra category (use servers.yaml)");
+            return Ok(KBRememberResult {
+                entry: KnowledgeEntry {
+                    id: String::new(),
+                    category: input.category.clone(),
+                    key: input.key.clone(),
+                    summary: "REJECTED: infra entries should use servers.yaml + mission_infra_get".into(),
+                    detail: None,
+                    source: source.to_string(),
+                    confidence: 0.0,
+                    access_count: 0,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    last_accessed_at: None,
+                },
+                action: "rejected".into(),
+                merged_key: None,
+                similarity: None,
+            });
+        }
+
         // Sensitive data detection: warn and lower confidence
         let check_text = format!("{} {} {}", input.summary, detail_str.as_deref().unwrap_or(""), input.key);
         if Self::contains_sensitive_data(&check_text) {
@@ -1771,6 +1794,39 @@ impl MissionDB {
         }
 
         Ok(stats)
+    }
+
+    /// Auto-GC: delete infra (duplicates servers.yaml), expired bugfix (>30d),
+    /// and stale zero-access entries (>14d, non-protected categories).
+    pub fn kb_auto_gc(&self) -> SqliteResult<usize> {
+        let conn = self.conn();
+        let mut deleted = 0;
+
+        // Rule 1: infra entries — servers.yaml + mission_infra_get already covers this
+        deleted += conn.execute("DELETE FROM knowledge WHERE category = 'infra'", [])?;
+
+        // Rule 2: memory:bugfix older than 30 days
+        deleted += conn.execute(
+            "DELETE FROM knowledge WHERE category = 'memory:bugfix' \
+             AND julianday('now') - julianday(updated_at) > 30",
+            [],
+        )?;
+
+        // Rule 3: zero access + 14 days stale + not in protected categories
+        deleted += conn.execute(
+            "DELETE FROM knowledge WHERE access_count = 0 \
+             AND last_accessed_at IS NULL \
+             AND julianday('now') - julianday(updated_at) > 14 \
+             AND category NOT IN ('preference', 'memory:decision', 'memory:architecture', 'project')",
+            [],
+        )?;
+
+        if deleted > 0 {
+            conn.execute_batch("INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild')")?;
+            tracing::info!(deleted, "kb_auto_gc: cleaned up entries");
+        }
+
+        Ok(deleted)
     }
 
     // ============ Message Pipeline Tracking ============
