@@ -10,20 +10,24 @@
 //! - { type: "state", state: string, prevState: string }
 //! - { type: "exit", code: number }
 
-use crate::cc_tasks::{CCTask, CCTaskChangeEvent, CCTasksOverview, CCTasksWatcher, WatcherEvent};
-use crate::pty::{PTYManager, SessionEvent, SessionState};
+use crate::cc_tasks::{
+    CCSession, CCTask, CCTaskChangeEvent, CCTasksOverview, CCTasksWatcher, WatcherEvent,
+};
+use crate::pty::{PTYManager, SessionEvent, SessionState, TextOutputEvent};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Mutex};
-use tokio_tungstenite::tungstenite::handshake::server::{Request as WsRequest, Response as WsResponse};
+use tokio_tungstenite::tungstenite::handshake::server::{
+    Request as WsRequest, Response as WsResponse,
+};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::{accept_hdr_async, tungstenite::Message};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// WebSocket server options
 pub struct WSServerOptions {
@@ -103,12 +107,19 @@ enum PtyInMessage {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum TasksEventMessage {
+    CcTasksSnapshot { sessions: Vec<CCSession> },
     CcTasksOverview { payload: CCTasksOverview },
     CcTasksChanged { payload: CCTaskChangeEvent },
     CcTaskStarted { payload: TaskEventPayload },
     CcTaskCompleted { payload: TaskEventPayload },
     CcSessionActive { payload: SessionEventPayload },
     CcSessionInactive { payload: SessionEventPayload },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TasksInMessage {
+    GetTasks,
 }
 
 #[derive(Debug, Serialize)]
@@ -204,20 +215,349 @@ impl PTYWebSocketServer {
         Ok(())
     }
 
+    /// Send an HTTP error response
+    async fn send_http_error(
+        stream: &mut TcpStream,
+        status: u16,
+        reason: &str,
+        body: &str,
+    ) -> anyhow::Result<()> {
+        let response = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            status, reason, body.len(), body
+        );
+        stream.write_all(response.as_bytes()).await?;
+        stream.shutdown().await?;
+        Ok(())
+    }
+
+    /// Read full HTTP request from stream (headers + body)
+    async fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<(String, String)> {
+        let mut buf = Vec::with_capacity(8192);
+        let mut tmp = [0u8; 4096];
+
+        // Read until we have full headers
+        let header_end;
+        loop {
+            let n = stream.read(&mut tmp).await?;
+            if n == 0 {
+                anyhow::bail!("Connection closed before headers complete");
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if let Some(pos) = buf
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+            {
+                header_end = pos + 4;
+                break;
+            }
+            if buf.len() > 65536 {
+                anyhow::bail!("Headers too large");
+            }
+        }
+
+        let headers_str = String::from_utf8_lossy(&buf[..header_end]).to_string();
+
+        // Parse Content-Length
+        let content_length: usize = headers_str
+            .lines()
+            .find_map(|line| {
+                let lower = line.to_lowercase();
+                if lower.starts_with("content-length:") {
+                    lower.trim_start_matches("content-length:").trim().parse().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        // Read remaining body
+        let _body_so_far = buf.len() - header_end;
+        let mut body_buf = buf[header_end..].to_vec();
+        while body_buf.len() < content_length {
+            let n = stream.read(&mut tmp).await?;
+            if n == 0 {
+                break;
+            }
+            body_buf.extend_from_slice(&tmp[..n]);
+        }
+
+        let body = String::from_utf8_lossy(&body_buf[..content_length.min(body_buf.len())]).to_string();
+        Ok((headers_str, body))
+    }
+
+    /// Handle POST /v1/chat/completions — OpenAI-compatible SSE endpoint
+    async fn handle_chat_completions(
+        mut stream: TcpStream,
+        addr: SocketAddr,
+        pty_manager: Arc<PTYManager>,
+    ) -> anyhow::Result<()> {
+        // Read full HTTP request
+        let (headers, body) = match Self::read_http_request(&mut stream).await {
+            Ok(r) => r,
+            Err(e) => {
+                let err = serde_json::json!({"error": {"message": format!("Bad request: {}", e)}});
+                Self::send_http_error(&mut stream, 400, "Bad Request", &err.to_string()).await?;
+                return Ok(());
+            }
+        };
+
+        // Auth check: extract Bearer token
+        let auth_token = headers
+            .lines()
+            .find_map(|line| {
+                let lower = line.to_lowercase();
+                if lower.starts_with("authorization:") {
+                    let val = line.splitn(2, ':').nth(1)?.trim();
+                    val.strip_prefix("Bearer ").map(|t| t.to_string())
+                } else {
+                    None
+                }
+            });
+
+        // TODO: validate token against Secret Store. For now accept any Bearer token.
+        if auth_token.is_none() {
+            let err = serde_json::json!({"error": {"message": "Missing Authorization header"}});
+            Self::send_http_error(&mut stream, 401, "Unauthorized", &err.to_string()).await?;
+            return Ok(());
+        }
+
+        // Parse request body
+        let req: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                let err = serde_json::json!({"error": {"message": format!("Invalid JSON: {}", e)}});
+                Self::send_http_error(&mut stream, 400, "Bad Request", &err.to_string()).await?;
+                return Ok(());
+            }
+        };
+
+        let messages = req.get("messages").and_then(|m| m.as_array());
+        if messages.is_none() || messages.unwrap().is_empty() {
+            let err = serde_json::json!({"error": {"message": "messages array is required"}});
+            Self::send_http_error(&mut stream, 400, "Bad Request", &err.to_string()).await?;
+            return Ok(());
+        }
+        let messages = messages.unwrap();
+
+        // Extract the last user message
+        let last_user_msg = messages
+            .iter()
+            .rev()
+            .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+            .and_then(|m| m.get("content").and_then(|c| c.as_str()));
+
+        let user_message = match last_user_msg {
+            Some(msg) => msg.to_string(),
+            None => {
+                let err = serde_json::json!({"error": {"message": "No user message found"}});
+                Self::send_http_error(&mut stream, 400, "Bad Request", &err.to_string()).await?;
+                return Ok(());
+            }
+        };
+
+        let slot_id = "slot-jarvis";
+        info!(?addr, slot_id, msg_len = user_message.len(), "Chat completions request");
+
+        // Check slot status
+        let status = pty_manager.get_status(slot_id).await;
+        let state = status.as_ref().map(|s| s.state.clone());
+
+        match &state {
+            None | Some(SessionState::Exited) => {
+                let err = serde_json::json!({
+                    "error": {"message": "Jarvis slot not running. Start slot-jarvis first."}
+                });
+                Self::send_http_error(&mut stream, 503, "Service Unavailable", &err.to_string()).await?;
+                return Ok(());
+            }
+            Some(s) if *s != SessionState::Idle => {
+                let err = serde_json::json!({
+                    "error": {"message": format!("Jarvis is busy (state: {:?}). Try again later.", s)},
+                    "retry_after": 5
+                });
+                let response = format!(
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: 5\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    err.to_string().len(), err
+                );
+                stream.write_all(response.as_bytes()).await?;
+                stream.shutdown().await?;
+                return Ok(());
+            }
+            _ => {} // Idle — good to go
+        }
+
+        // Subscribe to events BEFORE sending the message
+        let mut event_rx = match pty_manager.subscribe_session(slot_id).await {
+            Ok(rx) => rx,
+            Err(e) => {
+                let err = serde_json::json!({"error": {"message": format!("Cannot subscribe: {}", e)}});
+                Self::send_http_error(&mut stream, 500, "Internal Server Error", &err.to_string()).await?;
+                return Ok(());
+            }
+        };
+
+        // Detect new conversation: single message or has system message
+        let is_new_conversation = messages.len() == 1
+            || messages.iter().any(|m| {
+                m.get("role").and_then(|r| r.as_str()) == Some("system")
+            });
+
+        if is_new_conversation {
+            // Send /clear to reset Claude Code context
+            debug!(slot_id, "New conversation detected, sending /clear");
+            let _ = pty_manager.write(slot_id, "/clear\r").await;
+            // Wait for Claude Code to process /clear
+            tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+            // Wait for Idle state again
+            for _ in 0..10 {
+                if let Some(s) = pty_manager.get_status(slot_id).await {
+                    if s.state == SessionState::Idle {
+                        break;
+                    }
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            }
+        }
+
+        // Send the user message
+        if let Err(e) = pty_manager.send_fire_and_forget(slot_id, &user_message).await {
+            let err = serde_json::json!({"error": {"message": format!("Failed to send: {}", e)}});
+            Self::send_http_error(&mut stream, 500, "Internal Server Error", &err.to_string()).await?;
+            return Ok(());
+        }
+
+        // Write SSE response headers
+        let headers = "HTTP/1.1 200 OK\r\n\
+            Content-Type: text/event-stream\r\n\
+            Cache-Control: no-cache\r\n\
+            Connection: keep-alive\r\n\
+            Access-Control-Allow-Origin: *\r\n\
+            \r\n";
+        stream.write_all(headers.as_bytes()).await?;
+
+        let chat_id = format!("chatcmpl-jarvis-{}", chrono::Utc::now().timestamp_millis());
+
+        // Stream SSE events from PTY TextOutput
+        let timeout = tokio::time::Duration::from_secs(300); // 5 min timeout
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            tokio::select! {
+                evt = event_rx.recv() => {
+                    let evt = match evt {
+                        Ok(e) => e,
+                        Err(_) => break, // channel closed
+                    };
+
+                    match evt {
+                        SessionEvent::TextOutput(TextOutputEvent::Stream { content, .. }) => {
+                            let chunk = serde_json::json!({
+                                "id": &chat_id,
+                                "object": "chat.completion.chunk",
+                                "model": "jarvis-missiond",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": { "content": content },
+                                    "finish_reason": serde_json::Value::Null,
+                                }]
+                            });
+                            let event = format!("data: {}\n\n", chunk);
+                            if stream.write_all(event.as_bytes()).await.is_err() {
+                                break; // client disconnected
+                            }
+                        }
+                        SessionEvent::TextOutput(TextOutputEvent::Complete { .. }) => {
+                            // Send final chunk with finish_reason
+                            let chunk = serde_json::json!({
+                                "id": &chat_id,
+                                "object": "chat.completion.chunk",
+                                "model": "jarvis-missiond",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "stop",
+                                }]
+                            });
+                            let event = format!("data: {}\n\n", chunk);
+                            let _ = stream.write_all(event.as_bytes()).await;
+                            let _ = stream.write_all(b"data: [DONE]\n\n").await;
+                            break;
+                        }
+                        SessionEvent::StateChange { new_state: SessionState::Idle, .. } => {
+                            // Fallback: if we reach Idle without Complete, still end
+                            let _ = stream.write_all(b"data: [DONE]\n\n").await;
+                            break;
+                        }
+                        SessionEvent::Exit(code) => {
+                            let err_chunk = serde_json::json!({
+                                "error": {"message": format!("Claude Code exited with code {}", code)}
+                            });
+                            let event = format!("data: {}\n\n", err_chunk);
+                            let _ = stream.write_all(event.as_bytes()).await;
+                            let _ = stream.write_all(b"data: [DONE]\n\n").await;
+                            break;
+                        }
+                        _ => {} // ignore other events
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    let err_chunk = serde_json::json!({
+                        "error": {"message": "Request timed out (300s)"}
+                    });
+                    let event = format!("data: {}\n\n", err_chunk);
+                    let _ = stream.write_all(event.as_bytes()).await;
+                    let _ = stream.write_all(b"data: [DONE]\n\n").await;
+                    break;
+                }
+            }
+        }
+
+        let _ = stream.shutdown().await;
+        info!(?addr, slot_id, "Chat completions stream ended");
+        Ok(())
+    }
+
     async fn handle_connection(
         stream: TcpStream,
         addr: SocketAddr,
         pty_manager: Option<Arc<PTYManager>>,
         cc_tasks_watcher: Option<Arc<Mutex<CCTasksWatcher>>>,
     ) -> anyhow::Result<()> {
-        // Peek at first bytes to detect non-WebSocket HTTP requests (e.g. /health)
+        // Peek at first bytes to detect non-WebSocket HTTP requests
         let mut peek_buf = [0u8; 512];
         let n = stream.peek(&mut peek_buf).await.unwrap_or(0);
         if n > 0 {
             let request_line = String::from_utf8_lossy(&peek_buf[..n]);
-            // Check if it's a plain HTTP request to /health (no Upgrade header)
+            // Health check
             if request_line.starts_with("GET /health") && !request_line.contains("Upgrade:") {
                 return Self::handle_health(stream).await;
+            }
+            // Chat completions SSE endpoint
+            if request_line.starts_with("POST /v1/chat/completions") {
+                return match pty_manager {
+                    Some(pm) => Self::handle_chat_completions(stream, addr, pm).await,
+                    None => {
+                        let mut s = stream;
+                        let err = serde_json::json!({"error": {"message": "PTY manager not available"}});
+                        Self::send_http_error(&mut s, 503, "Service Unavailable", &err.to_string()).await
+                    }
+                };
+            }
+            // CORS preflight for chat completions
+            if request_line.starts_with("OPTIONS /v1/chat/completions") {
+                let mut s = stream;
+                let response = "HTTP/1.1 204 No Content\r\n\
+                    Access-Control-Allow-Origin: *\r\n\
+                    Access-Control-Allow-Methods: POST, OPTIONS\r\n\
+                    Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
+                    Access-Control-Max-Age: 86400\r\n\
+                    Content-Length: 0\r\n\
+                    Connection: close\r\n\
+                    \r\n";
+                s.write_all(response.as_bytes()).await?;
+                s.shutdown().await?;
+                return Ok(());
             }
         }
 
@@ -424,10 +764,17 @@ impl PTYWebSocketServer {
 
         info!(?addr, "Client subscribing to Tasks events");
 
-        // Send current overview on connect
-        let overview = watcher.lock().await.get_overview().await;
-        let msg = TasksEventMessage::CcTasksOverview { payload: overview };
-        let _ = send_json(&mut ws_tx, &msg).await;
+        // Send snapshot + overview on connect (supports both legacy and current dashboard protocols).
+        let (sessions, overview) = {
+            let guard = watcher.lock().await;
+            let sessions = guard.get_active_sessions().await;
+            let overview = guard.get_overview().await;
+            (sessions, overview)
+        };
+        let snapshot_msg = TasksEventMessage::CcTasksSnapshot { sessions };
+        let _ = send_json(&mut ws_tx, &snapshot_msg).await;
+        let overview_msg = TasksEventMessage::CcTasksOverview { payload: overview };
+        let _ = send_json(&mut ws_tx, &overview_msg).await;
 
         // Subscribe to watcher events
         let mut events_rx = watcher.lock().await.subscribe();
@@ -441,7 +788,23 @@ impl PTYWebSocketServer {
                     };
 
                     let msg = match event {
-                        WatcherEvent::TasksChanged(e) => TasksEventMessage::CcTasksChanged { payload: e },
+                        WatcherEvent::TasksChanged(e) => {
+                            let changed_msg = TasksEventMessage::CcTasksChanged { payload: e };
+                            if send_json(&mut ws_tx, &changed_msg).await.is_err() {
+                                break;
+                            }
+
+                            // Keep legacy clients in sync without requiring protocol awareness.
+                            let sessions = {
+                                let guard = watcher.lock().await;
+                                guard.get_active_sessions().await
+                            };
+                            let snapshot_msg = TasksEventMessage::CcTasksSnapshot { sessions };
+                            if send_json(&mut ws_tx, &snapshot_msg).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
                         WatcherEvent::TaskStarted { session, task } => TasksEventMessage::CcTaskStarted {
                             payload: TaskEventPayload {
                                 session_id: session.session_id,
@@ -481,6 +844,27 @@ impl PTYWebSocketServer {
 
                 msg = ws_rx.next() => {
                     match msg {
+                        Some(Ok(Message::Text(text))) => {
+                            if matches!(
+                                serde_json::from_str::<TasksInMessage>(&text),
+                                Ok(TasksInMessage::GetTasks)
+                            ) {
+                                let (sessions, overview) = {
+                                    let guard = watcher.lock().await;
+                                    let sessions = guard.get_active_sessions().await;
+                                    let overview = guard.get_overview().await;
+                                    (sessions, overview)
+                                };
+                                let snapshot_msg = TasksEventMessage::CcTasksSnapshot { sessions };
+                                if send_json(&mut ws_tx, &snapshot_msg).await.is_err() {
+                                    break;
+                                }
+                                let overview_msg = TasksEventMessage::CcTasksOverview { payload: overview };
+                                if send_json(&mut ws_tx, &overview_msg).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
                         Some(Ok(Message::Close(_))) | None => break,
                         Some(Err(e)) => {
                             warn!(?addr, error = %e, "WebSocket error");
