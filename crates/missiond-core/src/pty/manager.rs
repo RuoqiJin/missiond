@@ -90,6 +90,8 @@ pub struct PTYManager {
     logs_dir: PathBuf,
     /// Slots configured for auto-restart
     auto_restart_slots: Arc<RwLock<std::collections::HashSet<String>>>,
+    /// Last spawn options per slot (used to preserve restart behavior/config)
+    spawn_options_by_slot: Arc<RwLock<HashMap<String, PTYSpawnOptions>>>,
     /// Permission policy
     permission_policy: Arc<RwLock<Option<Arc<dyn PermissionPolicy>>>>,
     /// Aggregated event channel
@@ -139,6 +141,7 @@ impl PTYManager {
             agent_info: Arc::new(RwLock::new(HashMap::new())),
             logs_dir,
             auto_restart_slots: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            spawn_options_by_slot: Arc::new(RwLock::new(HashMap::new())),
             permission_policy: Arc::new(RwLock::new(None)),
             event_tx,
         }
@@ -189,9 +192,17 @@ impl PTYManager {
             }
         }
 
+        // Persist options so auto-restart can recreate the same runtime behavior.
+        self.spawn_options_by_slot
+            .write()
+            .await
+            .insert(slot.id.clone(), options.clone());
+
         // Track auto-restart
         if options.auto_restart {
             self.auto_restart_slots.write().await.insert(slot.id.clone());
+        } else {
+            self.auto_restart_slots.write().await.remove(&slot.id);
         }
 
         // Create session
@@ -379,6 +390,7 @@ impl PTYManager {
         let manager_sessions = Arc::clone(&self.sessions);
         let manager_info = Arc::clone(&self.agent_info);
         let manager_auto_restart = Arc::clone(&self.auto_restart_slots);
+        let manager_spawn_options = Arc::clone(&self.spawn_options_by_slot);
         let manager_policy = Arc::clone(&self.permission_policy);
         let manager_event_tx = self.event_tx.clone();
         let slot_for_restart = slot.clone();
@@ -409,6 +421,13 @@ impl PTYManager {
                     if auto_restart {
                         info!(slot_id = %slot_for_restart.id, "Auto-restarting PTY session");
 
+                        let restart_options = manager_spawn_options
+                            .read()
+                            .await
+                            .get(&slot_for_restart.id)
+                            .cloned()
+                            .unwrap_or_default();
+
                         // Create new session
                         let cwd = slot_for_restart.cwd.clone().unwrap_or_else(|| {
                             std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
@@ -423,12 +442,17 @@ impl PTYManager {
                         if let Ok(mut new_session) = PTYSession::new(PTYSessionOptions {
                             slot_id: slot_for_restart.id.clone(),
                             cwd,
-                            env: None,
+                            env: if restart_options.extra_env.is_empty() {
+                                None
+                            } else {
+                                Some(restart_options.extra_env.clone())
+                            },
                             log_file,
                             cols: 120,
                             rows: 30,
-                            mcp_config: None, // TODO: preserve mcp_config from original spawn
-                            dangerously_skip_permissions: false, // TODO: preserve from original
+                            mcp_config: restart_options.mcp_config.clone(),
+                            dangerously_skip_permissions: restart_options
+                                .dangerously_skip_permissions,
                         }) {
                             // Set up permission check
                             let policy = manager_policy.read().await.clone();
@@ -490,6 +514,25 @@ impl PTYManager {
         // Return current info
         let agent_info = self.agent_info.read().await;
         Ok(agent_info.get(&slot.id).cloned().unwrap())
+    }
+
+    /// Send message (fire-and-forget): paste + enter, return immediately
+    pub async fn send_fire_and_forget(&self, slot_id: &str, message: &str) -> Result<()> {
+        let session = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(slot_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("No PTY session for slot: {}", slot_id))?
+        };
+
+        // Session's send_fire_and_forget sets state to Thinking and broadcasts StateChange,
+        // which auto-syncs agent_info via the event forwarding loop.
+        let session = session.read().await;
+        session.send_fire_and_forget(message).await?;
+
+        info!(slot_id = slot_id, message_len = message.len(), "Message sent (fire-and-forget)");
+        Ok(())
     }
 
     /// Send message and wait for response
@@ -625,6 +668,20 @@ impl PTYManager {
         session.interrupt().await
     }
 
+    /// Take a screenshot of a PTY session
+    pub async fn screenshot(&self, slot_id: &str, output_dir: &std::path::Path) -> Result<std::path::PathBuf> {
+        let session = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(slot_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("No PTY session for slot: {}", slot_id))?
+        };
+
+        let session = session.read().await;
+        session.screenshot(output_dir).await
+    }
+
     /// Get screen content
     pub async fn get_screen(&self, slot_id: &str) -> Result<String> {
         let session = {
@@ -682,6 +739,7 @@ impl PTYManager {
     pub async fn kill(&self, slot_id: &str) -> Result<()> {
         // Remove from auto-restart
         self.auto_restart_slots.write().await.remove(slot_id);
+        self.spawn_options_by_slot.write().await.remove(slot_id);
 
         // Get and close session
         let session = {
@@ -796,6 +854,7 @@ impl PTYManager {
 
         // Clear auto-restart
         self.auto_restart_slots.write().await.clear();
+        self.spawn_options_by_slot.write().await.clear();
 
         // Collect slot IDs
         let slot_ids: Vec<String> = {

@@ -217,12 +217,42 @@
               term.write(msg.data);
               break;
             case 'state':
-              updateTabDot(slotId, msg.state === 'Idle' ? 'idle' : 'running');
+              updateTabDot(slotId, (msg.state === 'idle' || msg.state === 'Idle') ? 'idle' : 'running');
               break;
             case 'exit':
               term.writeln(`\r\n\x1b[33m[Process exited with code ${msg.code}]\x1b[0m`);
               updateTabDot(slotId, 'stopped');
               break;
+            case 'screenshot_request': {
+              const requestId = msg.requestId;
+              try {
+                const el = document.getElementById('terminal-container');
+                const screenEl = el && el.querySelector('.xterm-screen');
+                if (!screenEl || !term) {
+                  ws.send(JSON.stringify({ type: 'screenshot_response', requestId, error: 'No terminal' }));
+                  break;
+                }
+                const canvases = screenEl.querySelectorAll('canvas');
+                if (canvases.length === 0) {
+                  ws.send(JSON.stringify({ type: 'screenshot_response', requestId, error: 'No canvas' }));
+                  break;
+                }
+                const w = canvases[0].width;
+                const h = canvases[0].height;
+                const composite = document.createElement('canvas');
+                composite.width = w;
+                composite.height = h;
+                const ctx = composite.getContext('2d');
+                for (const c of canvases) {
+                  ctx.drawImage(c, 0, 0);
+                }
+                const base64 = composite.toDataURL('image/png').replace(/^data:image\/png;base64,/, '');
+                ws.send(JSON.stringify({ type: 'screenshot_response', requestId, data: base64, width: w, height: h }));
+              } catch (e) {
+                ws.send(JSON.stringify({ type: 'screenshot_response', requestId, error: String(e) }));
+              }
+              break;
+            }
           }
         } catch (e) {
           // Raw text fallback

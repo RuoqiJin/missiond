@@ -165,24 +165,36 @@ export class PTYSession extends TypedEventEmitter {
  * PTY Manager for spawning and attaching to PTY sessions
  */
 export class PTYManager {
+  private toolCaller?: (name: string, args: Record<string, unknown>) => Promise<ToolResult>;
+
   constructor(
     private wsUrl: string,
-    private httpUrl: string
-  ) {}
+    private httpUrl: string,
+    toolCaller?: (name: string, args: Record<string, unknown>) => Promise<ToolResult>
+  ) {
+    this.toolCaller = toolCaller;
+  }
 
   /**
    * Spawn a new PTY session
    */
   async spawn(options: PTYSpawnOptions): Promise<PTYSession> {
-    const response = await fetch(`${this.httpUrl}/pty/spawn`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(options),
-    });
+    if (this.toolCaller) {
+      await this.toolCaller('mission_pty_spawn', {
+        slotId: options.slotId,
+        autoRestart: options.autoRestart ?? false,
+      });
+    } else {
+      const response = await fetch(`${this.httpUrl}/pty/spawn`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(options),
+      });
 
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Failed to spawn PTY: ${error}`);
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`Failed to spawn PTY: ${error}`);
+      }
     }
 
     const session = new PTYSession(options.slotId, this.wsUrl);
@@ -203,6 +215,14 @@ export class PTYManager {
    * List all PTY sessions
    */
   async list(): Promise<PTYSessionInfo[]> {
+    if (this.toolCaller) {
+      const result = await this.toolCaller('mission_pty_status', {});
+      const text = result?.content?.[0]?.text ?? '';
+      if (!text) return [];
+      const parsed = JSON.parse(text) as PTYSessionInfo | PTYSessionInfo[];
+      return Array.isArray(parsed) ? parsed : [parsed];
+    }
+
     const response = await fetch(`${this.httpUrl}/pty/list`);
     if (!response.ok) {
       throw new Error('Failed to list PTY sessions');
@@ -216,13 +236,21 @@ export class PTYManager {
 /**
  * Claude Code Tasks Manager for monitoring task lists across sessions
  */
+interface CCSessionSummary {
+  sessionId: string;
+  project?: string;
+  summary?: string;
+  modified?: string;
+  isActive?: boolean;
+}
+
 export class CCTasksManager extends TypedEventEmitter {
   private ws: WebSocket | null = null;
   private _subscribed = false;
 
   constructor(
     private wsUrl: string,
-    private httpUrl: string
+    private toolCaller: (name: string, args: Record<string, unknown>) => Promise<ToolResult>
   ) {
     super();
   }
@@ -235,33 +263,59 @@ export class CCTasksManager extends TypedEventEmitter {
    * Get all Claude Code sessions
    */
   async sessions(): Promise<CCSession[]> {
-    const response = await fetch(`${this.httpUrl}/cc-tasks/sessions`);
-    if (!response.ok) {
-      throw new Error('Failed to get CC sessions');
+    const result = await this.toolCaller('mission_cc_sessions', { activeOnly: false });
+    const parsed = this.parseToolResult<CCSessionSummary[] | CCSession[]>(result) ?? [];
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      return [];
     }
-    return (await response.json()) as CCSession[];
+
+    // If daemon already returns full sessions, pass through directly.
+    if (Array.isArray((parsed as CCSession[])[0].tasks)) {
+      return parsed as CCSession[];
+    }
+
+    const summaries = parsed as CCSessionSummary[];
+    const sessions = await Promise.all(summaries.map(async (summary) => {
+      let tasks: CCTask[] = [];
+      try {
+        tasks = await this.tasks(summary.sessionId);
+      } catch {
+        // Best-effort task hydration; keep summary even if one fetch fails.
+      }
+      const modified = summary.modified || new Date().toISOString();
+      const projectPath = summary.project || '';
+      return {
+        sessionId: summary.sessionId,
+        projectPath,
+        projectName: projectPath.split('/').pop() || projectPath || 'Unknown',
+        summary: summary.summary || '',
+        modified,
+        created: modified,
+        gitBranch: undefined,
+        tasks,
+        messageCount: 0,
+        isActive: !!summary.isActive,
+        fullPath: projectPath,
+      };
+    }));
+
+    return sessions;
   }
 
   /**
    * Get tasks for a specific session
    */
   async tasks(sessionId: string): Promise<CCTask[]> {
-    const response = await fetch(`${this.httpUrl}/cc-tasks/sessions/${sessionId}/tasks`);
-    if (!response.ok) {
-      throw new Error('Failed to get CC tasks');
-    }
-    return (await response.json()) as CCTask[];
+    const result = await this.toolCaller('mission_cc_tasks', { sessionId });
+    return this.parseToolResult<CCTask[]>(result) ?? [];
   }
 
   /**
    * Get tasks overview
    */
   async overview(): Promise<CCTasksOverview> {
-    const response = await fetch(`${this.httpUrl}/cc-tasks/overview`);
-    if (!response.ok) {
-      throw new Error('Failed to get CC tasks overview');
-    }
-    return (await response.json()) as CCTasksOverview;
+    const result = await this.toolCaller('mission_cc_overview', {});
+    return this.parseToolResult<CCTasksOverview>(result);
   }
 
   /**
@@ -333,6 +387,16 @@ export class CCTasksManager extends TypedEventEmitter {
     }
     this._subscribed = false;
   }
+
+  private parseToolResult<T>(result: ToolResult): T {
+    const text = result?.content?.[0]?.text ?? '';
+    if (!text) return null as T;
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      return text as T;
+    }
+  }
 }
 
 // ============ Default Configuration ============
@@ -392,7 +456,7 @@ export class MissionControl extends TypedEventEmitter {
   private _wsUrl: string;
   private _connected = false;
 
-  /** Claude Code tasks monitoring (HTTP/WS based - may not be available) */
+  /** Claude Code tasks monitoring (IPC for snapshots + WS for subscriptions) */
   readonly ccTasks: CCTasksManager;
 
   constructor(options: MissionControlOptions = {}) {
@@ -401,8 +465,7 @@ export class MissionControl extends TypedEventEmitter {
     this.socketPath = options.ipcPath ?? getDefaultSocketPath();
     this._wsUrl = options.wsUrl ?? getDefaultWsUrl();
 
-    // CCTasksManager still uses WS (for subscriptions)
-    this.ccTasks = new CCTasksManager(this._wsUrl, options.httpUrl ?? 'http://localhost:9528');
+    this.ccTasks = new CCTasksManager(this._wsUrl, (name, args) => this.callTool(name, args));
 
     if (options.autoConnect) {
       this.isRunning().then((running) => {

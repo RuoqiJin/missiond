@@ -9,6 +9,7 @@
 
 mod extractor;
 mod manager;
+pub mod screenshot;
 mod session;
 
 pub use extractor::{

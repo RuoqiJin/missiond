@@ -226,6 +226,7 @@
     let ws = null;
     let reconnectTimeout = null;
     let sessions = {};
+    let latestOverview = null;
 
     function connect() {
       if (ws) {
@@ -272,17 +273,65 @@
       reconnectTimeout = setTimeout(connect, 3000);
     }
 
+    function normalizeSession(session) {
+      return {
+        sessionId: session.sessionId || session.session_id || '',
+        projectPath: session.projectPath || session.project_path || '',
+        projectName: session.projectName || session.project_name || '',
+        summary: session.summary || '',
+        tasks: Array.isArray(session.tasks) ? session.tasks : [],
+        active: !!(session.active ?? session.isActive ?? session.is_active),
+      };
+    }
+
+    function replaceSessions(items) {
+      sessions = {};
+      items.forEach((item) => {
+        const normalized = normalizeSession(item);
+        if (normalized.sessionId) {
+          sessions[normalized.sessionId] = normalized;
+        }
+      });
+      render();
+    }
+
     function handleMessage(data) {
       console.log('Received:', data);
+      const payload = data.payload || data;
 
       switch (data.type) {
         case 'cc_tasks_snapshot':
+          if (Array.isArray(data.sessions)) {
+            replaceSessions(data.sessions);
+          }
+          break;
+
+        case 'cc_tasks_overview':
+          latestOverview = payload;
+          render();
+          break;
+
         case 'cc_tasks_changed':
-          if (data.sessions) {
-            sessions = {};
-            data.sessions.forEach(session => {
-              sessions[session.sessionId] = session;
+          // Legacy format includes full sessions snapshot.
+          if (Array.isArray(data.sessions)) {
+            replaceSessions(data.sessions);
+            break;
+          }
+          // Current format includes per-session diff payload.
+          if (payload && payload.sessionId) {
+            const sessionId = payload.sessionId;
+            const existing = sessions[sessionId] || normalizeSession({
+              sessionId,
+              projectPath: payload.projectPath,
+              projectName: payload.projectName,
+              active: true,
+              tasks: [],
             });
+            existing.projectPath = payload.projectPath || existing.projectPath;
+            existing.projectName = payload.projectName || existing.projectName;
+            existing.tasks = Array.isArray(payload.currentTasks) ? payload.currentTasks : existing.tasks;
+            existing.active = true;
+            sessions[sessionId] = existing;
             render();
           }
           break;
@@ -296,15 +345,25 @@
           break;
 
         case 'cc_session_active':
-          if (sessions[data.sessionId]) {
-            sessions[data.sessionId].active = true;
+          if (payload && payload.sessionId) {
+            const existing = sessions[payload.sessionId] || normalizeSession({
+              sessionId: payload.sessionId,
+              projectName: payload.projectName,
+              active: true,
+              tasks: [],
+            });
+            existing.active = true;
+            existing.projectName = payload.projectName || existing.projectName;
+            sessions[payload.sessionId] = existing;
             render();
           }
           break;
 
         case 'cc_session_inactive':
-          if (sessions[data.sessionId]) {
-            sessions[data.sessionId].active = false;
+          if (payload && payload.sessionId) {
+            if (sessions[payload.sessionId]) {
+              sessions[payload.sessionId].active = false;
+            }
             render();
           }
           break;
@@ -333,6 +392,13 @@
           else if (task.status === 'completed') completed++;
         });
       });
+
+      const overviewStats = latestOverview?.tasksByStatus || latestOverview?.tasks_by_status;
+      if (overviewStats) {
+        inProgress = overviewStats.in_progress ?? inProgress;
+        pending = overviewStats.pending ?? pending;
+        completed = overviewStats.completed ?? completed;
+      }
 
       document.getElementById('inProgressCount').textContent = inProgress;
       document.getElementById('pendingCount').textContent = pending;
@@ -363,9 +429,9 @@
               <div>
                 <div class="session-title">
                   ${session.active ? '<div class="active-indicator"></div>' : ''}
-                  ${session.projectPath ? session.projectPath.split('/').pop() : 'Unknown Project'}
+                  ${escapeHtml(session.projectName || (session.projectPath ? session.projectPath.split('/').pop() : 'Unknown Project'))}
                 </div>
-                <div class="session-path">${session.projectPath || session.sessionId}</div>
+                <div class="session-path">${escapeHtml(session.projectPath || session.sessionId)}</div>
               </div>
               <div class="session-stats">
                 ${taskCounts.in_progress > 0 ? `<span class="session-stat" style="color: var(--yellow)">${taskCounts.in_progress} active</span>` : ''}
@@ -379,8 +445,8 @@
                   <div class="task">
                     <div class="task-status ${task.status}">${getStatusIcon(task.status)}</div>
                     <div class="task-content">
-                      <div class="task-subject">${escapeHtml(task.subject || 'Untitled')}</div>
-                      ${task.description ? `<div class="task-description">${escapeHtml(task.description)}</div>` : ''}
+                      <div class="task-subject">${escapeHtml(task.content || task.subject || 'Untitled')}</div>
+                      ${task.activeForm || task.description ? `<div class="task-description">${escapeHtml(task.activeForm || task.description)}</div>` : ''}
                       ${task.owner ? `<div class="task-meta">Owner: ${escapeHtml(task.owner)}</div>` : ''}
                     </div>
                   </div>

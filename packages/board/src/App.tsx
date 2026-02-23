@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -17,11 +17,7 @@ import { PendingQuestions } from './components/PendingQuestions';
 
 type Tab = 'board' | 'terminal' | 'knowledge' | 'conversations';
 
-const SLOTS = [
-  { id: 'slot-deploy-1', label: 'Deploy', role: 'deploy' },
-  { id: 'slot-coder-1', label: 'Coder', role: 'coder' },
-  { id: 'slot-secret-1', label: 'Secret', role: 'secret' },
-] as const;
+interface SlotDef { id: string; label: string; role: string; running?: boolean }
 
 export default function App() {
   const openAddDialog = useTaskCenterStore((s) => s.openAddDialog);
@@ -29,13 +25,48 @@ export default function App() {
   const isLoading = useTaskCenterStore((s) => s.isLoading);
   const taskCount = useTaskCenterStore((s) => s.tasks.filter((t) => t.status === 'open').length);
   const [mounted, setMounted] = useState(false);
-  const [tab, setTab] = useState<Tab>('board');
-  const [activeSlot, setActiveSlot] = useState<string>(SLOTS[0].id);
+  const [tab, setTab] = useState<Tab>(() => {
+    if (typeof window === 'undefined') return 'board';
+    return (localStorage.getItem('board:tab') as Tab) || 'board';
+  });
+  const [slots, setSlots] = useState<SlotDef[]>([]);
+  const [activeSlot, setActiveSlot] = useState<string>(() => {
+    if (typeof window === 'undefined') return '';
+    return localStorage.getItem('board:slot') || '';
+  });
+
+  // Persist tab & slot to localStorage
+  useEffect(() => { localStorage.setItem('board:tab', tab); }, [tab]);
+  useEffect(() => { if (activeSlot) localStorage.setItem('board:slot', activeSlot); }, [activeSlot]);
+
+  const fetchSlots = useCallback(() => {
+    fetch('/api/slots')
+      .then((r) => r.json())
+      .then((data: SlotDef[]) => {
+        if (Array.isArray(data) && data.length > 0) {
+          setSlots(data);
+          setActiveSlot((prev) => {
+            if (prev && data.some((s) => s.id === prev)) return prev;
+            const running = data.find((s) => s.running);
+            return running?.id ?? data[0].id;
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     setMounted(true);
     fetchTasks();
-  }, [fetchTasks]);
+    fetchSlots();
+  }, [fetchTasks, fetchSlots]);
+
+  // Refresh slots when on Terminal tab
+  useEffect(() => {
+    if (tab !== 'terminal') return;
+    const id = setInterval(fetchSlots, 5000);
+    return () => clearInterval(id);
+  }, [tab, fetchSlots]);
 
   if (!mounted) {
     return (
@@ -114,9 +145,9 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-2">
-          {tab === 'terminal' && (
+          {tab === 'terminal' && slots.filter((s) => s.running).length > 0 && (
             <div className="flex items-center gap-1 mr-2">
-              {SLOTS.map((slot) => (
+              {slots.filter((s) => s.running).map((slot) => (
                 <button
                   key={slot.id}
                   onClick={() => setActiveSlot(slot.id)}
@@ -154,7 +185,11 @@ export default function App() {
         </div>
       ) : tab === 'terminal' ? (
         <div className="flex-1 min-h-0 mx-4 sm:mx-8 mb-4 rounded-lg border border-neutral-800 overflow-hidden">
-          <Terminal key={activeSlot} slotId={activeSlot} />
+          {activeSlot ? (
+            <Terminal key={activeSlot} slotId={activeSlot} />
+          ) : (
+            <div className="flex items-center justify-center h-full text-neutral-500 text-sm">Loading slots...</div>
+          )}
         </div>
       ) : tab === 'knowledge' ? (
         <KnowledgeBase />

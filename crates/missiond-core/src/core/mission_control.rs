@@ -59,6 +59,7 @@ pub struct MissionControl {
     permission_policy: PermissionPolicy,
     inbox: Inbox,
     started: RwLock<bool>,
+    #[allow(dead_code)]
     logs_dir: PathBuf,
     default_mode: RwLock<ExecutionMode>,
 }
