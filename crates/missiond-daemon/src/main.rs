@@ -78,6 +78,8 @@ struct AppState {
     last_auto_gc_at: Arc<std::sync::atomic::AtomicI64>,
     /// Per-slot consecutive failure count for autopilot throttling.
     slot_fail_counts: Arc<std::sync::Mutex<HashMap<String, (i32, i64)>>>,  // (count, last_fail_at)
+    /// Screenshot broker for browser-based PTY screenshots.
+    screenshot_broker: Arc<missiond_core::ws::ScreenshotBroker>,
 }
 
 fn default_mission_home() -> PathBuf {
@@ -277,6 +279,8 @@ struct PTYSendArgs {
     #[serde(rename = "slotId")]
     slot_id: String,
     message: String,
+    #[serde(rename = "waitForResponse", default)]
+    wait_for_response: Option<bool>,
     #[serde(rename = "timeoutMs", default)]
     timeout_ms: Option<u64>,
 }
@@ -322,6 +326,12 @@ struct PTYInterruptArgs {
 
 #[derive(Deserialize)]
 struct PTYLogsArgs {
+    #[serde(rename = "slotId")]
+    slot_id: String,
+}
+
+#[derive(Deserialize)]
+struct PTYScreenshotArgs {
     #[serde(rename = "slotId")]
     slot_id: String,
 }
@@ -668,22 +678,35 @@ impl AppState {
                 let PTYSendArgs {
                     slot_id,
                     message,
+                    wait_for_response,
                     timeout_ms,
                 } = serde_json::from_value(args)?;
-                let timeout_ms = timeout_ms.unwrap_or(300_000);
-                let res = self.pty.send(&slot_id, &message, timeout_ms).await?;
-                let state = self
-                    .pty
-                    .get_status(&slot_id)
-                    .await
-                    .map(|s| format!("{:?}", s.state))
-                    .unwrap_or_else(|| "unknown".to_string());
-                Ok(ToolResult::json(&serde_json::json!({
-                    "delivered": true,
-                    "response": res.response,
-                    "durationMs": res.duration_ms,
-                    "state": state,
-                })))
+
+                if wait_for_response.unwrap_or(false) {
+                    // Blocking mode: send and wait for response
+                    let timeout_ms = timeout_ms.unwrap_or(300_000);
+                    let res = self.pty.send(&slot_id, &message, timeout_ms).await?;
+                    let state = self
+                        .pty
+                        .get_status(&slot_id)
+                        .await
+                        .map(|s| format!("{:?}", s.state))
+                        .unwrap_or_else(|| "unknown".to_string());
+                    Ok(ToolResult::json(&serde_json::json!({
+                        "delivered": true,
+                        "response": res.response,
+                        "durationMs": res.duration_ms,
+                        "state": state,
+                    })))
+                } else {
+                    // Fire-and-forget: send and return immediately
+                    self.pty.send_fire_and_forget(&slot_id, &message).await?;
+                    Ok(ToolResult::json(&serde_json::json!({
+                        "delivered": true,
+                        "mode": "fire-and-forget",
+                        "hint": "Use pty_status to poll for completion (state returns to Idle when done)",
+                    })))
+                }
             }
             "mission_pty_kill" => {
                 let PTYKillArgs { slot_id } = serde_json::from_value(args)?;
@@ -820,6 +843,43 @@ impl AppState {
                     "slotId": slot_id,
                     "logFile": status.log_file,
                     "hint": hint,
+                })))
+            }
+
+            "mission_pty_screenshot" => {
+                let PTYScreenshotArgs { slot_id } = serde_json::from_value(args)?;
+                let screenshots_dir = default_mission_home().join("screenshots");
+                std::fs::create_dir_all(&screenshots_dir)?;
+
+                // Try browser-based screenshot first (real xterm.js canvas)
+                let (request_id, rx) = self.screenshot_broker.request(&slot_id).await;
+                let _ = &request_id; // request is already broadcast by broker
+
+                let browser_result = tokio::time::timeout(
+                    self.screenshot_broker.timeout,
+                    rx,
+                ).await;
+
+                let (path, source) = match browser_result {
+                    Ok(Ok(Ok(result))) => {
+                        let ts = chrono::Utc::now().timestamp_millis();
+                        let filename = format!("{}-{}.png", slot_id, ts);
+                        let path = screenshots_dir.join(&filename);
+                        std::fs::write(&path, &result.png_data)?;
+                        (path, "browser")
+                    }
+                    _ => {
+                        // Fallback: backend rendering via alacritty grid
+                        info!(slot_id = %slot_id, "Browser screenshot unavailable, using backend rendering");
+                        let path = self.pty.screenshot(&slot_id, &screenshots_dir).await?;
+                        (path, "backend")
+                    }
+                };
+
+                Ok(ToolResult::json(&serde_json::json!({
+                    "path": path.to_string_lossy(),
+                    "source": source,
+                    "hint": "Use the Read tool to view this PNG image"
                 })))
             }
 
@@ -3227,12 +3287,18 @@ async fn main() -> Result<()> {
     // PTY conversation logger: subscribe to manager events
     let mut pty_logger_rx = pty.subscribe();
 
+    // Screenshot broker (coordinates browser-based PTY screenshots)
+    let screenshot_broker = missiond_core::ws::ScreenshotBroker::new(
+        std::time::Duration::from_secs(5),
+    );
+
     // WebSocket server (PTY attach + Tasks events)
     let ws_port = ws_port();
     let mut ws_server = PTYWebSocketServer::new(WSServerOptions {
         port: ws_port,
         pty_manager: Some(Arc::clone(&pty)),
         cc_tasks_watcher: Some(Arc::clone(&cc_tasks)),
+        screenshot_broker: Some(Arc::clone(&screenshot_broker)),
     });
     if let Err(e) = ws_server.start().await {
         // Match Node behavior: continue running even if WS is unavailable (e.g. port in use).
@@ -3287,6 +3353,7 @@ async fn main() -> Result<()> {
         extraction_notify: Arc::new(tokio::sync::Notify::new()),
         last_auto_gc_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         slot_fail_counts: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        screenshot_broker: Arc::clone(&screenshot_broker),
     };
 
     // Autopilot scheduler + IPC server via select

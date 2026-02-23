@@ -68,7 +68,7 @@ function DetailView({ detail }: { detail: Record<string, unknown> }) {
   );
 }
 
-function KBEntryCard({ entry, onDelete }: { entry: KBEntry; onDelete: (id: string) => void }) {
+function KBEntryCard({ entry, onDelete }: { entry: KBEntry; onDelete: (key: string) => void }) {
   const [expanded, setExpanded] = useState(false);
   const config = CATEGORY_CONFIG[entry.category] || CATEGORY_CONFIG.memory;
 
@@ -111,7 +111,7 @@ function KBEntryCard({ entry, onDelete }: { entry: KBEntry; onDelete: (id: strin
         <button
           onClick={(e) => {
             e.stopPropagation();
-            onDelete(entry.id);
+            onDelete(entry.key);
           }}
           className="flex-shrink-0 p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-red-500/10 hover:text-red-400 text-neutral-600 transition-all"
           title="删除"
@@ -153,10 +153,10 @@ export function KnowledgeBase() {
     fetchEntries();
   }, [fetchEntries]);
 
-  const handleDelete = useCallback(async (id: string) => {
-    setEntries((prev) => prev.filter((e) => e.id !== id));
+  const handleDelete = useCallback(async (key: string) => {
+    setEntries((prev) => prev.filter((e) => e.key !== key));
     try {
-      await fetch(`/api/kb?id=${id}`, { method: 'DELETE' });
+      await fetch(`/api/kb?key=${encodeURIComponent(key)}`, { method: 'DELETE' });
     } catch {
       fetchEntries(); // rollback
     }

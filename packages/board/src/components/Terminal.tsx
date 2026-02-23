@@ -8,7 +8,7 @@ interface TerminalProps {
   slotId: string;
 }
 
-type PTYState = 'unknown' | 'not_running' | 'starting' | 'idle' | 'thinking' | 'confirming' | 'error';
+type PTYState = 'unknown' | 'not_running' | 'starting' | 'idle' | 'thinking' | 'responding' | 'tool_running' | 'confirming' | 'error' | 'exited';
 
 // --- Error Boundary ---
 class TerminalErrorBoundary extends Component<
@@ -141,30 +141,27 @@ function TerminalInner({ slotId }: TerminalProps) {
     wsRef.current?.close();
     wsRef.current = null;
     term.clear();
-    term.writeln('\x1b[90m● Checking PTY status...\x1b[0m');
 
     let cancelled = false;
 
-    (async () => {
-      // Check PTY status
-      let running = false;
-      try {
-        const res = await fetch(`/api/pty/status?slotId=${slotId}`);
-        const data = await res.json();
-        running = !!data.running;
-        setPtyState(running ? (data.state || 'idle') : 'not_running');
-      } catch {
-        setPtyState('unknown');
-      }
-
-      if (cancelled) return;
-
-      if (running) {
-        connectWs(term, slotId);
-      } else {
-        term.writeln('\x1b[90m● No active session. Press Start to launch Claude Code.\x1b[0m');
-      }
-    })();
+    // Check status first, then connect WS only if running
+    fetch(`/api/pty/status?slotId=${slotId}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        if (data.running) {
+          setPtyState(data.state || 'idle');
+          connectWs(term, slotId);
+        } else {
+          setPtyState('not_running');
+          term.writeln('\x1b[90m● No active session. Press Start to launch Claude Code.\x1b[0m');
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setPtyState('not_running');
+        term.writeln('\x1b[90m● Cannot reach missiond.\x1b[0m');
+      });
 
     return () => { cancelled = true; };
   }, [slotId, ready]);
@@ -178,7 +175,6 @@ function TerminalInner({ slotId }: TerminalProps) {
 
     ws.onopen = () => {
       setWsStatus('connected');
-      term.writeln(`\x1b[32m● Connected to ${slot}\x1b[0m\r\n`);
     };
 
     ws.onmessage = (event) => {
@@ -195,6 +191,32 @@ function TerminalInner({ slotId }: TerminalProps) {
           term.writeln(`\r\n\x1b[31m[exited: code ${msg.code}]\x1b[0m`);
           setWsStatus('disconnected');
           setPtyState('not_running');
+        } else if (msg.type === 'screenshot_request') {
+          const requestId = msg.requestId;
+          try {
+            const el = containerRef.current;
+            const screenEl = el?.querySelector('.xterm-screen');
+            if (!screenEl || !term) {
+              ws.send(JSON.stringify({ type: 'screenshot_response', requestId, error: 'No terminal' }));
+              return;
+            }
+            const canvases = screenEl.querySelectorAll('canvas');
+            if (!canvases.length) {
+              ws.send(JSON.stringify({ type: 'screenshot_response', requestId, error: 'No canvas' }));
+              return;
+            }
+            const w = canvases[0].width;
+            const h = canvases[0].height;
+            const composite = document.createElement('canvas');
+            composite.width = w;
+            composite.height = h;
+            const ctx = composite.getContext('2d')!;
+            canvases.forEach(c => ctx.drawImage(c, 0, 0));
+            const base64 = composite.toDataURL('image/png').replace(/^data:image\/png;base64,/, '');
+            ws.send(JSON.stringify({ type: 'screenshot_response', requestId, data: base64, width: w, height: h }));
+          } catch (e) {
+            ws.send(JSON.stringify({ type: 'screenshot_response', requestId, error: String(e) }));
+          }
         }
       } catch {
         term.write(event.data);
@@ -264,12 +286,15 @@ function TerminalInner({ slotId }: TerminalProps) {
     starting: { text: 'Starting', color: 'text-yellow-400' },
     idle: { text: 'Idle', color: 'text-green-400' },
     thinking: { text: 'Thinking', color: 'text-blue-400' },
+    responding: { text: 'Responding', color: 'text-purple-400' },
+    tool_running: { text: 'Tool Running', color: 'text-cyan-400' },
     confirming: { text: 'Confirming', color: 'text-orange-400' },
     error: { text: 'Error', color: 'text-red-400' },
+    exited: { text: 'Exited', color: 'text-neutral-500' },
   };
 
-  const { text: stateText, color: stateColor } = stateLabel[ptyState];
-  const isRunning = ptyState !== 'not_running' && ptyState !== 'unknown';
+  const { text: stateText, color: stateColor } = stateLabel[ptyState] ?? { text: ptyState, color: 'text-neutral-500' };
+  const isRunning = ptyState !== 'not_running' && ptyState !== 'unknown' && ptyState !== 'exited';
 
   return (
     <div className="flex flex-col h-full">

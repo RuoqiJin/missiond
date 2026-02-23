@@ -13,7 +13,7 @@
 use crate::cc_tasks::{
     CCSession, CCTask, CCTaskChangeEvent, CCTasksOverview, CCTasksWatcher, WatcherEvent,
 };
-use crate::pty::{PTYManager, SessionEvent, SessionState, TextOutputEvent};
+use crate::pty::{PTYManager, SessionEvent, SessionState};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -27,7 +27,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::{accept_hdr_async, tungstenite::Message};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 /// WebSocket server options
 pub struct WSServerOptions {
@@ -37,6 +37,8 @@ pub struct WSServerOptions {
     pub pty_manager: Option<Arc<PTYManager>>,
     /// CC Tasks watcher (optional, for tasks events)
     pub cc_tasks_watcher: Option<Arc<Mutex<CCTasksWatcher>>>,
+    /// Screenshot broker (optional, for browser-based PTY screenshots)
+    pub screenshot_broker: Option<Arc<super::ScreenshotBroker>>,
 }
 
 /// PTY WebSocket Server
@@ -44,6 +46,7 @@ pub struct PTYWebSocketServer {
     port: u16,
     pty_manager: Option<Arc<PTYManager>>,
     cc_tasks_watcher: Option<Arc<Mutex<CCTasksWatcher>>>,
+    screenshot_broker: Option<Arc<super::ScreenshotBroker>>,
     shutdown_tx: Option<broadcast::Sender<()>>,
 }
 
@@ -94,6 +97,11 @@ enum PtyOutMessage {
         prev_state: SessionState,
     },
     Exit { code: i32 },
+    #[serde(rename = "screenshot_request")]
+    ScreenshotRequest {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
 }
 
 /// Messages from client to PTY
@@ -101,6 +109,19 @@ enum PtyOutMessage {
 #[serde(tag = "type", rename_all = "lowercase")]
 enum PtyInMessage {
     Input { data: String },
+    #[serde(rename = "screenshot_response")]
+    ScreenshotResponse {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(default)]
+        data: Option<String>,
+        #[serde(default)]
+        width: Option<u32>,
+        #[serde(default)]
+        height: Option<u32>,
+        #[serde(default)]
+        error: Option<String>,
+    },
 }
 
 /// CC Tasks event messages
@@ -146,6 +167,7 @@ impl PTYWebSocketServer {
             port: options.port,
             pty_manager: options.pty_manager,
             cc_tasks_watcher: options.cc_tasks_watcher,
+            screenshot_broker: options.screenshot_broker,
             shutdown_tx: None,
         }
     }
@@ -162,6 +184,7 @@ impl PTYWebSocketServer {
 
         let pty_manager = self.pty_manager.clone();
         let cc_tasks_watcher = self.cc_tasks_watcher.clone();
+        let screenshot_broker = self.screenshot_broker.clone();
 
         tokio::spawn(async move {
             let mut shutdown_rx = shutdown_tx.subscribe();
@@ -172,8 +195,9 @@ impl PTYWebSocketServer {
                             Ok((stream, addr)) => {
                                 let pty_manager = pty_manager.clone();
                                 let cc_tasks_watcher = cc_tasks_watcher.clone();
+                                let screenshot_broker = screenshot_broker.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher).await {
+                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker).await {
                                         error!(?e, ?addr, "WebSocket connection error");
                                     }
                                 });
@@ -292,6 +316,9 @@ impl PTYWebSocketServer {
         addr: SocketAddr,
         pty_manager: Arc<PTYManager>,
     ) -> anyhow::Result<()> {
+        // Disable Nagle — SSE needs every chunk sent immediately
+        stream.set_nodelay(true)?;
+
         // Read full HTTP request
         let (headers, body) = match Self::read_http_request(&mut stream).await {
             Ok(r) => r,
@@ -387,134 +414,65 @@ impl PTYWebSocketServer {
             _ => {} // Idle — good to go
         }
 
-        // Subscribe to events BEFORE sending the message
-        let mut event_rx = match pty_manager.subscribe_session(slot_id).await {
-            Ok(rx) => rx,
-            Err(e) => {
-                let err = serde_json::json!({"error": {"message": format!("Cannot subscribe: {}", e)}});
-                Self::send_http_error(&mut stream, 500, "Internal Server Error", &err.to_string()).await?;
-                return Ok(());
-            }
-        };
-
-        // Detect new conversation: single message or has system message
-        let is_new_conversation = messages.len() == 1
-            || messages.iter().any(|m| {
-                m.get("role").and_then(|r| r.as_str()) == Some("system")
-            });
-
-        if is_new_conversation {
-            // Send /clear to reset Claude Code context
-            debug!(slot_id, "New conversation detected, sending /clear");
-            let _ = pty_manager.write(slot_id, "/clear\r").await;
-            // Wait for Claude Code to process /clear
-            tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-            // Wait for Idle state again
-            for _ in 0..10 {
-                if let Some(s) = pty_manager.get_status(slot_id).await {
-                    if s.state == SessionState::Idle {
-                        break;
-                    }
-                }
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            }
-        }
-
-        // Send the user message
-        if let Err(e) = pty_manager.send_fire_and_forget(slot_id, &user_message).await {
-            let err = serde_json::json!({"error": {"message": format!("Failed to send: {}", e)}});
-            Self::send_http_error(&mut stream, 500, "Internal Server Error", &err.to_string()).await?;
-            return Ok(());
-        }
-
-        // Write SSE response headers
-        let headers = "HTTP/1.1 200 OK\r\n\
+        // Write SSE response headers immediately — flush for curl to see
+        let sse_headers = "HTTP/1.1 200 OK\r\n\
             Content-Type: text/event-stream\r\n\
             Cache-Control: no-cache\r\n\
             Connection: keep-alive\r\n\
             Access-Control-Allow-Origin: *\r\n\
             \r\n";
-        stream.write_all(headers.as_bytes()).await?;
+        stream.write_all(sse_headers.as_bytes()).await?;
+        stream.flush().await?;
 
         let chat_id = format!("chatcmpl-jarvis-{}", chrono::Utc::now().timestamp_millis());
 
-        // Stream SSE events from PTY TextOutput
-        let timeout = tokio::time::Duration::from_secs(300); // 5 min timeout
-        let deadline = tokio::time::Instant::now() + timeout;
-
-        loop {
-            tokio::select! {
-                evt = event_rx.recv() => {
-                    let evt = match evt {
-                        Ok(e) => e,
-                        Err(_) => break, // channel closed
-                    };
-
-                    match evt {
-                        SessionEvent::TextOutput(TextOutputEvent::Stream { content, .. }) => {
-                            let chunk = serde_json::json!({
-                                "id": &chat_id,
-                                "object": "chat.completion.chunk",
-                                "model": "jarvis-missiond",
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": { "content": content },
-                                    "finish_reason": serde_json::Value::Null,
-                                }]
-                            });
-                            let event = format!("data: {}\n\n", chunk);
-                            if stream.write_all(event.as_bytes()).await.is_err() {
-                                break; // client disconnected
-                            }
-                        }
-                        SessionEvent::TextOutput(TextOutputEvent::Complete { .. }) => {
-                            // Send final chunk with finish_reason
-                            let chunk = serde_json::json!({
-                                "id": &chat_id,
-                                "object": "chat.completion.chunk",
-                                "model": "jarvis-missiond",
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {},
-                                    "finish_reason": "stop",
-                                }]
-                            });
-                            let event = format!("data: {}\n\n", chunk);
-                            let _ = stream.write_all(event.as_bytes()).await;
-                            let _ = stream.write_all(b"data: [DONE]\n\n").await;
-                            break;
-                        }
-                        SessionEvent::StateChange { new_state: SessionState::Idle, .. } => {
-                            // Fallback: if we reach Idle without Complete, still end
-                            let _ = stream.write_all(b"data: [DONE]\n\n").await;
-                            break;
-                        }
-                        SessionEvent::Exit(code) => {
-                            let err_chunk = serde_json::json!({
-                                "error": {"message": format!("Claude Code exited with code {}", code)}
-                            });
-                            let event = format!("data: {}\n\n", err_chunk);
-                            let _ = stream.write_all(event.as_bytes()).await;
-                            let _ = stream.write_all(b"data: [DONE]\n\n").await;
-                            break;
-                        }
-                        _ => {} // ignore other events
-                    }
-                }
-                _ = tokio::time::sleep_until(deadline) => {
-                    let err_chunk = serde_json::json!({
-                        "error": {"message": "Request timed out (300s)"}
+        // Phase 1: blocking send — get full response, then emit as single SSE chunk.
+        // TODO: Phase 2 — true streaming via TextOutput::Stream events once
+        // IncrementalExtractor stable_ops pipeline is verified.
+        let timeout_ms = 300_000u64; // 5 min
+        match pty_manager.send(slot_id, &user_message, timeout_ms).await {
+            Ok(result) => {
+                if !result.response.is_empty() {
+                    let chunk = serde_json::json!({
+                        "id": &chat_id,
+                        "object": "chat.completion.chunk",
+                        "model": "jarvis-missiond",
+                        "choices": [{
+                            "index": 0,
+                            "delta": { "content": result.response },
+                            "finish_reason": serde_json::Value::Null,
+                        }]
                     });
-                    let event = format!("data: {}\n\n", err_chunk);
+                    let event = format!("data: {}\n\n", chunk);
                     let _ = stream.write_all(event.as_bytes()).await;
-                    let _ = stream.write_all(b"data: [DONE]\n\n").await;
-                    break;
                 }
+                // Send stop chunk
+                let stop = serde_json::json!({
+                    "id": &chat_id,
+                    "object": "chat.completion.chunk",
+                    "model": "jarvis-missiond",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop",
+                    }]
+                });
+                let _ = stream.write_all(format!("data: {}\n\n", stop).as_bytes()).await;
+                let _ = stream.write_all(b"data: [DONE]\n\n").await;
+                info!(?addr, slot_id, response_len = result.response.len(), duration_ms = result.duration_ms, "Chat completions done");
+            }
+            Err(e) => {
+                let err_chunk = serde_json::json!({
+                    "error": {"message": format!("Claude Code error: {}", e)}
+                });
+                let event = format!("data: {}\n\n", err_chunk);
+                let _ = stream.write_all(event.as_bytes()).await;
+                let _ = stream.write_all(b"data: [DONE]\n\n").await;
+                warn!(?addr, slot_id, error = %e, "Chat completions error");
             }
         }
 
         let _ = stream.shutdown().await;
-        info!(?addr, slot_id, "Chat completions stream ended");
         Ok(())
     }
 
@@ -523,6 +481,7 @@ impl PTYWebSocketServer {
         addr: SocketAddr,
         pty_manager: Option<Arc<PTYManager>>,
         cc_tasks_watcher: Option<Arc<Mutex<CCTasksWatcher>>>,
+        screenshot_broker: Option<Arc<super::ScreenshotBroker>>,
     ) -> anyhow::Result<()> {
         // Peek at first bytes to detect non-WebSocket HTTP requests
         let mut peek_buf = [0u8; 512];
@@ -581,7 +540,7 @@ impl PTYWebSocketServer {
         match parse_route(&path) {
             Route::Tasks => Self::handle_tasks_subscription(addr, ws_stream, cc_tasks_watcher).await,
             Route::Pty { slot_id } => {
-                Self::handle_pty_subscription(addr, ws_stream, pty_manager, slot_id).await
+                Self::handle_pty_subscription(addr, ws_stream, pty_manager, screenshot_broker, slot_id).await
             }
             Route::Invalid => {
                 let (mut ws_tx, _ws_rx) = ws_stream.split();
@@ -601,6 +560,7 @@ impl PTYWebSocketServer {
         addr: SocketAddr,
         ws_stream: tokio_tungstenite::WebSocketStream<TcpStream>,
         pty_manager: Option<Arc<PTYManager>>,
+        screenshot_broker: Option<Arc<super::ScreenshotBroker>>,
         slot_id: &str,
     ) -> anyhow::Result<()> {
         let pty_manager = match pty_manager {
@@ -673,6 +633,9 @@ impl PTYWebSocketServer {
             }
         };
 
+        // Subscribe to screenshot requests (if broker available)
+        let mut screenshot_rx = screenshot_broker.as_ref().map(|b| b.subscribe());
+
         loop {
             tokio::select! {
                 // PTY -> client
@@ -706,6 +669,21 @@ impl PTYWebSocketServer {
                     }
                 }
 
+                // Screenshot request from broker -> forward to browser client
+                screenshot_req = async {
+                    match screenshot_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Ok((req_slot, request_id)) = screenshot_req {
+                        if req_slot == slot_id {
+                            let msg = PtyOutMessage::ScreenshotRequest { request_id };
+                            let _ = send_json(&mut ws_tx, &msg).await;
+                        }
+                    }
+                }
+
                 // client -> PTY
                 msg = ws_rx.next() => {
                     match msg {
@@ -714,6 +692,31 @@ impl PTYWebSocketServer {
                                 match input {
                                     PtyInMessage::Input { data } => {
                                         let _ = pty_manager.write(slot_id, &data).await;
+                                    }
+                                    PtyInMessage::ScreenshotResponse { request_id, data, width, height, error } => {
+                                        if let Some(ref broker) = screenshot_broker {
+                                            if let Some(err) = error {
+                                                broker.resolve(&request_id, Err(err)).await;
+                                            } else if let Some(b64) = data {
+                                                match base64::Engine::decode(
+                                                    &base64::engine::general_purpose::STANDARD,
+                                                    &b64,
+                                                ) {
+                                                    Ok(png_bytes) => {
+                                                        broker.resolve(&request_id, Ok(super::ScreenshotResult {
+                                                            png_data: png_bytes,
+                                                            width: width.unwrap_or(0),
+                                                            height: height.unwrap_or(0),
+                                                        })).await;
+                                                    }
+                                                    Err(e) => {
+                                                        broker.resolve(&request_id, Err(format!("base64 decode: {e}"))).await;
+                                                    }
+                                                }
+                                            } else {
+                                                broker.resolve(&request_id, Err("No data in screenshot response".into())).await;
+                                            }
+                                        }
                                     }
                                 }
                             } else {

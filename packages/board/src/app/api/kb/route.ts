@@ -15,9 +15,10 @@ export async function GET(req: NextRequest) {
 
 export async function DELETE(req: NextRequest) {
   try {
-    const id = req.nextUrl.searchParams.get('id');
-    if (!id) return NextResponse.json({ error: 'Missing id' }, { status: 400 });
-    const result = await callTool('mission_kb_forget', { id });
+    // Prefer `key` (matches daemon contract), keep legacy `id` as fallback.
+    const key = req.nextUrl.searchParams.get('key') || req.nextUrl.searchParams.get('id');
+    if (!key) return NextResponse.json({ error: 'Missing key' }, { status: 400 });
+    const result = await callTool('mission_kb_forget', { key });
     return NextResponse.json(result);
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 502 });

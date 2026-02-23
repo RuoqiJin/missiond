@@ -286,7 +286,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_pty_send",
-            "向 PTY 会话发送消息并等待回复",
+            "向 PTY 会话发送消息。默认 fire-and-forget（立即返回），用 pty_status/pty_screen 轮询结果。设 waitForResponse=true 阻塞等待回复",
             json!({
                 "type": "object",
                 "properties": {
@@ -298,9 +298,13 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "发送的消息"
                     },
+                    "waitForResponse": {
+                        "type": "boolean",
+                        "description": "是否阻塞等待回复 (默认 false，fire-and-forget)"
+                    },
                     "timeoutMs": {
                         "type": "number",
-                        "description": "超时毫秒数 (默认 300000)"
+                        "description": "waitForResponse=true 时的超时毫秒数 (默认 300000)"
                     }
                 },
                 "required": ["slotId", "message"]
@@ -404,6 +408,20 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ToolDefinition::new(
             "mission_pty_logs",
             "获取 PTY 日志文件路径（用于 tail -f 实时查看）",
+            json!({
+                "type": "object",
+                "properties": {
+                    "slotId": {
+                        "type": "string",
+                        "description": "工位 ID"
+                    }
+                },
+                "required": ["slotId"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_pty_screenshot",
+            "截取 PTY 终端屏幕截图（PNG），返回文件路径。Claude Code 可用 Read 工具查看图片来可视化调试终端状态。",
             json!({
                 "type": "object",
                 "properties": {

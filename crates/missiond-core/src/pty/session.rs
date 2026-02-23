@@ -270,6 +270,7 @@ pub struct PTYSession {
     env: Option<HashMap<String, String>>,
 
     // Logging
+    #[allow(dead_code)]
     log_file: Option<PathBuf>,
 
     // Raw output replay buffer (for WebSocket late-join)
@@ -410,6 +411,15 @@ impl PTYSession {
     }
 
     // ========== Screen Reading ==========
+
+    /// Capture terminal screenshot as PNG, return file path
+    pub async fn screenshot(&self, output_dir: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+        let captured = {
+            let term = self.term.lock().await;
+            super::screenshot::capture_grid(&*term)
+        };
+        super::screenshot::save_screenshot(&captured, output_dir, &self.slot_id)
+    }
 
     /// Get current screen text
     pub async fn get_screen_text(&self) -> String {
@@ -651,7 +661,7 @@ impl PTYSession {
         term: Arc<Mutex<Term<SessionEventListener>>>,
         mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
     ) {
-        use alacritty_terminal::vte::ansi::{self, Processor};
+        use alacritty_terminal::vte::ansi::Processor;
         let mut processor: Processor = Processor::new();
 
         while let Some(data) = rx.recv().await {
@@ -733,6 +743,13 @@ impl PTYSession {
         let tool_parser = ClaudeCodeToolOutputParser::new();
         let fingerprint_registry = default_registry();
 
+        // Counter for consecutive empty-screen detections while in a processing state.
+        // When screen is empty, detect_state returns None and state gets stuck.
+        // After enough consecutive empty checks, fall back to Idle.
+        let mut empty_screen_count: u32 = 0;
+        const EMPTY_SCREEN_IDLE_THRESHOLD: u32 = 30; // 30 * 100ms = 3 seconds
+        let mut diag_tick: u32 = 0; // diagnostic log counter
+
         while running.load(Ordering::SeqCst) {
             check_interval.tick().await;
 
@@ -744,8 +761,9 @@ impl PTYSession {
             };
 
             // Get screen text for state detection (read ALL visible lines)
-            let last_lines = {
+            let (last_lines, is_alt_screen) = {
                 let term_guard = term.lock().await;
+                let is_alt = term_guard.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN);
                 let grid = term_guard.grid();
                 let mut lines = Vec::new();
                 let total_lines = grid.total_lines();
@@ -759,7 +777,7 @@ impl PTYSession {
                         lines.push(text.trim_end().to_string());
                     }
                 }
-                lines
+                (lines, is_alt)
             };
 
             // Create ParserContext with current state
@@ -773,6 +791,64 @@ impl PTYSession {
             // Detect state using semantic StateParser
             let detected_result = state_parser.detect_state(&context);
             let detected_state = detected_result.as_ref().map(|r| semantic_state_to_session_state(r.state));
+
+            // Diagnostic logging (once per second = every 10 ticks at 100ms)
+            diag_tick += 1;
+            if diag_tick % 10 == 0 && !matches!(current_state, SessionState::Idle | SessionState::Exited) {
+                let non_empty_count = last_lines.iter().filter(|l| !l.trim().is_empty()).count();
+                // Show last_non_empty_lines (what state detection actually uses)
+                let active = context.last_non_empty_lines(5);
+                let active_sample = active.iter().map(|s| {
+                    let truncated: String = s.chars().take(60).collect();
+                    if truncated.len() < s.len() { format!("{}...", truncated) } else { s.to_string() }
+                }).collect::<Vec<_>>().join(" | ");
+                // Extract spinner status line for diagnostics
+                let spinner_line = active.iter()
+                    .find(|l| l.trim().starts_with(|c: char| "·✻✽✶✳✢".contains(c)))
+                    .map(|s| {
+                        let t: String = s.chars().take(80).collect();
+                        t
+                    })
+                    .unwrap_or_default();
+                debug!(
+                    state = ?current_state,
+                    detected = ?detected_state,
+                    alt_screen = is_alt_screen,
+                    non_empty = non_empty_count,
+                    spinner = %spinner_line,
+                    active = %active_sample,
+                    "PTY state diag"
+                );
+            }
+
+            // Process stable ops for text streaming BEFORE state transitions,
+            // so text_assembler is populated when Complete fires.
+            if !delta.stable_ops.is_empty() && current_state.is_processing() {
+                let turn_id = *current_turn_id.read().await;
+                if let Some(turn_id) = turn_id {
+                    for op in &delta.stable_ops {
+                        let source = classify_stable_op(op);
+                        if matches!(source, ScreenTextSource::Assistant) {
+                            let chunk = text_assembler.lock().await.apply(op);
+                            if !chunk.is_empty() {
+                                let seq = {
+                                    let mut seq_guard = stream_seq.write().await;
+                                    let s = *seq_guard;
+                                    *seq_guard += 1;
+                                    s
+                                };
+                                let _ =
+                                    event_tx.send(SessionEvent::TextOutput(TextOutputEvent::Stream {
+                                        turn_id,
+                                        seq,
+                                        content: chunk,
+                                        timestamp: Utc::now().timestamp_millis(),
+                                    }));
+                            }
+                        }
+                    }
+                }
+            }
 
             // Handle state transitions
             if let Some(new_state) = detected_state {
@@ -790,6 +866,19 @@ impl PTYSession {
                 }
 
                 if new_state != current_state {
+                    // Diagnostic: dump active screen on state transition
+                    let active = context.last_non_empty_lines(8);
+                    let active_dump = active.iter().map(|s| {
+                        let truncated: String = s.chars().take(80).collect();
+                        if truncated.len() < s.len() { format!("{}...", truncated) } else { s.to_string() }
+                    }).collect::<Vec<_>>().join(" | ");
+                    info!(
+                        from = ?current_state,
+                        to = ?new_state,
+                        active = %active_dump,
+                        "PTY state transition"
+                    );
+
                     // Begin turn when entering processing state
                     if new_state.is_processing() && !current_state.is_processing() {
                         let mut counter = turn_counter.write().await;
@@ -874,6 +963,62 @@ impl PTYSession {
                         prev_state: current_state,
                     });
                 }
+
+                // Reset empty screen counter when we get a valid detection
+                empty_screen_count = 0;
+            } else if current_state.is_processing() {
+                // detect_state returned None while in a processing state.
+                // This happens when Claude Code's TUI clears the screen between phases.
+                // "Nearly empty" = only bottom bar (⏵⏵ bypass) and separators (────) remain,
+                // or truly all lines empty. Either way, no meaningful content to detect.
+                let non_empty = last_lines.iter().filter(|l| !l.trim().is_empty()).count();
+                let screen_is_nearly_empty = non_empty <= 3 && last_lines.iter().all(|l| {
+                    let t = l.trim();
+                    t.is_empty()
+                        || t.starts_with('─')
+                        || t.starts_with("⏵")
+                });
+                if screen_is_nearly_empty {
+                    empty_screen_count += 1;
+                    if empty_screen_count >= EMPTY_SCREEN_IDLE_THRESHOLD {
+                        debug!(
+                            prev_state = ?current_state,
+                            empty_ticks = empty_screen_count,
+                            "Empty screen fallback: transitioning to Idle"
+                        );
+                        let new_state = SessionState::Idle;
+                        *state.write().await = new_state;
+
+                        // End turn
+                        if let Some(turn_id) = *current_turn_id.read().await {
+                            let content = text_assembler.lock().await.finalize();
+                            let _ = event_tx.send(SessionEvent::TextOutput(
+                                TextOutputEvent::Complete {
+                                    turn_id,
+                                    content,
+                                    timestamp: Utc::now().timestamp_millis(),
+                                },
+                            ));
+                            debug!(turn_id = turn_id, "End turn (empty screen fallback)");
+                        }
+                        *current_turn_id.write().await = None;
+                        *stream_seq.write().await = 0;
+                        text_assembler.lock().await.reset();
+                        line_source_by_y.write().await.clear();
+                        assistant_block_active.store(false, Ordering::SeqCst);
+
+                        let _ = state_change_tx.send((new_state, current_state));
+                        let _ = event_tx.send(SessionEvent::StateChange {
+                            new_state,
+                            prev_state: current_state,
+                        });
+                        empty_screen_count = 0;
+                    }
+                } else {
+                    empty_screen_count = 0;
+                }
+            } else {
+                empty_screen_count = 0;
             }
 
             // Emit StatusUpdate event if spinner is detected
@@ -890,33 +1035,6 @@ impl PTYSession {
                 }
             }
 
-            // Process stable ops for text streaming
-            if !delta.stable_ops.is_empty() && current_state.is_processing() {
-                let turn_id = *current_turn_id.read().await;
-                if let Some(turn_id) = turn_id {
-                    for op in &delta.stable_ops {
-                        let source = classify_stable_op(op);
-                        if matches!(source, ScreenTextSource::Assistant) {
-                            let chunk = text_assembler.lock().await.apply(op);
-                            if !chunk.is_empty() {
-                                let seq = {
-                                    let mut seq_guard = stream_seq.write().await;
-                                    let s = *seq_guard;
-                                    *seq_guard += 1;
-                                    s
-                                };
-                                let _ =
-                                    event_tx.send(SessionEvent::TextOutput(TextOutputEvent::Stream {
-                                        turn_id,
-                                        seq,
-                                        content: chunk,
-                                        timestamp: Utc::now().timestamp_millis(),
-                                    }));
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -935,6 +1053,55 @@ impl PTYSession {
         } else {
             Err(anyhow!("PTY writer not available"))
         }
+    }
+
+    /// Send message (fire-and-forget): paste + enter, return immediately
+    pub async fn send_fire_and_forget(&self, message: &str) -> Result<()> {
+        let prev_state = self.state().await;
+        if prev_state != SessionState::Idle {
+            return Err(anyhow!("Cannot send message in state: {:?}", prev_state));
+        }
+
+        // Record user message
+        {
+            let mut history = self.history.write().await;
+            history.push(Message {
+                role: MessageRole::User,
+                content: message.trim().to_string(),
+                timestamp: Utc::now().timestamp_millis(),
+            });
+        }
+
+        // Set session state to Thinking and begin a new turn.
+        // Must set turn_id here because state_check_loop's begin-turn detection
+        // (new_state.is_processing() && !current_state.is_processing()) won't fire
+        // when current_state is already Thinking (which is_processing() = true).
+        {
+            *self.state.write().await = SessionState::Thinking;
+
+            // Begin turn
+            let mut counter = self.turn_counter.write().await;
+            *counter += 1;
+            *self.current_turn_id.write().await = Some(*counter);
+            *self.stream_seq.write().await = 0;
+            self.text_assembler.lock().await.reset();
+            self.line_source_by_y.write().await.clear();
+            self.assistant_block_active.store(false, Ordering::SeqCst);
+
+            let _ = self.state_change_tx.send((SessionState::Thinking, prev_state));
+            let _ = self.event_tx.send(SessionEvent::StateChange {
+                new_state: SessionState::Thinking,
+                prev_state,
+            });
+        }
+
+        // Send message using bracketed paste mode
+        let paste_payload = format!("\x1b[200~{}\x1b[201~", message);
+        self.write(&paste_payload).await?;
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        self.write("\r").await?;
+
+        Ok(())
     }
 
     /// Send message and wait for response
@@ -957,13 +1124,19 @@ impl PTYSession {
         // Subscribe to events before sending
         let mut rx = self.event_tx.subscribe();
 
-        // Send message
-        self.write(message).await?;
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Send message using bracketed paste mode so multi-line text is treated as one paste.
+        // Write paste markers + content in one call to avoid fragmentation.
+        let paste_payload = format!("\x1b[200~{}\x1b[201~", message);
+        self.write(&paste_payload).await?;
+        // Wait for Claude Code TUI to finish processing the paste before sending Enter.
+        tokio::time::sleep(Duration::from_millis(1000)).await;
         self.write("\r").await?;
 
-        // Wait for state to leave idle
-        self.wait_for_state_change(SessionState::Idle, Duration::from_secs(30))
+        // Wait for state to leave idle.
+        // First message in a session can take >30s (Claude loads CLAUDE.md, MCP servers, context).
+        // Use min(timeout_ms, 120s) to give enough time.
+        let state_wait = Duration::from_secs(timeout_ms.min(120_000) / 1000);
+        self.wait_for_state_change(SessionState::Idle, state_wait)
             .await?;
 
         // Wait for response complete
@@ -1158,6 +1331,7 @@ fn semantic_state_to_session_state(state: SemanticState) -> SessionState {
         SemanticState::Starting => SessionState::Starting,
         SemanticState::Idle => SessionState::Idle,
         SemanticState::Thinking => SessionState::Thinking,
+        SemanticState::Responding => SessionState::Responding,
         SemanticState::ToolRunning => SessionState::ToolRunning,
         SemanticState::Confirming => SessionState::Confirming,
         SemanticState::Error => SessionState::Error,
@@ -1170,7 +1344,7 @@ fn current_state_to_semantic(state: SessionState) -> SemanticState {
         SessionState::Starting => SemanticState::Starting,
         SessionState::Idle => SemanticState::Idle,
         SessionState::Thinking => SemanticState::Thinking,
-        SessionState::Responding => SemanticState::Thinking, // No direct mapping
+        SessionState::Responding => SemanticState::Responding,
         SessionState::ToolRunning => SemanticState::ToolRunning,
         SessionState::Confirming => SemanticState::Confirming,
         SessionState::Error => SemanticState::Error,
