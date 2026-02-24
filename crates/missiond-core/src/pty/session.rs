@@ -750,6 +750,14 @@ impl PTYSession {
         const EMPTY_SCREEN_IDLE_THRESHOLD: u32 = 30; // 30 * 100ms = 3 seconds
         let mut diag_tick: u32 = 0; // diagnostic log counter
 
+        // Debounce for processing sub-state transitions (Thinking↔ToolRunning).
+        // The ⏺ tool line flickers in alacritty's virtual terminal, causing
+        // rapid alternation at 100ms level. Require N consecutive ticks of the
+        // same new state before committing the transition.
+        let mut debounce_target: Option<SessionState> = None;
+        let mut debounce_count: u32 = 0;
+        const DEBOUNCE_THRESHOLD: u32 = 3; // 3 * 100ms = 300ms
+
         while running.load(Ordering::SeqCst) {
             check_interval.tick().await;
 
@@ -862,6 +870,40 @@ impl PTYSession {
                             }
                             continue;
                         }
+                    }
+                }
+
+                if new_state == current_state {
+                    // State is stable — reset any pending debounce
+                    debounce_target = None;
+                    debounce_count = 0;
+                } else {
+                    // Debounce only Thinking↔ToolRunning transitions.
+                    // The ⏺ tool line flickers in alacritty, causing rapid alternation.
+                    let needs_debounce = matches!(
+                        (current_state, new_state),
+                        (SessionState::Thinking, SessionState::ToolRunning)
+                            | (SessionState::ToolRunning, SessionState::Thinking)
+                    );
+
+                    if needs_debounce {
+                        if debounce_target == Some(new_state) {
+                            debounce_count += 1;
+                        } else {
+                            debounce_target = Some(new_state);
+                            debounce_count = 1;
+                        }
+                        if debounce_count < DEBOUNCE_THRESHOLD {
+                            // Not yet stable — keep current state, don't transition
+                            empty_screen_count = 0;
+                            continue;
+                        }
+                        // Threshold met — commit transition
+                        debounce_target = None;
+                        debounce_count = 0;
+                    } else {
+                        debounce_target = None;
+                        debounce_count = 0;
                     }
                 }
 
