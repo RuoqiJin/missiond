@@ -201,8 +201,7 @@ impl StateParser for ClaudeCodeStateParser {
 
     fn detect_state(&self, context: &ParserContext) -> Option<StateDetectionResult> {
         let text = context.text();
-        let active_lines = context.last_non_empty_lines(10);
-        let active_text = active_lines.join("\n");
+        let active_lines = context.last_non_empty_lines(12);
 
         // 0. Trust dialog during startup (auto-confirm)
         if context.current_state == Some(State::Starting)
@@ -269,15 +268,24 @@ impl StateParser for ClaudeCodeStateParser {
             }
         }
 
-        // 4. Responding: no spinner, no prompt, but has ⏺ output blocks
-        if !has_spinner && !has_prompt && text.contains('⏺') {
+        // 4. Responding: no spinner, no prompt, but has ⏺ output blocks in active region.
+        //    Note: In Claude Code v2.x, the spinner is present during the entire response
+        //    generation phase, so Responding may rarely trigger. It serves as a safety net
+        //    for brief transition windows where spinner disappears before prompt appears.
+        //    Check active_lines (not full text) to avoid matching historical ⏺ in scroll buffer.
+        if !has_spinner
+            && !has_prompt
+            && active_lines.iter().any(|l| l.trim().starts_with('⏺'))
+        {
             return Some(StateDetectionResult::new(State::Responding, 0.85));
         }
 
-        // 5. Error indicators in active region
-        if active_text.contains("Error:")
-            || active_text.contains("error:")
-            || active_text.contains('✖')
+        // 5. Error indicators — only match Claude Code's own error format.
+        //    The ✖ prefix is Claude Code's error marker. Don't match broad "error:"
+        //    patterns which trigger on compiler output (rustc, tsc, etc.) in tool results.
+        if active_lines
+            .iter()
+            .any(|line| line.trim().starts_with('✖'))
         {
             return Some(StateDetectionResult::new(State::Error, 0.7));
         }
@@ -564,14 +572,42 @@ mod tests {
     fn test_detect_error() {
         let parser = ClaudeCodeStateParser::new();
 
-        let context = make_context(&["Error: Something went wrong"]);
-        assert_eq!(parser.detect_state(&context).unwrap().state, State::Error);
-
-        let context = make_context(&["error: file not found"]);
-        assert_eq!(parser.detect_state(&context).unwrap().state, State::Error);
-
+        // Claude Code's own error format: ✖ prefix
         let context = make_context(&["✖ Failed to execute command"]);
         assert_eq!(parser.detect_state(&context).unwrap().state, State::Error);
+
+        let context = make_context(&["  ✖ Error: API request failed"]);
+        assert_eq!(parser.detect_state(&context).unwrap().state, State::Error);
+    }
+
+    #[test]
+    fn test_error_not_triggered_by_tool_output() {
+        let parser = ClaudeCodeStateParser::new();
+
+        // Compiler error in tool output should NOT trigger Error state
+        let context = make_context(&["error[E0425]: cannot find value `x`"]);
+        assert!(parser.detect_state(&context).is_none());
+
+        let context = make_context(&["Error: Something went wrong"]);
+        assert!(parser.detect_state(&context).is_none());
+
+        // Compiler error with spinner present → Thinking, not Error
+        let context = make_context(&[
+            "  │ error: aborting due to previous error",
+            "────────────────────",
+            "❯ ",
+            "────────────────────",
+            "✢ Drizzling… (thinking)",
+        ]);
+        assert_eq!(parser.detect_state(&context).unwrap().state, State::Thinking);
+
+        // Compiler error with prompt → Idle, not Error
+        let context = make_context(&[
+            "  │ error[E0425]: cannot find value `x`",
+            "────────────────────",
+            "❯ ",
+        ]);
+        assert_eq!(parser.detect_state(&context).unwrap().state, State::Idle);
     }
 
     #[test]
@@ -655,6 +691,30 @@ mod tests {
         assert!(SPINNER_LINE_PATTERN.is_match("✳ Determining…"));
         assert!(SPINNER_LINE_PATTERN.is_match("  ✻ Reading file..."));
         assert!(SPINNER_LINE_PATTERN.is_match("· Processing (esc to interrupt)"));
+    }
+
+    #[test]
+    fn test_spinner_with_dense_tool_output() {
+        let parser = ClaudeCodeStateParser::new();
+
+        // Spinner at bottom with many lines of tool output above
+        // Window=12 should still catch the spinner
+        let context = make_context(&[
+            "  │ src/main.rs:10:5: warning: unused variable",
+            "  │ src/main.rs:15:1: error: expected semicolon",
+            "  │ src/lib.rs:30:10: warning: dead code",
+            "  │ src/lib.rs:42:5: error: mismatched types",
+            "  │ src/util.rs:5:1: warning: unused import",
+            "  │ src/util.rs:20:8: error: cannot find value",
+            "  │ 3 errors, 3 warnings emitted",
+            "  │ error: could not compile `myproject`",
+            "────────────────────",
+            "❯ ",
+            "────────────────────",
+            "✢ Drizzling… (thinking)",
+        ]);
+        // Spinner found in last 12 non-empty lines
+        assert_eq!(parser.detect_state(&context).unwrap().state, State::Thinking);
     }
 
     #[test]
