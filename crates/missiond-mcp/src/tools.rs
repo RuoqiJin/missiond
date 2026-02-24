@@ -690,13 +690,55 @@ pub fn all_tools() -> Vec<ToolDefinition> {
             }),
         ),
 
-        // ===== Health =====
+        // ===== Health & Diagnostics =====
         ToolDefinition::new(
             "mission_health",
             "检查 missiond 守护进程健康状态：IPC、WebSocket、PTY、数据库",
             json!({
                 "type": "object",
                 "properties": {}
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_reachability",
+            "Multi-channel reachability probe for a server. Runs ICMP ping (LAN + public), \
+             Tailscale status, TCP SSH port probe, and deploy agent health check IN PARALLEL. \
+             Use when deploy agent is offline and you need to determine machine reachability.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Infra registry ID (e.g. 'privatecloud', 'gcp', 'win-3090ti') or IP address"
+                    },
+                    "channels": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Specific channels: lan_ping, public_ping, tailscale, ssh, deploy_agent. Default: all applicable"
+                    }
+                },
+                "required": ["target"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_os_diagnose",
+            "SSH into a server and collect OS-level diagnostics: crash reports, system load, \
+             top CPU processes, temperatures, journal errors, docker containers, network, GPU. \
+             Auto-resolves SSH credentials from infra registry. Channel priority: LAN > Tailscale > public.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Infra registry ID (e.g. 'privatecloud', 'win-3090ti') or user@host"
+                    },
+                    "checks": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Specific checks: system, crashes, top_cpu, temperatures, journal_errors, docker, network, gpu. Default: all"
+                    }
+                },
+                "required": ["target"]
             }),
         ),
 
