@@ -66,6 +66,8 @@ pub enum SessionState {
     Starting,
     /// Waiting for input (shows >)
     Idle,
+    /// Slash command autocomplete menu is open
+    SlashMenu,
     /// Claude is thinking (shows spinner)
     Thinking,
     /// Claude is outputting response
@@ -1372,6 +1374,7 @@ fn semantic_state_to_session_state(state: SemanticState) -> SessionState {
     match state {
         SemanticState::Starting => SessionState::Starting,
         SemanticState::Idle => SessionState::Idle,
+        SemanticState::SlashMenu => SessionState::SlashMenu,
         SemanticState::Thinking => SessionState::Thinking,
         SemanticState::Responding => SessionState::Responding,
         SemanticState::ToolRunning => SessionState::ToolRunning,
@@ -1385,6 +1388,7 @@ fn current_state_to_semantic(state: SessionState) -> SemanticState {
     match state {
         SessionState::Starting => SemanticState::Starting,
         SessionState::Idle => SemanticState::Idle,
+        SessionState::SlashMenu => SemanticState::SlashMenu,
         SessionState::Thinking => SemanticState::Thinking,
         SessionState::Responding => SemanticState::Responding,
         SessionState::ToolRunning => SemanticState::ToolRunning,
