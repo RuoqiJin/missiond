@@ -6,6 +6,18 @@ use serde::{Deserialize, Serialize};
 
 // ============ Slot Config ============
 
+/// Slot traits: declarative capabilities that control pipeline routing.
+/// Used to determine which slots' conversations enter extraction pipelines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotTrait {
+    /// Slot is a system/meta agent (memory extraction, code review, GC, etc.).
+    /// Its conversations are excluded from all extraction pipelines.
+    IsMetaAgent,
+    /// Slot produces conversations that should be analyzed for knowledge extraction.
+    GeneratesKnowledge,
+}
+
 /// Configuration for a slot (workstation)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,6 +34,28 @@ pub struct SlotConfig {
     /// Skip all permission prompts and trust dialogs (--dangerously-skip-permissions)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dangerously_skip_permissions: Option<bool>,
+    /// Declarative traits controlling pipeline behavior.
+    /// If empty/absent, defaults are inferred from role at load time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub traits: Vec<SlotTrait>,
+}
+
+impl SlotConfig {
+    /// Is this a system/meta agent whose conversations should be excluded from pipelines?
+    pub fn is_meta_agent(&self) -> bool {
+        self.traits.contains(&SlotTrait::IsMetaAgent)
+    }
+
+    /// Apply default traits based on role if none were explicitly configured.
+    pub fn apply_default_traits(&mut self) {
+        if !self.traits.is_empty() {
+            return;
+        }
+        match self.role.as_str() {
+            "memory" => self.traits.push(SlotTrait::IsMetaAgent),
+            _ => {}
+        }
+    }
 }
 
 /// Slot = Config + session (process state managed by ProcessManager)
@@ -774,6 +808,7 @@ mod tests {
             mcp_config: None,
             auto_start: Some(true),
             dangerously_skip_permissions: None,
+            traits: vec![],
         };
 
         let json = serde_json::to_string(&config).unwrap();

@@ -649,6 +649,7 @@ mod tests {
                 mcp_config: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
+                traits: vec![],
             },
             session_id: None,
         }
@@ -683,6 +684,7 @@ mod tests {
                 mcp_config: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
+                traits: vec![],
             },
             session_id: None,
         };
@@ -696,6 +698,7 @@ mod tests {
                 mcp_config: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
+                traits: vec![],
             },
             session_id: None,
         };

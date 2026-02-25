@@ -29,16 +29,24 @@ impl SlotManager {
     pub fn load_slots(&self, configs: Vec<SlotConfig>) {
         let mut slots = self.slots.write().unwrap();
 
-        for config in configs {
+        for mut config in configs {
+            // Apply default traits based on role if none explicitly configured
+            config.apply_default_traits();
+
             // Restore session_id from database
             let saved_session_id = self.db.get_slot_session(&config.id).ok().flatten();
+
+            let traits_desc = if config.traits.is_empty() {
+                String::new()
+            } else {
+                format!(" traits={:?}", config.traits)
+            };
+            info!(slot_id = %config.id, role = %config.role, "{}", traits_desc);
 
             let slot = Slot {
                 config: config.clone(),
                 session_id: saved_session_id,
             };
-
-            info!(slot_id = %config.id, role = %config.role, "Slot loaded");
             slots.insert(config.id.clone(), slot);
         }
     }
@@ -59,6 +67,12 @@ impl SlotManager {
     pub fn find_slot_by_role(&self, role: &str) -> Option<Slot> {
         let slots = self.slots.read().unwrap();
         slots.values().find(|s| s.config.role == role).cloned()
+    }
+
+    /// Find the first slot with a given trait
+    pub fn find_slot_by_trait(&self, t: crate::types::SlotTrait) -> Option<Slot> {
+        let slots = self.slots.read().unwrap();
+        slots.values().find(|s| s.config.traits.contains(&t)).cloned()
     }
 
     /// Get all slots with a specific role
@@ -141,6 +155,7 @@ mod tests {
                 mcp_config: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
+                traits: vec![],
             },
             SlotConfig {
                 id: "slot-2".to_string(),
@@ -150,6 +165,7 @@ mod tests {
                 mcp_config: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
+                traits: vec![],
             },
             SlotConfig {
                 id: "slot-3".to_string(),
@@ -159,6 +175,7 @@ mod tests {
                 mcp_config: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
+                traits: vec![],
             },
         ];
 
@@ -194,6 +211,7 @@ mod tests {
             mcp_config: None,
             auto_start: None,
             dangerously_skip_permissions: None,
+            traits: vec![],
         }];
 
         manager.load_slots(configs);
@@ -227,6 +245,7 @@ mod tests {
                 mcp_config: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
+                traits: vec![],
             },
             SlotConfig {
                 id: "slot-2".to_string(),
@@ -236,6 +255,7 @@ mod tests {
                 mcp_config: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
+                traits: vec![],
             },
             SlotConfig {
                 id: "slot-3".to_string(),
@@ -245,6 +265,7 @@ mod tests {
                 mcp_config: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
+                traits: vec![],
             },
         ];
 
