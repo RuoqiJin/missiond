@@ -96,6 +96,44 @@ impl ClaudeCodeStateParser {
             .any(|line| PROMPT_PATTERN.is_match(line.trim()))
     }
 
+    /// Check if the slash command autocomplete menu is visible.
+    ///
+    /// Detected by: prompt with `/` typed + menu items (`  /command-name    description`)
+    /// Screen format (from real alacritty capture):
+    /// ```text
+    /// ❯ /
+    /// ────────────────────
+    ///   /example-deploy            描述...
+    ///   /xjp-mcp                     描述...
+    /// ```
+    fn has_slash_menu(&self, active_lines: &[&str]) -> bool {
+        // 1. A prompt line with `/` typed (❯ / or ❯ /partial)
+        //    Search in active_lines (wider window) since menu items push prompt up.
+        let has_slash_prompt = active_lines.iter().any(|line| {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix('❯').or_else(|| trimmed.strip_prefix('>')) {
+                rest.trim_start().starts_with('/')
+            } else {
+                false
+            }
+        });
+        if !has_slash_prompt {
+            return false;
+        }
+
+        // 2. At least 2 menu item lines: /command-name (starts with / + alpha)
+        let menu_count = active_lines
+            .iter()
+            .filter(|line| {
+                let trimmed = line.trim();
+                trimmed.starts_with('/')
+                    && trimmed.len() > 2
+                    && trimmed.as_bytes().get(1).map_or(false, |b| b.is_ascii_alphabetic())
+            })
+            .count();
+        menu_count >= 2
+    }
+
     /// Check if any line is a spinner/status line (processing indicator)
     fn has_spinner_line(&self, lines: &[&str]) -> bool {
         lines.iter().any(|line| SPINNER_LINE_PATTERN.is_match(line))
@@ -204,8 +242,9 @@ impl StateParser for ClaudeCodeStateParser {
         let active_lines = context.last_non_empty_lines(12);
 
         // 0. Trust dialog during startup (auto-confirm)
+        // Matches both old ("Yes, proceed") and new ("Yes, I trust this folder") formats
         if context.current_state == Some(State::Starting)
-            && text.contains("Yes, proceed")
+            && (text.contains("Yes, proceed") || text.contains("Yes, I trust this folder"))
             && text.contains("Enter to confirm")
         {
             return Some(
@@ -235,12 +274,20 @@ impl StateParser for ClaudeCodeStateParser {
         }
 
         // Key signals from active region
-        let has_prompt = self.has_prompt_in(&context.last_non_empty_lines(3));
+        let prompt_lines = context.last_non_empty_lines(3);
+        let has_prompt = self.has_prompt_in(&prompt_lines);
         let has_spinner = self.has_spinner_line(&active_lines);
 
-        // 2. Idle: prompt visible AND no spinner line
-        if has_prompt && !has_spinner {
-            return Some(StateDetectionResult::new(State::Idle, 0.9));
+        // 2. Idle or SlashMenu: prompt visible AND no spinner line
+        //    Also check for slash menu even when prompt is outside the 3-line window
+        //    (menu items push the prompt higher up on screen).
+        if !has_spinner {
+            if self.has_slash_menu(&active_lines) {
+                return Some(StateDetectionResult::new(State::SlashMenu, 0.9));
+            }
+            if has_prompt {
+                return Some(StateDetectionResult::new(State::Idle, 0.9));
+            }
         }
 
         // 3. Processing: spinner line present → Thinking or ToolRunning
@@ -553,11 +600,35 @@ mod tests {
     fn test_detect_starting_trust_confirm() {
         let parser = ClaudeCodeStateParser::new();
 
+        // Old format: "Yes, proceed"
         let context = make_context_with_state(
             &[
                 "Do you trust this project?",
                 "Yes, proceed",
                 "Enter to confirm",
+            ],
+            State::Starting,
+        );
+        let result = parser.detect_state(&context);
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert_eq!(result.state, State::Starting);
+        assert_eq!(result.meta.unwrap().needs_trust_confirm, Some(true));
+    }
+
+    #[test]
+    fn test_detect_starting_trust_folder_confirm() {
+        let parser = ClaudeCodeStateParser::new();
+
+        // New format: "Yes, I trust this folder"
+        let context = make_context_with_state(
+            &[
+                "Accessing workspace:",
+                "<HOME>",
+                "Quick safety check: Is this a project you created or one you trust?",
+                "❯ 1. Yes, I trust this folder",
+                "  2. No, exit",
+                "Enter to confirm · Esc to cancel",
             ],
             State::Starting,
         );
@@ -715,6 +786,75 @@ mod tests {
         ]);
         // Spinner found in last 12 non-empty lines
         assert_eq!(parser.detect_state(&context).unwrap().state, State::Thinking);
+    }
+
+    #[test]
+    fn test_detect_slash_menu() {
+        let parser = ClaudeCodeStateParser::new();
+
+        // Real format from alacritty capture
+        let context = make_context(&[
+            "────────────────────────────────────────",
+            "❯ /",
+            "────────────────────────────────────────",
+            "  /example-deploy            description here",
+            "  /xjp-mcp                     XJP MCP server",
+            "  /missiond                    Claude Code multi-instance",
+            "  /backend-deploy              backend deploy",
+            "  /add-dir                     Add a new working directory",
+        ]);
+        let result = parser.detect_state(&context);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().state, State::SlashMenu);
+    }
+
+    #[test]
+    fn test_detect_slash_menu_partial_filter() {
+        let parser = ClaudeCodeStateParser::new();
+
+        // User typed /xjp to filter
+        let context = make_context(&[
+            "❯ /xjp",
+            "────────────────────────────────────────",
+            "  /example-deploy            desc",
+            "  /xjp-mcp                     desc",
+        ]);
+        let result = parser.detect_state(&context);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().state, State::SlashMenu);
+    }
+
+    #[test]
+    fn test_slash_prompt_without_menu_is_idle() {
+        let parser = ClaudeCodeStateParser::new();
+
+        // User typed / but no menu items visible (menu closed or not yet rendered)
+        let context = make_context(&[
+            "❯ /",
+            "────────────────────────────────────────",
+            "  ? for shortcuts",
+        ]);
+        let result = parser.detect_state(&context);
+        assert!(result.is_some());
+        // No menu items → Idle, not SlashMenu
+        assert_eq!(result.unwrap().state, State::Idle);
+    }
+
+    #[test]
+    fn test_idle_with_slash_in_output_not_slash_menu() {
+        let parser = ClaudeCodeStateParser::new();
+
+        // Output contains /paths but prompt doesn't have /
+        let context = make_context(&[
+            "  /usr/local/bin/node",
+            "  /etc/config",
+            "────────────────────────────────────────",
+            "❯ ",
+        ]);
+        let result = parser.detect_state(&context);
+        assert!(result.is_some());
+        // Prompt has no /, so it's Idle
+        assert_eq!(result.unwrap().state, State::Idle);
     }
 
     #[test]
