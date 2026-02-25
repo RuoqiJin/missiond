@@ -8,7 +8,7 @@ interface TerminalProps {
   slotId: string;
 }
 
-type PTYState = 'unknown' | 'not_running' | 'starting' | 'idle' | 'thinking' | 'responding' | 'tool_running' | 'confirming' | 'error' | 'exited';
+type PTYState = 'unknown' | 'not_running' | 'starting' | 'idle' | 'slash_menu' | 'thinking' | 'responding' | 'tool_running' | 'confirming' | 'error' | 'exited';
 
 // --- Error Boundary ---
 class TerminalErrorBoundary extends Component<
@@ -285,6 +285,7 @@ function TerminalInner({ slotId }: TerminalProps) {
     not_running: { text: 'Stopped', color: 'text-neutral-500' },
     starting: { text: 'Starting', color: 'text-yellow-400' },
     idle: { text: 'Idle', color: 'text-green-400' },
+    slash_menu: { text: '/ Menu', color: 'text-green-300' },
     thinking: { text: 'Thinking', color: 'text-blue-400' },
     responding: { text: 'Responding', color: 'text-purple-400' },
     tool_running: { text: 'Tool Running', color: 'text-cyan-400' },

@@ -20,6 +20,7 @@ use missiond_core::semantic::{
 pub enum State {
     Starting,
     Idle,
+    SlashMenu,
     Thinking,
     Responding,
     ToolRunning,
@@ -32,6 +33,7 @@ impl From<semantic::State> for State {
         match s {
             semantic::State::Starting => State::Starting,
             semantic::State::Idle => State::Idle,
+            semantic::State::SlashMenu => State::SlashMenu,
             semantic::State::Thinking => State::Thinking,
             semantic::State::Responding => State::Responding,
             semantic::State::ToolRunning => State::ToolRunning,
@@ -235,6 +237,7 @@ impl StateParser {
             let rust_state = match state {
                 State::Starting => semantic::State::Starting,
                 State::Idle => semantic::State::Idle,
+                State::SlashMenu => semantic::State::SlashMenu,
                 State::Thinking => semantic::State::Thinking,
                 State::Responding => semantic::State::Responding,
                 State::ToolRunning => semantic::State::ToolRunning,

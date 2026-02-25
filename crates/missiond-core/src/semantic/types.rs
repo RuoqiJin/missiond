@@ -13,6 +13,8 @@ pub enum State {
     Starting,
     /// Idle, waiting for user input (prompt visible)
     Idle,
+    /// Slash command autocomplete menu is open (❯ / + menu items)
+    SlashMenu,
     /// Thinking/processing (esc to interrupt visible)
     Thinking,
     /// Outputting response (no spinner, no prompt, has output blocks)
@@ -30,6 +32,7 @@ impl std::fmt::Display for State {
         match self {
             State::Starting => write!(f, "starting"),
             State::Idle => write!(f, "idle"),
+            State::SlashMenu => write!(f, "slash_menu"),
             State::Thinking => write!(f, "thinking"),
             State::Responding => write!(f, "responding"),
             State::ToolRunning => write!(f, "tool_running"),

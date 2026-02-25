@@ -820,7 +820,7 @@ impl PTYManager {
 
         for info in agent_info.values() {
             match info.state {
-                SessionState::Idle => {
+                SessionState::Idle | SessionState::SlashMenu => {
                     stats.idle += 1;
                     stats.running += 1;
                 }
