@@ -394,6 +394,21 @@ impl MissionDB {
             )?;
         }
 
+        // Cleanup: purge any control-plane messages that leaked into pipeline state
+        // (PTY slot sessions and agent sessions should never be in the extraction pipeline)
+        let cleaned: usize = conn.execute(
+            "DELETE FROM message_pipeline_state
+             WHERE message_id IN (
+                 SELECT m.id FROM conversation_messages m
+                 JOIN conversations c ON c.id = m.session_id
+                 WHERE c.slot_id IS NOT NULL OR c.id LIKE 'agent-%'
+             )",
+            [],
+        )?;
+        if cleaned > 0 {
+            tracing::info!(cleaned, "Purged control-plane messages from pipeline state");
+        }
+
         Ok(())
     }
 
@@ -1976,16 +1991,25 @@ impl MissionDB {
     }
 
     /// Check if any pending messages exist for a pipeline (lightweight)
+    /// Excludes PTY slot sessions and agent sessions (control plane isolation)
     pub fn has_pending_pipeline_messages(&self, pipeline: &str) -> SqliteResult<bool> {
         let conn = self.conn();
         conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM message_pipeline_state WHERE pipeline = ?1 AND status = 'pending')",
+            "SELECT EXISTS(
+                SELECT 1 FROM message_pipeline_state mps
+                JOIN conversation_messages m ON m.id = mps.message_id
+                JOIN conversations c ON c.id = m.session_id
+                WHERE mps.pipeline = ?1 AND mps.status = 'pending'
+                  AND c.slot_id IS NULL
+                  AND c.id NOT LIKE 'agent-%'
+            )",
             params![pipeline],
             |row| row.get(0),
         )
     }
 
     /// Get pending messages for a pipeline, grouped by session
+    /// Excludes PTY slot sessions and agent sessions (control plane isolation)
     pub fn get_pending_pipeline_messages(&self, pipeline: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
@@ -1994,6 +2018,8 @@ impl MissionDB {
              JOIN message_pipeline_state mps ON mps.message_id = m.id
              JOIN conversations c ON c.id = m.session_id
              WHERE mps.pipeline = ?1 AND mps.status = 'pending'
+               AND c.slot_id IS NULL
+               AND c.id NOT LIKE 'agent-%'
              ORDER BY c.started_at DESC, m.id ASC"
         )?;
 
@@ -2030,10 +2056,18 @@ impl MissionDB {
     }
 
     /// Get all pending message IDs for a pipeline (lightweight, no full message content)
+    /// Excludes PTY slot sessions and agent sessions (control plane isolation)
     pub fn get_pending_pipeline_msg_ids(&self, pipeline: &str) -> SqliteResult<Vec<i64>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT message_id FROM message_pipeline_state WHERE pipeline = ?1 AND status = 'pending' ORDER BY message_id ASC",
+            "SELECT mps.message_id
+             FROM message_pipeline_state mps
+             JOIN conversation_messages m ON m.id = mps.message_id
+             JOIN conversations c ON c.id = m.session_id
+             WHERE mps.pipeline = ?1 AND mps.status = 'pending'
+               AND c.slot_id IS NULL
+               AND c.id NOT LIKE 'agent-%'
+             ORDER BY mps.message_id ASC",
         )?;
         let ids = stmt
             .query_map(params![pipeline], |row| row.get(0))?
