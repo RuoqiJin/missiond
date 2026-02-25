@@ -409,6 +409,16 @@ impl MissionDB {
             tracing::info!(cleaned, "Purged control-plane messages from pipeline state");
         }
 
+        // Phase 2: realtime extraction now uses watermark (realtime_forwarded_at),
+        // not message_pipeline_state. Purge all realtime pipeline entries.
+        let realtime_purged: usize = conn.execute(
+            "DELETE FROM message_pipeline_state WHERE pipeline = 'realtime'",
+            [],
+        )?;
+        if realtime_purged > 0 {
+            tracing::info!(realtime_purged, "Purged realtime pipeline entries (migrated to watermark)");
+        }
+
         Ok(())
     }
 

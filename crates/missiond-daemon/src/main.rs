@@ -50,6 +50,9 @@ struct ExtractionState {
     last_realtime_completed_at: i64,
     /// Message IDs in the current deep_analysis batch, for marking done on completion.
     current_batch_msg_ids: Vec<i64>,
+    /// Watermark targets for realtime extraction: (session_id, max_timestamp).
+    /// On completion, update realtime_forwarded_at for each session.
+    watermark_targets: Vec<(String, String)>,
 }
 
 /// Safety valve: max time to wait for slot to return to Idle after send() returns.
@@ -1665,7 +1668,8 @@ impl AppState {
             // State auto-committed by Daemon on extraction completion — no manual done() needed.
             "mission_memory_pending" | "mission_memory_pending_user" => {
                 let db = self.mission.db();
-                let pending = db.get_pending_pipeline_messages("realtime")
+                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                let pending = db.get_pending_realtime_messages(&today)
                     .map_err(|e| anyhow!("DB error: {}", e))?;
 
                 if pending.is_empty() {
@@ -3132,6 +3136,7 @@ async fn check_memory_slot_stuck(state: &AppState) {
         es.phase = ExtractionPhase::Idle;
         es.active_type = None;
         es.current_batch_msg_ids.clear();
+        es.watermark_targets.clear();
     }
     // Don't reset to 0 — set to now so we can detect if respawn also gets stuck
     state.memory_slot_busy_since.store(now, std::sync::atomic::Ordering::SeqCst);
@@ -3155,6 +3160,7 @@ async fn check_extraction_gate(state: &AppState, label: &str) -> bool {
             es.phase = ExtractionPhase::Idle;
             es.active_type = None;
             es.current_batch_msg_ids.clear();
+            es.watermark_targets.clear();
             return true;
         }
     } else {
@@ -3193,15 +3199,27 @@ async fn check_realtime_extraction(state: &AppState) {
         }
     }
 
-    // Check for pending messages and get their IDs (for auto-commit on completion)
-    let msg_ids = match state.mission.db().get_pending_pipeline_msg_ids("realtime") {
-        Ok(ids) if !ids.is_empty() => ids,
+    // Watermark-based check: any conversations with messages beyond their realtime_forwarded_at?
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let pending = match state.mission.db().get_pending_realtime_messages(&today) {
+        Ok(p) if !p.is_empty() => p,
         Ok(_) => {
-            debug!("realtime: no pending messages");
+            debug!("realtime: no pending messages (watermark)");
             return;
         }
         Err(_) => return,
     };
+
+    // Capture watermark targets: (session_id, max_timestamp) for advancing on completion
+    let watermark_targets: Vec<(String, String)> = pending
+        .iter()
+        .filter_map(|(session_id, _, msgs)| {
+            msgs.last().map(|m| (session_id.clone(), m.timestamp.clone()))
+        })
+        .collect();
+
+    let session_count = pending.len();
+    let msg_count: usize = pending.iter().map(|(_, _, msgs)| msgs.len()).sum();
 
     // Ensure memory slot is spawned, then check it's idle
     if !ensure_memory_slot(state).await {
@@ -3221,16 +3239,16 @@ async fn check_realtime_extraction(state: &AppState) {
         }
     }
 
-    info!(batch_size = msg_ids.len(), "Realtime extraction: locking batch");
+    info!(sessions = session_count, messages = msg_count, "Realtime extraction: locking batch (watermark)");
 
-    // Store msg_ids in ExtractionState for auto-commit on completion (like deep_analysis)
+    // Store watermark targets for advancing on completion
     {
         let now = chrono::Utc::now().timestamp();
         let mut es = state.extraction_state.write().await;
         es.phase = ExtractionPhase::Sending;
         es.active_type = Some("realtime");
         es.phase_started_at = now;
-        es.current_batch_msg_ids = msg_ids;
+        es.watermark_targets = watermark_targets;
     }
 
     let prompt = "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，提取知识存入 KB。\n\
@@ -3265,8 +3283,8 @@ async fn check_realtime_extraction(state: &AppState) {
                 let mut es = extraction_state.write().await;
                 es.phase = ExtractionPhase::Idle;
                 es.active_type = None;
-                // Don't clear msg_ids on failure — they stay pending for retry
-                es.current_batch_msg_ids.clear();
+                // Watermark not advanced on failure — messages stay pending for retry
+                es.watermark_targets.clear();
             }
         }
     });
@@ -3621,10 +3639,11 @@ fn handle_new_messages(
         Ok(inserted_ids) if !inserted_ids.is_empty() => {
             info!(session = %session_id, count = inserted_ids.len(), "Logged conversation messages");
 
-            // Enqueue for pipeline processing (only user CLI sessions)
+            // Enqueue for deep_analysis pipeline (only user CLI sessions)
+            // Note: realtime extraction now uses watermark (realtime_forwarded_at), not pipeline state
             if !is_pty && !session_id.starts_with("agent-") {
-                if let Err(e) = db.enqueue_messages_for_pipelines(&inserted_ids, &["realtime", "deep_analysis"]) {
-                    warn!(session = %session_id, error = %e, "Failed to enqueue messages for pipelines");
+                if let Err(e) = db.enqueue_messages_for_pipelines(&inserted_ids, &["deep_analysis"]) {
+                    warn!(session = %session_id, error = %e, "Failed to enqueue messages for pipeline");
                 }
             }
         }
@@ -3855,6 +3874,7 @@ async fn main() -> Result<()> {
             phase_started_at: 0,
             last_realtime_completed_at: 0,
             current_batch_msg_ids: Vec::new(),
+            watermark_targets: Vec::new(),
         })),
         memory_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         claude_md_hash: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -3946,12 +3966,24 @@ async fn main() -> Result<()> {
                                         if is_realtime {
                                             es.last_realtime_completed_at = chrono::Utc::now().timestamp();
                                         }
-                                        // Auto-commit: mark batch messages as done (both realtime and deep_analysis)
-                                        if !es.current_batch_msg_ids.is_empty() {
-                                            let pipeline = if is_realtime { "realtime" } else { "deep_analysis" };
-                                            let _ = state.mission.db().mark_pipeline_done(&es.current_batch_msg_ids, pipeline);
-                                            info!(count = es.current_batch_msg_ids.len(), pipeline, "Auto-committed batch done");
-                                            es.current_batch_msg_ids.clear();
+                                        // Auto-commit on extraction completion
+                                        if is_realtime {
+                                            // Realtime: advance watermarks for processed sessions
+                                            if !es.watermark_targets.is_empty() {
+                                                let db = state.mission.db();
+                                                for (session_id, timestamp) in &es.watermark_targets {
+                                                    let _ = db.update_realtime_forwarded_at(session_id, timestamp);
+                                                }
+                                                info!(sessions = es.watermark_targets.len(), "Realtime: advanced watermarks");
+                                                es.watermark_targets.clear();
+                                            }
+                                        } else {
+                                            // Deep analysis: mark pipeline messages as done
+                                            if !es.current_batch_msg_ids.is_empty() {
+                                                let _ = state.mission.db().mark_pipeline_done(&es.current_batch_msg_ids, "deep_analysis");
+                                                info!(count = es.current_batch_msg_ids.len(), "Deep analysis: auto-committed batch done");
+                                                es.current_batch_msg_ids.clear();
+                                            }
                                         }
                                         es.phase = ExtractionPhase::Idle;
                                         es.active_type = None;
