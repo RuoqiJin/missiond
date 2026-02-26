@@ -866,12 +866,43 @@ impl MissionDB {
     }
 
     /// Get a board task by ID
+    /// Resolve a (possibly short) board task ID to a full UUID.
+    /// Supports exact match and unique prefix match (>= 6 chars).
+    pub fn resolve_board_task_id(&self, id: &str) -> SqliteResult<Option<String>> {
+        let conn = self.conn();
+        // Exact match
+        let exact: Option<String> = conn.query_row(
+            "SELECT id FROM board_tasks WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        ).optional()?;
+        if exact.is_some() {
+            return Ok(exact);
+        }
+        // Prefix match for short IDs
+        if id.len() >= 6 && id.len() < 36 {
+            let prefix = format!("{}%", id);
+            let mut stmt = conn.prepare("SELECT id FROM board_tasks WHERE id LIKE ?1")?;
+            let matches: Vec<String> = stmt
+                .query_map(params![prefix], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if matches.len() == 1 {
+                return Ok(Some(matches.into_iter().next().unwrap()));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn get_board_task(&self, id: &str) -> SqliteResult<Option<BoardTask>> {
+        let full_id = match self.resolve_board_task_id(id)? {
+            Some(fid) => fid,
+            None => return Ok(None),
+        };
         let conn = self.conn();
         let mut stmt = conn
             .prepare("SELECT * FROM board_tasks WHERE id = ?")?;
-        let mut rows = stmt.query(params![id])?;
-
+        let mut rows = stmt.query(params![full_id])?;
         if let Some(row) = rows.next()? {
             Ok(Some(Self::row_to_board_task(row)?))
         } else {
@@ -910,6 +941,11 @@ impl MissionDB {
 
     /// Update a board task
     pub fn update_board_task(&self, id: &str, update: &UpdateBoardTaskInput) -> SqliteResult<Option<BoardTask>> {
+        let id = match self.resolve_board_task_id(id)? {
+            Some(fid) => fid,
+            None => return Ok(None),
+        };
+        let id = id.as_str();
         let now = chrono::Utc::now().to_rfc3339();
         let mut fields = vec!["updated_at = ?".to_string()];
         let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now)];
@@ -967,6 +1003,10 @@ impl MissionDB {
 
     /// Delete a board task and all descendants
     pub fn delete_board_task(&self, id: &str) -> SqliteResult<i64> {
+        let id = match self.resolve_board_task_id(id)? {
+            Some(fid) => fid,
+            None => return Ok(0),
+        };
         let conn = self.conn();
         // Collect all descendant IDs recursively
         let mut to_delete = vec![id.to_string()];
