@@ -150,10 +150,9 @@ impl ClaudeCodeStateParser {
     fn has_tool_call_line(&self, lines: &[&str]) -> bool {
         lines.iter().any(|line| {
             let trimmed = line.trim();
-            if !trimmed.starts_with('⏺') {
+            let Some(after) = trimmed.strip_prefix('⏺') else {
                 return false;
-            }
-            let after = &trimmed[3..]; // skip ⏺ (3 bytes UTF-8)
+            };
             let after = after.trim_start();
             // Tool call: ⏺ followed by a tool name (capitalized word or contains "(MCP)")
             after.contains("(MCP)")

@@ -279,8 +279,8 @@ impl ToolOutputParser for ClaudeCodeToolOutputParser {
                         }
 
                         // Check for output content (lines starting with │ but not key: value)
-                        if trimmed.starts_with('│') {
-                            let content = trimmed[3..].trim(); // Skip "│ "
+                        if let Some(rest) = trimmed.strip_prefix('│') {
+                            let content = rest.trim();
                             if !content.is_empty() && !PARAM_LINE_PATTERN.is_match(trimmed) {
                                 output_lines.push(content.to_string());
                                 raw_lines.push(line.clone());

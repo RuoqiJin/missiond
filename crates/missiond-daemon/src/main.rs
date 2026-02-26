@@ -3688,7 +3688,7 @@ fn extract_text_content(content: &Value) -> String {
                                             Value::String(s) => {
                                                 if s.len() > 200 {
                                                     let mut end = 200;
-                                                    while !s.is_char_boundary(end) && end > 0 { end -= 1; }
+                                                    while !s.is_char_boundary(end) { end -= 1; }
                                                     format!("\"{}…\"", &s[..end])
                                                 } else {
                                                     format!("\"{}\"", s)
@@ -3698,7 +3698,7 @@ fn extract_text_content(content: &Value) -> String {
                                                 let raw = v.to_string();
                                                 if raw.len() > 200 {
                                                     let mut end = 200;
-                                                    while !raw.is_char_boundary(end) && end > 0 { end -= 1; }
+                                                    while !raw.is_char_boundary(end) { end -= 1; }
                                                     format!("{}…", &raw[..end])
                                                 } else { raw }
                                             }
