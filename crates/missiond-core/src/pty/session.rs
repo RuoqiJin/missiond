@@ -1531,10 +1531,13 @@ fn classify_stable_op(op: &StableTextOp) -> ScreenTextSource {
         return ScreenTextSource::Assistant;
     }
 
-    // UI elements
+    // UI elements — status bar, shortcuts, permission toggles
     if trimmed.contains("ctrl+")
         || trimmed.contains("Ctrl+")
+        || trimmed.contains("shift+tab")
         || trimmed.contains("IDE disconnected")
+        || trimmed.starts_with("⏵⏵")
+        || trimmed.starts_with("✢")
     {
         return ScreenTextSource::Ui;
     }
