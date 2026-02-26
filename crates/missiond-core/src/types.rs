@@ -626,6 +626,41 @@ pub struct ConversationMessage {
     pub metadata: Option<String>,
 }
 
+// ============ Slot Task History ============
+
+/// A task dispatched to a slot by the daemon (for tracking history)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlotTask {
+    pub id: String,
+    pub slot_id: String,
+    /// Task type: "realtime_extract", "deep_analysis", "kb_gc", etc.
+    pub task_type: String,
+    /// Status: "pending", "running", "completed", "failed"
+    pub status: String,
+    /// First ~200 chars of the prompt sent to the slot
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_summary: Option<String>,
+    /// JSON array of source session IDs that triggered this task
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_sessions: Option<String>,
+    /// Number of KB entries produced by this task
+    #[serde(default)]
+    pub output_count: i64,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The conversation ID created on the slot for this task
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+}
+
 // ============ Infrastructure Server Registry ============
 
 /// A server in the infrastructure registry
