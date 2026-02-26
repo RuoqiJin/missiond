@@ -2071,6 +2071,18 @@ impl MissionDB {
         Ok(())
     }
 
+    /// Get child (subagent) conversations for a parent session.
+    pub fn get_child_conversations(&self, parent_session_id: &str) -> SqliteResult<Vec<Conversation>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM conversations WHERE parent_session_id = ?1 ORDER BY started_at ASC"
+        )?;
+        let rows = stmt.query_map(params![parent_session_id], |row| Self::row_to_conversation(row))?;
+        let mut convs = Vec::new();
+        for c in rows { convs.push(c?); }
+        Ok(convs)
+    }
+
     /// Insert a conversation message, returns the auto-increment ID.
     /// Dedup via UNIQUE index on message_uuid — duplicate inserts are silently ignored.
     pub fn insert_conversation_message(&self, msg: &ConversationMessage) -> SqliteResult<i64> {

@@ -89,6 +89,8 @@ struct AppState {
     slot_fail_counts: Arc<std::sync::Mutex<HashMap<String, (i32, i64)>>>,  // (count, last_fail_at)
     /// Screenshot broker for browser-based PTY screenshots.
     screenshot_broker: Arc<missiond_core::ws::ScreenshotBroker>,
+    /// Jarvis request trace store for debugging.
+    jarvis_trace: missiond_core::ws::JarvisTraceStore,
 }
 
 fn default_mission_home() -> PathBuf {
@@ -1696,6 +1698,23 @@ impl AppState {
                         output.push_str(&format!("[#{}][{}] {}{}: {}\n\n", msg.id, msg.timestamp, prefix, msg.role, msg.content));
                         if msg.role == "user" { user_count += 1; }
                     }
+                    // Append subagent conversation summaries for this parent
+                    if let Ok(children) = db.get_child_conversations(session_id) {
+                        if !children.is_empty() {
+                            output.push_str(&format!("### 子任务 ({} 个)\n\n", children.len()));
+                            for child in &children {
+                                // Fetch recent messages from subagent (last 10 for context)
+                                let child_msgs = db.get_conversation_messages(&child.id, None, 10).unwrap_or_default();
+                                if child_msgs.is_empty() { continue; }
+                                output.push_str(&format!("#### subagent: {} ({} 条消息)\n\n", child.id, child.message_count));
+                                for cm in &child_msgs {
+                                    if cm.role == "assistant" && cm.content.len() < 50 { continue; }
+                                    let prefix = if cm.role == "user" { "★ " } else { "" };
+                                    output.push_str(&format!("[{}] {}{}: {}\n\n", cm.timestamp, prefix, cm.role, cm.content));
+                                }
+                            }
+                        }
+                    }
                 }
 
                 let session_count = pending.len();
@@ -1748,17 +1767,31 @@ impl AppState {
                     since_id: Option<i64>,
                 }
                 let Args { session_id, tail, since_id } = serde_json::from_value(args)?;
-                let conv = self.mission.db()
-                    .get_conversation(&session_id)
+                let db = self.mission.db();
+                let conv = db.get_conversation(&session_id)
                     .map_err(|e| anyhow!("DB error: {}", e))?;
-                let msgs = self.mission.db()
-                    .get_conversation_messages(&session_id, since_id, tail.unwrap_or(50))
+                let msgs = db.get_conversation_messages(&session_id, since_id, tail.unwrap_or(50))
                     .map_err(|e| anyhow!("DB error: {}", e))?;
-                Ok(ToolResult::json(&serde_json::json!({
+                // Include child (subagent) conversations summary
+                let children = db.get_child_conversations(&session_id)
+                    .unwrap_or_default();
+                let mut result = serde_json::json!({
                     "conversation": conv,
                     "messages": msgs,
                     "count": msgs.len(),
-                })))
+                });
+                if !children.is_empty() {
+                    let child_summaries: Vec<serde_json::Value> = children.iter().map(|c| {
+                        serde_json::json!({
+                            "id": c.id,
+                            "messageCount": c.message_count,
+                            "status": c.status,
+                            "startedAt": c.started_at,
+                        })
+                    }).collect();
+                    result["subagents"] = serde_json::json!(child_summaries);
+                }
+                Ok(ToolResult::json(&result))
             }
             "mission_conversation_search" => {
                 #[derive(Deserialize)]
@@ -3365,7 +3398,8 @@ async fn check_deep_analysis(state: &AppState) {
              session_id: {session_id}\n\
              project: {project}\n\
              消息数: {msg_count}\n\
-             调用 mission_conversation_get(sessionId: \"{session_id}\") 获取完整会话内容。\n\n\
+             调用 mission_conversation_get(sessionId: \"{session_id}\") 获取完整会话内容。\n\
+             返回中如有 subagents 字段，表示该会话产生了子任务(Task tool)，可按需获取子会话内容。\n\n\
              ⚠️ 重要: 消息级知识（偏好/决策/事实）已由 realtime 管道提取，不要重复提取。\n\
              你的任务仅限于:\n\
              1. 跨会话模式 — 用 mission_conversation_search 搜索相关会话，发现反复出现的主题\n\
