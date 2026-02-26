@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { GripVertical, Calendar, Check, ChevronRight, ChevronDown, Plus } from 'lucide-react';
+import { GripVertical, Calendar, Check, Minus, ChevronRight, ChevronDown, Plus } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { CATEGORY_CONFIG, PRIORITY_CONFIG } from '../constants';
@@ -33,6 +33,10 @@ export function TaskItem({
   children,
 }: TaskItemProps) {
   const [subInput, setSubInput] = useState('');
+  const isDone = task.status === 'done';
+  const isSkipped = task.status === 'skipped';
+  const isInactive = isDone || isSkipped;
+
   const {
     attributes,
     listeners,
@@ -44,15 +48,13 @@ export function TaskItem({
   } = useSortable({
     id: task.id,
     data: { type: 'task', task },
-    disabled: task.status === 'done' || depth > 0,
+    disabled: isInactive || depth > 0,
   });
 
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
   };
-
-  const isDone = task.status === 'done';
   const categoryConf = CATEGORY_CONFIG[task.category];
   const priorityConf = PRIORITY_CONFIG[task.priority];
   const isOverdue = task.dueDate && !isDone && new Date(task.dueDate) < new Date();
@@ -75,11 +77,11 @@ export function TaskItem({
           'flex items-start gap-2 py-2 rounded-lg border border-transparent transition-all group',
           'hover:bg-neutral-900/80 hover:border-neutral-800',
           isDragging && 'opacity-40',
-          isDone && 'opacity-50',
+          isInactive && 'opacity-50',
         )}
       >
         {/* Drag handle */}
-        {!isDone && depth === 0 ? (
+        {!isInactive && depth === 0 ? (
           <button
             ref={setActivatorNodeRef}
             className="mt-1 opacity-0 group-hover:opacity-100 transition-opacity cursor-grab active:cursor-grabbing text-neutral-700 hover:text-neutral-500 shrink-0"
@@ -93,7 +95,7 @@ export function TaskItem({
         )}
 
         {/* Expand/collapse */}
-        {!isDone ? (
+        {!isInactive ? (
           <button
             onClick={(e) => { e.stopPropagation(); onExpand?.(); }}
             className={cn(
@@ -121,23 +123,29 @@ export function TaskItem({
             'mt-0.5 w-4 h-4 rounded border flex items-center justify-center shrink-0 transition-colors',
             isDone
               ? 'bg-green-500/20 border-green-500/40 text-green-400'
-              : allChildrenDone
-                ? 'border-green-500/40 hover:border-green-500/60'
-                : 'border-neutral-700 hover:border-neutral-500',
+              : isSkipped
+                ? 'bg-neutral-500/20 border-neutral-500/40 text-neutral-400'
+                : allChildrenDone
+                  ? 'border-green-500/40 hover:border-green-500/60'
+                  : 'border-neutral-700 hover:border-neutral-500',
           )}
         >
           {isDone && <Check className="w-3 h-3" />}
+          {isSkipped && <Minus className="w-3 h-3" />}
         </button>
 
         {/* Content */}
         <div className="flex-1 min-w-0 cursor-pointer" onClick={onClick}>
           <div className="flex items-center gap-2">
-            {!isDone && <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', priorityConf.dotColor)} />}
-            <span className={cn('text-sm truncate', isDone ? 'line-through text-neutral-600' : 'text-white')}>
+            {!isInactive && <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', priorityConf.dotColor)} />}
+            <span className={cn(
+              'text-sm truncate',
+              isDone ? 'line-through text-neutral-600' : isSkipped ? 'text-neutral-500 italic' : 'text-white',
+            )}>
               {task.title}
             </span>
 
-            {hasChildren && !isDone && (
+            {hasChildren && !isInactive && (
               <span className={cn(
                 'text-[10px] shrink-0 tabular-nums',
                 allChildrenDone ? 'text-green-500' : 'text-neutral-600',
@@ -147,7 +155,7 @@ export function TaskItem({
             )}
           </div>
 
-          {task.description && !isDone && (
+          {task.description && !isInactive && (
             <p className="text-xs text-neutral-600 line-clamp-1 mt-0.5 ml-3.5">{task.description}</p>
           )}
 
@@ -178,7 +186,7 @@ export function TaskItem({
       </div>
 
       {/* Expanded children + inline add */}
-      {isExpanded && !isDone && (
+      {isExpanded && !isInactive && (
         <div>
           {children}
 

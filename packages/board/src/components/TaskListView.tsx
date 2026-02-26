@@ -12,7 +12,7 @@ import {
   type DragEndEvent,
 } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy, sortableKeyboardCoordinates } from '@dnd-kit/sortable';
-import { ChevronDown, ChevronRight, CheckCircle2, Trash2, EyeOff } from 'lucide-react';
+import { ChevronDown, ChevronRight, CheckCircle2, Trash2, EyeOff, SkipForward } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useTaskCenterStore } from '../store';
 import { CATEGORY_CONFIG, PRIORITY_CONFIG } from '../constants';
@@ -169,6 +169,8 @@ export function TaskListView() {
   const setShowDone = useTaskCenterStore((s) => s.setShowDone);
   const showHidden = useTaskCenterStore((s) => s.showHidden);
   const setShowHidden = useTaskCenterStore((s) => s.setShowHidden);
+  const showSkipped = useTaskCenterStore((s) => s.showSkipped);
+  const setShowSkipped = useTaskCenterStore((s) => s.setShowSkipped);
   const clearDoneTasks = useTaskCenterStore((s) => s.clearDoneTasks);
 
   const [activeTask, setActiveTask] = useState<Task | null>(null);
@@ -183,8 +185,9 @@ export function TaskListView() {
 
   const filtered = useMemo(() => {
     return tasks.filter((task) => {
-      // Exclude hidden tasks from main view
+      // Exclude hidden and skipped tasks from main view
       if (task.hidden) return false;
+      if (task.status === 'skipped') return false;
       if (filters.search) {
         const q = filters.search.toLowerCase();
         if (!task.title.toLowerCase().includes(q) && !task.description.toLowerCase().includes(q)) return false;
@@ -197,6 +200,11 @@ export function TaskListView() {
 
   const hiddenTasks = useMemo(() =>
     tasks.filter((t) => t.hidden && t.status === 'open'),
+    [tasks],
+  );
+
+  const skippedTasks = useMemo(() =>
+    tasks.filter((t) => t.status === 'skipped' && !t.parentId),
     [tasks],
   );
 
@@ -333,6 +341,38 @@ export function TaskListView() {
                 onClickTask={openEditDialog}
                 onAddSub={quickAddSub}
               />
+            </div>
+          )}
+        </div>
+      )}
+
+      {skippedTasks.length > 0 && (
+        <div className="mt-6 border-t border-neutral-800/50 pt-4">
+          <button
+            onClick={() => setShowSkipped(!showSkipped)}
+            className="flex items-center gap-2 px-3 text-xs text-neutral-600 hover:text-neutral-500 transition-colors"
+          >
+            <SkipForward className="w-3.5 h-3.5" />
+            <span>已跳过 ({skippedTasks.length})</span>
+            {showSkipped ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+          </button>
+
+          {showSkipped && (
+            <div className="mt-2 space-y-0.5">
+              {skippedTasks.sort((a, b) => a.order - b.order).map((task) => (
+                <TaskItem
+                  key={task.id}
+                  task={task}
+                  depth={0}
+                  childCount={0}
+                  doneChildCount={0}
+                  isExpanded={false}
+                  onToggle={() => toggleTask(task.id)}
+                  onClick={() => openEditDialog(task)}
+                  onExpand={() => {}}
+                  onAddSub={() => {}}
+                />
+              ))}
             </div>
           )}
         </div>

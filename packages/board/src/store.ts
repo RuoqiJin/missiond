@@ -39,6 +39,9 @@ interface TaskCenterState {
   setShowDone: (show: boolean) => void;
   showHidden: boolean;
   setShowHidden: (show: boolean) => void;
+  showSkipped: boolean;
+  setShowSkipped: (show: boolean) => void;
+  skipTask: (id: string) => void;
   openAddDialog: (parentId?: string) => void;
   openEditDialog: (task: Task) => void;
   closeDialog: () => void;
@@ -233,6 +236,23 @@ export const useTaskCenterStore = create<TaskCenterState>()(
     setGroupBy: (groupBy) => set({ groupBy }),
     setShowDone: (showDone) => set({ showDone }),
     setShowHidden: (showHidden) => set({ showHidden }),
+    showSkipped: false,
+    setShowSkipped: (showSkipped) => set({ showSkipped }),
+    skipTask: (id) => {
+      const task = get().tasks.find((t) => t.id === id);
+      if (!task) return;
+      const newStatus = task.status === 'skipped' ? 'open' : 'skipped';
+      set({
+        tasks: get().tasks.map((t) =>
+          t.id === id ? { ...t, status: newStatus as Task['status'], updatedAt: new Date().toISOString() } : t
+        ),
+      });
+      api.updateTask(id, { status: newStatus } as never)
+        .then((saved) => {
+          set({ tasks: get().tasks.map((t) => (t.id === id ? saved : t)) });
+        })
+        .catch((err) => console.error('[TaskCenter] skipTask sync failed:', err));
+    },
     openAddDialog: (parentId) => set({ isDialogOpen: true, editingTask: null, _addDialogParentId: parentId }),
     openEditDialog: (task) => set({ isDialogOpen: true, editingTask: task, _addDialogParentId: undefined }),
     closeDialog: () => set({ isDialogOpen: false, editingTask: null, _addDialogParentId: undefined }),
