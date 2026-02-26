@@ -1728,7 +1728,7 @@ impl AppState {
             "mission_memory_pending" | "mission_memory_pending_user" => {
                 let db = self.mission.db();
                 let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-                const PENDING_MSG_LIMIT: usize = 200;
+                const PENDING_MSG_LIMIT: usize = 50;
                 let pending = db.get_pending_realtime_messages_with_limit(&today, PENDING_MSG_LIMIT)
                     .map_err(|e| anyhow!("DB error: {}", e))?;
 
@@ -1743,24 +1743,19 @@ impl AppState {
                     output.push_str(&format!("## session: {} (project: {})\n\n", session_id, project));
                     for msg in msgs {
                         all_msg_ids.push(msg.id);
-                        let prefix = if msg.role == "user" { "★ " } else { "" };
-                        output.push_str(&format!("[#{}][{}] {}{}: {}\n\n", msg.id, msg.timestamp, prefix, msg.role, msg.content));
-                        if msg.role == "user" { user_count += 1; }
-                    }
-                    // Append subagent conversation summaries for this parent
-                    if let Ok(children) = db.get_child_conversations(session_id) {
-                        if !children.is_empty() {
-                            output.push_str(&format!("### 子任务 ({} 个)\n\n", children.len()));
-                            for child in &children {
-                                // Fetch recent messages from subagent (last 10 for context)
-                                let child_msgs = db.get_conversation_messages(&child.id, None, 10).unwrap_or_default();
-                                if child_msgs.is_empty() { continue; }
-                                output.push_str(&format!("#### subagent: {} ({} 条消息)\n\n", child.id, child.message_count));
-                                for cm in &child_msgs {
-                                    let prefix = if cm.role == "user" { "★ " } else { "" };
-                                    output.push_str(&format!("[{}] {}{}: {}\n\n", cm.timestamp, prefix, cm.role, cm.content));
-                                }
-                            }
+                        if msg.role == "user" {
+                            user_count += 1;
+                            output.push_str(&format!("[#{}][{}] ★ user: {}\n\n", msg.id, msg.timestamp, msg.content));
+                        } else {
+                            // Assistant messages: truncate to reduce payload
+                            let content = if msg.content.len() > 500 {
+                                let mut end = 500;
+                                while !msg.content.is_char_boundary(end) && end > 0 { end -= 1; }
+                                format!("{}…", &msg.content[..end])
+                            } else {
+                                msg.content.clone()
+                            };
+                            output.push_str(&format!("[#{}][{}] assistant: {}\n\n", msg.id, msg.timestamp, content));
                         }
                     }
                 }
@@ -1774,17 +1769,16 @@ impl AppState {
                 };
                 let header = format!(
                     "[realtime-extract] {} 个会话, {} 条消息 (其中 {} 条用户消息){}\n\n\
-                     提取值得长期记忆的事实，用 mission_kb_remember 存入。\n\
-                     ★ 标记的是用户原话，优先级最高。用户的每句话都是刻意的。\n\n\
+                     ★ = 用户原话，优先级最高。每句用户消息都是刻意的。\n\
+                     assistant 消息仅提供上下文，不需逐条分析。\n\n\
                      提取规则:\n\
                      - 用户偏好/纠正/否定 → category: preference (最高优先)\n\
-                     - 架构决策/技术事实 → category: memory\n\
+                     - 架构决策/技术事实 → category: memory 或子分类\n\
                      - 「好」「行」= 用户认可 AI 方案，记录为决策\n\
                      - 「别...」「不要...」= 高价值偏好\n\
-                     - 用户抱怨操作繁琐/链路太长/反复手动 → category: memory:ops (记录痛点+建议封装为 MCP 工具)\n\
-                     - 调试走弯路/错误归因/浪费时间的尝试 → category: memory:debug (记录正确路径)\n\
+                     - 运维痛点/调试弯路 → category: memory:ops / memory:debug\n\
                      - 不存: 纯任务指令、当天工作日志、代码提交记录\n\
-                     - 模糊用户消息 → 调 mission_conversation_get 看上下文再判断\n\n",
+                     - 存入前用 mission_kb_search 检查去重\n\n",
                     session_count, msg_count, user_count, truncated_note,
                 );
 
@@ -3433,7 +3427,7 @@ async fn check_realtime_extraction(state: &AppState) {
 
     // Watermark-based check: any conversations with messages beyond their realtime_forwarded_at?
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    let pending = match state.mission.db().get_pending_realtime_messages(&today) {
+    let raw_pending = match state.mission.db().get_pending_realtime_messages(&today) {
         Ok(p) if !p.is_empty() => p,
         Ok(_) => {
             debug!("realtime: no pending messages (watermark)");
@@ -3441,6 +3435,23 @@ async fn check_realtime_extraction(state: &AppState) {
         }
         Err(_) => return,
     };
+
+    // Triage: skip sessions with zero user messages, auto-advance their watermarks
+    let db = state.mission.db();
+    let mut pending = Vec::new();
+    for (session_id, project, msgs) in raw_pending {
+        if msgs.iter().any(|m| m.role == "user") {
+            pending.push((session_id, project, msgs));
+        } else {
+            if let Some(last) = msgs.last() {
+                let _ = db.update_realtime_forwarded_at(&session_id, &last.timestamp);
+            }
+        }
+    }
+    if pending.is_empty() {
+        debug!("realtime: all sessions filtered (no user messages)");
+        return;
+    }
 
     // Capture watermark targets: (session_id, max_timestamp) for advancing on completion
     let watermark_targets: Vec<(String, String)> = pending
@@ -3511,20 +3522,20 @@ async fn check_realtime_extraction(state: &AppState) {
         es.current_slot_task_id = Some(slot_task_id.clone());
     }
 
-    let prompt = "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，提取知识存入 KB。\n\
+    let prompt = "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，提取知识存入 KB。\n\n\
+         ⚠️ 作业边界:\n\
+         - 只处理 mission_memory_pending 返回的内容\n\
+         - 禁止调用 mission_conversation_search / mission_conversation_get\n\
+         - 跨会话分析是 deep-analysis 的职责，不在此处执行\n\n\
          提取目标（按优先级）:\n\
          - 用户偏好/原则/纠正 → category: preference\n\
          - 架构决策/技术事实 → category: memory 或 memory:architecture/memory:decision\n\
-         - 已修 bug 的根因 → category: memory:bugfix\n\
-         - 运维/调试痛点信号（用户抱怨操作繁琐、反复手动执行多步、链路太长）→ category: memory:ops，记录痛点并建议可封装的 MCP 工具\n\
-         - 调试走弯路的经验（错误归因、方向错误、浪费时间的尝试）→ category: memory:debug，记录正确路径供下次参考\n\
-         禁止提取:\n\
-         - 基础设施信息（IP/端口/凭据/服务器配置）→ 已有 servers.yaml + mission_infra_get\n\
-         - API 参数/代码实现细节 → 属于代码层，不进 KB\n\
-         - 版本号/commit hash/构建事件 → 临时信息\n\
-         - 通用技术知识（Rust 语法等）→ AI 已知\n\
-         过滤: 不记录当天工作日志、代码提交记录、一次性操作。只记录长期有效的知识。\n\
-         问题上报: 如发现 bug、需要代码修复的问题，调用 mission_board_create 创建任务。";
+         - 已修 bug 根因 → category: memory:bugfix\n\
+         - 运维痛点信号 → category: memory:ops\n\
+         - 调试弯路经验 → category: memory:debug\n\
+         禁止提取: 基础设施信息/API细节/版本号/通用技术知识/当天日志\n\
+         去重: 提取前 mission_kb_search 检查。\n\
+         问题上报: 发现 bug → mission_board_create。";
 
     info!("Triggering realtime extraction via MCP pull");
 
