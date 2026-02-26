@@ -295,19 +295,11 @@ impl StateParser for ClaudeCodeStateParser {
                 return Some(StateDetectionResult::new(State::Idle, 0.9));
             }
         }
-        // When both spinner and prompt visible: check if spinner is still active.
-        // A frozen spinner (no phase hint like "thinking"/"tool"/"running" in parens)
-        // means the task is done → Idle.
-        if has_spinner && has_prompt {
-            let phase_hint = self.extract_phase_hint(&active_lines);
-            if phase_hint.is_none() {
-                // Spinner visible but no active phase hint → stale/frozen spinner → Idle
-                if self.has_slash_menu(&active_lines) {
-                    return Some(StateDetectionResult::new(State::SlashMenu, 0.9));
-                }
-                return Some(StateDetectionResult::new(State::Idle, 0.9));
-            }
-        }
+        // When both spinner and prompt visible: spinner takes precedence.
+        // Claude Code v2+ removes the spinner when processing completes, so a visible
+        // spinner always means active processing. Phase hints (e.g., "(thinking)")
+        // appear after a few seconds — their absence does NOT mean frozen.
+        // Fall through to the spinner processing block (section 3) below.
 
         // 3. Processing: spinner line present → Thinking or ToolRunning
         //    Phase hint from spinner status line is the MOST authoritative signal.
@@ -808,12 +800,13 @@ mod tests {
     }
 
     #[test]
-    fn test_frozen_spinner_with_prompt_is_idle() {
+    fn test_spinner_without_phase_hint_is_thinking() {
         let parser = ClaudeCodeStateParser::new();
 
-        // Real scenario: task complete, spinner frozen (no phase hint in parens),
-        // prompt visible below spinner. This was a bug where UI stayed "Thinking".
-        // Frozen spinner example: "✻ Sautéed for 57s" — no (...) at all.
+        // Spinner visible without phase hint in parens — still Thinking.
+        // Claude Code v2+ removes the spinner when processing completes,
+        // so a visible spinner always indicates active processing.
+        // Phase hints like "(thinking)" appear after a few seconds delay.
         let context = make_context(&[
             "  元循环状态：仍在持续。",
             "",
@@ -824,8 +817,8 @@ mod tests {
             "────────────────────────────────────────",
             "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
         ]);
-        // Spinner has no phase hint → frozen → should be Idle
-        assert_eq!(parser.detect_state(&context).unwrap().state, State::Idle);
+        // Spinner present → Thinking (even without phase hint)
+        assert_eq!(parser.detect_state(&context).unwrap().state, State::Thinking);
     }
 
     #[test]
