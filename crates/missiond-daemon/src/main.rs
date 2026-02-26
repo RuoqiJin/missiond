@@ -3696,7 +3696,11 @@ fn extract_text_content(content: &Value) -> String {
                                             }
                                             _ => {
                                                 let raw = v.to_string();
-                                                if raw.len() > 200 { format!("{}…", &raw[..200]) } else { raw }
+                                                if raw.len() > 200 {
+                                                    let mut end = 200;
+                                                    while !raw.is_char_boundary(end) && end > 0 { end -= 1; }
+                                                    format!("{}…", &raw[..end])
+                                                } else { raw }
                                             }
                                         };
                                         format!("{k}: {val}")
@@ -3712,6 +3716,16 @@ fn extract_text_content(content: &Value) -> String {
                             Some(format!("[Tool: {name}]"))
                         } else {
                             Some(format!("[Tool: {name}] {input_str}"))
+                        }
+                    }
+                    "thinking" => {
+                        let text = item.get("thinking")?.as_str()?;
+                        if text.len() > 2000 {
+                            let mut end = 2000;
+                            while !text.is_char_boundary(end) && end > 0 { end -= 1; }
+                            Some(format!("[thinking] {}…", &text[..end]))
+                        } else {
+                            Some(format!("[thinking] {text}"))
                         }
                     }
                     "tool_result" => {
@@ -3858,12 +3872,15 @@ fn handle_new_messages(
     let batch: Vec<missiond_core::types::ConversationMessage> = messages.iter()
         .filter_map(|msg| {
             let text_content = extract_text_content(&msg.message.content);
-            // Detect tool_result: JSONL top-level type is "user" but content blocks are tool_result
-            let is_tool_result = msg.message.content.as_array()
-                .map(|arr| !arr.is_empty() && arr.iter().all(|b|
-                    b.get("type").and_then(|t| t.as_str()) == Some("tool_result")))
-                .unwrap_or(false);
-            // Keep tool_result messages even if content extraction is empty
+            // Detect special content types from JSONL content blocks
+            let content_types: Vec<&str> = msg.message.content.as_array()
+                .map(|arr| arr.iter()
+                    .filter_map(|b| b.get("type").and_then(|t| t.as_str()))
+                    .collect())
+                .unwrap_or_default();
+            let is_tool_result = !content_types.is_empty() && content_types.iter().all(|t| *t == "tool_result");
+            let is_thinking = !content_types.is_empty() && content_types.iter().all(|t| *t == "thinking");
+            // Keep tool_result and thinking messages even if content extraction is empty
             if text_content.is_empty() && !is_tool_result {
                 return None;
             }
@@ -3874,6 +3891,8 @@ fn handle_new_messages(
             };
             let role = if is_tool_result {
                 "tool_result".to_string()
+            } else if is_thinking {
+                "thinking".to_string()
             } else if msg.message.role == "user" && is_slot_session {
                 // Slot sessions: "user" messages are daemon-sent system prompts, not the human
                 "system".to_string()
