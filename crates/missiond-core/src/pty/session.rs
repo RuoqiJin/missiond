@@ -92,6 +92,10 @@ impl SessionState {
     }
 }
 
+/// Max number of messages to keep in PTY session history.
+/// Oldest messages are evicted when this limit is exceeded.
+const MAX_HISTORY_MESSAGES: usize = 1000;
+
 /// Chat message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -1193,6 +1197,10 @@ impl PTYSession {
                 content: message.trim().to_string(),
                 timestamp: Utc::now().timestamp_millis(),
             });
+            if history.len() > MAX_HISTORY_MESSAGES {
+                let drain = history.len() - MAX_HISTORY_MESSAGES;
+                history.drain(..drain);
+            }
         }
 
         // Set session state to Thinking and begin a new turn.
@@ -1246,6 +1254,10 @@ impl PTYSession {
                 content: message.trim().to_string(),
                 timestamp: Utc::now().timestamp_millis(),
             });
+            if history.len() > MAX_HISTORY_MESSAGES {
+                let drain = history.len() - MAX_HISTORY_MESSAGES;
+                history.drain(..drain);
+            }
         }
 
         // Subscribe to events BEFORE sending so we never miss the Complete event.
@@ -1313,6 +1325,10 @@ impl PTYSession {
                         content: response.clone(),
                         timestamp: Utc::now().timestamp_millis(),
                     });
+                    if history.len() > MAX_HISTORY_MESSAGES {
+                        let drain = history.len() - MAX_HISTORY_MESSAGES;
+                        history.drain(..drain);
+                    }
                 }
                 Ok(response)
             }

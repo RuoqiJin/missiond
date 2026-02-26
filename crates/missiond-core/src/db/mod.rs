@@ -2517,6 +2517,11 @@ impl MissionDB {
     /// Get pending messages for unified realtime extraction (replaces separate user_voice + memory).
     /// Returns all user+assistant messages since realtime_forwarded_at watermark.
     pub fn get_pending_realtime_messages(&self, today: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
+        self.get_pending_realtime_messages_with_limit(today, 200)
+    }
+
+    /// Get pending realtime messages with a configurable limit.
+    pub fn get_pending_realtime_messages_with_limit(&self, today: &str, limit: usize) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT m.*, COALESCE(c.project, '') as c_project
@@ -2527,12 +2532,13 @@ impl MissionDB {
                AND m.timestamp >= ?1
                AND m.timestamp > COALESCE(c.realtime_forwarded_at, ?1)
                AND m.role IN ('user', 'assistant')
-             ORDER BY c.started_at DESC, m.id ASC"
+             ORDER BY c.started_at DESC, m.id ASC
+             LIMIT ?2"
         )?;
 
         let mut results: Vec<(String, String, Vec<ConversationMessage>)> = Vec::new();
 
-        let rows = stmt.query_map(params![today], |row| {
+        let rows = stmt.query_map(params![today, limit as i64], |row| {
             let msg = Self::row_to_conversation_message(row)?;
             let project: String = row.get("c_project")?;
             Ok((msg, project))
