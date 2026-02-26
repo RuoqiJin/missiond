@@ -191,28 +191,20 @@ impl IncrementalExtractor {
         let grid = term.grid();
         let mut lines = Vec::new();
 
-        let total_lines = grid.total_lines();
-        let display_offset = grid.display_offset();
         let rows = grid.screen_lines();
 
-        // Calculate the visible region (accounting for scrollback)
-        let base_y = if total_lines > rows {
-            total_lines - rows - display_offset
-        } else {
-            0
-        };
-
-        let end_y = base_y + rows;
-        let start_y = if end_y > self.window_lines {
-            end_y - self.window_lines
+        // Line(0) = top of visible screen, Line(rows-1) = bottom.
+        // Capture only the bottom window_lines of the visible area.
+        let start_y = if rows > self.window_lines {
+            rows - self.window_lines
         } else {
             0
         };
 
         // Capture lines in the window
-        for y in start_y..end_y {
+        for y in start_y..rows {
             let line_idx = alacritty_terminal::index::Line(y as i32);
-            if y < total_lines {
+            {
                 let row = &grid[line_idx];
                 // Skip wide-char spacer cells to avoid extra spaces between CJK characters.
                 // Alacritty stores wide chars (CJK, emoji) across 2 cells:
@@ -239,11 +231,6 @@ impl IncrementalExtractor {
                 };
 
                 lines.push(LineData { text, is_wrapped });
-            } else {
-                lines.push(LineData {
-                    text: String::new(),
-                    is_wrapped: false,
-                });
             }
         }
 
@@ -251,11 +238,11 @@ impl IncrementalExtractor {
 
         ScreenSnapshot {
             start_y,
-            end_y,
+            end_y: rows,
             lines,
             cursor_x: cursor.point.column.0,
             cursor_y: cursor.point.line.0 as usize,
-            base_y,
+            base_y: 0,
             timestamp: chrono::Utc::now().timestamp_millis(),
         }
     }
