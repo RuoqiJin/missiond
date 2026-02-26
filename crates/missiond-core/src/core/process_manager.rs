@@ -520,12 +520,13 @@ impl ProcessManager {
             auto_restart.remove(slot_id);
         }
 
-        // Kill child process if running
-        {
+        // Kill child process if running — extract before await to avoid holding guard across await
+        let child_to_kill = {
             let mut children = self.child_processes.write().unwrap();
-            if let Some(mut child) = children.remove(slot_id) {
-                child.kill().await.ok();
-            }
+            children.remove(slot_id)
+        };
+        if let Some(mut child) = child_to_kill {
+            child.kill().await.ok();
         }
 
         // Update to stopped

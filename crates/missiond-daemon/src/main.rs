@@ -89,6 +89,8 @@ struct AppState {
     extraction_notify: Arc<tokio::sync::Notify>,
     /// Last KB auto-GC timestamp (epoch secs). 0 = never run.
     last_auto_gc_at: Arc<std::sync::atomic::AtomicI64>,
+    /// Pause switch for memory extraction tasks (realtime, deep_analysis, sync, GC).
+    memory_paused: Arc<std::sync::atomic::AtomicBool>,
     /// Per-slot consecutive failure count for autopilot throttling.
     slot_fail_counts: Arc<std::sync::Mutex<HashMap<String, (i32, i64)>>>,  // (count, last_fail_at)
     /// Screenshot broker for browser-based PTY screenshots.
@@ -1720,7 +1722,8 @@ impl AppState {
             "mission_memory_pending" | "mission_memory_pending_user" => {
                 let db = self.mission.db();
                 let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-                let pending = db.get_pending_realtime_messages(&today)
+                const PENDING_MSG_LIMIT: usize = 200;
+                let pending = db.get_pending_realtime_messages_with_limit(&today, PENDING_MSG_LIMIT)
                     .map_err(|e| anyhow!("DB error: {}", e))?;
 
                 if pending.is_empty() {
@@ -1758,8 +1761,13 @@ impl AppState {
 
                 let session_count = pending.len();
                 let msg_count = all_msg_ids.len();
+                let truncated_note = if msg_count >= PENDING_MSG_LIMIT {
+                    format!(" ⚠️ 已达上限 {}，可能还有更多未显示的消息。处理完当前批次后系统将自动推送下一批。", PENDING_MSG_LIMIT)
+                } else {
+                    String::new()
+                };
                 let header = format!(
-                    "[realtime-extract] {} 个会话, {} 条消息 (其中 {} 条用户消息)\n\n\
+                    "[realtime-extract] {} 个会话, {} 条消息 (其中 {} 条用户消息){}\n\n\
                      提取值得长期记忆的事实，用 mission_kb_remember 存入。\n\
                      ★ 标记的是用户原话，优先级最高。用户的每句话都是刻意的。\n\n\
                      提取规则:\n\
@@ -1771,7 +1779,7 @@ impl AppState {
                      - 调试走弯路/错误归因/浪费时间的尝试 → category: memory:debug (记录正确路径)\n\
                      - 不存: 纯任务指令、当天工作日志、代码提交记录\n\
                      - 模糊用户消息 → 调 mission_conversation_get 看上下文再判断\n\n",
-                    session_count, msg_count, user_count,
+                    session_count, msg_count, user_count, truncated_note,
                 );
 
                 Ok(ToolResult::text(&format!("{}{}", header, output)))
@@ -1781,6 +1789,31 @@ impl AppState {
             // now use conversation-level watermarks. Kept for backward compat with old agent prompts.
             "mission_memory_done" => {
                 Ok(ToolResult::text("已废弃。系统现在使用会话级水位线自动管理状态，无需手动调用。"))
+            }
+
+            "mission_memory_pause" => {
+                #[derive(Deserialize)]
+                struct Args {
+                    paused: Option<bool>,
+                }
+                let args: Args = serde_json::from_value(args).unwrap_or(Args { paused: None });
+                let current = self.memory_paused.load(std::sync::atomic::Ordering::Relaxed);
+                let new_val = args.paused.unwrap_or(!current); // toggle if not specified
+                self.memory_paused.store(new_val, std::sync::atomic::Ordering::Relaxed);
+                // Persist to flag file so pause survives daemon restart
+                let flag = default_mission_home().join("memory_paused");
+                if new_val {
+                    let _ = std::fs::write(&flag, "");
+                    info!("Memory extraction PAUSED by user");
+                } else {
+                    let _ = std::fs::remove_file(&flag);
+                    info!("Memory extraction RESUMED by user");
+                }
+                Ok(ToolResult::text(if new_val {
+                    "记忆任务已暂停。realtime extraction 和 deep analysis 不再调度。调用 mission_memory_pause(paused: false) 恢复。"
+                } else {
+                    "记忆任务已恢复。"
+                }))
             }
 
             // ===== Conversation Logs =====
@@ -2843,14 +2876,18 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
         _ => {}
     }
 
-    // Check if memory slot is stuck in non-Idle state for too long
-    check_memory_slot_stuck(state).await;
+    let memory_paused = state.memory_paused.load(std::sync::atomic::Ordering::Relaxed);
 
-    // Realtime extraction: unified pipeline for user preferences + conversation knowledge
-    check_realtime_extraction(state).await;
+    if !memory_paused {
+        // Check if memory slot is stuck in non-Idle state for too long
+        check_memory_slot_stuck(state).await;
 
-    // Deep analysis: cross-session pattern discovery (no message-level extraction)
-    check_deep_analysis(state).await;
+        // Realtime extraction: unified pipeline for user preferences + conversation knowledge
+        check_realtime_extraction(state).await;
+
+        // Deep analysis: cross-session pattern discovery (no message-level extraction)
+        check_deep_analysis(state).await;
+    }
 
     // Sync KB preferences + hot topics into CLAUDE.md
     sync_claude_md(state);
@@ -4409,6 +4446,9 @@ async fn main() -> Result<()> {
         claude_md_hash: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         extraction_notify: Arc::new(tokio::sync::Notify::new()),
         last_auto_gc_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        memory_paused: Arc::new(std::sync::atomic::AtomicBool::new(
+            home.join("memory_paused").exists()
+        )),
         slot_fail_counts: Arc::new(std::sync::Mutex::new(HashMap::new())),
         screenshot_broker: Arc::clone(&screenshot_broker),
         jarvis_trace: ws_server.jarvis_trace_store().clone(),
@@ -4423,9 +4463,12 @@ async fn main() -> Result<()> {
             result = listener.accept() => {
                 let stream = result?;
                 let reader = BufReader::new(stream);
-                if let Err(e) = handle_ipc_connection(state.clone(), reader).await {
-                    warn!(error = %e, "IPC connection error");
-                }
+                let conn_state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_ipc_connection(conn_state, reader).await {
+                        warn!(error = %e, "IPC connection error");
+                    }
+                });
             }
             _ = autopilot_interval.tick() => {
                 if let Err(e) = autopilot_tick(&state).await {
@@ -4434,9 +4477,11 @@ async fn main() -> Result<()> {
             }
             _ = state.extraction_notify.notified() => {
                 // Event-driven: extraction just completed, immediately check for more pending work
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                check_realtime_extraction(&state).await;
-                check_deep_analysis(&state).await;
+                if !state.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    check_realtime_extraction(&state).await;
+                    check_deep_analysis(&state).await;
+                }
             }
             event = conv_logger_rx.recv() => {
                 match event {
