@@ -3707,6 +3707,7 @@ fn handle_new_messages(
     } else {
         None
     };
+    let is_slot_session = slot_id.is_some();
     let source = if is_pty { "pty_jsonl" } else { "claude_cli" };
 
     // Ensure conversation exists; re-activate if completed
@@ -3772,6 +3773,9 @@ fn handle_new_messages(
             };
             let role = if is_tool_result {
                 "tool_result".to_string()
+            } else if msg.message.role == "user" && is_slot_session {
+                // Slot sessions: "user" messages are daemon-sent system prompts, not the human
+                "system".to_string()
             } else {
                 msg.message.role.clone()
             };

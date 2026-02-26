@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Search, RefreshCw, MessageSquare, User, Bot, Wrench, ArrowLeft, ChevronRight, ChevronDown, GitBranch } from 'lucide-react';
+import { Search, RefreshCw, MessageSquare, User, Bot, Wrench, ArrowLeft, ChevronRight, ChevronDown, GitBranch, Terminal } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 
@@ -56,6 +56,7 @@ function formatDate(dateStr: string): string {
 
 const ROLE_CONFIG: Record<string, { icon: typeof User; color: string; label: string }> = {
   user: { icon: User, color: 'text-blue-400', label: '用户' },
+  system: { icon: Terminal, color: 'text-orange-400', label: '系统指令' },
   assistant: { icon: Bot, color: 'text-green-400', label: 'AI' },
   tool_use: { icon: Wrench, color: 'text-amber-400', label: '工具调用' },
   tool_result: { icon: Wrench, color: 'text-neutral-500', label: '工具结果' },
