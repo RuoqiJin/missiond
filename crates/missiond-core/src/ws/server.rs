@@ -97,6 +97,8 @@ enum PtyOutMessage {
         state: SessionState,
         #[serde(rename = "prevState")]
         prev_state: SessionState,
+        #[serde(rename = "statusText", skip_serializing_if = "Option::is_none")]
+        status_text: Option<String>,
     },
     Exit { code: i32 },
     #[serde(rename = "screenshot_request")]
@@ -664,6 +666,7 @@ impl PTYWebSocketServer {
             let msg = PtyOutMessage::State {
                 state: status.state.clone(),
                 prev_state: status.state,
+                status_text: status.status_text.clone(),
             };
             let _ = send_json(&mut ws_tx, &msg).await;
         }
@@ -701,7 +704,7 @@ impl PTYWebSocketServer {
                         let current = status.state.clone();
                         if last_sent_state.as_ref() != Some(&current) {
                             let prev = last_sent_state.replace(current.clone()).unwrap_or(current.clone());
-                            let msg = PtyOutMessage::State { state: current, prev_state: prev };
+                            let msg = PtyOutMessage::State { state: current, prev_state: prev, status_text: status.status_text.clone() };
                             if send_json(&mut ws_tx, &msg).await.is_err() {
                                 break;
                             }
@@ -726,7 +729,10 @@ impl PTYWebSocketServer {
                         }
                         SessionEvent::StateChange { new_state, prev_state } => {
                             last_sent_state = Some(new_state.clone());
-                            let msg = PtyOutMessage::State { state: new_state, prev_state };
+                            // Get status_text from agent_info
+                            let status_text = pty_manager.get_status(slot_id).await
+                                .and_then(|s| s.status_text);
+                            let msg = PtyOutMessage::State { state: new_state, prev_state, status_text };
                             if send_json(&mut ws_tx, &msg).await.is_err() {
                                 break;
                             }
@@ -736,6 +742,19 @@ impl PTYWebSocketServer {
                             let _ = send_json(&mut ws_tx, &msg).await;
                             let _ = ws_tx.send(Message::Close(Some(close_frame(4003, format!("PTY exited with code {}", code))))).await;
                             break;
+                        }
+                        SessionEvent::StatusUpdate(status) => {
+                            // Push status_text to client in real-time
+                            let text = format!("{} {}", status.spinner, status.status_text);
+                            let current_state = last_sent_state.clone().unwrap_or(SessionState::Starting);
+                            let msg = PtyOutMessage::State {
+                                state: current_state.clone(),
+                                prev_state: current_state,
+                                status_text: Some(text),
+                            };
+                            if send_json(&mut ws_tx, &msg).await.is_err() {
+                                break;
+                            }
                         }
                         _ => {}
                     }

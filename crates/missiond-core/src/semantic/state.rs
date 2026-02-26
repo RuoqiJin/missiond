@@ -139,6 +139,21 @@ impl ClaudeCodeStateParser {
         lines.iter().any(|line| SPINNER_LINE_PATTERN.is_match(line))
     }
 
+    /// Check if the spinner is actively processing (not a stale/completion spinner).
+    ///
+    /// Claude Code spinner formats:
+    /// - **Active**: `✻ Kneading…` or `✳ Combobulating… (5m · thinking)` — always has `…`
+    /// - **Completion**: `✻ Baked for 7m 11s` — no `…`, shows total elapsed time
+    ///
+    /// Completion spinners remain on screen after task finishes. They must NOT
+    /// be treated as active processing indicators.
+    fn has_active_spinner(&self, lines: &[&str]) -> bool {
+        lines.iter().any(|line| {
+            SPINNER_LINE_PATTERN.is_match(line)
+                && (line.contains('…') || line.contains("..."))
+        })
+    }
+
     /// Check if any line looks like a tool call header.
     ///
     /// Matches lines like:
@@ -276,17 +291,18 @@ impl StateParser for ClaudeCodeStateParser {
         let prompt_lines = context.last_non_empty_lines(3);
         let has_prompt = self.has_prompt_in(&prompt_lines);
         let has_spinner = self.has_spinner_line(&active_lines);
+        let has_active_spinner = self.has_active_spinner(&active_lines);
 
         // 2. Idle or SlashMenu detection.
         //    Claude Code TUI layout when thinking:
-        //      ✻ Thinking… (35s · thinking)   ← spinner (above prompt)
+        //      ✻ Thinking… (35s · thinking)   ← active spinner (has …)
         //      ────────────────────
         //      ❯                              ← prompt always visible
-        //    When idle (task complete), spinner freezes but stays on screen.
-        //    Key insight: if prompt is BELOW spinner in the line order,
-        //    and spinner has no active phase hint (thinking/tool/running),
-        //    then the spinner is frozen/stale → actually Idle.
-        if !has_spinner {
+        //    When task completes, spinner stays on screen but changes format:
+        //      ✻ Baked for 7m 11s             ← completion spinner (no …)
+        //    Key insight: only spinners with … (ellipsis) indicate active processing.
+        //    Completion spinners (no …) are stale — treat as no spinner.
+        if !has_active_spinner {
             if self.has_slash_menu(&active_lines) {
                 return Some(StateDetectionResult::new(State::SlashMenu, 0.9));
             }
@@ -294,17 +310,16 @@ impl StateParser for ClaudeCodeStateParser {
                 return Some(StateDetectionResult::new(State::Idle, 0.9));
             }
         }
-        // When both spinner and prompt visible: spinner takes precedence.
-        // Claude Code v2+ removes the spinner when processing completes, so a visible
-        // spinner always means active processing. Phase hints (e.g., "(thinking)")
-        // appear after a few seconds — their absence does NOT mean frozen.
+        // When active spinner is present: it takes precedence over prompt.
+        // Phase hints (e.g., "(thinking)") appear after a few seconds —
+        // their absence does NOT mean frozen.
         // Fall through to the spinner processing block (section 3) below.
 
-        // 3. Processing: spinner line present → Thinking or ToolRunning
+        // 3. Processing: active spinner line present → Thinking or ToolRunning
         //    Phase hint from spinner status line is the MOST authoritative signal.
         //    Historical tool call lines (⏺ ToolName) may linger in scroll buffer
         //    from previous tool runs, so only use them as fallback when no phase hint.
-        if has_spinner {
+        if has_active_spinner {
             let phase_hint = self.extract_phase_hint(&active_lines);
             match &phase_hint {
                 Some(PhaseHint::ToolRunning) => {
@@ -799,24 +814,43 @@ mod tests {
     }
 
     #[test]
-    fn test_spinner_without_phase_hint_is_thinking() {
+    fn test_completion_spinner_is_idle() {
         let parser = ClaudeCodeStateParser::new();
 
-        // Spinner visible without phase hint in parens — still Thinking.
-        // Claude Code v2+ removes the spinner when processing completes,
-        // so a visible spinner always indicates active processing.
-        // Phase hints like "(thinking)" appear after a few seconds delay.
+        // Completion spinner: no ellipsis (…), shows total elapsed time.
+        // Claude Code leaves this on screen after task finishes.
+        // Must NOT be treated as active processing.
         let context = make_context(&[
             "  元循环状态：仍在持续。",
             "",
-            "✻ Sautéed for 57s",
+            "✻ Baked for 7m 11s",
             "",
             "────────────────────────────────────────",
             "❯ ",
             "────────────────────────────────────────",
             "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
         ]);
-        // Spinner present → Thinking (even without phase hint)
+        // Completion spinner (no …) + prompt → Idle
+        assert_eq!(parser.detect_state(&context).unwrap().state, State::Idle);
+    }
+
+    #[test]
+    fn test_active_spinner_without_phase_hint_is_thinking() {
+        let parser = ClaudeCodeStateParser::new();
+
+        // Active spinner with ellipsis but no phase hint yet (first few seconds).
+        // The … indicates ongoing processing — trust it.
+        let context = make_context(&[
+            "  Previous output",
+            "",
+            "✻ Kneading…",
+            "",
+            "────────────────────────────────────────",
+            "❯ ",
+            "────────────────────────────────────────",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+        ]);
+        // Active spinner (has …) → Thinking
         assert_eq!(parser.detect_state(&context).unwrap().state, State::Thinking);
     }
 
@@ -951,7 +985,22 @@ mod tests {
             State::ToolRunning
         );
 
-        // Phase 4: Back to Idle (spinner gone, prompt back)
+        // Phase 4: Completion spinner remains (stale) — still Idle
+        let completion_screen = make_context(&[
+            "  ⏺ Response completed",
+            "    Done!",
+            "✻ Baked for 3m 22s",
+            "────────────────────",
+            "❯ ",
+            "────────────────────",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt",
+        ]);
+        assert_eq!(
+            parser.detect_state(&completion_screen).unwrap().state,
+            State::Idle
+        );
+
+        // Phase 5: Back to Idle (spinner gone, prompt back)
         let idle_again = make_context(&[
             "  ⏺ Response completed",
             "    Done!",
