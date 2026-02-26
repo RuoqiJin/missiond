@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Search, RefreshCw, MessageSquare, User, Bot, Wrench, ArrowLeft } from 'lucide-react';
+import { Search, RefreshCw, MessageSquare, User, Bot, Wrench, ArrowLeft, ChevronRight, ChevronDown, GitBranch } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 
@@ -13,6 +13,7 @@ interface Conversation {
   model: string | null;
   gitBranch: string | null;
   jsonlPath: string | null;
+  parentSessionId: string | null;
   messageCount: number;
   startedAt: string;
   endedAt: string | null;
@@ -193,62 +194,91 @@ function ConversationListItem({
   conv,
   active,
   onClick,
+  subagentCount,
+  expanded,
+  onToggleExpand,
+  isSubagent,
 }: {
   conv: Conversation;
   active: boolean;
   onClick: () => void;
+  subagentCount?: number;
+  expanded?: boolean;
+  onToggleExpand?: () => void;
+  isSubagent?: boolean;
 }) {
   return (
-    <button
-      onClick={onClick}
-      className={cn(
-        'w-full text-left p-3 rounded-lg border transition-colors',
-        active
-          ? 'bg-neutral-800/50 border-orange-500/30'
-          : 'border-neutral-800/50 hover:border-neutral-700',
-      )}
-    >
-      <div className="flex items-center justify-between mb-1">
-        <div className="flex items-center gap-2 min-w-0">
-          {conv.project && (
-            <span className="text-[11px] font-mono text-orange-400/80 bg-orange-500/10 px-1.5 py-0.5 rounded truncate max-w-[140px]">
-              {conv.project.split('/').pop()}
-            </span>
-          )}
-          {conv.slotId && (
-            <span className="text-[10px] font-mono text-neutral-600 truncate">
-              {conv.slotId}
-            </span>
-          )}
+    <div className={cn(isSubagent && 'ml-4 border-l border-neutral-800/50 pl-1')}>
+      <button
+        onClick={onClick}
+        className={cn(
+          'w-full text-left p-3 rounded-lg border transition-colors',
+          active
+            ? 'bg-neutral-800/50 border-orange-500/30'
+            : 'border-neutral-800/50 hover:border-neutral-700',
+          isSubagent && 'py-2',
+        )}
+      >
+        <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center gap-2 min-w-0">
+            {isSubagent && (
+              <GitBranch className="w-3 h-3 text-neutral-600 flex-shrink-0" />
+            )}
+            {conv.project && (
+              <span className="text-[11px] font-mono text-orange-400/80 bg-orange-500/10 px-1.5 py-0.5 rounded truncate max-w-[140px]">
+                {conv.project.split('/').pop()}
+              </span>
+            )}
+            {conv.slotId && (
+              <span className="text-[10px] font-mono text-neutral-600 truncate">
+                {conv.slotId}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            {subagentCount && subagentCount > 0 ? (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleExpand?.();
+                }}
+                className="flex items-center gap-0.5 text-[10px] text-neutral-500 hover:text-neutral-300 transition-colors px-1 py-0.5 rounded hover:bg-neutral-800"
+                title={expanded ? '收起子任务' : '展开子任务'}
+              >
+                {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                <span>{subagentCount} 子任务</span>
+              </button>
+            ) : null}
+            <Badge
+              variant="outline"
+              className={cn(
+                'text-[10px] border-neutral-800',
+                conv.status === 'active' ? 'text-green-500' : 'text-neutral-600',
+              )}
+            >
+              {conv.status === 'active' ? '进行中' : '已完成'}
+            </Badge>
+          </div>
         </div>
-        <Badge
-          variant="outline"
-          className={cn(
-            'text-[10px] border-neutral-800 flex-shrink-0',
-            conv.status === 'active' ? 'text-green-500' : 'text-neutral-600',
-          )}
-        >
-          {conv.status === 'active' ? '进行中' : '已完成'}
-        </Badge>
-      </div>
 
-      <div className="flex items-center justify-between text-[11px] text-neutral-500">
-        <div className="flex items-center gap-2">
-          <span>{conv.messageCount} 条消息</span>
-          {conv.source === 'pty' && <span className="text-purple-500/60">PTY</span>}
-          {conv.model && (
-            <span className="font-mono text-neutral-600 truncate max-w-[100px]">{conv.model}</span>
-          )}
+        <div className="flex items-center justify-between text-[11px] text-neutral-500">
+          <div className="flex items-center gap-2">
+            <span>{conv.messageCount} 条消息</span>
+            {conv.source === 'pty' && <span className="text-purple-500/60">PTY</span>}
+            {conv.model && (
+              <span className="font-mono text-neutral-600 truncate max-w-[100px]">{conv.model}</span>
+            )}
+          </div>
+          <span>{timeAgo(conv.startedAt)}</span>
         </div>
-        <span>{timeAgo(conv.startedAt)}</span>
-      </div>
 
-      {conv.gitBranch && (
-        <div className="text-[10px] text-neutral-600 font-mono mt-1 truncate">
-          {conv.gitBranch}
-        </div>
-      )}
-    </button>
+        {conv.gitBranch && (
+          <div className="text-[10px] text-neutral-600 font-mono mt-1 truncate">
+            {conv.gitBranch}
+          </div>
+        )}
+      </button>
+    </div>
   );
 }
 
@@ -263,6 +293,7 @@ export function Conversations() {
   const [searchResults, setSearchResults] = useState<ConversationMessage[] | null>(null);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [showList, setShowList] = useState(true); // mobile: toggle list/detail
+  const [expandedParents, setExpandedParents] = useState<Set<string>>(new Set());
 
   const fetchConversations = useCallback(async () => {
     setLoading(true);
@@ -359,6 +390,34 @@ export function Conversations() {
     const completed = conversations.filter((c) => c.status === 'completed').length;
     return { active, completed, total: conversations.length };
   }, [conversations]);
+
+  // Group: separate subagents from main list, map parentSessionId → children
+  const { mainList, subagentMap } = useMemo(() => {
+    const map = new Map<string, Conversation[]>();
+    const main: Conversation[] = [];
+    for (const conv of conversations) {
+      if (conv.parentSessionId) {
+        const list = map.get(conv.parentSessionId) || [];
+        list.push(conv);
+        map.set(conv.parentSessionId, list);
+      } else {
+        main.push(conv);
+      }
+    }
+    return { mainList: main, subagentMap: map };
+  }, [conversations]);
+
+  const toggleParentExpand = useCallback((sessionId: string) => {
+    setExpandedParents((prev) => {
+      const next = new Set(prev);
+      if (next.has(sessionId)) {
+        next.delete(sessionId);
+      } else {
+        next.add(sessionId);
+      }
+      return next;
+    });
+  }, []);
 
   return (
     <div className="flex-1 flex min-h-0 overflow-hidden">
@@ -464,17 +523,34 @@ export function Conversations() {
           <div className="flex-1 overflow-auto p-2 space-y-1">
             {loading && conversations.length === 0 ? (
               <div className="text-center py-8 text-neutral-600 text-xs">加载中...</div>
-            ) : conversations.length === 0 ? (
+            ) : mainList.length === 0 ? (
               <div className="text-center py-8 text-neutral-600 text-xs">暂无对话记录</div>
             ) : (
-              conversations.map((conv) => (
-                <ConversationListItem
-                  key={conv.id}
-                  conv={conv}
-                  active={conv.id === selectedId}
-                  onClick={() => selectConversation(conv.id)}
-                />
-              ))
+              mainList.map((conv) => {
+                const children = subagentMap.get(conv.id) || [];
+                const isExpanded = expandedParents.has(conv.id);
+                return (
+                  <div key={conv.id}>
+                    <ConversationListItem
+                      conv={conv}
+                      active={conv.id === selectedId}
+                      onClick={() => selectConversation(conv.id)}
+                      subagentCount={children.length}
+                      expanded={isExpanded}
+                      onToggleExpand={() => toggleParentExpand(conv.id)}
+                    />
+                    {isExpanded && children.map((child) => (
+                      <ConversationListItem
+                        key={child.id}
+                        conv={child}
+                        active={child.id === selectedId}
+                        onClick={() => selectConversation(child.id)}
+                        isSubagent
+                      />
+                    ))}
+                  </div>
+                );
+              })
             )}
           </div>
         )}
@@ -498,6 +574,16 @@ export function Conversations() {
               <MessageSquare className="w-4 h-4 text-orange-400" />
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
+                  {selectedConv.parentSessionId && (
+                    <button
+                      onClick={() => selectConversation(selectedConv.parentSessionId!)}
+                      className="flex items-center gap-1 text-[11px] text-neutral-500 hover:text-neutral-300 transition-colors"
+                      title="返回父会话"
+                    >
+                      <GitBranch className="w-3 h-3" />
+                      <span>子任务</span>
+                    </button>
+                  )}
                   {selectedConv.project && (
                     <span className="text-sm font-medium text-neutral-200">{selectedConv.project.split('/').pop()}</span>
                   )}

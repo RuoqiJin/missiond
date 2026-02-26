@@ -178,6 +178,24 @@ CREATE INDEX IF NOT EXISTS idx_conv_msg_session ON conversation_messages(session
 CREATE INDEX IF NOT EXISTS idx_conv_msg_timestamp ON conversation_messages(timestamp);
 "#;
 
+/// Extract parent session ID from a subagent's jsonl_path.
+/// Path pattern: .../PARENT_SESSION_ID/subagents/agent-xxx.jsonl
+pub fn extract_parent_session_id(jsonl_path: &str) -> Option<String> {
+    let path = std::path::Path::new(jsonl_path);
+    let parent = path.parent()?; // .../PARENT_SESSION_ID/subagents/
+    if parent.file_name()?.to_str()? != "subagents" {
+        return None;
+    }
+    let grandparent = parent.parent()?; // .../PARENT_SESSION_ID/
+    let session_id = grandparent.file_name()?.to_str()?.to_string();
+    // Sanity: parent session ID should look like a UUID
+    if session_id.contains('-') && session_id.len() > 8 {
+        Some(session_id)
+    } else {
+        None
+    }
+}
+
 /// SQLite database operations class
 pub struct MissionDB {
     conn: std::sync::Mutex<Connection>,
@@ -373,6 +391,36 @@ impl MissionDB {
         // Drop legacy message_pipeline_state table (no longer used by any pipeline:
         // realtime uses realtime_forwarded_at watermark, deep_analysis uses analyzed_at + analysis_version)
         conn.execute_batch("DROP TABLE IF EXISTS message_pipeline_state;")?;
+
+        // Add parent_session_id for subagent → parent conversation linking
+        let has_parent_session_id: bool = conn
+            .prepare("SELECT parent_session_id FROM conversations LIMIT 0")
+            .is_ok();
+        if !has_parent_session_id {
+            conn.execute_batch(
+                "ALTER TABLE conversations ADD COLUMN parent_session_id TEXT;"
+            )?;
+            // Backfill: extract parent session ID from jsonl_path for existing subagent sessions
+            // Path pattern: .../PARENT_SESSION_ID/subagents/agent-xxx.jsonl
+            let mut stmt = conn.prepare(
+                "SELECT id, jsonl_path FROM conversations WHERE id LIKE 'agent-%' AND jsonl_path IS NOT NULL"
+            )?;
+            let rows: Vec<(String, String)> = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .filter_map(|r| r.ok())
+                .collect();
+            for (id, path) in &rows {
+                if let Some(parent_id) = extract_parent_session_id(path) {
+                    conn.execute(
+                        "UPDATE conversations SET parent_session_id = ?1 WHERE id = ?2",
+                        rusqlite::params![parent_id, id],
+                    )?;
+                }
+            }
+            if !rows.is_empty() {
+                tracing::info!(count = rows.len(), "Backfilled parent_session_id for subagent conversations");
+            }
+        }
 
         Ok(())
     }
@@ -2005,18 +2053,19 @@ impl MissionDB {
     pub fn upsert_conversation(&self, conv: &Conversation) -> SqliteResult<()> {
         let conn = self.conn();
         conn.execute(
-            "INSERT INTO conversations (id, project, slot_id, source, model, git_branch, jsonl_path, message_count, started_at, ended_at, status, analyzed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            "INSERT INTO conversations (id, project, slot_id, source, model, git_branch, jsonl_path, parent_session_id, message_count, started_at, ended_at, status, analyzed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                 model = COALESCE(?5, model),
                 git_branch = COALESCE(?6, git_branch),
-                message_count = ?8,
-                ended_at = ?10,
-                status = ?11",
+                message_count = ?9,
+                ended_at = ?11,
+                status = ?12",
             params![
                 conv.id, conv.project, conv.slot_id, conv.source, conv.model,
-                conv.git_branch, conv.jsonl_path, conv.message_count,
-                conv.started_at, conv.ended_at, conv.status, conv.analyzed_at,
+                conv.git_branch, conv.jsonl_path, conv.parent_session_id,
+                conv.message_count, conv.started_at, conv.ended_at, conv.status,
+                conv.analyzed_at,
             ],
         )?;
         Ok(())
@@ -2359,6 +2408,7 @@ impl MissionDB {
             model: row.get("model")?,
             git_branch: row.get("git_branch")?,
             jsonl_path: row.get("jsonl_path")?,
+            parent_session_id: row.get("parent_session_id").unwrap_or(None),
             message_count: row.get("message_count")?,
             started_at: row.get("started_at")?,
             ended_at: row.get("ended_at")?,
