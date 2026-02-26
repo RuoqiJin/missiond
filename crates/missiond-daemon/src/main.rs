@@ -1621,6 +1621,12 @@ impl AppState {
                     }
                 }
 
+                // Apply context budget before sending
+                let budget_result = apply_context_budget(&mut messages, MAX_ROUTER_PAYLOAD_BYTES);
+                if budget_result.trimmed {
+                    info!("Router chat: context budget applied — {}", budget_result.note.as_deref().unwrap_or("trimmed"));
+                }
+
                 // Read JWT
                 let cred_path = dirs::home_dir()
                     .ok_or_else(|| anyhow!("Cannot determine home directory"))?
@@ -1689,6 +1695,9 @@ impl AppState {
                 if finish_reason == "length" || finish_reason == "max_tokens" {
                     resp["warning"] = serde_json::json!("⚠️ 输出被截断：LLM 达到 max_tokens 限制，返回内容不完整。可增大 max_tokens 参数重试。");
                     resp["finish_reason"] = serde_json::json!(finish_reason);
+                }
+                if let Some(note) = budget_result.note {
+                    resp["context_budget"] = serde_json::json!(note);
                 }
                 Ok(ToolResult::json_pretty(&resp))
             }
@@ -2515,6 +2524,36 @@ impl AppState {
                 Ok(ToolResult::json_pretty(&summary))
             }
 
+            // ===== Slot Task History =====
+            "mission_slot_history" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct SlotHistoryArgs {
+                    slot_id: Option<String>,
+                    task_type: Option<String>,
+                    status: Option<String>,
+                    limit: Option<i64>,
+                    stats: Option<bool>,
+                }
+                let args: SlotHistoryArgs = serde_json::from_value(args)?;
+                if args.stats.unwrap_or(false) {
+                    let stats = self.mission.db()
+                        .slot_task_stats(args.slot_id.as_deref())
+                        .map_err(|e| anyhow!("DB error: {}", e))?;
+                    Ok(ToolResult::json_pretty(&stats))
+                } else {
+                    let tasks = self.mission.db()
+                        .list_slot_tasks(
+                            args.slot_id.as_deref(),
+                            args.task_type.as_deref(),
+                            args.status.as_deref(),
+                            args.limit.unwrap_or(20),
+                        )
+                        .map_err(|e| anyhow!("DB error: {}", e))?;
+                    Ok(ToolResult::json_pretty(&tasks))
+                }
+            }
+
             // ===== Agent Questions (Pending Decisions) =====
             "mission_question_create" => {
                 let args: QuestionCreateArgs = serde_json::from_value(args)?;
@@ -3257,9 +3296,14 @@ async fn check_memory_slot_stuck(state: &AppState) {
             let _ = state.mission.db().mark_analysis_failed(&conv_id);
             warn!(conv_id = %conv_id, "Marked stuck deep analysis as failed");
         }
+        // Mark slot task as failed (stuck)
+        if let Some(ref st_id) = es.current_slot_task_id {
+            let _ = state.mission.db().slot_task_set_failed(st_id, "slot stuck, force reset");
+        }
         es.phase = ExtractionPhase::Idle;
         es.active_type = None;
         es.current_task_id = None;
+        es.current_slot_task_id = None;
         es.watermark_targets.clear();
     }
     // Don't reset to 0 — set to now so we can detect if respawn also gets stuck
@@ -3285,9 +3329,14 @@ async fn check_extraction_gate(state: &AppState, label: &str) -> bool {
             if let Some(conv_id) = es.current_deep_conv_id.take() {
                 let _ = state.mission.db().mark_analysis_failed(&conv_id);
             }
+            // Mark slot task as failed (timeout)
+            if let Some(ref st_id) = es.current_slot_task_id {
+                let _ = state.mission.db().slot_task_set_failed(st_id, "WaitingForSlotIdle timeout");
+            }
             es.phase = ExtractionPhase::Idle;
             es.active_type = None;
             es.current_task_id = None;
+            es.current_slot_task_id = None;
             es.watermark_targets.clear();
             return true;
         }
@@ -3375,6 +3424,26 @@ async fn check_realtime_extraction(state: &AppState) {
         let _ = state.mission.db().set_conversation_task_id(&current_session, &task_id);
     }
 
+    // Record slot task for history tracking
+    let source_session_ids: Vec<String> = pending.iter().map(|(sid, _, _)| sid.clone()).collect();
+    let slot_task_id = uuid::Uuid::new_v4().to_string();
+    let slot_task = missiond_core::types::SlotTask {
+        id: slot_task_id.clone(),
+        slot_id: MEMORY_SLOT_ID.to_string(),
+        task_type: "realtime_extract".to_string(),
+        status: "pending".to_string(),
+        prompt_summary: Some(format!("{} 个会话, {} 条消息", session_count, msg_count)),
+        source_sessions: Some(serde_json::to_string(&source_session_ids).unwrap_or_default()),
+        output_count: 0,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        started_at: None,
+        completed_at: None,
+        duration_ms: None,
+        error: None,
+        conversation_id: None,
+    };
+    let _ = state.mission.db().insert_slot_task(&slot_task);
+
     // Store watermark targets for advancing on completion
     {
         let now = chrono::Utc::now().timestamp();
@@ -3384,6 +3453,7 @@ async fn check_realtime_extraction(state: &AppState) {
         es.phase_started_at = now;
         es.watermark_targets = watermark_targets;
         es.current_task_id = Some(task_id);
+        es.current_slot_task_id = Some(slot_task_id.clone());
     }
 
     let prompt = "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，提取知识存入 KB。\n\
@@ -3405,10 +3475,13 @@ async fn check_realtime_extraction(state: &AppState) {
 
     let pty = Arc::clone(&state.pty);
     let extraction_state = Arc::clone(&state.extraction_state);
+    let mission = Arc::clone(&state.mission);
+    let slot_task_id_clone = slot_task_id;
     tokio::spawn(async move {
         match pty.send(MEMORY_SLOT_ID, prompt, 300_000).await {
             Ok(res) => {
                 info!(duration_ms = res.duration_ms, "realtime extraction send() returned");
+                let _ = mission.db().slot_task_set_running(&slot_task_id_clone);
                 let mut es = extraction_state.write().await;
                 if es.phase == ExtractionPhase::Sending {
                     es.phase = ExtractionPhase::WaitingForSlotIdle;
@@ -3417,10 +3490,12 @@ async fn check_realtime_extraction(state: &AppState) {
             }
             Err(e) => {
                 warn!(error = %e, "realtime extraction trigger failed");
+                let _ = mission.db().slot_task_set_failed(&slot_task_id_clone, &e.to_string());
                 let mut es = extraction_state.write().await;
                 es.phase = ExtractionPhase::Idle;
                 es.active_type = None;
                 es.current_task_id = None;
+                es.current_slot_task_id = None;
                 // Watermark not advanced on failure — messages stay pending for retry
                 es.watermark_targets.clear();
             }
@@ -3521,6 +3596,25 @@ async fn check_deep_analysis(state: &AppState) {
             let _ = state.mission.db().set_conversation_task_id(&current_session, &task_id);
         }
 
+        // Record slot task for history tracking
+        let slot_task_id = uuid::Uuid::new_v4().to_string();
+        let slot_task = missiond_core::types::SlotTask {
+            id: slot_task_id.clone(),
+            slot_id: MEMORY_SLOT_ID.to_string(),
+            task_type: "deep_analysis".to_string(),
+            status: "pending".to_string(),
+            prompt_summary: Some(format!("session: {}, {} msgs", &conv.id[..8.min(conv.id.len())], msg_count)),
+            source_sessions: Some(serde_json::to_string(&[&conv.id]).unwrap_or_default()),
+            output_count: 0,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            started_at: None,
+            completed_at: None,
+            duration_ms: None,
+            error: None,
+            conversation_id: None,
+        };
+        let _ = state.mission.db().insert_slot_task(&slot_task);
+
         // Set extraction state with conv_id for marking complete on Idle
         {
             let now = chrono::Utc::now().timestamp();
@@ -3530,6 +3624,7 @@ async fn check_deep_analysis(state: &AppState) {
             es.phase_started_at = now;
             es.current_deep_conv_id = Some(conv.id.clone());
             es.current_task_id = Some(task_id);
+            es.current_slot_task_id = Some(slot_task_id.clone());
         }
 
         let conv_id = conv.id.clone();
@@ -3540,6 +3635,7 @@ async fn check_deep_analysis(state: &AppState) {
             match pty.send(MEMORY_SLOT_ID, &prompt, 300_000).await {
                 Ok(res) => {
                     info!(conv_id = %conv_id, duration_ms = res.duration_ms, "Deep analysis send() returned");
+                    let _ = mission.db().slot_task_set_running(&slot_task_id);
                     let mut es = extraction_state.write().await;
                     if es.phase == ExtractionPhase::Sending {
                         es.phase = ExtractionPhase::WaitingForSlotIdle;
@@ -3548,12 +3644,13 @@ async fn check_deep_analysis(state: &AppState) {
                 }
                 Err(e) => {
                     warn!(conv_id = %conv_id, error = %e, "Deep analysis send() failed");
-                    // Mark as failed (increments retry count) instead of silently losing
                     let _ = mission.db().mark_analysis_failed(&conv_id);
+                    let _ = mission.db().slot_task_set_failed(&slot_task_id, &e.to_string());
                     let mut es = extraction_state.write().await;
                     es.phase = ExtractionPhase::Idle;
                     es.active_type = None;
                     es.current_task_id = None;
+                    es.current_slot_task_id = None;
                     es.current_deep_conv_id = None;
                 }
             }
@@ -3673,6 +3770,134 @@ fn sync_claude_md(state: &AppState) {
             state.claude_md_hash.store(new_hash, std::sync::atomic::Ordering::Relaxed);
         }
         Err(e) => warn!(error = %e, "Failed to write CLAUDE.md"),
+    }
+}
+
+// ===== Context Budget Manager =====
+// Prevents 502/413 errors by ensuring messages don't exceed upstream payload limits.
+// Architecture: Storage layer stores everything; this is the Compute/Transport layer.
+
+/// Max HTTP payload content size for Router API calls.
+/// Conservative limit to avoid 502 from upstream proxies (Caddy/Nginx/Cloudflare).
+const MAX_ROUTER_PAYLOAD_BYTES: usize = 6 * 1024 * 1024; // 6 MB
+
+/// Result of applying context budget to a messages array.
+struct ContextBudgetResult {
+    /// Whether any trimming was applied.
+    trimmed: bool,
+    /// Human-readable note about what was trimmed (None if within budget).
+    note: Option<String>,
+}
+
+/// Apply context budget to a messages array for Router API calls.
+///
+/// Strategy when over budget:
+/// 1. Keep first message (system prompt / context) + last N recent turns
+/// 2. Drop middle messages, insert a note about omitted context
+/// 3. Progressively reduce N until within budget
+/// 4. If even 2 messages exceed budget, truncate the longest message
+fn apply_context_budget(messages: &mut Vec<Value>, max_bytes: usize) -> ContextBudgetResult {
+    let calc_size = |msgs: &[Value]| -> usize {
+        msgs.iter()
+            .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+            .map(|s| s.len())
+            .sum()
+    };
+
+    let total_bytes = calc_size(messages);
+    if total_bytes <= max_bytes {
+        return ContextBudgetResult { trimmed: false, note: None };
+    }
+
+    let original_count = messages.len();
+
+    // Edge case: 0-1 messages, can only truncate content
+    if messages.len() <= 1 {
+        if let Some(msg) = messages.first_mut() {
+            truncate_message_content(msg, max_bytes);
+        }
+        return ContextBudgetResult {
+            trimmed: true,
+            note: Some(format!(
+                "单条消息超出预算({:.1}MB > {:.1}MB)，已截断内容。",
+                total_bytes as f64 / 1_048_576.0,
+                max_bytes as f64 / 1_048_576.0
+            )),
+        };
+    }
+
+    // Sliding window: keep first message + last N turns
+    let first = messages[0].clone();
+    let mut keep_tail = messages.len() - 1;
+
+    loop {
+        let mut candidate: Vec<Value> = Vec::new();
+        candidate.push(first.clone());
+
+        let dropped = original_count - 1 - keep_tail;
+        if dropped > 0 {
+            candidate.push(serde_json::json!({
+                "role": "system",
+                "content": format!(
+                    "[上下文管理] 为适应上下文窗口，已省略中间 {} 轮对话。如需回溯历史，请使用 mission_conversation_get 工具查询完整记录。",
+                    dropped
+                )
+            }));
+        }
+
+        let tail_start = original_count - keep_tail;
+        for msg in &messages[tail_start..] {
+            candidate.push(msg.clone());
+        }
+
+        let size = calc_size(&candidate);
+        if size <= max_bytes {
+            let note = format!(
+                "上下文超出预算({:.1}MB > {:.1}MB)，保留首条 + 最近 {} 轮，省略 {} 轮中间对话。",
+                total_bytes as f64 / 1_048_576.0,
+                max_bytes as f64 / 1_048_576.0,
+                keep_tail,
+                dropped
+            );
+            *messages = candidate;
+            return ContextBudgetResult { trimmed: true, note: Some(note) };
+        }
+
+        if keep_tail <= 1 {
+            // Even first + last message exceeds budget; truncate the longest
+            let longest_idx = candidate.iter().enumerate()
+                .max_by_key(|(_, m)| {
+                    m.get("content").and_then(|c| c.as_str()).map(|s| s.len()).unwrap_or(0)
+                })
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            truncate_message_content(&mut candidate[longest_idx], max_bytes / 2);
+            let note = format!(
+                "上下文严重超出预算({:.1}MB > {:.1}MB)，仅保留首尾消息并截断最长内容。",
+                total_bytes as f64 / 1_048_576.0,
+                max_bytes as f64 / 1_048_576.0,
+            );
+            *messages = candidate;
+            return ContextBudgetResult { trimmed: true, note: Some(note) };
+        }
+
+        keep_tail -= 1;
+    }
+}
+
+/// Truncate a single message's content to fit within max_bytes (char-safe).
+fn truncate_message_content(msg: &mut Value, max_bytes: usize) {
+    if let Some(content) = msg.get("content").and_then(|c| c.as_str()).map(String::from) {
+        if content.len() > max_bytes {
+            // Use char_indices for safe UTF-8 truncation
+            let target_chars = max_bytes / 3; // conservative: assume ~3 bytes per char average
+            let truncated: String = content.chars().take(target_chars).collect();
+            msg["content"] = Value::String(format!(
+                "{}\n\n[...内容因超出上下文预算被截断，原始长度 {:.1}MB...]",
+                truncated,
+                content.len() as f64 / 1_048_576.0
+            ));
+        }
     }
 }
 
@@ -4315,9 +4540,14 @@ async fn main() -> Result<()> {
                                                 }
                                             }
                                         }
+                                        // Mark slot task completed in history
+                                        if let Some(ref st_id) = es.current_slot_task_id {
+                                            let _ = state.mission.db().slot_task_set_completed(st_id, 0);
+                                        }
                                         es.phase = ExtractionPhase::Idle;
                                         es.active_type = None;
                                         es.current_task_id = None;
+                                        es.current_slot_task_id = None;
                                         // Event-driven: signal main loop to re-check extractions
                                         state.extraction_notify.notify_one();
                                     }
