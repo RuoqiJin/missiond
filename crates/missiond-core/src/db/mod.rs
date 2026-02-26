@@ -2517,7 +2517,7 @@ impl MissionDB {
     /// Get pending messages for unified realtime extraction (replaces separate user_voice + memory).
     /// Returns all user+assistant messages since realtime_forwarded_at watermark.
     pub fn get_pending_realtime_messages(&self, today: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
-        self.get_pending_realtime_messages_with_limit(today, 200)
+        self.get_pending_realtime_messages_with_limit(today, 50)
     }
 
     /// Get pending realtime messages with a configurable limit.
