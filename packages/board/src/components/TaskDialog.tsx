@@ -17,7 +17,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Trash2 } from 'lucide-react';
+import { Trash2, SkipForward } from 'lucide-react';
 import { useTaskCenterStore } from '../store';
 import { CATEGORY_CONFIG, PRIORITY_CONFIG, SERVER_OPTIONS } from '../constants';
 import type { TaskFormData, TaskCategory, TaskPriority } from '../types';
@@ -38,6 +38,7 @@ export function TaskDialog() {
   const addTask = useTaskCenterStore((s) => s.addTask);
   const updateTask = useTaskCenterStore((s) => s.updateTask);
   const deleteTask = useTaskCenterStore((s) => s.deleteTask);
+  const skipTask = useTaskCenterStore((s) => s.skipTask);
   const closeDialog = useTaskCenterStore((s) => s.closeDialog);
   const parentId = useTaskCenterStore((s) => s._addDialogParentId);
 
@@ -196,10 +197,23 @@ export function TaskDialog() {
 
         <DialogFooter className="flex-row justify-between sm:justify-between">
           {isEditing ? (
-            <Button variant="ghost" size="sm" onClick={handleDelete} className="text-red-400 hover:text-red-300 hover:bg-red-500/10">
-              <Trash2 className="w-4 h-4 mr-1" />
-              删除
-            </Button>
+            <div className="flex gap-1">
+              <Button variant="ghost" size="sm" onClick={handleDelete} className="text-red-400 hover:text-red-300 hover:bg-red-500/10">
+                <Trash2 className="w-4 h-4 mr-1" />
+                删除
+              </Button>
+              {editingTask.status !== 'done' && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => { skipTask(editingTask.id); closeDialog(); }}
+                  className="text-neutral-400 hover:text-neutral-300 hover:bg-neutral-500/10"
+                >
+                  <SkipForward className="w-4 h-4 mr-1" />
+                  {editingTask.status === 'skipped' ? '恢复' : '跳过'}
+                </Button>
+              )}
+            </div>
           ) : (
             <div />
           )}

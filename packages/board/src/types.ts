@@ -1,4 +1,4 @@
-export type TaskStatus = 'open' | 'done';
+export type TaskStatus = 'open' | 'done' | 'skipped';
 export type TaskPriority = 'high' | 'medium' | 'low';
 export type TaskCategory = 'deploy' | 'dev' | 'infra' | 'test' | 'other';
 export type GroupBy = 'none' | 'category' | 'priority' | 'project';

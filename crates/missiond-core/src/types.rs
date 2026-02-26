@@ -234,6 +234,7 @@ pub enum BoardTaskStatus {
     Done,
     Blocked,
     Failed,
+    Skipped,
 }
 
 impl BoardTaskStatus {
@@ -245,6 +246,7 @@ impl BoardTaskStatus {
             BoardTaskStatus::Done => "done",
             BoardTaskStatus::Blocked => "blocked",
             BoardTaskStatus::Failed => "failed",
+            BoardTaskStatus::Skipped => "skipped",
         }
     }
 
@@ -256,6 +258,7 @@ impl BoardTaskStatus {
             "done" => Some(BoardTaskStatus::Done),
             "blocked" => Some(BoardTaskStatus::Blocked),
             "failed" => Some(BoardTaskStatus::Failed),
+            "skipped" => Some(BoardTaskStatus::Skipped),
             _ => None,
         }
     }
@@ -587,6 +590,12 @@ pub struct Conversation {
     pub status: String, // "active" | "completed"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analyzed_at: Option<String>,
+    /// Deep analysis schema version (0 = never analyzed)
+    #[serde(default)]
+    pub analysis_version: i32,
+    /// Retry count for deep analysis failures (capped at MAX_ANALYSIS_RETRIES)
+    #[serde(default)]
+    pub analysis_retries: i32,
 }
 
 /// A message within a conversation
