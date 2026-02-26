@@ -2561,6 +2561,30 @@ impl AppState {
                 }
             }
 
+            // ── Jarvis Trace ──
+            "mission_jarvis_logs" => {
+                let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+                let limit = limit.min(100);
+                let status_filter = args.get("status").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let mut traces = self.jarvis_trace.list_traces(limit).await;
+                if let Some(ref sf) = status_filter {
+                    traces.retain(|t| t.status.to_string() == *sf);
+                }
+                Ok(ToolResult::json_pretty(&traces))
+            }
+            "mission_jarvis_trace" => {
+                let trace_id = args.get("trace_id").and_then(|v| v.as_str());
+                let trace = if let Some(id) = trace_id {
+                    self.jarvis_trace.get_trace(id).await
+                } else {
+                    self.jarvis_trace.latest_trace().await
+                };
+                match trace {
+                    Some(t) => Ok(ToolResult::json_pretty(&t)),
+                    None => Ok(ToolResult::error("Trace not found")),
+                }
+            }
+
             _ => {
                 let mut res = ToolResult::text(format!("Unknown tool: {}", name));
                 res.is_error = Some(true);
@@ -3732,17 +3756,21 @@ fn handle_new_messages(
     let batch: Vec<missiond_core::types::ConversationMessage> = messages.iter()
         .filter_map(|msg| {
             let text_content = extract_text_content(&msg.message.content);
+            // Detect tool_result: JSONL top-level type is "user" but content blocks are tool_result
+            let is_tool_result = msg.message.content.as_array()
+                .map(|arr| !arr.is_empty() && arr.iter().all(|b|
+                    b.get("type").and_then(|t| t.as_str()) == Some("tool_result")))
+                .unwrap_or(false);
             // Keep tool_result messages even if content extraction is empty
-            if text_content.is_empty() && msg.message_type != "tool_result" {
+            if text_content.is_empty() && !is_tool_result {
                 return None;
             }
             let content = if text_content.is_empty() {
-                format!("[{}]", msg.message_type)
+                "[tool_result]".to_string()
             } else {
                 text_content
             };
-            // Use message_type as role for tool_result (message.role may be "user")
-            let role = if msg.message_type == "tool_result" {
+            let role = if is_tool_result {
                 "tool_result".to_string()
             } else {
                 msg.message.role.clone()
@@ -4007,6 +4035,7 @@ async fn main() -> Result<()> {
         last_auto_gc_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         slot_fail_counts: Arc::new(std::sync::Mutex::new(HashMap::new())),
         screenshot_broker: Arc::clone(&screenshot_broker),
+        jarvis_trace: ws_server.jarvis_trace_store().clone(),
     };
 
     // Autopilot scheduler + IPC server via select

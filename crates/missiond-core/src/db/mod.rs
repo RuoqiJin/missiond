@@ -422,6 +422,18 @@ impl MissionDB {
             }
         }
 
+        // Backfill: fix tool_result messages incorrectly stored as role='user'.
+        // In Claude Code JSONL, tool_result has type="user" + role="user" but
+        // content blocks are all type="tool_result". Detect via raw_content.
+        let fixed = conn.execute(
+            "UPDATE conversation_messages SET role = 'tool_result'
+             WHERE role = 'user' AND raw_content LIKE '%\"type\":\"tool_result\"%'",
+            [],
+        )?;
+        if fixed > 0 {
+            tracing::info!(count = fixed, "Backfilled tool_result role for misclassified messages");
+        }
+
         Ok(())
     }
 
