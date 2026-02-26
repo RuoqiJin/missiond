@@ -1709,6 +1709,8 @@ impl AppState {
                      - 架构决策/技术事实 → category: memory\n\
                      - 「好」「行」= 用户认可 AI 方案，记录为决策\n\
                      - 「别...」「不要...」= 高价值偏好\n\
+                     - 用户抱怨操作繁琐/链路太长/反复手动 → category: memory:ops (记录痛点+建议封装为 MCP 工具)\n\
+                     - 调试走弯路/错误归因/浪费时间的尝试 → category: memory:debug (记录正确路径)\n\
                      - 不存: 纯任务指令、当天工作日志、代码提交记录\n\
                      - 模糊用户消息 → 调 mission_conversation_get 看上下文再判断\n\n",
                     session_count, msg_count, user_count,
@@ -3262,6 +3264,8 @@ async fn check_realtime_extraction(state: &AppState) {
          - 用户偏好/原则/纠正 → category: preference\n\
          - 架构决策/技术事实 → category: memory 或 memory:architecture/memory:decision\n\
          - 已修 bug 的根因 → category: memory:bugfix\n\
+         - 运维/调试痛点信号（用户抱怨操作繁琐、反复手动执行多步、链路太长）→ category: memory:ops，记录痛点并建议可封装的 MCP 工具\n\
+         - 调试走弯路的经验（错误归因、方向错误、浪费时间的尝试）→ category: memory:debug，记录正确路径供下次参考\n\
          禁止提取:\n\
          - 基础设施信息（IP/端口/凭据/服务器配置）→ 已有 servers.yaml + mission_infra_get\n\
          - API 参数/代码实现细节 → 属于代码层，不进 KB\n\
@@ -3368,7 +3372,11 @@ async fn check_deep_analysis(state: &AppState) {
              2. 工作流抽象 — 可以固化为工具/服务的重复操作\n\
              3. 知识关联 — 不同会话之间的隐含联系\n\
              4. 趋势发现 — 用户行为/需求的演变方向\n\
-             5. 问题上报 — 发现 bug/资源浪费/反复出错等需要代码修复的问题时，调用 mission_board_create 创建任务\n\n\
+             5. 问题上报 — 发现 bug/资源浪费/反复出错等需要代码修复的问题时，调用 mission_board_create 创建任务\n\
+             6. 运维链路审计 — 会话中是否有重复的多步手动操作（SSH→查日志→重启→再查）？\
+             这些操作链可以封装为 MCP 工具一步完成。记录具体步骤序列和建议的工具名，存 category: memory:ops\n\
+             7. 调试经验提炼 — 调试过程中走了哪些弯路（错误假设→验证失败→换方向）？\
+             根因最终是什么？总结「正确排查路径」供下次遇到类似问题时参考，存 category: memory:debug\n\n\
              不要提取: 单条消息的偏好/决策/事实（realtime 已处理）、当天工作日志、版本细节。\n\
              绝对禁止写入 category: infra（基础设施由 servers.yaml 管理）。",
             session_id = conv.id,
@@ -3531,24 +3539,97 @@ fn sync_claude_md(state: &AppState) {
     }
 }
 
-/// Extract text content from a Claude Code message content field.
+/// Extract displayable content from a Claude Code message content field.
 /// Content can be a plain string or an array of content blocks.
+/// Handles text, image, tool_use, and tool_result block types.
 fn extract_text_content(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),
         Value::Array(arr) => arr
             .iter()
             .filter_map(|item| {
-                if item.get("type")?.as_str()? == "text" {
-                    item.get("text")?.as_str().map(String::from)
-                } else {
-                    None
+                let block_type = item.get("type")?.as_str()?;
+                match block_type {
+                    "text" => item.get("text")?.as_str().map(String::from),
+                    "image" => Some("[图片]".to_string()),
+                    "tool_use" => {
+                        let name = item
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("unknown");
+                        Some(format!("[Tool: {name}]"))
+                    }
+                    "tool_result" => {
+                        // Nested tool result content
+                        if let Some(Value::String(s)) = item.get("content") {
+                            let display = if s.len() > 500 {
+                                // Find a valid char boundary near 500
+                                let mut end = 500;
+                                while !s.is_char_boundary(end) && end > 0 {
+                                    end -= 1;
+                                }
+                                format!("{}…", &s[..end])
+                            } else {
+                                s.clone()
+                            };
+                            Some(display)
+                        } else if let Some(Value::Array(inner)) = item.get("content") {
+                            let text: String = inner
+                                .iter()
+                                .filter_map(|i| {
+                                    if i.get("type")?.as_str()? == "text" {
+                                        i.get("text")?.as_str().map(String::from)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if text.is_empty() {
+                                None
+                            } else {
+                                Some(text)
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
                 }
             })
             .collect::<Vec<_>>()
             .join("\n"),
         _ => String::new(),
     }
+}
+
+/// Sanitize raw content JSON for DB storage: strip base64 image data to avoid bloat.
+fn sanitize_raw_content(content: &Value) -> Option<String> {
+    if let Value::Array(arr) = content {
+        let has_image = arr
+            .iter()
+            .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("image"));
+        if has_image {
+            let sanitized: Vec<Value> = arr
+                .iter()
+                .map(|item| {
+                    if item.get("type").and_then(|t| t.as_str()) == Some("image") {
+                        let mut obj = item.clone();
+                        if let Some(source) = obj.get_mut("source") {
+                            if let Some(data) = source.get_mut("data") {
+                                *data = Value::String("[base64 omitted]".to_string());
+                            }
+                        }
+                        obj
+                    } else {
+                        item.clone()
+                    }
+                })
+                .collect();
+            return serde_json::to_string(&sanitized).ok();
+        }
+    }
+    serde_json::to_string(content).ok()
 }
 
 /// Handle a NewMessages watcher event: write conversation messages to DB.
@@ -3610,15 +3691,27 @@ fn handle_new_messages(
     let batch: Vec<missiond_core::types::ConversationMessage> = messages.iter()
         .filter_map(|msg| {
             let text_content = extract_text_content(&msg.message.content);
-            if text_content.is_empty() {
+            // Keep tool_result messages even if content extraction is empty
+            if text_content.is_empty() && msg.message_type != "tool_result" {
                 return None;
             }
-            let raw_content = serde_json::to_string(&msg.message.content).ok();
+            let content = if text_content.is_empty() {
+                format!("[{}]", msg.message_type)
+            } else {
+                text_content
+            };
+            // Use message_type as role for tool_result (message.role may be "user")
+            let role = if msg.message_type == "tool_result" {
+                "tool_result".to_string()
+            } else {
+                msg.message.role.clone()
+            };
+            let raw_content = sanitize_raw_content(&msg.message.content);
             Some(missiond_core::types::ConversationMessage {
                 id: 0,
                 session_id: session_id.clone(),
-                role: msg.message.role.clone(),
-                content: text_content,
+                role,
+                content,
                 raw_content,
                 message_uuid: Some(msg.uuid.clone()),
                 parent_uuid: msg.parent_uuid.clone(),
