@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Search, RefreshCw, MessageSquare, User, Bot, Wrench, ArrowLeft, ChevronRight, ChevronDown, GitBranch, Terminal } from 'lucide-react';
+import { Search, RefreshCw, MessageSquare, User, Bot, Wrench, ArrowLeft, ChevronRight, ChevronDown, GitBranch, Terminal, Brain } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 
@@ -61,6 +61,7 @@ const ROLE_CONFIG: Record<string, { icon: typeof User; color: string; label: str
   assistant: { icon: Bot, color: 'text-green-400', label: 'AI' },
   tool_use: { icon: Wrench, color: 'text-amber-400', label: '工具调用' },
   tool_result: { icon: Wrench, color: 'text-neutral-500', label: '工具结果' },
+  thinking: { icon: Brain, color: 'text-purple-400', label: '思考' },
 };
 
 function ImageBlock({ jsonlPath, messageUuid, imageIndex }: {
@@ -142,17 +143,20 @@ function MessageBubble({ msg, jsonlPath }: { msg: ConversationMessage; jsonlPath
   const Icon = config.icon;
   const isToolResult = msg.role === 'tool_result';
   const isToolUse = msg.role === 'tool_use';
+  const isThinking = msg.role === 'thinking';
 
   // Check if this message has images (use rich rendering for those)
   const hasImages = msg.rawContent?.includes('"type":"image"') || msg.content.includes('[图片]');
-  const contentPreview = !hasImages && msg.content.length > 500 && !expanded
-    ? msg.content.slice(0, 500) + '...'
+  // Thinking messages: default collapsed at 300 chars; others at 500
+  const collapseThreshold = isThinking ? 300 : 500;
+  const contentPreview = !hasImages && msg.content.length > collapseThreshold && !expanded
+    ? msg.content.slice(0, collapseThreshold) + '...'
     : msg.content;
 
   return (
     <div className={cn(
       'group flex gap-2.5 py-2',
-      isToolResult && 'opacity-60',
+      (isToolResult || isThinking) && 'opacity-60',
     )}>
       <div className={cn('flex-shrink-0 mt-1 p-1 rounded', config.color)}>
         <Icon className="w-3.5 h-3.5" />
@@ -170,8 +174,9 @@ function MessageBubble({ msg, jsonlPath }: { msg: ConversationMessage; jsonlPath
             'text-sm leading-relaxed whitespace-pre-wrap break-words',
             msg.role === 'user' ? 'text-neutral-200' : 'text-neutral-400',
             (isToolUse || isToolResult) && 'font-mono text-xs',
+            isThinking && 'text-xs italic text-purple-300/60',
           )}
-          onClick={() => !hasImages && msg.content.length > 500 && setExpanded(!expanded)}
+          onClick={() => !hasImages && msg.content.length > collapseThreshold && setExpanded(!expanded)}
         >
           {hasImages ? (
             <MessageContent msg={msg} jsonlPath={jsonlPath} />
@@ -179,7 +184,7 @@ function MessageBubble({ msg, jsonlPath }: { msg: ConversationMessage; jsonlPath
             contentPreview
           )}
         </div>
-        {!hasImages && msg.content.length > 500 && (
+        {!hasImages && msg.content.length > collapseThreshold && (
           <button
             onClick={() => setExpanded(!expanded)}
             className="text-[11px] text-neutral-600 hover:text-neutral-400 mt-1"

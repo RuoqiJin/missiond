@@ -199,17 +199,29 @@ pub fn extract_parent_session_id(jsonl_path: &str) -> Option<String> {
 /// SQLite database operations class
 pub struct MissionDB {
     conn: std::sync::Mutex<Connection>,
+    /// Read-only connection for queries — avoids blocking on write Mutex (WAL concurrent reads)
+    read_conn: std::sync::Mutex<Connection>,
 }
 
 impl MissionDB {
     /// Create a new database connection
     pub fn new<P: AsRef<Path>>(db_path: P) -> SqliteResult<Self> {
-        let conn = Connection::open(db_path)?;
+        let conn = Connection::open(&db_path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        let db = Self { conn: std::sync::Mutex::new(conn) };
+        // Separate read-only connection for queries — WAL allows concurrent reads during writes
+        let read_conn = Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        read_conn.busy_timeout(std::time::Duration::from_secs(2))?;
+        let db = Self {
+            conn: std::sync::Mutex::new(conn),
+            read_conn: std::sync::Mutex::new(read_conn),
+        };
         db.init()?;
         Ok(db)
     }
@@ -219,23 +231,32 @@ impl MissionDB {
         Self::new(db_path)
     }
 
-    /// Close the database connection
+    /// Close the database connections
     pub fn close(self) {
-        // Connection is automatically closed when Mutex is dropped
+        drop(self.read_conn);
         drop(self.conn);
     }
 
     /// Create an in-memory database (for testing)
     pub fn in_memory() -> SqliteResult<Self> {
         let conn = Connection::open_in_memory()?;
-        let db = Self { conn: std::sync::Mutex::new(conn) };
+        let read_conn = Connection::open_in_memory()?;
+        let db = Self {
+            conn: std::sync::Mutex::new(conn),
+            read_conn: std::sync::Mutex::new(read_conn),
+        };
         db.init()?;
         Ok(db)
     }
 
-    /// Get a lock on the database connection
+    /// Get a lock on the write database connection
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().expect("MissionDB mutex poisoned")
+    }
+
+    /// Get a lock on the read-only database connection (non-blocking during writes in WAL mode)
+    fn read_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.read_conn.lock().expect("MissionDB read_conn mutex poisoned")
     }
 
     fn init(&self) -> SqliteResult<()> {
@@ -869,7 +890,7 @@ impl MissionDB {
     /// Resolve a (possibly short) board task ID to a full UUID.
     /// Supports exact match and unique prefix match (>= 6 chars).
     pub fn resolve_board_task_id(&self, id: &str) -> SqliteResult<Option<String>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         // Exact match
         let exact: Option<String> = conn.query_row(
             "SELECT id FROM board_tasks WHERE id = ?1",
@@ -899,7 +920,7 @@ impl MissionDB {
             Some(fid) => fid,
             None => return Ok(None),
         };
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn
             .prepare("SELECT * FROM board_tasks WHERE id = ?")?;
         let mut rows = stmt.query(params![full_id])?;
@@ -912,7 +933,7 @@ impl MissionDB {
 
     /// List all board tasks (optionally filtered by status, hidden excluded by default)
     pub fn list_board_tasks(&self, status: Option<&str>, include_hidden: bool) -> SqliteResult<Vec<BoardTask>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut tasks = Vec::new();
         let hidden_clause = if include_hidden { "" } else { " AND hidden = 0" };
 
@@ -1207,7 +1228,7 @@ impl MissionDB {
 
     /// Get all notes for a board task (ordered by creation time ASC)
     pub fn get_board_task_notes(&self, task_id: &str) -> SqliteResult<Vec<BoardTaskNote>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, task_id, content, note_type, author, created_at
              FROM board_task_notes WHERE task_id = ?1 ORDER BY created_at ASC",
@@ -1632,7 +1653,7 @@ impl MissionDB {
 
     /// Get a knowledge entry by key
     pub fn kb_get(&self, key: &str) -> SqliteResult<Option<KnowledgeEntry>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM knowledge WHERE key = ?1"
         )?;
@@ -1709,7 +1730,7 @@ impl MissionDB {
             return Ok(Vec::new());
         }
 
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut results = Vec::new();
 
         if let Some(cat) = category {
@@ -1777,7 +1798,7 @@ impl MissionDB {
         }
         sql.push_str(" ORDER BY access_count DESC, updated_at DESC LIMIT 20");
 
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&sql)?;
 
         // Bind parameters: %keyword% for each, then optional category + like pattern
@@ -1808,7 +1829,7 @@ impl MissionDB {
     /// List knowledge entries, optionally filtered by category.
     /// Supports composite categories: querying "memory" also returns "memory:architecture" etc.
     pub fn kb_list(&self, category: Option<&str>) -> SqliteResult<Vec<KnowledgeEntry>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         Self::kb_list_with_conn(&conn, category)
     }
 
@@ -1977,7 +1998,7 @@ impl MissionDB {
 
     /// Get KB statistics for governance
     pub fn kb_stats(&self) -> SqliteResult<serde_json::Value> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let total: i64 = conn.query_row(
             "SELECT COUNT(*) FROM knowledge", [], |row| row.get(0)
         )?;
@@ -2208,7 +2229,7 @@ impl MissionDB {
 
     /// Get a conversation by ID
     pub fn get_conversation(&self, id: &str) -> SqliteResult<Option<Conversation>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare("SELECT * FROM conversations WHERE id = ?1")?;
         let mut rows = stmt.query(params![id])?;
         if let Some(row) = rows.next()? {
@@ -2220,7 +2241,7 @@ impl MissionDB {
 
     /// List conversations, optionally filtered by status
     pub fn list_conversations(&self, status: Option<&str>, limit: i64) -> SqliteResult<Vec<Conversation>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut convs = Vec::new();
         if let Some(s) = status {
             let mut stmt = conn.prepare(
@@ -2245,7 +2266,7 @@ impl MissionDB {
         since_id: Option<i64>,
         limit: i64,
     ) -> SqliteResult<Vec<ConversationMessage>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut msgs = Vec::new();
         if let Some(since) = since_id {
             let mut stmt = conn.prepare(
@@ -2267,7 +2288,7 @@ impl MissionDB {
     /// Search conversation messages by content
     pub fn search_conversation_messages(&self, query: &str, limit: i64) -> SqliteResult<Vec<ConversationMessage>> {
         let pattern = format!("%{}%", query);
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM conversation_messages WHERE content LIKE ?1 ORDER BY timestamp DESC LIMIT ?2"
         )?;
@@ -2356,7 +2377,7 @@ impl MissionDB {
 
     /// Get all conversations sharing the same task_id.
     pub fn get_conversations_by_task_id(&self, task_id: &str) -> SqliteResult<Vec<Conversation>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM conversations WHERE task_id = ?1 ORDER BY started_at ASC"
         )?;
