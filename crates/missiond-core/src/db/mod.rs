@@ -2764,6 +2764,30 @@ impl MissionDB {
         }))
     }
 
+    /// Reaper: force-fail stale pending/running tasks older than threshold.
+    /// Returns the number of tasks reaped.
+    pub fn reap_stale_slot_tasks(&self, max_age_secs: i64) -> SqliteResult<usize> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE slot_tasks SET status = 'failed', error = 'reaper: stale task', completed_at = ?1
+             WHERE status IN ('pending', 'running')
+               AND julianday(?1) - julianday(created_at) > ?2 / 86400.0",
+            params![now, max_age_secs as f64],
+        )
+    }
+
+    /// Startup cleanup: force-fail all pending/running tasks (leftover from previous daemon).
+    pub fn cleanup_orphan_slot_tasks(&self) -> SqliteResult<usize> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE slot_tasks SET status = 'failed', error = 'daemon restart: orphan cleanup', completed_at = ?1
+             WHERE status IN ('pending', 'running')",
+            params![now],
+        )
+    }
+
     /// Get the ID of the currently running slot task (if any)
     pub fn get_running_slot_task(&self, slot_id: &str) -> SqliteResult<Option<String>> {
         let conn = self.read_conn();
