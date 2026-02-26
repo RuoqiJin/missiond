@@ -39,3 +39,6 @@ path = "src/bin/mission-mcp.rs"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

@@ -471,8 +471,7 @@ impl PTYWebSocketServer {
                         .lines()
                         .map(|line| {
                             let trimmed = line.trim_start();
-                            if trimmed.starts_with('⏺') {
-                                let after = &trimmed[3..];
+                            if let Some(after) = trimmed.strip_prefix('⏺') {
                                 after.strip_prefix(' ').unwrap_or(after)
                             } else {
                                 line

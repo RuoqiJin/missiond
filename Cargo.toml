@@ -9,6 +9,9 @@ members = [
     "crates/semantic-terminal-napi",
 ]
 
+[workspace.lints.clippy]
+string_slice = "warn"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
