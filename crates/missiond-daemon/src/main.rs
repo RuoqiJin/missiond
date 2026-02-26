@@ -1591,6 +1591,9 @@ impl AppState {
                     .and_then(|v| v.as_u64())
                     .map(|n| n as u32)
                     .unwrap_or(16384);
+                let search_enabled = params.get("search")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
 
                 // Auto-inject context into first user message if requested
                 if context_mode != "none" {
@@ -1659,11 +1662,14 @@ impl AppState {
 
                 // Call router API
                 let url = format!("{}/v1/chat/completions", base_url);
-                let body = serde_json::json!({
+                let mut body = serde_json::json!({
                     "model": model,
                     "messages": messages,
                     "max_tokens": max_tokens,
                 });
+                if search_enabled {
+                    body["tools"] = serde_json::json!([{"type": "google_search"}]);
+                }
 
                 let total_chars: usize = messages.iter()
                     .filter_map(|m| m.get("content").and_then(|c| c.as_str()))

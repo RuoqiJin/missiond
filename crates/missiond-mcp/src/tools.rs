@@ -970,6 +970,10 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     "max_tokens": {
                         "type": "integer",
                         "description": "Max response tokens (default: 16384)"
+                    },
+                    "search": {
+                        "type": "boolean",
+                        "description": "Enable Google Search grounding (Gemini models only). When true, Gemini can search the web for up-to-date info. Cost: ~$0.035/search. Default: false"
                     }
                 },
                 "required": ["messages"]
