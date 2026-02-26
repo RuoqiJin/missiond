@@ -2910,14 +2910,16 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
     let memory_paused = state.memory_paused.load(std::sync::atomic::Ordering::Relaxed);
 
     if !memory_paused {
-        // Check if memory slot is stuck in non-Idle state for too long
-        check_memory_slot_stuck(state).await;
+        // Check if memory slots are stuck in non-Idle state for too long
+        check_slot_stuck(state, MEMORY_SLOT_ID, &state.memory_slot_busy_since, &state.extraction_state).await;
+        check_slot_stuck(state, MEMORY_SLOW_SLOT_ID, &state.slow_slot_busy_since, &state.slow_extraction_state).await;
 
-        // Realtime extraction: unified pipeline for user preferences + conversation knowledge
+        // Fast lane: realtime extraction on slot-memory
         check_realtime_extraction(state).await;
 
-        // Deep analysis: cross-session pattern discovery (no message-level extraction)
+        // Slow lane: deep analysis + kb consolidation on slot-memory-slow
         check_deep_analysis(state).await;
+        check_kb_consolidation(state).await;
     }
 
     // Sync KB preferences + hot topics into CLAUDE.md
@@ -3604,24 +3606,23 @@ async fn check_realtime_extraction(state: &AppState) {
     });
 }
 
-/// Deep analysis: review completed conversations using conversation-level watermark.
-/// Uses analyzed_at + analysis_version instead of per-message pipeline state.
+/// Deep analysis on slow lane (slot-memory-slow).
+/// Reviews completed conversations using conversation-level watermark.
 async fn check_deep_analysis(state: &AppState) {
-    if !check_extraction_gate(state, "deep_analysis").await {
+    if !check_extraction_gate(&state.slow_extraction_state, &state.mission, "deep_analysis").await {
         return;
     }
 
-    // Ensure slot is idle before proceeding
-    let status = state.pty.get_status(MEMORY_SLOT_ID).await;
+    // Ensure slow slot is idle before proceeding
+    let status = state.pty.get_status(MEMORY_SLOW_SLOT_ID).await;
     match status {
         Some(s) if s.state == SessionState::Idle => {}
         Some(s) => {
-            debug!(state = ?s.state, "deep_analysis: slot not idle");
+            debug!(state = ?s.state, "deep_analysis: slow slot not idle");
             return;
         }
         None => {
-            debug!("deep_analysis: slot status unavailable");
-            return;
+            // Slot not spawned yet — will be spawned below by ensure_memory_slot_by_id
         }
     }
 
@@ -3653,6 +3654,7 @@ async fn check_deep_analysis(state: &AppState) {
                 || text.contains("mission_kb_remember")
                 || text.starts_with("[realtime-extract]")
                 || text.starts_with("[deep-analysis]")
+                || text.starts_with("[kb-consolidation]")
             {
                 let _ = db.mark_analysis_complete(&conv.id, CURRENT_ANALYSIS_VERSION);
                 debug!(conv_id = %conv.id, "deep_analysis: skipping extraction meta-session");
@@ -3660,7 +3662,7 @@ async fn check_deep_analysis(state: &AppState) {
             }
         }
 
-        if !ensure_memory_slot(state).await {
+        if !ensure_memory_slot_by_id(state, MEMORY_SLOW_SLOT_ID).await {
             break;
         }
 
@@ -3689,11 +3691,11 @@ async fn check_deep_analysis(state: &AppState) {
             msg_count = msg_count,
         );
 
-        info!(conv_id = %conv.id, msg_count, retries = conv.analysis_retries, "Deep analysis: sending to memory agent");
+        info!(conv_id = %conv.id, msg_count, retries = conv.analysis_retries, "Deep analysis: sending to slow lane");
 
-        // Generate task_id and tag the memory slot's current session
+        // Generate task_id and tag the slow slot's current session
         let task_id = uuid::Uuid::new_v4().to_string();
-        if let Ok(Some(current_session)) = state.mission.db().get_slot_session(MEMORY_SLOT_ID) {
+        if let Ok(Some(current_session)) = state.mission.db().get_slot_session(MEMORY_SLOW_SLOT_ID) {
             let _ = state.mission.db().set_conversation_task_id(&current_session, &task_id);
         }
 
@@ -3701,7 +3703,7 @@ async fn check_deep_analysis(state: &AppState) {
         let slot_task_id = uuid::Uuid::new_v4().to_string();
         let slot_task = missiond_core::types::SlotTask {
             id: slot_task_id.clone(),
-            slot_id: MEMORY_SLOT_ID.to_string(),
+            slot_id: MEMORY_SLOW_SLOT_ID.to_string(),
             task_type: "deep_analysis".to_string(),
             status: "pending".to_string(),
             prompt_summary: Some(format!("session: {}, {} msgs", &conv.id[..8.min(conv.id.len())], msg_count)),
@@ -3716,10 +3718,10 @@ async fn check_deep_analysis(state: &AppState) {
         };
         let _ = state.mission.db().insert_slot_task(&slot_task);
 
-        // Set extraction state with conv_id for marking complete on Idle
+        // Set slow extraction state with conv_id for marking complete on Idle
         {
             let now = chrono::Utc::now().timestamp();
-            let mut es = state.extraction_state.write().await;
+            let mut es = state.slow_extraction_state.write().await;
             es.phase = ExtractionPhase::Sending;
             es.active_type = Some("deep_analysis");
             es.phase_started_at = now;
@@ -3730,10 +3732,10 @@ async fn check_deep_analysis(state: &AppState) {
 
         let conv_id = conv.id.clone();
         let pty = Arc::clone(&state.pty);
-        let extraction_state = Arc::clone(&state.extraction_state);
+        let extraction_state = Arc::clone(&state.slow_extraction_state);
         let mission = Arc::clone(&state.mission);
         tokio::spawn(async move {
-            match pty.send(MEMORY_SLOT_ID, &prompt, 900_000).await {
+            match pty.send(MEMORY_SLOW_SLOT_ID, &prompt, 900_000).await {
                 Ok(res) => {
                     info!(conv_id = %conv_id, duration_ms = res.duration_ms, "Deep analysis send() returned");
                     let _ = mission.db().slot_task_set_running(&slot_task_id);
