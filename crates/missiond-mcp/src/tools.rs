@@ -1381,6 +1381,37 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                 "required": ["id"]
             }),
         ),
+        // ── Jarvis Trace ──
+        ToolDefinition::new(
+            "mission_jarvis_logs",
+            "查看最近 Jarvis chat completion 请求日志（环形缓冲区，最多 100 条）。用于调试 Router→MissionD→PTY 全链路。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "number",
+                        "description": "返回条数（默认 10，最大 100）"
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "按状态过滤: in_progress / success / empty_response / error / slot_unavailable"
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_jarvis_trace",
+            "查看单条 Jarvis 请求的详细 trace（含 Router trace_id 关联、状态变迁、耗时）",
+            json!({
+                "type": "object",
+                "properties": {
+                    "trace_id": {
+                        "type": "string",
+                        "description": "Trace ID（不传则返回最新一条）"
+                    }
+                }
+            }),
+        ),
     ]
 }
 
