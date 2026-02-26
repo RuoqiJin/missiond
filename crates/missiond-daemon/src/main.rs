@@ -1505,11 +1505,20 @@ impl AppState {
                     .and_then(|v| v.as_str())
                     .unwrap_or("https://auth.xiaojinpro.com");
 
-                // 5. Call router API
+                // 5. Apply context budget to analysis prompt
+                let mut analysis_messages: Vec<Value> = vec![
+                    serde_json::json!({"role": "user", "content": analysis_prompt})
+                ];
+                let budget_result = apply_context_budget(&mut analysis_messages, MAX_ROUTER_PAYLOAD_BYTES);
+                if budget_result.trimmed {
+                    info!("KB analyze: context budget applied — {}", budget_result.note.as_deref().unwrap_or("trimmed"));
+                }
+
+                // 6. Call router API
                 let url = format!("{}/v1/chat/completions", base_url);
                 let body = serde_json::json!({
                     "model": model,
-                    "messages": [{"role": "user", "content": analysis_prompt}],
+                    "messages": analysis_messages,
                     "max_tokens": max_tokens,
                 });
 
@@ -1553,6 +1562,9 @@ impl AppState {
                 if finish_reason == "length" || finish_reason == "max_tokens" {
                     resp["warning"] = serde_json::json!("⚠️ 输出被截断：LLM 达到 max_tokens 限制，返回内容不完整。可增大 max_tokens 参数重试。");
                     resp["finish_reason"] = serde_json::json!(finish_reason);
+                }
+                if let Some(note) = budget_result.note {
+                    resp["context_budget"] = serde_json::json!(note);
                 }
                 Ok(ToolResult::json_pretty(&resp))
             }
