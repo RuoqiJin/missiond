@@ -24,6 +24,11 @@ static STATUSBAR_PATTERN: Lazy<Regex> =
 /// Prompt-only line (e.g., "> " or "❯ ")
 static PROMPT_ONLY_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[❯>]\s*$").unwrap());
 
+/// Spinner status line (e.g., "✳ Determining…", "· Processing…")
+/// These lines are transient — the spinner character and timer update every frame.
+static SPINNER_LINE_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\s*[·✻✽✶✳✢]\s+\S").unwrap());
+
 // ========== Types ==========
 
 /// Data for a single terminal line
@@ -209,7 +214,18 @@ impl IncrementalExtractor {
             let line_idx = alacritty_terminal::index::Line(y as i32);
             if y < total_lines {
                 let row = &grid[line_idx];
-                let text: String = row.into_iter().map(|cell| cell.c).collect();
+                // Skip wide-char spacer cells to avoid extra spaces between CJK characters.
+                // Alacritty stores wide chars (CJK, emoji) across 2 cells:
+                // cell[0] = the char (WIDE_CHAR flag), cell[1] = space (WIDE_CHAR_SPACER flag).
+                let text: String = row
+                    .into_iter()
+                    .filter(|cell| {
+                        !cell
+                            .flags
+                            .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER)
+                    })
+                    .map(|cell| cell.c)
+                    .collect();
                 let text = text.trim_end().to_string();
 
                 // Check if line is wrapped (continues from previous line)
@@ -361,9 +377,10 @@ impl IncrementalExtractor {
                 continue;
             }
 
-            // Case 2: Both stable, extract appended portion (streaming text)
+            // Case 2: Both stable, extract changes
             if self.is_stable_line(new_text) && self.is_stable_line(old_text) {
                 if new_text.starts_with(old_text) && new_text.len() > old_text.len() {
+                    // Appended text (streaming)
                     let appended = &new_text[old_text.len()..];
                     if !appended.is_empty() {
                         ops.push(StableTextOp::Append {
@@ -371,6 +388,13 @@ impl IncrementalExtractor {
                             text: appended.to_string(),
                         });
                     }
+                } else if new_text != old_text {
+                    // Complete content replacement (different stable content)
+                    ops.push(StableTextOp::Replace {
+                        y: line.y,
+                        text: new_text.to_string(),
+                        is_wrapped: line.is_wrapped,
+                    });
                 }
             }
         }
@@ -399,8 +423,14 @@ impl IncrementalExtractor {
             return false;
         }
 
-        // Filter out spinner-only lines
+        // Filter out spinner-only lines (e.g., "·····")
         if SPINNER_ONLY_PATTERN.is_match(trimmed) {
+            return false;
+        }
+
+        // Filter out spinner status lines (e.g., "✳ Determining…", "✢ Incubating… (3s · thinking)")
+        // These are transient — spinner char and timer update every frame.
+        if SPINNER_LINE_PATTERN.is_match(trimmed) {
             return false;
         }
 
@@ -571,5 +601,15 @@ mod tests {
         assert!(!extractor.is_stable_line("❯ "));
         assert!(!extractor.is_stable_line(""));
         assert!(!extractor.is_stable_line("   "));
+
+        // Spinner status lines (transient — animating every frame)
+        assert!(!extractor.is_stable_line("✳ Determining…"));
+        assert!(!extractor.is_stable_line("✢ Incubating… (3s · thinking)"));
+        assert!(!extractor.is_stable_line("· Contemplating…"));
+        assert!(!extractor.is_stable_line("  ✻ Processing…"));
+
+        // Response lines starting with ⏺ should still be stable
+        assert!(extractor.is_stable_line("⏺ Hello, I am Claude."));
+        assert!(extractor.is_stable_line("⏺ Bash(command=\"ls\")"));
     }
 }

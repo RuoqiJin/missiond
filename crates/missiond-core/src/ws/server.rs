@@ -433,13 +433,31 @@ impl PTYWebSocketServer {
         match pty_manager.send(slot_id, &user_message, timeout_ms).await {
             Ok(result) => {
                 if !result.response.is_empty() {
+                    // Clean Claude Code TUI artifacts from the response:
+                    // - Strip ⏺ prefix (Claude Code's response marker)
+                    // - Strip ⎿ prefix (tool output continuation marker)
+                    let cleaned: String = result
+                        .response
+                        .lines()
+                        .map(|line| {
+                            let trimmed = line.trim_start();
+                            if trimmed.starts_with('⏺') {
+                                // Skip ⏺ (3 bytes) + optional space
+                                let after = &trimmed[3..];
+                                after.strip_prefix(' ').unwrap_or(after)
+                            } else {
+                                line
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     let chunk = serde_json::json!({
                         "id": &chat_id,
                         "object": "chat.completion.chunk",
                         "model": "jarvis-missiond",
                         "choices": [{
                             "index": 0,
-                            "delta": { "content": result.response },
+                            "delta": { "content": cleaned },
                             "finish_reason": serde_json::Value::Null,
                         }]
                     });

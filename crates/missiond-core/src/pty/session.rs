@@ -608,8 +608,10 @@ impl PTYSession {
         let permission_check = Arc::clone(&self.permission_check);
         let pty_writer = Arc::clone(&self.pty_writer);
 
+        let slot_id_for_check = self.slot_id.clone();
         tokio::spawn(async move {
             Self::state_check_loop(
+                slot_id_for_check,
                 session_state,
                 term_for_check,
                 extractor,
@@ -720,6 +722,7 @@ impl PTYSession {
     /// State check loop - periodically checks terminal state
     #[allow(clippy::too_many_arguments)]
     async fn state_check_loop(
+        slot_id: String,
         state: Arc<RwLock<SessionState>>,
         term: Arc<Mutex<Term<SessionEventListener>>>,
         extractor: Arc<Mutex<IncrementalExtractor>>,
@@ -760,8 +763,10 @@ impl PTYSession {
         let mut debounce_count: u32 = 0;
         const DEBOUNCE_THRESHOLD: u32 = 3; // 3 * 100ms = 300ms
 
+        let mut heartbeat_tick: u64 = 0;
         while running.load(Ordering::SeqCst) {
             check_interval.tick().await;
+            heartbeat_tick += 1;
 
             // Extract frame delta
             let delta = {
@@ -783,7 +788,16 @@ impl PTYSession {
                     let line = alacritty_terminal::index::Line(y as i32);
                     if y < total_lines {
                         let row = &grid[line];
-                        let text: String = row.into_iter().map(|cell| cell.c).collect();
+                        // Skip wide-char spacer cells (CJK/emoji second cells)
+                        let text: String = row
+                            .into_iter()
+                            .filter(|cell| {
+                                !cell.flags.contains(
+                                    alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER,
+                                )
+                            })
+                            .map(|cell| cell.c)
+                            .collect();
                         lines.push(text.trim_end().to_string());
                     }
                 }
@@ -801,6 +815,26 @@ impl PTYSession {
             // Detect state using semantic StateParser
             let detected_result = state_parser.detect_state(&context);
             let detected_state = detected_result.as_ref().map(|r| semantic_state_to_session_state(r.state));
+
+            // Periodic heartbeat (every 5s) — log detected state and screen sample
+            if heartbeat_tick % 50 == 0 {
+                let non_empty: Vec<_> = last_lines.iter()
+                    .filter(|l| !l.trim().is_empty())
+                    .take(3)
+                    .map(|s| {
+                        let t: String = s.chars().take(60).collect();
+                        t
+                    })
+                    .collect();
+                debug!(
+                    slot = %slot_id,
+                    tick = heartbeat_tick,
+                    current = ?current_state,
+                    detected = ?detected_state,
+                    screen_sample = ?non_empty,
+                    "state_check_loop heartbeat"
+                );
+            }
 
             // Diagnostic logging (once per second = every 10 ticks at 100ms)
             diag_tick += 1;
@@ -834,6 +868,19 @@ impl PTYSession {
             // Process stable ops for text streaming BEFORE state transitions,
             // so text_assembler is populated when Complete fires.
             if !delta.stable_ops.is_empty() && current_state.is_processing() {
+                // Diagnostic: log all stable_ops during processing
+                for op in &delta.stable_ops {
+                    let source = classify_stable_op(op);
+                    let text_preview: String = op.text().chars().take(60).collect();
+                    debug!(
+                        slot = %slot_id,
+                        kind = op.kind(),
+                        y = op.y(),
+                        source = ?source,
+                        text = %text_preview,
+                        "stable_op during processing"
+                    );
+                }
                 let turn_id = *current_turn_id.read().await;
                 if let Some(turn_id) = turn_id {
                     for op in &delta.stable_ops {
@@ -917,6 +964,7 @@ impl PTYSession {
                         if truncated.len() < s.len() { format!("{}...", truncated) } else { s.to_string() }
                     }).collect::<Vec<_>>().join(" | ");
                     info!(
+                        slot = %slot_id,
                         from = ?current_state,
                         to = ?new_state,
                         active = %active_dump,
@@ -927,12 +975,43 @@ impl PTYSession {
                     if new_state.is_processing() && !current_state.is_processing() {
                         let mut counter = turn_counter.write().await;
                         *counter += 1;
-                        *current_turn_id.write().await = Some(*counter);
+                        let new_turn_id = *counter;
+                        *current_turn_id.write().await = Some(new_turn_id);
                         *stream_seq.write().await = 0;
                         text_assembler.lock().await.reset();
                         line_source_by_y.write().await.clear();
                         assistant_block_active.store(false, Ordering::SeqCst);
-                        debug!(turn_id = *counter, "Begin turn");
+                        debug!(slot = %slot_id, turn_id = new_turn_id, "Begin turn");
+
+                        // Retroactively process stable_ops from this frame.
+                        // On the Idle→Processing transition frame, the ops processing
+                        // above was skipped (current_state was still Idle). Now that
+                        // the turn is set up, process any assistant output that appeared
+                        // on this same frame as the state transition.
+                        if !delta.stable_ops.is_empty() {
+                            for op in &delta.stable_ops {
+                                let source = classify_stable_op(op);
+                                if matches!(source, ScreenTextSource::Assistant) {
+                                    let chunk = text_assembler.lock().await.apply(op);
+                                    if !chunk.is_empty() {
+                                        let seq = {
+                                            let mut seq_guard = stream_seq.write().await;
+                                            let s = *seq_guard;
+                                            *seq_guard += 1;
+                                            s
+                                        };
+                                        let _ = event_tx.send(SessionEvent::TextOutput(
+                                            TextOutputEvent::Stream {
+                                                turn_id: new_turn_id,
+                                                seq,
+                                                content: chunk,
+                                                timestamp: Utc::now().timestamp_millis(),
+                                            },
+                                        ));
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     *state.write().await = new_state;
@@ -941,6 +1020,12 @@ impl PTYSession {
                     if current_state.is_processing() && !new_state.is_processing() {
                         if let Some(turn_id) = *current_turn_id.read().await {
                             let content = text_assembler.lock().await.finalize();
+                            info!(
+                                slot = %slot_id,
+                                turn_id = turn_id,
+                                content_len = content.len(),
+                                "End turn — emitting Complete"
+                            );
                             let _ = event_tx.send(SessionEvent::TextOutput(
                                 TextOutputEvent::Complete {
                                     turn_id,
@@ -948,7 +1033,6 @@ impl PTYSession {
                                     timestamp: Utc::now().timestamp_millis(),
                                 },
                             ));
-                            debug!(turn_id = turn_id, "End turn");
                         }
                         *current_turn_id.write().await = None;
                         *stream_seq.write().await = 0;
@@ -1148,7 +1232,11 @@ impl PTYSession {
         Ok(())
     }
 
-    /// Send message and wait for response
+    /// Send message and wait for response.
+    ///
+    /// Design: subscribe to event channel BEFORE sending, then wait for Complete.
+    /// Do NOT manually set state — let state_check_loop handle all transitions
+    /// naturally from screen detection.
     pub async fn send(&self, message: &str, timeout_ms: u64) -> Result<String> {
         let state = self.state().await;
         if state != SessionState::Idle {
@@ -1165,7 +1253,7 @@ impl PTYSession {
             });
         }
 
-        // Subscribe to events before sending
+        // Subscribe to events BEFORE sending so we never miss the Complete event.
         let mut rx = self.event_tx.subscribe();
 
         // Send message using bracketed paste mode so multi-line text is treated as one paste.
@@ -1176,25 +1264,44 @@ impl PTYSession {
         tokio::time::sleep(Duration::from_millis(1000)).await;
         self.write("\r").await?;
 
-        // Wait for state to leave idle.
-        // First message in a session can take >30s (Claude loads CLAUDE.md, MCP servers, context).
-        // Use min(timeout_ms, 120s) to give enough time.
-        let state_wait = Duration::from_secs(timeout_ms.min(120_000) / 1000);
-        self.wait_for_state_change(SessionState::Idle, state_wait)
-            .await?;
-
-        // Wait for response complete
+        // Wait for TextOutputEvent::Complete — emitted by state_check_loop when
+        // processing state transitions back to Idle (turn end).
+        // state_check_loop detects Idle→Thinking (begin turn) and Thinking/etc→Idle (end turn)
+        // purely from screen content, so no manual state manipulation needed.
         let timeout_duration = Duration::from_millis(timeout_ms);
+        let slot_id = self.slot_id.clone();
         let result = timeout(timeout_duration, async {
+            let mut event_count = 0u64;
             loop {
-                if let Ok(event) = rx.recv().await {
-                    if let SessionEvent::TextOutput(TextOutputEvent::Complete { content, .. }) =
-                        event
-                    {
-                        return Ok(content);
+                match rx.recv().await {
+                    Ok(event) => {
+                        event_count += 1;
+                        if let SessionEvent::TextOutput(TextOutputEvent::Complete { content, .. }) =
+                            event
+                        {
+                            info!(
+                                slot = %slot_id,
+                                content_len = content.len(),
+                                events_processed = event_count,
+                                "send() received Complete"
+                            );
+                            return Ok(content);
+                        }
+                        if let SessionEvent::Exit(code) = event {
+                            return Err(anyhow!("Session exited with code: {}", code));
+                        }
                     }
-                    if let SessionEvent::Exit(code) = event {
-                        return Err(anyhow!("Session exited with code: {}", code));
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(
+                            slot = %slot_id,
+                            skipped = n,
+                            events_processed = event_count,
+                            "send() broadcast lagged — events skipped"
+                        );
+                        // Continue receiving from new position
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(anyhow!("Event channel closed"));
                     }
                 }
             }
@@ -1291,32 +1398,6 @@ impl PTYSession {
         })
         .await
         .map_err(|_| anyhow!("Timeout waiting for state: {:?}", target))?
-    }
-
-    /// Wait for state to change from current
-    async fn wait_for_state_change(
-        &self,
-        current: SessionState,
-        timeout_duration: Duration,
-    ) -> Result<()> {
-        let state = self.state().await;
-        if state != current {
-            return Ok(());
-        }
-
-        let mut rx = self.state_change_tx.subscribe();
-
-        timeout(timeout_duration, async {
-            loop {
-                if let Ok((new_state, _)) = rx.recv().await {
-                    if new_state != current {
-                        return Ok(());
-                    }
-                }
-            }
-        })
-        .await
-        .map_err(|_| anyhow!("Timeout waiting to leave state: {:?}", current))?
     }
 
     /// Close session gracefully
