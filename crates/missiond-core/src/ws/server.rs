@@ -10,7 +10,7 @@
 //! - { type: "state", state: string, prevState: string }
 //! - { type: "exit", code: number }
 
-use super::jarvis_trace::{JarvisTraceStore, TraceStatus};
+use super::jarvis_trace::JarvisTraceStore;
 use crate::cc_tasks::{
     CCSession, CCTask, CCTaskChangeEvent, CCTasksOverview, CCTasksWatcher, WatcherEvent,
 };
@@ -325,6 +325,7 @@ impl PTYWebSocketServer {
         mut stream: TcpStream,
         addr: SocketAddr,
         pty_manager: Arc<PTYManager>,
+        trace_store: JarvisTraceStore,
     ) -> anyhow::Result<()> {
         // Disable Nagle — SSE needs every chunk sent immediately
         stream.set_nodelay(true)?;
@@ -394,7 +395,21 @@ impl PTYWebSocketServer {
         };
 
         let slot_id = "slot-jarvis";
-        info!(?addr, slot_id, msg_len = user_message.len(), "Chat completions request");
+        let chat_id = format!("chatcmpl-jarvis-{}", chrono::Utc::now().timestamp_millis());
+
+        // Extract Router's trace_id from X-Trace-Id header
+        let router_trace_id = headers
+            .lines()
+            .find_map(|line| {
+                let lower = line.to_lowercase();
+                if lower.starts_with("x-trace-id:") {
+                    Some(line.splitn(2, ':').nth(1)?.trim().to_string())
+                } else {
+                    None
+                }
+            });
+
+        info!(?addr, slot_id, msg_len = user_message.len(), trace_id = %chat_id, "Chat completions request");
 
         // Check slot status
         let status = pty_manager.get_status(slot_id).await;
@@ -402,17 +417,20 @@ impl PTYWebSocketServer {
 
         match &state {
             None | Some(SessionState::Exited) => {
-                let err = serde_json::json!({
-                    "error": {"message": "Jarvis slot not running. Start slot-jarvis first."}
-                });
+                let error_msg = "Jarvis slot not running. Start slot-jarvis first.";
+                trace_store.unavailable_trace(
+                    chat_id, addr, slot_id, &user_message, error_msg, router_trace_id,
+                ).await;
+                let err = serde_json::json!({"error": {"message": error_msg}});
                 Self::send_http_error(&mut stream, 503, "Service Unavailable", &err.to_string()).await?;
                 return Ok(());
             }
             Some(s) if *s != SessionState::Idle => {
-                let err = serde_json::json!({
-                    "error": {"message": format!("Jarvis is busy (state: {:?}). Try again later.", s)},
-                    "retry_after": 5
-                });
+                let error_msg = format!("Jarvis is busy (state: {:?}). Try again later.", s);
+                trace_store.unavailable_trace(
+                    chat_id, addr, slot_id, &user_message, &error_msg, router_trace_id,
+                ).await;
+                let err = serde_json::json!({"error": {"message": &error_msg}, "retry_after": 5});
                 let response = format!(
                     "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: 5\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     err.to_string().len(), err
@@ -424,6 +442,11 @@ impl PTYWebSocketServer {
             _ => {} // Idle — good to go
         }
 
+        // Start trace
+        trace_store.start_trace(
+            chat_id.clone(), addr, slot_id, &user_message, router_trace_id,
+        ).await;
+
         // Write SSE response headers immediately — flush for curl to see
         let sse_headers = "HTTP/1.1 200 OK\r\n\
             Content-Type: text/event-stream\r\n\
@@ -434,25 +457,21 @@ impl PTYWebSocketServer {
         stream.write_all(sse_headers.as_bytes()).await?;
         stream.flush().await?;
 
-        let chat_id = format!("chatcmpl-jarvis-{}", chrono::Utc::now().timestamp_millis());
-
         // Phase 1: blocking send — get full response, then emit as single SSE chunk.
-        // TODO: Phase 2 — true streaming via TextOutput::Stream events once
-        // IncrementalExtractor stable_ops pipeline is verified.
         let timeout_ms = 300_000u64; // 5 min
         match pty_manager.send(slot_id, &user_message, timeout_ms).await {
             Ok(result) => {
+                // Record trace completion
+                trace_store.complete_trace(&chat_id, &result.response, result.duration_ms).await;
+
                 if !result.response.is_empty() {
-                    // Clean Claude Code TUI artifacts from the response:
-                    // - Strip ⏺ prefix (Claude Code's response marker)
-                    // - Strip ⎿ prefix (tool output continuation marker)
+                    // Clean Claude Code TUI artifacts from the response
                     let cleaned: String = result
                         .response
                         .lines()
                         .map(|line| {
                             let trimmed = line.trim_start();
                             if trimmed.starts_with('⏺') {
-                                // Skip ⏺ (3 bytes) + optional space
                                 let after = &trimmed[3..];
                                 after.strip_prefix(' ').unwrap_or(after)
                             } else {
@@ -487,16 +506,19 @@ impl PTYWebSocketServer {
                 });
                 let _ = stream.write_all(format!("data: {}\n\n", stop).as_bytes()).await;
                 let _ = stream.write_all(b"data: [DONE]\n\n").await;
-                info!(?addr, slot_id, response_len = result.response.len(), duration_ms = result.duration_ms, "Chat completions done");
+                info!(?addr, slot_id, response_len = result.response.len(), duration_ms = result.duration_ms, trace_id = %chat_id, "Chat completions done");
             }
             Err(e) => {
+                // Record trace error
+                trace_store.error_trace(&chat_id, &e.to_string(), None).await;
+
                 let err_chunk = serde_json::json!({
                     "error": {"message": format!("Claude Code error: {}", e)}
                 });
                 let event = format!("data: {}\n\n", err_chunk);
                 let _ = stream.write_all(event.as_bytes()).await;
                 let _ = stream.write_all(b"data: [DONE]\n\n").await;
-                warn!(?addr, slot_id, error = %e, "Chat completions error");
+                warn!(?addr, slot_id, error = %e, trace_id = %chat_id, "Chat completions error");
             }
         }
 
@@ -510,6 +532,7 @@ impl PTYWebSocketServer {
         pty_manager: Option<Arc<PTYManager>>,
         cc_tasks_watcher: Option<Arc<Mutex<CCTasksWatcher>>>,
         screenshot_broker: Option<Arc<super::ScreenshotBroker>>,
+        jarvis_trace: JarvisTraceStore,
     ) -> anyhow::Result<()> {
         // Peek at first bytes to detect non-WebSocket HTTP requests
         let mut peek_buf = [0u8; 512];
@@ -523,7 +546,7 @@ impl PTYWebSocketServer {
             // Chat completions SSE endpoint
             if request_line.starts_with("POST /v1/chat/completions") {
                 return match pty_manager {
-                    Some(pm) => Self::handle_chat_completions(stream, addr, pm).await,
+                    Some(pm) => Self::handle_chat_completions(stream, addr, pm, jarvis_trace).await,
                     None => {
                         let mut s = stream;
                         let err = serde_json::json!({"error": {"message": "PTY manager not available"}});
