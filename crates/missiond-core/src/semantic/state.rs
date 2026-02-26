@@ -278,14 +278,33 @@ impl StateParser for ClaudeCodeStateParser {
         let has_prompt = self.has_prompt_in(&prompt_lines);
         let has_spinner = self.has_spinner_line(&active_lines);
 
-        // 2. Idle or SlashMenu: prompt visible AND no spinner line
-        //    Also check for slash menu even when prompt is outside the 3-line window
-        //    (menu items push the prompt higher up on screen).
+        // 2. Idle or SlashMenu detection.
+        //    Claude Code TUI layout when thinking:
+        //      ✻ Thinking… (35s · thinking)   ← spinner (above prompt)
+        //      ────────────────────
+        //      ❯                              ← prompt always visible
+        //    When idle (task complete), spinner freezes but stays on screen.
+        //    Key insight: if prompt is BELOW spinner in the line order,
+        //    and spinner has no active phase hint (thinking/tool/running),
+        //    then the spinner is frozen/stale → actually Idle.
         if !has_spinner {
             if self.has_slash_menu(&active_lines) {
                 return Some(StateDetectionResult::new(State::SlashMenu, 0.9));
             }
             if has_prompt {
+                return Some(StateDetectionResult::new(State::Idle, 0.9));
+            }
+        }
+        // When both spinner and prompt visible: check if spinner is still active.
+        // A frozen spinner (no phase hint like "thinking"/"tool"/"running" in parens)
+        // means the task is done → Idle.
+        if has_spinner && has_prompt {
+            let phase_hint = self.extract_phase_hint(&active_lines);
+            if phase_hint.is_none() {
+                // Spinner visible but no active phase hint → stale/frozen spinner → Idle
+                if self.has_slash_menu(&active_lines) {
+                    return Some(StateDetectionResult::new(State::SlashMenu, 0.9));
+                }
                 return Some(StateDetectionResult::new(State::Idle, 0.9));
             }
         }
@@ -786,6 +805,49 @@ mod tests {
         ]);
         // Spinner found in last 12 non-empty lines
         assert_eq!(parser.detect_state(&context).unwrap().state, State::Thinking);
+    }
+
+    #[test]
+    fn test_frozen_spinner_with_prompt_is_idle() {
+        let parser = ClaudeCodeStateParser::new();
+
+        // Real scenario: task complete, spinner frozen (no phase hint in parens),
+        // prompt visible below spinner. This was a bug where UI stayed "Thinking".
+        // Frozen spinner example: "✻ Sautéed for 57s" — no (...) at all.
+        let context = make_context(&[
+            "  元循环状态：仍在持续。",
+            "",
+            "✻ Sautéed for 57s",
+            "",
+            "────────────────────────────────────────",
+            "❯ ",
+            "────────────────────────────────────────",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+        ]);
+        // Spinner has no phase hint → frozen → should be Idle
+        assert_eq!(parser.detect_state(&context).unwrap().state, State::Idle);
+    }
+
+    #[test]
+    fn test_active_spinner_with_prompt_is_thinking() {
+        let parser = ClaudeCodeStateParser::new();
+
+        // Active spinner WITH phase hint + prompt visible → still Thinking
+        let context = make_context(&[
+            "Previous output line",
+            "",
+            "✻ Analyzing… (45s · ↑ 300 tokens · thinking)",
+            "",
+            "────────────────────────────────────────",
+            "❯ ",
+            "────────────────────────────────────────",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+        ]);
+        // Spinner has active phase hint (thinking) → still Thinking
+        assert_eq!(
+            parser.detect_state(&context).unwrap().state,
+            State::Thinking
+        );
     }
 
     #[test]

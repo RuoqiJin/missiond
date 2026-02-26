@@ -171,8 +171,35 @@ impl PTYManager {
         debug!(slot_id = %slot.id, role = %slot.role, "PTY slot initialized");
     }
 
+    /// Check network reachability before spawning Claude Code.
+    /// Tries to TCP-connect to Google DNS (8.8.8.8:443) with a 3s timeout.
+    async fn check_network_reachability() -> Result<()> {
+        use tokio::net::TcpStream;
+        use std::net::SocketAddr;
+
+        let target: SocketAddr = "8.8.8.8:443".parse().unwrap();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            TcpStream::connect(target),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(anyhow!(
+                "Network unreachable (cannot connect to 8.8.8.8:443): {}. Claude Code requires internet access.",
+                e
+            )),
+            Err(_) => Err(anyhow!(
+                "Network check timed out (3s to 8.8.8.8:443). Claude Code requires internet access."
+            )),
+        }
+    }
+
     /// Spawn a PTY session for a slot
     pub async fn spawn(&self, slot: &Slot, options: PTYSpawnOptions) -> Result<PTYAgentInfo> {
+        // Pre-flight: verify internet connectivity (Claude Code needs API access)
+        Self::check_network_reachability().await?;
+
         let info = {
             let agent_info = self.agent_info.read().await;
             agent_info
