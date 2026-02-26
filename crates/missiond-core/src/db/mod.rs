@@ -434,6 +434,17 @@ impl MissionDB {
             tracing::info!(count = fixed, "Backfilled tool_result role for misclassified messages");
         }
 
+        // Backfill: slot session "user" messages → "system" (daemon-sent prompts, not the human)
+        let fixed_system = conn.execute(
+            "UPDATE conversation_messages SET role = 'system'
+             WHERE role = 'user'
+               AND session_id IN (SELECT id FROM conversations WHERE slot_id IS NOT NULL)",
+            [],
+        )?;
+        if fixed_system > 0 {
+            tracing::info!(count = fixed_system, "Backfilled system role for slot session messages");
+        }
+
         Ok(())
     }
 
