@@ -371,7 +371,10 @@ impl CCTasksWatcher {
                                 let messages: Vec<CCMessageLine> = new_lines
                                     .into_iter()
                                     .filter(|m| {
-                                        matches!(m.message_type.as_str(), "user" | "assistant")
+                                        matches!(
+                                            m.message_type.as_str(),
+                                            "user" | "assistant" | "tool_result"
+                                        )
                                     })
                                     .collect();
 
@@ -405,10 +408,15 @@ impl CCTasksWatcher {
                     .await
                     .insert(file_path_str.clone(), new_pos);
 
-                // Filter to user/assistant messages and emit
+                // Filter to conversation-relevant messages and emit
                 let messages: Vec<CCMessageLine> = new_lines
                     .into_iter()
-                    .filter(|m| matches!(m.message_type.as_str(), "user" | "assistant"))
+                    .filter(|m| {
+                        matches!(
+                            m.message_type.as_str(),
+                            "user" | "assistant" | "tool_result"
+                        )
+                    })
                     .collect();
 
                 if !messages.is_empty() {

@@ -12,6 +12,7 @@ interface Conversation {
   source: string;
   model: string | null;
   gitBranch: string | null;
+  jsonlPath: string | null;
   messageCount: number;
   startedAt: string;
   endedAt: string | null;
@@ -59,13 +60,89 @@ const ROLE_CONFIG: Record<string, { icon: typeof User; color: string; label: str
   tool_result: { icon: Wrench, color: 'text-neutral-500', label: '工具结果' },
 };
 
-function MessageBubble({ msg }: { msg: ConversationMessage }) {
+function ImageBlock({ jsonlPath, messageUuid, imageIndex }: {
+  jsonlPath: string;
+  messageUuid: string;
+  imageIndex: number;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const src = `/api/conversation-image?path=${encodeURIComponent(jsonlPath)}&uuid=${encodeURIComponent(messageUuid)}&index=${imageIndex}`;
+
+  return (
+    <div className="my-2">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={src}
+        alt="用户截图"
+        className={cn(
+          'rounded-lg border border-neutral-700 cursor-pointer transition-all hover:border-neutral-500',
+          expanded ? 'max-w-full' : 'max-w-sm max-h-64 object-cover',
+        )}
+        onClick={() => setExpanded(!expanded)}
+        loading="lazy"
+      />
+    </div>
+  );
+}
+
+/** Render message content with inline images from rawContent when available */
+function MessageContent({ msg, jsonlPath }: { msg: ConversationMessage; jsonlPath?: string | null }) {
+  const blocks = useMemo(() => {
+    if (!msg.rawContent) return null;
+    try {
+      const raw = JSON.parse(msg.rawContent);
+      if (!Array.isArray(raw)) return null;
+      // Only use rich rendering if there are image blocks
+      if (!raw.some((b: Record<string, unknown>) => b.type === 'image')) return null;
+      return raw as Array<Record<string, unknown>>;
+    } catch {
+      return null;
+    }
+  }, [msg.rawContent]);
+
+  // Rich rendering: interleave text and images from rawContent
+  if (blocks && jsonlPath && msg.messageUuid) {
+    let imageIdx = 0;
+    return (
+      <>
+        {blocks.map((block, i) => {
+          if (block.type === 'text') {
+            return <span key={i}>{block.text as string}</span>;
+          }
+          if (block.type === 'image') {
+            const idx = imageIdx++;
+            return (
+              <ImageBlock
+                key={i}
+                jsonlPath={jsonlPath}
+                messageUuid={msg.messageUuid!}
+                imageIndex={idx}
+              />
+            );
+          }
+          if (block.type === 'tool_use') {
+            return <span key={i} className="text-amber-400/70">[Tool: {block.name as string}]</span>;
+          }
+          return null;
+        })}
+      </>
+    );
+  }
+
+  // Fallback: plain text
+  return <>{msg.content}</>;
+}
+
+function MessageBubble({ msg, jsonlPath }: { msg: ConversationMessage; jsonlPath?: string | null }) {
   const [expanded, setExpanded] = useState(false);
   const config = ROLE_CONFIG[msg.role] || ROLE_CONFIG.assistant;
   const Icon = config.icon;
   const isToolResult = msg.role === 'tool_result';
   const isToolUse = msg.role === 'tool_use';
-  const contentPreview = msg.content.length > 500 && !expanded
+
+  // Check if this message has images (use rich rendering for those)
+  const hasImages = msg.rawContent?.includes('"type":"image"') || msg.content.includes('[图片]');
+  const contentPreview = !hasImages && msg.content.length > 500 && !expanded
     ? msg.content.slice(0, 500) + '...'
     : msg.content;
 
@@ -91,11 +168,15 @@ function MessageBubble({ msg }: { msg: ConversationMessage }) {
             msg.role === 'user' ? 'text-neutral-200' : 'text-neutral-400',
             (isToolUse || isToolResult) && 'font-mono text-xs',
           )}
-          onClick={() => msg.content.length > 500 && setExpanded(!expanded)}
+          onClick={() => !hasImages && msg.content.length > 500 && setExpanded(!expanded)}
         >
-          {contentPreview}
+          {hasImages ? (
+            <MessageContent msg={msg} jsonlPath={jsonlPath} />
+          ) : (
+            contentPreview
+          )}
         </div>
-        {msg.content.length > 500 && (
+        {!hasImages && msg.content.length > 500 && (
           <button
             onClick={() => setExpanded(!expanded)}
             className="text-[11px] text-neutral-600 hover:text-neutral-400 mt-1"
@@ -175,6 +256,7 @@ export function Conversations() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [jsonlPath, setJsonlPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [search, setSearch] = useState('');
@@ -191,7 +273,14 @@ export function Conversations() {
       const res = await fetch(`/api/conversations?${params}`);
       if (res.ok) {
         const data = await res.json();
-        setConversations(Array.isArray(data) ? data : []);
+        const list: Conversation[] = Array.isArray(data) ? data : [];
+        // Sort: active first, then by most recent
+        list.sort((a, b) => {
+          if (a.status === 'active' && b.status !== 'active') return -1;
+          if (a.status !== 'active' && b.status === 'active') return 1;
+          return new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime();
+        });
+        setConversations(list);
       }
     } catch {
       // silent
@@ -207,9 +296,11 @@ export function Conversations() {
       if (res.ok) {
         const data = await res.json();
         setMessages(data.messages || []);
+        setJsonlPath(data.conversation?.jsonlPath || null);
       }
     } catch {
       setMessages([]);
+      setJsonlPath(null);
     }
     setLoadingMessages(false);
   }, []);
@@ -444,7 +535,7 @@ export function Conversations() {
                       <div className="flex-1 h-px bg-neutral-800/50" />
                     </div>
                     {group.messages.map((msg) => (
-                      <MessageBubble key={msg.id} msg={msg} />
+                      <MessageBubble key={msg.id} msg={msg} jsonlPath={jsonlPath} />
                     ))}
                   </div>
                 ))
