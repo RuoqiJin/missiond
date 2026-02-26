@@ -48,12 +48,18 @@ struct ExtractionState {
     /// When the last realtime extraction completed.
     /// Used to give deep_analysis a window to run.
     last_realtime_completed_at: i64,
-    /// Message IDs in the current deep_analysis batch, for marking done on completion.
-    current_batch_msg_ids: Vec<i64>,
+    /// Conversation ID currently being deep-analyzed (for marking complete on Idle).
+    current_deep_conv_id: Option<String>,
     /// Watermark targets for realtime extraction: (session_id, max_timestamp).
     /// On completion, update realtime_forwarded_at for each session.
     watermark_targets: Vec<(String, String)>,
 }
+
+/// Deep analysis schema version. Bump this when the analysis prompt changes
+/// to trigger re-analysis of all previously analyzed conversations.
+const CURRENT_ANALYSIS_VERSION: i32 = 1;
+/// Max retries for a single conversation's deep analysis before giving up.
+const MAX_ANALYSIS_RETRIES: i32 = 2;
 
 /// Safety valve: max time to wait for slot to return to Idle after send() returns.
 const MAX_WAIT_FOR_IDLE_SECS: i64 = 300;
@@ -1711,17 +1717,10 @@ impl AppState {
                 Ok(ToolResult::text(&format!("{}{}", header, output)))
             }
 
-            // Legacy: kept for backward compatibility. State is now auto-committed by Daemon.
+            // Deprecated: pipeline state table has been removed. Both realtime and deep_analysis
+            // now use conversation-level watermarks. Kept for backward compat with old agent prompts.
             "mission_memory_done" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    message_ids: Vec<i64>,
-                }
-                let Args { message_ids } = serde_json::from_value(args)?;
-                let db = self.mission.db();
-                let count = db.mark_pipeline_done(&message_ids, "realtime")
-                    .map_err(|e| anyhow!("DB error: {}", e))?;
-                Ok(ToolResult::text(&format!("已确认 {} 条消息处理完成 (realtime)。注意：系统已自动管理状态，无需手动调用。", count)))
+                Ok(ToolResult::text("已废弃。系统现在使用会话级水位线自动管理状态，无需手动调用。"))
             }
 
             // ===== Conversation Logs =====
@@ -3133,9 +3132,13 @@ async fn check_memory_slot_stuck(state: &AppState) {
     // Reset extraction state so next tick can trigger
     {
         let mut es = state.extraction_state.write().await;
+        // Mark deep analysis as failed so it increments retry count (not silently lost)
+        if let Some(conv_id) = es.current_deep_conv_id.take() {
+            let _ = state.mission.db().mark_analysis_failed(&conv_id);
+            warn!(conv_id = %conv_id, "Marked stuck deep analysis as failed");
+        }
         es.phase = ExtractionPhase::Idle;
         es.active_type = None;
-        es.current_batch_msg_ids.clear();
         es.watermark_targets.clear();
     }
     // Don't reset to 0 — set to now so we can detect if respawn also gets stuck
@@ -3157,9 +3160,12 @@ async fn check_extraction_gate(state: &AppState, label: &str) -> bool {
         let mut es = state.extraction_state.write().await;
         if es.phase == ExtractionPhase::WaitingForSlotIdle {
             warn!(age_secs = age, "{}: extraction stuck in WaitingForSlotIdle, forcing reset", label);
+            // Mark deep analysis as failed (increments retry count) instead of silently losing
+            if let Some(conv_id) = es.current_deep_conv_id.take() {
+                let _ = state.mission.db().mark_analysis_failed(&conv_id);
+            }
             es.phase = ExtractionPhase::Idle;
             es.active_type = None;
-            es.current_batch_msg_ids.clear();
             es.watermark_targets.clear();
             return true;
         }
@@ -3190,8 +3196,8 @@ async fn check_realtime_extraction(state: &AppState) {
         let es = state.extraction_state.read().await;
         let since_last = chrono::Utc::now().timestamp() - es.last_realtime_completed_at;
         if es.last_realtime_completed_at > 0 && since_last < REALTIME_EXTRACTION_COOLDOWN_SECS {
-            let has_deep_pending = state.mission.db().get_conversations_with_pending_pipeline("deep_analysis")
-                .map(|c| !c.is_empty()).unwrap_or(false);
+            let has_deep_pending = state.mission.db().has_pending_deep_analysis(CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES)
+                .unwrap_or(false);
             if has_deep_pending {
                 debug!(since_last, "realtime: cooldown, yielding to deep_analysis");
                 return;
@@ -3290,8 +3296,8 @@ async fn check_realtime_extraction(state: &AppState) {
     });
 }
 
-/// Deep analysis: review completed conversations with pending deep_analysis messages.
-/// Called from autopilot_tick.
+/// Deep analysis: review completed conversations using conversation-level watermark.
+/// Uses analyzed_at + analysis_version instead of per-message pipeline state.
 async fn check_deep_analysis(state: &AppState) {
     if !check_extraction_gate(state, "deep_analysis").await {
         return;
@@ -3312,7 +3318,7 @@ async fn check_deep_analysis(state: &AppState) {
     }
 
     let db = state.mission.db();
-    let pending_convs = match db.get_conversations_with_pending_pipeline("deep_analysis") {
+    let pending_convs = match db.get_pending_deep_analysis(CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES) {
         Ok(convs) => convs,
         Err(_) => return,
     };
@@ -3322,26 +3328,13 @@ async fn check_deep_analysis(state: &AppState) {
     }
 
     for conv in &pending_convs {
-        // Only analyze conversations ended >= 5 minutes ago
-        if let Some(ref ended) = conv.ended_at {
-            if let Ok(ended_dt) = chrono::DateTime::parse_from_rfc3339(ended) {
-                let age = chrono::Utc::now().signed_duration_since(ended_dt.with_timezone(&chrono::Utc));
-                if age < chrono::TimeDelta::minutes(5) {
-                    continue;
-                }
-            }
-        } else {
-            continue; // Not yet ended
-        }
-
         let msgs = db
             .get_conversation_messages(&conv.id, None, 1000)
             .unwrap_or_default();
         let msg_count = msgs.len();
-        // Skip conversations with too few messages — mark done and move on
+        // Skip conversations with too few messages — mark analyzed and move on
         if msg_count < 6 {
-            let msg_ids = db.get_pipeline_message_ids_for_session(&conv.id).unwrap_or_default();
-            let _ = db.mark_pipeline_done(&msg_ids, "deep_analysis");
+            let _ = db.mark_analysis_complete(&conv.id, CURRENT_ANALYSIS_VERSION);
             continue;
         }
 
@@ -3353,8 +3346,7 @@ async fn check_deep_analysis(state: &AppState) {
                 || text.starts_with("[realtime-extract]")
                 || text.starts_with("[deep-analysis]")
             {
-                let msg_ids = db.get_pipeline_message_ids_for_session(&conv.id).unwrap_or_default();
-                let _ = db.mark_pipeline_done(&msg_ids, "deep_analysis");
+                let _ = db.mark_analysis_complete(&conv.id, CURRENT_ANALYSIS_VERSION);
                 debug!(conv_id = %conv.id, "deep_analysis: skipping extraction meta-session");
                 continue;
             }
@@ -3363,9 +3355,6 @@ async fn check_deep_analysis(state: &AppState) {
         if !ensure_memory_slot(state).await {
             break;
         }
-
-        // Get message IDs for this conversation (for marking done after completion)
-        let msg_ids = db.get_pipeline_message_ids_for_session(&conv.id).unwrap_or_default();
 
         let prompt = format!(
             "[deep-analysis]\n\
@@ -3387,21 +3376,22 @@ async fn check_deep_analysis(state: &AppState) {
             msg_count = msg_count,
         );
 
-        info!(conv_id = %conv.id, msg_count, batch_size = msg_ids.len(), "Deep analysis: sending to memory agent");
+        info!(conv_id = %conv.id, msg_count, retries = conv.analysis_retries, "Deep analysis: sending to memory agent");
 
-        // Set extraction state with batch msg_ids for marking done on completion
+        // Set extraction state with conv_id for marking complete on Idle
         {
             let now = chrono::Utc::now().timestamp();
             let mut es = state.extraction_state.write().await;
             es.phase = ExtractionPhase::Sending;
             es.active_type = Some("deep_analysis");
             es.phase_started_at = now;
-            es.current_batch_msg_ids = msg_ids;
+            es.current_deep_conv_id = Some(conv.id.clone());
         }
 
         let conv_id = conv.id.clone();
         let pty = Arc::clone(&state.pty);
         let extraction_state = Arc::clone(&state.extraction_state);
+        let mission = Arc::clone(&state.mission);
         tokio::spawn(async move {
             match pty.send(MEMORY_SLOT_ID, &prompt, 300_000).await {
                 Ok(res) => {
@@ -3413,11 +3403,13 @@ async fn check_deep_analysis(state: &AppState) {
                     }
                 }
                 Err(e) => {
-                    warn!(conv_id = %conv_id, error = %e, "Deep analysis failed");
+                    warn!(conv_id = %conv_id, error = %e, "Deep analysis send() failed");
+                    // Mark as failed (increments retry count) instead of silently losing
+                    let _ = mission.db().mark_analysis_failed(&conv_id);
                     let mut es = extraction_state.write().await;
                     es.phase = ExtractionPhase::Idle;
                     es.active_type = None;
-                    es.current_batch_msg_ids.clear();
+                    es.current_deep_conv_id = None;
                 }
             }
         });
@@ -3606,6 +3598,8 @@ fn handle_new_messages(
             ended_at: None,
             status: "active".to_string(),
             analyzed_at: None,
+            analysis_version: 0,
+            analysis_retries: 0,
         };
         if let Err(e) = db.upsert_conversation(&conv) {
             error!(session = %session_id, error = %e, "Failed to create conversation");
@@ -3638,14 +3632,8 @@ fn handle_new_messages(
     match db.insert_conversation_messages_batch(&batch) {
         Ok(inserted_ids) if !inserted_ids.is_empty() => {
             info!(session = %session_id, count = inserted_ids.len(), "Logged conversation messages");
-
-            // Enqueue for deep_analysis pipeline (only user CLI sessions)
-            // Note: realtime extraction now uses watermark (realtime_forwarded_at), not pipeline state
-            if !is_pty && !session_id.starts_with("agent-") {
-                if let Err(e) = db.enqueue_messages_for_pipelines(&inserted_ids, &["deep_analysis"]) {
-                    warn!(session = %session_id, error = %e, "Failed to enqueue messages for pipeline");
-                }
-            }
+            // Deep analysis uses conversation-level analyzed_at watermark (no per-message enqueue needed).
+            // Realtime extraction uses realtime_forwarded_at watermark.
         }
         Err(e) => {
             error!(session = %session_id, error = %e, "Failed to insert conversation messages");
@@ -3689,6 +3677,8 @@ fn handle_pty_text_complete(
             ended_at: None,
             status: "active".to_string(),
             analyzed_at: None,
+            analysis_version: 0,
+            analysis_retries: 0,
         };
         if let Err(e) = db.upsert_conversation(&conv) {
             error!(slot = %slot_id, error = %e, "Failed to create PTY conversation");
@@ -3873,7 +3863,7 @@ async fn main() -> Result<()> {
             active_type: None,
             phase_started_at: 0,
             last_realtime_completed_at: 0,
-            current_batch_msg_ids: Vec::new(),
+            current_deep_conv_id: None,
             watermark_targets: Vec::new(),
         })),
         memory_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
@@ -3978,11 +3968,13 @@ async fn main() -> Result<()> {
                                                 es.watermark_targets.clear();
                                             }
                                         } else {
-                                            // Deep analysis: mark pipeline messages as done
-                                            if !es.current_batch_msg_ids.is_empty() {
-                                                let _ = state.mission.db().mark_pipeline_done(&es.current_batch_msg_ids, "deep_analysis");
-                                                info!(count = es.current_batch_msg_ids.len(), "Deep analysis: auto-committed batch done");
-                                                es.current_batch_msg_ids.clear();
+                                            // Deep analysis: mark conversation as analyzed
+                                            if let Some(conv_id) = es.current_deep_conv_id.take() {
+                                                if let Err(e) = state.mission.db().mark_analysis_complete(&conv_id, CURRENT_ANALYSIS_VERSION) {
+                                                    warn!(conv_id = %conv_id, error = %e, "Failed to mark analysis complete");
+                                                } else {
+                                                    info!(conv_id = %conv_id, version = CURRENT_ANALYSIS_VERSION, "Deep analysis: marked complete");
+                                                }
                                             }
                                         }
                                         es.phase = ExtractionPhase::Idle;

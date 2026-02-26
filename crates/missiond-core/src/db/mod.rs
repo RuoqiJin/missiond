@@ -343,81 +343,36 @@ impl MissionDB {
              CREATE INDEX IF NOT EXISTS idx_conv_realtime_pending ON conversations(slot_id, realtime_forwarded_at);"
         )?;
 
-        // Message-level pipeline tracking (replaces conversation-level watermarks)
-        let has_mps: bool = conn.query_row(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='message_pipeline_state'",
-            [],
-            |row| row.get(0),
-        )?;
-
-        if !has_mps {
+        // Deep analysis: migrate from message_pipeline_state to conversation-level watermark.
+        // Add analysis_version and analysis_retries columns if missing.
+        let has_analysis_version: bool = conn
+            .prepare("SELECT analysis_version FROM conversations LIMIT 0")
+            .is_ok();
+        if !has_analysis_version {
             conn.execute_batch(
-                "CREATE TABLE message_pipeline_state (
-                    message_id INTEGER NOT NULL,
-                    pipeline TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    done_at TEXT,
-                    PRIMARY KEY (message_id, pipeline),
-                    FOREIGN KEY (message_id) REFERENCES conversation_messages(id)
-                );
-                CREATE INDEX idx_mps_pipeline_status ON message_pipeline_state(pipeline, status);"
+                "ALTER TABLE conversations ADD COLUMN analysis_version INTEGER DEFAULT 0;
+                 ALTER TABLE conversations ADD COLUMN analysis_retries INTEGER DEFAULT 0;"
             )?;
-
-            // Migrate from old watermarks: messages before realtime_forwarded_at → done
-            conn.execute_batch(
-                "INSERT OR IGNORE INTO message_pipeline_state (message_id, pipeline, status, done_at)
-                 SELECT m.id, 'realtime',
-                     CASE WHEN c.realtime_forwarded_at IS NOT NULL
-                               AND m.timestamp <= c.realtime_forwarded_at
-                          THEN 'done' ELSE 'pending' END,
-                     CASE WHEN c.realtime_forwarded_at IS NOT NULL
-                               AND m.timestamp <= c.realtime_forwarded_at
-                          THEN c.realtime_forwarded_at ELSE NULL END
-                 FROM conversation_messages m
-                 JOIN conversations c ON c.id = m.session_id
-                 WHERE m.role IN ('user', 'assistant')
-                   AND c.slot_id IS NULL
-                   AND c.id NOT LIKE 'agent-%';"
+            // Backfill: mark all completed user conversations as analyzed (v1) to prevent
+            // startup thundering herd. Realtime pipeline already extracted message-level knowledge.
+            let backfilled: usize = conn.execute(
+                "UPDATE conversations
+                 SET analyzed_at = COALESCE(analyzed_at, ended_at),
+                     analysis_version = 1
+                 WHERE status = 'completed'
+                   AND slot_id IS NULL
+                   AND id NOT LIKE 'agent-%'
+                   AND analyzed_at IS NULL",
+                [],
             )?;
-
-            // Migrate deep_analysis: analyzed conversations → done
-            conn.execute_batch(
-                "INSERT OR IGNORE INTO message_pipeline_state (message_id, pipeline, status, done_at)
-                 SELECT m.id, 'deep_analysis',
-                     CASE WHEN c.analyzed_at IS NOT NULL THEN 'done' ELSE 'pending' END,
-                     c.analyzed_at
-                 FROM conversation_messages m
-                 JOIN conversations c ON c.id = m.session_id
-                 WHERE m.role IN ('user', 'assistant')
-                   AND c.slot_id IS NULL
-                   AND c.id NOT LIKE 'agent-%';"
-            )?;
+            if backfilled > 0 {
+                tracing::info!(backfilled, "Backfilled analysis_version for historical conversations");
+            }
         }
 
-        // Cleanup: purge any control-plane messages that leaked into pipeline state
-        // (PTY slot sessions and agent sessions should never be in the extraction pipeline)
-        let cleaned: usize = conn.execute(
-            "DELETE FROM message_pipeline_state
-             WHERE message_id IN (
-                 SELECT m.id FROM conversation_messages m
-                 JOIN conversations c ON c.id = m.session_id
-                 WHERE c.slot_id IS NOT NULL OR c.id LIKE 'agent-%'
-             )",
-            [],
-        )?;
-        if cleaned > 0 {
-            tracing::info!(cleaned, "Purged control-plane messages from pipeline state");
-        }
-
-        // Phase 2: realtime extraction now uses watermark (realtime_forwarded_at),
-        // not message_pipeline_state. Purge all realtime pipeline entries.
-        let realtime_purged: usize = conn.execute(
-            "DELETE FROM message_pipeline_state WHERE pipeline = 'realtime'",
-            [],
-        )?;
-        if realtime_purged > 0 {
-            tracing::info!(realtime_purged, "Purged realtime pipeline entries (migrated to watermark)");
-        }
+        // Drop legacy message_pipeline_state table (no longer used by any pipeline:
+        // realtime uses realtime_forwarded_at watermark, deep_analysis uses analyzed_at + analysis_version)
+        conn.execute_batch("DROP TABLE IF EXISTS message_pipeline_state;")?;
 
         Ok(())
     }
@@ -1983,138 +1938,65 @@ impl MissionDB {
 
     // ============ Message Pipeline Tracking ============
 
-    /// Enqueue messages for pipeline processing (status = pending)
-    pub fn enqueue_messages_for_pipelines(&self, msg_ids: &[i64], pipelines: &[&str]) -> SqliteResult<()> {
-        if msg_ids.is_empty() || pipelines.is_empty() {
-            return Ok(());
-        }
-        let conn = self.conn();
-        for &msg_id in msg_ids {
-            for &pipeline in pipelines {
-                conn.execute(
-                    "INSERT OR IGNORE INTO message_pipeline_state (message_id, pipeline, status) VALUES (?1, ?2, 'pending')",
-                    params![msg_id, pipeline],
-                )?;
-            }
-        }
-        Ok(())
-    }
 
-    /// Check if any pending messages exist for a pipeline (lightweight)
-    /// Excludes PTY slot sessions and agent sessions (control plane isolation)
-    pub fn has_pending_pipeline_messages(&self, pipeline: &str) -> SqliteResult<bool> {
-        let conn = self.conn();
-        conn.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM message_pipeline_state mps
-                JOIN conversation_messages m ON m.id = mps.message_id
-                JOIN conversations c ON c.id = m.session_id
-                WHERE mps.pipeline = ?1 AND mps.status = 'pending'
-                  AND c.slot_id IS NULL
-                  AND c.id NOT LIKE 'agent-%'
-            )",
-            params![pipeline],
-            |row| row.get(0),
-        )
-    }
 
-    /// Get pending messages for a pipeline, grouped by session
-    /// Excludes PTY slot sessions and agent sessions (control plane isolation)
-    pub fn get_pending_pipeline_messages(&self, pipeline: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
+    /// Get conversations pending deep analysis (conversation-level watermark).
+    /// Returns completed user conversations that haven't been analyzed at the current version.
+    pub fn get_pending_deep_analysis(&self, current_version: i32, max_retries: i32) -> SqliteResult<Vec<Conversation>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT m.*, COALESCE(c.project, '') as c_project
-             FROM conversation_messages m
-             JOIN message_pipeline_state mps ON mps.message_id = m.id
-             JOIN conversations c ON c.id = m.session_id
-             WHERE mps.pipeline = ?1 AND mps.status = 'pending'
-               AND c.slot_id IS NULL
-               AND c.id NOT LIKE 'agent-%'
-             ORDER BY c.started_at DESC, m.id ASC"
+            "SELECT * FROM conversations
+             WHERE status = 'completed'
+               AND slot_id IS NULL
+               AND id NOT LIKE 'agent-%'
+               AND ended_at < datetime('now', '-5 minutes')
+               AND analysis_retries < ?1
+               AND (analyzed_at IS NULL OR analysis_version < ?2)
+             ORDER BY ended_at ASC"
         )?;
-
-        let mut groups: Vec<(String, String, Vec<ConversationMessage>)> = Vec::new();
-        let mut rows = stmt.query(params![pipeline])?;
-        while let Some(row) = rows.next()? {
-            let msg = Self::row_to_conversation_message(row)?;
-            let project: String = row.get("c_project")?;
-            let sid = msg.session_id.clone();
-            if let Some(group) = groups.iter_mut().find(|(s, _, _)| s == &sid) {
-                group.2.push(msg);
-            } else {
-                groups.push((sid, project, vec![msg]));
-            }
-        }
-        Ok(groups)
-    }
-
-    /// Mark messages as done for a pipeline
-    pub fn mark_pipeline_done(&self, msg_ids: &[i64], pipeline: &str) -> SqliteResult<usize> {
-        if msg_ids.is_empty() {
-            return Ok(0);
-        }
-        let now = chrono::Utc::now().to_rfc3339();
-        let conn = self.conn();
-        let mut count = 0usize;
-        for &msg_id in msg_ids {
-            count += conn.execute(
-                "UPDATE message_pipeline_state SET status = 'done', done_at = ?1 WHERE message_id = ?2 AND pipeline = ?3 AND status = 'pending'",
-                params![now, msg_id, pipeline],
-            )?;
-        }
-        Ok(count)
-    }
-
-    /// Get all pending message IDs for a pipeline (lightweight, no full message content)
-    /// Excludes PTY slot sessions and agent sessions (control plane isolation)
-    pub fn get_pending_pipeline_msg_ids(&self, pipeline: &str) -> SqliteResult<Vec<i64>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT mps.message_id
-             FROM message_pipeline_state mps
-             JOIN conversation_messages m ON m.id = mps.message_id
-             JOIN conversations c ON c.id = m.session_id
-             WHERE mps.pipeline = ?1 AND mps.status = 'pending'
-               AND c.slot_id IS NULL
-               AND c.id NOT LIKE 'agent-%'
-             ORDER BY mps.message_id ASC",
-        )?;
-        let ids = stmt
-            .query_map(params![pipeline], |row| row.get(0))?
-            .filter_map(|r| r.ok())
-            .collect();
-        Ok(ids)
-    }
-
-    /// Get completed conversations that still have pending messages for a pipeline
-    pub fn get_conversations_with_pending_pipeline(&self, pipeline: &str) -> SqliteResult<Vec<Conversation>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT c.* FROM conversations c
-             JOIN conversation_messages m ON m.session_id = c.id
-             JOIN message_pipeline_state mps ON mps.message_id = m.id
-             WHERE c.status = 'completed'
-               AND mps.pipeline = ?1 AND mps.status = 'pending'
-               AND c.slot_id IS NULL
-               AND c.id NOT LIKE 'agent-%'
-             ORDER BY c.started_at DESC"
-        )?;
-        let rows = stmt.query_map(params![pipeline], |row| Self::row_to_conversation(row))?;
+        let rows = stmt.query_map(params![max_retries, current_version], |row| Self::row_to_conversation(row))?;
         let mut convs = Vec::new();
         for c in rows { convs.push(c?); }
         Ok(convs)
     }
 
-    /// Get all user/assistant message IDs for a session
-    pub fn get_pipeline_message_ids_for_session(&self, session_id: &str) -> SqliteResult<Vec<i64>> {
+    /// Lightweight check: are there any conversations pending deep analysis?
+    pub fn has_pending_deep_analysis(&self, current_version: i32, max_retries: i32) -> SqliteResult<bool> {
         let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT id FROM conversation_messages WHERE session_id = ?1 AND role IN ('user', 'assistant') ORDER BY id ASC"
+        conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM conversations
+                WHERE status = 'completed'
+                  AND slot_id IS NULL
+                  AND id NOT LIKE 'agent-%'
+                  AND ended_at < datetime('now', '-5 minutes')
+                  AND analysis_retries < ?1
+                  AND (analyzed_at IS NULL OR analysis_version < ?2)
+            )",
+            params![max_retries, current_version],
+            |row| row.get(0),
+        )
+    }
+
+    /// Mark a conversation's deep analysis as complete with the given version.
+    pub fn mark_analysis_complete(&self, id: &str, version: i32) -> SqliteResult<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE conversations SET analyzed_at = ?1, analysis_version = ?2, analysis_retries = 0 WHERE id = ?3",
+            params![now, version, id],
         )?;
-        let ids = stmt.query_map(params![session_id], |row| row.get(0))?
-            .filter_map(|r| r.ok())
-            .collect();
-        Ok(ids)
+        Ok(())
+    }
+
+    /// Increment analysis retry count for a failed deep analysis attempt.
+    pub fn mark_analysis_failed(&self, id: &str) -> SqliteResult<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE conversations SET analysis_retries = analysis_retries + 1 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
     }
 
     // ============ Conversations ============
@@ -2482,6 +2364,8 @@ impl MissionDB {
             ended_at: row.get("ended_at")?,
             status: row.get("status")?,
             analyzed_at: row.get("analyzed_at")?,
+            analysis_version: row.get("analysis_version").unwrap_or(0),
+            analysis_retries: row.get("analysis_retries").unwrap_or(0),
         })
     }
 
