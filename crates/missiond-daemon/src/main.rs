@@ -3678,41 +3678,78 @@ fn extract_text_content(content: &Value) -> String {
                             .get("name")
                             .and_then(|n| n.as_str())
                             .unwrap_or("unknown");
-                        Some(format!("[Tool: {name}]"))
+                        // Include input parameters for context (truncated)
+                        let input_str = item.get("input").map(|input| {
+                            let s = if let Value::Object(map) = input {
+                                // Compact key=value pairs
+                                map.iter()
+                                    .map(|(k, v)| {
+                                        let val = match v {
+                                            Value::String(s) => {
+                                                if s.len() > 200 {
+                                                    let mut end = 200;
+                                                    while !s.is_char_boundary(end) && end > 0 { end -= 1; }
+                                                    format!("\"{}…\"", &s[..end])
+                                                } else {
+                                                    format!("\"{}\"", s)
+                                                }
+                                            }
+                                            _ => {
+                                                let raw = v.to_string();
+                                                if raw.len() > 200 { format!("{}…", &raw[..200]) } else { raw }
+                                            }
+                                        };
+                                        format!("{k}: {val}")
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            } else {
+                                input.to_string()
+                            };
+                            s
+                        }).unwrap_or_default();
+                        if input_str.is_empty() {
+                            Some(format!("[Tool: {name}]"))
+                        } else {
+                            Some(format!("[Tool: {name}] {input_str}"))
+                        }
                     }
                     "tool_result" => {
-                        // Nested tool result content
-                        if let Some(Value::String(s)) = item.get("content") {
-                            let display = if s.len() > 500 {
-                                // Find a valid char boundary near 500
-                                let mut end = 500;
-                                while !s.is_char_boundary(end) && end > 0 {
-                                    end -= 1;
-                                }
-                                format!("{}…", &s[..end])
-                            } else {
-                                s.clone()
-                            };
-                            Some(display)
+                        // Nested tool result content — extract text with truncation
+                        let text = if let Some(Value::String(s)) = item.get("content") {
+                            s.clone()
                         } else if let Some(Value::Array(inner)) = item.get("content") {
-                            let text: String = inner
+                            inner
                                 .iter()
                                 .filter_map(|i| {
-                                    if i.get("type")?.as_str()? == "text" {
-                                        i.get("text")?.as_str().map(String::from)
-                                    } else {
-                                        None
+                                    let t = i.get("type")?.as_str()?;
+                                    match t {
+                                        "text" => i.get("text")?.as_str().map(String::from),
+                                        "tool_reference" => {
+                                            let name = i.get("tool_name").and_then(|n| n.as_str()).unwrap_or("?");
+                                            Some(format!("[ref: {name}]"))
+                                        }
+                                        _ => None,
                                     }
                                 })
                                 .collect::<Vec<_>>()
-                                .join("\n");
-                            if text.is_empty() {
-                                None
-                            } else {
-                                Some(text)
-                            }
+                                .join("\n")
                         } else {
-                            None
+                            String::new()
+                        };
+                        if text.is_empty() {
+                            // Check for error field
+                            if let Some(err) = item.get("error").and_then(|e| e.as_str()) {
+                                Some(format!("[error: {err}]"))
+                            } else {
+                                Some("[tool_result]".to_string())
+                            }
+                        } else if text.len() > 1000 {
+                            let mut end = 1000;
+                            while !text.is_char_boundary(end) && end > 0 { end -= 1; }
+                            Some(format!("{}…", &text[..end]))
+                        } else {
+                            Some(text)
                         }
                     }
                     _ => None,
