@@ -42,6 +42,7 @@ function TerminalInner({ slotId }: TerminalProps) {
   const wsRef = useRef<WebSocket | null>(null);
   const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'disconnected'>('disconnected');
   const [ptyState, setPtyState] = useState<PTYState>('unknown');
+  const [statusText, setStatusText] = useState<string | null>(null);
   const [spawning, setSpawning] = useState(false);
   const [ready, setReady] = useState(false); // xterm initialized
 
@@ -186,7 +187,11 @@ function TerminalInner({ slotId }: TerminalProps) {
           term.clear();
           term.write(msg.data);
         } else if (msg.type === 'state') {
-          setPtyState(msg.state || 'unknown');
+          const newState = msg.state || 'unknown';
+          setPtyState(newState);
+          // Show statusText during processing; clear when idle/stopped
+          const processing = ['thinking', 'responding', 'tool_running'].includes(newState);
+          setStatusText(processing ? (msg.statusText || null) : null);
         } else if (msg.type === 'exit') {
           term.writeln(`\r\n\x1b[31m[exited: code ${msg.code}]\x1b[0m`);
           setWsStatus('disconnected');
@@ -303,7 +308,7 @@ function TerminalInner({ slotId }: TerminalProps) {
         <div className="flex items-center gap-2">
           <span className={`w-2 h-2 rounded-full ${wsColor}`} />
           <span className="text-xs text-neutral-400 font-mono">{slotId}</span>
-          <span className={`text-[10px] font-medium ${stateColor}`}>{stateText}</span>
+          <span className={`text-[10px] font-medium ${stateColor}`}>{statusText || stateText}</span>
         </div>
         <div className="flex gap-1.5">
           {!isRunning && (

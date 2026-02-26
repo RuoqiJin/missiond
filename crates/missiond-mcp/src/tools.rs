@@ -989,6 +989,20 @@ pub fn all_tools() -> Vec<ToolDefinition> {
             }),
         ),
         ToolDefinition::new(
+            "mission_memory_pause",
+            "暂停/恢复记忆任务。暂停后 realtime extraction 和 deep analysis 不再调度。\
+             不传 paused 参数则 toggle 当前状态。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "paused": {
+                        "type": "boolean",
+                        "description": "true=暂停, false=恢复。省略则 toggle。"
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
             "mission_memory_done",
             "兼容工具：手动确认一批消息已被 realtime 管道处理完成。\
              当前系统默认由 daemon 自动管理状态，通常不需要调用本工具。",

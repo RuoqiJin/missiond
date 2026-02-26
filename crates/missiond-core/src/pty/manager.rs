@@ -30,6 +30,9 @@ pub struct PTYAgentInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     pub state: SessionState,
+    /// Spinner status text from Claude Code (e.g., "Compacting conversation… (1m 40s · ↑ 704 tokens · thought for 6s)")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -162,6 +165,7 @@ impl PTYManager {
             role: slot.role.clone(),
             pid: None,
             state: SessionState::Exited,
+            status_text: None,
             started_at: None,
             current_task_id: None,
             log_file,
@@ -283,6 +287,10 @@ impl PTYManager {
                             let mut info = agent_info_for_forward.write().await;
                             if let Some(entry) = info.get_mut(&slot_id_for_events) {
                                 entry.state = new_state;
+                                // Clear status_text when leaving processing state
+                                if !new_state.is_processing() {
+                                    entry.status_text = None;
+                                }
                             }
                         }
                         let _ = event_tx.send(ManagerEvent::StateChange {
@@ -290,6 +298,17 @@ impl PTYManager {
                             new_state,
                             prev_state,
                         });
+                    }
+                    SessionEvent::StatusUpdate(status) => {
+                        // Update spinner status text in agent_info
+                        let text = format!(
+                            "{} {}",
+                            status.spinner, status.status_text
+                        );
+                        let mut info = agent_info_for_forward.write().await;
+                        if let Some(entry) = info.get_mut(&slot_id_for_events) {
+                            entry.status_text = Some(text);
+                        }
                     }
                     SessionEvent::ConfirmRequired { prompt, info } => {
                         let _ = event_tx.send(ManagerEvent::ConfirmRequired {
