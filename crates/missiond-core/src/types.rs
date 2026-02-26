@@ -583,6 +583,9 @@ pub struct Conversation {
     pub git_branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jsonl_path: Option<String>,
+    /// Parent conversation ID (for subagent sessions spawned by Task tool)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     pub message_count: i64,
     pub started_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]

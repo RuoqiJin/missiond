@@ -3664,6 +3664,12 @@ fn handle_new_messages(
     }
     if existing_conv.is_none() {
         let first = messages.first();
+        // Extract parent session ID for subagent conversations
+        let parent_session_id = if session_id.starts_with("agent-") {
+            missiond_core::db::extract_parent_session_id(&jsonl_path)
+        } else {
+            None
+        };
         let conv = missiond_core::types::Conversation {
             id: session_id.clone(),
             project: Some(first.map(|m| m.cwd.clone()).unwrap_or(project_path)),
@@ -3672,6 +3678,7 @@ fn handle_new_messages(
             model: first.and_then(|m| m.message.model.clone()),
             git_branch: first.and_then(|m| m.git_branch.clone()),
             jsonl_path: Some(jsonl_path),
+            parent_session_id,
             message_count: 0,
             started_at: first
                 .map(|m| m.timestamp.clone())
@@ -3765,6 +3772,7 @@ fn handle_pty_text_complete(
             model: None,
             git_branch: None,
             jsonl_path: None,
+            parent_session_id: None,
             message_count: 0,
             started_at: ts,
             ended_at: None,
