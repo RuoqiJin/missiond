@@ -885,7 +885,9 @@ impl PTYSession {
                 if let Some(turn_id) = turn_id {
                     for op in &delta.stable_ops {
                         let source = classify_stable_op(op);
-                        if matches!(source, ScreenTextSource::Assistant) {
+                        // Unknown source during active turn is treated as assistant text
+                        // Claude Code output after tool use often lacks ⏺ prefix
+                        if matches!(source, ScreenTextSource::Assistant | ScreenTextSource::Unknown) {
                             let chunk = text_assembler.lock().await.apply(op);
                             if !chunk.is_empty() {
                                 let seq = {
@@ -991,7 +993,7 @@ impl PTYSession {
                         if !delta.stable_ops.is_empty() {
                             for op in &delta.stable_ops {
                                 let source = classify_stable_op(op);
-                                if matches!(source, ScreenTextSource::Assistant) {
+                                if matches!(source, ScreenTextSource::Assistant | ScreenTextSource::Unknown) {
                                     let chunk = text_assembler.lock().await.apply(op);
                                     if !chunk.is_empty() {
                                         let seq = {

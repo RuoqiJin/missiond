@@ -10,6 +10,7 @@
 //! - { type: "state", state: string, prevState: string }
 //! - { type: "exit", code: number }
 
+use super::jarvis_trace::{JarvisTraceStore, TraceStatus};
 use crate::cc_tasks::{
     CCSession, CCTask, CCTaskChangeEvent, CCTasksOverview, CCTasksWatcher, WatcherEvent,
 };
@@ -48,6 +49,7 @@ pub struct PTYWebSocketServer {
     cc_tasks_watcher: Option<Arc<Mutex<CCTasksWatcher>>>,
     screenshot_broker: Option<Arc<super::ScreenshotBroker>>,
     shutdown_tx: Option<broadcast::Sender<()>>,
+    jarvis_trace: JarvisTraceStore,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,7 +171,13 @@ impl PTYWebSocketServer {
             cc_tasks_watcher: options.cc_tasks_watcher,
             screenshot_broker: options.screenshot_broker,
             shutdown_tx: None,
+            jarvis_trace: JarvisTraceStore::new(),
         }
+    }
+
+    /// Get a reference to the Jarvis trace store (for MCP tools)
+    pub fn jarvis_trace_store(&self) -> &JarvisTraceStore {
+        &self.jarvis_trace
     }
 
     /// Start the server
@@ -185,6 +193,7 @@ impl PTYWebSocketServer {
         let pty_manager = self.pty_manager.clone();
         let cc_tasks_watcher = self.cc_tasks_watcher.clone();
         let screenshot_broker = self.screenshot_broker.clone();
+        let jarvis_trace = self.jarvis_trace.clone();
 
         tokio::spawn(async move {
             let mut shutdown_rx = shutdown_tx.subscribe();
@@ -196,8 +205,9 @@ impl PTYWebSocketServer {
                                 let pty_manager = pty_manager.clone();
                                 let cc_tasks_watcher = cc_tasks_watcher.clone();
                                 let screenshot_broker = screenshot_broker.clone();
+                                let jarvis_trace = jarvis_trace.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker).await {
+                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace).await {
                                         error!(?e, ?addr, "WebSocket connection error");
                                     }
                                 });
