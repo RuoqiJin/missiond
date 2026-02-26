@@ -24,6 +24,7 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 dirs = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
 
 reqwest = { workspace = true }
 
