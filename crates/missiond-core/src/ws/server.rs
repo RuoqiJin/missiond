@@ -636,8 +636,29 @@ impl PTYWebSocketServer {
         // Subscribe to screenshot requests (if broker available)
         let mut screenshot_rx = screenshot_broker.as_ref().map(|b| b.subscribe());
 
+        // State heartbeat: periodically send current state to prevent stale UI.
+        // If a StateChange event is missed (broadcast lag), the client would
+        // be stuck showing the old state forever. This 5s heartbeat fixes that.
+        let mut state_heartbeat = tokio::time::interval(std::time::Duration::from_secs(5));
+        state_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last_sent_state: Option<SessionState> = None;
+
         loop {
             tokio::select! {
+                // State heartbeat -> send current state if changed since last heartbeat
+                _ = state_heartbeat.tick() => {
+                    if let Some(status) = pty_manager.get_status(slot_id).await {
+                        let current = status.state.clone();
+                        if last_sent_state.as_ref() != Some(&current) {
+                            let prev = last_sent_state.replace(current.clone()).unwrap_or(current.clone());
+                            let msg = PtyOutMessage::State { state: current, prev_state: prev };
+                            if send_json(&mut ws_tx, &msg).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+
                 // PTY -> client
                 evt = session_rx.recv() => {
                     let evt = match evt {
@@ -654,6 +675,7 @@ impl PTYWebSocketServer {
                             }
                         }
                         SessionEvent::StateChange { new_state, prev_state } => {
+                            last_sent_state = Some(new_state.clone());
                             let msg = PtyOutMessage::State { state: new_state, prev_state };
                             if send_json(&mut ws_tx, &msg).await.is_err() {
                                 break;
