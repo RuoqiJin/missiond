@@ -82,6 +82,19 @@ pub struct CCMessageLine {
     pub todos: Option<Vec<CCTask>>,
 }
 
+/// Token usage from Claude API response
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TokenUsage {
+    #[serde(default)]
+    pub input_tokens: i64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: i64,
+    #[serde(default)]
+    pub cache_read_input_tokens: i64,
+    #[serde(default)]
+    pub output_tokens: i64,
+}
+
 /// Message content in JSONL
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CCMessage {
@@ -89,6 +102,8 @@ pub struct CCMessage {
     pub content: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TokenUsage>,
 }
 
 // ============ Aggregated Views ============

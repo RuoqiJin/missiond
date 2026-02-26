@@ -79,16 +79,24 @@ struct AppState {
     /// JSONL session UUIDs belonging to PTY-managed slots.
     /// White-list: any session_id NOT in this set is a user CLI session.
     pty_session_uuids: Arc<tokio::sync::RwLock<HashSet<String>>>,
-    /// State machine for memory extraction cooldown. Shared by user_voice, memory, deep_analysis.
+    /// Fast lane state machine (realtime extraction on slot-memory).
     extraction_state: Arc<tokio::sync::RwLock<ExtractionState>>,
+    /// Slow lane state machine (deep analysis + kb consolidation on slot-memory-slow).
+    slow_extraction_state: Arc<tokio::sync::RwLock<ExtractionState>>,
     /// Timestamp when slot-memory entered its current non-Idle state. 0 = idle.
     memory_slot_busy_since: Arc<std::sync::atomic::AtomicI64>,
+    /// Timestamp when slot-memory-slow entered its current non-Idle state. 0 = idle.
+    slow_slot_busy_since: Arc<std::sync::atomic::AtomicI64>,
     /// Hash of last synced CLAUDE.md managed section (to avoid unnecessary writes).
     claude_md_hash: Arc<std::sync::atomic::AtomicU64>,
-    /// Signal to re-check extractions immediately (event-driven, not waiting for 60s tick).
+    /// Signal to re-check fast lane extractions immediately.
     extraction_notify: Arc<tokio::sync::Notify>,
+    /// Signal to re-check slow lane extractions immediately.
+    slow_extraction_notify: Arc<tokio::sync::Notify>,
     /// Last KB auto-GC timestamp (epoch secs). 0 = never run.
     last_auto_gc_at: Arc<std::sync::atomic::AtomicI64>,
+    /// Last KB consolidation timestamp (epoch secs). 0 = never run.
+    last_kb_consolidation_at: Arc<std::sync::atomic::AtomicI64>,
     /// Pause switch for memory extraction tasks (realtime, deep_analysis, sync, GC).
     memory_paused: Arc<std::sync::atomic::AtomicBool>,
     /// Per-slot consecutive failure count for autopilot throttling.
@@ -1816,6 +1824,29 @@ impl AppState {
                 }))
             }
 
+            // ===== Token Stats =====
+            "mission_token_stats" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Args {
+                    session_id: Option<String>,
+                    slot_id: Option<String>,
+                    since: Option<String>,
+                    group_by: Option<String>,
+                }
+                let Args { session_id, slot_id, since, group_by } =
+                    serde_json::from_value(args).unwrap_or(Args {
+                        session_id: None, slot_id: None, since: None, group_by: None,
+                    });
+                let rows = self.mission.db().token_stats(
+                    session_id.as_deref(),
+                    slot_id.as_deref(),
+                    since.as_deref(),
+                    group_by.as_deref(),
+                ).map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json_pretty(&rows))
+            }
+
             // ===== Conversation Logs =====
             "mission_conversation_list" => {
                 #[derive(Deserialize)]
@@ -3119,7 +3150,8 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
     Ok(())
 }
 
-const MEMORY_SLOT_ID: &str = "slot-memory";
+const MEMORY_SLOT_ID: &str = "slot-memory";           // Fast lane (realtime)
+const MEMORY_SLOW_SLOT_ID: &str = "slot-memory-slow";  // Slow lane (deep + consolidation)
 
 /// Detect if a new unknown session is a compacted replacement for an active slot session.
 ///
@@ -3248,11 +3280,11 @@ async fn capture_slot_session_uuid(
     }
 }
 
-/// Ensure slot-memory PTY session is running, spawn if needed.
+/// Ensure a memory-role PTY session is running, spawn if needed.
 /// Returns true if the session is available.
-async fn ensure_memory_slot(state: &AppState) -> bool {
+async fn ensure_memory_slot_by_id(state: &AppState, slot_id: &str) -> bool {
     // Check if session is actually running (not just initialized/exited)
-    if let Some(info) = state.pty.get_status(MEMORY_SLOT_ID).await {
+    if let Some(info) = state.pty.get_status(slot_id).await {
         if info.state != SessionState::Exited {
             return true;
         }
@@ -3261,9 +3293,9 @@ async fn ensure_memory_slot(state: &AppState) -> bool {
         .mission
         .list_slots()
         .into_iter()
-        .find(|s| s.config.id == MEMORY_SLOT_ID);
+        .find(|s| s.config.id == slot_id);
     let Some(slot) = slot else {
-        warn!("Memory slot not configured in slots.yaml");
+        warn!(slot_id, "Memory slot not configured in slots.yaml");
         return false;
     };
     let pty_slot = missiond_core::PTYSlot {
@@ -3272,7 +3304,7 @@ async fn ensure_memory_slot(state: &AppState) -> bool {
         cwd: slot.config.cwd.as_deref().map(PathBuf::from),
     };
     let mcp_config = slot.config.mcp_config.map(PathBuf::from);
-    let (extra_env, session_file) = build_slot_tracking_env(MEMORY_SLOT_ID);
+    let (extra_env, session_file) = build_slot_tracking_env(slot_id);
     match state.pty.spawn(&pty_slot, PTYSpawnOptions {
         auto_restart: true,
         wait_for_idle: true,
@@ -3282,34 +3314,44 @@ async fn ensure_memory_slot(state: &AppState) -> bool {
         extra_env,
     }).await {
         Ok(_) => {
-            capture_slot_session_uuid(state, MEMORY_SLOT_ID, &session_file).await;
-            info!("Memory slot spawned (auto_restart=true)");
+            capture_slot_session_uuid(state, slot_id, &session_file).await;
+            info!(slot_id, "Memory slot spawned (auto_restart=true)");
             true
         }
         Err(e) => {
-            warn!(error = %e, "Failed to spawn memory slot");
+            warn!(slot_id, error = %e, "Failed to spawn memory slot");
             false
         }
     }
 }
 
+/// Convenience wrapper for fast-lane memory slot.
+async fn ensure_memory_slot(state: &AppState) -> bool {
+    ensure_memory_slot_by_id(state, MEMORY_SLOT_ID).await
+}
+
 /// Threshold for considering the memory slot stuck (10 minutes).
 const STUCK_THRESHOLD_SECS: i64 = 600;
 
-/// Detect and recover from memory slot stuck in non-Idle state.
-async fn check_memory_slot_stuck(state: &AppState) {
+/// Detect and recover from a memory slot stuck in non-Idle state.
+async fn check_slot_stuck(
+    state: &AppState,
+    slot_id: &str,
+    busy_since_atomic: &std::sync::atomic::AtomicI64,
+    extraction_state: &tokio::sync::RwLock<ExtractionState>,
+) {
     let now = chrono::Utc::now().timestamp();
-    let busy_since = state.memory_slot_busy_since.load(std::sync::atomic::Ordering::SeqCst);
+    let busy_since = busy_since_atomic.load(std::sync::atomic::Ordering::SeqCst);
 
     // Poll actual slot state: if slot is non-Idle but busy_since is 0 (lost track),
     // re-initialize busy_since so stuck detection can work.
     if busy_since == 0 {
-        let is_busy = state.pty.get_status(MEMORY_SLOT_ID).await
+        let is_busy = state.pty.get_status(slot_id).await
             .map(|s| s.state != SessionState::Idle)
             .unwrap_or(false);
         if is_busy {
-            state.memory_slot_busy_since.store(now, std::sync::atomic::Ordering::SeqCst);
-            debug!("memory_slot_stuck: re-initialized busy_since (slot is non-Idle but was untracked)");
+            busy_since_atomic.store(now, std::sync::atomic::Ordering::SeqCst);
+            debug!(slot_id, "slot_stuck: re-initialized busy_since (slot is non-Idle but was untracked)");
         }
         return;
     }
@@ -3319,34 +3361,35 @@ async fn check_memory_slot_stuck(state: &AppState) {
         return;
     }
 
-    let status = state.pty.get_status(MEMORY_SLOT_ID).await;
+    let status = state.pty.get_status(slot_id).await;
     let current_state = status.as_ref()
         .map(|s| format!("{:?}", s.state))
         .unwrap_or_else(|| "unknown".to_string());
 
     // If slot is actually Idle, just clear the counter
     if status.as_ref().map(|s| s.state == SessionState::Idle).unwrap_or(false) {
-        state.memory_slot_busy_since.store(0, std::sync::atomic::Ordering::SeqCst);
+        busy_since_atomic.store(0, std::sync::atomic::Ordering::SeqCst);
         return;
     }
 
     warn!(
+        slot_id,
         state = %current_state,
         stuck_secs = stuck_duration,
         "Memory slot stuck, killing and respawning"
     );
 
     // Kill and respawn instead of just Ctrl+C (Ctrl+C often doesn't recover)
-    if let Err(e) = state.pty.kill(MEMORY_SLOT_ID).await {
-        warn!(error = %e, "Failed to kill stuck memory slot");
+    if let Err(e) = state.pty.kill(slot_id).await {
+        warn!(slot_id, error = %e, "Failed to kill stuck memory slot");
     }
-    // Allow next tick to respawn via ensure_memory_slot
+    // Allow next tick to respawn
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    let _ = ensure_memory_slot(state).await;
+    let _ = ensure_memory_slot_by_id(state, slot_id).await;
 
     // Reset extraction state so next tick can trigger
     {
-        let mut es = state.extraction_state.write().await;
+        let mut es = extraction_state.write().await;
         // Mark deep analysis as failed so it increments retry count (not silently lost)
         if let Some(conv_id) = es.current_deep_conv_id.take() {
             let _ = state.mission.db().mark_analysis_failed(&conv_id);
@@ -3363,14 +3406,18 @@ async fn check_memory_slot_stuck(state: &AppState) {
         es.watermark_targets.clear();
     }
     // Don't reset to 0 — set to now so we can detect if respawn also gets stuck
-    state.memory_slot_busy_since.store(now, std::sync::atomic::Ordering::SeqCst);
+    busy_since_atomic.store(now, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Check extraction state gate: returns true if extraction is allowed.
 /// Handles safety-valve timeout for WaitingForSlotIdle phase.
-async fn check_extraction_gate(state: &AppState, label: &str) -> bool {
+async fn check_extraction_gate(
+    extraction_state: &tokio::sync::RwLock<ExtractionState>,
+    mission: &MissionControl,
+    label: &str,
+) -> bool {
     let now = chrono::Utc::now().timestamp();
-    let es = state.extraction_state.read().await;
+    let es = extraction_state.read().await;
     if es.phase == ExtractionPhase::Idle {
         return true;
     }
@@ -3378,16 +3425,16 @@ async fn check_extraction_gate(state: &AppState, label: &str) -> bool {
     // Safety valve: force reset if WaitingForSlotIdle exceeds MAX_WAIT_FOR_IDLE_SECS
     if es.phase == ExtractionPhase::WaitingForSlotIdle && age > MAX_WAIT_FOR_IDLE_SECS {
         drop(es);
-        let mut es = state.extraction_state.write().await;
+        let mut es = extraction_state.write().await;
         if es.phase == ExtractionPhase::WaitingForSlotIdle {
             warn!(age_secs = age, "{}: extraction stuck in WaitingForSlotIdle, forcing reset", label);
             // Mark deep analysis as failed (increments retry count) instead of silently losing
             if let Some(conv_id) = es.current_deep_conv_id.take() {
-                let _ = state.mission.db().mark_analysis_failed(&conv_id);
+                let _ = mission.db().mark_analysis_failed(&conv_id);
             }
             // Mark slot task as failed (timeout)
             if let Some(ref st_id) = es.current_slot_task_id {
-                let _ = state.mission.db().slot_task_set_failed(st_id, "WaitingForSlotIdle timeout");
+                let _ = mission.db().slot_task_set_failed(st_id, "WaitingForSlotIdle timeout");
             }
             es.phase = ExtractionPhase::Idle;
             es.active_type = None;
@@ -3407,29 +3454,10 @@ async fn check_extraction_gate(state: &AppState, label: &str) -> bool {
     false
 }
 
-/// Cooldown: skip realtime extraction if the last one completed < 30 seconds ago,
-/// giving deep_analysis a window to run.
-const REALTIME_EXTRACTION_COOLDOWN_SECS: i64 = 30;
-
-/// Unified realtime extraction: user preferences + conversation knowledge in one pass.
-/// Replaces separate check_user_voice_extraction + check_memory_extraction.
+/// Unified realtime extraction on fast lane (slot-memory).
 async fn check_realtime_extraction(state: &AppState) {
-    if !check_extraction_gate(state, "realtime").await {
+    if !check_extraction_gate(&state.extraction_state, &state.mission, "realtime").await {
         return;
-    }
-
-    // Cooldown: yield to deep_analysis if we recently completed a realtime extraction
-    {
-        let es = state.extraction_state.read().await;
-        let since_last = chrono::Utc::now().timestamp() - es.last_realtime_completed_at;
-        if es.last_realtime_completed_at > 0 && since_last < REALTIME_EXTRACTION_COOLDOWN_SECS {
-            let has_deep_pending = state.mission.db().has_pending_deep_analysis(CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES)
-                .unwrap_or(false);
-            if has_deep_pending {
-                debug!(since_last, "realtime: cooldown, yielding to deep_analysis");
-                return;
-            }
-        }
     }
 
     // Watermark-based check: any conversations with messages beyond their realtime_forwarded_at?
@@ -4156,7 +4184,7 @@ fn handle_new_messages(
         let conv = missiond_core::types::Conversation {
             id: session_id.clone(),
             project: Some(first.map(|m| m.cwd.clone()).unwrap_or(project_path)),
-            slot_id,
+            slot_id: slot_id.clone(),
             source: source.to_string(),
             model: first.and_then(|m| m.message.model.clone()),
             git_branch: first.and_then(|m| m.git_branch.clone()),
@@ -4235,6 +4263,32 @@ fn handle_new_messages(
             error!(session = %session_id, error = %e, "Failed to insert conversation messages");
         }
         _ => {}
+    }
+
+    // ── Token usage ledger ─────────────────────────────────────────
+    // Extract usage from assistant messages and write to append-only ledger.
+    let slot_task_id = slot_id.as_deref()
+        .and_then(|sid| db.get_running_slot_task(sid).ok().flatten());
+    for msg in &messages {
+        if let Some(ref usage) = msg.message.usage {
+            let total = usage.input_tokens + usage.output_tokens
+                + usage.cache_creation_input_tokens + usage.cache_read_input_tokens;
+            if total == 0 {
+                continue;
+            }
+            if let Err(e) = db.insert_token_usage(
+                &session_id,
+                slot_id.as_deref(),
+                slot_task_id.as_deref(),
+                msg.message.model.as_deref(),
+                usage.input_tokens,
+                usage.cache_creation_input_tokens,
+                usage.cache_read_input_tokens,
+                usage.output_tokens,
+            ) {
+                warn!(session = %session_id, error = %e, "Failed to insert token usage");
+            }
+        }
     }
 }
 
@@ -4473,10 +4527,23 @@ async fn main() -> Result<()> {
             current_task_id: None,
             current_slot_task_id: None,
         })),
+        slow_extraction_state: Arc::new(tokio::sync::RwLock::new(ExtractionState {
+            phase: ExtractionPhase::Idle,
+            active_type: None,
+            phase_started_at: 0,
+            last_realtime_completed_at: 0,
+            current_deep_conv_id: None,
+            watermark_targets: Vec::new(),
+            current_task_id: None,
+            current_slot_task_id: None,
+        })),
         memory_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        slow_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         claude_md_hash: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         extraction_notify: Arc::new(tokio::sync::Notify::new()),
+        slow_extraction_notify: Arc::new(tokio::sync::Notify::new()),
         last_auto_gc_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        last_kb_consolidation_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         memory_paused: Arc::new(std::sync::atomic::AtomicBool::new(
             home.join("memory_paused").exists()
         )),

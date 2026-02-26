@@ -1023,6 +1023,35 @@ pub fn all_tools() -> Vec<ToolDefinition> {
             }),
         ),
 
+        // ===== Token Stats =====
+        ToolDefinition::new(
+            "mission_token_stats",
+            "查询 token 消耗统计。支持按会话、工位、模型、日期聚合。\
+             无参数返回全局总量。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "sessionId": {
+                        "type": "string",
+                        "description": "按会话 ID 过滤"
+                    },
+                    "slotId": {
+                        "type": "string",
+                        "description": "按工位 ID 过滤"
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": "时间过滤，ISO 8601 格式 (e.g. 2026-02-27T00:00:00Z)"
+                    },
+                    "groupBy": {
+                        "type": "string",
+                        "enum": ["session", "slot", "model", "day"],
+                        "description": "聚合维度: session=按会话, slot=按工位, model=按模型, day=按天"
+                    }
+                }
+            }),
+        ),
+
         // ===== Conversation Log =====
         ToolDefinition::new(
             "mission_conversation_list",
