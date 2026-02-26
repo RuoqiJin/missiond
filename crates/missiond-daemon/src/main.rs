@@ -55,6 +55,8 @@ struct ExtractionState {
     watermark_targets: Vec<(String, String)>,
     /// Task ID for the current extraction job (survives compaction).
     current_task_id: Option<String>,
+    /// slot_tasks table row ID for the current extraction (for history tracking).
+    current_slot_task_id: Option<String>,
 }
 
 /// Deep analysis schema version. Bump this when the analysis prompt changes
@@ -1535,15 +1537,24 @@ impl AppState {
                     .pointer("/choices/0/message/content")
                     .and_then(|v| v.as_str())
                     .unwrap_or("(empty response)");
+                let finish_reason = result
+                    .pointer("/choices/0/finish_reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 let usage = result.get("usage");
                 let resp_model = result.get("model").and_then(|v| v.as_str()).unwrap_or(&model);
 
-                Ok(ToolResult::json_pretty(&serde_json::json!({
+                let mut resp = serde_json::json!({
                     "model": resp_model,
                     "kb_entries_count": entries.len(),
                     "analysis": content,
                     "usage": usage,
-                })))
+                });
+                if finish_reason == "length" || finish_reason == "max_tokens" {
+                    resp["warning"] = serde_json::json!("⚠️ 输出被截断：LLM 达到 max_tokens 限制，返回内容不完整。可增大 max_tokens 参数重试。");
+                    resp["finish_reason"] = serde_json::json!(finish_reason);
+                }
+                Ok(ToolResult::json_pretty(&resp))
             }
 
             // ===== Router Chat =====
@@ -1588,7 +1599,7 @@ impl AppState {
                             .map_err(|e| anyhow!("DB error: {}", e))?;
                         let task_lines: Vec<String> = tasks.iter()
                             .map(|t| {
-                                let desc_preview: String = t.description.chars().take(300).collect();
+                                let desc_preview: String = t.description.chars().take(2000).collect();
                                 let project = t.project.as_deref().unwrap_or("");
                                 let mut line = format!("[{}|{}|{}] {}",
                                     t.status.as_str(), t.priority, t.category, t.title);
@@ -1663,14 +1674,23 @@ impl AppState {
                     .pointer("/choices/0/message/content")
                     .and_then(|v| v.as_str())
                     .unwrap_or("(empty response)");
+                let finish_reason = result
+                    .pointer("/choices/0/finish_reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 let usage = result.get("usage");
                 let resp_model = result.get("model").and_then(|v| v.as_str()).unwrap_or(&model);
 
-                Ok(ToolResult::json_pretty(&serde_json::json!({
+                let mut resp = serde_json::json!({
                     "model": resp_model,
                     "response": content,
                     "usage": usage,
-                })))
+                });
+                if finish_reason == "length" || finish_reason == "max_tokens" {
+                    resp["warning"] = serde_json::json!("⚠️ 输出被截断：LLM 达到 max_tokens 限制，返回内容不完整。可增大 max_tokens 参数重试。");
+                    resp["finish_reason"] = serde_json::json!(finish_reason);
+                }
+                Ok(ToolResult::json_pretty(&resp))
             }
 
             // ===== Memory Extraction =====
@@ -1693,9 +1713,6 @@ impl AppState {
                     output.push_str(&format!("## session: {} (project: {})\n\n", session_id, project));
                     for msg in msgs {
                         all_msg_ids.push(msg.id);
-                        if msg.role == "assistant" && msg.content.len() < 50 {
-                            continue;
-                        }
                         let prefix = if msg.role == "user" { "★ " } else { "" };
                         output.push_str(&format!("[#{}][{}] {}{}: {}\n\n", msg.id, msg.timestamp, prefix, msg.role, msg.content));
                         if msg.role == "user" { user_count += 1; }
@@ -1710,7 +1727,6 @@ impl AppState {
                                 if child_msgs.is_empty() { continue; }
                                 output.push_str(&format!("#### subagent: {} ({} 条消息)\n\n", child.id, child.message_count));
                                 for cm in &child_msgs {
-                                    if cm.role == "assistant" && cm.content.len() < 50 { continue; }
                                     let prefix = if cm.role == "user" { "★ " } else { "" };
                                     output.push_str(&format!("[{}] {}{}: {}\n\n", cm.timestamp, prefix, cm.role, cm.content));
                                 }
@@ -3720,13 +3736,9 @@ fn extract_text_content(content: &Value) -> String {
                     }
                     "thinking" => {
                         let text = item.get("thinking")?.as_str()?;
-                        if text.len() > 2000 {
-                            let mut end = 2000;
-                            while !text.is_char_boundary(end) && end > 0 { end -= 1; }
-                            Some(format!("[thinking] {}…", &text[..end]))
-                        } else {
-                            Some(format!("[thinking] {text}"))
-                        }
+                        // Store full thinking content — no truncation in Storage layer.
+                        // User explicitly requires complete thinking preservation.
+                        Some(format!("[thinking] {text}"))
                     }
                     "tool_result" => {
                         // Nested tool result content — extract text with truncation
@@ -4154,6 +4166,7 @@ async fn main() -> Result<()> {
             current_deep_conv_id: None,
             watermark_targets: Vec::new(),
             current_task_id: None,
+            current_slot_task_id: None,
         })),
         memory_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         claude_md_hash: Arc::new(std::sync::atomic::AtomicU64::new(0)),

@@ -341,7 +341,12 @@ impl ProcessManager {
                 .write_all(format!("\n--- Task {} completed ---\n", task.id).as_bytes())
                 .await?;
             let preview = if res.result.len() > 500 {
-                format!("{}...", &res.result[..500])
+                // Safe UTF-8 truncation: find char boundary at ~500 chars
+                let end = res.result.char_indices()
+                    .nth(500)
+                    .map(|(i, _)| i)
+                    .unwrap_or(res.result.len());
+                format!("{}...", &res.result[..end])
             } else {
                 res.result.clone()
             };
