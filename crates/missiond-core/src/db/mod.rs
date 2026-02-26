@@ -422,6 +422,17 @@ impl MissionDB {
             }
         }
 
+        // Add task_id for grouping compacted sessions under the same logical task
+        let has_task_id: bool = conn
+            .prepare("SELECT task_id FROM conversations LIMIT 0")
+            .is_ok();
+        if !has_task_id {
+            conn.execute_batch(
+                "ALTER TABLE conversations ADD COLUMN task_id TEXT;
+                 CREATE INDEX IF NOT EXISTS idx_conv_task_id ON conversations(task_id);"
+            )?;
+        }
+
         // Backfill: fix tool_result messages incorrectly stored as role='user'.
         // In Claude Code JSONL, tool_result has type="user" + role="user" but
         // content blocks are all type="tool_result". Detect via raw_content.
@@ -2076,17 +2087,17 @@ impl MissionDB {
     pub fn upsert_conversation(&self, conv: &Conversation) -> SqliteResult<()> {
         let conn = self.conn();
         conn.execute(
-            "INSERT INTO conversations (id, project, slot_id, source, model, git_branch, jsonl_path, parent_session_id, message_count, started_at, ended_at, status, analyzed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "INSERT INTO conversations (id, project, slot_id, source, model, git_branch, jsonl_path, parent_session_id, task_id, message_count, started_at, ended_at, status, analyzed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET
                 model = COALESCE(?5, model),
                 git_branch = COALESCE(?6, git_branch),
-                message_count = ?9,
-                ended_at = ?11,
-                status = ?12",
+                message_count = ?10,
+                ended_at = ?12,
+                status = ?13",
             params![
                 conv.id, conv.project, conv.slot_id, conv.source, conv.model,
-                conv.git_branch, conv.jsonl_path, conv.parent_session_id,
+                conv.git_branch, conv.jsonl_path, conv.parent_session_id, conv.task_id,
                 conv.message_count, conv.started_at, conv.ended_at, conv.status,
                 conv.analyzed_at,
             ],
@@ -2282,6 +2293,39 @@ impl MissionDB {
         Ok(ids.len())
     }
 
+    /// Mark a conversation as compacted (replaced by context compaction).
+    pub fn mark_conversation_compacted(&self, id: &str) -> SqliteResult<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE conversations SET status = 'compacted', ended_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Set the task_id on a conversation.
+    pub fn set_conversation_task_id(&self, id: &str, task_id: &str) -> SqliteResult<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE conversations SET task_id = ?1 WHERE id = ?2",
+            params![task_id, id],
+        )?;
+        Ok(())
+    }
+
+    /// Get all conversations sharing the same task_id.
+    pub fn get_conversations_by_task_id(&self, task_id: &str) -> SqliteResult<Vec<Conversation>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM conversations WHERE task_id = ?1 ORDER BY started_at ASC"
+        )?;
+        let rows = stmt.query_map(params![task_id], |row| Self::row_to_conversation(row))?;
+        let mut convs = Vec::new();
+        for c in rows { convs.push(c?); }
+        Ok(convs)
+    }
+
     /// Re-activate a completed conversation when new messages arrive.
     pub fn reactivate_conversation(&self, id: &str) -> SqliteResult<usize> {
         let conn = self.conn();
@@ -2444,6 +2488,7 @@ impl MissionDB {
             git_branch: row.get("git_branch")?,
             jsonl_path: row.get("jsonl_path")?,
             parent_session_id: row.get("parent_session_id").unwrap_or(None),
+            task_id: row.get("task_id").unwrap_or(None),
             message_count: row.get("message_count")?,
             started_at: row.get("started_at")?,
             ended_at: row.get("ended_at")?,

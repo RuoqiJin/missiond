@@ -53,6 +53,8 @@ struct ExtractionState {
     /// Watermark targets for realtime extraction: (session_id, max_timestamp).
     /// On completion, update realtime_forwarded_at for each session.
     watermark_targets: Vec<(String, String)>,
+    /// Task ID for the current extraction job (survives compaction).
+    current_task_id: Option<String>,
 }
 
 /// Deep analysis schema version. Bump this when the analysis prompt changes
@@ -3008,6 +3010,49 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
 
 const MEMORY_SLOT_ID: &str = "slot-memory";
 
+/// Detect if a new unknown session is a compacted replacement for an active slot session.
+///
+/// When Claude Code runs out of context, it compacts into a new session (new JSONL file).
+/// The old session stops being written to, but the PTY process continues.
+/// We detect this by checking if any active slot has a session in the same project directory.
+///
+/// Returns (slot_id, old_session_id, old_task_id) if compaction is detected.
+fn detect_compaction(
+    state: &AppState,
+    new_session_id: &str,
+    new_project: &str,
+) -> Option<(String, String, Option<String>)> {
+    let db = state.mission.db();
+    let all_slot_sessions = db.get_all_slot_sessions().ok()?;
+
+    for (slot_id, old_uuid) in &all_slot_sessions {
+        if old_uuid == new_session_id {
+            continue; // Same session, not compaction
+        }
+        let old_conv = db.get_conversation(old_uuid).ok()??;
+        // Must be same project and still active
+        if old_conv.project.as_deref() != Some(new_project) || old_conv.status != "active" {
+            continue;
+        }
+        // The old session should have been written to recently (within 10 min)
+        // to avoid false positives with stale slot sessions
+        if let Some(ref started) = Some(&old_conv.started_at) {
+            if let Ok(start_time) = chrono::DateTime::parse_from_rfc3339(started) {
+                let age = chrono::Utc::now().signed_duration_since(start_time);
+                if age > chrono::Duration::hours(2) {
+                    continue; // Too old to be a live compaction
+                }
+            }
+        }
+        return Some((
+            slot_id.clone(),
+            old_uuid.clone(),
+            old_conv.task_id.clone(),
+        ));
+    }
+    None
+}
+
 /// Build env vars for PTY spawn that enable UUID capture via SessionStart hook.
 /// Returns (extra_env, session_file_path).
 fn build_slot_tracking_env(slot_id: &str) -> (HashMap<String, String>, PathBuf) {
@@ -3198,6 +3243,7 @@ async fn check_memory_slot_stuck(state: &AppState) {
         }
         es.phase = ExtractionPhase::Idle;
         es.active_type = None;
+        es.current_task_id = None;
         es.watermark_targets.clear();
     }
     // Don't reset to 0 — set to now so we can detect if respawn also gets stuck
@@ -3225,6 +3271,7 @@ async fn check_extraction_gate(state: &AppState, label: &str) -> bool {
             }
             es.phase = ExtractionPhase::Idle;
             es.active_type = None;
+            es.current_task_id = None;
             es.watermark_targets.clear();
             return true;
         }
@@ -3306,6 +3353,12 @@ async fn check_realtime_extraction(state: &AppState) {
 
     info!(sessions = session_count, messages = msg_count, "Realtime extraction: locking batch (watermark)");
 
+    // Generate task_id and tag the memory slot's current session
+    let task_id = uuid::Uuid::new_v4().to_string();
+    if let Ok(Some(current_session)) = state.mission.db().get_slot_session(MEMORY_SLOT_ID) {
+        let _ = state.mission.db().set_conversation_task_id(&current_session, &task_id);
+    }
+
     // Store watermark targets for advancing on completion
     {
         let now = chrono::Utc::now().timestamp();
@@ -3314,6 +3367,7 @@ async fn check_realtime_extraction(state: &AppState) {
         es.active_type = Some("realtime");
         es.phase_started_at = now;
         es.watermark_targets = watermark_targets;
+        es.current_task_id = Some(task_id);
     }
 
     let prompt = "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，提取知识存入 KB。\n\
@@ -3350,6 +3404,7 @@ async fn check_realtime_extraction(state: &AppState) {
                 let mut es = extraction_state.write().await;
                 es.phase = ExtractionPhase::Idle;
                 es.active_type = None;
+                es.current_task_id = None;
                 // Watermark not advanced on failure — messages stay pending for retry
                 es.watermark_targets.clear();
             }
@@ -3444,6 +3499,12 @@ async fn check_deep_analysis(state: &AppState) {
 
         info!(conv_id = %conv.id, msg_count, retries = conv.analysis_retries, "Deep analysis: sending to memory agent");
 
+        // Generate task_id and tag the memory slot's current session
+        let task_id = uuid::Uuid::new_v4().to_string();
+        if let Ok(Some(current_session)) = state.mission.db().get_slot_session(MEMORY_SLOT_ID) {
+            let _ = state.mission.db().set_conversation_task_id(&current_session, &task_id);
+        }
+
         // Set extraction state with conv_id for marking complete on Idle
         {
             let now = chrono::Utc::now().timestamp();
@@ -3452,6 +3513,7 @@ async fn check_deep_analysis(state: &AppState) {
             es.active_type = Some("deep_analysis");
             es.phase_started_at = now;
             es.current_deep_conv_id = Some(conv.id.clone());
+            es.current_task_id = Some(task_id);
         }
 
         let conv_id = conv.id.clone();
@@ -3475,6 +3537,7 @@ async fn check_deep_analysis(state: &AppState) {
                     let mut es = extraction_state.write().await;
                     es.phase = ExtractionPhase::Idle;
                     es.active_type = None;
+                    es.current_task_id = None;
                     es.current_deep_conv_id = None;
                 }
             }
@@ -3738,6 +3801,7 @@ fn handle_new_messages(
             git_branch: first.and_then(|m| m.git_branch.clone()),
             jsonl_path: Some(jsonl_path),
             parent_session_id,
+            task_id: None,
             message_count: 0,
             started_at: first
                 .map(|m| m.timestamp.clone())
@@ -3839,6 +3903,7 @@ fn handle_pty_text_complete(
             git_branch: None,
             jsonl_path: None,
             parent_session_id: None,
+            task_id: None,
             message_count: 0,
             started_at: ts,
             ended_at: None,
@@ -4032,6 +4097,7 @@ async fn main() -> Result<()> {
             last_realtime_completed_at: 0,
             current_deep_conv_id: None,
             watermark_targets: Vec::new(),
+            current_task_id: None,
         })),
         memory_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         claude_md_hash: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -4069,10 +4135,45 @@ async fn main() -> Result<()> {
             event = conv_logger_rx.recv() => {
                 match event {
                     Ok(WatcherEvent::NewMessages { session_id, project_path, jsonl_path, messages }) => {
-                        let is_pty = state.pty_session_uuids.read().await.contains(&session_id);
+                        let mut is_pty = state.pty_session_uuids.read().await.contains(&session_id);
+
+                        // Compaction detection: if session is unknown, check if it replaced an active slot session
+                        let mut compaction_task_id: Option<String> = None;
+                        if !is_pty {
+                            if let Some((slot_id, old_uuid, old_task_id)) = detect_compaction(&state, &session_id, &project_path) {
+                                info!(
+                                    slot_id = %slot_id,
+                                    old_session = %old_uuid,
+                                    new_session = %session_id,
+                                    "Compaction detected: session replaced by context compaction"
+                                );
+                                let db = state.mission.db();
+                                // Mark old session as compacted (not completed)
+                                let _ = db.mark_conversation_compacted(&old_uuid);
+                                // Update slot→session mapping
+                                let _ = db.set_slot_session(&slot_id, &session_id);
+                                state.pty_session_uuids.write().await.remove(&old_uuid);
+                                state.pty_session_uuids.write().await.insert(session_id.clone());
+                                compaction_task_id = old_task_id;
+                                is_pty = true;
+                            }
+                        }
+
                         handle_new_messages(&state, session_id.clone(), project_path, jsonl_path, messages.clone(), is_pty);
+
+                        // Transfer task_id AFTER conversation creation (so the row exists)
+                        if let Some(tid) = compaction_task_id {
+                            let _ = state.mission.db().set_conversation_task_id(&session_id, &tid);
+                        }
                     }
                     Ok(WatcherEvent::SessionInactive(session)) => {
+                        // Skip already-compacted sessions (replaced by context compaction)
+                        if let Ok(Some(conv)) = state.mission.db().get_conversation(&session.session_id) {
+                            if conv.status == "compacted" {
+                                debug!(session = %session.session_id, "Skipping inactive check for compacted session");
+                                continue;
+                            }
+                        }
                         // Mark conversation as completed so deep analysis can pick it up
                         if let Err(e) = state.mission.db().complete_conversation(&session.session_id) {
                             warn!(session = %session.session_id, error = %e, "Failed to complete conversation");
@@ -4147,6 +4248,7 @@ async fn main() -> Result<()> {
                                         }
                                         es.phase = ExtractionPhase::Idle;
                                         es.active_type = None;
+                                        es.current_task_id = None;
                                         // Event-driven: signal main loop to re-check extractions
                                         state.extraction_notify.notify_one();
                                     }

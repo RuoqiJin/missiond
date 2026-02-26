@@ -14,6 +14,7 @@ interface Conversation {
   gitBranch: string | null;
   jsonlPath: string | null;
   parentSessionId: string | null;
+  taskId: string | null;
   messageCount: number;
   startedAt: string;
   endedAt: string | null;
@@ -254,10 +255,12 @@ function ConversationListItem({
               variant="outline"
               className={cn(
                 'text-[10px] border-neutral-800',
-                conv.status === 'active' ? 'text-green-500' : 'text-neutral-600',
+                conv.status === 'active' ? 'text-green-500'
+                  : conv.status === 'compacted' ? 'text-yellow-600'
+                  : 'text-neutral-600',
               )}
             >
-              {conv.status === 'active' ? '进行中' : '已完成'}
+              {conv.status === 'active' ? '进行中' : conv.status === 'compacted' ? '已压缩' : '已完成'}
             </Badge>
           </div>
         </div>
@@ -389,10 +392,11 @@ export function Conversations() {
   const counts = useMemo(() => {
     const active = conversations.filter((c) => c.status === 'active').length;
     const completed = conversations.filter((c) => c.status === 'completed').length;
-    return { active, completed, total: conversations.length };
+    const compacted = conversations.filter((c) => c.status === 'compacted').length;
+    return { active, completed, compacted, total: conversations.length };
   }, [conversations]);
 
-  // Group: separate subagents from main list, map parentSessionId → children
+  // Group: separate subagents and compacted sessions from main list
   const { mainList, subagentMap } = useMemo(() => {
     const map = new Map<string, Conversation[]>();
     const main: Conversation[] = [];
@@ -401,6 +405,9 @@ export function Conversations() {
         const list = map.get(conv.parentSessionId) || [];
         list.push(conv);
         map.set(conv.parentSessionId, list);
+      } else if (conv.status === 'compacted') {
+        // Hide compacted sessions from main list (context compaction fragments)
+        continue;
       } else {
         main.push(conv);
       }
@@ -592,10 +599,12 @@ export function Conversations() {
                     variant="outline"
                     className={cn(
                       'text-[10px] border-neutral-800',
-                      selectedConv.status === 'active' ? 'text-green-500' : 'text-neutral-600',
+                      selectedConv.status === 'active' ? 'text-green-500'
+                        : selectedConv.status === 'compacted' ? 'text-yellow-600'
+                        : 'text-neutral-600',
                     )}
                   >
-                    {selectedConv.status === 'active' ? '进行中' : '已完成'}
+                    {selectedConv.status === 'active' ? '进行中' : selectedConv.status === 'compacted' ? '已压缩' : '已完成'}
                   </Badge>
                 </div>
                 <div className="flex items-center gap-3 text-[11px] text-neutral-500">
