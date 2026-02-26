@@ -66,7 +66,7 @@ const CURRENT_ANALYSIS_VERSION: i32 = 1;
 const MAX_ANALYSIS_RETRIES: i32 = 2;
 
 /// Safety valve: max time to wait for slot to return to Idle after send() returns.
-const MAX_WAIT_FOR_IDLE_SECS: i64 = 300;
+const MAX_WAIT_FOR_IDLE_SECS: i64 = 900;
 
 #[derive(Clone)]
 struct AppState {
@@ -2895,6 +2895,13 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
     // KB auto-GC: every hour
     check_kb_auto_gc(state);
 
+    // Reaper: force-fail stale slot tasks (pending/running > 30 min)
+    match state.mission.db().reap_stale_slot_tasks(1800) {
+        Ok(n) if n > 0 => warn!(count = n, "Reaped stale slot tasks"),
+        Err(e) => warn!(error = %e, "Slot task reaper failed"),
+        _ => {}
+    }
+
     // Extraction status summary (debug)
     {
         let es = state.extraction_state.read().await;
@@ -3698,7 +3705,7 @@ async fn check_deep_analysis(state: &AppState) {
         let extraction_state = Arc::clone(&state.extraction_state);
         let mission = Arc::clone(&state.mission);
         tokio::spawn(async move {
-            match pty.send(MEMORY_SLOT_ID, &prompt, 300_000).await {
+            match pty.send(MEMORY_SLOT_ID, &prompt, 900_000).await {
                 Ok(res) => {
                     info!(conv_id = %conv_id, duration_ms = res.duration_ms, "Deep analysis send() returned");
                     let _ = mission.db().slot_task_set_running(&slot_task_id);
@@ -4367,6 +4374,13 @@ async fn main() -> Result<()> {
         default_mode: None,
     })?);
     mission.start().await?;
+
+    // Startup: clean orphan slot_tasks from previous daemon instance
+    match mission.db().cleanup_orphan_slot_tasks() {
+        Ok(n) if n > 0 => info!(count = n, "Cleaned up orphan slot tasks from previous run"),
+        Err(e) => warn!(error = %e, "Failed to cleanup orphan slot tasks"),
+        _ => {}
+    }
 
     // PTY manager setup
     let pty = Arc::new(PTYManager::new(logs_dir.clone()));
