@@ -104,11 +104,15 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                 "properties": {
                     "role": {
                         "type": "string",
-                        "description": "专家角色 (如 secret, deploy)"
+                        "description": "专家角色 (如 secret, deploy, memory)"
                     },
                     "prompt": {
                         "type": "string",
                         "description": "任务提示词"
+                    },
+                    "slotId": {
+                        "type": "string",
+                        "description": "指定目标工位 ID（可选，精确分发到具体 slot，跳过 role 匹配）"
                     }
                 },
                 "required": ["role", "prompt"]

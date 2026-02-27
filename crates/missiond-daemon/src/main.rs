@@ -228,6 +228,8 @@ impl missiond_core::PTYPermissionPolicy for PermissionAdapter {
 struct SubmitArgs {
     role: String,
     prompt: String,
+    #[serde(rename = "slotId")]
+    slot_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -571,38 +573,55 @@ impl AppState {
         match name {
             // ===== Task operations =====
             "mission_submit" => {
-                let SubmitArgs { role, prompt } = serde_json::from_value(args)?;
+                let SubmitArgs { role, prompt, slot_id: target_slot } = serde_json::from_value(args)?;
                 let task_id = self.mission.submit(&role, &prompt)?;
 
-                // Try immediate dispatch to an idle slot matching the role
+                // If slotId specified, store it on the task for autopilot fallback
+                if let Some(ref target) = target_slot {
+                    let _ = self.mission.db().update_task(
+                        &task_id,
+                        &missiond_core::types::TaskUpdate {
+                            slot_id: Some(target.clone()),
+                            ..Default::default()
+                        },
+                    );
+                }
+
+                // Try immediate dispatch
                 let mut dispatched_to: Option<String> = None;
                 let slots = self.mission.list_slots();
-                for slot in &slots {
-                    if slot.config.role != role {
-                        continue;
-                    }
-                    let slot_id = &slot.config.id;
-                    if let Some(status) = self.pty.get_status(slot_id).await {
+
+                // Build candidate list: if slotId specified, only that slot; otherwise all matching role
+                let candidates: Vec<&str> = if let Some(ref target) = target_slot {
+                    vec![target.as_str()]
+                } else {
+                    slots.iter()
+                        .filter(|s| s.config.role == role)
+                        .map(|s| s.config.id.as_str())
+                        .collect()
+                };
+
+                for candidate_id in &candidates {
+                    if let Some(status) = self.pty.get_status(candidate_id).await {
                         if status.state == missiond_core::pty::SessionState::Idle {
-                            // Fire-and-forget dispatch to idle slot
-                            match self.pty.send_fire_and_forget(slot_id, &prompt).await {
+                            match self.pty.send_fire_and_forget(candidate_id, &prompt).await {
                                 Ok(()) => {
                                     let now = chrono::Utc::now().timestamp_millis();
                                     let _ = self.mission.db().update_task(
                                         &task_id,
                                         &missiond_core::types::TaskUpdate {
                                             status: Some(missiond_core::types::TaskStatus::Running),
-                                            slot_id: Some(slot_id.clone()),
+                                            slot_id: Some(candidate_id.to_string()),
                                             started_at: Some(now),
                                             ..Default::default()
                                         },
                                     );
-                                    dispatched_to = Some(slot_id.clone());
-                                    info!(task_id = %task_id, slot_id = %slot_id, "mission_submit: dispatched to idle slot");
+                                    dispatched_to = Some(candidate_id.to_string());
+                                    info!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: dispatched to idle slot");
                                     break;
                                 }
                                 Err(e) => {
-                                    warn!(task_id = %task_id, slot_id = %slot_id, error = %e, "mission_submit: dispatch failed, queued for autopilot");
+                                    warn!(task_id = %task_id, slot_id = %candidate_id, error = %e, "mission_submit: dispatch failed");
                                 }
                             }
                         }
@@ -615,7 +634,7 @@ impl AppState {
                     result["slotId"] = serde_json::json!(slot_id);
                 } else {
                     result["dispatched"] = serde_json::json!(false);
-                    result["hint"] = serde_json::json!("No idle slot found for role, task queued for autopilot dispatch");
+                    result["hint"] = serde_json::json!("No idle slot found, task queued for autopilot dispatch");
                 }
                 Ok(ToolResult::json(&result))
             }
@@ -3753,15 +3772,21 @@ async fn dispatch_queued_submit_tasks(state: &AppState) {
     info!(count = queued.len(), "Autopilot: found queued submit tasks");
 
     for task in &queued {
-        // Find an idle slot matching the task's role
+        // Find an idle slot: prefer task.slot_id if set, else match by role
         let slots = state.mission.list_slots();
         let mut dispatched = false;
 
-        for slot in &slots {
-            if slot.config.role != task.role {
-                continue;
-            }
-            let slot_id = &slot.config.id;
+        let candidates: Vec<String> = if let Some(ref target) = task.slot_id {
+            // Specific slot requested
+            vec![target.clone()]
+        } else {
+            slots.iter()
+                .filter(|s| s.config.role == task.role)
+                .map(|s| s.config.id.clone())
+                .collect()
+        };
+
+        for slot_id in &candidates {
             let status = match state.pty.get_status(slot_id).await {
                 Some(s) => s,
                 None => continue,
