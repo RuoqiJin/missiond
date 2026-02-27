@@ -41,13 +41,10 @@ enum ExtractionPhase {
 
 struct ExtractionState {
     phase: ExtractionPhase,
-    /// Which extraction type is active: "realtime", "deep_analysis"
+    /// Which extraction type is active: "realtime", "deep_analysis", "kb_consolidation"
     active_type: Option<&'static str>,
     /// When current phase started (epoch secs), for timeout detection.
     phase_started_at: i64,
-    /// When the last realtime extraction completed.
-    /// Used to give deep_analysis a window to run.
-    last_realtime_completed_at: i64,
     /// Conversation ID currently being deep-analyzed (for marking complete on Idle).
     current_deep_conv_id: Option<String>,
     /// Watermark targets for realtime extraction: (session_id, max_timestamp).
@@ -2937,16 +2934,24 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
 
     // Extraction status summary (debug)
     {
-        let es = state.extraction_state.read().await;
-        let slot_state = state.pty.get_status(MEMORY_SLOT_ID).await
+        let now = chrono::Utc::now().timestamp();
+        let fast_es = state.extraction_state.read().await;
+        let fast_slot = state.pty.get_status(MEMORY_SLOT_ID).await
             .map(|s| format!("{:?}", s.state))
             .unwrap_or_else(|| "not_spawned".to_string());
-        let age = chrono::Utc::now().timestamp() - es.phase_started_at;
+        let slow_es = state.slow_extraction_state.read().await;
+        let slow_slot = state.pty.get_status(MEMORY_SLOW_SLOT_ID).await
+            .map(|s| format!("{:?}", s.state))
+            .unwrap_or_else(|| "not_spawned".to_string());
         debug!(
-            slot = %slot_state,
-            extraction_phase = ?es.phase,
-            extraction_type = ?es.active_type,
-            phase_age = age,
+            fast_slot = %fast_slot,
+            fast_phase = ?fast_es.phase,
+            fast_type = ?fast_es.active_type,
+            fast_age = now - fast_es.phase_started_at,
+            slow_slot = %slow_slot,
+            slow_phase = ?slow_es.phase,
+            slow_type = ?slow_es.active_type,
+            slow_age = now - slow_es.phase_started_at,
             "autopilot: extraction status"
         );
     }
@@ -3762,6 +3767,120 @@ async fn check_deep_analysis(state: &AppState) {
     }
 }
 
+/// KB consolidation on slow lane (slot-memory-slow).
+/// Periodic (every 24h) KB dedup, merge, and cleanup.
+async fn check_kb_consolidation(state: &AppState) {
+    // Only run once per 24 hours
+    let now = chrono::Utc::now().timestamp();
+    let last = state.last_kb_consolidation_at.load(std::sync::atomic::Ordering::Relaxed);
+    if last > 0 && now - last < 86400 {
+        return;
+    }
+
+    // Yield to deep analysis if there's pending work
+    let has_deep_pending = state.mission.db()
+        .has_pending_deep_analysis(CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES)
+        .unwrap_or(false);
+    if has_deep_pending {
+        return;
+    }
+
+    // Gate: slow lane must be idle
+    if !check_extraction_gate(&state.slow_extraction_state, &state.mission, "kb_consolidation").await {
+        return;
+    }
+
+    // Ensure slow slot is spawned and idle
+    if !ensure_memory_slot_by_id(state, MEMORY_SLOW_SLOT_ID).await {
+        return;
+    }
+    let status = state.pty.get_status(MEMORY_SLOW_SLOT_ID).await;
+    match status {
+        Some(s) if s.state == SessionState::Idle => {}
+        _ => return,
+    }
+
+    info!("KB consolidation: starting periodic cleanup on slow lane");
+
+    let prompt = "[kb-consolidation] 定期 KB 整理任务。\n\n\
+        步骤:\n\
+        1. 调用 mission_kb_list 获取所有 KB 条目\n\
+        2. 识别重复/相似条目（相同主题，不同措辞）→ 合并为一条\n\
+        3. 识别过时条目（已被后续决策覆盖）→ 删除\n\
+        4. 识别可合并的碎片信息 → 整合为一条完整记录\n\
+        5. 报告操作：合并了 N 条、删除了 M 条\n\n\
+        规则:\n\
+        - 只操作 category: memory/preference/discovery\n\
+        - 不动 memory:bugfix（有自己的 GC 策略）\n\
+        - 保守操作：不确定是否重复就保留\n\
+        - 用 mission_kb_remember 写入合并后的新条目\n\
+        - 用 mission_kb_forget 删除已合并的旧条目";
+
+    // Generate task_id and tag session
+    let task_id = uuid::Uuid::new_v4().to_string();
+    if let Ok(Some(current_session)) = state.mission.db().get_slot_session(MEMORY_SLOW_SLOT_ID) {
+        let _ = state.mission.db().set_conversation_task_id(&current_session, &task_id);
+    }
+
+    // Record slot task for history tracking
+    let slot_task_id = uuid::Uuid::new_v4().to_string();
+    let slot_task = missiond_core::types::SlotTask {
+        id: slot_task_id.clone(),
+        slot_id: MEMORY_SLOW_SLOT_ID.to_string(),
+        task_type: "kb_consolidation".to_string(),
+        status: "pending".to_string(),
+        prompt_summary: Some("periodic KB dedup/merge/cleanup".to_string()),
+        source_sessions: None,
+        output_count: 0,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        started_at: None,
+        completed_at: None,
+        duration_ms: None,
+        error: None,
+        conversation_id: None,
+    };
+    let _ = state.mission.db().insert_slot_task(&slot_task);
+
+    // Set slow extraction state
+    {
+        let mut es = state.slow_extraction_state.write().await;
+        es.phase = ExtractionPhase::Sending;
+        es.active_type = Some("kb_consolidation");
+        es.phase_started_at = now;
+        es.current_task_id = Some(task_id);
+        es.current_slot_task_id = Some(slot_task_id.clone());
+    }
+
+    // Update last consolidation timestamp
+    state.last_kb_consolidation_at.store(now, std::sync::atomic::Ordering::Relaxed);
+
+    let pty = Arc::clone(&state.pty);
+    let extraction_state = Arc::clone(&state.slow_extraction_state);
+    let mission = Arc::clone(&state.mission);
+    tokio::spawn(async move {
+        match pty.send(MEMORY_SLOW_SLOT_ID, prompt, 900_000).await {
+            Ok(res) => {
+                info!(duration_ms = res.duration_ms, "KB consolidation send() returned");
+                let _ = mission.db().slot_task_set_running(&slot_task_id);
+                let mut es = extraction_state.write().await;
+                if es.phase == ExtractionPhase::Sending {
+                    es.phase = ExtractionPhase::WaitingForSlotIdle;
+                    es.phase_started_at = chrono::Utc::now().timestamp();
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "KB consolidation send() failed");
+                let _ = mission.db().slot_task_set_failed(&slot_task_id, &e.to_string());
+                let mut es = extraction_state.write().await;
+                es.phase = ExtractionPhase::Idle;
+                es.active_type = None;
+                es.current_task_id = None;
+                es.current_slot_task_id = None;
+            }
+        }
+    });
+}
+
 // ===== CLAUDE.md sync =====
 
 const MANAGED_START: &str = "<!-- missiond:managed:start -->";
@@ -4523,7 +4642,7 @@ async fn main() -> Result<()> {
             phase: ExtractionPhase::Idle,
             active_type: None,
             phase_started_at: 0,
-            last_realtime_completed_at: 0,
+
             current_deep_conv_id: None,
             watermark_targets: Vec::new(),
             current_task_id: None,
@@ -4533,7 +4652,7 @@ async fn main() -> Result<()> {
             phase: ExtractionPhase::Idle,
             active_type: None,
             phase_started_at: 0,
-            last_realtime_completed_at: 0,
+
             current_deep_conv_id: None,
             watermark_targets: Vec::new(),
             current_task_id: None,
@@ -4576,11 +4695,18 @@ async fn main() -> Result<()> {
                 }
             }
             _ = state.extraction_notify.notified() => {
-                // Event-driven: extraction just completed, immediately check for more pending work
+                // Fast lane event-driven: realtime extraction completed, check for more
                 if !state.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     check_realtime_extraction(&state).await;
+                }
+            }
+            _ = state.slow_extraction_notify.notified() => {
+                // Slow lane event-driven: deep analysis/consolidation completed, check for more
+                if !state.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     check_deep_analysis(&state).await;
+                    check_kb_consolidation(&state).await;
                 }
             }
             event = conv_logger_rx.recv() => {
@@ -4655,30 +4781,34 @@ async fn main() -> Result<()> {
                         state.mission.db().clear_slot_session(&slot_id);
                     }
                     Ok(missiond_core::ManagerEvent::StateChange { ref slot_id, new_state, prev_state }) => {
-                        if slot_id == MEMORY_SLOT_ID {
-                            // Track busy-since for stuck detection (Phase 3)
+                        // Route memory slot state changes to the correct lane
+                        let lane = if slot_id == MEMORY_SLOT_ID {
+                            Some(("fast", &state.extraction_state, &state.memory_slot_busy_since, &state.extraction_notify))
+                        } else if slot_id == MEMORY_SLOW_SLOT_ID {
+                            Some(("slow", &state.slow_extraction_state, &state.slow_slot_busy_since, &state.slow_extraction_notify))
+                        } else {
+                            None
+                        };
+                        if let Some((lane_name, es_lock, busy_since, notify)) = lane {
                             if new_state == SessionState::Idle {
-                                state.memory_slot_busy_since.store(0, std::sync::atomic::Ordering::SeqCst);
+                                busy_since.store(0, std::sync::atomic::Ordering::SeqCst);
                                 // Release extraction gate when slot returns to Idle
-                                let mut es = state.extraction_state.write().await;
+                                let mut es = es_lock.write().await;
                                 if es.phase == ExtractionPhase::WaitingForSlotIdle || es.phase == ExtractionPhase::Sending {
                                     let phase_age = chrono::Utc::now().timestamp() - es.phase_started_at;
                                     // Ignore spurious Idle transitions from slot spawn (< 3s)
                                     if phase_age < 3 {
-                                        debug!(phase_age, "Ignoring early Idle transition (likely spawn init)");
+                                        debug!(lane = lane_name, phase_age, "Ignoring early Idle transition (likely spawn init)");
                                     } else {
                                         let is_realtime = matches!(es.active_type, Some("realtime"));
                                         info!(
+                                            lane = lane_name,
                                             extraction_type = ?es.active_type,
                                             phase_age,
                                             "Extraction complete: slot returned to Idle"
                                         );
+                                        // Fast lane: advance watermarks for processed sessions
                                         if is_realtime {
-                                            es.last_realtime_completed_at = chrono::Utc::now().timestamp();
-                                        }
-                                        // Auto-commit on extraction completion
-                                        if is_realtime {
-                                            // Realtime: advance watermarks for processed sessions
                                             if !es.watermark_targets.is_empty() {
                                                 let db = state.mission.db();
                                                 for (session_id, timestamp) in &es.watermark_targets {
@@ -4687,8 +4817,9 @@ async fn main() -> Result<()> {
                                                 info!(sessions = es.watermark_targets.len(), "Realtime: advanced watermarks");
                                                 es.watermark_targets.clear();
                                             }
-                                        } else {
-                                            // Deep analysis: mark conversation as analyzed
+                                        }
+                                        // Slow lane: mark deep analysis conversation as analyzed
+                                        if matches!(es.active_type, Some("deep_analysis")) {
                                             if let Some(conv_id) = es.current_deep_conv_id.take() {
                                                 if let Err(e) = state.mission.db().mark_analysis_complete(&conv_id, CURRENT_ANALYSIS_VERSION) {
                                                     warn!(conv_id = %conv_id, error = %e, "Failed to mark analysis complete");
@@ -4705,12 +4836,12 @@ async fn main() -> Result<()> {
                                         es.active_type = None;
                                         es.current_task_id = None;
                                         es.current_slot_task_id = None;
-                                        // Event-driven: signal main loop to re-check extractions
-                                        state.extraction_notify.notify_one();
+                                        // Event-driven: signal main loop to re-check this lane
+                                        notify.notify_one();
                                     }
                                 }
                             } else if prev_state == SessionState::Idle {
-                                state.memory_slot_busy_since.store(
+                                busy_since.store(
                                     chrono::Utc::now().timestamp(),
                                     std::sync::atomic::Ordering::SeqCst,
                                 );
