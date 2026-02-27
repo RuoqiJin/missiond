@@ -731,7 +731,7 @@ impl AppState {
                     .or(slot.config.mcp_config.clone())
                     .map(PathBuf::from);
 
-                let (extra_env, session_file) = build_slot_tracking_env(&slot_id, slot.config.env.as_ref());
+                let (extra_env, session_file) = build_slot_tracking_env(&slot_id, slot.config.env.as_ref()).await;
                 let wait = wait_for_idle.unwrap_or(false);
                 let info = self
                     .pty
@@ -3182,7 +3182,7 @@ async fn check_slot_context_levels(state: &AppState) {
                     cwd: slot.config.cwd.as_deref().map(PathBuf::from),
                 };
                 let mcp_config = slot.config.mcp_config.clone().map(PathBuf::from);
-                let (extra_env, session_file) = build_slot_tracking_env(&slot.config.id, slot.config.env.as_ref());
+                let (extra_env, session_file) = build_slot_tracking_env(&slot.config.id, slot.config.env.as_ref()).await;
                 match state.pty.spawn(&pty_slot, PTYSpawnOptions {
                     auto_restart: false,
                     wait_for_idle: true,
@@ -3362,7 +3362,7 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
                 };
                 let slot_env = slot.config.env.as_ref();
                 let mcp_config = slot.config.mcp_config.map(PathBuf::from);
-                let (extra_env, session_file) = build_slot_tracking_env(&slot_id, slot_env);
+                let (extra_env, session_file) = build_slot_tracking_env(&slot_id, slot_env).await;
                 if let Err(e) = state.pty.spawn(&pty_slot, PTYSpawnOptions {
                     auto_restart: false,
                     wait_for_idle: true,
@@ -3540,7 +3540,7 @@ fn detect_compaction(
 /// Merges slot-level custom env (from slots.yaml `env:` field) with tracking vars.
 /// Supports `${secret:path}` syntax — resolved via `xjp secret get <path>` at spawn time.
 /// Returns (extra_env, session_file_path).
-fn build_slot_tracking_env(slot_id: &str, slot_env: Option<&HashMap<String, String>>) -> (HashMap<String, String>, PathBuf) {
+async fn build_slot_tracking_env(slot_id: &str, slot_env: Option<&HashMap<String, String>>) -> (HashMap<String, String>, PathBuf) {
     let session_file = std::env::temp_dir().join(format!("missiond-session-{}.txt", slot_id));
     // Remove stale file from previous spawn
     let _ = std::fs::remove_file(&session_file);
@@ -3551,7 +3551,7 @@ fn build_slot_tracking_env(slot_id: &str, slot_env: Option<&HashMap<String, Stri
     if let Some(env_map) = slot_env {
         info!(slot_id, env_count = env_map.len(), "Injecting slot-level custom env");
         for (key, value) in env_map {
-            let resolved = resolve_env_value(value);
+            let resolved = resolve_env_value(value).await;
             let is_secret = value.starts_with("${secret:");
             if is_secret {
                 info!(slot_id, key, "Resolved secret env var");
@@ -3575,18 +3575,23 @@ fn build_slot_tracking_env(slot_id: &str, slot_env: Option<&HashMap<String, Stri
 }
 
 /// Resolve `${secret:path}` references in env values via `xjp secret get`.
-/// Falls back to the raw value on any error.
-fn resolve_env_value(value: &str) -> String {
+/// Falls back to the raw value on any error. Uses async process to avoid blocking tokio executor.
+async fn resolve_env_value(value: &str) -> String {
     if !value.starts_with("${secret:") || !value.ends_with('}') {
         return value.to_string();
     }
 
     let path = &value[9..value.len() - 1]; // extract "minimax/API_KEY_DOMESTIC"
-    match std::process::Command::new("xjp")
-        .args(["secret", "get", "--raw", path])
-        .output()
-    {
-        Ok(output) if output.status.success() => {
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::process::Command::new("xjp")
+            .args(["secret", "get", "--raw", path])
+            .output(),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(output)) if output.status.success() => {
             let secret = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if secret.is_empty() {
                 warn!(path, "xjp secret get returned empty, using raw value");
@@ -3596,13 +3601,17 @@ fn resolve_env_value(value: &str) -> String {
                 secret
             }
         }
-        Ok(output) => {
+        Ok(Ok(output)) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             warn!(path, %stderr, "xjp secret get failed, using raw value");
             value.to_string()
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             warn!(path, error = %e, "Failed to run xjp secret get, using raw value");
+            value.to_string()
+        }
+        Err(_) => {
+            warn!(path, "xjp secret get timed out (10s), using raw value");
             value.to_string()
         }
     }
@@ -3700,7 +3709,7 @@ async fn ensure_memory_slot_by_id(state: &AppState, slot_id: &str) -> bool {
     };
     let slot_env = slot.config.env.as_ref();
     let mcp_config = slot.config.mcp_config.map(PathBuf::from);
-    let (extra_env, session_file) = build_slot_tracking_env(slot_id, slot_env);
+    let (extra_env, session_file) = build_slot_tracking_env(slot_id, slot_env).await;
     match state.pty.spawn(&pty_slot, PTYSpawnOptions {
         auto_restart: true,
         wait_for_idle: true,
