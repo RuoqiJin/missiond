@@ -705,20 +705,18 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_reachability",
-            "Multi-channel reachability probe for a server. Runs ICMP ping (LAN + public), \
-             Tailscale status, TCP SSH port probe, and deploy agent health check IN PARALLEL. \
-             Use when deploy agent is offline and you need to determine machine reachability.",
+            "多通道服务器可达性探测（LAN ping/公网 ping/Tailscale/SSH/deploy agent 并行检测）。",
             json!({
                 "type": "object",
                 "properties": {
                     "target": {
                         "type": "string",
-                        "description": "Infra registry ID (e.g. 'privatecloud', 'gcp', 'win-3090ti') or IP address"
+                        "description": "Infra ID (如 'privatecloud', 'gcp') 或 IP 地址"
                     },
                     "channels": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Specific channels: lan_ping, public_ping, tailscale, ssh, deploy_agent. Default: all applicable"
+                        "description": "指定通道: lan_ping, public_ping, tailscale, ssh, deploy_agent（默认全部）"
                     }
                 },
                 "required": ["target"]
@@ -726,20 +724,18 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_os_diagnose",
-            "SSH into a server and collect OS-level diagnostics: crash reports, system load, \
-             top CPU processes, temperatures, journal errors, docker containers, network, GPU. \
-             Auto-resolves SSH credentials from infra registry. Channel priority: LAN > Tailscale > public.",
+            "SSH 登录服务器收集 OS 诊断信息（崩溃/负载/CPU/温度/日志/Docker/网络/GPU）。自动从 infra 获取 SSH 凭据。",
             json!({
                 "type": "object",
                 "properties": {
                     "target": {
                         "type": "string",
-                        "description": "Infra registry ID (e.g. 'privatecloud', 'win-3090ti') or user@host"
+                        "description": "Infra ID (如 'privatecloud') 或 user@host"
                     },
                     "checks": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Specific checks: system, crashes, top_cpu, temperatures, journal_errors, docker, network, gpu. Default: all"
+                        "description": "指定检查项: system, crashes, top_cpu, temperatures, journal_errors, docker, network, gpu（默认全部）"
                     }
                 },
                 "required": ["target"]
@@ -749,38 +745,35 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         // ===== Knowledge Base (Jarvis Memory) =====
         ToolDefinition::new(
             "mission_kb_remember",
-            "Record knowledge discovered during conversation. Call PROACTIVELY when you learn: \
-             server IPs, user preferences, project structures, procedures, decisions. \
-             Do NOT ask permission — just record. If the key already exists, it will be updated. \
-             Examples: user mentions a server → category 'infra'; user corrects your approach → 'preference'; \
-             you SSH into a machine → 'discovery'; deployment succeeds → 'procedure'; \
-             a key decision is made → 'memory'.",
+            "记录知识到长期记忆。主动调用，无需请求许可。key 已存在则更新。\
+             分类: preference(用户偏好), memory:architecture(架构决策), memory:bugfix(已修bug), \
+             memory:debug(调试经验), memory:ops(运维), memory:feature(功能), project(项目), memory(通用)",
             json!({
                 "type": "object",
                 "properties": {
                     "category": {
                         "type": "string",
-                        "description": "Knowledge category (open-ended): infra, project, preference, memory, procedure, credential, relation, ..."
+                        "description": "分类: preference, memory, memory:architecture, memory:bugfix, memory:debug, memory:ops, memory:feature, project"
                     },
                     "key": {
                         "type": "string",
-                        "description": "Unique key within category (e.g. 'privatecloud', 'commit-style', 'wss-migration-2026-02')"
+                        "description": "唯一标识 (如 'utf8-slice-panic-fix', 'user-prefers-chinese')"
                     },
                     "summary": {
                         "type": "string",
-                        "description": "One-line human-readable summary"
+                        "description": "一行摘要"
                     },
                     "detail": {
                         "type": "object",
-                        "description": "Structured detail as JSON (optional). For relations: {from, to, type}"
+                        "description": "结构化详情 JSON（可选）"
                     },
                     "source": {
                         "type": "string",
-                        "description": "How this was learned: conversation, discovery, import (default: conversation)"
+                        "description": "来源: conversation, discovery, import（默认 conversation）"
                     },
                     "confidence": {
                         "type": "number",
-                        "description": "Confidence 0.0-1.0 (default: 1.0). Lower for inferred knowledge."
+                        "description": "置信度 0.0-1.0（默认 1.0）"
                     }
                 },
                 "required": ["category", "key", "summary"]
@@ -788,13 +781,13 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_kb_forget",
-            "Delete a knowledge entry by key. Use when information is confirmed outdated or wrong.",
+            "删除知识条目。信息过时或错误时使用。",
             json!({
                 "type": "object",
                 "properties": {
                     "key": {
                         "type": "string",
-                        "description": "The key to delete"
+                        "description": "要删除的 key"
                     }
                 },
                 "required": ["key"]
@@ -802,19 +795,17 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_kb_search",
-            "Search the knowledge base BEFORE guessing or asking the user. \
-             If the user mentions a server, project, or concept — search here first. \
-             This is your long-term memory across all conversations.",
+            "搜索知识库（长期记忆）。遇到不确定的信息时先搜这里再回答。支持全文检索。",
             json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Full-text search query"
+                        "description": "搜索关键词"
                     },
                     "category": {
                         "type": "string",
-                        "description": "Filter by category (optional)"
+                        "description": "按分类过滤（可选）"
                     }
                 },
                 "required": ["query"]
@@ -822,13 +813,13 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_kb_get",
-            "Get a single knowledge entry by exact key.",
+            "按 key 精确查询单个知识条目。",
             json!({
                 "type": "object",
                 "properties": {
                     "key": {
                         "type": "string",
-                        "description": "The exact key to look up"
+                        "description": "精确 key"
                     }
                 },
                 "required": ["key"]
@@ -836,32 +827,30 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_kb_list",
-            "List all knowledge entries, optionally filtered by category. Supports composite categories: \
-             querying 'memory' also returns 'memory:architecture', 'memory:changelog', etc.",
+            "列出所有知识条目。支持复合分类：查 'memory' 同时返回 'memory:architecture' 等子分类。",
             json!({
                 "type": "object",
                 "properties": {
                     "category": {
                         "type": "string",
-                        "description": "Filter by category (e.g. infra, project, preference, memory, memory:architecture)"
+                        "description": "按分类过滤 (如 preference, memory, memory:architecture)"
                     }
                 }
             }),
         ),
         ToolDefinition::new(
             "mission_kb_import",
-            "Import knowledge from external sources. Currently supports 'servers_yaml' format \
-             to migrate servers.yaml into KB entries.",
+            "从外部源导入知识。支持 servers_yaml 格式。",
             json!({
                 "type": "object",
                 "properties": {
                     "format": {
                         "type": "string",
-                        "description": "Import format: servers_yaml, json"
+                        "description": "导入格式: servers_yaml, json"
                     },
                     "path": {
                         "type": "string",
-                        "description": "File path (optional, uses default location if omitted)"
+                        "description": "文件路径（可选，不填用默认位置）"
                     }
                 },
                 "required": ["format"]
@@ -870,24 +859,21 @@ pub fn all_tools() -> Vec<ToolDefinition> {
 
         ToolDefinition::new(
             "mission_kb_discover",
-            "Probe a remote host via SSH to discover its specs (OS, CPU, RAM, disk, docker containers, \
-             network). Call this PROACTIVELY after you SSH into a new server or when the user mentions \
-             a server you haven't profiled yet. Results are automatically saved to KB as category='infra'. \
-             Accepts host (user@ip or infra key), optional port and password. If no password, tries SSH key auth.",
+            "SSH 探测远程主机硬件配置（OS/CPU/RAM/磁盘/Docker/网络），结果自动存入 KB。",
             json!({
                 "type": "object",
                 "properties": {
                     "host": {
                         "type": "string",
-                        "description": "SSH target: user@ip, ip, or infra registry key (e.g. 'privatecloud', 'root@10.0.0.1')"
+                        "description": "SSH 目标: user@ip 或 infra key (如 'privatecloud')"
                     },
                     "port": {
                         "type": "integer",
-                        "description": "SSH port (default 22)"
+                        "description": "SSH 端口（默认 22）"
                     },
                     "password": {
                         "type": "string",
-                        "description": "SSH password (if not provided, uses key-based auth)"
+                        "description": "SSH 密码（不填用密钥认证）"
                     }
                 },
                 "required": ["host"]
@@ -895,20 +881,18 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_kb_gc",
-            "Knowledge governance: detect stale entries, duplicates, and show KB health stats. \
-             Actions: 'stats' = overview, 'stale' = find unused entries, 'duplicates' = find similar entries (Jaccard ≥0.6), \
-             'clean_stale' = auto-delete stale entries, 'clean_duplicates' = auto-delete lower-value duplicate. \
-             Call periodically to keep the knowledge base clean and accurate.",
+            "知识库治理: 检测过期/重复条目。stats=概览, stale=找未使用, duplicates=找重复, \
+             clean_stale=自动清理过期, clean_duplicates=自动去重。",
             json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "description": "Governance action: stats, stale, duplicates, clean_stale, clean_duplicates"
+                        "description": "操作: stats, stale, duplicates, clean_stale, clean_duplicates"
                     },
                     "days": {
                         "type": "integer",
-                        "description": "For 'stale' action: number of days threshold (default 30)"
+                        "description": "stale 的天数阈值（默认 30）"
                     }
                 },
                 "required": ["action"]
@@ -918,48 +902,43 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         // ===== KB Analysis (via external AI) =====
         ToolDefinition::new(
             "mission_kb_analyze",
-            "Analyze KB entries using Gemini via AI router. Three modes: \
-             'overview' = macro quality assessment with dedup+reclassify suggestions (default), \
-             'consolidation_plan' = generate executable merge/delete/update/distill JSON actions, \
-             'custom' = user-defined analysis with custom_prompt. \
-             Supports Board-aware consolidation: set include_board_context=true to inject Board tasks \
-             so the AI can protect Open-task KB and distill Done-task KB. \
-             Supports pagination (limit/offset) and category filtering.",
+            "用 Gemini 分析 KB 质量。overview=宏观评估+去重/重分类建议, \
+             consolidation_plan=生成可执行的合并/删除 JSON, custom=自定义分析。\
+             支持分页和分类过滤。include_board_context=true 注入 Board 任务上下文。",
             json!({
                 "type": "object",
                 "properties": {
                     "mode": {
                         "type": "string",
-                        "description": "Analysis mode: 'overview' (default), 'consolidation_plan', 'custom'"
+                        "description": "分析模式: overview(默认), consolidation_plan, custom"
                     },
                     "target_category": {
                         "type": "string",
-                        "description": "Filter by category (supports prefix: 'memory' includes 'memory:bugfix' etc.)"
+                        "description": "按分类过滤（支持前缀匹配: 'memory' 包含 'memory:bugfix' 等）"
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max entries per request (default: 500)"
+                        "description": "每次最大条目数（默认 500）"
                     },
                     "offset": {
                         "type": "integer",
-                        "description": "Pagination offset (default: 0)"
+                        "description": "分页偏移（默认 0）"
                     },
                     "include_board_context": {
                         "type": "boolean",
-                        "description": "Inject Board tasks as context for Board-aware consolidation (default: false). \
-                         When true, consolidation_plan mode adds lifecycle rules: protect Open-task KB, distill Done-task KB."
+                        "description": "注入 Board 任务上下文（默认 false）"
                     },
                     "custom_prompt": {
                         "type": "string",
-                        "description": "Custom analysis prompt (only for mode='custom')"
+                        "description": "自定义分析 prompt（仅 mode=custom）"
                     },
                     "model": {
                         "type": "string",
-                        "description": "Model to use (default: gemini-3.1-pro)"
+                        "description": "使用的模型（默认 gemini-3.1-pro）"
                     },
                     "max_tokens": {
                         "type": "integer",
-                        "description": "Max response tokens (default: 16384)"
+                        "description": "最大响应 token 数（默认 16384）"
                     }
                 }
             }),
@@ -968,10 +947,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         // ===== Router Chat =====
         ToolDefinition::new(
             "mission_router_chat",
-            "Multi-turn chat with AI models via the XiaojinPro router. \
-             Supports conversation history (messages array) and optional auto-context injection (board/KB data). \
-             Use this to have extended conversations with Gemini or other models. \
-             The caller manages conversation history — pass the full messages array each time.",
+            "通过 AI 路由器与 Gemini 等模型多轮对话。调用方管理对话历史，每次传完整 messages 数组。",
             json!({
                 "type": "object",
                 "properties": {
@@ -985,24 +961,24 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                             },
                             "required": ["role", "content"]
                         },
-                        "description": "Conversation messages array. Include full history for multi-turn."
+                        "description": "对话消息数组（多轮时传完整历史）"
                     },
                     "context": {
                         "type": "string",
                         "enum": ["board", "kb", "both", "none"],
-                        "description": "Auto-inject context into the first user message: 'board' (task board), 'kb' (knowledge base), 'both', or 'none' (default: none)"
+                        "description": "自动注入上下文: board(任务板), kb(知识库), both, none（默认 none）"
                     },
                     "model": {
                         "type": "string",
-                        "description": "Model to use (default: gemini-3.1-pro)"
+                        "description": "模型（默认 gemini-3.1-pro）"
                     },
                     "max_tokens": {
                         "type": "integer",
-                        "description": "Max response tokens (default: 16384)"
+                        "description": "最大响应 token 数（默认 16384）"
                     },
                     "search": {
                         "type": "boolean",
-                        "description": "Enable Google Search grounding (Gemini models only). When true, Gemini can search the web for up-to-date info. Cost: ~$0.035/search. Default: false"
+                        "description": "启用 Google 搜索增强（仅 Gemini，默认 false）"
                     }
                 },
                 "required": ["messages"]
@@ -1084,40 +1060,38 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         // ===== Conversation Log =====
         ToolDefinition::new(
             "mission_conversation_list",
-            "List conversation sessions stored in the database. Shows session ID, project, message count, \
-             start time, and analysis status. Use status filter to find active or completed sessions.",
+            "列出对话会话。显示 ID、项目、消息数、开始时间。可按状态过滤。",
             json!({
                 "type": "object",
                 "properties": {
                     "status": {
                         "type": "string",
-                        "description": "Filter by status: active, completed (omit for all)"
+                        "description": "按状态过滤: active, completed（不传返回全部）"
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum number of conversations to return (default 20)"
+                        "description": "最大返回数（默认 20）"
                     }
                 }
             }),
         ),
         ToolDefinition::new(
             "mission_conversation_get",
-            "Get messages from a conversation session. Returns the conversation metadata and messages. \
-             Use tail parameter to control how many recent messages to return.",
+            "获取对话会话的消息内容。用 tail 控制返回最近几条。",
             json!({
                 "type": "object",
                 "properties": {
                     "sessionId": {
                         "type": "string",
-                        "description": "Conversation session ID"
+                        "description": "会话 ID"
                     },
                     "tail": {
                         "type": "integer",
-                        "description": "Number of recent messages to return (default 50)"
+                        "description": "返回最近 N 条消息（默认 50）"
                     },
                     "sinceId": {
                         "type": "integer",
-                        "description": "Return messages with ID greater than this (for incremental fetch)"
+                        "description": "增量拉取：只返回 ID 大于此值的消息"
                     }
                 },
                 "required": ["sessionId"]
@@ -1125,18 +1099,17 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_conversation_search",
-            "Search conversation messages by content. Searches across all sessions. \
-             Returns matching messages with session context.",
+            "按内容搜索对话消息（跨会话），返回匹配消息及上下文。",
             json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search query (substring match)"
+                        "description": "搜索关键词"
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum number of results (default 20)"
+                        "description": "最大返回数（默认 20）"
                     }
                 },
                 "required": ["query"]
