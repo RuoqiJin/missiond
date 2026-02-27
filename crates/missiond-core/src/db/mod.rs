@@ -668,6 +668,17 @@ impl MissionDB {
         Ok(tasks)
     }
 
+    /// Requeue running tasks assigned to a slot (e.g. after slot restart).
+    /// Resets status to Queued and clears slot_id/started_at so they get re-dispatched.
+    pub fn requeue_running_tasks_for_slot(&self, slot_id: &str) -> SqliteResult<usize> {
+        let conn = self.conn();
+        let n = conn.execute(
+            "UPDATE tasks SET status = 'queued', slot_id = NULL, started_at = NULL WHERE status = 'running' AND slot_id = ?",
+            params![slot_id],
+        )?;
+        Ok(n)
+    }
+
     /// Get all tasks (for listing)
     pub fn get_all_tasks(&self, limit: i64) -> SqliteResult<Vec<Task>> {
         let conn = self.conn();
