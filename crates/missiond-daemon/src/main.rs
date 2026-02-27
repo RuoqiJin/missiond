@@ -69,6 +69,29 @@ const MAX_ANALYSIS_RETRIES: i32 = 2;
 /// Safety valve: max time to wait for slot to return to Idle after send() returns.
 const MAX_WAIT_FOR_IDLE_SECS: i64 = 900;
 
+/// Per-slot JSONL progress tracking: tool call counts, current tool, etc.
+/// Populated from tool_use/tool_result events, queried by mission_pty_status.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SlotProgress {
+    session_id: String,
+    tool_counts: HashMap<String, u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_tool: Option<CurrentToolInfo>,
+    total_calls: u32,
+    total_results: u32,
+    error_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_activity: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CurrentToolInfo {
+    name: String,
+    started_at: String,
+}
+
 #[derive(Clone)]
 struct AppState {
     mission: Arc<MissionControl>,
@@ -110,6 +133,8 @@ struct AppState {
     jarvis_trace: missiond_core::ws::JarvisTraceStore,
     /// Last complete response per slot (for submit task result tracking).
     slot_last_responses: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
+    /// Per-slot JSONL progress tracking (tool call counts, current tool, etc.).
+    slot_progress: Arc<tokio::sync::RwLock<HashMap<String, SlotProgress>>>,
     /// Shared HTTP client for Router API calls (connection pool reuse).
     http_client: reqwest::Client,
 }
@@ -880,6 +905,15 @@ impl AppState {
                                                 obj["lastActivitySecsAgo"] = json!(secs_ago);
                                             }
                                         }
+                                    }
+                                }
+                            }
+                            // Attach JSONL progress stats (tool call counts, current tool)
+                            {
+                                let progress = self.slot_progress.read().await;
+                                if let Some(sp) = progress.get(&slot_id) {
+                                    if sp.total_calls > 0 {
+                                        obj["progress"] = serde_json::to_value(sp).unwrap_or_default();
                                     }
                                 }
                             }
@@ -5463,6 +5497,7 @@ async fn main() -> Result<()> {
         screenshot_broker: Arc::clone(&screenshot_broker),
         jarvis_trace: ws_server.jarvis_trace_store().clone(),
         slot_last_responses: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        slot_progress: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         http_client: reqwest::Client::builder()
             .pool_max_idle_per_host(10)
             .timeout(std::time::Duration::from_secs(180))
@@ -5553,7 +5588,53 @@ async fn main() -> Result<()> {
                             }
                         }
 
-                        handle_new_messages(&state, session_id.clone(), project_path, jsonl_path, messages.clone(), is_pty);
+                        // --- Progress tracking: extract tool_use/tool_result for in-memory stats ---
+                        if is_pty {
+                            if let Ok(Some(slot_id)) = state.mission.db().get_slot_for_session(&session_id) {
+                                let mut progress = state.slot_progress.write().await;
+                                let sp = progress.entry(slot_id).or_default();
+                                // Session switch detection: reset counters when session changes
+                                if sp.session_id != session_id {
+                                    *sp = SlotProgress { session_id: session_id.clone(), ..Default::default() };
+                                }
+                                for msg in &messages {
+                                    if let Some(blocks) = msg.message.content.as_array() {
+                                        for block in blocks {
+                                            match block.get("type").and_then(|t| t.as_str()) {
+                                                Some("tool_use") => {
+                                                    let name = block.get("name")
+                                                        .and_then(|n| n.as_str())
+                                                        .unwrap_or("unknown")
+                                                        .to_string();
+                                                    *sp.tool_counts.entry(name.clone()).or_insert(0) += 1;
+                                                    sp.total_calls += 1;
+                                                    sp.current_tool = Some(CurrentToolInfo {
+                                                        name,
+                                                        started_at: msg.timestamp.clone(),
+                                                    });
+                                                    sp.last_activity = Some(msg.timestamp.clone());
+                                                }
+                                                Some("tool_result") => {
+                                                    sp.total_results += 1;
+                                                    sp.current_tool = None;
+                                                    if block.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false) {
+                                                        sp.error_count += 1;
+                                                    }
+                                                    sp.last_activity = Some(msg.timestamp.clone());
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Filter out tool_use before DB insertion (keep existing DB behavior)
+                        let db_messages: Vec<_> = messages.into_iter()
+                            .filter(|m| m.message_type != "tool_use")
+                            .collect();
+                        handle_new_messages(&state, session_id.clone(), project_path, jsonl_path, db_messages, is_pty);
 
                         // Transfer task_id AFTER conversation creation (so the row exists)
                         if let Some(tid) = compaction_task_id {
