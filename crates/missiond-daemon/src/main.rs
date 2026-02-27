@@ -104,6 +104,8 @@ struct AppState {
     screenshot_broker: Arc<missiond_core::ws::ScreenshotBroker>,
     /// Jarvis request trace store for debugging.
     jarvis_trace: missiond_core::ws::JarvisTraceStore,
+    /// Last complete response per slot (for submit task result tracking).
+    slot_last_responses: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
 }
 
 fn default_mission_home() -> PathBuf {
@@ -5248,6 +5250,7 @@ async fn main() -> Result<()> {
         slot_fail_counts: Arc::new(std::sync::Mutex::new(HashMap::new())),
         screenshot_broker: Arc::clone(&screenshot_broker),
         jarvis_trace: ws_server.jarvis_trace_store().clone(),
+        slot_last_responses: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
     };
 
     // Autopilot scheduler + IPC server via select
@@ -5345,6 +5348,10 @@ async fn main() -> Result<()> {
             pty_event = pty_logger_rx.recv() => {
                 match pty_event {
                     Ok(missiond_core::ManagerEvent::TextComplete { slot_id, turn_id, content, timestamp }) => {
+                        // Save last response for submit task result tracking
+                        if !content.is_empty() {
+                            state.slot_last_responses.write().await.insert(slot_id.clone(), content.clone());
+                        }
                         handle_pty_text_complete(&state, slot_id, turn_id, content, timestamp);
                     }
                     Ok(missiond_core::ManagerEvent::Exited { slot_id, exit_code }) => {
@@ -5429,14 +5436,23 @@ async fn main() -> Result<()> {
                         if new_state == SessionState::Idle && prev_state != SessionState::Idle {
                             if let Ok(running_tasks) = state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Running) {
                                 let now = chrono::Utc::now().timestamp_millis();
+                                // Get last response from this slot (if any)
+                                let last_resp = state.slot_last_responses.write().await.remove(slot_id.as_str());
                                 for task in &running_tasks {
                                     if task.slot_id.as_deref() == Some(slot_id.as_str()) {
+                                        let result_text = last_resp.clone().unwrap_or_else(|| "completed".to_string());
+                                        // Truncate to 4KB to avoid bloating the tasks table
+                                        let result_text = if result_text.len() > 4096 {
+                                            format!("{}...(truncated)", &result_text[..4096])
+                                        } else {
+                                            result_text
+                                        };
                                         let _ = state.mission.db().update_task(
                                             &task.id,
                                             &missiond_core::types::TaskUpdate {
                                                 status: Some(missiond_core::types::TaskStatus::Done),
                                                 finished_at: Some(now),
-                                                result: Some("completed".to_string()),
+                                                result: Some(result_text),
                                                 ..Default::default()
                                             },
                                         );
