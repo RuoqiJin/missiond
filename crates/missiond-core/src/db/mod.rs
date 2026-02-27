@@ -606,13 +606,26 @@ impl MissionDB {
     /// Get a task by ID
     pub fn get_task(&self, id: &str) -> SqliteResult<Option<Task>> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT * FROM tasks WHERE id = ?")?;
-        let mut rows = stmt.query(params![id])?;
-
-        if let Some(row) = rows.next()? {
-            Ok(Some(Self::row_to_task(row)?))
+        // Support short ID prefix matching (like git short hashes)
+        if id.len() < 36 {
+            let prefix = format!("{}%", id);
+            let mut stmt = conn.prepare("SELECT * FROM tasks WHERE id LIKE ? ORDER BY created_at DESC LIMIT 2")?;
+            let tasks: Vec<Task> = stmt
+                .query_map(params![prefix], |row| Self::row_to_task(row))?
+                .filter_map(|r| r.ok())
+                .collect();
+            match tasks.len() {
+                1 => Ok(Some(tasks.into_iter().next().unwrap())),
+                _ => Ok(None), // 0 = not found, 2+ = ambiguous
+            }
         } else {
-            Ok(None)
+            let mut stmt = conn.prepare("SELECT * FROM tasks WHERE id = ?")?;
+            let mut rows = stmt.query(params![id])?;
+            if let Some(row) = rows.next()? {
+                Ok(Some(Self::row_to_task(row)?))
+            } else {
+                Ok(None)
+            }
         }
     }
 
@@ -1716,7 +1729,7 @@ impl MissionDB {
 
     /// Get a knowledge entry by key
     pub fn kb_get(&self, key: &str) -> SqliteResult<Option<KnowledgeEntry>> {
-        let conn = self.read_conn();
+        let conn = self.conn(); // Need write conn for access_count update
         let mut stmt = conn.prepare(
             "SELECT * FROM knowledge WHERE key = ?1"
         )?;
@@ -2227,19 +2240,63 @@ impl MissionDB {
     }
 
     /// Count distinct sessions with pending realtime messages.
-    pub fn count_pending_realtime(&self, today: &str) -> SqliteResult<i64> {
+    pub fn count_pending_realtime(&self) -> SqliteResult<i64> {
         let conn = self.read_conn();
         conn.query_row(
             "SELECT COUNT(DISTINCT c.id) FROM conversations c
              JOIN conversation_messages m ON c.id = m.session_id
              WHERE c.slot_id IS NULL
                AND c.id NOT LIKE 'agent-%'
-               AND m.timestamp >= ?1
-               AND m.timestamp > COALESCE(c.realtime_forwarded_at, ?1)
+               AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)
                AND m.role IN ('user', 'assistant')",
-            params![today],
+            [],
             |row| row.get(0),
         )
+    }
+
+    /// Per-session pending realtime message summary (session_id, msg_count, oldest_timestamp).
+    pub fn pending_realtime_detail(&self) -> SqliteResult<Vec<(String, i64, String)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT c.id, COUNT(*) as cnt, MIN(m.timestamp) as oldest
+             FROM conversations c
+             JOIN conversation_messages m ON c.id = m.session_id
+             WHERE c.slot_id IS NULL
+               AND c.id NOT LIKE 'agent-%'
+               AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)
+               AND m.role IN ('user', 'assistant')
+             GROUP BY c.id
+             ORDER BY cnt DESC
+             LIMIT 20"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))
+        })?;
+        let mut result = Vec::new();
+        for r in rows { result.push(r?); }
+        Ok(result)
+    }
+
+    /// Per-conversation pending deep analysis summary (id, ended_at, retries).
+    pub fn pending_deep_detail(&self, current_version: i32, max_retries: i32) -> SqliteResult<Vec<(String, String, i32)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, COALESCE(ended_at, ''), analysis_retries FROM conversations
+             WHERE status = 'completed'
+               AND slot_id IS NULL
+               AND id NOT LIKE 'agent-%'
+               AND ended_at < datetime('now', '-5 minutes')
+               AND analysis_retries < ?1
+               AND (analyzed_at IS NULL OR analysis_version < ?2)
+             ORDER BY ended_at ASC
+             LIMIT 20"
+        )?;
+        let rows = stmt.query_map(params![max_retries, current_version], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i32>(2)?))
+        })?;
+        let mut result = Vec::new();
+        for r in rows { result.push(r?); }
+        Ok(result)
     }
 
     /// Mark a conversation's deep analysis as complete with the given version.
@@ -2592,7 +2649,7 @@ impl MissionDB {
 
     /// Get pending USER-ONLY messages for user-voice extraction.
     /// Same logic as get_pending_memory_messages but only returns role='user'.
-    pub fn get_pending_user_voice_messages(&self, today: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
+    pub fn get_pending_user_voice_messages(&self) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT m.*, COALESCE(c.project, '') as c_project, c.user_voice_forwarded_at
@@ -2600,15 +2657,14 @@ impl MissionDB {
              JOIN conversations c ON c.id = m.session_id
              WHERE c.slot_id IS NULL
                AND c.id NOT LIKE 'agent-%'
-               AND m.timestamp >= ?1
-               AND m.timestamp > COALESCE(c.user_voice_forwarded_at, ?1)
+               AND m.timestamp > COALESCE(c.user_voice_forwarded_at, c.started_at)
                AND m.role = 'user'
-             ORDER BY c.started_at DESC, m.id ASC"
+             ORDER BY m.timestamp ASC"
         )?;
 
         let mut results: Vec<(String, String, Vec<ConversationMessage>)> = Vec::new();
 
-        let rows = stmt.query_map(params![today], |row| {
+        let rows = stmt.query_map([], |row| {
             let msg = Self::row_to_conversation_message(row)?;
             let project: String = row.get("c_project")?;
             Ok((msg, project))
@@ -2639,29 +2695,35 @@ impl MissionDB {
 
     /// Get pending messages for unified realtime extraction (replaces separate user_voice + memory).
     /// Returns all user+assistant messages since realtime_forwarded_at watermark.
-    pub fn get_pending_realtime_messages(&self, today: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
-        self.get_pending_realtime_messages_with_limit(today, 50)
+    /// Uses fair-queuing: per-session cap (10 msgs) + oldest-first ordering to prevent starvation.
+    pub fn get_pending_realtime_messages(&self) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
+        self.get_pending_realtime_messages_with_limit(50)
     }
 
     /// Get pending realtime messages with a configurable limit.
-    pub fn get_pending_realtime_messages_with_limit(&self, today: &str, limit: usize) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
+    /// Fair-queuing: each session gets at most 10 messages per batch, ordered by oldest first.
+    pub fn get_pending_realtime_messages_with_limit(&self, limit: usize) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT m.*, COALESCE(c.project, '') as c_project
-             FROM conversation_messages m
-             JOIN conversations c ON c.id = m.session_id
-             WHERE c.slot_id IS NULL
-               AND c.id NOT LIKE 'agent-%'
-               AND m.timestamp >= ?1
-               AND m.timestamp > COALESCE(c.realtime_forwarded_at, ?1)
-               AND m.role IN ('user', 'assistant')
-             ORDER BY c.started_at DESC, m.id ASC
-             LIMIT ?2"
+            "WITH ranked AS (
+                SELECT m.*, COALESCE(c.project, '') as c_project,
+                    ROW_NUMBER() OVER(PARTITION BY m.session_id ORDER BY m.timestamp ASC) as rn
+                FROM conversation_messages m
+                JOIN conversations c ON c.id = m.session_id
+                WHERE c.slot_id IS NULL
+                  AND c.id NOT LIKE 'agent-%'
+                  AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)
+                  AND m.role IN ('user', 'assistant')
+            )
+            SELECT * FROM ranked
+            WHERE rn <= 10
+            ORDER BY timestamp ASC
+            LIMIT ?1"
         )?;
 
         let mut results: Vec<(String, String, Vec<ConversationMessage>)> = Vec::new();
 
-        let rows = stmt.query_map(params![today, limit as i64], |row| {
+        let rows = stmt.query_map(params![limit as i64], |row| {
             let msg = Self::row_to_conversation_message(row)?;
             let project: String = row.get("c_project")?;
             Ok((msg, project))
