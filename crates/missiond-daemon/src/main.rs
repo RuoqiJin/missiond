@@ -110,6 +110,8 @@ struct AppState {
     jarvis_trace: missiond_core::ws::JarvisTraceStore,
     /// Last complete response per slot (for submit task result tracking).
     slot_last_responses: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
+    /// Shared HTTP client for Router API calls (connection pool reuse).
+    http_client: reqwest::Client,
 }
 
 fn default_mission_home() -> PathBuf {
@@ -1769,12 +1771,10 @@ impl AppState {
                 info!("KB analyze [{}]: sending {} entries ({} chars) to {} via {}",
                     mode, entries.len(), kb_jsonl.len(), model, url);
 
-                // 7. Call router API
-                let client = reqwest::Client::new();
-                let resp = client.post(&url)
+                // 7. Call router API (shared client for connection pool reuse)
+                let resp = self.http_client.post(&url)
                     .header("Content-Type", "application/json")
                     .header("Authorization", format!("Bearer {}", jwt))
-                    .timeout(std::time::Duration::from_secs(180))
                     .json(&body)
                     .send()
                     .await
@@ -1939,11 +1939,9 @@ impl AppState {
                     .sum();
                 info!("Router chat: {} messages ({} chars) to {} via {}", messages.len(), total_chars, model, url);
 
-                let client = reqwest::Client::new();
-                let resp = client.post(&url)
+                let resp = self.http_client.post(&url)
                     .header("Content-Type", "application/json")
                     .header("Authorization", format!("Bearer {}", jwt))
-                    .timeout(std::time::Duration::from_secs(180))
                     .json(&body)
                     .send()
                     .await
@@ -5327,6 +5325,11 @@ async fn main() -> Result<()> {
         screenshot_broker: Arc::clone(&screenshot_broker),
         jarvis_trace: ws_server.jarvis_trace_store().clone(),
         slot_last_responses: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        http_client: reqwest::Client::builder()
+            .pool_max_idle_per_host(10)
+            .timeout(std::time::Duration::from_secs(180))
+            .build()
+            .expect("Failed to build HTTP client"),
     };
 
     // Autopilot scheduler + IPC server via select
