@@ -2,9 +2,9 @@
 name = "semantic-terminal-napi"
 version = "0.1.0"
 edition = "2021"
-authors = ["Xiaojin Pro"]
+authors = ["MissionD Contributors"]
 license = "MIT"
-repository = "https://github.com/rickyjim626/missiond"
+repository = "https://github.com/RuoqiJin/missiond"
 description = "Node.js bindings for semantic-terminal - Claude Code terminal output parser"
 keywords = ["napi", "claude", "terminal", "parser", "semantic"]
 categories = ["development-tools", "parsing"]

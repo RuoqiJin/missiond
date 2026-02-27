@@ -547,7 +547,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     },
                     "pattern": {
                         "type": "string",
-                        "description": "工具模式 (如 xjp_secret_*)"
+                        "description": "工具模式 (如 secret_*)"
                     }
                 },
                 "required": ["pattern"]
@@ -1175,7 +1175,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     },
                     "project": {
                         "type": "string",
-                        "description": "关联项目 (如 xiaojinpro-backend)"
+                        "description": "关联项目 (如 my-project)"
                     },
                     "server": {
                         "type": "string",

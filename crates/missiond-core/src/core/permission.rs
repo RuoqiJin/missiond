@@ -404,17 +404,17 @@ mod tests {
         let policy = create_test_policy();
 
         // Test prefix wildcard
-        assert!(policy.match_pattern("xjp_*", "xjp_secret_get"));
-        assert!(!policy.match_pattern("xjp_*", "other_tool"));
+        assert!(policy.match_pattern("app_*", "app_secret_get"));
+        assert!(!policy.match_pattern("app_*", "other_tool"));
 
         // Test suffix wildcard
         assert!(policy.match_pattern("*_delete", "file_delete"));
         assert!(!policy.match_pattern("*_delete", "delete_file"));
 
         // Test middle wildcard
-        assert!(policy.match_pattern("xjp_*_get", "xjp_secret_get"));
-        assert!(policy.match_pattern("xjp_*_get", "xjp_user_info_get"));
-        assert!(!policy.match_pattern("xjp_*_get", "xjp_secret_set"));
+        assert!(policy.match_pattern("app_*_get", "app_secret_get"));
+        assert!(policy.match_pattern("app_*_get", "app_user_info_get"));
+        assert!(!policy.match_pattern("app_*_get", "app_secret_set"));
 
         // Test universal wildcard
         assert!(policy.match_pattern("*", "any_tool"));

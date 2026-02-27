@@ -190,7 +190,8 @@ fn ensure_config_permissions(home: &Path) {
     let files = [
         "servers.yaml",
         "slots.yaml",
-        "xjp-mcp-config.json",
+        "mcp-config.json",
+        "xjp-mcp-config.json", // legacy name
         "config/permissions.yaml",
         "mission.db",
     ];
@@ -1799,21 +1800,8 @@ impl AppState {
                     }
                 };
 
-                // 4. Read JWT credentials
-                let cred_path = dirs::home_dir()
-                    .ok_or_else(|| anyhow!("Cannot determine home directory"))?
-                    .join(".xjp")
-                    .join("credentials.json");
-                let cred_content = tokio::fs::read_to_string(&cred_path).await
-                    .map_err(|e| anyhow!("Failed to read credentials: {}", e))?;
-                let creds: serde_json::Value = serde_json::from_str(&cred_content)
-                    .map_err(|e| anyhow!("Failed to parse credentials: {}", e))?;
-                let jwt = creds.get("jwt_token")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow!("No jwt_token in credentials.json. Run 'xjp login' first."))?;
-                let base_url = creds.get("auth_url")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("https://auth.xiaojinpro.com");
+                // 4. Resolve LLM credentials
+                let (base_url, jwt) = resolve_llm_credentials().await?;
 
                 // 5. Apply context budget
                 let mut analysis_messages: Vec<Value> = vec![
@@ -1973,21 +1961,8 @@ impl AppState {
                     info!("Router chat: context budget applied — {}", budget_result.note.as_deref().unwrap_or("trimmed"));
                 }
 
-                // Read JWT
-                let cred_path = dirs::home_dir()
-                    .ok_or_else(|| anyhow!("Cannot determine home directory"))?
-                    .join(".xjp")
-                    .join("credentials.json");
-                let cred_content = tokio::fs::read_to_string(&cred_path).await
-                    .map_err(|e| anyhow!("Failed to read credentials: {}", e))?;
-                let creds: serde_json::Value = serde_json::from_str(&cred_content)
-                    .map_err(|e| anyhow!("Failed to parse credentials: {}", e))?;
-                let jwt = creds.get("jwt_token")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow!("No jwt_token in credentials.json. Run 'xjp login' first."))?;
-                let base_url = creds.get("auth_url")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("https://auth.xiaojinpro.com");
+                // Resolve LLM credentials
+                let (base_url, jwt) = resolve_llm_credentials().await?;
 
                 // Call router API
                 let url = format!("{}/v1/chat/completions", base_url);
@@ -2647,19 +2622,12 @@ impl AppState {
                     Some(serde_json::json!({ "reachable": false, "error": "All SSH targets timed out" }))
                 };
 
-                // Probe 5: Deploy agent HTTP
-                let target_clone = target.clone();
-                let do_agent = should_probe("deploy_agent");
+                // Probe 5: Deploy agent HTTP (reads health_endpoint from servers.yaml)
+                let health_url = server.and_then(|s| s.health_endpoint.clone());
+                let do_agent = should_probe("deploy_agent") && health_url.is_some();
                 let agent_fut = async {
                     if !do_agent { return None; }
-                    let url = match target_clone.as_str() {
-                        "gcp" => "https://auth.xiaojinpro.com/deploy-agent/health",
-                        "privatecloud" => "https://auth.xiaojinpro.com/tunnel/proxy/privatecloud/health",
-                        "windows" | "win-3090ti" => "https://auth.xiaojinpro.com/tunnel/proxy/windows/health",
-                        "ecs" => "https://auth.xiaojinpro.com/tunnel/proxy/ecs/health",
-                        "bwg" => "http://104.194.81.38:9876/health",
-                        _ => return None,
-                    };
+                    let url = health_url.as_ref().unwrap();
                     let client = reqwest::Client::builder()
                         .timeout(std::time::Duration::from_secs(5))
                         .danger_accept_invalid_certs(true)
@@ -3675,9 +3643,119 @@ fn detect_compaction(
     None
 }
 
+/// LLM API configuration for Router / KB Analyze calls.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct LlmConfig {
+    base_url: String,
+    #[serde(default)]
+    auth: LlmAuth,
+    #[serde(default = "LlmConfig::default_model")]
+    default_model: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type")]
+enum LlmAuth {
+    /// Read bearer token from an environment variable.
+    #[serde(rename = "bearer_env")]
+    BearerEnv { env: String },
+    /// Read bearer token from a JSON file (extract a specific key).
+    #[serde(rename = "bearer_file")]
+    BearerFile { path: String, key: String },
+    /// No authentication.
+    #[serde(rename = "none")]
+    None,
+}
+
+impl Default for LlmAuth {
+    fn default() -> Self {
+        LlmAuth::None
+    }
+}
+
+impl LlmConfig {
+    fn default_model() -> String {
+        "gpt-4o".to_string()
+    }
+}
+
+/// Resolve LLM credentials (base_url, bearer_token) for Router API calls.
+///
+/// Resolution order:
+/// 1. `$MISSIOND_HOME/llm.yaml` — explicit config (preferred)
+/// 2. `~/.xjp/credentials.json` — legacy fallback (jwt_token + auth_url)
+///
+/// Returns (base_url, bearer_token).
+async fn resolve_llm_credentials() -> Result<(String, String)> {
+    // 1. Try llm.yaml in mission home
+    let llm_yaml = default_mission_home().join("llm.yaml");
+    if llm_yaml.exists() {
+        let content = tokio::fs::read_to_string(&llm_yaml).await
+            .map_err(|e| anyhow!("Failed to read {}: {}", llm_yaml.display(), e))?;
+        let config: LlmConfig = serde_yaml::from_str(&content)
+            .map_err(|e| anyhow!("Failed to parse {}: {}", llm_yaml.display(), e))?;
+
+        let token = match &config.auth {
+            LlmAuth::BearerEnv { env } => {
+                std::env::var(env)
+                    .map_err(|_| anyhow!("Env var '{}' not set (required by llm.yaml)", env))?
+            }
+            LlmAuth::BearerFile { path, key } => {
+                let expanded = if path.starts_with("~/") {
+                    dirs::home_dir()
+                        .ok_or_else(|| anyhow!("Cannot determine home directory"))?
+                        .join(&path[2..])
+                } else {
+                    PathBuf::from(path)
+                };
+                let file_content = tokio::fs::read_to_string(&expanded).await
+                    .map_err(|e| anyhow!("Failed to read {}: {}", expanded.display(), e))?;
+                let json: serde_json::Value = serde_json::from_str(&file_content)
+                    .map_err(|e| anyhow!("Failed to parse {}: {}", expanded.display(), e))?;
+                json.get(key)
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("Key '{}' not found in {}", key, expanded.display()))?
+                    .to_string()
+            }
+            LlmAuth::None => String::new(),
+        };
+
+        info!(base_url = %config.base_url, "LLM credentials resolved from llm.yaml");
+        return Ok((config.base_url, token));
+    }
+
+    // 2. Legacy fallback: ~/.xjp/credentials.json
+    let cred_path = dirs::home_dir()
+        .ok_or_else(|| anyhow!("Cannot determine home directory"))?
+        .join(".xjp")
+        .join("credentials.json");
+
+    if cred_path.exists() {
+        let cred_content = tokio::fs::read_to_string(&cred_path).await
+            .map_err(|e| anyhow!("Failed to read credentials: {}", e))?;
+        let creds: serde_json::Value = serde_json::from_str(&cred_content)
+            .map_err(|e| anyhow!("Failed to parse credentials: {}", e))?;
+        let jwt = creds.get("jwt_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("No jwt_token in credentials.json. Configure LLM credentials first."))?;
+        let base_url = creds.get("auth_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+
+        if base_url.is_empty() {
+            return Err(anyhow!("No auth_url in credentials.json. Configure LLM credentials in llm.yaml or credentials.json."));
+        }
+
+        info!("LLM credentials resolved from legacy credentials.json");
+        return Ok((base_url.to_string(), jwt.to_string()));
+    }
+
+    Err(anyhow!("No LLM credentials found. Create llm.yaml in mission home or ~/.xjp/credentials.json."))
+}
+
 /// Build env vars for PTY spawn that enable UUID capture via SessionStart hook.
 /// Merges slot-level custom env (from slots.yaml `env:` field) with tracking vars.
-/// Supports `${secret:path}` syntax — resolved via `xjp secret get <path>` at spawn time.
+/// Supports dynamic references: `${env:VAR}`, `${file:path}`, `${cmd:...}`, `${secret:path}`.
 /// Returns (extra_env, session_file_path).
 async fn build_slot_tracking_env(slot_id: &str, slot_env: Option<&HashMap<String, String>>) -> (HashMap<String, String>, PathBuf) {
     let session_file = std::env::temp_dir().join(format!("missiond-session-{}.txt", slot_id));
@@ -3691,9 +3769,9 @@ async fn build_slot_tracking_env(slot_id: &str, slot_env: Option<&HashMap<String
         info!(slot_id, env_count = env_map.len(), "Injecting slot-level custom env");
         for (key, value) in env_map {
             let resolved = resolve_env_value(value).await;
-            let is_secret = value.starts_with("${secret:");
-            if is_secret {
-                info!(slot_id, key, "Resolved secret env var");
+            let is_sensitive = value.starts_with("${secret:") || value.starts_with("${cmd:");
+            if is_sensitive {
+                info!(slot_id, key, "Resolved sensitive env var");
             } else {
                 info!(slot_id, key, %resolved, "Set env var");
             }
@@ -3713,45 +3791,110 @@ async fn build_slot_tracking_env(slot_id: &str, slot_env: Option<&HashMap<String
     (extra_env, session_file)
 }
 
-/// Resolve `${secret:path}` references in env values via `xjp secret get`.
-/// Falls back to the raw value on any error. Uses async process to avoid blocking tokio executor.
+/// Resolve dynamic references in env values.
+///
+/// Supported providers:
+/// - `${env:VAR}` — read from environment variable
+/// - `${file:path}` — read file contents (trimmed)
+/// - `${cmd:program args...}` — execute command, use stdout
+/// - `${secret:path}` — backward compat, translates to `${cmd:xjp secret get --raw path}`
+/// - bare string — returned as-is (plaintext fallback)
+///
+/// Falls back to the raw value on any error.
 async fn resolve_env_value(value: &str) -> String {
-    if !value.starts_with("${secret:") || !value.ends_with('}') {
+    // Must match ${provider:content} pattern
+    if !value.starts_with("${") || !value.ends_with('}') {
         return value.to_string();
     }
 
-    let path = &value[9..value.len() - 1]; // extract "minimax/API_KEY_DOMESTIC"
+    let inner = &value[2..value.len() - 1]; // strip ${ and }
+    let Some((provider, content)) = inner.split_once(':') else {
+        return value.to_string();
+    };
+
+    match provider {
+        "env" => {
+            match std::env::var(content) {
+                Ok(val) => {
+                    info!(var = content, "Resolved env var");
+                    val
+                }
+                Err(_) => {
+                    warn!(var = content, "Env var not set, using raw value");
+                    value.to_string()
+                }
+            }
+        }
+        "file" => {
+            match tokio::fs::read_to_string(content).await {
+                Ok(val) => {
+                    let trimmed = val.trim().to_string();
+                    info!(path = content, "Resolved file value");
+                    trimmed
+                }
+                Err(e) => {
+                    warn!(path = content, error = %e, "Failed to read file, using raw value");
+                    value.to_string()
+                }
+            }
+        }
+        "cmd" => {
+            resolve_cmd_value(value, content).await
+        }
+        "secret" => {
+            // Backward compat: translate to xjp secret get --raw
+            let cmd_str = format!("xjp secret get --raw {}", content);
+            resolve_cmd_value(value, &cmd_str).await
+        }
+        _ => {
+            warn!(provider, "Unknown env value provider, using raw value");
+            value.to_string()
+        }
+    }
+}
+
+/// Execute a command string and return its stdout. Helper for ${cmd:} and ${secret:}.
+async fn resolve_cmd_value(raw_value: &str, cmd_str: &str) -> String {
+    let parts: Vec<&str> = cmd_str.split_whitespace().collect();
+    if parts.is_empty() {
+        warn!("Empty command in env value, using raw value");
+        return raw_value.to_string();
+    }
+
+    let program = parts[0];
+    let args = &parts[1..];
+
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        tokio::process::Command::new("xjp")
-            .args(["secret", "get", "--raw", path])
+        tokio::process::Command::new(program)
+            .args(args)
             .output(),
     )
     .await;
 
     match result {
         Ok(Ok(output)) if output.status.success() => {
-            let secret = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if secret.is_empty() {
-                warn!(path, "xjp secret get returned empty, using raw value");
-                value.to_string()
+            let out = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if out.is_empty() {
+                warn!(cmd = cmd_str, "Command returned empty, using raw value");
+                raw_value.to_string()
             } else {
-                info!(path, "Resolved secret for slot env");
-                secret
+                info!(cmd = program, "Resolved command value for slot env");
+                out
             }
         }
         Ok(Ok(output)) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(path, %stderr, "xjp secret get failed, using raw value");
-            value.to_string()
+            warn!(cmd = cmd_str, %stderr, "Command failed, using raw value");
+            raw_value.to_string()
         }
         Ok(Err(e)) => {
-            warn!(path, error = %e, "Failed to run xjp secret get, using raw value");
-            value.to_string()
+            warn!(cmd = cmd_str, error = %e, "Failed to run command, using raw value");
+            raw_value.to_string()
         }
         Err(_) => {
-            warn!(path, "xjp secret get timed out (10s), using raw value");
-            value.to_string()
+            warn!(cmd = cmd_str, "Command timed out (10s), using raw value");
+            raw_value.to_string()
         }
     }
 }

@@ -8,6 +8,6 @@
     "dev": "npx serve -p 3120 ."
   },
   "keywords": ["missiond", "claude", "dashboard"],
-  "author": "Xiaojin Pro",
+  "author": "MissionD Contributors",
   "license": "MIT"
 }

@@ -9,7 +9,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rickyjim626/missiond"
+    "url": "https://github.com/RuoqiJin/missiond"
   },
   "engines": {
     "node": ">=18"
