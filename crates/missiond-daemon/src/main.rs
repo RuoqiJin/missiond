@@ -665,6 +665,25 @@ impl AppState {
                 let cancelled = self.mission.cancel(&task_id).await?;
                 Ok(ToolResult::json(&serde_json::json!({ "cancelled": cancelled })))
             }
+            "mission_task" => {
+                #[derive(Deserialize)]
+                struct Args {
+                    status: Option<String>,
+                    limit: Option<i64>,
+                }
+                let args: Args = serde_json::from_value(args).unwrap_or(Args { status: None, limit: None });
+                let limit = args.limit.unwrap_or(20);
+                let tasks = if let Some(ref status_str) = args.status {
+                    if let Some(status) = missiond_core::types::TaskStatus::from_str(status_str) {
+                        self.mission.db().get_tasks_by_status(status)?
+                    } else {
+                        return Ok(ToolResult::error(format!("Invalid status: {}. Use: queued, running, done, failed", status_str)));
+                    }
+                } else {
+                    self.mission.db().get_all_tasks(limit)?
+                };
+                Ok(ToolResult::json(&tasks))
+            }
 
             // ===== Process control =====
             "mission_spawn" => {

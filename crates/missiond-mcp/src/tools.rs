@@ -168,6 +168,23 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                 "required": ["taskId"]
             }),
         ),
+        ToolDefinition::new(
+            "mission_task",
+            "查询 submit task 列表。显示 ID、角色、工位、状态、结果。可按状态过滤。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "description": "按状态过滤: queued, running, done, failed（不传返回最近 20 条）"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "最大返回数（默认 20）"
+                    }
+                }
+            }),
+        ),
         // ===== Process Control =====
         ToolDefinition::new(
             "mission_spawn",
