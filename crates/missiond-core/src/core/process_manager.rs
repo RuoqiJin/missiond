@@ -656,6 +656,7 @@ mod tests {
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
+                env: None,
             },
             session_id: None,
         }
@@ -691,6 +692,7 @@ mod tests {
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
+                env: None,
             },
             session_id: None,
         };
@@ -705,6 +707,7 @@ mod tests {
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
+                env: None,
             },
             session_id: None,
         };

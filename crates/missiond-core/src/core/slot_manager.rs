@@ -156,6 +156,7 @@ mod tests {
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
+                env: None,
             },
             SlotConfig {
                 id: "slot-2".to_string(),
@@ -166,6 +167,7 @@ mod tests {
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
+                env: None,
             },
             SlotConfig {
                 id: "slot-3".to_string(),
@@ -176,6 +178,7 @@ mod tests {
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
+                env: None,
             },
         ];
 
@@ -212,6 +215,7 @@ mod tests {
             auto_start: None,
             dangerously_skip_permissions: None,
             traits: vec![],
+            env: None,
         }];
 
         manager.load_slots(configs);
@@ -246,6 +250,7 @@ mod tests {
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
+                env: None,
             },
             SlotConfig {
                 id: "slot-2".to_string(),
@@ -256,6 +261,7 @@ mod tests {
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
+                env: None,
             },
             SlotConfig {
                 id: "slot-3".to_string(),
@@ -266,6 +272,7 @@ mod tests {
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
+                env: None,
             },
         ];
 
