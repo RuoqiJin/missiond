@@ -611,6 +611,9 @@ pub struct Conversation {
     /// Retry count for deep analysis failures (capped at MAX_ANALYSIS_RETRIES)
     #[serde(default)]
     pub analysis_retries: i32,
+    /// Checkpoint watermark: last message ID processed by incremental deep analysis
+    #[serde(default)]
+    pub deep_analyzed_message_id: i64,
 }
 
 /// A message within a conversation
