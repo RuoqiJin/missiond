@@ -2,6 +2,7 @@
 //!
 //! Mirrors the TypeScript definitions in packages/missiond/src/types.ts
 
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 // ============ Slot Config ============
@@ -38,6 +39,11 @@ pub struct SlotConfig {
     /// If empty/absent, defaults are inferred from role at load time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub traits: Vec<SlotTrait>,
+    /// Custom environment variables injected into the PTY child process.
+    /// Supports `${secret:path}` syntax for Secret Store resolution.
+    /// Used for per-slot model provider configuration (e.g., MiniMax M2.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<HashMap<String, String>>,
 }
 
 impl SlotConfig {
@@ -860,6 +866,7 @@ mod tests {
             auto_start: Some(true),
             dangerously_skip_permissions: None,
             traits: vec![],
+            env: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
