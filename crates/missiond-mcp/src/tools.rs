@@ -915,11 +915,12 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ToolDefinition::new(
             "mission_kb_analyze",
             "Analyze KB entries using Gemini via AI router. Three modes: \
-             'overview' = macro quality assessment (default), \
-             'consolidation_plan' = generate executable merge/delete/update JSON actions, \
+             'overview' = macro quality assessment with dedup+reclassify suggestions (default), \
+             'consolidation_plan' = generate executable merge/delete/update/distill JSON actions, \
              'custom' = user-defined analysis with custom_prompt. \
-             Supports pagination (limit/offset) and category filtering. \
-             consolidation_plan mode uses json_schema for structured output.",
+             Supports Board-aware consolidation: set include_board_context=true to inject Board tasks \
+             so the AI can protect Open-task KB and distill Done-task KB. \
+             Supports pagination (limit/offset) and category filtering.",
             json!({
                 "type": "object",
                 "properties": {
@@ -938,6 +939,11 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     "offset": {
                         "type": "integer",
                         "description": "Pagination offset (default: 0)"
+                    },
+                    "include_board_context": {
+                        "type": "boolean",
+                        "description": "Inject Board tasks as context for Board-aware consolidation (default: false). \
+                         When true, consolidation_plan mode adds lifecycle rules: protect Open-task KB, distill Done-task KB."
                     },
                     "custom_prompt": {
                         "type": "string",

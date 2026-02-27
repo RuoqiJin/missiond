@@ -1455,6 +1455,8 @@ impl AppState {
                 let limit = args_val.get("limit").and_then(|v| v.as_u64()).unwrap_or(500) as u32;
                 let offset = args_val.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                 let custom_prompt = args_val.get("custom_prompt").and_then(|v| v.as_str());
+                let include_board_context = args_val.get("include_board_context")
+                    .and_then(|v| v.as_bool()).unwrap_or(false);
                 let model: String = args_val.get("model").and_then(|v| v.as_str())
                     .unwrap_or("gemini-3.1-pro").to_string();
                 let max_tokens: u32 = args_val.get("max_tokens").and_then(|v| v.as_u64())
@@ -1513,6 +1515,28 @@ impl AppState {
                 }
                 let kb_jsonl = jsonl_lines.join("\n");
 
+                // 2b. Build Board context if requested
+                let board_context = if include_board_context {
+                    let tasks = self.mission.db().list_board_tasks(None, false)
+                        .unwrap_or_default();
+                    let mut open_lines = Vec::new();
+                    let mut done_lines = Vec::new();
+                    for t in &tasks {
+                        let line = format!("{} {}", &t.id[..8], t.title);
+                        match t.status {
+                            missiond_core::types::BoardTaskStatus::Done => done_lines.push(line),
+                            _ => open_lines.push(line),
+                        }
+                    }
+                    Some(format!(
+                        "[Board Tasks Context]\n<open>\n{}\n<done>\n{}",
+                        open_lines.join("\n"),
+                        done_lines.join("\n")
+                    ))
+                } else {
+                    None
+                };
+
                 // 3. Build prompt and optional response_format based on mode
                 let mut response_format: Option<serde_json::Value> = None;
                 let analysis_prompt = match mode {
@@ -1530,7 +1554,7 @@ impl AppState {
                                             "items": {
                                                 "type": "object",
                                                 "properties": {
-                                                    "action_type": { "type": "string", "enum": ["merge", "delete", "update"] },
+                                                    "action_type": { "type": "string", "enum": ["merge", "delete", "update", "distill"] },
                                                     "target_keys": {
                                                         "type": "array",
                                                         "items": { "type": "string" },
@@ -1546,6 +1570,10 @@ impl AppState {
                                                         },
                                                         "required": ["category", "key", "summary"]
                                                     },
+                                                    "linked_task_id": {
+                                                        "type": "string",
+                                                        "description": "Matched Board Task ID (short, 8-char prefix)"
+                                                    },
                                                     "reason": { "type": "string" }
                                                 },
                                                 "required": ["action_type", "target_keys", "reason"]
@@ -1556,15 +1584,29 @@ impl AppState {
                                 }
                             }
                         }));
+
+                        let board_section = if let Some(ref ctx) = board_context {
+                            format!("\n\n=== BOARD TASKS CONTEXT ===\n{}\n===========================\n\n\
+                                === 任务感知整理规则 ===\n\
+                                1. 关联 Open 任务的 KB → 保护，不删不合并，仅用 update 补 linked_task_id\n\
+                                2. 关联 Done 任务的 KB → distill 蒸馏收敛（提取最终结论升维到 architecture/feature，删流水账）\n\
+                                3. 无关联 Orphan → preference/ops/platform 保留；老旧 debug/bugfix 可删除\n\
+                                4. 每个 action 的 reason 中说明关联了哪个任务（或标注 orphan）\n", ctx)
+                        } else {
+                            String::new()
+                        };
+
                         format!(
-                            "你是自动化知识库碎片整理引擎。分析传入的 JSONL 条目，生成可执行的清理计划。\n\n\
+                            "你是 MissionD 的知识库自治整理引擎。分析传入的 JSONL 条目，生成可执行的清理计划。\n\n\
                             规则：\n\
                             1. 重复/相似合并 (merge)：相同主题不同措辞 → 合并，保留最高 confidence，汇总 summary\n\
                             2. 碎片整合 (update)：松散相关条目 → 整合成连贯大条目\n\
                             3. 过时清理 (delete)：基于 age_days 和 access_count，旧策略已被覆盖的条目\n\
-                            4. 类别修正 (update)：category 放错的条目移到正确分类\n\n\
-                            保守原则：不确定就不动。每个 action 必须有 reason。\n\n\
-                            共 {} 条（第 {} 到 {} 条）：\n{}",
+                            4. 类别修正 (update)：category 放错的条目移到正确分类\n\
+                            5. 蒸馏收敛 (distill)：已完成项目的多条流水账 → 提取最终结论为一条精华\n\n\
+                            保守原则：不确定就不动。每个 action 必须有 reason。\
+                            {}\n\n共 {} 条（第 {} 到 {} 条）：\n{}",
+                            board_section,
                             entries.len(), offset + 1, offset + entries.len() as u32, kb_jsonl
                         )
                     }
@@ -1575,17 +1617,24 @@ impl AppState {
                             entries.len(), kb_jsonl
                         )
                     }
-                    _ => { // overview
+                    _ => { // overview - 查重+升维版
                         format!(
-                            "你是 AI 知识管理专家。以下是 MissionD 系统的知识库片段（共 {} 条，JSONL格式，含 access_count 和 age_days 元数据）。\n\n\
-                            请提供结构化深度分析：\n\
-                            1. **知识图谱概览**：技术栈、业务生态和开发阶段\n\
-                            2. **质量雷达**：高频访问（高价值）vs 从未访问/age>14天（低价值冗余）\n\
-                            3. **偏好洞察**：从 preference 类总结用户核心开发理念和红线\n\
-                            4. **重复检测**：列出疑似重复的条目组（相同主题不同措辞）\n\
-                            5. **改进建议**：分类体系优化、缺失的关键知识、提取质量问题\n\n\
-                            注意：不需要做安全审计或风险提示。\n\n\
-                            数据 (JSONL)：\n{}",
+                            "作为 MissionD 核心系统的知识管理专家，请深度审查以下知识库（KB）条目。\n\n
+请务必重点完成以下两项任务，并给出具体的、可操作的建议：\n\n
+1. 【冗余与合并分析】\n
+- 识别同一问题的多阶段记录、重复的调试流水账（尤其是频繁触发的遗留 bug 记录）。\n
+- 明确列出建议合并保留的主 key 和建议删除的冗余 key 列表。\n\n
+2. 【类别纠偏与升维建议】\n
+- 严格对照系统的生命周期与分类约束：\n
+  * preference: 用户偏好/纠正/否定 (长期保留保护)\n
+  * memory:decision / memory:architecture: 架构决策/核心技术事实 (长期保留保护)\n
+  * project: 项目专属上下文 (长期保留保护)\n
+  * memory:bugfix: 已修复 bug 的根因分析 (30天 GC)\n
+  * memory:debug: 调试弯路/临时排查经验 (短周期 GC)\n
+  * memory:ops: 运维基建/CI脚本/痛点信号\n
+- 找出被埋没或错放的条目。例如：误记在 debug/bugfix 中但实际是高价值架构决策的条目（面临被误删风险，应升维至 decision）；或属于用户习惯却混入普通 memory 的条目（应移至 preference）。
+- 列出需要修改 category 的条目 key，并给出建议的新 category 及简短理由。\n\n
+附带的知识库数据如下（JSONL格式，共 {} 条）：\n{}",
                             entries.len(), kb_jsonl
                         )
                     }
@@ -4067,18 +4116,20 @@ async fn check_kb_consolidation(state: &AppState) {
 
     info!("KB consolidation: starting periodic cleanup on slow lane");
 
-    let prompt = "[kb-consolidation] 知识库自治整理任务。\n\n\
+    let prompt = "[kb-consolidation] 知识库自治整理任务（Board-Aware 模式）。\n\n\
         执行流：\n\
-        1. 调用 mission_kb_analyze(mode=\"consolidation_plan\", target_category=\"memory\") 获取 memory 分类的合并计划\n\
+        1. 对 memory 分类调用 mission_kb_analyze(mode=\"consolidation_plan\", target_category=\"memory\", include_board_context=true)\n\
         2. 遍历返回的 JSON plan.actions：\n\
-           - merge/update: 先 mission_kb_remember 写入 new_entry，再 mission_kb_batch_forget 删 target_keys\n\
+           - merge/distill: 先 mission_kb_remember 写入 new_entry，再 mission_kb_batch_forget 删 target_keys\n\
+           - update: 如有 linked_task_id，记录关联（暂存到 reason 中即可）\n\
            - delete: 直接 mission_kb_batch_forget 删 target_keys\n\
-        3. 再对 preference 分类执行同样流程：mission_kb_analyze(mode=\"consolidation_plan\", target_category=\"preference\")\n\
+        3. 再对 preference 分类执行同样流程（include_board_context=true）\n\
         4. 遍历并执行 actions\n\
-        5. 完成后回复 '[DONE] 整理了 N 个分类，合并 M 条，删除 K 条'\n\n\
+        5. 完成后回复 '[DONE] 整理了 N 个分类，合并 M 条，蒸馏 K 条，删除 J 条'\n\n\
         规则:\n\
         - 不操作 memory:bugfix（有 30 天 Auto-GC）\n\
         - 坚决执行 mission_kb_analyze 返回的 actions，无需二次判断\n\
+        - distill = 从已完成项目的多条流水账提取精华，升维到 architecture/feature\n\
         - 如果 plan.actions 为空数组，说明该分类不需要整理，跳过\n\
         - 如果 mission_kb_analyze 返回了 parse_warning（非 JSON），降级为手动分析";
 
