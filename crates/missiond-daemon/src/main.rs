@@ -96,6 +96,8 @@ struct AppState {
     last_kb_consolidation_at: Arc<std::sync::atomic::AtomicI64>,
     /// Pause switch for memory extraction tasks (realtime, deep_analysis, sync, GC).
     memory_paused: Arc<std::sync::atomic::AtomicBool>,
+    /// Epoch secs when memory was paused. 0 = not paused. Used for TTL auto-resume.
+    memory_paused_at: Arc<std::sync::atomic::AtomicI64>,
     /// Per-slot consecutive failure count for autopilot throttling.
     slot_fail_counts: Arc<std::sync::Mutex<HashMap<String, (i32, i64)>>>,  // (count, last_fail_at)
     /// Screenshot broker for browser-based PTY screenshots.
@@ -2037,14 +2039,17 @@ impl AppState {
                 // Persist to flag file so pause survives daemon restart
                 let flag = default_mission_home().join("memory_paused");
                 if new_val {
-                    let _ = std::fs::write(&flag, "");
+                    let now = chrono::Utc::now().timestamp();
+                    let _ = std::fs::write(&flag, now.to_string());
+                    self.memory_paused_at.store(now, std::sync::atomic::Ordering::Relaxed);
                     info!("Memory extraction PAUSED by user");
                 } else {
                     let _ = std::fs::remove_file(&flag);
+                    self.memory_paused_at.store(0, std::sync::atomic::Ordering::Relaxed);
                     info!("Memory extraction RESUMED by user");
                 }
                 Ok(ToolResult::text(if new_val {
-                    "记忆任务已暂停。realtime extraction 和 deep analysis 不再调度。调用 mission_memory_pause(paused: false) 恢复。"
+                    "记忆任务已暂停（2 小时后自动恢复）。调用 mission_memory_pause(paused: false) 手动恢复。"
                 } else {
                     "记忆任务已恢复。"
                 }))
@@ -3252,7 +3257,23 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
         _ => {}
     }
 
-    let memory_paused = state.memory_paused.load(std::sync::atomic::Ordering::Relaxed);
+    let mut memory_paused = state.memory_paused.load(std::sync::atomic::Ordering::Relaxed);
+
+    // TTL auto-resume: if paused for > 2 hours, auto-resume
+    if memory_paused {
+        const PAUSE_TTL_SECS: i64 = 2 * 60 * 60; // 2 hours
+        let paused_at = state.memory_paused_at.load(std::sync::atomic::Ordering::Relaxed);
+        if paused_at > 0 {
+            let now = chrono::Utc::now().timestamp();
+            if now - paused_at > PAUSE_TTL_SECS {
+                warn!(paused_secs = now - paused_at, "Memory pause TTL expired, auto-resuming");
+                state.memory_paused.store(false, std::sync::atomic::Ordering::Relaxed);
+                state.memory_paused_at.store(0, std::sync::atomic::Ordering::Relaxed);
+                let _ = std::fs::remove_file(default_mission_home().join("memory_paused"));
+                memory_paused = false;
+            }
+        }
+    }
 
     if !memory_paused {
         // Check if memory slots are stuck in non-Idle state for too long
@@ -5214,6 +5235,16 @@ async fn main() -> Result<()> {
         memory_paused: Arc::new(std::sync::atomic::AtomicBool::new(
             home.join("memory_paused").exists()
         )),
+        memory_paused_at: Arc::new(std::sync::atomic::AtomicI64::new({
+            let flag = home.join("memory_paused");
+            if flag.exists() {
+                std::fs::read_to_string(&flag).ok()
+                    .and_then(|s| s.trim().parse::<i64>().ok())
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp())
+            } else {
+                0
+            }
+        })),
         slot_fail_counts: Arc::new(std::sync::Mutex::new(HashMap::new())),
         screenshot_broker: Arc::clone(&screenshot_broker),
         jarvis_trace: ws_server.jarvis_trace_store().clone(),
