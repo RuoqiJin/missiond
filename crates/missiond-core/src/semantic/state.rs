@@ -103,8 +103,8 @@ impl ClaudeCodeStateParser {
     /// ```text
     /// ❯ /
     /// ────────────────────
-    ///   /example-deploy            描述...
-    ///   /xjp-mcp                     描述...
+    ///   /my-deploy-agent             描述...
+    ///   /my-mcp                      描述...
     /// ```
     fn has_slash_menu(&self, active_lines: &[&str]) -> bool {
         // 1. A prompt line with `/` typed (❯ / or ❯ /partial)
@@ -592,7 +592,7 @@ mod tests {
         let parser = ClaudeCodeStateParser::new();
 
         let context = make_context(&[
-            "xjp-mcp - xjp_secret_get(key: \"test\")",
+            "example-mcp - example_tool(key: \"test\")",
             "❯ 1. Yes, allow this action",
             "  2. Yes, allow for this session",
             "  3. No, deny this action",
@@ -649,7 +649,7 @@ mod tests {
         let context = make_context_with_state(
             &[
                 "Accessing workspace:",
-                "<HOME>",
+                "/Users/testuser",
                 "Quick safety check: Is this a project you created or one you trust?",
                 "❯ 1. Yes, I trust this folder",
                 "  2. No, exit",
@@ -885,8 +885,8 @@ mod tests {
             "────────────────────────────────────────",
             "❯ /",
             "────────────────────────────────────────",
-            "  /example-deploy            description here",
-            "  /xjp-mcp                     XJP MCP server",
+            "  /my-deploy-agent             description here",
+            "  /my-mcp                      My MCP server",
             "  /missiond                    Claude Code multi-instance",
             "  /backend-deploy              backend deploy",
             "  /add-dir                     Add a new working directory",
@@ -900,12 +900,12 @@ mod tests {
     fn test_detect_slash_menu_partial_filter() {
         let parser = ClaudeCodeStateParser::new();
 
-        // User typed /xjp to filter
+        // User typed /my to filter
         let context = make_context(&[
-            "❯ /xjp",
+            "❯ /my",
             "────────────────────────────────────────",
-            "  /example-deploy            desc",
-            "  /xjp-mcp                     desc",
+            "  /my-deploy-agent             desc",
+            "  /my-mcp                      desc",
         ]);
         let result = parser.detect_state(&context);
         assert!(result.is_some());

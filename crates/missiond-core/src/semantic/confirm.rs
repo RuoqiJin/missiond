@@ -80,8 +80,8 @@ impl ClaudeCodeConfirmParser {
     /// Parse tool info from confirmation text
     ///
     /// Supports formats:
-    /// - `xjp-mcp - xjp_secret_get(key: "value")`
-    /// - `xjp-mcp - xjp_secret_get(key: "value") (MCP)`
+    /// - `server-name - tool_name(key: "value")`
+    /// - `server-name - tool_name(key: "value") (MCP)`
     /// - `Use skill "skill-name"`
     fn parse_tool_info(&self, text: &str) -> Option<ToolInfo> {
         // Try standard MCP tool format first
@@ -289,19 +289,19 @@ mod tests {
         let parser = ClaudeCodeConfirmParser::new();
 
         // Basic format
-        let text = r#"xjp-mcp - xjp_secret_get(key: "test_value")"#;
+        let text = r#"example-mcp - example_tool(key: "test_value")"#;
         let tool = parser.parse_tool_info(text);
         assert!(tool.is_some());
         let tool = tool.unwrap();
-        assert_eq!(tool.name, "xjp_secret_get");
-        assert_eq!(tool.mcp_server, Some("xjp-mcp".to_string()));
+        assert_eq!(tool.name, "example_tool");
+        assert_eq!(tool.mcp_server, Some("example-mcp".to_string()));
         assert_eq!(tool.params.get("key"), Some(&"test_value".to_string()));
 
         // With (MCP) suffix
-        let text = r#"xjp-mcp - xjp_secret_get(key: "value") (MCP)"#;
+        let text = r#"example-mcp - example_tool(key: "value") (MCP)"#;
         let tool = parser.parse_tool_info(text);
         assert!(tool.is_some());
-        assert_eq!(tool.unwrap().name, "xjp_secret_get");
+        assert_eq!(tool.unwrap().name, "example_tool");
 
         // Multiple parameters
         let text = r#"server - tool_name(param1: "val1", param2: "val2")"#;
@@ -338,7 +338,7 @@ mod tests {
         let parser = ClaudeCodeConfirmParser::new();
 
         let context = make_context(&[
-            "xjp-mcp - xjp_secret_get(key: \"test\")",
+            "example-mcp - example_tool(key: \"test\")",
             "❯ 1. Yes, allow this action",
             "  2. Yes, allow for this session",
             "  3. No, deny this action",
@@ -351,7 +351,7 @@ mod tests {
 
         assert_eq!(info.confirm_type, ConfirmType::Options);
         assert!(info.tool.is_some());
-        assert_eq!(info.tool.as_ref().unwrap().name, "xjp_secret_get");
+        assert_eq!(info.tool.as_ref().unwrap().name, "example_tool");
         assert!(info.options.is_some());
         assert_eq!(info.options.as_ref().unwrap().len(), 3);
     }

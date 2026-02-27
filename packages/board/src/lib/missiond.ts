@@ -1,11 +1,20 @@
+import fs from 'fs';
 import net from 'net';
 import os from 'os';
 import path from 'path';
 
-const SOCKET_PATH =
-  process.env.MISSION_IPC_ENDPOINT ||
-  process.env.MISSION_IPC_SOCKET ||
-  path.join(os.homedir(), '.xjp-mission', 'missiond.sock');
+function resolveSocketPath(): string {
+  if (process.env.MISSION_IPC_ENDPOINT) return process.env.MISSION_IPC_ENDPOINT;
+  if (process.env.MISSION_IPC_SOCKET) return process.env.MISSION_IPC_SOCKET;
+  const home = os.homedir();
+  const newPath = path.join(home, '.missiond', 'missiond.sock');
+  const legacyPath = path.join(home, '.xjp-mission', 'missiond.sock');
+  if (fs.existsSync(newPath)) return newPath;
+  if (fs.existsSync(legacyPath)) return legacyPath;
+  return newPath;
+}
+
+const SOCKET_PATH = resolveSocketPath();
 
 export async function callMissiond(method: string, params: Record<string, unknown>): Promise<unknown> {
   return new Promise((resolve, reject) => {

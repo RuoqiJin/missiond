@@ -15,9 +15,21 @@ import * as path from "path";
 import { getBinaryPath } from "./binary.js";
 
 /**
- * Default configuration directory
+ * Resolve the default configuration directory.
+ * Priority: MISSIOND_HOME env > XJP_MISSION_HOME env > ~/.missiond (if exists) > ~/.xjp-mission (if exists) > ~/.missiond
  */
-const DEFAULT_CONFIG_DIR = path.join(os.homedir(), ".xjp-mission");
+function resolveConfigDir(): string {
+  if (process.env.MISSIOND_HOME) return process.env.MISSIOND_HOME;
+  if (process.env.XJP_MISSION_HOME) return process.env.XJP_MISSION_HOME;
+  const home = os.homedir();
+  const newPath = path.join(home, ".missiond");
+  const legacyPath = path.join(home, ".xjp-mission");
+  if (fs.existsSync(newPath)) return newPath;
+  if (fs.existsSync(legacyPath)) return legacyPath;
+  return newPath;
+}
+
+const DEFAULT_CONFIG_DIR = resolveConfigDir();
 
 /**
  * Default WebSocket port
@@ -28,7 +40,7 @@ const DEFAULT_WS_PORT = 9120;
  * Daemon manager options
  */
 export interface DaemonOptions {
-  /** Configuration directory (default: ~/.xjp-mission) */
+  /** Configuration directory (default: ~/.missiond or ~/.xjp-mission) */
   configDir?: string;
   /** WebSocket port (default: 9120) */
   wsPort?: number;
@@ -160,7 +172,7 @@ export class DaemonManager {
     // Set up environment
     const env: NodeJS.ProcessEnv = {
       ...process.env,
-      XJP_MISSION_HOME: this.configDir,
+      MISSIOND_HOME: this.configDir,
       MISSION_WS_PORT: String(this.wsPort),
     };
 

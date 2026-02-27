@@ -30,14 +30,35 @@ pub fn ipc_endpoint(base_dir: &Path, name: &str) -> String {
     }
 }
 
-/// Get default mission home directory
+/// Get default mission home directory.
+///
+/// Resolution order:
+/// 1. `MISSIOND_HOME` env var (if set)
+/// 2. `XJP_MISSION_HOME` env var (legacy compat)
+/// 3. `~/.missiond` (if exists)
+/// 4. `~/.xjp-mission` (if exists, legacy compat)
+/// 5. `~/.missiond` (default for new installs)
 pub fn default_mission_home() -> PathBuf {
+    // Explicit env vars take priority
+    if let Ok(home) = std::env::var("MISSIOND_HOME") {
+        return PathBuf::from(home);
+    }
     if let Ok(home) = std::env::var("XJP_MISSION_HOME") {
         return PathBuf::from(home);
     }
-    dirs::home_dir()
-        .map(|h| h.join(".xjp-mission"))
-        .unwrap_or_else(|| PathBuf::from(".xjp-mission"))
+    // Auto-detect existing directory
+    if let Some(home) = dirs::home_dir() {
+        let new_path = home.join(".missiond");
+        let legacy_path = home.join(".xjp-mission");
+        if new_path.exists() {
+            return new_path;
+        }
+        if legacy_path.exists() {
+            return legacy_path;
+        }
+        return new_path; // default for new installs
+    }
+    PathBuf::from(".missiond")
 }
 
 /// Get the default IPC endpoint for missiond
@@ -282,22 +303,23 @@ mod tests {
     #[test]
     fn test_default_mission_home() {
         let home = default_mission_home();
-        // Should end with .xjp-mission
-        assert!(home.to_string_lossy().contains("xjp-mission"));
+        // Should resolve to .missiond or .xjp-mission (legacy)
+        let home_str = home.to_string_lossy();
+        assert!(home_str.contains("missiond") || home_str.contains("xjp-mission"));
     }
 
     #[cfg(unix)]
     #[test]
     fn test_ipc_endpoint_unix() {
-        let home = PathBuf::from("/home/user/.xjp-mission");
+        let home = PathBuf::from("/home/user/.missiond");
         let endpoint = ipc_endpoint(&home, "missiond");
-        assert_eq!(endpoint, "/home/user/.xjp-mission/missiond.sock");
+        assert_eq!(endpoint, "/home/user/.missiond/missiond.sock");
     }
 
     #[cfg(windows)]
     #[test]
     fn test_ipc_endpoint_windows() {
-        let home = PathBuf::from(r"C:\Users\user\.xjp-mission");
+        let home = PathBuf::from(r"C:\Users\user\.missiond");
         let endpoint = ipc_endpoint(&home, "missiond");
         assert!(endpoint.starts_with("127.0.0.1:"));
     }

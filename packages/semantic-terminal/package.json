@@ -32,13 +32,13 @@
     "pty",
     "state-machine"
   ],
-  "author": "Xiaojin Pro",
+  "author": "MissionD Contributors",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rickyjim626/missiond"
+    "url": "https://github.com/RuoqiJin/missiond"
   },
-  "homepage": "https://github.com/rickyjim626/missiond#semantic-terminal",
+  "homepage": "https://github.com/RuoqiJin/missiond#semantic-terminal",
   "engines": {
     "node": ">=18"
   },

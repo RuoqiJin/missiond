@@ -693,6 +693,10 @@ pub struct InfraServer {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// HTTP(S) endpoint for deploy-agent health checks (Probe 5 in reachability).
+    /// If set, reachability tool uses this URL instead of hardcoded map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_endpoint: Option<String>,
 }
 
 /// Parsed SSH connection target from InfraServer description
@@ -710,9 +714,9 @@ impl InfraServer {
     /// Parse SSH targets from description field, ordered by priority (LAN > Tailscale > public).
     ///
     /// Matches patterns like:
-    /// - `ssh rickyjin@192.168.31.174 (密码 1234`
-    /// - `ssh -p 2222 rickyjin@45.156.24.163 (密码 1234`
-    /// - `ssh jin@100.73.97.46`
+    /// - `ssh user@192.168.1.100 (密码 pass`
+    /// - `ssh -p 2222 user@198.51.100.1 (密码 pass`
+    /// - `ssh user@100.64.0.1`
     pub fn parse_ssh_targets(&self) -> Vec<SshTarget> {
         let desc = match &self.description {
             Some(d) => d,
@@ -885,18 +889,19 @@ mod tests {
             id: "privatecloud".into(),
             name: "私有云构建机".into(),
             provider: "self-hosted".into(),
-            host: Some("45.156.24.163".into()),
-            lan: Some("192.168.31.174".into()),
+            host: Some("198.51.100.1".into()),
+            lan: Some("192.168.1.100".into()),
             location: None,
             roles: vec![],
             tags: vec![],
             description: Some(
-                "主力构建机。访问: \
-                 1) LAN: ssh rickyjin@192.168.31.174 (密码 1234, 同局域网最快) \
-                 2) Tailscale: ssh rickyjin@100.102.38.47 (rickyjin-10900kf) \
-                 3) HostVDS 隧道: ssh -p 2222 rickyjin@45.156.24.163 (密码 1234, 公网)"
+                "Build server. Access: \
+                 1) LAN: ssh testuser@192.168.1.100 (密码 testpass, 同局域网最快) \
+                 2) Tailscale: ssh testuser@100.64.0.1 (testuser-buildbox) \
+                 3) Tunnel: ssh -p 2222 testuser@198.51.100.1 (密码 testpass, 公网)"
                     .into(),
             ),
+            health_endpoint: None,
         };
 
         let targets = server.parse_ssh_targets();
@@ -904,20 +909,20 @@ mod tests {
 
         // LAN first
         assert_eq!(targets[0].via, "lan");
-        assert_eq!(targets[0].host, "192.168.31.174");
-        assert_eq!(targets[0].user, "rickyjin");
+        assert_eq!(targets[0].host, "192.168.1.100");
+        assert_eq!(targets[0].user, "testuser");
         assert_eq!(targets[0].port, 22);
-        assert_eq!(targets[0].password.as_deref(), Some("1234"));
+        assert_eq!(targets[0].password.as_deref(), Some("testpass"));
 
         // Tailscale second
         assert_eq!(targets[1].via, "tailscale");
-        assert_eq!(targets[1].host, "100.102.38.47");
+        assert_eq!(targets[1].host, "100.64.0.1");
 
         // Public last
         assert_eq!(targets[2].via, "public");
-        assert_eq!(targets[2].host, "45.156.24.163");
+        assert_eq!(targets[2].host, "198.51.100.1");
         assert_eq!(targets[2].port, 2222);
-        assert_eq!(targets[2].password.as_deref(), Some("1234"));
+        assert_eq!(targets[2].password.as_deref(), Some("testpass"));
     }
 
     #[test]
@@ -926,25 +931,26 @@ mod tests {
             id: "win-3090ti".into(),
             name: "Windows".into(),
             provider: "self-hosted".into(),
-            host: Some("192.168.31.239".into()),
+            host: Some("192.168.1.101".into()),
             lan: None,
             location: None,
             roles: vec![],
             tags: vec![],
             description: Some(
-                "访问: 1) LAN: ssh jin@192.168.31.239 (密码 1234) \
-                 2) Tailscale: ssh jin@100.73.97.46 (jin-win3090ti)"
+                "访问: 1) LAN: ssh testuser@192.168.1.101 (密码 testpass) \
+                 2) Tailscale: ssh testuser@100.64.0.2 (testuser-gpu)"
                     .into(),
             ),
+            health_endpoint: None,
         };
 
         let targets = server.parse_ssh_targets();
         assert_eq!(targets.len(), 2);
-        assert_eq!(targets[0].user, "jin");
-        assert_eq!(targets[0].host, "192.168.31.239");
+        assert_eq!(targets[0].user, "testuser");
+        assert_eq!(targets[0].host, "192.168.1.101");
         // Tailscale
         assert_eq!(targets[1].via, "tailscale");
-        assert_eq!(targets[1].host, "100.73.97.46");
+        assert_eq!(targets[1].host, "100.64.0.2");
     }
 
     #[test]
@@ -959,6 +965,7 @@ mod tests {
             roles: vec![],
             tags: vec![],
             description: None,
+            health_endpoint: None,
         };
         assert!(server.parse_ssh_targets().is_empty());
     }

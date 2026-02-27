@@ -15,10 +15,10 @@ string_slice = "warn"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["Xiaojin Pro"]
+authors = ["MissionD Contributors"]
 license = "MIT"
-repository = "https://github.com/rickyjim626/missiond"
-homepage = "https://github.com/rickyjim626/missiond"
+repository = "https://github.com/RuoqiJin/missiond"
+homepage = "https://github.com/RuoqiJin/missiond"
 documentation = "https://docs.rs/missiond-core"
 keywords = ["mcp", "claude", "ai", "agent", "orchestration"]
 categories = ["development-tools", "command-line-utilities"]

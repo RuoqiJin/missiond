@@ -10,6 +10,7 @@
  */
 
 import { EventEmitter } from 'events';
+import * as fs from 'fs';
 import * as net from 'net';
 import * as path from 'path';
 import * as os from 'os';
@@ -404,7 +405,11 @@ export class CCTasksManager extends TypedEventEmitter {
 const DEFAULT_WS_PORT = 9120;
 
 function getDefaultSocketPath(): string {
-  const missionHome = process.env.XJP_MISSION_HOME || path.join(os.homedir(), '.xjp-mission');
+  const missionHome = process.env.MISSIOND_HOME
+    || process.env.XJP_MISSION_HOME
+    || (fs.existsSync(path.join(os.homedir(), '.missiond')) ? path.join(os.homedir(), '.missiond')
+      : fs.existsSync(path.join(os.homedir(), '.xjp-mission')) ? path.join(os.homedir(), '.xjp-mission')
+      : path.join(os.homedir(), '.missiond'));
   return path.join(missionHome, 'missiond.sock');
 }
 
