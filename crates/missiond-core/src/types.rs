@@ -527,6 +527,8 @@ pub struct KnowledgeEntry {
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_accessed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linked_task_id: Option<String>,
 }
 
 /// Input for remembering (upserting) knowledge

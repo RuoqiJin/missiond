@@ -499,6 +499,16 @@ impl MissionDB {
             tracing::info!(count = fixed_system, "Backfilled system role for slot session messages");
         }
 
+        // Add linked_task_id to knowledge table for Board-aware consolidation
+        let has_linked_task_id: bool = conn
+            .prepare("SELECT linked_task_id FROM knowledge LIMIT 0")
+            .is_ok();
+        if !has_linked_task_id {
+            conn.execute_batch(
+                "ALTER TABLE knowledge ADD COLUMN linked_task_id TEXT;"
+            )?;
+        }
+
         // Token usage ledger — append-only event stream for cost analysis
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS token_usage_ledger (
@@ -1541,6 +1551,7 @@ impl MissionDB {
                     created_at: now.clone(),
                     updated_at: now.clone(),
                     last_accessed_at: None,
+                    linked_task_id: None,
                 },
                 action: "rejected".into(),
                 merged_key: None,
@@ -1655,6 +1666,7 @@ impl MissionDB {
             created_at: now.clone(),
             updated_at: now,
             last_accessed_at: None,
+            linked_task_id: None,
         };
 
         Self::kb_sync_fts_with_conn(&conn, &entry)?;
@@ -1690,6 +1702,16 @@ impl MissionDB {
         }
 
         Ok(best)
+    }
+
+    /// Set linked_task_id on a knowledge entry (for Board-aware consolidation)
+    pub fn kb_set_linked_task_id(&self, key: &str, task_id: Option<&str>) -> SqliteResult<bool> {
+        let conn = self.conn();
+        let updated = conn.execute(
+            "UPDATE knowledge SET linked_task_id = ?1 WHERE key = ?2",
+            params![task_id, key],
+        )?;
+        Ok(updated > 0)
     }
 
     /// Get a knowledge entry by key
@@ -2338,22 +2360,46 @@ impl MissionDB {
         }
     }
 
-    /// List conversations, optionally filtered by status
+    /// List conversations, optionally filtered by status.
+    /// Subagent sessions (id LIKE 'agent-%') are excluded from the main list — they fold under parents.
+    /// When no status filter: always includes ALL active main conversations + recent completed ones up to limit.
     pub fn list_conversations(&self, status: Option<&str>, limit: i64) -> SqliteResult<Vec<Conversation>> {
         let conn = self.read_conn();
         let mut convs = Vec::new();
         if let Some(s) = status {
             let mut stmt = conn.prepare(
-                "SELECT * FROM conversations WHERE status = ?1 ORDER BY started_at DESC LIMIT ?2"
+                "SELECT * FROM conversations WHERE status = ?1 AND id NOT LIKE 'agent-%' ORDER BY started_at DESC LIMIT ?2"
             )?;
             let rows = stmt.query_map(params![s, limit], |row| Self::row_to_conversation(row))?;
             for c in rows { convs.push(c?); }
         } else {
-            let mut stmt = conn.prepare(
-                "SELECT * FROM conversations ORDER BY started_at DESC LIMIT ?1"
-            )?;
-            let rows = stmt.query_map(params![limit], |row| Self::row_to_conversation(row))?;
-            for c in rows { convs.push(c?); }
+            // Always include ALL active main conversations first
+            {
+                let mut stmt = conn.prepare(
+                    "SELECT * FROM conversations WHERE status = 'active' AND id NOT LIKE 'agent-%' ORDER BY started_at DESC"
+                )?;
+                let rows = stmt.query_map([], |row| Self::row_to_conversation(row))?;
+                for c in rows { convs.push(c?); }
+            }
+            // Fill remaining limit with non-active main conversations
+            let remaining = limit - convs.len() as i64;
+            if remaining > 0 {
+                let mut stmt = conn.prepare(
+                    "SELECT * FROM conversations WHERE status != 'active' AND id NOT LIKE 'agent-%' ORDER BY started_at DESC LIMIT ?1"
+                )?;
+                let rows = stmt.query_map(params![remaining], |row| Self::row_to_conversation(row))?;
+                for c in rows { convs.push(c?); }
+            }
+            // Sort all: active first, then by started_at DESC
+            convs.sort_by(|a, b| {
+                let a_active = a.status == "active";
+                let b_active = b.status == "active";
+                match (a_active, b_active) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => b.started_at.cmp(&a.started_at),
+                }
+            });
         }
         Ok(convs)
     }
@@ -3030,6 +3076,7 @@ impl MissionDB {
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
             last_accessed_at: row.get("last_accessed_at")?,
+            linked_task_id: row.get("linked_task_id").unwrap_or(None),
         })
     }
 }
