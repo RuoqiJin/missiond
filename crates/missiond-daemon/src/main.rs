@@ -19,7 +19,7 @@ use missiond_core::{CCTasksWatcher, CCTasksWatcherOptions, WatcherEvent};
 use missiond_mcp::protocol::{self, Request, RequestId, Response, RpcError};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
@@ -866,7 +866,27 @@ impl AppState {
                 });
                 if let Some(slot_id) = slot_id {
                     let status = self.pty.get_status(&slot_id).await;
-                    Ok(ToolResult::json(&status))
+                    match status {
+                        Some(info) => {
+                            let mut obj = serde_json::to_value(&info).unwrap_or_default();
+                            // Enrich with session_uuid and JSONL activity
+                            if let Ok(Some(session_uuid)) = self.mission.db().get_slot_session(&slot_id) {
+                                obj["sessionId"] = json!(session_uuid);
+                                if let Ok(Some(conv)) = self.mission.db().get_conversation(&session_uuid) {
+                                    if let Some(ref jsonl_path) = conv.jsonl_path {
+                                        if let Ok(metadata) = std::fs::metadata(jsonl_path) {
+                                            if let Ok(modified) = metadata.modified() {
+                                                let secs_ago = modified.elapsed().unwrap_or_default().as_secs();
+                                                obj["lastActivitySecsAgo"] = json!(secs_ago);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(ToolResult::json(&obj))
+                        }
+                        None => Ok(ToolResult::json(&serde_json::Value::Null)),
+                    }
                 } else {
                     let all = self.pty.get_all_status().await;
                     Ok(ToolResult::json(&all))
@@ -4050,6 +4070,18 @@ async fn check_slot_stuck(
         es.current_slot_task_id = None;
         es.is_checkpoint = false;
         es.checkpoint_message_id = None;
+        // Advance realtime watermarks before clearing — same fix as check_extraction_gate.
+        if matches!(es.active_type, Some("realtime")) && !es.watermark_targets.is_empty() {
+            let db = state.mission.db();
+            for (session_id, timestamp) in &es.watermark_targets {
+                let _ = db.update_realtime_forwarded_at(session_id, timestamp);
+            }
+            warn!(
+                slot_id,
+                sessions = es.watermark_targets.len(),
+                "Advanced watermarks before slot kill (preventing stall)"
+            );
+        }
         es.watermark_targets.clear();
     }
     // Don't reset to 0 — set to now so we can detect if respawn also gets stuck
@@ -4089,6 +4121,19 @@ async fn check_extraction_gate(
             es.current_slot_task_id = None;
             es.is_checkpoint = false;
             es.checkpoint_message_id = None;
+            // Advance realtime watermarks before clearing — prevents permanent
+            // watermark stall. Messages were already sent to slot; even if
+            // processing was incomplete, not advancing causes 100% message leak.
+            if matches!(es.active_type, Some("realtime")) && !es.watermark_targets.is_empty() {
+                let db = mission.db();
+                for (session_id, timestamp) in &es.watermark_targets {
+                    let _ = db.update_realtime_forwarded_at(session_id, timestamp);
+                }
+                warn!(
+                    sessions = es.watermark_targets.len(),
+                    "{}: advanced watermarks on timeout (preventing stall)", label
+                );
+            }
             es.watermark_targets.clear();
             return true;
         }
@@ -5645,7 +5690,7 @@ async fn main() -> Result<()> {
                         if new_state == SessionState::Idle && prev_state != SessionState::Idle {
                             if let Ok(running_tasks) = state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Running) {
                                 let now = chrono::Utc::now().timestamp_millis();
-                                const MIN_EXECUTION_MS: i64 = 10_000; // 10 seconds minimum
+                                const MIN_EXECUTION_MS: i64 = 30_000; // 30 seconds minimum (MiniMax M2.5 needs longer to start tool calls)
                                 // Get last response from this slot (if any)
                                 let last_resp = state.slot_last_responses.write().await.remove(slot_id.as_str());
                                 for task in &running_tasks {
