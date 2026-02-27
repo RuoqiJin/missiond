@@ -573,7 +573,51 @@ impl AppState {
             "mission_submit" => {
                 let SubmitArgs { role, prompt } = serde_json::from_value(args)?;
                 let task_id = self.mission.submit(&role, &prompt)?;
-                Ok(ToolResult::json(&serde_json::json!({ "taskId": task_id })))
+
+                // Try immediate dispatch to an idle slot matching the role
+                let mut dispatched_to: Option<String> = None;
+                let slots = self.mission.list_slots();
+                for slot in &slots {
+                    if slot.config.role != role {
+                        continue;
+                    }
+                    let slot_id = &slot.config.id;
+                    if let Some(status) = self.pty.get_status(slot_id).await {
+                        if status.state == missiond_core::pty::SessionState::Idle {
+                            // Fire-and-forget dispatch to idle slot
+                            match self.pty.send_fire_and_forget(slot_id, &prompt).await {
+                                Ok(()) => {
+                                    let now = chrono::Utc::now().timestamp_millis();
+                                    let _ = self.mission.db().update_task(
+                                        &task_id,
+                                        &missiond_core::types::TaskUpdate {
+                                            status: Some(missiond_core::types::TaskStatus::Running),
+                                            slot_id: Some(slot_id.clone()),
+                                            started_at: Some(now),
+                                            ..Default::default()
+                                        },
+                                    );
+                                    dispatched_to = Some(slot_id.clone());
+                                    info!(task_id = %task_id, slot_id = %slot_id, "mission_submit: dispatched to idle slot");
+                                    break;
+                                }
+                                Err(e) => {
+                                    warn!(task_id = %task_id, slot_id = %slot_id, error = %e, "mission_submit: dispatch failed, queued for autopilot");
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let mut result = serde_json::json!({ "taskId": task_id });
+                if let Some(slot_id) = dispatched_to {
+                    result["dispatched"] = serde_json::json!(true);
+                    result["slotId"] = serde_json::json!(slot_id);
+                } else {
+                    result["dispatched"] = serde_json::json!(false);
+                    result["hint"] = serde_json::json!("No idle slot found for role, task queued for autopilot dispatch");
+                }
+                Ok(ToolResult::json(&result))
             }
             "mission_ask" => {
                 let AskArgs {
@@ -1899,9 +1943,8 @@ impl AppState {
             // State auto-committed by Daemon on extraction completion — no manual done() needed.
             "mission_memory_pending" | "mission_memory_pending_user" => {
                 let db = self.mission.db();
-                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
                 const PENDING_MSG_LIMIT: usize = 50;
-                let pending = db.get_pending_realtime_messages_with_limit(&today, PENDING_MSG_LIMIT)
+                let pending = db.get_pending_realtime_messages_with_limit(PENDING_MSG_LIMIT)
                     .map_err(|e| anyhow!("DB error: {}", e))?;
 
                 if pending.is_empty() {
@@ -1994,30 +2037,38 @@ impl AppState {
 
                 // Fast lane state
                 let fast_es = self.extraction_state.read().await;
+                let fast_busy = self.memory_slot_busy_since.load(std::sync::atomic::Ordering::Relaxed);
                 let fast_lane = serde_json::json!({
                     "slotId": MEMORY_SLOT_ID,
                     "phase": format!("{:?}", fast_es.phase),
                     "activeType": fast_es.active_type,
                     "phaseAge": if fast_es.phase_started_at > 0 { now - fast_es.phase_started_at } else { 0 },
-                    "busySince": self.memory_slot_busy_since.load(std::sync::atomic::Ordering::Relaxed),
+                    "busySince": fast_busy,
+                    "busyDuration": if fast_busy > 0 { now - fast_busy } else { 0 },
+                    "currentTargets": fast_es.watermark_targets.iter()
+                        .map(|(sid, _)| sid.clone()).collect::<Vec<_>>(),
+                    "currentTaskId": fast_es.current_task_id,
                 });
                 drop(fast_es);
 
                 // Slow lane state
                 let slow_es = self.slow_extraction_state.read().await;
+                let slow_busy = self.slow_slot_busy_since.load(std::sync::atomic::Ordering::Relaxed);
                 let slow_lane = serde_json::json!({
                     "slotId": MEMORY_SLOW_SLOT_ID,
                     "phase": format!("{:?}", slow_es.phase),
                     "activeType": slow_es.active_type,
                     "phaseAge": if slow_es.phase_started_at > 0 { now - slow_es.phase_started_at } else { 0 },
-                    "busySince": self.slow_slot_busy_since.load(std::sync::atomic::Ordering::Relaxed),
+                    "busySince": slow_busy,
+                    "busyDuration": if slow_busy > 0 { now - slow_busy } else { 0 },
+                    "currentConvId": slow_es.current_deep_conv_id,
+                    "currentTaskId": slow_es.current_task_id,
                 });
                 drop(slow_es);
 
                 // Pending counts
                 let db = self.mission.db();
-                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-                let pending_realtime = db.count_pending_realtime(&today).unwrap_or(0);
+                let pending_realtime = db.count_pending_realtime().unwrap_or(0);
                 let pending_deep = db.count_pending_deep_analysis(
                     CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES
                 ).unwrap_or(0);
@@ -2026,12 +2077,15 @@ impl AppState {
                 let last_consolidation = self.last_kb_consolidation_at.load(std::sync::atomic::Ordering::Relaxed);
                 let last_gc = self.last_auto_gc_at.load(std::sync::atomic::Ordering::Relaxed);
 
-                // KB stats (lightweight)
+                // KB stats (full — includes mostAccessed, oldest, subcategories)
                 let kb_stats = db.kb_stats()
                     .map(|s| serde_json::json!({
                         "total": s["total"],
                         "categories": s["categoryRollup"],
+                        "subcategories": s["categories"],
                         "neverAccessed": s["neverAccessed"],
+                        "mostAccessed": s["mostAccessed"],
+                        "oldest": s["oldest"],
                     }))
                     .unwrap_or(serde_json::json!(null));
 
@@ -2048,6 +2102,9 @@ impl AppState {
                                 "durationMs": t.duration_ms,
                                 "createdAt": t.created_at,
                                 "error": t.error,
+                                "outputCount": t.output_count,
+                                "sourceSessions": t.source_sessions,
+                                "conversationId": t.conversation_id,
                             }));
                         }
                     }
@@ -2059,12 +2116,27 @@ impl AppState {
                 });
                 recent.truncate(15);
 
+                // Queue detail (per-session / per-conversation)
+                let realtime_detail: Vec<serde_json::Value> = db.pending_realtime_detail()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(sid, cnt, oldest)| serde_json::json!({"sessionId": sid, "msgCount": cnt, "oldest": oldest}))
+                    .collect();
+                let deep_detail: Vec<serde_json::Value> = db.pending_deep_detail(
+                    CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES
+                ).unwrap_or_default()
+                    .into_iter()
+                    .map(|(id, ended, retries)| serde_json::json!({"conversationId": id, "endedAt": ended, "retries": retries}))
+                    .collect();
+
                 Ok(ToolResult::json(&serde_json::json!({
                     "paused": paused,
                     "fastLane": fast_lane,
                     "slowLane": slow_lane,
                     "pendingRealtime": pending_realtime,
                     "pendingDeep": pending_deep,
+                    "realtimeDetail": realtime_detail,
+                    "deepDetail": deep_detail,
                     "lastKbConsolidation": if last_consolidation > 0 {
                         chrono::DateTime::from_timestamp(last_consolidation, 0)
                             .map(|d| d.to_rfc3339()).unwrap_or_default()
@@ -3168,6 +3240,9 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
         check_slot_stuck(state, MEMORY_SLOT_ID, &state.memory_slot_busy_since, &state.extraction_state).await;
         check_slot_stuck(state, MEMORY_SLOW_SLOT_ID, &state.slow_slot_busy_since, &state.slow_extraction_state).await;
 
+        // User-submitted tasks take priority over daemon-internal extraction
+        dispatch_queued_submit_tasks(state).await;
+
         // Fast lane: realtime extraction on slot-memory
         check_realtime_extraction(state).await;
 
@@ -3651,6 +3726,70 @@ async fn ensure_memory_slot(state: &AppState) -> bool {
     ensure_memory_slot_by_id(state, MEMORY_SLOT_ID).await
 }
 
+/// Dispatch queued tasks from the `tasks` table (created by mission_submit).
+/// Runs every autopilot tick (60s). Finds queued tasks, matches them to idle slots.
+async fn dispatch_queued_submit_tasks(state: &AppState) {
+    let queued = match state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Queued) {
+        Ok(tasks) => tasks,
+        Err(e) => {
+            warn!(error = %e, "Failed to query queued submit tasks");
+            return;
+        }
+    };
+
+    if queued.is_empty() {
+        return;
+    }
+
+    info!(count = queued.len(), "Autopilot: found queued submit tasks");
+
+    for task in &queued {
+        // Find an idle slot matching the task's role
+        let slots = state.mission.list_slots();
+        let mut dispatched = false;
+
+        for slot in &slots {
+            if slot.config.role != task.role {
+                continue;
+            }
+            let slot_id = &slot.config.id;
+            let status = match state.pty.get_status(slot_id).await {
+                Some(s) => s,
+                None => continue,
+            };
+            if status.state != missiond_core::pty::SessionState::Idle {
+                continue;
+            }
+
+            // Try fire-and-forget dispatch
+            match state.pty.send_fire_and_forget(slot_id, &task.prompt).await {
+                Ok(()) => {
+                    let now = chrono::Utc::now().timestamp_millis();
+                    let _ = state.mission.db().update_task(
+                        &task.id,
+                        &missiond_core::types::TaskUpdate {
+                            status: Some(missiond_core::types::TaskStatus::Running),
+                            slot_id: Some(slot_id.clone()),
+                            started_at: Some(now),
+                            ..Default::default()
+                        },
+                    );
+                    info!(task_id = %task.id, slot_id = %slot_id, role = %task.role, "Autopilot: dispatched queued submit task");
+                    dispatched = true;
+                    break;
+                }
+                Err(e) => {
+                    warn!(task_id = %task.id, slot_id = %slot_id, error = %e, "Autopilot: dispatch to slot failed");
+                }
+            }
+        }
+
+        if !dispatched {
+            debug!(task_id = %task.id, role = %task.role, "Autopilot: no idle slot for queued task, will retry next tick");
+        }
+    }
+}
+
 /// Threshold for considering the memory slot stuck (10 minutes).
 const STUCK_THRESHOLD_SECS: i64 = 600;
 
@@ -3782,8 +3921,7 @@ async fn check_realtime_extraction(state: &AppState) {
     }
 
     // Watermark-based check: any conversations with messages beyond their realtime_forwarded_at?
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    let raw_pending = match state.mission.db().get_pending_realtime_messages(&today) {
+    let raw_pending = match state.mission.db().get_pending_realtime_messages() {
         Ok(p) if !p.is_empty() => p,
         Ok(_) => {
             debug!("realtime: no pending messages (watermark)");

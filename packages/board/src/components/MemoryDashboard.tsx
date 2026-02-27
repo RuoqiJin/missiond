@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Activity, Pause, Play, RefreshCw, Zap, Clock, Database, AlertCircle } from 'lucide-react';
+import { Activity, Pause, Play, RefreshCw, Zap, Clock, Database, AlertCircle, AlertTriangle, ChevronDown, ChevronRight, TrendingUp } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 
@@ -11,6 +11,10 @@ interface LaneStatus {
   activeType: string | null;
   phaseAge: number;
   busySince: number;
+  busyDuration: number;
+  currentTargets?: string[];
+  currentConvId?: string | null;
+  currentTaskId?: string | null;
 }
 
 interface RecentTask {
@@ -21,12 +25,30 @@ interface RecentTask {
   durationMs: number | null;
   createdAt: string;
   error: string | null;
+  outputCount: number;
+  sourceSessions: string | null;
+  conversationId: string | null;
+}
+
+interface RealtimeDetail {
+  sessionId: string;
+  msgCount: number;
+  oldest: string;
+}
+
+interface DeepDetail {
+  conversationId: string;
+  endedAt: string;
+  retries: number;
 }
 
 interface KBStats {
   total: number;
   categories: Record<string, number> | null;
+  subcategories: Record<string, number> | null;
   neverAccessed: number;
+  mostAccessed: { category: string; key: string; accessCount: number } | null;
+  oldest: { category: string; key: string; updatedAt: string } | null;
 }
 
 interface MemoryStatus {
@@ -35,6 +57,8 @@ interface MemoryStatus {
   slowLane: LaneStatus;
   pendingRealtime: number;
   pendingDeep: number;
+  realtimeDetail: RealtimeDetail[];
+  deepDetail: DeepDetail[];
   lastKbConsolidation: string;
   lastAutoGc: string;
   kbStats: KBStats | null;
@@ -66,6 +90,10 @@ function timeAgo(dateStr: string): string {
   return `${days}天前`;
 }
 
+function shortSessionId(id: string): string {
+  return id.length > 12 ? id.slice(0, 8) + '...' : id;
+}
+
 const PHASE_STYLES: Record<string, { label: string; color: string; bg: string }> = {
   Idle: { label: 'Idle', color: 'text-neutral-400', bg: 'bg-neutral-500/10' },
   Sending: { label: 'Sending', color: 'text-yellow-400', bg: 'bg-yellow-500/10' },
@@ -86,13 +114,17 @@ const TYPE_LABELS: Record<string, string> = {
   kb_gc: 'KB GC',
 };
 
+const STUCK_THRESHOLD_SECS = 900; // 15 min
+
 function LaneCard({ label, lane, icon }: { label: string; lane: LaneStatus; icon: 'fast' | 'slow' }) {
   const phase = PHASE_STYLES[lane.phase] || PHASE_STYLES.Idle;
   const isActive = lane.phase !== 'Idle';
+  const isStuck = isActive && lane.busyDuration > STUCK_THRESHOLD_SECS;
 
   return (
     <div className={cn(
       'flex-1 rounded-lg border p-3',
+      isStuck ? 'border-red-500/40 bg-red-500/5' :
       isActive ? 'border-orange-500/30 bg-orange-500/5' : 'border-neutral-800 bg-neutral-900/50',
     )}>
       <div className="flex items-center justify-between mb-2">
@@ -100,14 +132,104 @@ function LaneCard({ label, lane, icon }: { label: string; lane: LaneStatus; icon
           {icon === 'fast' ? <Zap className="w-3 h-3 text-yellow-400" /> : <Clock className="w-3 h-3 text-blue-400" />}
           {label}
         </span>
-        <Badge variant="outline" className={cn('text-[10px] px-1.5 py-0 border-0', phase.color, phase.bg)}>
-          {phase.label}
-        </Badge>
+        <div className="flex items-center gap-1">
+          {isStuck && <AlertTriangle className="w-3 h-3 text-red-400" />}
+          <Badge variant="outline" className={cn(
+            'text-[10px] px-1.5 py-0 border-0',
+            isStuck ? 'text-red-400 bg-red-500/10' : phase.color, !isStuck && phase.bg,
+          )}>
+            {isStuck ? 'Stuck' : phase.label}
+          </Badge>
+        </div>
       </div>
       {isActive && (
         <div className="text-xs text-neutral-500 space-y-0.5">
           <div>类型: <span className="text-neutral-300">{lane.activeType || '-'}</span></div>
-          <div>已运行: <span className="text-neutral-300">{formatAge(lane.phaseAge)}</span></div>
+          <div>已运行: <span className={cn('text-neutral-300', isStuck && 'text-red-400')}>{formatAge(lane.phaseAge)}</span></div>
+          {lane.busyDuration > 0 && (
+            <div>总占用: <span className={cn('text-neutral-300', isStuck && 'text-red-400')}>{formatAge(lane.busyDuration)}</span></div>
+          )}
+          {/* Fast lane: show target sessions */}
+          {lane.currentTargets && lane.currentTargets.length > 0 && (
+            <div className="mt-1 pt-1 border-t border-neutral-800">
+              <span className="text-neutral-500">目标:</span>
+              <div className="flex flex-wrap gap-1 mt-0.5">
+                {lane.currentTargets.map(sid => (
+                  <span key={sid} className="text-[9px] px-1 py-0 rounded bg-neutral-800 text-neutral-400 font-mono" title={sid}>
+                    {shortSessionId(sid)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {/* Slow lane: show current conversation */}
+          {lane.currentConvId && (
+            <div className="mt-1 pt-1 border-t border-neutral-800">
+              <span className="text-neutral-500">会话: </span>
+              <span className="text-neutral-400 font-mono text-[9px]" title={lane.currentConvId}>
+                {shortSessionId(lane.currentConvId)}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function QueueDetailPanel({ realtimeDetail, deepDetail }: { realtimeDetail: RealtimeDetail[]; deepDetail: DeepDetail[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasDetail = realtimeDetail.length > 0 || deepDetail.length > 0;
+
+  if (!hasDetail) return null;
+
+  return (
+    <div className="rounded-lg border border-neutral-800 overflow-hidden mb-4">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center justify-between px-3 py-2 bg-neutral-900/80 text-xs text-neutral-400 hover:text-neutral-300 transition-colors"
+      >
+        <span className="font-medium">队列明细</span>
+        {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+      </button>
+      {expanded && (
+        <div className="px-3 py-2 space-y-3">
+          {realtimeDetail.length > 0 && (
+            <div>
+              <div className="text-[10px] text-neutral-500 mb-1 uppercase tracking-wider">Realtime — 按 session</div>
+              <div className="space-y-0.5">
+                {realtimeDetail.map(d => (
+                  <div key={d.sessionId} className="flex items-center gap-2 text-xs">
+                    <span className="text-neutral-400 font-mono w-24 shrink-0 truncate" title={d.sessionId}>
+                      {shortSessionId(d.sessionId)}
+                    </span>
+                    <span className="text-neutral-300">{d.msgCount} 条</span>
+                    <span className="text-neutral-500">最早 {timeAgo(d.oldest)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {deepDetail.length > 0 && (
+            <div>
+              <div className="text-[10px] text-neutral-500 mb-1 uppercase tracking-wider">Deep Analysis — 按会话</div>
+              <div className="space-y-0.5">
+                {deepDetail.map(d => (
+                  <div key={d.conversationId} className="flex items-center gap-2 text-xs">
+                    <span className="text-neutral-400 font-mono w-24 shrink-0 truncate" title={d.conversationId}>
+                      {shortSessionId(d.conversationId)}
+                    </span>
+                    <span className="text-neutral-500">结束于 {timeAgo(d.endedAt)}</span>
+                    {d.retries > 0 && (
+                      <Badge variant="outline" className="text-[9px] px-1 py-0 border-0 text-yellow-400 bg-yellow-500/10">
+                        retry {d.retries}
+                      </Badge>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -118,6 +240,7 @@ export function MemoryDashboard() {
   const [status, setStatus] = useState<MemoryStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [toggling, setToggling] = useState(false);
+  const [showSubcategories, setShowSubcategories] = useState(false);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -159,8 +282,12 @@ export function MemoryDashboard() {
     );
   }
 
-  const categories = status.kbStats?.categories || {};
+  const categories = (showSubcategories ? status.kbStats?.subcategories : status.kbStats?.categories) || {};
   const totalKb = status.kbStats?.total || 0;
+
+  // Compute recent output stats
+  const completedTasks = status.recentTasks.filter(t => t.status === 'completed');
+  const totalOutput = completedTasks.reduce((sum, t) => sum + (t.outputCount || 0), 0);
 
   return (
     <div className="flex-1 overflow-auto px-4 sm:px-8 pb-8 max-w-5xl">
@@ -223,6 +350,12 @@ export function MemoryDashboard() {
         </div>
       </div>
 
+      {/* Queue Detail (collapsible) */}
+      <QueueDetailPanel
+        realtimeDetail={status.realtimeDetail || []}
+        deepDetail={status.deepDetail || []}
+      />
+
       {/* KB Stats + Timers */}
       <div className="flex gap-3 mb-4">
         <div className="flex-1 rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
@@ -239,14 +372,48 @@ export function MemoryDashboard() {
               <div className="text-sm font-medium text-neutral-300">{status.kbStats?.neverAccessed || 0}</div>
               <div className="text-[10px] text-neutral-500">未访问</div>
             </div>
+            {totalOutput > 0 && (
+              <div className="flex items-center gap-1">
+                <TrendingUp className="w-3 h-3 text-green-400" />
+                <div>
+                  <div className="text-sm font-medium text-green-400">+{totalOutput}</div>
+                  <div className="text-[10px] text-neutral-500">近期产出</div>
+                </div>
+              </div>
+            )}
           </div>
+          {/* Most accessed + oldest */}
+          {(status.kbStats?.mostAccessed || status.kbStats?.oldest) && (
+            <div className="mt-2 pt-2 border-t border-neutral-800 flex gap-4 text-[10px]">
+              {status.kbStats?.mostAccessed && (
+                <div className="text-neutral-500">
+                  热门: <span className="text-neutral-400">{status.kbStats.mostAccessed.category}/{status.kbStats.mostAccessed.key}</span>
+                  <span className="text-neutral-500 ml-1">({status.kbStats.mostAccessed.accessCount}次)</span>
+                </div>
+              )}
+              {status.kbStats?.oldest && (
+                <div className="text-neutral-500">
+                  最旧: <span className="text-neutral-400">{status.kbStats.oldest.category}/{status.kbStats.oldest.key}</span>
+                  <span className="text-neutral-500 ml-1">({timeAgo(status.kbStats.oldest.updatedAt)})</span>
+                </div>
+              )}
+            </div>
+          )}
           {Object.keys(categories).length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {Object.entries(categories).sort(([,a], [,b]) => (b as number) - (a as number)).map(([cat, count]) => (
-                <span key={cat} className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-400">
-                  {cat}: {count as number}
-                </span>
-              ))}
+            <div className="mt-2">
+              <button
+                onClick={() => setShowSubcategories(!showSubcategories)}
+                className="text-[10px] text-neutral-500 hover:text-neutral-400 transition-colors mb-1"
+              >
+                {showSubcategories ? '收起子分类' : '展开子分类'}
+              </button>
+              <div className="flex flex-wrap gap-1.5">
+                {Object.entries(categories).sort(([,a], [,b]) => (b as number) - (a as number)).map(([cat, count]) => (
+                  <span key={cat} className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-400">
+                    {cat}: {count as number}
+                  </span>
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -284,9 +451,20 @@ export function MemoryDashboard() {
                   <Badge variant="outline" className={cn('text-[10px] px-1.5 py-0 border-0 shrink-0', st.color, st.bg)}>
                     {task.status}
                   </Badge>
-                  <span className="text-neutral-500 w-16 text-right shrink-0">{formatDuration(task.durationMs)}</span>
-                  {task.error && (
+                  <span className="text-neutral-500 w-12 text-right shrink-0">{formatDuration(task.durationMs)}</span>
+                  {task.status === 'completed' && task.outputCount > 0 ? (
+                    <span className="text-green-400 w-10 text-right shrink-0">+{task.outputCount}</span>
+                  ) : (
+                    <span className="w-10 shrink-0" />
+                  )}
+                  {task.error ? (
                     <span className="text-red-400 truncate flex-1" title={task.error}>{task.error}</span>
+                  ) : task.sourceSessions ? (
+                    <span className="text-neutral-600 truncate flex-1 font-mono text-[9px]" title={task.sourceSessions}>
+                      {task.sourceSessions}
+                    </span>
+                  ) : (
+                    <span className="flex-1" />
                   )}
                 </div>
               );
