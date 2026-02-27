@@ -1821,6 +1821,96 @@ impl AppState {
                 }))
             }
 
+            "mission_memory_status" => {
+                let paused = self.memory_paused.load(std::sync::atomic::Ordering::Relaxed);
+                let now = chrono::Utc::now().timestamp();
+
+                // Fast lane state
+                let fast_es = self.extraction_state.read().await;
+                let fast_lane = serde_json::json!({
+                    "slotId": MEMORY_SLOT_ID,
+                    "phase": format!("{:?}", fast_es.phase),
+                    "activeType": fast_es.active_type,
+                    "phaseAge": if fast_es.phase_started_at > 0 { now - fast_es.phase_started_at } else { 0 },
+                    "busySince": self.memory_slot_busy_since.load(std::sync::atomic::Ordering::Relaxed),
+                });
+                drop(fast_es);
+
+                // Slow lane state
+                let slow_es = self.slow_extraction_state.read().await;
+                let slow_lane = serde_json::json!({
+                    "slotId": MEMORY_SLOW_SLOT_ID,
+                    "phase": format!("{:?}", slow_es.phase),
+                    "activeType": slow_es.active_type,
+                    "phaseAge": if slow_es.phase_started_at > 0 { now - slow_es.phase_started_at } else { 0 },
+                    "busySince": self.slow_slot_busy_since.load(std::sync::atomic::Ordering::Relaxed),
+                });
+                drop(slow_es);
+
+                // Pending counts
+                let db = self.mission.db();
+                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                let pending_realtime = db.count_pending_realtime(&today).unwrap_or(0);
+                let pending_deep = db.count_pending_deep_analysis(
+                    CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES
+                ).unwrap_or(0);
+
+                // Timestamps
+                let last_consolidation = self.last_kb_consolidation_at.load(std::sync::atomic::Ordering::Relaxed);
+                let last_gc = self.last_auto_gc_at.load(std::sync::atomic::Ordering::Relaxed);
+
+                // KB stats (lightweight)
+                let kb_stats = db.kb_stats()
+                    .map(|s| serde_json::json!({
+                        "total": s["total"],
+                        "categories": s["categoryRollup"],
+                        "neverAccessed": s["neverAccessed"],
+                    }))
+                    .unwrap_or(serde_json::json!(null));
+
+                // Recent memory slot tasks (last 15 across both slots)
+                let mut recent: Vec<serde_json::Value> = Vec::new();
+                for sid in &[MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID] {
+                    if let Ok(tasks) = db.list_slot_tasks(Some(sid), None, None, 10) {
+                        for t in tasks {
+                            recent.push(serde_json::json!({
+                                "id": t.id,
+                                "slotId": t.slot_id,
+                                "taskType": t.task_type,
+                                "status": t.status,
+                                "durationMs": t.duration_ms,
+                                "createdAt": t.created_at,
+                                "error": t.error,
+                            }));
+                        }
+                    }
+                }
+                recent.sort_by(|a, b| {
+                    let ta = a["createdAt"].as_str().unwrap_or("");
+                    let tb = b["createdAt"].as_str().unwrap_or("");
+                    tb.cmp(ta)
+                });
+                recent.truncate(15);
+
+                Ok(ToolResult::json(&serde_json::json!({
+                    "paused": paused,
+                    "fastLane": fast_lane,
+                    "slowLane": slow_lane,
+                    "pendingRealtime": pending_realtime,
+                    "pendingDeep": pending_deep,
+                    "lastKbConsolidation": if last_consolidation > 0 {
+                        chrono::DateTime::from_timestamp(last_consolidation, 0)
+                            .map(|d| d.to_rfc3339()).unwrap_or_default()
+                    } else { String::new() },
+                    "lastAutoGc": if last_gc > 0 {
+                        chrono::DateTime::from_timestamp(last_gc, 0)
+                            .map(|d| d.to_rfc3339()).unwrap_or_default()
+                    } else { String::new() },
+                    "kbStats": kb_stats,
+                    "recentTasks": recent,
+                })))
+            }
+
             // ===== Token Stats =====
             "mission_token_stats" => {
                 #[derive(Deserialize)]

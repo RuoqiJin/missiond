@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText } from 'lucide-react';
+import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Activity } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
@@ -14,8 +14,9 @@ import { Terminal } from './components/Terminal';
 import { KnowledgeBase } from './components/KnowledgeBase';
 import { Conversations } from './components/Conversations';
 import { PendingQuestions } from './components/PendingQuestions';
+import { MemoryDashboard } from './components/MemoryDashboard';
 
-type Tab = 'board' | 'terminal' | 'knowledge' | 'conversations';
+type Tab = 'board' | 'terminal' | 'knowledge' | 'conversations' | 'memory';
 
 interface SlotDef { id: string; label: string; role: string; running?: boolean }
 
@@ -141,6 +142,16 @@ export default function App() {
               <MessageSquareText className="w-3 h-3" />
               Logs
             </button>
+            <button
+              onClick={() => setTab('memory')}
+              className={cn(
+                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
+                tab === 'memory' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
+              )}
+            >
+              <Activity className="w-3 h-3" />
+              Memory
+            </button>
           </div>
         </div>
 
@@ -193,8 +204,10 @@ export default function App() {
         </div>
       ) : tab === 'knowledge' ? (
         <KnowledgeBase />
-      ) : (
+      ) : tab === 'conversations' ? (
         <Conversations />
+      ) : (
+        <MemoryDashboard />
       )}
     </div>
   );

@@ -2162,6 +2162,38 @@ impl MissionDB {
         )
     }
 
+    /// Count conversations pending deep analysis.
+    pub fn count_pending_deep_analysis(&self, current_version: i32, max_retries: i32) -> SqliteResult<i64> {
+        let conn = self.read_conn();
+        conn.query_row(
+            "SELECT COUNT(*) FROM conversations
+             WHERE status = 'completed'
+               AND slot_id IS NULL
+               AND id NOT LIKE 'agent-%'
+               AND ended_at < datetime('now', '-5 minutes')
+               AND analysis_retries < ?1
+               AND (analyzed_at IS NULL OR analysis_version < ?2)",
+            params![max_retries, current_version],
+            |row| row.get(0),
+        )
+    }
+
+    /// Count distinct sessions with pending realtime messages.
+    pub fn count_pending_realtime(&self, today: &str) -> SqliteResult<i64> {
+        let conn = self.read_conn();
+        conn.query_row(
+            "SELECT COUNT(DISTINCT c.id) FROM conversations c
+             JOIN conversation_messages m ON c.id = m.session_id
+             WHERE c.slot_id IS NULL
+               AND c.id NOT LIKE 'agent-%'
+               AND m.timestamp >= ?1
+               AND m.timestamp > COALESCE(c.realtime_forwarded_at, ?1)
+               AND m.role IN ('user', 'assistant')",
+            params![today],
+            |row| row.get(0),
+        )
+    }
+
     /// Mark a conversation's deep analysis as complete with the given version.
     pub fn mark_analysis_complete(&self, id: &str, version: i32) -> SqliteResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
