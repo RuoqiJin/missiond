@@ -54,6 +54,10 @@ struct ExtractionState {
     current_task_id: Option<String>,
     /// slot_tasks table row ID for the current extraction (for history tracking).
     current_slot_task_id: Option<String>,
+    /// Whether current deep analysis is a checkpoint (active session) vs full (completed session).
+    is_checkpoint: bool,
+    /// Max message ID in the batch being analyzed (for advancing checkpoint watermark on completion).
+    checkpoint_message_id: Option<i64>,
 }
 
 /// Deep analysis schema version. Bump this when the analysis prompt changes
@@ -3996,6 +4000,8 @@ async fn check_slot_stuck(
         es.active_type = None;
         es.current_task_id = None;
         es.current_slot_task_id = None;
+        es.is_checkpoint = false;
+        es.checkpoint_message_id = None;
         es.watermark_targets.clear();
     }
     // Don't reset to 0 — set to now so we can detect if respawn also gets stuck
@@ -4033,6 +4039,8 @@ async fn check_extraction_gate(
             es.active_type = None;
             es.current_task_id = None;
             es.current_slot_task_id = None;
+            es.is_checkpoint = false;
+            es.checkpoint_message_id = None;
             es.watermark_targets.clear();
             return true;
         }
@@ -4189,6 +4197,8 @@ async fn check_realtime_extraction(state: &AppState) {
                 es.active_type = None;
                 es.current_task_id = None;
                 es.current_slot_task_id = None;
+                es.is_checkpoint = false;
+                es.checkpoint_message_id = None;
                 // Watermark not advanced on failure — messages stay pending for retry
                 es.watermark_targets.clear();
             }
@@ -4227,12 +4237,21 @@ async fn check_deep_analysis(state: &AppState) {
     }
 
     for conv in &pending_convs {
+        let is_checkpoint = conv.status == "active";
+        let since_id = if is_checkpoint && conv.deep_analyzed_message_id > 0 {
+            Some(conv.deep_analyzed_message_id)
+        } else {
+            None
+        };
+
         let msgs = db
-            .get_conversation_messages(&conv.id, None, 1000)
+            .get_conversation_messages(&conv.id, since_id, 1000)
             .unwrap_or_default();
         let msg_count = msgs.len();
+
         // Skip conversations with too few messages — mark analyzed and move on
-        if msg_count < 6 {
+        // (only for completed sessions; checkpoints already passed the 100-msg threshold)
+        if !is_checkpoint && msg_count < 6 {
             let _ = db.mark_analysis_complete(&conv.id, CURRENT_ANALYSIS_VERSION);
             continue;
         }
@@ -4256,13 +4275,38 @@ async fn check_deep_analysis(state: &AppState) {
             break;
         }
 
+        // Record the max message ID for checkpoint watermark advancement
+        let max_message_id = msgs.last().map(|m| m.id);
+
+        let checkpoint_hint = if is_checkpoint {
+            format!(
+                "\n⚠️ 这是增量 checkpoint 分析（活跃会话）。\n\
+                 仅分析 since_id={} 之后的 {} 条新消息。\n\
+                 调用 mission_conversation_get(sessionId: \"{}\", sinceId: {}) 获取新消息。\n",
+                since_id.unwrap_or(0), msg_count, conv.id, since_id.unwrap_or(0)
+            )
+        } else if conv.deep_analyzed_message_id > 0 {
+            // Completed session with previous checkpoint — only analyze remaining
+            format!(
+                "\n⚠️ 此会话已有 checkpoint，仅分析 since_id={} 之后的 {} 条剩余消息。\n\
+                 调用 mission_conversation_get(sessionId: \"{}\", sinceId: {}) 获取剩余消息。\n",
+                conv.deep_analyzed_message_id, msg_count, conv.id, conv.deep_analyzed_message_id
+            )
+        } else {
+            format!(
+                "\n调用 mission_conversation_get(sessionId: \"{}\") 获取完整会话内容。\n\
+                 返回中如有 subagents 字段，表示该会话产生了子任务(Task tool)，可按需获取子会话内容。\n",
+                conv.id
+            )
+        };
+
         let prompt = format!(
             "[deep-analysis]\n\
              session_id: {session_id}\n\
              project: {project}\n\
              消息数: {msg_count}\n\
-             调用 mission_conversation_get(sessionId: \"{session_id}\") 获取完整会话内容。\n\
-             返回中如有 subagents 字段，表示该会话产生了子任务(Task tool)，可按需获取子会话内容。\n\n\
+             模式: {mode}\n\
+             {checkpoint_hint}\n\
              ⚠️ 重要: 消息级知识（偏好/决策/事实）已由 realtime 管道提取，不要重复提取。\n\
              你的任务仅限于:\n\
              1. 跨会话模式 — 用 mission_conversation_search 搜索相关会话，发现反复出现的主题\n\
@@ -4279,9 +4323,12 @@ async fn check_deep_analysis(state: &AppState) {
             session_id = conv.id,
             project = conv.project.as_deref().unwrap_or("unknown"),
             msg_count = msg_count,
+            mode = if is_checkpoint { "checkpoint (活跃会话增量)" } else { "full (已完成会话)" },
+            checkpoint_hint = checkpoint_hint,
         );
 
-        info!(conv_id = %conv.id, msg_count, retries = conv.analysis_retries, "Deep analysis: sending to slow lane");
+        let task_type = if is_checkpoint { "deep_checkpoint" } else { "deep_analysis" };
+        info!(conv_id = %conv.id, msg_count, retries = conv.analysis_retries, is_checkpoint, "Deep analysis: sending to slow lane");
 
         // Generate task_id and tag the slow slot's current session
         let task_id = uuid::Uuid::new_v4().to_string();
@@ -4294,9 +4341,9 @@ async fn check_deep_analysis(state: &AppState) {
         let slot_task = missiond_core::types::SlotTask {
             id: slot_task_id.clone(),
             slot_id: MEMORY_SLOW_SLOT_ID.to_string(),
-            task_type: "deep_analysis".to_string(),
+            task_type: task_type.to_string(),
             status: "pending".to_string(),
-            prompt_summary: Some(format!("session: {}, {} msgs", &conv.id[..8.min(conv.id.len())], msg_count)),
+            prompt_summary: Some(format!("session: {}, {} msgs{}", &conv.id[..8.min(conv.id.len())], msg_count, if is_checkpoint { " [checkpoint]" } else { "" })),
             source_sessions: Some(serde_json::to_string(&[&conv.id]).unwrap_or_default()),
             output_count: 0,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -4318,6 +4365,8 @@ async fn check_deep_analysis(state: &AppState) {
             es.current_deep_conv_id = Some(conv.id.clone());
             es.current_task_id = Some(task_id);
             es.current_slot_task_id = Some(slot_task_id.clone());
+            es.is_checkpoint = is_checkpoint;
+            es.checkpoint_message_id = max_message_id;
         }
 
         let conv_id = conv.id.clone();
@@ -4345,6 +4394,8 @@ async fn check_deep_analysis(state: &AppState) {
                     es.current_task_id = None;
                     es.current_slot_task_id = None;
                     es.current_deep_conv_id = None;
+                    es.is_checkpoint = false;
+                    es.checkpoint_message_id = None;
                 }
             }
         });
@@ -4464,6 +4515,8 @@ async fn check_kb_consolidation(state: &AppState) {
                 es.active_type = None;
                 es.current_task_id = None;
                 es.current_slot_task_id = None;
+                es.is_checkpoint = false;
+                es.checkpoint_message_id = None;
             }
         }
     });
@@ -4909,6 +4962,7 @@ fn handle_new_messages(
             analyzed_at: None,
             analysis_version: 0,
             analysis_retries: 0,
+            deep_analyzed_message_id: 0,
         };
         if let Err(e) = db.upsert_conversation(&conv) {
             error!(session = %session_id, error = %e, "Failed to create conversation");
@@ -5040,6 +5094,7 @@ fn handle_pty_text_complete(
             analyzed_at: None,
             analysis_version: 0,
             analysis_retries: 0,
+            deep_analyzed_message_id: 0,
         };
         if let Err(e) = db.upsert_conversation(&conv) {
             error!(slot = %slot_id, error = %e, "Failed to create PTY conversation");
@@ -5230,21 +5285,23 @@ async fn main() -> Result<()> {
             phase: ExtractionPhase::Idle,
             active_type: None,
             phase_started_at: 0,
-
             current_deep_conv_id: None,
             watermark_targets: Vec::new(),
             current_task_id: None,
             current_slot_task_id: None,
+            is_checkpoint: false,
+            checkpoint_message_id: None,
         })),
         slow_extraction_state: Arc::new(tokio::sync::RwLock::new(ExtractionState {
             phase: ExtractionPhase::Idle,
             active_type: None,
             phase_started_at: 0,
-
             current_deep_conv_id: None,
             watermark_targets: Vec::new(),
             current_task_id: None,
             current_slot_task_id: None,
+            is_checkpoint: false,
+            checkpoint_message_id: None,
         })),
         memory_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         slow_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
@@ -5424,10 +5481,22 @@ async fn main() -> Result<()> {
                                         // Slow lane: mark deep analysis conversation as analyzed
                                         if matches!(es.active_type, Some("deep_analysis")) {
                                             if let Some(conv_id) = es.current_deep_conv_id.take() {
-                                                if let Err(e) = state.mission.db().mark_analysis_complete(&conv_id, CURRENT_ANALYSIS_VERSION) {
-                                                    warn!(conv_id = %conv_id, error = %e, "Failed to mark analysis complete");
+                                                if es.is_checkpoint {
+                                                    // Checkpoint: advance watermark, don't mark fully analyzed
+                                                    if let Some(msg_id) = es.checkpoint_message_id.take() {
+                                                        if let Err(e) = state.mission.db().update_deep_checkpoint(&conv_id, msg_id) {
+                                                            warn!(conv_id = %conv_id, error = %e, "Failed to advance checkpoint watermark");
+                                                        } else {
+                                                            info!(conv_id = %conv_id, msg_id, "Deep analysis checkpoint: advanced watermark");
+                                                        }
+                                                    }
                                                 } else {
-                                                    info!(conv_id = %conv_id, version = CURRENT_ANALYSIS_VERSION, "Deep analysis: marked complete");
+                                                    // Full analysis (completed session)
+                                                    if let Err(e) = state.mission.db().mark_analysis_complete(&conv_id, CURRENT_ANALYSIS_VERSION) {
+                                                        warn!(conv_id = %conv_id, error = %e, "Failed to mark analysis complete");
+                                                    } else {
+                                                        info!(conv_id = %conv_id, version = CURRENT_ANALYSIS_VERSION, "Deep analysis: marked complete");
+                                                    }
                                                 }
                                             }
                                         }
@@ -5439,6 +5508,8 @@ async fn main() -> Result<()> {
                                         es.active_type = None;
                                         es.current_task_id = None;
                                         es.current_slot_task_id = None;
+                                        es.is_checkpoint = false;
+                                        es.checkpoint_message_id = None;
                                         // Event-driven: signal main loop to re-check this lane
                                         notify.notify_one();
                                     }

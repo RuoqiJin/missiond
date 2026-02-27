@@ -443,6 +443,16 @@ impl MissionDB {
             }
         }
 
+        // Add deep_analyzed_message_id for incremental checkpoint watermark
+        let has_deep_analyzed_message_id: bool = conn
+            .prepare("SELECT deep_analyzed_message_id FROM conversations LIMIT 0")
+            .is_ok();
+        if !has_deep_analyzed_message_id {
+            conn.execute_batch(
+                "ALTER TABLE conversations ADD COLUMN deep_analyzed_message_id INTEGER DEFAULT 0;"
+            )?;
+        }
+
         // Add task_id for grouping compacted sessions under the same logical task
         let has_task_id: bool = conn
             .prepare("SELECT task_id FROM conversations LIMIT 0")
@@ -2197,7 +2207,20 @@ impl MissionDB {
                AND ended_at < datetime('now', '-5 minutes')
                AND analysis_retries < ?1
                AND (analyzed_at IS NULL OR analysis_version < ?2)
-             ORDER BY ended_at ASC"
+
+             UNION ALL
+
+             SELECT * FROM conversations
+             WHERE status = 'active'
+               AND slot_id IS NULL
+               AND id NOT LIKE 'agent-%'
+               AND analysis_retries < ?1
+               AND (SELECT COUNT(*) FROM conversation_messages m
+                    WHERE m.session_id = conversations.id
+                      AND m.id > COALESCE(conversations.deep_analyzed_message_id, 0)
+                      AND m.role IN ('user', 'assistant')) >= 100
+
+             ORDER BY started_at ASC"
         )?;
         let rows = stmt.query_map(params![max_retries, current_version], |row| Self::row_to_conversation(row))?;
         let mut convs = Vec::new();
@@ -2217,6 +2240,18 @@ impl MissionDB {
                   AND ended_at < datetime('now', '-5 minutes')
                   AND analysis_retries < ?1
                   AND (analyzed_at IS NULL OR analysis_version < ?2)
+
+                UNION ALL
+
+                SELECT 1 FROM conversations
+                WHERE status = 'active'
+                  AND slot_id IS NULL
+                  AND id NOT LIKE 'agent-%'
+                  AND analysis_retries < ?1
+                  AND (SELECT COUNT(*) FROM conversation_messages m
+                       WHERE m.session_id = conversations.id
+                         AND m.id > COALESCE(conversations.deep_analyzed_message_id, 0)
+                         AND m.role IN ('user', 'assistant')) >= 100
             )",
             params![max_retries, current_version],
             |row| row.get(0),
@@ -2227,13 +2262,27 @@ impl MissionDB {
     pub fn count_pending_deep_analysis(&self, current_version: i32, max_retries: i32) -> SqliteResult<i64> {
         let conn = self.read_conn();
         conn.query_row(
-            "SELECT COUNT(*) FROM conversations
-             WHERE status = 'completed'
-               AND slot_id IS NULL
-               AND id NOT LIKE 'agent-%'
-               AND ended_at < datetime('now', '-5 minutes')
-               AND analysis_retries < ?1
-               AND (analyzed_at IS NULL OR analysis_version < ?2)",
+            "SELECT COUNT(*) FROM (
+                SELECT id FROM conversations
+                WHERE status = 'completed'
+                  AND slot_id IS NULL
+                  AND id NOT LIKE 'agent-%'
+                  AND ended_at < datetime('now', '-5 minutes')
+                  AND analysis_retries < ?1
+                  AND (analyzed_at IS NULL OR analysis_version < ?2)
+
+                UNION ALL
+
+                SELECT id FROM conversations
+                WHERE status = 'active'
+                  AND slot_id IS NULL
+                  AND id NOT LIKE 'agent-%'
+                  AND analysis_retries < ?1
+                  AND (SELECT COUNT(*) FROM conversation_messages m
+                       WHERE m.session_id = conversations.id
+                         AND m.id > COALESCE(conversations.deep_analyzed_message_id, 0)
+                         AND m.role IN ('user', 'assistant')) >= 100
+            )",
             params![max_retries, current_version],
             |row| row.get(0),
         )
@@ -2281,14 +2330,27 @@ impl MissionDB {
     pub fn pending_deep_detail(&self, current_version: i32, max_retries: i32) -> SqliteResult<Vec<(String, String, i32)>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
-            "SELECT id, COALESCE(ended_at, ''), analysis_retries FROM conversations
+            "SELECT id, COALESCE(ended_at, '[active]'), analysis_retries FROM conversations
              WHERE status = 'completed'
                AND slot_id IS NULL
                AND id NOT LIKE 'agent-%'
                AND ended_at < datetime('now', '-5 minutes')
                AND analysis_retries < ?1
                AND (analyzed_at IS NULL OR analysis_version < ?2)
-             ORDER BY ended_at ASC
+
+             UNION ALL
+
+             SELECT id, '[checkpoint]', analysis_retries FROM conversations
+             WHERE status = 'active'
+               AND slot_id IS NULL
+               AND id NOT LIKE 'agent-%'
+               AND analysis_retries < ?1
+               AND (SELECT COUNT(*) FROM conversation_messages m
+                    WHERE m.session_id = conversations.id
+                      AND m.id > COALESCE(conversations.deep_analyzed_message_id, 0)
+                      AND m.role IN ('user', 'assistant')) >= 100
+
+             ORDER BY 2 ASC
              LIMIT 20"
         )?;
         let rows = stmt.query_map(params![max_retries, current_version], |row| {
@@ -2304,8 +2366,17 @@ impl MissionDB {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn();
         conn.execute(
-            "UPDATE conversations SET analyzed_at = ?1, analysis_version = ?2, analysis_retries = 0 WHERE id = ?3",
+            "UPDATE conversations SET analyzed_at = ?1, analysis_version = ?2, analysis_retries = 0, deep_analyzed_message_id = 0 WHERE id = ?3",
             params![now, version, id],
+        )?;
+        Ok(())
+    }
+
+    /// Advance the deep analysis checkpoint watermark for an active session.
+    pub fn update_deep_checkpoint(&self, id: &str, message_id: i64) -> SqliteResult<()> {
+        self.conn().execute(
+            "UPDATE conversations SET deep_analyzed_message_id = ?1, analysis_retries = 0 WHERE id = ?2",
+            params![message_id, id],
         )?;
         Ok(())
     }
@@ -2770,6 +2841,7 @@ impl MissionDB {
             analyzed_at: row.get("analyzed_at")?,
             analysis_version: row.get("analysis_version").unwrap_or(0),
             analysis_retries: row.get("analysis_retries").unwrap_or(0),
+            deep_analyzed_message_id: row.get("deep_analyzed_message_id").unwrap_or(0),
         })
     }
 
