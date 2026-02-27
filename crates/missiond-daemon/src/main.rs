@@ -534,7 +534,8 @@ struct KBKeyArgs {
 
 #[derive(Deserialize)]
 struct KBSearchArgs {
-    query: String,
+    #[serde(default)]
+    query: Option<String>,
     #[serde(default)]
     category: Option<String>,
 }
@@ -1261,11 +1262,21 @@ impl AppState {
                 })))
             }
             "mission_kb_search" => {
-                let KBSearchArgs { query, category } = serde_json::from_value(args)?;
-                let results = self.mission.db()
-                    .kb_search(&query, category.as_deref())
-                    .map_err(|e| anyhow!("DB error: {}", e))?;
-                Ok(ToolResult::json_pretty(&results))
+                let KBSearchArgs { query, category } = serde_json::from_value(args)
+                    .unwrap_or(KBSearchArgs { query: None, category: None });
+                let query = query.unwrap_or_default();
+                if query.is_empty() && category.is_none() {
+                    // No query: return recent entries
+                    let entries = self.mission.db()
+                        .kb_list(None)
+                        .map_err(|e| anyhow!("DB error: {}", e))?;
+                    Ok(ToolResult::json_pretty(&entries))
+                } else {
+                    let results = self.mission.db()
+                        .kb_search(&query, category.as_deref())
+                        .map_err(|e| anyhow!("DB error: {}", e))?;
+                    Ok(ToolResult::json_pretty(&results))
+                }
             }
             "mission_kb_get" => {
                 let KBKeyArgs { key } = serde_json::from_value(args)?;
@@ -3975,6 +3986,29 @@ async fn check_slot_stuck(
         return;
     }
 
+    // P2: Check JSONL activity before killing — slot may be doing bulk MCP tool_use
+    // which shows as Thinking the entire time (especially with MiniMax M2.5)
+    if let Ok(Some(session_uuid)) = state.mission.db().get_slot_session(slot_id) {
+        if let Ok(Some(conv)) = state.mission.db().get_conversation(&session_uuid) {
+            if let Some(ref jsonl_path) = conv.jsonl_path {
+                if let Ok(metadata) = std::fs::metadata(jsonl_path) {
+                    if let Ok(modified) = metadata.modified() {
+                        let elapsed = modified.elapsed().unwrap_or_default();
+                        if elapsed.as_secs() < 120 {
+                            info!(
+                                slot_id,
+                                stuck_secs = stuck_duration,
+                                jsonl_activity_secs_ago = elapsed.as_secs(),
+                                "Slot appears stuck but JSONL is active, deferring kill"
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     warn!(
         slot_id,
         state = %current_state,
@@ -4073,6 +4107,20 @@ async fn check_extraction_gate(
 async fn check_realtime_extraction(state: &AppState) {
     if !check_extraction_gate(&state.extraction_state, &state.mission, "realtime").await {
         return;
+    }
+
+    // P1: Yield to pending submit tasks — let dispatch_queued_submit_tasks handle them first
+    if let Ok(queued) = state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Queued) {
+        if queued.iter().any(|t| t.role == "memory") {
+            debug!("realtime: skipping, queued submit tasks for memory role take priority");
+            return;
+        }
+    }
+    if let Ok(running) = state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Running) {
+        if running.iter().any(|t| t.slot_id.as_deref() == Some(MEMORY_SLOT_ID)) {
+            debug!("realtime: skipping, running submit task on memory slot");
+            return;
+        }
     }
 
     // Watermark-based check: any conversations with messages beyond their realtime_forwarded_at?
@@ -4225,6 +4273,20 @@ async fn check_realtime_extraction(state: &AppState) {
 async fn check_deep_analysis(state: &AppState) {
     if !check_extraction_gate(&state.slow_extraction_state, &state.mission, "deep_analysis").await {
         return;
+    }
+
+    // P1: Yield to pending submit tasks on slow slot
+    if let Ok(queued) = state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Queued) {
+        if queued.iter().any(|t| t.role == "memory") {
+            debug!("deep_analysis: skipping, queued submit tasks for memory role take priority");
+            return;
+        }
+    }
+    if let Ok(running) = state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Running) {
+        if running.iter().any(|t| t.slot_id.as_deref() == Some(MEMORY_SLOW_SLOT_ID)) {
+            debug!("deep_analysis: skipping, running submit task on slow slot");
+            return;
+        }
     }
 
     // Ensure slow slot is idle before proceeding
@@ -5177,6 +5239,21 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // Panic hook: log panic info before process exits (normal panic output goes to stderr
+    // which may not be captured; this ensures it's in the tracing log file too).
+    std::panic::set_hook(Box::new(|info| {
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".to_string()
+        };
+        let location = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_default();
+        eprintln!("PANIC at {}: {}", location, payload);
+        tracing::error!(location = %location, "DAEMON PANIC: {}", payload);
+    }));
+
     // Ensure config files have restrictive permissions
     #[cfg(unix)]
     ensure_config_permissions(&home);
@@ -5347,6 +5424,26 @@ async fn main() -> Result<()> {
             .build()
             .expect("Failed to build HTTP client"),
     };
+
+    // Auto-spawn slots with auto_start: true
+    {
+        let slots = state.mission.list_slots();
+        for slot in &slots {
+            if slot.config.auto_start == Some(true) {
+                info!(slot_id = %slot.config.id, "Auto-starting slot on daemon boot");
+                match state.mission.spawn_agent(
+                    &slot.config.id,
+                    Some(missiond_core::SpawnOptions {
+                        visible: false,
+                        auto_restart: true,
+                    }),
+                ).await {
+                    Ok(_) => info!(slot_id = %slot.config.id, "Auto-started slot"),
+                    Err(e) => warn!(slot_id = %slot.config.id, error = %e, "Failed to auto-start slot"),
+                }
+            }
+        }
+    }
 
     // Autopilot scheduler + IPC server via select
     let mut autopilot_interval = tokio::time::interval(std::time::Duration::from_secs(60));

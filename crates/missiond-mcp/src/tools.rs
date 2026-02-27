@@ -812,20 +812,20 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_kb_search",
-            "搜索知识库（长期记忆）。遇到不确定的信息时先搜这里再回答。支持全文检索。",
+            "搜索知识库。传 query 全文搜索，不传则列出最近条目。",
             json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "搜索关键词"
+                        "description": "搜索关键词（不传则返回最近条目）",
+                        "default": ""
                     },
                     "category": {
                         "type": "string",
-                        "description": "按分类过滤（可选）"
+                        "description": "按分类过滤"
                     }
-                },
-                "required": ["query"]
+                }
             }),
         ),
         ToolDefinition::new(
