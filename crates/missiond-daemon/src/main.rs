@@ -3283,6 +3283,9 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
         _ => {}
     }
 
+    // Reaper: timeout Running submit tasks after 15 minutes
+    reap_stale_submit_tasks(state).await;
+
     // Extraction status summary (debug)
     {
         let now = chrono::Utc::now().timestamp();
@@ -3821,6 +3824,60 @@ async fn dispatch_queued_submit_tasks(state: &AppState) {
         if !dispatched {
             debug!(task_id = %task.id, role = %task.role, "Autopilot: no idle slot for queued task, will retry next tick");
         }
+    }
+}
+
+/// Reap submit tasks stuck in Running state for too long (15 min).
+/// If the slot is Idle, mark Done; otherwise mark Failed after timeout.
+async fn reap_stale_submit_tasks(state: &AppState) {
+    let running = match state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Running) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    if running.is_empty() {
+        return;
+    }
+
+    let now = chrono::Utc::now().timestamp_millis();
+    const SUBMIT_TASK_TIMEOUT_MS: i64 = 15 * 60 * 1000; // 15 minutes
+
+    for task in &running {
+        let started = task.started_at.unwrap_or(task.created_at);
+        if now - started < SUBMIT_TASK_TIMEOUT_MS {
+            continue;
+        }
+
+        // Check if the assigned slot is idle (task might have completed but event was missed)
+        let slot_idle = if let Some(ref sid) = task.slot_id {
+            state.pty.get_status(sid).await
+                .map(|s| s.state == missiond_core::pty::SessionState::Idle)
+                .unwrap_or(true) // no session = treat as idle
+        } else {
+            true
+        };
+
+        let (new_status, result_msg) = if slot_idle {
+            (missiond_core::types::TaskStatus::Done, "completed (timeout reaper)")
+        } else {
+            (missiond_core::types::TaskStatus::Failed, "timed out after 15 minutes")
+        };
+
+        let _ = state.mission.db().update_task(
+            &task.id,
+            &missiond_core::types::TaskUpdate {
+                status: Some(new_status),
+                finished_at: Some(now),
+                result: Some(result_msg.to_string()),
+                ..Default::default()
+            },
+        );
+        warn!(
+            task_id = %task.id,
+            slot_id = ?task.slot_id,
+            status = ?new_status,
+            age_min = (now - started) / 60000,
+            "Reaped stale submit task"
+        );
     }
 }
 
@@ -5334,6 +5391,27 @@ async fn main() -> Result<()> {
                                     chrono::Utc::now().timestamp(),
                                     std::sync::atomic::Ordering::SeqCst,
                                 );
+                            }
+                        }
+
+                        // Close any Running submit tasks assigned to this slot when it returns to Idle
+                        if new_state == SessionState::Idle && prev_state != SessionState::Idle {
+                            if let Ok(running_tasks) = state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Running) {
+                                let now = chrono::Utc::now().timestamp_millis();
+                                for task in &running_tasks {
+                                    if task.slot_id.as_deref() == Some(slot_id.as_str()) {
+                                        let _ = state.mission.db().update_task(
+                                            &task.id,
+                                            &missiond_core::types::TaskUpdate {
+                                                status: Some(missiond_core::types::TaskStatus::Done),
+                                                finished_at: Some(now),
+                                                result: Some("completed".to_string()),
+                                                ..Default::default()
+                                            },
+                                        );
+                                        info!(task_id = %task.id, slot_id = %slot_id, "Submit task closed: slot returned to Idle");
+                                    }
+                                }
                             }
                         }
                     }
