@@ -1898,6 +1898,32 @@ impl MissionDB {
         Ok(entries)
     }
 
+    /// List knowledge entries with pagination support.
+    /// Used by kb_analyze v2 for chunked analysis.
+    pub fn kb_list_paginated(&self, category: Option<&str>, limit: u32, offset: u32) -> SqliteResult<Vec<KnowledgeEntry>> {
+        let conn = self.read_conn();
+        let mut entries = Vec::new();
+        if let Some(cat) = category {
+            let like_pattern = format!("{}:%", cat);
+            let mut stmt = conn.prepare(
+                "SELECT * FROM knowledge WHERE category = ?1 OR category LIKE ?2 ORDER BY updated_at DESC LIMIT ?3 OFFSET ?4"
+            )?;
+            let rows = stmt.query_map(params![cat, like_pattern, limit, offset], |row| Self::row_to_knowledge_entry(row))?;
+            for entry in rows {
+                entries.push(entry?);
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT * FROM knowledge ORDER BY category, updated_at DESC LIMIT ?1 OFFSET ?2"
+            )?;
+            let rows = stmt.query_map(params![limit, offset], |row| Self::row_to_knowledge_entry(row))?;
+            for entry in rows {
+                entries.push(entry?);
+            }
+        }
+        Ok(entries)
+    }
+
     /// Forget (delete) a knowledge entry by key
     pub fn kb_forget(&self, key: &str) -> SqliteResult<bool> {
         let conn = self.conn();

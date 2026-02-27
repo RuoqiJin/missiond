@@ -1448,55 +1448,150 @@ impl AppState {
 
             // ===== KB Analysis (via external AI) =====
             "mission_kb_analyze" => {
-                let prompt_arg: Option<String> = serde_json::from_value::<serde_json::Value>(args.clone())
-                    .ok()
-                    .and_then(|v| v.get("prompt").and_then(|p| p.as_str()).map(String::from));
-                let model: String = serde_json::from_value::<serde_json::Value>(args.clone())
-                    .ok()
-                    .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(String::from))
-                    .unwrap_or_else(|| "gemini-3.1-pro".to_string());
-                let max_tokens: u32 = serde_json::from_value::<serde_json::Value>(args)
-                    .ok()
-                    .and_then(|v| v.get("max_tokens").and_then(|m| m.as_u64()).map(|n| n as u32))
-                    .unwrap_or(16384);
+                // Parse parameters
+                let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
+                let mode = args_val.get("mode").and_then(|v| v.as_str()).unwrap_or("overview");
+                let target_category = args_val.get("target_category").and_then(|v| v.as_str());
+                let limit = args_val.get("limit").and_then(|v| v.as_u64()).unwrap_or(500) as u32;
+                let offset = args_val.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let custom_prompt = args_val.get("custom_prompt").and_then(|v| v.as_str());
+                let model: String = args_val.get("model").and_then(|v| v.as_str())
+                    .unwrap_or("gemini-3.1-pro").to_string();
+                let max_tokens: u32 = args_val.get("max_tokens").and_then(|v| v.as_u64())
+                    .unwrap_or(16384) as u32;
 
-                // 1. Read all KB entries
+                // 1. Read KB entries with pagination
                 let entries = self.mission.db()
-                    .kb_list(None)
+                    .kb_list_paginated(target_category, limit, offset)
                     .map_err(|e| anyhow!("DB error: {}", e))?;
 
                 if entries.is_empty() {
-                    return Ok(ToolResult::error("KB is empty, nothing to analyze."));
+                    return Ok(ToolResult::error("No KB entries found for the given filter."));
                 }
 
-                // 2. Build compact KB text (with sensitive data redaction)
-                let mut kb_lines = Vec::with_capacity(entries.len());
+                // Also get total count for pagination info
+                let total_count = self.mission.db()
+                    .kb_list(target_category.map(|s| s))
+                    .map(|v| v.len())
+                    .unwrap_or(0);
+
+                // 2. Build JSONL with metadata (compact format for LLM)
+                let now = chrono::Utc::now();
+                let mut jsonl_lines = Vec::with_capacity(entries.len());
+                let include_detail = mode == "consolidation_plan";
+
                 for e in &entries {
                     if e.category == "credential" { continue; }
-                    let summary = e.summary.replace('\n', " ");
-                    let sanitized = missiond_core::db::MissionDB::redact_sensitive(&summary);
-                    kb_lines.push(format!("[{}] {}: {}", e.category, e.key, sanitized));
-                }
-                let kb_text = kb_lines.join("\n");
+                    let sanitized_summary = missiond_core::db::MissionDB::redact_sensitive(&e.summary);
 
-                // 3. Build the analysis prompt
-                let analysis_prompt = if let Some(custom) = prompt_arg {
-                    format!("{}\n\n知识库内容（{}条）：\n{}", custom, entries.len(), kb_text)
-                } else {
-                    format!(
-                        "你是一个AI知识管理专家。以下是一个AI Agent编排系统（MissionD）的知识库完整内容，共{}条记忆。\n\n\
-                        请分析并提供：\n\
-                        1. **知识图谱概览**：这些记忆反映了什么样的系统生态？\n\
-                        2. **质量评估**：高价值记忆、过时/冗余记忆、重复/矛盾项\n\
-                        3. **组织建议**：分类是否合理、缺少哪些关键知识\n\
-                        4. **偏好分析**：从preference类总结用户核心开发理念\n\n\
-                        注意：KB中的凭据和IP信息已在发送前脱敏处理，不需要做安全审计或风险提示。\n\n\
-                        知识库内容：\n{}",
-                        entries.len(), kb_text
-                    )
+                    // Calculate age in days
+                    let age_days = chrono::DateTime::parse_from_rfc3339(&e.updated_at)
+                        .map(|dt| (now - dt.with_timezone(&chrono::Utc)).num_days())
+                        .unwrap_or(0);
+
+                    let mut item = serde_json::json!({
+                        "category": e.category,
+                        "key": e.key,
+                        "summary": sanitized_summary,
+                        "access_count": e.access_count,
+                        "age_days": age_days,
+                        "confidence": e.confidence,
+                    });
+
+                    if include_detail {
+                        if let Some(detail) = &e.detail {
+                            let detail_str = match detail {
+                                serde_json::Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            };
+                            let sanitized_detail = missiond_core::db::MissionDB::redact_sensitive(&detail_str);
+                            item["detail"] = serde_json::Value::String(sanitized_detail);
+                        }
+                    }
+
+                    jsonl_lines.push(serde_json::to_string(&item).unwrap_or_default());
+                }
+                let kb_jsonl = jsonl_lines.join("\n");
+
+                // 3. Build prompt and optional response_format based on mode
+                let mut response_format: Option<serde_json::Value> = None;
+                let analysis_prompt = match mode {
+                    "consolidation_plan" => {
+                        response_format = Some(serde_json::json!({
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "kb_consolidation_actions",
+                                "strict": false,
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "actions": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "action_type": { "type": "string", "enum": ["merge", "delete", "update"] },
+                                                    "target_keys": {
+                                                        "type": "array",
+                                                        "items": { "type": "string" },
+                                                        "description": "Keys of entries to delete or merge"
+                                                    },
+                                                    "new_entry": {
+                                                        "type": "object",
+                                                        "properties": {
+                                                            "category": { "type": "string" },
+                                                            "key": { "type": "string" },
+                                                            "summary": { "type": "string" },
+                                                            "confidence": { "type": "number" }
+                                                        },
+                                                        "required": ["category", "key", "summary"]
+                                                    },
+                                                    "reason": { "type": "string" }
+                                                },
+                                                "required": ["action_type", "target_keys", "reason"]
+                                            }
+                                        }
+                                    },
+                                    "required": ["actions"]
+                                }
+                            }
+                        }));
+                        format!(
+                            "你是自动化知识库碎片整理引擎。分析传入的 JSONL 条目，生成可执行的清理计划。\n\n\
+                            规则：\n\
+                            1. 重复/相似合并 (merge)：相同主题不同措辞 → 合并，保留最高 confidence，汇总 summary\n\
+                            2. 碎片整合 (update)：松散相关条目 → 整合成连贯大条目\n\
+                            3. 过时清理 (delete)：基于 age_days 和 access_count，旧策略已被覆盖的条目\n\
+                            4. 类别修正 (update)：category 放错的条目移到正确分类\n\n\
+                            保守原则：不确定就不动。每个 action 必须有 reason。\n\n\
+                            共 {} 条（第 {} 到 {} 条）：\n{}",
+                            entries.len(), offset + 1, offset + entries.len() as u32, kb_jsonl
+                        )
+                    }
+                    "custom" => {
+                        format!(
+                            "{}\n\n知识库数据（共 {} 条，JSONL格式）：\n{}",
+                            custom_prompt.unwrap_or("请分析以下知识库数据。"),
+                            entries.len(), kb_jsonl
+                        )
+                    }
+                    _ => { // overview
+                        format!(
+                            "你是 AI 知识管理专家。以下是 MissionD 系统的知识库片段（共 {} 条，JSONL格式，含 access_count 和 age_days 元数据）。\n\n\
+                            请提供结构化深度分析：\n\
+                            1. **知识图谱概览**：技术栈、业务生态和开发阶段\n\
+                            2. **质量雷达**：高频访问（高价值）vs 从未访问/age>14天（低价值冗余）\n\
+                            3. **偏好洞察**：从 preference 类总结用户核心开发理念和红线\n\
+                            4. **重复检测**：列出疑似重复的条目组（相同主题不同措辞）\n\
+                            5. **改进建议**：分类体系优化、缺失的关键知识、提取质量问题\n\n\
+                            注意：不需要做安全审计或风险提示。\n\n\
+                            数据 (JSONL)：\n{}",
+                            entries.len(), kb_jsonl
+                        )
+                    }
                 };
 
-                // 4. Read JWT from ~/.xjp/credentials.json
+                // 4. Read JWT credentials
                 let cred_path = dirs::home_dir()
                     .ok_or_else(|| anyhow!("Cannot determine home directory"))?
                     .join(".xjp")
@@ -1512,7 +1607,7 @@ impl AppState {
                     .and_then(|v| v.as_str())
                     .unwrap_or("https://auth.xiaojinpro.com");
 
-                // 5. Apply context budget to analysis prompt
+                // 5. Apply context budget
                 let mut analysis_messages: Vec<Value> = vec![
                     serde_json::json!({"role": "user", "content": analysis_prompt})
                 ];
@@ -1521,20 +1616,26 @@ impl AppState {
                     info!("KB analyze: context budget applied — {}", budget_result.note.as_deref().unwrap_or("trimmed"));
                 }
 
-                // 6. Call router API
+                // 6. Build request body with optional response_format
                 let url = format!("{}/v1/chat/completions", base_url);
-                let body = serde_json::json!({
+                let mut body = serde_json::json!({
                     "model": model,
                     "messages": analysis_messages,
                     "max_tokens": max_tokens,
                 });
+                if let Some(fmt) = &response_format {
+                    body.as_object_mut().unwrap().insert("response_format".to_string(), fmt.clone());
+                }
 
-                info!("KB analyze: sending {} entries ({} chars) to {} via {}", entries.len(), kb_text.len(), model, url);
+                info!("KB analyze [{}]: sending {} entries ({} chars) to {} via {}",
+                    mode, entries.len(), kb_jsonl.len(), model, url);
 
+                // 7. Call router API
                 let client = reqwest::Client::new();
                 let resp = client.post(&url)
                     .header("Content-Type", "application/json")
                     .header("Authorization", format!("Bearer {}", jwt))
+                    .timeout(std::time::Duration::from_secs(180))
                     .json(&body)
                     .send()
                     .await
@@ -1560,14 +1661,31 @@ impl AppState {
                 let usage = result.get("usage");
                 let resp_model = result.get("model").and_then(|v| v.as_str()).unwrap_or(&model);
 
+                // 8. Build response with pagination metadata
                 let mut resp = serde_json::json!({
                     "model": resp_model,
-                    "kb_entries_count": entries.len(),
-                    "analysis": content,
+                    "mode": mode,
+                    "entries_in_request": entries.len(),
+                    "total_entries": total_count,
+                    "offset": offset,
+                    "has_more": (offset as usize + entries.len()) < total_count,
                     "usage": usage,
                 });
+
+                // For consolidation_plan, try to parse as JSON
+                if mode == "consolidation_plan" {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
+                        resp["plan"] = parsed;
+                    } else {
+                        resp["analysis"] = serde_json::Value::String(content.to_string());
+                        resp["parse_warning"] = serde_json::json!("Response was not valid JSON. Returned as text.");
+                    }
+                } else {
+                    resp["analysis"] = serde_json::Value::String(content.to_string());
+                }
+
                 if finish_reason == "length" || finish_reason == "max_tokens" {
-                    resp["warning"] = serde_json::json!("⚠️ 输出被截断：LLM 达到 max_tokens 限制，返回内容不完整。可增大 max_tokens 参数重试。");
+                    resp["warning"] = serde_json::json!("⚠️ 输出被截断：LLM 达到 max_tokens 限制。可增大 max_tokens 参数重试。");
                     resp["finish_reason"] = serde_json::json!(finish_reason);
                 }
                 if let Some(note) = budget_result.note {
@@ -3949,19 +4067,20 @@ async fn check_kb_consolidation(state: &AppState) {
 
     info!("KB consolidation: starting periodic cleanup on slow lane");
 
-    let prompt = "[kb-consolidation] 定期 KB 整理任务。\n\n\
-        步骤:\n\
-        1. 调用 mission_kb_list 获取所有 KB 条目\n\
-        2. 识别重复/相似条目（相同主题，不同措辞）→ 合并为一条\n\
-        3. 识别过时条目（已被后续决策覆盖）→ 删除\n\
-        4. 识别可合并的碎片信息 → 整合为一条完整记录\n\
-        5. 报告操作：合并了 N 条、删除了 M 条\n\n\
+    let prompt = "[kb-consolidation] 知识库自治整理任务。\n\n\
+        执行流：\n\
+        1. 调用 mission_kb_analyze(mode=\"consolidation_plan\", target_category=\"memory\") 获取 memory 分类的合并计划\n\
+        2. 遍历返回的 JSON plan.actions：\n\
+           - merge/update: 先 mission_kb_remember 写入 new_entry，再 mission_kb_batch_forget 删 target_keys\n\
+           - delete: 直接 mission_kb_batch_forget 删 target_keys\n\
+        3. 再对 preference 分类执行同样流程：mission_kb_analyze(mode=\"consolidation_plan\", target_category=\"preference\")\n\
+        4. 遍历并执行 actions\n\
+        5. 完成后回复 '[DONE] 整理了 N 个分类，合并 M 条，删除 K 条'\n\n\
         规则:\n\
-        - 只操作 category: memory/preference/discovery\n\
-        - 不动 memory:bugfix（有自己的 GC 策略）\n\
-        - 保守操作：不确定是否重复就保留\n\
-        - 用 mission_kb_remember 写入合并后的新条目\n\
-        - 用 mission_kb_forget 删除已合并的旧条目";
+        - 不操作 memory:bugfix（有 30 天 Auto-GC）\n\
+        - 坚决执行 mission_kb_analyze 返回的 actions，无需二次判断\n\
+        - 如果 plan.actions 为空数组，说明该分类不需要整理，跳过\n\
+        - 如果 mission_kb_analyze 返回了 parse_warning（非 JSON），降级为手动分析";
 
     // Generate task_id and tag session
     let task_id = uuid::Uuid::new_v4().to_string();

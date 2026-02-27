@@ -914,15 +914,34 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         // ===== KB Analysis (via external AI) =====
         ToolDefinition::new(
             "mission_kb_analyze",
-            "Send all KB entries to Gemini for deep analysis. Returns quality assessment, \
-             duplicate detection, security risks, and optimization suggestions. \
-             Uses the AI router (auth.xiaojinpro.com) with Gemini 3.1 Pro.",
+            "Analyze KB entries using Gemini via AI router. Three modes: \
+             'overview' = macro quality assessment (default), \
+             'consolidation_plan' = generate executable merge/delete/update JSON actions, \
+             'custom' = user-defined analysis with custom_prompt. \
+             Supports pagination (limit/offset) and category filtering. \
+             consolidation_plan mode uses json_schema for structured output.",
             json!({
                 "type": "object",
                 "properties": {
-                    "prompt": {
+                    "mode": {
                         "type": "string",
-                        "description": "Custom analysis prompt (optional). If not provided, uses default comprehensive analysis prompt."
+                        "description": "Analysis mode: 'overview' (default), 'consolidation_plan', 'custom'"
+                    },
+                    "target_category": {
+                        "type": "string",
+                        "description": "Filter by category (supports prefix: 'memory' includes 'memory:bugfix' etc.)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max entries per request (default: 500)"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Pagination offset (default: 0)"
+                    },
+                    "custom_prompt": {
+                        "type": "string",
+                        "description": "Custom analysis prompt (only for mode='custom')"
                     },
                     "model": {
                         "type": "string",
