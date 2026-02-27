@@ -839,8 +839,10 @@ impl AppState {
             "mission_pty_kill" => {
                 let PTYKillArgs { slot_id } = serde_json::from_value(args)?;
                 self.pty.kill(&slot_id).await?;
+                // Requeue any Running submit tasks assigned to this slot
+                let requeued = self.mission.db().requeue_running_tasks_for_slot(&slot_id).unwrap_or(0);
                 Ok(ToolResult::json(
-                    &serde_json::json!({ "success": true, "slotId": slot_id }),
+                    &serde_json::json!({ "success": true, "slotId": slot_id, "requeuedTasks": requeued }),
                 ))
             }
             "mission_pty_screen" => {
@@ -3219,6 +3221,12 @@ async fn check_slot_context_levels(state: &AppState) {
                     warn!(error = %e, slot_id = %slot.config.id, "Failed to kill low-context slot");
                     continue;
                 }
+                // Requeue any Running submit tasks assigned to this slot
+                match state.mission.db().requeue_running_tasks_for_slot(&slot.config.id) {
+                    Ok(n) if n > 0 => warn!(slot_id = %slot.config.id, count = n, "Requeued running submit tasks after low-context restart"),
+                    Err(e) => warn!(slot_id = %slot.config.id, error = %e, "Failed to requeue tasks after low-context restart"),
+                    _ => {}
+                }
                 // Wait for exit
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
@@ -3978,6 +3986,14 @@ async fn check_slot_stuck(
     if let Err(e) = state.pty.kill(slot_id).await {
         warn!(slot_id, error = %e, "Failed to kill stuck memory slot");
     }
+
+    // Requeue any Running submit tasks assigned to this slot — they were lost with the old session
+    match state.mission.db().requeue_running_tasks_for_slot(slot_id) {
+        Ok(n) if n > 0 => warn!(slot_id, count = n, "Requeued running submit tasks after slot restart"),
+        Err(e) => warn!(slot_id, error = %e, "Failed to requeue tasks after slot restart"),
+        _ => {}
+    }
+
     // Allow next tick to respawn
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     let _ = ensure_memory_slot_by_id(state, slot_id).await;
@@ -5525,18 +5541,33 @@ async fn main() -> Result<()> {
                             }
                         }
 
-                        // Close any Running submit tasks assigned to this slot when it returns to Idle
+                        // Close Running submit tasks assigned to this slot when it returns to Idle.
+                        // Minimum execution time: tasks running < 10s are NOT auto-closed,
+                        // because the slot may have just given a brief acknowledgment before
+                        // starting multi-step work. The 15-min reaper handles the fallback.
                         if new_state == SessionState::Idle && prev_state != SessionState::Idle {
                             if let Ok(running_tasks) = state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Running) {
                                 let now = chrono::Utc::now().timestamp_millis();
+                                const MIN_EXECUTION_MS: i64 = 10_000; // 10 seconds minimum
                                 // Get last response from this slot (if any)
                                 let last_resp = state.slot_last_responses.write().await.remove(slot_id.as_str());
                                 for task in &running_tasks {
                                     if task.slot_id.as_deref() == Some(slot_id.as_str()) {
+                                        let started = task.started_at.unwrap_or(task.created_at);
+                                        let elapsed = now - started;
+                                        if elapsed < MIN_EXECUTION_MS {
+                                            debug!(
+                                                task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,
+                                                "Submit task NOT closed: execution too short ({elapsed}ms < {MIN_EXECUTION_MS}ms), slot may resume"
+                                            );
+                                            continue;
+                                        }
                                         let result_text = last_resp.clone().unwrap_or_else(|| "completed".to_string());
-                                        // Truncate to 4KB to avoid bloating the tasks table
+                                        // Safe UTF-8 truncation to 4KB
                                         let result_text = if result_text.len() > 4096 {
-                                            format!("{}...(truncated)", &result_text[..4096])
+                                            let mut end = 4096;
+                                            while !result_text.is_char_boundary(end) && end > 0 { end -= 1; }
+                                            format!("{}...(truncated)", &result_text[..end])
                                         } else {
                                             result_text
                                         };
@@ -5549,7 +5580,7 @@ async fn main() -> Result<()> {
                                                 ..Default::default()
                                             },
                                         );
-                                        info!(task_id = %task.id, slot_id = %slot_id, "Submit task closed: slot returned to Idle");
+                                        info!(task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed, "Submit task closed: slot returned to Idle");
                                     }
                                 }
                             }
