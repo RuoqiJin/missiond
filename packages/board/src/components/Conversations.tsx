@@ -450,13 +450,16 @@ export function Conversations() {
   }, [messages, events]);
 
   const counts = useMemo(() => {
-    const active = conversations.filter((c) => c.status === 'active').length;
-    const completed = conversations.filter((c) => c.status === 'completed').length;
-    const compacted = conversations.filter((c) => c.status === 'compacted').length;
-    return { active, completed, compacted, total: conversations.length };
-  }, [conversations]);
+    const filtered = conversations.filter((c) =>
+      viewMode === 'user' ? c.conversationType === 'user' : c.conversationType !== 'user'
+    );
+    const active = filtered.filter((c) => c.status === 'active').length;
+    const completed = filtered.filter((c) => c.status === 'completed').length;
+    const compacted = filtered.filter((c) => c.status === 'compacted').length;
+    return { active, completed, compacted, total: filtered.length };
+  }, [conversations, viewMode]);
 
-  // Group: separate subagents and compacted sessions from main list
+  // Group: separate subagents and compacted sessions from main list, filter by viewMode
   const { mainList, subagentMap } = useMemo(() => {
     const map = new Map<string, Conversation[]>();
     const main: Conversation[] = [];
@@ -468,12 +471,16 @@ export function Conversations() {
       } else if (conv.status === 'compacted') {
         // Hide compacted sessions from main list (context compaction fragments)
         continue;
+      } else if (viewMode === 'user' && conv.conversationType !== 'user') {
+        continue;
+      } else if (viewMode === 'system' && conv.conversationType === 'user') {
+        continue;
       } else {
         main.push(conv);
       }
     }
     return { mainList: main, subagentMap: map };
-  }, [conversations]);
+  }, [conversations, viewMode]);
 
   const toggleParentExpand = useCallback((sessionId: string) => {
     setExpandedParents((prev) => {

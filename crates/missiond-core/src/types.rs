@@ -732,7 +732,12 @@ pub struct Conversation {
     /// Conversation type: "pty" (default) or "router_chat" (Gemini sessions)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_type: Option<String>,
+    /// Classification: "user" | "meta" | "worker" | "subagent"
+    #[serde(default = "default_conversation_type")]
+    pub conversation_type: String,
 }
+
+fn default_conversation_type() -> String { "user".to_string() }
 
 /// A message within a conversation
 #[derive(Debug, Clone, Serialize, Deserialize)]

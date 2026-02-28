@@ -1306,6 +1306,80 @@ impl AppState {
                 Ok(ToolResult::json(&tasks))
             }
 
+            "mission_task_track" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Args { task_id: String }
+                let Args { task_id } = serde_json::from_value(args)?;
+
+                // 1. Task status
+                let task = self.mission.db().get_task(&task_id)
+                    .map_err(|e| anyhow!("DB error: {}", e))?
+                    .ok_or_else(|| anyhow!("Task not found: {}", task_id))?;
+                let mut result = serde_json::json!({
+                    "task": {
+                        "id": task.id,
+                        "role": task.role,
+                        "status": format!("{:?}", task.status),
+                        "slotId": task.slot_id,
+                        "createdAt": task.created_at,
+                        "startedAt": task.started_at,
+                        "finishedAt": task.finished_at,
+                        "result": task.result,
+                        "error": task.error,
+                    }
+                });
+
+                // 2. Slot PTY status + progress + lastResponse (if assigned)
+                if let Some(ref slot_id) = task.slot_id {
+                    if let Some(info) = self.pty.get_status(slot_id).await {
+                        let mut slot_obj = serde_json::json!({
+                            "state": format!("{:?}", info.state),
+                            "statusText": info.status_text,
+                        });
+                        // Session & activity
+                        if let Ok(Some(session_uuid)) = self.mission.db().get_slot_session(slot_id) {
+                            slot_obj["sessionId"] = json!(session_uuid);
+                            if let Ok(Some(conv)) = self.mission.db().get_conversation(&session_uuid) {
+                                if let Some(ref jp) = conv.jsonl_path {
+                                    if let Ok(md) = std::fs::metadata(jp) {
+                                        if let Ok(m) = md.modified() {
+                                            slot_obj["lastActivitySecsAgo"] = json!(m.elapsed().unwrap_or_default().as_secs());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Progress
+                        {
+                            let progress = self.slot_progress.read().await;
+                            if let Some(sp) = progress.get(slot_id) {
+                                if sp.total_calls > 0 {
+                                    slot_obj["progress"] = serde_json::to_value(sp).unwrap_or_default();
+                                }
+                            }
+                        }
+                        // Last response
+                        {
+                            let responses = self.slot_last_responses.read().await;
+                            if let Some(resp) = responses.get(slot_id) {
+                                let truncated = if resp.len() > 2048 {
+                                    let mut end = 2048;
+                                    while end > 0 && !resp.is_char_boundary(end) { end -= 1; }
+                                    format!("{}...(truncated)", &resp[..end])
+                                } else {
+                                    resp.clone()
+                                };
+                                slot_obj["lastResponse"] = json!(truncated);
+                            }
+                        }
+                        result["slot"] = slot_obj;
+                    }
+                }
+
+                Ok(ToolResult::json_pretty(&result))
+            }
+
             // ===== Process control =====
             "mission_spawn" => {
                 let SpawnArgs {
@@ -1506,6 +1580,21 @@ impl AppState {
                                     }
                                 }
                             }
+                            // Attach last response (eliminates screen-blank misjudgment)
+                            {
+                                let responses = self.slot_last_responses.read().await;
+                                if let Some(resp) = responses.get(&slot_id) {
+                                    // Truncate to 2KB for status response
+                                    let truncated = if resp.len() > 2048 {
+                                        let mut end = 2048;
+                                        while end > 0 && !resp.is_char_boundary(end) { end -= 1; }
+                                        format!("{}...(truncated)", &resp[..end])
+                                    } else {
+                                        resp.clone()
+                                    };
+                                    obj["lastResponse"] = json!(truncated);
+                                }
+                            }
                             Ok(ToolResult::json(&obj))
                         }
                         None => Ok(ToolResult::json(&serde_json::Value::Null)),
@@ -1608,14 +1697,30 @@ impl AppState {
                 let PTYLogsArgs { slot_id } = serde_json::from_value(args)?;
                 let status = self.pty.get_status(&slot_id).await;
                 let status = status.ok_or_else(|| anyhow!("PTY session not found"))?;
+                // Find JSONL path from slot→session DB mapping
+                let jsonl_path = self.mission.db().get_all_slot_sessions().ok()
+                    .and_then(|sessions| sessions.into_iter().find(|(sid, _)| sid == &slot_id))
+                    .and_then(|(_, session_uuid)| {
+                        self.mission.db().get_conversation(&session_uuid).ok().flatten()
+                            .and_then(|c| c.jsonl_path)
+                    });
                 #[cfg(unix)]
-                let hint = format!("tail -f {}", status.log_file.display());
+                let hint = if let Some(ref jp) = jsonl_path {
+                    format!("tail -f {}", jp)
+                } else {
+                    format!("tail -f {}", status.log_file.display())
+                };
                 #[cfg(windows)]
-                let hint = format!("Get-Content -Path \"{}\" -Wait -Tail 50", status.log_file.display());
+                let hint = if let Some(ref jp) = jsonl_path {
+                    format!("Get-Content -Path \"{}\" -Wait -Tail 50", jp)
+                } else {
+                    format!("Get-Content -Path \"{}\" -Wait -Tail 50", status.log_file.display())
+                };
 
                 Ok(ToolResult::json(&serde_json::json!({
                     "slotId": slot_id,
                     "logFile": status.log_file,
+                    "jsonlFile": jsonl_path,
                     "hint": hint,
                 })))
             }
@@ -2557,8 +2662,16 @@ impl AppState {
                 let plan_id = args_val.get("plan_id").and_then(|v| v.as_str());
                 let limit = args_val.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
 
+                // Expire stale pending ops (>24h)
+                let expired = self.mission.db().kb_ops_expire_stale(86400).unwrap_or(0);
+                if expired > 0 {
+                    info!(expired, "kb_execute_plan: expired stale pending ops");
+                }
+
+                let plan_id = plan_id.ok_or_else(|| anyhow!("plan_id is required"))?;
+
                 // Get pending operations
-                let ops = self.mission.db().kb_ops_list(plan_id, Some("pending"))
+                let ops = self.mission.db().kb_ops_list(Some(plan_id), Some("pending"))
                     .map_err(|e| anyhow!("DB error: {}", e))?;
 
                 if ops.is_empty() {
@@ -2692,13 +2805,8 @@ impl AppState {
                 }
 
                 // Get remaining count
-                let remaining = if let Some(pid) = plan_id {
-                    self.mission.db().kb_ops_list(Some(pid), Some("pending"))
-                        .map(|v| v.len()).unwrap_or(0)
-                } else {
-                    self.mission.db().kb_ops_list(None, Some("pending"))
-                        .map(|v| v.len()).unwrap_or(0)
-                };
+                let remaining = self.mission.db().kb_ops_list(Some(plan_id), Some("pending"))
+                    .map(|v| v.len()).unwrap_or(0);
 
                 Ok(ToolResult::json_pretty(&serde_json::json!({
                     "executed": results.len(),
@@ -3151,11 +3259,12 @@ impl AppState {
                 struct Args {
                     status: Option<String>,
                     limit: Option<i64>,
+                    conversation_type: Option<String>,
                 }
-                let Args { status, limit } =
-                    serde_json::from_value(args).unwrap_or(Args { status: None, limit: None });
+                let Args { status, limit, conversation_type } =
+                    serde_json::from_value(args).unwrap_or(Args { status: None, limit: None, conversation_type: None });
                 let convs = self.mission.db()
-                    .list_conversations(status.as_deref(), limit.unwrap_or(20))
+                    .list_conversations(status.as_deref(), limit.unwrap_or(20), conversation_type.as_deref())
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 Ok(ToolResult::json_pretty(&convs))
             }
@@ -3226,14 +3335,30 @@ impl AppState {
             }
             "mission_conversation_search" => {
                 #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
                 struct Args {
                     query: String,
                     limit: Option<i64>,
+                    role: Option<String>,
+                    session_id: Option<String>,
+                    exclude_session_id: Option<String>,
                 }
-                let Args { query, limit } = serde_json::from_value(args)?;
-                let msgs = self.mission.db()
-                    .search_conversation_messages(&query, limit.unwrap_or(20))
+                let Args { query, limit, role, session_id, exclude_session_id } = serde_json::from_value(args)?;
+                let mut msgs = self.mission.db()
+                    .search_conversation_messages(&query, limit.unwrap_or(20) * 3) // over-fetch for post-filter
                     .map_err(|e| anyhow!("DB error: {}", e))?;
+                let limit = limit.unwrap_or(20) as usize;
+                // Post-filter by role/session
+                if let Some(ref r) = role {
+                    msgs.retain(|m| m.role == *r);
+                }
+                if let Some(ref sid) = session_id {
+                    msgs.retain(|m| m.session_id == *sid);
+                }
+                if let Some(ref ex_sid) = exclude_session_id {
+                    msgs.retain(|m| m.session_id != *ex_sid);
+                }
+                msgs.truncate(limit);
                 let msgs_lite: Vec<serde_json::Value> = msgs.iter().map(|m| {
                     serde_json::json!({
                         "id": m.id,
@@ -6142,20 +6267,7 @@ async fn check_deep_analysis(state: &AppState) {
             continue;
         }
 
-        // Skip extraction meta-sessions (memory agent's own work)
-        if let Some(first_user) = msgs.iter().find(|m| m.role == "user") {
-            let text = &first_user.content;
-            if text.contains("mission_memory_pending")
-                || text.contains("mission_kb_remember")
-                || text.starts_with("[realtime-extract]")
-                || text.starts_with("[deep-analysis]")
-                || text.starts_with("[kb-consolidation]")
-            {
-                let _ = db.mark_analysis_complete(&conv.id, CURRENT_ANALYSIS_VERSION);
-                debug!(conv_id = %conv.id, "deep_analysis: skipping extraction meta-session");
-                continue;
-            }
-        }
+        // Meta-sessions excluded at SQL level via conversation_type = 'user'.
 
         if !ensure_memory_slot_by_id(state, MEMORY_SLOW_SLOT_ID).await {
             break;
@@ -6746,6 +6858,7 @@ fn handle_new_messages(
             analysis_retries: 0,
             deep_analyzed_message_id: 0,
             chat_type: None,
+            conversation_type: missiond_core::db::derive_conversation_type(slot_id.as_deref(), &session_id),
         };
         if let Err(e) = db.upsert_conversation(&conv) {
             error!(session = %session_id, error = %e, "Failed to create conversation");
@@ -6879,6 +6992,7 @@ fn handle_pty_text_complete(
             analysis_retries: 0,
             deep_analyzed_message_id: 0,
             chat_type: None,
+            conversation_type: missiond_core::db::derive_conversation_type(Some(&slot_id), &session_id),
         };
         if let Err(e) = db.upsert_conversation(&conv) {
             error!(slot = %slot_id, error = %e, "Failed to create PTY conversation");
