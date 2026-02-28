@@ -3519,6 +3519,35 @@ impl AppState {
                     None => Ok(ToolResult::error("Task not found")),
                 }
             }
+            "mission_board_claim" => {
+                let task_id = args.get("taskId").and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("taskId is required"))?;
+                let executor_type = args.get("executorType").and_then(|v| v.as_str())
+                    .unwrap_or("manual_session");
+                // Use explicit executorId or fall back to a generated session identifier
+                let executor_id = args.get("executorId").and_then(|v| v.as_str())
+                    .unwrap_or("claude-code-session");
+                match self.mission.db().claim_board_task(task_id, executor_id, executor_type) {
+                    Ok(Some(task)) => Ok(ToolResult::json_pretty(&task)),
+                    Ok(None) => {
+                        // Check why it failed: task not found vs already claimed
+                        match self.mission.db().get_board_task(task_id) {
+                            Ok(Some(existing)) => {
+                                let msg = if let Some(ref claimer) = existing.claim_executor_id {
+                                    format!("Task already claimed by {} ({})",
+                                        claimer,
+                                        existing.claim_executor_type.as_deref().unwrap_or("unknown"))
+                                } else {
+                                    format!("Task cannot be claimed (status: {})", existing.status.as_str())
+                                };
+                                Ok(ToolResult::error(msg))
+                            }
+                            _ => Ok(ToolResult::error("Task not found")),
+                        }
+                    }
+                    Err(e) => Ok(ToolResult::error(format!("DB error: {}", e))),
+                }
+            }
             // ===== Skill Knowledge Hub =====
             "mission_skill_list" => {
                 let skills: Vec<Value> = self
