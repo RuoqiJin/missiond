@@ -12,8 +12,8 @@ use crate::types::{
     AddBoardTaskNoteInput, AgentQuestion, AgentQuestionStatus, BoardNoteType, BoardTask,
     BoardTaskNote, BoardTaskStatus, BoardTaskWithNotes, Conversation, ConversationMessage,
     CreateAgentQuestionInput, CreateBoardTaskInput, EventType, InboxMessage, KBRememberInput,
-    KBRememberResult, KnowledgeEntry, SlotTask, Task, TaskEvent, TaskStatus, TaskUpdate,
-    UpdateBoardTaskInput,
+    KBRememberResult, KnowledgeEntry, SkillBlock, SkillSearchResult, SkillTopic, SlotTask, Task,
+    TaskEvent, TaskStatus, TaskUpdate, UpdateBoardTaskInput,
 };
 
 const SCHEMA: &str = r#"
@@ -555,6 +555,52 @@ impl MissionDB {
             CREATE INDEX IF NOT EXISTS idx_token_ledger_slot ON token_usage_ledger(slot_id);
             CREATE INDEX IF NOT EXISTS idx_token_ledger_created ON token_usage_ledger(created_at);"
         )?;
+
+        // Skill self-management tables (CQRS: DB as SoT, SKILL.md as materialized view)
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS skill_topics (
+                topic TEXT PRIMARY KEY,
+                description TEXT,
+                aka TEXT,
+                allowed_tools TEXT,
+                file_path TEXT NOT NULL,
+                hit_count INTEGER DEFAULT 0,
+                last_hit_at TEXT,
+                fragment_count INTEGER DEFAULT 0,
+                total_lines INTEGER DEFAULT 0,
+                checksum TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS skill_blocks (
+                id TEXT PRIMARY KEY,
+                topic TEXT NOT NULL,
+                block_type TEXT NOT NULL,
+                title TEXT,
+                content TEXT NOT NULL,
+                sort_order INTEGER DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_skill_blocks_topic ON skill_blocks(topic);
+            CREATE INDEX IF NOT EXISTS idx_skill_blocks_status ON skill_blocks(status);"
+        )?;
+
+        // Skill FTS5 index for full-text search
+        let has_skill_fts: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='skill_fts'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_skill_fts {
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE skill_fts USING fts5(
+                    topic, title, content,
+                    content='skill_blocks', content_rowid='rowid'
+                );"
+            )?;
+        }
 
         Ok(())
     }
@@ -2212,6 +2258,302 @@ impl MissionDB {
         }
 
         Ok(deleted)
+    }
+
+    // ============ Skill Engine ============
+
+    /// Upsert a skill topic (metadata)
+    pub fn skill_topic_upsert(
+        &self,
+        topic: &str,
+        description: Option<&str>,
+        aka: Option<&str>,
+        allowed_tools: Option<&str>,
+        file_path: &str,
+    ) -> SqliteResult<()> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO skill_topics (topic, description, aka, allowed_tools, file_path, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT(topic) DO UPDATE SET
+                description = ?2, aka = ?3, allowed_tools = ?4, file_path = ?5, updated_at = ?6",
+            params![topic, description, aka, allowed_tools, file_path, now],
+        )?;
+        Ok(())
+    }
+
+    /// Get a skill topic by name
+    pub fn skill_topic_get(&self, topic: &str) -> SqliteResult<Option<SkillTopic>> {
+        let conn = self.conn();
+        conn.query_row(
+            "SELECT topic, description, aka, allowed_tools, file_path,
+                    hit_count, last_hit_at, fragment_count, total_lines, checksum,
+                    created_at, updated_at
+             FROM skill_topics WHERE topic = ?1",
+            params![topic],
+            |row| {
+                Ok(SkillTopic {
+                    topic: row.get(0)?,
+                    description: row.get(1)?,
+                    aka: row.get(2)?,
+                    allowed_tools: row.get(3)?,
+                    file_path: row.get(4)?,
+                    hit_count: row.get(5)?,
+                    last_hit_at: row.get(6)?,
+                    fragment_count: row.get(7)?,
+                    total_lines: row.get(8)?,
+                    checksum: row.get(9)?,
+                    created_at: row.get(10)?,
+                    updated_at: row.get(11)?,
+                })
+            },
+        )
+        .optional()
+    }
+
+    /// List all skill topics
+    pub fn skill_topic_list(&self) -> SqliteResult<Vec<SkillTopic>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT topic, description, aka, allowed_tools, file_path,
+                    hit_count, last_hit_at, fragment_count, total_lines, checksum,
+                    created_at, updated_at
+             FROM skill_topics ORDER BY topic",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(SkillTopic {
+                topic: row.get(0)?,
+                description: row.get(1)?,
+                aka: row.get(2)?,
+                allowed_tools: row.get(3)?,
+                file_path: row.get(4)?,
+                hit_count: row.get(5)?,
+                last_hit_at: row.get(6)?,
+                fragment_count: row.get(7)?,
+                total_lines: row.get(8)?,
+                checksum: row.get(9)?,
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Record a hit on a skill topic (for Hook injection tracking)
+    pub fn skill_topic_hit(&self, topic: &str) -> SqliteResult<()> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE skill_topics SET hit_count = hit_count + 1, last_hit_at = ?1 WHERE topic = ?2",
+            params![now, topic],
+        )?;
+        Ok(())
+    }
+
+    /// Insert a skill block (section or fragment)
+    pub fn skill_block_insert(
+        &self,
+        topic: &str,
+        block_type: &str,
+        title: Option<&str>,
+        content: &str,
+        sort_order: i32,
+    ) -> SqliteResult<String> {
+        let conn = self.conn();
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO skill_blocks (id, topic, block_type, title, content, sort_order, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?7)",
+            params![id, topic, block_type, title, content, sort_order, now],
+        )?;
+
+        // Sync FTS
+        let rowid: i64 = conn.query_row(
+            "SELECT rowid FROM skill_blocks WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        conn.execute(
+            "INSERT INTO skill_fts(rowid, topic, title, content) VALUES (?1, ?2, ?3, ?4)",
+            params![rowid, topic, title.unwrap_or(""), content],
+        )?;
+
+        // Update fragment count if fragment
+        if block_type == "fragment" {
+            conn.execute(
+                "UPDATE skill_topics SET fragment_count = fragment_count + 1 WHERE topic = ?1",
+                params![topic],
+            )?;
+        }
+
+        Ok(id)
+    }
+
+    /// Update a skill block's content
+    pub fn skill_block_update(&self, id: &str, content: &str) -> SqliteResult<bool> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        let updated = conn.execute(
+            "UPDATE skill_blocks SET content = ?1, updated_at = ?2 WHERE id = ?3 AND status = 'active'",
+            params![content, now, id],
+        )?;
+        if updated > 0 {
+            // Rebuild FTS for this block
+            let rowid: i64 = conn.query_row(
+                "SELECT rowid FROM skill_blocks WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )?;
+            let (topic, title): (String, Option<String>) = conn.query_row(
+                "SELECT topic, title FROM skill_blocks WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO skill_fts(rowid, topic, title, content) VALUES (?1, ?2, ?3, ?4)",
+                params![rowid, topic, title.unwrap_or_default(), content],
+            )?;
+        }
+        Ok(updated > 0)
+    }
+
+    /// Get all active blocks for a topic, ordered by sort_order
+    pub fn skill_blocks_for_topic(&self, topic: &str) -> SqliteResult<Vec<SkillBlock>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, topic, block_type, title, content, sort_order, status, created_at, updated_at
+             FROM skill_blocks
+             WHERE topic = ?1 AND status = 'active'
+             ORDER BY block_type DESC, sort_order ASC",
+        )?;
+        let rows = stmt.query_map(params![topic], |row| {
+            Ok(SkillBlock {
+                id: row.get(0)?,
+                topic: row.get(1)?,
+                block_type: row.get(2)?,
+                title: row.get(3)?,
+                content: row.get(4)?,
+                sort_order: row.get(5)?,
+                status: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Search skill blocks using FTS5
+    pub fn skill_search_fts(&self, query: &str) -> SqliteResult<Vec<SkillSearchResult>> {
+        let conn = self.read_conn();
+        let tokens: Vec<&str> = query.split_whitespace().collect();
+        if tokens.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let fts_query = tokens
+            .iter()
+            .map(|t| format!("\"{}\"", t.replace('"', "")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+
+        let mut stmt = conn.prepare(
+            "SELECT sb.topic, sb.title, snippet(skill_fts, 2, '>>>', '<<<', '...', 32) as snippet,
+                    st.file_path, st.description
+             FROM skill_fts
+             JOIN skill_blocks sb ON sb.rowid = skill_fts.rowid
+             JOIN skill_topics st ON st.topic = sb.topic
+             WHERE skill_fts MATCH ?1 AND sb.status = 'active'
+             ORDER BY rank
+             LIMIT 20",
+        )?;
+
+        let rows = stmt.query_map(params![fts_query], |row| {
+            Ok(SkillSearchResult {
+                topic: row.get(0)?,
+                section_title: row.get(1)?,
+                snippet: row.get(2)?,
+                file_path: row.get(3)?,
+                description: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Search skill topics by name/aka (exact + fuzzy)
+    pub fn skill_search_topics(&self, query: &str) -> SqliteResult<Vec<SkillTopic>> {
+        let conn = self.conn();
+        let query_lower = query.to_lowercase();
+        let pattern = format!("%{}%", query_lower);
+
+        let mut stmt = conn.prepare(
+            "SELECT topic, description, aka, allowed_tools, file_path,
+                    hit_count, last_hit_at, fragment_count, total_lines, checksum,
+                    created_at, updated_at
+             FROM skill_topics
+             WHERE LOWER(topic) LIKE ?1
+                OR LOWER(COALESCE(description, '')) LIKE ?1
+                OR LOWER(COALESCE(aka, '')) LIKE ?1
+             ORDER BY hit_count DESC
+             LIMIT 10",
+        )?;
+        let rows = stmt.query_map(params![pattern], |row| {
+            Ok(SkillTopic {
+                topic: row.get(0)?,
+                description: row.get(1)?,
+                aka: row.get(2)?,
+                allowed_tools: row.get(3)?,
+                file_path: row.get(4)?,
+                hit_count: row.get(5)?,
+                last_hit_at: row.get(6)?,
+                fragment_count: row.get(7)?,
+                total_lines: row.get(8)?,
+                checksum: row.get(9)?,
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Update skill_topics metadata after materialization
+    pub fn skill_topic_update_stats(&self, topic: &str, total_lines: i32, checksum: &str) -> SqliteResult<()> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE skill_topics SET total_lines = ?1, checksum = ?2, updated_at = ?3 WHERE topic = ?4",
+            params![total_lines, checksum, now, topic],
+        )?;
+        Ok(())
+    }
+
+    /// Set block status (for lifecycle management: active → merged/archived)
+    pub fn skill_block_set_status(&self, id: &str, status: &str) -> SqliteResult<bool> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        let updated = conn.execute(
+            "UPDATE skill_blocks SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status, now, id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// Delete all blocks for a topic (used before re-ingest)
+    pub fn skill_blocks_delete_topic(&self, topic: &str) -> SqliteResult<usize> {
+        let conn = self.conn();
+        let deleted = conn.execute(
+            "DELETE FROM skill_blocks WHERE topic = ?1",
+            params![topic],
+        )?;
+        Ok(deleted)
+    }
+
+    /// Rebuild skill FTS index from scratch
+    pub fn skill_rebuild_fts(&self) -> SqliteResult<()> {
+        let conn = self.conn();
+        conn.execute_batch("INSERT INTO skill_fts(skill_fts) VALUES('rebuild')")?;
+        Ok(())
     }
 
     // ============ Message Pipeline Tracking ============

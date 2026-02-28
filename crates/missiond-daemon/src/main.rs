@@ -2423,19 +2423,48 @@ impl AppState {
             }
             "mission_skill_search" => {
                 let SkillSearchArgs { query } = serde_json::from_value(args)?;
-                let results: Vec<Value> = self
-                    .skills
-                    .search(&query)
-                    .iter()
-                    .map(|s| {
-                        serde_json::json!({
+
+                // Primary: FTS5 full-text search (covers content, not just name/aka)
+                let db = self.mission.db();
+                let mut seen_topics = std::collections::HashSet::new();
+                let mut results: Vec<Value> = Vec::new();
+
+                // 1. Exact name/aka match from in-memory index (highest priority)
+                for s in self.skills.search(&query).iter().take(5) {
+                    if seen_topics.insert(s.name.clone()) {
+                        results.push(serde_json::json!({
                             "name": s.name,
                             "description": s.description,
                             "aka": s.aka,
                             "path": s.path,
-                        })
-                    })
-                    .collect();
+                            "match_type": "name/aka",
+                        }));
+                    }
+                }
+
+                // 2. FTS5 full-text search (content-level matching)
+                if let Ok(fts_results) = db.skill_search_fts(&query) {
+                    for r in fts_results.iter().take(10) {
+                        if seen_topics.insert(r.topic.clone()) {
+                            results.push(serde_json::json!({
+                                "name": r.topic,
+                                "description": r.description,
+                                "path": r.file_path,
+                                "match_type": "content",
+                                "matched_section": r.section_title,
+                                "snippet": r.snippet,
+                            }));
+                        }
+                    }
+                }
+
+                // 3. Track hits for matched topics
+                for r in &results {
+                    if let Some(name) = r.get("name").and_then(|v| v.as_str()) {
+                        let _ = db.skill_topic_hit(name);
+                    }
+                }
+
                 Ok(ToolResult::json_pretty(&results))
             }
             "mission_context_build" => {
@@ -2468,6 +2497,119 @@ impl AppState {
                 }
 
                 Ok(ToolResult::text(context))
+            }
+
+            // ===== Skill Engine (CQRS write tools) =====
+            "mission_skill_upsert" => {
+                #[derive(Deserialize)]
+                struct SkillUpsertArgs {
+                    topic: String,
+                    section_title: String,
+                    content: String,
+                    sort_order: Option<i32>,
+                }
+                let args: SkillUpsertArgs = serde_json::from_value(args)?;
+                let db = self.mission.db();
+
+                // Ensure topic exists
+                if db.skill_topic_get(&args.topic).map_err(|e| anyhow!("DB: {}", e))?.is_none() {
+                    // Auto-create topic with default path
+                    let skills_dir = dirs::home_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from("."))
+                        .join(".claude/skills");
+                    let file_path = skills_dir.join(&args.topic).join("SKILL.md");
+                    db.skill_topic_upsert(
+                        &args.topic, None, None, None,
+                        &file_path.to_string_lossy(),
+                    ).map_err(|e| anyhow!("DB: {}", e))?;
+                }
+
+                // Find existing block with same title, or create new
+                let blocks = db.skill_blocks_for_topic(&args.topic)
+                    .map_err(|e| anyhow!("DB: {}", e))?;
+                let existing = blocks.iter().find(|b| b.title.as_deref() == Some(&args.section_title));
+
+                let action;
+                if let Some(block) = existing {
+                    db.skill_block_update(&block.id, &args.content)
+                        .map_err(|e| anyhow!("DB: {}", e))?;
+                    action = "updated";
+                } else {
+                    let sort = args.sort_order.unwrap_or(blocks.len() as i32);
+                    db.skill_block_insert(&args.topic, "section", Some(&args.section_title), &args.content, sort)
+                        .map_err(|e| anyhow!("DB: {}", e))?;
+                    action = "created";
+                }
+
+                // Materialize to file
+                match missiond_core::skill::materialize_topic(db, &args.topic) {
+                    Ok(_) => Ok(ToolResult::text(format!("Section '{}' {} in topic '{}', file regenerated", args.section_title, action, args.topic))),
+                    Err(e) => Ok(ToolResult::text(format!("Section {} but materialize failed: {}", action, e))),
+                }
+            }
+            "mission_skill_record" => {
+                #[derive(Deserialize)]
+                struct SkillRecordArgs {
+                    topic: String,
+                    content: String,
+                }
+                let args: SkillRecordArgs = serde_json::from_value(args)?;
+                let db = self.mission.db();
+
+                // Ensure topic exists
+                if db.skill_topic_get(&args.topic).map_err(|e| anyhow!("DB: {}", e))?.is_none() {
+                    let skills_dir = dirs::home_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from("."))
+                        .join(".claude/skills");
+                    let file_path = skills_dir.join(&args.topic).join("SKILL.md");
+                    db.skill_topic_upsert(
+                        &args.topic, None, None, None,
+                        &file_path.to_string_lossy(),
+                    ).map_err(|e| anyhow!("DB: {}", e))?;
+                }
+
+                db.skill_block_insert(&args.topic, "fragment", None, &args.content, 0)
+                    .map_err(|e| anyhow!("DB: {}", e))?;
+
+                let topic_meta = db.skill_topic_get(&args.topic)
+                    .map_err(|e| anyhow!("DB: {}", e))?;
+                let frag_count = topic_meta.map(|t| t.fragment_count).unwrap_or(0);
+
+                // Materialize
+                let _ = missiond_core::skill::materialize_topic(db, &args.topic);
+
+                let mut msg = format!("Fragment recorded for '{}' ({} fragments)", args.topic, frag_count);
+                if frag_count >= 5 {
+                    msg.push_str(". Recommend running mission_skill_optimize to consolidate.");
+                }
+                Ok(ToolResult::text(msg))
+            }
+            "mission_skill_render" => {
+                #[derive(Deserialize)]
+                struct SkillRenderArgs {
+                    topic: Option<String>,
+                }
+                let args: SkillRenderArgs = serde_json::from_value(args)
+                    .unwrap_or(SkillRenderArgs { topic: None });
+                let db = self.mission.db();
+
+                if let Some(topic) = args.topic {
+                    match missiond_core::skill::materialize_topic(db, &topic) {
+                        Ok(output) => Ok(ToolResult::text(format!("Rendered '{}' ({} lines)", topic, output.lines().count()))),
+                        Err(e) => Ok(ToolResult::error(format!("Render failed: {}", e))),
+                    }
+                } else {
+                    match missiond_core::skill::materialize_all(db) {
+                        Ok(count) => Ok(ToolResult::text(format!("Rendered all {} skills", count))),
+                        Err(e) => Ok(ToolResult::error(format!("Render all failed: {}", e))),
+                    }
+                }
+            }
+            "mission_skill_topics" => {
+                let db = self.mission.db();
+                let topics = db.skill_topic_list()
+                    .map_err(|e| anyhow!("DB: {}", e))?;
+                Ok(ToolResult::json_pretty(&topics))
             }
 
             // ===== Infrastructure Registry =====
@@ -5652,6 +5794,10 @@ async fn main() -> Result<()> {
     let skills = Arc::new(SkillIndex::build(&skills_dir));
     info!(count = skills.list().len(), "Skill index loaded");
 
+    // Skill Engine: ingest SKILL.md files into DB for FTS5 search
+    let ingested = missiond_core::skill::ingest_skills(mission.db(), &skills_dir);
+    info!(count = ingested, "Skill engine: ingested skills into DB");
+
     // Warm PTY session UUID cache from DB (activates slot_sessions table)
     let existing_slot_sessions = mission.db().get_all_slot_sessions().unwrap_or_default();
     let pty_uuids: HashSet<String> = existing_slot_sessions
@@ -5984,13 +6130,13 @@ async fn main() -> Result<()> {
                         }
 
                         // Close Running submit tasks assigned to this slot when it returns to Idle.
-                        // Minimum execution time: tasks running < 30s are NOT auto-closed,
-                        // because the slot may have just given a brief acknowledgment before
-                        // starting multi-step work. The 15-min reaper handles the fallback.
+                        // Guard: tasks running < 5s are only closed if JSONL confirms turn_duration.
+                        // This prevents premature closure on PTY startup noise while allowing
+                        // genuinely fast tasks (e.g. simple KB operations) to close promptly.
                         if new_state == SessionState::Idle && prev_state != SessionState::Idle {
                             if let Ok(running_tasks) = state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Running) {
                                 let now = chrono::Utc::now().timestamp_millis();
-                                const MIN_EXECUTION_MS: i64 = 30_000; // 30 seconds minimum (MiniMax M2.5 needs longer to start tool calls)
+                                const MIN_EXECUTION_MS: i64 = 5_000; // 5 seconds: filter PTY startup noise
                                 // Get PTY last response as fallback
                                 let pty_resp = state.slot_last_responses.write().await.remove(slot_id.as_str());
                                 // Try JSONL extraction for more accurate result
@@ -6007,14 +6153,23 @@ async fn main() -> Result<()> {
                                     }
                                     _ => None,
                                 };
+                                // Check JSONL turn_duration for fast tasks that complete under the guard
+                                let jsonl_confirmed = if let Some(jsonl_path) = get_task_jsonl_path(&state, &missiond_core::types::Task {
+                                    id: String::new(), role: String::new(), prompt: String::new(),
+                                    status: missiond_core::types::TaskStatus::Running,
+                                    slot_id: Some(slot_id.to_string()), session_id: None,
+                                    result: None, error: None, created_at: 0, started_at: None, finished_at: None,
+                                }) {
+                                    missiond_core::jsonl_has_completed_turn(std::path::Path::new(&jsonl_path)).await
+                                } else { false };
                                 for task in &running_tasks {
                                     if task.slot_id.as_deref() == Some(slot_id.as_str()) {
                                         let started = task.started_at.unwrap_or(task.created_at);
                                         let elapsed = now - started;
-                                        if elapsed < MIN_EXECUTION_MS {
+                                        if elapsed < MIN_EXECUTION_MS && !jsonl_confirmed {
                                             debug!(
                                                 task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,
-                                                "Submit task NOT closed: execution too short ({elapsed}ms < {MIN_EXECUTION_MS}ms), slot may resume"
+                                                "Submit task NOT closed: execution too short ({elapsed}ms < {MIN_EXECUTION_MS}ms) and no JSONL confirmation"
                                             );
                                             continue;
                                         }
