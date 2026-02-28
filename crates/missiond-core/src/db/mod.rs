@@ -701,6 +701,16 @@ impl MissionDB {
             CREATE INDEX IF NOT EXISTS idx_kb_op_plan ON kb_operation_queue(plan_id);"
         )?;
 
+        // Add notified_at to tasks table for hook-based completion notification
+        let has_notified_at: bool = conn
+            .prepare("SELECT notified_at FROM tasks LIMIT 0")
+            .is_ok();
+        if !has_notified_at {
+            conn.execute_batch(
+                "ALTER TABLE tasks ADD COLUMN notified_at INTEGER;"
+            )?;
+        }
+
         // Conversation events — non-dialog system events from JSONL
         // (turn_duration, compact_boundary, hook_progress, queue_operation, file_history_snapshot)
         conn.execute_batch(
@@ -869,6 +879,33 @@ impl MissionDB {
         for task in rows {
             tasks.push(task?);
         }
+        Ok(tasks)
+    }
+
+    /// Atomically consume completed/failed tasks that haven't been notified yet.
+    /// Returns the tasks and marks them as notified in one transaction.
+    pub fn ack_completed_tasks(&self) -> SqliteResult<Vec<Task>> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().timestamp();
+
+        // Single transaction: SELECT + UPDATE
+        let tx = conn.unchecked_transaction()?;
+        let tasks: Vec<Task> = {
+            let mut stmt = tx.prepare(
+                "SELECT * FROM tasks WHERE status IN ('done', 'failed') AND notified_at IS NULL ORDER BY finished_at ASC"
+            )?;
+            let mapped = stmt.query_map([], |row| Self::row_to_task(row))?;
+            let result: Vec<Task> = mapped.filter_map(|r| r.ok()).collect();
+            result
+        };
+
+        if !tasks.is_empty() {
+            let ids: Vec<String> = tasks.iter().map(|t| format!("'{}'", t.id)).collect();
+            tx.execute_batch(
+                &format!("UPDATE tasks SET notified_at = {} WHERE id IN ({})", now, ids.join(","))
+            )?;
+        }
+        tx.commit()?;
         Ok(tasks)
     }
 
@@ -2473,6 +2510,25 @@ impl MissionDB {
         let updated = conn.execute(
             "UPDATE kb_operation_queue SET status = ?1, result = ?2, error = ?3, executed_at = ?4 WHERE id = ?5",
             params![status, result, error, executed_at, op_id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// Update a dispatched kb_operation by its associated submit task_id.
+    /// Called when a submit task finishes — updates status and stores the task result.
+    pub fn kb_ops_complete_by_task_id(
+        &self,
+        task_id: &str,
+        new_status: &str,
+        result: Option<&str>,
+    ) -> SqliteResult<bool> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        let pattern = format!("%task_id={}%", task_id);
+        let updated = conn.execute(
+            "UPDATE kb_operation_queue SET status = ?1, result = COALESCE(?2, result), executed_at = ?3
+             WHERE status = 'dispatched' AND result LIKE ?4",
+            params![new_status, result, now, pattern],
         )?;
         Ok(updated > 0)
     }

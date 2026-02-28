@@ -185,6 +185,14 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                 }
             }),
         ),
+        ToolDefinition::new(
+            "mission_task_ack",
+            "消费已完成但未通知的 submit task。原子操作：返回任务列表并标记已通知。供 UserPromptSubmit hook 调用。",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+        ),
         // ===== Process Control =====
         ToolDefinition::new(
             "mission_spawn",
