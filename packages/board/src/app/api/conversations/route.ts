@@ -35,13 +35,11 @@ export async function GET(req: NextRequest) {
       return NextResponse.json(result);
     }
 
-    // List conversations
+    // List conversations (filtering by conversation_type is done client-side)
     const status = req.nextUrl.searchParams.get('status') || undefined;
     const limit = req.nextUrl.searchParams.get('limit') || '50';
-    const conversationType = req.nextUrl.searchParams.get('conversation_type') || undefined;
     const args: Record<string, unknown> = { limit: Number(limit) };
     if (status) args.status = status;
-    if (conversationType) args.conversation_type = conversationType;
     const conversations = await callTool('mission_conversation_list', args);
     return NextResponse.json(conversations);
   } catch (err) {
