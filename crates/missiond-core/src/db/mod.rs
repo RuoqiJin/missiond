@@ -2547,6 +2547,19 @@ impl MissionDB {
         Ok(updated > 0)
     }
 
+    /// Expire stale pending kb_operations older than `ttl_secs` seconds.
+    /// Returns the number of expired operations.
+    pub fn kb_ops_expire_stale(&self, ttl_secs: i64) -> SqliteResult<usize> {
+        let conn = self.conn();
+        let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(ttl_secs)).to_rfc3339();
+        let updated = conn.execute(
+            "UPDATE kb_operation_queue SET status = 'expired', executed_at = ?1
+             WHERE status = 'pending' AND created_at < ?2",
+            params![chrono::Utc::now().to_rfc3339(), cutoff],
+        )?;
+        Ok(updated)
+    }
+
     /// Get queue status summary for a plan
     pub fn kb_ops_plan_summary(&self, plan_id: &str) -> SqliteResult<serde_json::Value> {
         let conn = self.conn();

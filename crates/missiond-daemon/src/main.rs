@@ -5496,8 +5496,6 @@ async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
     info!(count = queued.len(), "Autopilot: found queued submit tasks");
 
     let mut any_dispatched = false;
-    // Collect unique roles from queued tasks for auto-spawn
-    let queued_roles: HashSet<String> = queued.iter().map(|t| t.role.clone()).collect();
     // Track slots used in this dispatch round to avoid sending multiple tasks to the same slot
     let mut used_slots: HashSet<String> = HashSet::new();
 
@@ -5556,30 +5554,36 @@ async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
         }
     }
 
-    // Phase 2: Auto-spawn exited/no-session slots for roles with undispatched tasks
-    if !any_dispatched {
-        let slots = state.mission.list_slots();
-        for role in &queued_roles {
-            for slot in slots.iter().filter(|s| s.config.role == *role) {
-                let slot_id = &slot.config.id;
-                let status = state.pty.get_status(slot_id).await;
-                let is_spawnable = match &status {
-                    Some(s) => s.state == missiond_core::pty::SessionState::Exited,
-                    None => true,
-                };
-                if !is_spawnable { continue; }
+    // Phase 2: Wake-on-Demand — auto-spawn stopped slots for roles that still have queued tasks
+    {
+        let remaining = match state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Queued) {
+            Ok(t) => t,
+            Err(_) => vec![],
+        };
+        let remaining_roles: HashSet<String> = remaining.iter().map(|t| t.role.clone()).collect();
+        if !remaining_roles.is_empty() {
+            let slots = state.mission.list_slots();
+            for role in &remaining_roles {
+                for slot in slots.iter().filter(|s| s.config.role == *role) {
+                    let slot_id = &slot.config.id;
+                    if used_slots.contains(slot_id) { continue; }
+                    let status = state.pty.get_status(slot_id).await;
+                    let is_spawnable = match &status {
+                        Some(s) => s.state == missiond_core::pty::SessionState::Exited,
+                        None => true,
+                    };
+                    if !is_spawnable { continue; }
 
-                // Spawn in background — will fire submit_notify when idle
-                let state_clone = state.clone();
-                let slot_id_clone = slot_id.clone();
-                info!(slot_id = %slot_id, role = %role, "Autopilot: auto-spawning slot for queued submit tasks");
-                tokio::spawn(async move {
-                    if ensure_memory_slot_by_id(&state_clone, &slot_id_clone).await {
-                        // Slot is now idle — signal re-dispatch
-                        state_clone.submit_notify.notify_one();
-                    }
-                });
-                break; // One spawn attempt per role
+                    let state_clone = state.clone();
+                    let slot_id_clone = slot_id.clone();
+                    info!(slot_id = %slot_id, role = %role, "Autopilot: auto-spawning slot for queued tasks (Wake-on-Demand)");
+                    tokio::spawn(async move {
+                        if ensure_memory_slot_by_id(&state_clone, &slot_id_clone).await {
+                            state_clone.submit_notify.notify_one();
+                        }
+                    });
+                    break; // One spawn attempt per role
+                }
             }
         }
     }
