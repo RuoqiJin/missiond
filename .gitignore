@@ -1,0 +1,39 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Node.js
+node_modules/
+dist/
+*.tsbuildinfo
+.pnpm-debug.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.cursor/
+.cursorindexingignore
+.specstory/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Claude Code (contains credentials and private config)
+.claude/
+
+# Next.js build output
+.next/
+
+# Private notes and internal design docs (may contain business URLs/credentials)
+分析.md
+历史记录.md
+兼容 node.md
+docs/designs/
+
+# Misc
+*.md.bak

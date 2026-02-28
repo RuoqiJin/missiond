@@ -1,0 +1,44 @@
+[package]
+name = "missiond-mcp"
+description = "MCP (Model Context Protocol) server for missiond - Claude Code multi-agent orchestration"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+async-trait = "0.1"
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Paths
+dirs = { workspace = true }
+
+# Internal - missiond-core for cross-platform IPC
+missiond-core = { workspace = true }
+
+[[bin]]
+name = "mission-mcp"
+path = "src/bin/mission-mcp.rs"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

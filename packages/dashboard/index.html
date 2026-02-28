@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>missiond - CC Tasks Dashboard</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --bg-secondary: #161b22;
+      --border: #30363d;
+      --text: #c9d1d9;
+      --text-muted: #8b949e;
+      --green: #3fb950;
+      --yellow: #d29922;
+      --blue: #58a6ff;
+      --purple: #a371f7;
+      --red: #f85149;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 20px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    h1 { font-size: 24px; font-weight: 600; }
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--red);
+    }
+    .status-dot.connected { background: var(--green); }
+    .stats {
+      display: flex;
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+    .stat {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px 24px;
+      min-width: 140px;
+    }
+    .stat-value {
+      font-size: 32px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .stat-label {
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+    .stat.in-progress .stat-value { color: var(--yellow); }
+    .stat.completed .stat-value { color: var(--green); }
+    .stat.pending .stat-value { color: var(--blue); }
+    .sessions {
+      display: grid;
+      gap: 16px;
+    }
+    .session {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .session-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 16px;
+      background: rgba(255,255,255,0.02);
+      border-bottom: 1px solid var(--border);
+    }
+    .session-title {
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .session-title .active-indicator {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--green);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    .session-path {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-family: monospace;
+    }
+    .session-stats {
+      display: flex;
+      gap: 12px;
+      font-size: 13px;
+    }
+    .session-stat {
+      padding: 2px 8px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.05);
+    }
+    .tasks {
+      padding: 12px 16px;
+    }
+    .task {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .task:last-child { border-bottom: none; }
+    .task-status {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+    .task-status.pending {
+      border: 2px solid var(--blue);
+      color: var(--blue);
+    }
+    .task-status.in_progress {
+      border: 2px solid var(--yellow);
+      color: var(--yellow);
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    .task-status.completed {
+      background: var(--green);
+      color: var(--bg);
+    }
+    .task-content { flex: 1; }
+    .task-subject {
+      font-weight: 500;
+      margin-bottom: 4px;
+    }
+    .task-description {
+      font-size: 13px;
+      color: var(--text-muted);
+      line-height: 1.4;
+    }
+    .task-meta {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+    .empty {
+      text-align: center;
+      padding: 40px;
+      color: var(--text-muted);
+    }
+    .error {
+      background: rgba(248, 81, 73, 0.1);
+      border: 1px solid var(--red);
+      color: var(--red);
+      padding: 12px 16px;
+      border-radius: 8px;
+      margin-bottom: 24px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>CC Tasks Dashboard</h1>
+    <div class="status">
+      <div class="status-dot" id="statusDot"></div>
+      <span id="statusText">Disconnected</span>
+    </div>
+  </header>
+
+  <div id="error" class="error" style="display: none;"></div>
+
+  <div class="stats">
+    <div class="stat in-progress">
+      <div class="stat-value" id="inProgressCount">0</div>
+      <div class="stat-label">In Progress</div>
+    </div>
+    <div class="stat pending">
+      <div class="stat-value" id="pendingCount">0</div>
+      <div class="stat-label">Pending</div>
+    </div>
+    <div class="stat completed">
+      <div class="stat-value" id="completedCount">0</div>
+      <div class="stat-label">Completed</div>
+    </div>
+  </div>
+
+  <div class="sessions" id="sessions">
+    <div class="empty">Connecting to missiond...</div>
+  </div>
+
+  <script>
+    const WS_URL = 'ws://localhost:9120/tasks';
+    let ws = null;
+    let reconnectTimeout = null;
+    let sessions = {};
+    let latestOverview = null;
+
+    function connect() {
+      if (ws) {
+        ws.close();
+      }
+
+      ws = new WebSocket(WS_URL);
+
+      ws.onopen = () => {
+        document.getElementById('statusDot').classList.add('connected');
+        document.getElementById('statusText').textContent = 'Connected';
+        document.getElementById('error').style.display = 'none';
+        console.log('Connected to missiond');
+      };
+
+      ws.onclose = () => {
+        document.getElementById('statusDot').classList.remove('connected');
+        document.getElementById('statusText').textContent = 'Disconnected';
+        console.log('Disconnected from missiond');
+        scheduleReconnect();
+      };
+
+      ws.onerror = (err) => {
+        console.error('WebSocket error:', err);
+        document.getElementById('error').textContent =
+          'Cannot connect to missiond. Make sure missiond is running on port 9120.';
+        document.getElementById('error').style.display = 'block';
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          handleMessage(data);
+        } catch (err) {
+          console.error('Failed to parse message:', err);
+        }
+      };
+    }
+
+    function scheduleReconnect() {
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+      }
+      reconnectTimeout = setTimeout(connect, 3000);
+    }
+
+    function normalizeSession(session) {
+      return {
+        sessionId: session.sessionId || session.session_id || '',
+        projectPath: session.projectPath || session.project_path || '',
+        projectName: session.projectName || session.project_name || '',
+        summary: session.summary || '',
+        tasks: Array.isArray(session.tasks) ? session.tasks : [],
+        active: !!(session.active ?? session.isActive ?? session.is_active),
+      };
+    }
+
+    function replaceSessions(items) {
+      sessions = {};
+      items.forEach((item) => {
+        const normalized = normalizeSession(item);
+        if (normalized.sessionId) {
+          sessions[normalized.sessionId] = normalized;
+        }
+      });
+      render();
+    }
+
+    function handleMessage(data) {
+      console.log('Received:', data);
+      const payload = data.payload || data;
+
+      switch (data.type) {
+        case 'cc_tasks_snapshot':
+          if (Array.isArray(data.sessions)) {
+            replaceSessions(data.sessions);
+          }
+          break;
+
+        case 'cc_tasks_overview':
+          latestOverview = payload;
+          render();
+          break;
+
+        case 'cc_tasks_changed':
+          // Legacy format includes full sessions snapshot.
+          if (Array.isArray(data.sessions)) {
+            replaceSessions(data.sessions);
+            break;
+          }
+          // Current format includes per-session diff payload.
+          if (payload && payload.sessionId) {
+            const sessionId = payload.sessionId;
+            const existing = sessions[sessionId] || normalizeSession({
+              sessionId,
+              projectPath: payload.projectPath,
+              projectName: payload.projectName,
+              active: true,
+              tasks: [],
+            });
+            existing.projectPath = payload.projectPath || existing.projectPath;
+            existing.projectName = payload.projectName || existing.projectName;
+            existing.tasks = Array.isArray(payload.currentTasks) ? payload.currentTasks : existing.tasks;
+            existing.active = true;
+            sessions[sessionId] = existing;
+            render();
+          }
+          break;
+
+        case 'cc_task_started':
+        case 'cc_task_completed':
+          // Request full snapshot
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'get_tasks' }));
+          }
+          break;
+
+        case 'cc_session_active':
+          if (payload && payload.sessionId) {
+            const existing = sessions[payload.sessionId] || normalizeSession({
+              sessionId: payload.sessionId,
+              projectName: payload.projectName,
+              active: true,
+              tasks: [],
+            });
+            existing.active = true;
+            existing.projectName = payload.projectName || existing.projectName;
+            sessions[payload.sessionId] = existing;
+            render();
+          }
+          break;
+
+        case 'cc_session_inactive':
+          if (payload && payload.sessionId) {
+            if (sessions[payload.sessionId]) {
+              sessions[payload.sessionId].active = false;
+            }
+            render();
+          }
+          break;
+      }
+    }
+
+    function getStatusIcon(status) {
+      switch (status) {
+        case 'pending': return '○';
+        case 'in_progress': return '◐';
+        case 'completed': return '✓';
+        default: return '?';
+      }
+    }
+
+    function render() {
+      const sessionsEl = document.getElementById('sessions');
+      const sessionList = Object.values(sessions);
+
+      // Update stats
+      let inProgress = 0, pending = 0, completed = 0;
+      sessionList.forEach(session => {
+        (session.tasks || []).forEach(task => {
+          if (task.status === 'in_progress') inProgress++;
+          else if (task.status === 'pending') pending++;
+          else if (task.status === 'completed') completed++;
+        });
+      });
+
+      const overviewStats = latestOverview?.tasksByStatus || latestOverview?.tasks_by_status;
+      if (overviewStats) {
+        inProgress = overviewStats.in_progress ?? inProgress;
+        pending = overviewStats.pending ?? pending;
+        completed = overviewStats.completed ?? completed;
+      }
+
+      document.getElementById('inProgressCount').textContent = inProgress;
+      document.getElementById('pendingCount').textContent = pending;
+      document.getElementById('completedCount').textContent = completed;
+
+      if (sessionList.length === 0) {
+        sessionsEl.innerHTML = '<div class="empty">No active Claude Code sessions</div>';
+        return;
+      }
+
+      // Sort sessions: active first, then by path
+      sessionList.sort((a, b) => {
+        if (a.active !== b.active) return b.active ? 1 : -1;
+        return (a.projectPath || '').localeCompare(b.projectPath || '');
+      });
+
+      sessionsEl.innerHTML = sessionList.map(session => {
+        const tasks = session.tasks || [];
+        const taskCounts = {
+          pending: tasks.filter(t => t.status === 'pending').length,
+          in_progress: tasks.filter(t => t.status === 'in_progress').length,
+          completed: tasks.filter(t => t.status === 'completed').length
+        };
+
+        return `
+          <div class="session">
+            <div class="session-header">
+              <div>
+                <div class="session-title">
+                  ${session.active ? '<div class="active-indicator"></div>' : ''}
+                  ${escapeHtml(session.projectName || (session.projectPath ? session.projectPath.split('/').pop() : 'Unknown Project'))}
+                </div>
+                <div class="session-path">${escapeHtml(session.projectPath || session.sessionId)}</div>
+              </div>
+              <div class="session-stats">
+                ${taskCounts.in_progress > 0 ? `<span class="session-stat" style="color: var(--yellow)">${taskCounts.in_progress} active</span>` : ''}
+                ${taskCounts.pending > 0 ? `<span class="session-stat" style="color: var(--blue)">${taskCounts.pending} pending</span>` : ''}
+                ${taskCounts.completed > 0 ? `<span class="session-stat" style="color: var(--green)">${taskCounts.completed} done</span>` : ''}
+              </div>
+            </div>
+            <div class="tasks">
+              ${tasks.length === 0 ? '<div class="empty" style="padding: 16px;">No tasks</div>' :
+                tasks.map(task => `
+                  <div class="task">
+                    <div class="task-status ${task.status}">${getStatusIcon(task.status)}</div>
+                    <div class="task-content">
+                      <div class="task-subject">${escapeHtml(task.content || task.subject || 'Untitled')}</div>
+                      ${task.activeForm || task.description ? `<div class="task-description">${escapeHtml(task.activeForm || task.description)}</div>` : ''}
+                      ${task.owner ? `<div class="task-meta">Owner: ${escapeHtml(task.owner)}</div>` : ''}
+                    </div>
+                  </div>
+                `).join('')
+              }
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // Start connection
+    connect();
+  </script>
+</body>
+</html>

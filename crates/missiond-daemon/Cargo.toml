@@ -1,0 +1,36 @@
+[package]
+name = "missiond-daemon"
+description = "Singleton missiond daemon - task queue, PTY management, WebSocket API, and MCP IPC"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+
+[[bin]]
+name = "missiond"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+dirs = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+reqwest = { workspace = true }
+
+missiond-core = { workspace = true }
+missiond-mcp = { workspace = true }
+
+[lints]
+workspace = true

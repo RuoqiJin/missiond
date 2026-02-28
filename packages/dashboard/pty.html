@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>missiond - PTY Monitor</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+  <style>
+    :root {
+      --bg: #0d1117;
+      --bg-secondary: #161b22;
+      --border: #30363d;
+      --text: #c9d1d9;
+      --text-muted: #8b949e;
+      --green: #3fb950;
+      --yellow: #d29922;
+      --blue: #58a6ff;
+      --red: #f85149;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 20px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    h1 { font-size: 18px; font-weight: 600; }
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .slot-tabs {
+      display: flex;
+      gap: 4px;
+    }
+    .slot-tab {
+      padding: 4px 12px;
+      border-radius: 6px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.15s;
+    }
+    .slot-tab:hover { border-color: var(--blue); color: var(--text); }
+    .slot-tab.active { background: var(--blue); color: #fff; border-color: var(--blue); }
+    .slot-tab .dot {
+      display: inline-block;
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      margin-right: 6px;
+    }
+    .dot.running { background: var(--green); }
+    .dot.stopped { background: var(--red); }
+    .dot.idle { background: var(--yellow); }
+    .status-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    .status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--red);
+    }
+    .status-dot.connected { background: var(--green); }
+    #terminal-container {
+      flex: 1;
+      padding: 4px;
+      overflow: hidden;
+    }
+    .empty-state {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      color: var(--text-muted);
+      font-size: 16px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>PTY Monitor</h1>
+    <div class="controls">
+      <div class="slot-tabs" id="slotTabs"></div>
+      <div class="status-bar">
+        <div class="status-dot" id="statusDot"></div>
+        <span id="statusText">Disconnected</span>
+      </div>
+    </div>
+  </header>
+  <div id="terminal-container">
+    <div class="empty-state" id="emptyState">Select a slot to attach</div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  <script>
+    const WS_BASE = `ws://${location.hostname}:9120`;
+    const SLOTS = ['slot-memory', 'slot-coder-1', 'slot-deploy-1', 'slot-secret-1'];
+
+    let currentSlot = null;
+    let ws = null;
+    let term = null;
+    let fitAddon = null;
+
+    // Parse ?slot= from URL
+    const params = new URLSearchParams(location.search);
+    const initialSlot = params.get('slot');
+
+    // Build slot tabs
+    const tabsEl = document.getElementById('slotTabs');
+    SLOTS.forEach(slotId => {
+      const tab = document.createElement('div');
+      tab.className = 'slot-tab';
+      tab.dataset.slot = slotId;
+      tab.innerHTML = `<span class="dot stopped"></span>${slotId.replace('slot-', '')}`;
+      tab.onclick = () => attachToSlot(slotId);
+      tabsEl.appendChild(tab);
+    });
+
+    function setConnected(connected) {
+      document.getElementById('statusDot').classList.toggle('connected', connected);
+      document.getElementById('statusText').textContent = connected ? 'Connected' : 'Disconnected';
+    }
+
+    function attachToSlot(slotId) {
+      // Update URL
+      const url = new URL(location);
+      url.searchParams.set('slot', slotId);
+      history.replaceState(null, '', url);
+
+      // Update active tab
+      document.querySelectorAll('.slot-tab').forEach(t => t.classList.remove('active'));
+      const tab = document.querySelector(`[data-slot="${slotId}"]`);
+      if (tab) tab.classList.add('active');
+
+      // Close existing
+      if (ws) { ws.close(); ws = null; }
+
+      // Hide empty state
+      document.getElementById('emptyState').style.display = 'none';
+
+      // Create terminal
+      if (term) { term.dispose(); }
+      const container = document.getElementById('terminal-container');
+
+      term = new Terminal({
+        fontSize: 13,
+        fontFamily: "'SF Mono', Menlo, Monaco, 'Courier New', monospace",
+        theme: {
+          background: '#0d1117',
+          foreground: '#c9d1d9',
+          cursor: '#58a6ff',
+          selectionBackground: '#264f78',
+          black: '#484f58', red: '#ff7b72', green: '#3fb950', yellow: '#d29922',
+          blue: '#58a6ff', magenta: '#a371f7', cyan: '#56d4dd', white: '#c9d1d9',
+          brightBlack: '#6e7681', brightRed: '#ffa198', brightGreen: '#56d364',
+          brightYellow: '#e3b341', brightBlue: '#79c0ff', brightMagenta: '#bc8cff',
+          brightCyan: '#76e3ea', brightWhite: '#f0f3f6',
+        },
+        scrollback: 10000,
+        cursorBlink: true,
+      });
+
+      fitAddon = new FitAddon.FitAddon();
+      term.loadAddon(fitAddon);
+      term.open(container);
+      fitAddon.fit();
+
+      currentSlot = slotId;
+
+      // Connect WebSocket
+      ws = new WebSocket(`${WS_BASE}/pty/${slotId}`);
+
+      ws.onopen = () => {
+        setConnected(true);
+        updateTabDot(slotId, 'running');
+      };
+
+      ws.onclose = (e) => {
+        setConnected(false);
+        if (e.reason) {
+          term.writeln(`\r\n\x1b[31m[Disconnected: ${e.reason}]\x1b[0m`);
+        }
+      };
+
+      ws.onerror = () => {
+        setConnected(false);
+        updateTabDot(slotId, 'stopped');
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          switch (msg.type) {
+            case 'screen':
+              term.reset();
+              term.write(msg.data);
+              break;
+            case 'data':
+              term.write(msg.data);
+              break;
+            case 'state':
+              updateTabDot(slotId, (msg.state === 'idle' || msg.state === 'Idle') ? 'idle' : 'running');
+              break;
+            case 'exit':
+              term.writeln(`\r\n\x1b[33m[Process exited with code ${msg.code}]\x1b[0m`);
+              updateTabDot(slotId, 'stopped');
+              break;
+            case 'screenshot_request': {
+              const requestId = msg.requestId;
+              try {
+                const el = document.getElementById('terminal-container');
+                const screenEl = el && el.querySelector('.xterm-screen');
+                if (!screenEl || !term) {
+                  ws.send(JSON.stringify({ type: 'screenshot_response', requestId, error: 'No terminal' }));
+                  break;
+                }
+                const canvases = screenEl.querySelectorAll('canvas');
+                if (canvases.length === 0) {
+                  ws.send(JSON.stringify({ type: 'screenshot_response', requestId, error: 'No canvas' }));
+                  break;
+                }
+                const w = canvases[0].width;
+                const h = canvases[0].height;
+                const composite = document.createElement('canvas');
+                composite.width = w;
+                composite.height = h;
+                const ctx = composite.getContext('2d');
+                for (const c of canvases) {
+                  ctx.drawImage(c, 0, 0);
+                }
+                const base64 = composite.toDataURL('image/png').replace(/^data:image\/png;base64,/, '');
+                ws.send(JSON.stringify({ type: 'screenshot_response', requestId, data: base64, width: w, height: h }));
+              } catch (e) {
+                ws.send(JSON.stringify({ type: 'screenshot_response', requestId, error: String(e) }));
+              }
+              break;
+            }
+          }
+        } catch (e) {
+          // Raw text fallback
+          term.write(event.data);
+        }
+      };
+    }
+
+    function updateTabDot(slotId, state) {
+      const tab = document.querySelector(`[data-slot="${slotId}"] .dot`);
+      if (tab) {
+        tab.className = `dot ${state}`;
+      }
+    }
+
+    // Auto-resize
+    window.addEventListener('resize', () => {
+      if (fitAddon) fitAddon.fit();
+    });
+
+    // Auto-attach if ?slot= provided
+    if (initialSlot && SLOTS.includes(initialSlot)) {
+      attachToSlot(initialSlot);
+    }
+  </script>
+</body>
+</html>

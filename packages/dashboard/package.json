@@ -1,0 +1,13 @@
+{
+  "name": "@missiond/dashboard",
+  "version": "0.1.0",
+  "description": "Web dashboard for monitoring Claude Code tasks",
+  "private": true,
+  "scripts": {
+    "serve": "npx serve .",
+    "dev": "npx serve -p 3120 ."
+  },
+  "keywords": ["missiond", "claude", "dashboard"],
+  "author": "MissionD Contributors",
+  "license": "MIT"
+}

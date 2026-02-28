@@ -1,0 +1,17 @@
+{
+  "name": "@missiond/core-darwin-arm64",
+  "version": "0.1.0",
+  "description": "missiond binaries for macOS ARM64",
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "main": "bin/missiond",
+  "files": ["bin"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RuoqiJin/missiond"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

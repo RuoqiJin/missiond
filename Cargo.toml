@@ -1,0 +1,86 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/missiond-core",
+    "crates/missiond-runner",
+    "crates/missiond-mcp",
+    "crates/missiond-attach",
+    "crates/missiond-daemon",
+    "crates/semantic-terminal-napi",
+]
+
+[workspace.lints.clippy]
+string_slice = "warn"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["MissionD Contributors"]
+license = "MIT"
+repository = "https://github.com/RuoqiJin/missiond"
+homepage = "https://github.com/RuoqiJin/missiond"
+documentation = "https://docs.rs/missiond-core"
+keywords = ["mcp", "claude", "ai", "agent", "orchestration"]
+categories = ["development-tools", "command-line-utilities"]
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# PTY
+portable-pty = "0.8"
+
+# Terminal emulation
+alacritty_terminal = "0.25"
+vte = "0.14"
+
+# WebSocket
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+
+# File watching
+notify = "7.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Regex
+regex = "1.11"
+
+# Utilities
+uuid = { version = "1.11", features = ["v4"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+
+# Terminal
+crossterm = "0.28"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Image rendering (PTY screenshot)
+image = "0.25"
+ab_glyph = "0.2"
+
+# Internal crates
+missiond-core = { version = "0.1.0", path = "crates/missiond-core" }
+missiond-runner = { version = "0.1.0", path = "crates/missiond-runner" }
+missiond-mcp = { version = "0.1.0", path = "crates/missiond-mcp" }
