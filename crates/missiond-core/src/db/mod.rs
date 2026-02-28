@@ -4,6 +4,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension, Result as SqliteResult};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use std::collections::HashSet;
 
@@ -201,6 +202,8 @@ pub struct MissionDB {
     conn: std::sync::Mutex<Connection>,
     /// Read-only connection for queries — avoids blocking on write Mutex (WAL concurrent reads)
     read_conn: std::sync::Mutex<Connection>,
+    /// Dirty flag: set after kb_forget, cleared after FTS rebuild
+    fts_dirty: AtomicBool,
 }
 
 impl MissionDB {
@@ -221,6 +224,7 @@ impl MissionDB {
         let db = Self {
             conn: std::sync::Mutex::new(conn),
             read_conn: std::sync::Mutex::new(read_conn),
+            fts_dirty: AtomicBool::new(false),
         };
         db.init()?;
         Ok(db)
@@ -244,6 +248,7 @@ impl MissionDB {
         let db = Self {
             conn: std::sync::Mutex::new(conn),
             read_conn: std::sync::Mutex::new(read_conn),
+            fts_dirty: AtomicBool::new(false),
         };
         db.init()?;
         Ok(db)
@@ -284,8 +289,21 @@ impl MissionDB {
         conn.execute_batch(
             "INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild')"
         )?;
+        self.fts_dirty.store(false, Ordering::Relaxed);
         tracing::info!("FTS5 index rebuilt on startup");
         Ok(())
+    }
+
+    /// Rebuild FTS5 index if dirty flag is set (called from autopilot_tick).
+    /// Returns true if rebuild was performed.
+    pub fn kb_rebuild_fts_if_dirty(&self) -> SqliteResult<bool> {
+        if !self.fts_dirty.swap(false, Ordering::Relaxed) {
+            return Ok(false);
+        }
+        let conn = self.conn();
+        conn.execute_batch("INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild')")?;
+        tracing::info!("FTS5 index rebuilt (dirty flag)");
+        Ok(true)
     }
 
     /// Run schema migrations for existing databases
@@ -1983,30 +2001,13 @@ impl MissionDB {
     /// Forget (delete) a knowledge entry by key
     pub fn kb_forget(&self, key: &str) -> SqliteResult<bool> {
         let conn = self.conn();
-        Self::kb_forget_with_conn(&conn, key)
-    }
-
-    /// Forget using an existing connection (no lock)
-    fn kb_forget_with_conn(conn: &Connection, key: &str) -> SqliteResult<bool> {
-        // Read entry values for FTS cleanup (external content FTS requires actual values)
-        let entry: Option<(i64, String, String, String, String)> = conn.query_row(
-            "SELECT rowid, key, summary, COALESCE(detail, ''), category FROM knowledge WHERE key = ?1",
-            params![key],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-        ).ok();
-
-        if let Some((rowid, k, summary, detail, category)) = entry {
-            // Remove from FTS first (must provide actual indexed values)
-            conn.execute(
-                "INSERT INTO knowledge_fts(knowledge_fts, rowid, key, summary, detail, category) VALUES('delete', ?1, ?2, ?3, ?4, ?5)",
-                params![rowid, k, summary, detail, category],
-            ).ok();
-        }
-
         let deleted = conn.execute(
             "DELETE FROM knowledge WHERE key = ?1",
             params![key],
         )?;
+        if deleted > 0 {
+            self.fts_dirty.store(true, Ordering::Relaxed);
+        }
         Ok(deleted > 0)
     }
 
@@ -2015,9 +2016,19 @@ impl MissionDB {
         let conn = self.conn();
         let mut deleted = 0;
         for key in keys {
-            if Self::kb_forget_with_conn(&conn, key)? {
+            let n = conn.execute(
+                "DELETE FROM knowledge WHERE key = ?1",
+                params![key],
+            )?;
+            if n > 0 {
                 deleted += 1;
             }
+        }
+        if deleted > 0 {
+            // Immediate rebuild after batch — don't wait for autopilot_tick
+            conn.execute_batch("INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild')")?;
+            self.fts_dirty.store(false, Ordering::Relaxed);
+            tracing::info!(deleted, "kb_batch_forget: FTS rebuilt after batch delete");
         }
         Ok(deleted)
     }
@@ -2196,7 +2207,8 @@ impl MissionDB {
 
         if deleted > 0 {
             conn.execute_batch("INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild')")?;
-            tracing::info!(deleted, "kb_auto_gc: cleaned up entries");
+            self.fts_dirty.store(false, Ordering::Relaxed);
+            tracing::info!(deleted, "kb_auto_gc: cleaned up entries, FTS rebuilt");
         }
 
         Ok(deleted)

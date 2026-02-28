@@ -437,7 +437,8 @@ impl PTYSession {
 
         // Line(0) = top of visible screen, Line(rows-1) = bottom
         for y in 0..rows {
-            let line = alacritty_terminal::index::Line(y as i32);
+            let Ok(line_idx) = i32::try_from(y) else { break };
+            let line = alacritty_terminal::index::Line(line_idx);
             let row = &grid[line];
             let text: String = row.into_iter().map(|cell| cell.c).collect();
             lines.push(text.trim_end().to_string());
@@ -462,7 +463,8 @@ impl PTYSession {
         let start = if total_lines > n { total_lines - n } else { 0 };
 
         for y in start..total_lines {
-            let line = alacritty_terminal::index::Line(y as i32);
+            let Ok(line_idx) = i32::try_from(y) else { break };
+            let line = alacritty_terminal::index::Line(line_idx);
             if y < grid.total_lines() {
                 let row = &grid[line];
                 let text: String = row.into_iter().map(|cell| cell.c).collect();
@@ -782,7 +784,8 @@ impl PTYSession {
                 let rows = grid.screen_lines();
                 let start = if total_lines > rows { total_lines - rows } else { 0 };
                 for y in start..total_lines {
-                    let line = alacritty_terminal::index::Line(y as i32);
+                    let Ok(line_idx) = i32::try_from(y) else { break };
+                    let line = alacritty_terminal::index::Line(line_idx);
                     if y < total_lines {
                         let row = &grid[line];
                         // Skip wide-char spacer cells (CJK/emoji second cells)
