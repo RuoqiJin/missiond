@@ -92,6 +92,190 @@ struct CurrentToolInfo {
     started_at: String,
 }
 
+/// Persistent MCP client for xjp-mcp server (stdio-based, lazy-initialized).
+/// Uses Arc-wrapped shared state so the outer lock can be released before awaiting responses.
+struct McpProcessClient {
+    state: tokio::sync::Mutex<Option<McpClientState>>,
+    config_path: PathBuf,
+}
+
+#[derive(Clone)]
+struct McpClientState {
+    stdin: Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>,
+    pending: Arc<tokio::sync::Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Value>>>>,
+    next_id: Arc<std::sync::atomic::AtomicU64>,
+    reader_alive: Arc<std::sync::atomic::AtomicBool>,
+    /// Keep child alive — kill_on_drop fires when this Arc reaches zero.
+    _child: Arc<tokio::sync::Mutex<tokio::process::Child>>,
+}
+
+impl McpProcessClient {
+    fn new(config_path: PathBuf) -> Self {
+        Self { state: tokio::sync::Mutex::new(None), config_path }
+    }
+
+    async fn call_tool(&self, tool_name: &str, tool_args: Value) -> Result<ToolResult> {
+        // Phase 1: Get or create client state (short lock)
+        let client = {
+            let mut guard = self.state.lock().await;
+            if guard.is_none() || !guard.as_ref().unwrap().reader_alive.load(std::sync::atomic::Ordering::Relaxed) {
+                if guard.is_some() {
+                    warn!("xjp-mcp process died, respawning");
+                }
+                *guard = Some(Self::spawn(&self.config_path).await?);
+            }
+            guard.as_ref().unwrap().clone()
+        }; // Lock released here!
+
+        // Phase 2: Send request (no outer lock held)
+        let id = client.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        client.pending.lock().await.insert(id, tx);
+
+        {
+            let mut stdin = client.stdin.lock().await;
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                "params": {"name": tool_name, "arguments": tool_args}
+            });
+            stdin.write_all(req.to_string().as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+            stdin.flush().await?;
+        } // stdin lock released
+
+        // Phase 3: Wait for response (completely lock-free)
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            rx,
+        ).await
+            .map_err(|_| anyhow!("xjp-mcp tool '{}' timed out after 30s", tool_name))?
+            .map_err(|_| anyhow!("xjp-mcp response channel closed (process may have died)"))?;
+
+        if let Some(result) = resp.get("result") {
+            let tool_result: ToolResult = serde_json::from_value(result.clone())
+                .unwrap_or_else(|_| ToolResult::text(result.to_string()));
+            Ok(tool_result)
+        } else if let Some(error) = resp.get("error") {
+            let msg = error.get("message").and_then(|v| v.as_str()).unwrap_or("Unknown error");
+            let mut res = ToolResult::text(msg.to_string());
+            res.is_error = Some(true);
+            Ok(res)
+        } else {
+            Ok(ToolResult::text(format!("Unexpected xjp-mcp response: {}", resp)))
+        }
+    }
+
+    async fn spawn(config_path: &Path) -> Result<McpClientState> {
+        let config_str = tokio::fs::read_to_string(config_path).await
+            .map_err(|e| anyhow!("Failed to read xjp-mcp config: {}", e))?;
+        let config: Value = serde_json::from_str(&config_str)?;
+        let mcp_config = config.get("mcpServers").and_then(|s| s.get("xjp-mcp"))
+            .ok_or_else(|| anyhow!("xjp-mcp not found in config"))?;
+
+        let command = mcp_config.get("command").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("Missing command"))?;
+        let args: Vec<String> = mcp_config.get("args")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let env_map: std::collections::HashMap<String, String> = mcp_config.get("env")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let mut child = tokio::process::Command::new(command)
+            .args(&args)
+            .envs(&env_map)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| anyhow!("Failed to spawn xjp-mcp: {}", e))?;
+
+        let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("No stdin"))?;
+        let stdout = child.stdout.take().ok_or_else(|| anyhow!("No stdout"))?;
+
+        // Background stderr reader for debugging
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stderr);
+                let mut buf = String::new();
+                loop {
+                    buf.clear();
+                    match reader.read_line(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            debug!("xjp-mcp stderr: {}", buf.trim());
+                        }
+                    }
+                }
+            });
+        }
+
+        // MCP handshake
+        let init_req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "missiond", "version": "0.1.0"}}
+        });
+        stdin.write_all(init_req.to_string().as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        stdin.flush().await?;
+
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+
+        let notif = serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+        stdin.write_all(notif.to_string().as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        stdin.flush().await?;
+
+        let pending: Arc<tokio::sync::Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Value>>>> =
+            Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let reader_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        let pending_clone = pending.clone();
+        let alive_clone = reader_alive.clone();
+
+        // Background reader task
+        tokio::spawn(async move {
+            let mut buf = String::new();
+            loop {
+                buf.clear();
+                match reader.read_line(&mut buf).await {
+                    Ok(0) => {
+                        warn!("xjp-mcp reader: EOF (process exited)");
+                        alive_clone.store(false, std::sync::atomic::Ordering::Relaxed);
+                        break;
+                    }
+                    Err(e) => {
+                        warn!("xjp-mcp reader: error: {}", e);
+                        alive_clone.store(false, std::sync::atomic::Ordering::Relaxed);
+                        break;
+                    }
+                    Ok(_) => {
+                        if let Ok(resp) = serde_json::from_str::<Value>(buf.trim()) {
+                            if let Some(id) = resp.get("id").and_then(|v| v.as_u64()) {
+                                if let Some(tx) = pending_clone.lock().await.remove(&id) {
+                                    let _ = tx.send(resp);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        info!("xjp-mcp persistent client spawned");
+        Ok(McpClientState {
+            stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
+            pending,
+            next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            reader_alive,
+            _child: Arc::new(tokio::sync::Mutex::new(child)),
+        })
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     mission: Arc<MissionControl>,
@@ -137,6 +321,8 @@ struct AppState {
     slot_progress: Arc<tokio::sync::RwLock<HashMap<String, SlotProgress>>>,
     /// Shared HTTP client for Router API calls (connection pool reuse).
     http_client: reqwest::Client,
+    /// Persistent xjp-mcp client (lazy-initialized, auto-reconnect on crash).
+    xjp_mcp: Arc<McpProcessClient>,
 }
 
 fn default_mission_home() -> PathBuf {
@@ -606,6 +792,173 @@ impl AppState {
         }
     }
 
+    /// Execute a skill workflow: load workflow block, run MCP tools sequentially
+    fn execute_workflow<'a>(
+        &'a self,
+        skill_name: &'a str,
+        action_id: &'a str,
+        dry_run: bool,
+        param_overrides: Option<Value>,
+        depth: u32,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<missiond_core::WorkflowResult>> + Send + 'a>> {
+        const MAX_DEPTH: u32 = 3;
+        const STEP_TIMEOUT_SECS: u64 = 30;
+
+        Box::pin(async move {
+        use missiond_core::{WorkflowStepPreview, WorkflowStepResult, WorkflowResult, parse_workflow_blocks, resolve_vars};
+
+        // Guard: prevent recursive workflow bombs
+        if depth > MAX_DEPTH {
+            return Err(anyhow!("Workflow recursion depth exceeded (max {}). Skill '{}' action '{}'", MAX_DEPTH, skill_name, action_id));
+        }
+        let db = self.mission.db();
+
+        // Guard: prevent concurrent execution of same action
+        if !dry_run {
+            if let Ok(true) = db.skill_execution_is_running(skill_name, action_id) {
+                return Err(anyhow!("Action '{}' on skill '{}' is already running", action_id, skill_name));
+            }
+        }
+
+        // Step 1: Load skill content from file
+        let topic = db.skill_topic_get(skill_name)
+            .map_err(|e| anyhow!("DB: {}", e))?
+            .ok_or_else(|| anyhow!("Skill '{}' not found", skill_name))?;
+
+        let content = std::fs::read_to_string(&topic.file_path)
+            .map_err(|e| anyhow!("Failed to read skill file {}: {}", topic.file_path, e))?;
+
+        // Step 2: Parse workflow blocks from skill content
+        let workflows = parse_workflow_blocks(&content);
+        let workflow = workflows.iter()
+            .find(|w| w.id == action_id)
+            .ok_or_else(|| anyhow!("Workflow '{}' not found in skill '{}'", action_id, skill_name))?;
+
+        // Step 3: Check requires_approval from frontmatter actions
+        let actions_json = topic.actions_json.as_deref().unwrap_or("[]");
+        let actions: Vec<missiond_core::SkillAction> = serde_json::from_str(actions_json).unwrap_or_default();
+        let action_meta = actions.iter().find(|a| a.id == action_id);
+        let requires_approval = action_meta.map(|a| a.requires_approval).unwrap_or(false);
+
+        if requires_approval && !dry_run {
+            return Ok(WorkflowResult::PendingApproval {
+                action_id: action_id.to_string(),
+                skill: skill_name.to_string(),
+            });
+        }
+
+        // Step 4: Dry-run → return preview only
+        if dry_run {
+            let steps: Vec<WorkflowStepPreview> = workflow.steps.iter().map(|s| {
+                WorkflowStepPreview {
+                    name: s.name.clone(),
+                    tool: s.tool.clone(),
+                    params: s.params.clone(),
+                }
+            }).collect();
+            return Ok(WorkflowResult::Preview { steps });
+        }
+
+        // Step 5: Create execution log
+        let exec_id = uuid::Uuid::new_v4().to_string();
+        let _ = db.skill_execution_insert(
+            &exec_id, skill_name, action_id,
+            workflow.steps.len() as i32, "manual",
+        );
+
+        // Step 6: Sequential execution
+        let mut context: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+        // Apply param_overrides to context
+        if let Some(overrides) = param_overrides {
+            if let Value::Object(map) = overrides {
+                for (k, v) in map {
+                    context.insert(k, v.as_str().unwrap_or(&v.to_string()).to_string());
+                }
+            }
+        }
+
+        let mut results: Vec<WorkflowStepResult> = Vec::new();
+
+        for (i, step) in workflow.steps.iter().enumerate() {
+            info!(exec_id = %exec_id, step = i, tool = %step.tool, "Executing workflow step");
+
+            // Resolve ${var} references in params
+            let resolved_params = resolve_vars(&step.params, &context);
+
+            // Call the MCP tool with timeout
+            let tool_result = match tokio::time::timeout(
+                std::time::Duration::from_secs(STEP_TIMEOUT_SECS),
+                self.call_tool(&step.tool, resolved_params),
+            ).await {
+                Ok(result) => result,
+                Err(_) => {
+                    let mut res = ToolResult::text(format!("Step timed out after {}s: {}", STEP_TIMEOUT_SECS, step.tool));
+                    res.is_error = Some(true);
+                    res
+                }
+            };
+            let is_error = tool_result.is_error.unwrap_or(false);
+            let output = tool_result.content.first()
+                .map(|c| match c { missiond_mcp::ToolContent::Text { text } => text.clone() })
+                .unwrap_or_default();
+
+            // Save result to context if save_as is specified
+            if let Some(ref key) = step.save_as {
+                context.insert(key.clone(), output.clone());
+            }
+
+            results.push(WorkflowStepResult {
+                name: step.name.clone(),
+                tool: step.tool.clone(),
+                success: !is_error,
+                output: output.clone(),
+            });
+
+            // Update progress
+            let _ = db.skill_execution_update(
+                &exec_id, "running", (i + 1) as i32, None, None,
+            );
+
+            // Error handling
+            if is_error {
+                match step.on_error.as_str() {
+                    "skip" => {
+                        warn!(step = i, tool = %step.tool, "Step failed, skipping");
+                        continue;
+                    }
+                    _ => {
+                        // "stop" (default)
+                        let _ = db.skill_execution_update(
+                            &exec_id, "failed", (i + 1) as i32,
+                            Some(&serde_json::to_string(&context).unwrap_or_default()),
+                            Some(&output),
+                        );
+                        return Ok(WorkflowResult::Failed {
+                            steps_completed: i + 1,
+                            error_step: i,
+                            error: output,
+                            results,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Success
+        let _ = db.skill_execution_update(
+            &exec_id, "success", workflow.steps.len() as i32,
+            Some(&serde_json::to_string(&context).unwrap_or_default()),
+            None,
+        );
+
+        Ok(WorkflowResult::Success {
+            steps_completed: workflow.steps.len(),
+            results,
+        })
+        }) // Box::pin(async move)
+    }
+
     async fn call_tool_inner(&self, name: &str, args: Value) -> Result<ToolResult> {
         match name {
             // ===== Task operations =====
@@ -661,6 +1014,66 @@ impl AppState {
                                     warn!(task_id = %task_id, slot_id = %candidate_id, error = %e, "mission_submit: dispatch failed");
                                 }
                             }
+                        }
+                    }
+                }
+
+                // Phase 2: No idle slot — auto-spawn an exited/no-session slot then dispatch
+                if dispatched_to.is_none() {
+                    for candidate_id in &candidates {
+                        let status = self.pty.get_status(candidate_id).await;
+                        let is_spawnable = match &status {
+                            Some(s) => s.state == missiond_core::pty::SessionState::Exited,
+                            None => true, // no session at all
+                        };
+                        if !is_spawnable { continue; }
+
+                        // Find slot config for spawn
+                        let slot = slots.iter().find(|s| s.config.id == *candidate_id);
+                        let slot = match slot {
+                            Some(s) => s,
+                            None => continue,
+                        };
+
+                        let pty_slot = missiond_core::PTYSlot {
+                            id: slot.config.id.clone(),
+                            role: slot.config.role.clone(),
+                            cwd: slot.config.cwd.as_deref().map(std::path::PathBuf::from),
+                        };
+                        let mcp_config = slot.config.mcp_config.clone().map(std::path::PathBuf::from);
+                        let (extra_env, session_file) = build_slot_tracking_env(candidate_id, slot.config.env.as_ref()).await;
+
+                        info!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: auto-spawning exited slot");
+                        match self.pty.spawn(&pty_slot, PTYSpawnOptions {
+                            auto_restart: false,
+                            wait_for_idle: true,
+                            timeout_secs: Some(30),
+                            mcp_config,
+                            dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+                            extra_env,
+                        }).await {
+                            Ok(_info) => {
+                                capture_slot_session_uuid(self, candidate_id, &session_file).await;
+                                match self.pty.send_fire_and_forget(candidate_id, &prompt).await {
+                                    Ok(()) => {
+                                        let now = chrono::Utc::now().timestamp_millis();
+                                        let _ = self.mission.db().update_task(
+                                            &task_id,
+                                            &missiond_core::types::TaskUpdate {
+                                                status: Some(missiond_core::types::TaskStatus::Running),
+                                                slot_id: Some(candidate_id.to_string()),
+                                                started_at: Some(now),
+                                                ..Default::default()
+                                            },
+                                        );
+                                        dispatched_to = Some(candidate_id.to_string());
+                                        info!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: spawned + dispatched");
+                                        break;
+                                    }
+                                    Err(e) => warn!(task_id = %task_id, slot_id = %candidate_id, error = %e, "mission_submit: send after spawn failed"),
+                                }
+                            }
+                            Err(e) => warn!(task_id = %task_id, slot_id = %candidate_id, error = %e, "mission_submit: auto-spawn failed"),
                         }
                     }
                 }
@@ -1877,15 +2290,19 @@ impl AppState {
                                 let plan_id = uuid::Uuid::new_v4().to_string();
                                 let task_id_param = args_val.get("task_id").and_then(|v| v.as_str());
                                 let ops: Vec<missiond_core::types::KBOperation> = actions.iter().filter_map(|a| {
-                                    let operation = a.get("action").and_then(|v| v.as_str())
+                                    let operation = a.get("action_type").and_then(|v| v.as_str())
+                                        .or_else(|| a.get("action").and_then(|v| v.as_str()))
                                         .or_else(|| a.get("operation").and_then(|v| v.as_str()))?;
-                                    let keys: Vec<String> = a.get("keys").and_then(|v| v.as_array())
+                                    let keys: Vec<String> = a.get("target_keys").and_then(|v| v.as_array())
+                                        .or_else(|| a.get("keys").and_then(|v| v.as_array()))
                                         .map(|arr| arr.iter().filter_map(|k| k.as_str().map(|s| s.to_string())).collect())
                                         .or_else(|| a.get("key").and_then(|v| v.as_str()).map(|k| vec![k.to_string()]))?;
                                     Some(missiond_core::types::KBOperation {
                                         operation: operation.to_string(),
                                         target_keys: keys,
-                                        rationale: a.get("rationale").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                        rationale: a.get("reason").and_then(|v| v.as_str())
+                                            .or_else(|| a.get("rationale").and_then(|v| v.as_str()))
+                                            .map(|s| s.to_string()),
                                     })
                                 }).collect();
                                 if !ops.is_empty() {
@@ -1983,8 +2400,39 @@ impl AppState {
                             Ok(format!("Category fix for {} keys (manual execution recommended)", target_keys.len()))
                         }
                         "merge" | "distill" => {
-                            // Merge/distill operations are complex — generate prompt for slot execution
-                            Ok(format!("{} operation for {} keys (dispatch to slot recommended)", op.operation, target_keys.len()))
+                            // Auto-dispatch: fetch entries, build prompt, submit to slot-memory-slow
+                            let mut entries_text = String::new();
+                            for key in &target_keys {
+                                if let Ok(Some(entry)) = self.mission.db().kb_get(key) {
+                                    entries_text.push_str(&format!(
+                                        "---\nKey: {}\nCategory: {}\nSummary: {}\nDetail: {}\n",
+                                        entry.key, entry.category, entry.summary,
+                                        entry.detail.as_ref().map(|d| d.to_string()).unwrap_or_default(),
+                                    ));
+                                }
+                            }
+                            if entries_text.is_empty() {
+                                Err(format!("No KB entries found for keys: {:?}", target_keys))
+                            } else {
+                                let rationale = op.rationale.as_deref().unwrap_or("");
+                                let prompt = if op.operation == "merge" {
+                                    format!(
+                                        "KB整理任务(merge):\n\n原因: {}\n\n以下KB条目内容重叠,请合并为一条。\
+                                        保留最完整的key,用 mission_kb_remember 写入合并后的内容(category/summary/detail),\
+                                        然后用 mission_kb_forget 删除多余的key。\n\n{}", rationale, entries_text
+                                    )
+                                } else {
+                                    format!(
+                                        "KB整理任务(distill):\n\n原因: {}\n\n以下KB条目需要精炼。\
+                                        用 mission_kb_remember 更新每条的 summary(更简洁)和 detail(保留关键信息,删除冗余)。\n\n{}",
+                                        rationale, entries_text
+                                    )
+                                };
+                                match self.mission.submit("memory", &prompt) {
+                                    Ok(task_id) => Ok(format!("dispatched:task_id={}", task_id)),
+                                    Err(e) => Err(format!("submit failed: {}", e)),
+                                }
+                            }
                         }
                         other => {
                             Err(format!("Unknown operation: {}", other))
@@ -1993,13 +2441,25 @@ impl AppState {
 
                     match outcome {
                         Ok(msg) => {
-                            let _ = self.mission.db().kb_ops_update_status(&op.id, "done", Some(&msg), None);
-                            results.push(serde_json::json!({
-                                "id": op.id,
-                                "operation": op.operation,
-                                "status": "done",
-                                "result": msg,
-                            }));
+                            let (status_str, result_json) = if msg.starts_with("dispatched:") {
+                                // Extract task_id from "dispatched:task_id=xxx"
+                                let task_id = msg.strip_prefix("dispatched:task_id=").unwrap_or(&msg);
+                                ("dispatched", serde_json::json!({
+                                    "id": op.id,
+                                    "operation": op.operation,
+                                    "status": "dispatched",
+                                    "taskId": task_id,
+                                }))
+                            } else {
+                                ("done", serde_json::json!({
+                                    "id": op.id,
+                                    "operation": op.operation,
+                                    "status": "done",
+                                    "result": msg,
+                                }))
+                            };
+                            let _ = self.mission.db().kb_ops_update_status(&op.id, status_str, Some(&msg), None);
+                            results.push(result_json);
                         }
                         Err(msg) => {
                             let _ = self.mission.db().kb_ops_update_status(&op.id, "failed", None, Some(&msg));
@@ -2893,7 +3353,7 @@ impl AppState {
                     let file_path = skills_dir.join(&args.topic).join("SKILL.md");
                     db.skill_topic_upsert(
                         &args.topic, None, None, None,
-                        &file_path.to_string_lossy(), None,
+                        &file_path.to_string_lossy(), None, None,
                     ).map_err(|e| anyhow!("DB: {}", e))?;
                 }
 
@@ -2937,7 +3397,7 @@ impl AppState {
                     let file_path = skills_dir.join(&args.topic).join("SKILL.md");
                     db.skill_topic_upsert(
                         &args.topic, None, None, None,
-                        &file_path.to_string_lossy(), None,
+                        &file_path.to_string_lossy(), None, None,
                     ).map_err(|e| anyhow!("DB: {}", e))?;
                 }
 
@@ -2983,6 +3443,69 @@ impl AppState {
                 let topics = db.skill_topic_list()
                     .map_err(|e| anyhow!("DB: {}", e))?;
                 Ok(ToolResult::json_pretty(&topics))
+            }
+
+            // ===== Skill Execution (Phase 3) =====
+            "mission_skill_exec" => {
+                #[derive(Deserialize)]
+                struct SkillExecArgs {
+                    skill: String,
+                    action: String,
+                    #[serde(default)]
+                    dry_run: bool,
+                    params: Option<Value>,
+                }
+                let args: SkillExecArgs = serde_json::from_value(args)?;
+
+                match self.execute_workflow(&args.skill, &args.action, args.dry_run, args.params, 0).await {
+                    Ok(result) => Ok(ToolResult::json_pretty(&result)),
+                    Err(e) => Ok(ToolResult::error(format!("Workflow execution failed: {}", e))),
+                }
+            }
+            "mission_skill_actions" => {
+                #[derive(Deserialize)]
+                struct SkillActionsArgs {
+                    skill: Option<String>,
+                }
+                let args: SkillActionsArgs = serde_json::from_value(args)
+                    .unwrap_or(SkillActionsArgs { skill: None });
+                let db = self.mission.db();
+
+                let topics = if let Some(ref name) = args.skill {
+                    db.skill_topic_get(name)
+                        .map_err(|e| anyhow!("DB: {}", e))?
+                        .into_iter().collect::<Vec<_>>()
+                } else {
+                    db.skill_topic_list()
+                        .map_err(|e| anyhow!("DB: {}", e))?
+                };
+
+                let mut all_actions: Vec<Value> = Vec::new();
+                for topic in &topics {
+                    if let Some(ref json_str) = topic.actions_json {
+                        if let Ok(actions) = serde_json::from_str::<Vec<missiond_core::SkillAction>>(json_str) {
+                            // Also count workflow steps from file
+                            let step_counts = if let Ok(content) = std::fs::read_to_string(&topic.file_path) {
+                                let workflows = missiond_core::parse_workflow_blocks(&content);
+                                workflows.iter().map(|w| (w.id.clone(), w.steps.len())).collect::<std::collections::HashMap<_, _>>()
+                            } else {
+                                std::collections::HashMap::new()
+                            };
+
+                            for action in actions {
+                                all_actions.push(serde_json::json!({
+                                    "skill": topic.topic,
+                                    "action_id": action.id,
+                                    "name": action.name,
+                                    "requires_approval": action.requires_approval,
+                                    "step_count": step_counts.get(&action.id).unwrap_or(&0),
+                                }));
+                            }
+                        }
+                    }
+                }
+
+                Ok(ToolResult::json_pretty(&all_actions))
             }
 
             // ===== Infrastructure Registry =====
@@ -3642,11 +4165,28 @@ impl AppState {
             }
 
             _ => {
-                let mut res = ToolResult::text(format!("Unknown tool: {}", name));
-                res.is_error = Some(true);
-                Ok(res)
+                // Proxy xjp_* tools to xjp-mcp server
+                if name.starts_with("xjp_") {
+                    match self.call_xjp_mcp_tool(name, args).await {
+                        Ok(result) => Ok(result),
+                        Err(e) => {
+                            let mut res = ToolResult::text(format!("xjp-mcp proxy error: {}", e));
+                            res.is_error = Some(true);
+                            Ok(res)
+                        }
+                    }
+                } else {
+                    let mut res = ToolResult::text(format!("Unknown tool: {}", name));
+                    res.is_error = Some(true);
+                    Ok(res)
+                }
             }
         }
+    }
+
+    /// Proxy a tool call to the xjp-mcp server via persistent client
+    async fn call_xjp_mcp_tool(&self, tool_name: &str, tool_args: Value) -> Result<ToolResult> {
+        self.xjp_mcp.call_tool(tool_name, tool_args).await
     }
 }
 
@@ -5654,8 +6194,10 @@ fn truncate_message_content(msg: &mut Value, max_bytes: usize) {
 }
 
 /// Extract displayable content from a Claude Code message content field.
+/// Extract text content from a message's content field for the `content` DB column.
 /// Content can be a plain string or an array of content blocks.
-/// Handles text, image, tool_use, and tool_result block types.
+/// Storage layer: NO truncation. Full content preserved for analysis pipelines.
+/// Truncation happens at the API/display layer only.
 fn extract_text_content(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),
@@ -5665,36 +6207,25 @@ fn extract_text_content(content: &Value) -> String {
                 let block_type = item.get("type")?.as_str()?;
                 match block_type {
                     "text" => item.get("text")?.as_str().map(String::from),
-                    "image" => Some("[图片]".to_string()),
+                    "image" => {
+                        let media_type = item.pointer("/source/media_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        Some(format!("[图片: {media_type}]"))
+                    }
                     "tool_use" => {
                         let name = item
                             .get("name")
                             .and_then(|n| n.as_str())
                             .unwrap_or("unknown");
-                        // Include input parameters for context (truncated)
+                        // Full parameters — no truncation in storage layer
                         let input_str = item.get("input").map(|input| {
-                            let s = if let Value::Object(map) = input {
-                                // Compact key=value pairs
+                            if let Value::Object(map) = input {
                                 map.iter()
                                     .map(|(k, v)| {
                                         let val = match v {
-                                            Value::String(s) => {
-                                                if s.len() > 200 {
-                                                    let mut end = 200;
-                                                    while !s.is_char_boundary(end) { end -= 1; }
-                                                    format!("\"{}…\"", &s[..end])
-                                                } else {
-                                                    format!("\"{}\"", s)
-                                                }
-                                            }
-                                            _ => {
-                                                let raw = v.to_string();
-                                                if raw.len() > 200 {
-                                                    let mut end = 200;
-                                                    while !raw.is_char_boundary(end) { end -= 1; }
-                                                    format!("{}…", &raw[..end])
-                                                } else { raw }
-                                            }
+                                            Value::String(s) => format!("\"{}\"", s),
+                                            _ => v.to_string(),
                                         };
                                         format!("{k}: {val}")
                                     })
@@ -5702,8 +6233,7 @@ fn extract_text_content(content: &Value) -> String {
                                     .join(", ")
                             } else {
                                 input.to_string()
-                            };
-                            s
+                            }
                         }).unwrap_or_default();
                         if input_str.is_empty() {
                             Some(format!("[Tool: {name}]"))
@@ -5713,12 +6243,10 @@ fn extract_text_content(content: &Value) -> String {
                     }
                     "thinking" => {
                         let text = item.get("thinking")?.as_str()?;
-                        // Store full thinking content — no truncation in Storage layer.
-                        // User explicitly requires complete thinking preservation.
                         Some(format!("[thinking] {text}"))
                     }
                     "tool_result" => {
-                        // Nested tool result content — extract text with truncation
+                        // Full tool result content — no truncation in storage layer
                         let text = if let Some(Value::String(s)) = item.get("content") {
                             s.clone()
                         } else if let Some(Value::Array(inner)) = item.get("content") {
@@ -5741,16 +6269,11 @@ fn extract_text_content(content: &Value) -> String {
                             String::new()
                         };
                         if text.is_empty() {
-                            // Check for error field
                             if let Some(err) = item.get("error").and_then(|e| e.as_str()) {
                                 Some(format!("[error: {err}]"))
                             } else {
                                 Some("[tool_result]".to_string())
                             }
-                        } else if text.len() > 1000 {
-                            let mut end = 1000;
-                            while !text.is_char_boundary(end) && end > 0 { end -= 1; }
-                            Some(format!("{}…", &text[..end]))
                         } else {
                             Some(text)
                         }
@@ -5764,33 +6287,179 @@ fn extract_text_content(content: &Value) -> String {
     }
 }
 
-/// Sanitize raw content JSON for DB storage: strip base64 image data to avoid bloat.
+/// Store raw content JSON for DB storage.
+/// Full preservation including base64 images — user requires complete data capture.
 fn sanitize_raw_content(content: &Value) -> Option<String> {
-    if let Value::Array(arr) = content {
-        let has_image = arr
-            .iter()
-            .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("image"));
-        if has_image {
-            let sanitized: Vec<Value> = arr
-                .iter()
-                .map(|item| {
-                    if item.get("type").and_then(|t| t.as_str()) == Some("image") {
-                        let mut obj = item.clone();
-                        if let Some(source) = obj.get_mut("source") {
-                            if let Some(data) = source.get_mut("data") {
-                                *data = Value::String("[base64 omitted]".to_string());
+    serde_json::to_string(content).ok()
+}
+
+/// Handle NewEvents from JSONL watcher: progress, system, queue-operation, file-history-snapshot.
+/// - agent_progress → conversation_messages with agent_* roles
+/// - everything else → conversation_events table
+fn handle_new_events(state: &AppState, session_id: String, events: Vec<Value>) {
+    let db = state.mission.db();
+    let mut conv_events: Vec<missiond_core::types::ConversationEvent> = Vec::new();
+    let mut agent_messages: Vec<missiond_core::types::ConversationMessage> = Vec::new();
+
+    for val in &events {
+        let msg_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let timestamp = val.get("timestamp").and_then(|t| t.as_str()).unwrap_or("").to_string();
+
+        match msg_type {
+            "progress" => {
+                let data_type = val.pointer("/data/type").and_then(|v| v.as_str()).unwrap_or("");
+                match data_type {
+                    "agent_progress" => {
+                        let agent_id = val.pointer("/data/agentId")
+                            .and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let parent_tool_use_id = val.get("parentToolUseID")
+                            .and_then(|v| v.as_str()).map(String::from);
+
+                        if let Some(inner_msg) = val.pointer("/data/message") {
+                            if let Some(message) = inner_msg.get("message") {
+                                let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("assistant");
+                                let agent_role = format!("agent_{role}");
+                                let content_val = message.get("content").cloned().unwrap_or(Value::Null);
+                                let text_content = extract_text_content(&content_val);
+                                let model = message.get("model").and_then(|m| m.as_str()).map(String::from);
+                                let inner_timestamp = inner_msg.get("timestamp")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or(&timestamp)
+                                    .to_string();
+
+                                if !text_content.is_empty() {
+                                    let uuid = val.get("uuid").and_then(|u| u.as_str())
+                                        .map(String::from)
+                                        .unwrap_or_else(|| format!("agent-{}-{}", agent_id, inner_timestamp));
+
+                                    let prompt = val.pointer("/data/prompt")
+                                        .and_then(|p| p.as_str())
+                                        .filter(|s| !s.is_empty());
+                                    let metadata = {
+                                        let mut meta = serde_json::Map::new();
+                                        meta.insert("agentId".to_string(), Value::String(agent_id.clone()));
+                                        if let Some(p) = prompt {
+                                            meta.insert("prompt".to_string(), Value::String(p.to_string()));
+                                        }
+                                        serde_json::to_string(&meta).ok()
+                                    };
+
+                                    agent_messages.push(missiond_core::types::ConversationMessage {
+                                        id: 0,
+                                        session_id: session_id.clone(),
+                                        role: agent_role,
+                                        content: text_content,
+                                        raw_content: serde_json::to_string(&content_val).ok(),
+                                        message_uuid: Some(uuid),
+                                        parent_uuid: parent_tool_use_id.clone(),
+                                        model,
+                                        timestamp: inner_timestamp,
+                                        metadata,
+                                    });
+                                }
                             }
                         }
-                        obj
-                    } else {
-                        item.clone()
                     }
-                })
-                .collect();
-            return serde_json::to_string(&sanitized).ok();
+                    "hook_progress" => {
+                        let hook_name = val.pointer("/data/hookName")
+                            .and_then(|v| v.as_str()).unwrap_or("");
+                        let hook_event = val.pointer("/data/hookEvent")
+                            .and_then(|v| v.as_str()).unwrap_or("");
+                        conv_events.push(missiond_core::types::ConversationEvent {
+                            id: 0,
+                            session_id: session_id.clone(),
+                            event_type: "hook_progress".to_string(),
+                            content: Some(format!("{hook_event}:{hook_name}")),
+                            raw_data: serde_json::to_string(val).ok(),
+                            timestamp: timestamp.clone(),
+                        });
+                    }
+                    _ => {
+                        conv_events.push(missiond_core::types::ConversationEvent {
+                            id: 0,
+                            session_id: session_id.clone(),
+                            event_type: format!("progress:{data_type}"),
+                            content: None,
+                            raw_data: serde_json::to_string(val).ok(),
+                            timestamp: timestamp.clone(),
+                        });
+                    }
+                }
+            }
+            "system" => {
+                let subtype = val.get("subtype").and_then(|s| s.as_str()).unwrap_or("system");
+                let content = match subtype {
+                    "turn_duration" => {
+                        let duration_ms = val.get("durationMs").and_then(|d| d.as_i64()).unwrap_or(0);
+                        Some(format!("{}ms", duration_ms))
+                    }
+                    "compact_boundary" => {
+                        let pre_tokens = val.pointer("/compactMetadata/preTokens")
+                            .and_then(|v| v.as_i64()).unwrap_or(0);
+                        let trigger = val.pointer("/compactMetadata/trigger")
+                            .and_then(|v| v.as_str()).unwrap_or("unknown");
+                        Some(format!("trigger={trigger}, preTokens={pre_tokens}"))
+                    }
+                    _ => val.get("content").and_then(|c| c.as_str()).map(String::from),
+                };
+                conv_events.push(missiond_core::types::ConversationEvent {
+                    id: 0,
+                    session_id: session_id.clone(),
+                    event_type: subtype.to_string(),
+                    content,
+                    raw_data: serde_json::to_string(val).ok(),
+                    timestamp: timestamp.clone(),
+                });
+            }
+            "queue-operation" => {
+                let operation = val.get("operation").and_then(|o| o.as_str()).unwrap_or("");
+                let content = val.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
+                conv_events.push(missiond_core::types::ConversationEvent {
+                    id: 0,
+                    session_id: session_id.clone(),
+                    event_type: format!("queue:{operation}"),
+                    content: if content.is_empty() { None } else { Some(content) },
+                    raw_data: serde_json::to_string(val).ok(),
+                    timestamp: timestamp.clone(),
+                });
+            }
+            "file-history-snapshot" => {
+                conv_events.push(missiond_core::types::ConversationEvent {
+                    id: 0,
+                    session_id: session_id.clone(),
+                    event_type: "file_history_snapshot".to_string(),
+                    content: None,
+                    raw_data: serde_json::to_string(val).ok(),
+                    timestamp: timestamp.clone(),
+                });
+            }
+            _ => {}
         }
     }
-    serde_json::to_string(content).ok()
+
+    if !agent_messages.is_empty() {
+        match db.insert_conversation_messages_batch(&agent_messages) {
+            Ok(ids) if !ids.is_empty() => {
+                info!(session = %session_id, count = ids.len(), "Logged agent sub-conversation messages");
+            }
+            Err(e) => {
+                warn!(session = %session_id, error = %e, "Failed to insert agent messages");
+            }
+            _ => {}
+        }
+    }
+
+    if !conv_events.is_empty() {
+        match db.insert_conversation_events_batch(&conv_events) {
+            Ok(count) if count > 0 => {
+                info!(session = %session_id, count, "Logged conversation events");
+            }
+            Err(e) => {
+                warn!(session = %session_id, error = %e, "Failed to insert conversation events");
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Handle a NewMessages watcher event: write conversation messages to DB.
@@ -6243,6 +6912,9 @@ async fn main() -> Result<()> {
             .timeout(std::time::Duration::from_secs(180))
             .build()
             .expect("Failed to build HTTP client"),
+        xjp_mcp: Arc::new(McpProcessClient::new(
+            default_mission_home().join("xjp-mcp-config.json"),
+        )),
     };
 
     // Auto-spawn slots with auto_start: true
@@ -6380,6 +7052,9 @@ async fn main() -> Result<()> {
                         if let Some(tid) = compaction_task_id {
                             let _ = state.mission.db().set_conversation_task_id(&session_id, &tid);
                         }
+                    }
+                    Ok(WatcherEvent::NewEvents { session_id, events }) => {
+                        handle_new_events(&state, session_id, events);
                     }
                     Ok(WatcherEvent::SessionInactive(session)) => {
                         // Skip already-compacted sessions (replaced by context compaction)

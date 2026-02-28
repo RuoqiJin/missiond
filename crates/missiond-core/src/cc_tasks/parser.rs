@@ -271,6 +271,40 @@ pub async fn read_new_lines(
     Ok((lines, file_size))
 }
 
+/// Read new content from file since last position — returns raw JSON values.
+/// Unlike read_new_lines, this captures ALL JSONL line types (progress, system, etc.)
+pub async fn read_new_lines_raw(
+    file_path: &Path,
+    from_position: u64,
+) -> anyhow::Result<(Vec<serde_json::Value>, u64)> {
+    let metadata = fs::metadata(file_path).await?;
+    let file_size = metadata.len();
+
+    if file_size <= from_position {
+        return Ok((Vec::new(), from_position));
+    }
+
+    let mut file = fs::File::open(file_path).await?;
+    file.seek(SeekFrom::Start(from_position)).await?;
+
+    let mut buffer = vec![0u8; (file_size - from_position) as usize];
+    file.read_exact(&mut buffer).await?;
+
+    let content = String::from_utf8_lossy(&buffer);
+    let mut lines = Vec::new();
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+            lines.push(val);
+        }
+    }
+
+    Ok((lines, file_size))
+}
+
 /// Diff two task arrays to find changes
 pub fn diff_tasks(previous: &[CCTask], current: &[CCTask]) -> TaskDiff {
     let mut added = Vec::new();

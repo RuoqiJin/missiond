@@ -624,6 +624,29 @@ impl MissionDB {
                 "ALTER TABLE skill_topics ADD COLUMN requires_json TEXT;"
             )?;
         }
+        // Phase 3: Add actions_json column for executable skill action declarations
+        if !skill_columns.iter().any(|c| c == "actions_json") {
+            conn.execute_batch(
+                "ALTER TABLE skill_topics ADD COLUMN actions_json TEXT;"
+            )?;
+        }
+
+        // Phase 3: Skill workflow execution log
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS skill_executions (
+                id TEXT PRIMARY KEY,
+                skill_topic TEXT NOT NULL,
+                action_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                steps_total INTEGER NOT NULL,
+                steps_completed INTEGER DEFAULT 0,
+                context_json TEXT,
+                error TEXT,
+                triggered_by TEXT DEFAULT 'manual',
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            )"
+        )?;
 
         // KB operation queue — persists kb_analyze consolidation plans for cross-session execution
         conn.execute_batch(
@@ -643,6 +666,22 @@ impl MissionDB {
             );
             CREATE INDEX IF NOT EXISTS idx_kb_op_status ON kb_operation_queue(status);
             CREATE INDEX IF NOT EXISTS idx_kb_op_plan ON kb_operation_queue(plan_id);"
+        )?;
+
+        // Conversation events — non-dialog system events from JSONL
+        // (turn_duration, compact_boundary, hook_progress, queue_operation, file_history_snapshot)
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS conversation_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                content TEXT,
+                raw_data TEXT,
+                timestamp TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES conversations(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_conv_event_session ON conversation_events(session_id);
+            CREATE INDEX IF NOT EXISTS idx_conv_event_type ON conversation_events(event_type);"
         )?;
 
         Ok(())
@@ -2438,15 +2477,16 @@ impl MissionDB {
         allowed_tools: Option<&str>,
         file_path: &str,
         requires_json: Option<&str>,
+        actions_json: Option<&str>,
     ) -> SqliteResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO skill_topics (topic, description, aka, allowed_tools, file_path, requires_json, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+            "INSERT INTO skill_topics (topic, description, aka, allowed_tools, file_path, requires_json, actions_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
              ON CONFLICT(topic) DO UPDATE SET
-                description = ?2, aka = ?3, allowed_tools = ?4, file_path = ?5, requires_json = ?6, updated_at = ?7",
-            params![topic, description, aka, allowed_tools, file_path, requires_json, now],
+                description = ?2, aka = ?3, allowed_tools = ?4, file_path = ?5, requires_json = ?6, actions_json = ?7, updated_at = ?8",
+            params![topic, description, aka, allowed_tools, file_path, requires_json, actions_json, now],
         )?;
         Ok(())
     }
@@ -2457,7 +2497,7 @@ impl MissionDB {
         conn.query_row(
             "SELECT topic, description, aka, allowed_tools, file_path,
                     hit_count, last_hit_at, fragment_count, total_lines, checksum,
-                    requires_json, created_at, updated_at
+                    requires_json, actions_json, created_at, updated_at
              FROM skill_topics WHERE topic = ?1",
             params![topic],
             |row| {
@@ -2473,8 +2513,9 @@ impl MissionDB {
                     total_lines: row.get(8)?,
                     checksum: row.get(9)?,
                     requires_json: row.get(10)?,
-                    created_at: row.get(11)?,
-                    updated_at: row.get(12)?,
+                    actions_json: row.get(11)?,
+                    created_at: row.get(12)?,
+                    updated_at: row.get(13)?,
                 })
             },
         )
@@ -2487,7 +2528,7 @@ impl MissionDB {
         let mut stmt = conn.prepare(
             "SELECT topic, description, aka, allowed_tools, file_path,
                     hit_count, last_hit_at, fragment_count, total_lines, checksum,
-                    requires_json, created_at, updated_at
+                    requires_json, actions_json, created_at, updated_at
              FROM skill_topics ORDER BY topic",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -2503,8 +2544,9 @@ impl MissionDB {
                 total_lines: row.get(8)?,
                 checksum: row.get(9)?,
                 requires_json: row.get(10)?,
-                created_at: row.get(11)?,
-                updated_at: row.get(12)?,
+                actions_json: row.get(11)?,
+                created_at: row.get(12)?,
+                updated_at: row.get(13)?,
             })
         })?;
         rows.collect()
@@ -2660,7 +2702,7 @@ impl MissionDB {
         let mut stmt = conn.prepare(
             "SELECT topic, description, aka, allowed_tools, file_path,
                     hit_count, last_hit_at, fragment_count, total_lines, checksum,
-                    requires_json, created_at, updated_at
+                    requires_json, actions_json, created_at, updated_at
              FROM skill_topics
              WHERE LOWER(topic) LIKE ?1
                 OR LOWER(COALESCE(description, '')) LIKE ?1
@@ -2681,8 +2723,9 @@ impl MissionDB {
                 total_lines: row.get(8)?,
                 checksum: row.get(9)?,
                 requires_json: row.get(10)?,
-                created_at: row.get(11)?,
-                updated_at: row.get(12)?,
+                actions_json: row.get(11)?,
+                created_at: row.get(12)?,
+                updated_at: row.get(13)?,
             })
         })?;
         rows.collect()
@@ -2725,6 +2768,59 @@ impl MissionDB {
         let conn = self.conn();
         conn.execute_batch("INSERT INTO skill_fts(skill_fts) VALUES('rebuild')")?;
         Ok(())
+    }
+
+    /// Insert a skill execution log entry
+    pub fn skill_execution_insert(
+        &self,
+        id: &str,
+        skill_topic: &str,
+        action_id: &str,
+        steps_total: i32,
+        triggered_by: &str,
+    ) -> SqliteResult<()> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO skill_executions (id, skill_topic, action_id, status, steps_total, triggered_by, created_at)
+             VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6)",
+            params![id, skill_topic, action_id, steps_total, triggered_by, now],
+        )?;
+        Ok(())
+    }
+
+    /// Update a skill execution (progress or completion)
+    pub fn skill_execution_update(
+        &self,
+        id: &str,
+        status: &str,
+        steps_completed: i32,
+        context_json: Option<&str>,
+        error: Option<&str>,
+    ) -> SqliteResult<()> {
+        let conn = self.conn();
+        let completed_at = if status == "success" || status == "failed" || status == "cancelled" {
+            Some(chrono::Utc::now().to_rfc3339())
+        } else {
+            None
+        };
+        conn.execute(
+            "UPDATE skill_executions SET status = ?1, steps_completed = ?2, context_json = ?3, error = ?4, completed_at = ?5
+             WHERE id = ?6",
+            params![status, steps_completed, context_json, error, completed_at, id],
+        )?;
+        Ok(())
+    }
+
+    /// Check if a skill action is currently running (for concurrency guard)
+    pub fn skill_execution_is_running(&self, skill_topic: &str, action_id: &str) -> SqliteResult<bool> {
+        let conn = self.conn();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM skill_executions WHERE skill_topic = ?1 AND action_id = ?2 AND status = 'running'",
+            params![skill_topic, action_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     // ============ Message Pipeline Tracking ============
@@ -3105,6 +3201,73 @@ impl MissionDB {
         let mut msgs = Vec::new();
         for m in rows { msgs.push(m?); }
         Ok(msgs)
+    }
+
+    /// Batch insert conversation events (system events from JSONL: turn_duration, etc.)
+    pub fn insert_conversation_events_batch(&self, events: &[crate::types::ConversationEvent]) -> SqliteResult<usize> {
+        if events.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn();
+        let tx = conn.unchecked_transaction()?;
+        let mut count = 0usize;
+        for event in events {
+            tx.execute(
+                "INSERT INTO conversation_events (session_id, event_type, content, raw_data, timestamp)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![event.session_id, event.event_type, event.content, event.raw_data, event.timestamp],
+            )?;
+            count += 1;
+        }
+        tx.commit()?;
+        Ok(count)
+    }
+
+    /// Get conversation events for a session, optionally filtered by event_type
+    pub fn get_conversation_events(
+        &self,
+        session_id: &str,
+        event_type: Option<&str>,
+        limit: i64,
+    ) -> SqliteResult<Vec<crate::types::ConversationEvent>> {
+        let conn = self.read_conn();
+        let mut events = Vec::new();
+        if let Some(et) = event_type {
+            let mut stmt = conn.prepare(
+                "SELECT id, session_id, event_type, content, raw_data, timestamp
+                 FROM conversation_events WHERE session_id = ?1 AND event_type = ?2
+                 ORDER BY id ASC LIMIT ?3"
+            )?;
+            let rows = stmt.query_map(params![session_id, et, limit], |row| {
+                Ok(crate::types::ConversationEvent {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    event_type: row.get(2)?,
+                    content: row.get(3)?,
+                    raw_data: row.get(4)?,
+                    timestamp: row.get(5)?,
+                })
+            })?;
+            for e in rows { events.push(e?); }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id, session_id, event_type, content, raw_data, timestamp
+                 FROM conversation_events WHERE session_id = ?1
+                 ORDER BY id ASC LIMIT ?2"
+            )?;
+            let rows = stmt.query_map(params![session_id, limit], |row| {
+                Ok(crate::types::ConversationEvent {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    event_type: row.get(2)?,
+                    content: row.get(3)?,
+                    raw_data: row.get(4)?,
+                    timestamp: row.get(5)?,
+                })
+            })?;
+            for e in rows { events.push(e?); }
+        }
+        Ok(events)
     }
 
     /// Mark a conversation as analyzed

@@ -73,4 +73,7 @@ pub use ipc::{
 };
 
 // Re-export Skill types
-pub use skill::{SkillIndex, SkillMeta, SkillRequires};
+pub use skill::{
+    SkillAction, SkillIndex, SkillMeta, SkillRequires, WorkflowBlock, WorkflowResult,
+    WorkflowStep, WorkflowStepPreview, WorkflowStepResult, parse_workflow_blocks, resolve_vars,
+};
