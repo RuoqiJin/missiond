@@ -561,6 +561,34 @@ pub struct KBRememberResult {
     pub similarity: Option<f64>,
 }
 
+// ============ KB Operation Queue Types ============
+
+/// Input for saving a KB operation (from consolidation plan)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KBOperation {
+    pub operation: String,
+    pub target_keys: Vec<String>,
+    pub rationale: Option<String>,
+}
+
+/// Row from kb_operation_queue table
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KBOperationRow {
+    pub id: String,
+    pub plan_id: String,
+    pub task_id: Option<String>,
+    pub operation: String,
+    pub target_keys: String,
+    pub rationale: Option<String>,
+    pub status: String,
+    pub priority: i32,
+    pub result: Option<String>,
+    pub created_at: String,
+    pub executed_at: Option<String>,
+    pub error: Option<String>,
+}
+
 // ============ Skill Engine Types ============
 
 /// Skill topic metadata (maps to skill_topics table)
@@ -582,6 +610,9 @@ pub struct SkillTopic {
     pub total_lines: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checksum: Option<String>,
+    /// Phase 2: JSON-serialized SkillRequires (dependency declarations)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires_json: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -669,6 +700,9 @@ pub struct Conversation {
     /// Checkpoint watermark: last message ID processed by incremental deep analysis
     #[serde(default)]
     pub deep_analyzed_message_id: i64,
+    /// Conversation type: "pty" (default) or "router_chat" (Gemini sessions)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_type: Option<String>,
 }
 
 /// A message within a conversation

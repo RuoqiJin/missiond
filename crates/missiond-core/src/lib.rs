@@ -30,8 +30,8 @@ pub use crate::core::{
 // Re-export core types
 pub use types::{
     CreateTaskInput, Credential, EventType, InboxMessage, InfraConfig, InfraServer,
-    KBRememberInput, KnowledgeEntry, SkillBlock, SkillSearchResult, SkillTopic, Slot, SlotConfig,
-    SlotsConfig, Task, TaskEvent, TaskStatus, TaskUpdate,
+    KBOperation, KBOperationRow, KBRememberInput, KnowledgeEntry, SkillBlock, SkillSearchResult,
+    SkillTopic, Slot, SlotConfig, SlotsConfig, Task, TaskEvent, TaskStatus, TaskUpdate,
 };
 
 // Re-export database
@@ -73,4 +73,4 @@ pub use ipc::{
 };
 
 // Re-export Skill types
-pub use skill::{SkillIndex, SkillMeta};
+pub use skill::{SkillIndex, SkillMeta, SkillRequires};

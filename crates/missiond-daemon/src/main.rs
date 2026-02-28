@@ -1866,10 +1866,42 @@ impl AppState {
                     "usage": usage,
                 });
 
-                // For consolidation_plan, try to parse as JSON
+                // For consolidation_plan, try to parse as JSON and auto-save to queue
+                let save_plan = args_val.get("save_plan").and_then(|v| v.as_bool()).unwrap_or(true);
                 if mode == "consolidation_plan" {
                     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
-                        resp["plan"] = parsed;
+                        resp["plan"] = parsed.clone();
+                        // Auto-save plan to operation queue
+                        if save_plan {
+                            if let Some(actions) = parsed.get("actions").and_then(|a| a.as_array()) {
+                                let plan_id = uuid::Uuid::new_v4().to_string();
+                                let task_id_param = args_val.get("task_id").and_then(|v| v.as_str());
+                                let ops: Vec<missiond_core::types::KBOperation> = actions.iter().filter_map(|a| {
+                                    let operation = a.get("action").and_then(|v| v.as_str())
+                                        .or_else(|| a.get("operation").and_then(|v| v.as_str()))?;
+                                    let keys: Vec<String> = a.get("keys").and_then(|v| v.as_array())
+                                        .map(|arr| arr.iter().filter_map(|k| k.as_str().map(|s| s.to_string())).collect())
+                                        .or_else(|| a.get("key").and_then(|v| v.as_str()).map(|k| vec![k.to_string()]))?;
+                                    Some(missiond_core::types::KBOperation {
+                                        operation: operation.to_string(),
+                                        target_keys: keys,
+                                        rationale: a.get("rationale").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                    })
+                                }).collect();
+                                if !ops.is_empty() {
+                                    match self.mission.db().kb_ops_save_plan(&plan_id, task_id_param, &ops) {
+                                        Ok(n) => {
+                                            resp["plan_id"] = serde_json::json!(plan_id);
+                                            resp["operations_saved"] = serde_json::json!(n);
+                                            info!(plan_id = %plan_id, ops = n, "KB consolidation plan saved to queue");
+                                        }
+                                        Err(e) => {
+                                            resp["save_error"] = serde_json::json!(format!("Failed to save plan: {}", e));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     } else {
                         resp["analysis"] = serde_json::Value::String(content.to_string());
                         resp["parse_warning"] = serde_json::json!("Response was not valid JSON. Returned as text.");
@@ -1886,6 +1918,115 @@ impl AppState {
                     resp["context_budget"] = serde_json::json!(note);
                 }
                 Ok(ToolResult::json_pretty(&resp))
+            }
+
+            // ===== KB Operation Queue =====
+            "mission_kb_queue_status" => {
+                let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
+                let plan_id = args_val.get("plan_id").and_then(|v| v.as_str());
+                let status_filter = args_val.get("status").and_then(|v| v.as_str());
+
+                let ops = self.mission.db().kb_ops_list(plan_id, status_filter)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+
+                // If plan_id given, also get summary
+                let summary = if let Some(pid) = plan_id {
+                    self.mission.db().kb_ops_plan_summary(pid).ok()
+                } else {
+                    None
+                };
+
+                let mut resp = serde_json::json!({
+                    "operations": ops,
+                    "count": ops.len(),
+                });
+                if let Some(s) = summary {
+                    resp["summary"] = s;
+                }
+                Ok(ToolResult::json_pretty(&resp))
+            }
+
+            "mission_kb_execute_plan" => {
+                let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
+                let plan_id = args_val.get("plan_id").and_then(|v| v.as_str());
+                let limit = args_val.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+
+                // Get pending operations
+                let ops = self.mission.db().kb_ops_list(plan_id, Some("pending"))
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+
+                if ops.is_empty() {
+                    return Ok(ToolResult::text("No pending operations in queue."));
+                }
+
+                let batch: Vec<_> = ops.into_iter().take(limit).collect();
+                let mut results = Vec::new();
+
+                for op in &batch {
+                    // Mark as running
+                    let _ = self.mission.db().kb_ops_update_status(&op.id, "running", None, None);
+
+                    let target_keys: Vec<String> = serde_json::from_str(&op.target_keys).unwrap_or_default();
+                    let outcome = match op.operation.as_str() {
+                        "delete" => {
+                            let mut deleted = 0usize;
+                            for key in &target_keys {
+                                if self.mission.db().kb_forget(key).unwrap_or(false) {
+                                    deleted += 1;
+                                }
+                            }
+                            Ok(format!("Deleted {}/{} keys", deleted, target_keys.len()))
+                        }
+                        "category_fix" | "recategorize" => {
+                            // Category fix: target_keys[0] = key, rationale contains new category
+                            // This is a simplification — actual merge logic would be more complex
+                            Ok(format!("Category fix for {} keys (manual execution recommended)", target_keys.len()))
+                        }
+                        "merge" | "distill" => {
+                            // Merge/distill operations are complex — generate prompt for slot execution
+                            Ok(format!("{} operation for {} keys (dispatch to slot recommended)", op.operation, target_keys.len()))
+                        }
+                        other => {
+                            Err(format!("Unknown operation: {}", other))
+                        }
+                    };
+
+                    match outcome {
+                        Ok(msg) => {
+                            let _ = self.mission.db().kb_ops_update_status(&op.id, "done", Some(&msg), None);
+                            results.push(serde_json::json!({
+                                "id": op.id,
+                                "operation": op.operation,
+                                "status": "done",
+                                "result": msg,
+                            }));
+                        }
+                        Err(msg) => {
+                            let _ = self.mission.db().kb_ops_update_status(&op.id, "failed", None, Some(&msg));
+                            results.push(serde_json::json!({
+                                "id": op.id,
+                                "operation": op.operation,
+                                "status": "failed",
+                                "error": msg,
+                            }));
+                        }
+                    }
+                }
+
+                // Get remaining count
+                let remaining = if let Some(pid) = plan_id {
+                    self.mission.db().kb_ops_list(Some(pid), Some("pending"))
+                        .map(|v| v.len()).unwrap_or(0)
+                } else {
+                    self.mission.db().kb_ops_list(None, Some("pending"))
+                        .map(|v| v.len()).unwrap_or(0)
+                };
+
+                Ok(ToolResult::json_pretty(&serde_json::json!({
+                    "executed": results.len(),
+                    "results": results,
+                    "remaining": remaining,
+                })))
             }
 
             // ===== Router Chat =====
@@ -1911,6 +2052,25 @@ impl AppState {
                 let search_enabled = params.get("search")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                let task_id = params.get("task_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+                // If task_id provided, load conversation history and prepend
+                let conv_id = if let Some(ref tid) = task_id {
+                    let cid = self.mission.db().router_chat_get_or_create(tid, &model)
+                        .map_err(|e| anyhow!("DB error: {}", e))?;
+                    let history = self.mission.db().router_chat_load_history(&cid)
+                        .map_err(|e| anyhow!("DB error: {}", e))?;
+                    if !history.is_empty() {
+                        // Prepend history before new messages
+                        let mut combined = history;
+                        combined.extend(messages);
+                        messages = combined;
+                        info!(task_id = %tid, history_msgs = messages.len(), "Router chat: loaded history for task");
+                    }
+                    Some(cid)
+                } else {
+                    None
+                };
 
                 // Auto-inject context into first user message if requested
                 if context_mode != "none" {
@@ -2021,6 +2181,51 @@ impl AppState {
                 if let Some(note) = budget_result.note {
                     resp["context_budget"] = serde_json::json!(note);
                 }
+
+                // Save new messages + assistant response to conversation history
+                if let Some(ref cid) = conv_id {
+                    let mut new_msgs: Vec<(String, String)> = Vec::new();
+                    // Count how many history messages were prepended
+                    let history_count = self.mission.db().router_chat_load_history(cid)
+                        .map(|h| h.len()).unwrap_or(0);
+                    // messages array = history + new_user_messages; skip history portion
+                    for msg in messages.iter().skip(history_count) {
+                        let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+                        let msg_content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                        new_msgs.push((role.to_string(), msg_content.to_string()));
+                    }
+                    // Add assistant response
+                    new_msgs.push(("assistant".to_string(), content.to_string()));
+
+                    if let Err(e) = self.mission.db().router_chat_append_messages(cid, &new_msgs) {
+                        warn!("Failed to save router chat history: {}", e);
+                    } else {
+                        info!(conv_id = %cid, saved = new_msgs.len(), "Router chat: saved messages to history");
+                    }
+                    resp["conversation_id"] = serde_json::json!(cid);
+                }
+
+                Ok(ToolResult::json_pretty(&resp))
+            }
+
+            "mission_router_chat_history" => {
+                let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
+                let task_id = args_val.get("task_id").and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("task_id is required"))?;
+                let model = "gemini-3.1-pro"; // default model for lookup
+                let conv_id = self.mission.db().router_chat_get_or_create(task_id, model)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                let history = self.mission.db().router_chat_load_history(&conv_id)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                if history.is_empty() {
+                    return Ok(ToolResult::text(format!("任务 {} 暂无 Gemini 对话记录", task_id)));
+                }
+                let resp = serde_json::json!({
+                    "task_id": task_id,
+                    "conversation_id": conv_id,
+                    "message_count": history.len(),
+                    "messages": history,
+                });
                 Ok(ToolResult::json_pretty(&resp))
             }
 
@@ -2498,6 +2703,174 @@ impl AppState {
 
                 Ok(ToolResult::text(context))
             }
+            "mission_context_resolve" => {
+                #[derive(Deserialize)]
+                struct ContextResolveArgs {
+                    query: String,
+                    skill: Option<String>,
+                    include_board: Option<bool>,
+                }
+                let args: ContextResolveArgs = serde_json::from_value(args)?;
+                let db = self.mission.db();
+                let include_board = args.include_board.unwrap_or(false);
+
+                // Step 1: Find primary skills
+                let mut primary_topics: Vec<String> = Vec::new();
+                if let Some(ref name) = args.skill {
+                    primary_topics.push(name.clone());
+                } else {
+                    // FTS search + name/aka match
+                    for s in self.skills.search(&args.query).iter().take(3) {
+                        primary_topics.push(s.name.clone());
+                    }
+                }
+
+                // Step 2: Recursive dependency resolution (max 2 layers)
+                let mut all_skill_names: Vec<String> = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+                let mut infra_ids = std::collections::HashSet::new();
+                let mut kb_categories = std::collections::HashSet::new();
+
+                let mut skill_results: Vec<Value> = Vec::new();
+
+                for topic_name in &primary_topics {
+                    if !seen.insert(topic_name.clone()) { continue; }
+                    all_skill_names.push(topic_name.clone());
+
+                    if let Ok(Some(topic)) = db.skill_topic_get(topic_name) {
+                        skill_results.push(json!({
+                            "name": topic.topic,
+                            "path": topic.file_path,
+                            "description": topic.description,
+                            "matched_by": if args.skill.is_some() { "direct" } else { "query" },
+                        }));
+
+                        // Parse requires from DB
+                        if let Some(ref rj) = topic.requires_json {
+                            if let Ok(req) = serde_json::from_str::<missiond_core::SkillRequires>(rj) {
+                                // Layer 1 dependencies
+                                for dep_name in &req.skills {
+                                    if seen.insert(dep_name.clone()) {
+                                        all_skill_names.push(dep_name.clone());
+                                        if let Ok(Some(dep_topic)) = db.skill_topic_get(dep_name) {
+                                            skill_results.push(json!({
+                                                "name": dep_topic.topic,
+                                                "path": dep_topic.file_path,
+                                                "description": dep_topic.description,
+                                                "matched_by": "dependency",
+                                            }));
+                                            // Layer 2 dependencies (no further recursion)
+                                            if let Some(ref drj) = dep_topic.requires_json {
+                                                if let Ok(dreq) = serde_json::from_str::<missiond_core::SkillRequires>(drj) {
+                                                    for dep2_name in &dreq.skills {
+                                                        if seen.insert(dep2_name.clone()) {
+                                                            if let Ok(Some(dep2)) = db.skill_topic_get(dep2_name) {
+                                                                skill_results.push(json!({
+                                                                    "name": dep2.topic,
+                                                                    "path": dep2.file_path,
+                                                                    "description": dep2.description,
+                                                                    "matched_by": "dependency_l2",
+                                                                }));
+                                                            }
+                                                        }
+                                                    }
+                                                    infra_ids.extend(dreq.infra);
+                                                    kb_categories.extend(dreq.kb);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                infra_ids.extend(req.infra);
+                                kb_categories.extend(req.kb);
+                            }
+                        }
+                    } else if let Some(skill_meta) = self.skills.get(topic_name) {
+                        // Fallback: found in memory index but not in DB
+                        skill_results.push(json!({
+                            "name": skill_meta.name,
+                            "path": skill_meta.path,
+                            "description": skill_meta.description,
+                            "matched_by": if args.skill.is_some() { "direct" } else { "query" },
+                        }));
+                    }
+                }
+
+                // Step 3: Aggregate Infra
+                let mut infra_results: Vec<Value> = Vec::new();
+                for id in &infra_ids {
+                    if let Some(server) = self.infra.get(id) {
+                        infra_results.push(json!({
+                            "id": server.id,
+                            "name": server.name,
+                            "host": server.host,
+                            "roles": server.roles,
+                            "matched_by": "dependency",
+                        }));
+                    }
+                }
+
+                // Step 4: Aggregate KB (by category + query joint search)
+                let mut kb_results: Vec<Value> = Vec::new();
+                let mut kb_seen = std::collections::HashSet::new();
+                for cat in &kb_categories {
+                    if let Ok(entries) = db.kb_search(&args.query, Some(cat)) {
+                        for entry in entries.iter().take(5) {
+                            if kb_seen.insert(entry.key.clone()) {
+                                kb_results.push(json!({
+                                    "key": entry.key,
+                                    "category": entry.category,
+                                    "summary": entry.summary,
+                                    "matched_by": "category_filter",
+                                }));
+                            }
+                        }
+                    }
+                }
+                // Also do a general KB search if no category filter yielded results
+                if kb_results.is_empty() {
+                    if let Ok(entries) = db.kb_search(&args.query, None) {
+                        for entry in entries.iter().take(5) {
+                            if kb_seen.insert(entry.key.clone()) {
+                                kb_results.push(json!({
+                                    "key": entry.key,
+                                    "category": entry.category,
+                                    "summary": entry.summary,
+                                    "matched_by": "query",
+                                }));
+                            }
+                        }
+                    }
+                }
+
+                // Step 5: Optional Board search
+                let mut board_results: Vec<Value> = Vec::new();
+                if include_board {
+                    if let Ok(tasks) = db.list_board_tasks(None, false) {
+                        let query_lower = args.query.to_lowercase();
+                        for task in tasks.iter().take(100) {
+                            if task.title.to_lowercase().contains(&query_lower)
+                                || task.description.to_lowercase().contains(&query_lower) {
+                                board_results.push(json!({
+                                    "id": task.id,
+                                    "title": task.title,
+                                    "status": task.status,
+                                }));
+                                if board_results.len() >= 5 { break; }
+                            }
+                        }
+                    }
+                }
+
+                let result = json!({
+                    "skills": skill_results,
+                    "infra": infra_results,
+                    "kb": kb_results,
+                    "board": board_results,
+                });
+
+                Ok(ToolResult::json_pretty(&result))
+            }
 
             // ===== Skill Engine (CQRS write tools) =====
             "mission_skill_upsert" => {
@@ -2520,7 +2893,7 @@ impl AppState {
                     let file_path = skills_dir.join(&args.topic).join("SKILL.md");
                     db.skill_topic_upsert(
                         &args.topic, None, None, None,
-                        &file_path.to_string_lossy(),
+                        &file_path.to_string_lossy(), None,
                     ).map_err(|e| anyhow!("DB: {}", e))?;
                 }
 
@@ -2564,7 +2937,7 @@ impl AppState {
                     let file_path = skills_dir.join(&args.topic).join("SKILL.md");
                     db.skill_topic_upsert(
                         &args.topic, None, None, None,
-                        &file_path.to_string_lossy(),
+                        &file_path.to_string_lossy(), None,
                     ).map_err(|e| anyhow!("DB: {}", e))?;
                 }
 
@@ -5479,6 +5852,7 @@ fn handle_new_messages(
             analysis_version: 0,
             analysis_retries: 0,
             deep_analyzed_message_id: 0,
+            chat_type: None,
         };
         if let Err(e) = db.upsert_conversation(&conv) {
             error!(session = %session_id, error = %e, "Failed to create conversation");
@@ -5611,6 +5985,7 @@ fn handle_pty_text_complete(
             analysis_version: 0,
             analysis_retries: 0,
             deep_analyzed_message_id: 0,
+            chat_type: None,
         };
         if let Err(e) = db.upsert_conversation(&conv) {
             error!(slot = %slot_id, error = %e, "Failed to create PTY conversation");

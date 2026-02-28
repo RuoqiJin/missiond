@@ -744,6 +744,28 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                 "properties": {}
             }),
         ),
+        ToolDefinition::new(
+            "mission_context_resolve",
+            "跨域上下文聚合。根据任务描述自动匹配 Skill，递归解析 requires 依赖（skills/infra/kb），一次性返回完整认知上下文。替代 mission_context_build 用于复杂任务。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "任务描述 (如 '部署 auth 服务到 GCP')"
+                    },
+                    "skill": {
+                        "type": "string",
+                        "description": "可选，直接指定 skill name 跳过搜索"
+                    },
+                    "include_board": {
+                        "type": "boolean",
+                        "description": "是否包含 Board 相关任务（默认 false）"
+                    }
+                },
+                "required": ["query"]
+            }),
+        ),
 
         // ===== Infrastructure Registry =====
         ToolDefinition::new(
@@ -1023,6 +1045,50 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     "max_tokens": {
                         "type": "integer",
                         "description": "最大响应 token 数（默认 16384）"
+                    },
+                    "save_plan": {
+                        "type": "boolean",
+                        "description": "consolidation_plan 模式时自动保存到操作队列（默认 true）"
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "关联 Board 任务 ID（保存 plan 时关联）"
+                    }
+                }
+            }),
+        ),
+
+        // ===== KB Operation Queue =====
+        ToolDefinition::new(
+            "mission_kb_queue_status",
+            "查看 KB 操作队列状态。kb_analyze consolidation_plan 的执行进度。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "plan_id": {
+                        "type": "string",
+                        "description": "按批次 ID 过滤"
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "按状态过滤: pending, running, done, skipped, failed"
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_kb_execute_plan",
+            "执行 KB 操作队列中的 pending 操作。delete 自动执行，merge/distill 建议派发工位。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "plan_id": {
+                        "type": "string",
+                        "description": "执行特定批次的操作"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "每次最多执行 N 个操作（默认 5）"
                     }
                 }
             }),
@@ -1031,7 +1097,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         // ===== Router Chat =====
         ToolDefinition::new(
             "mission_router_chat",
-            "通过 AI 路由器与 Gemini 等模型多轮对话。调用方管理对话历史，每次传完整 messages 数组。",
+            "通过 AI 路由器与 Gemini 等模型多轮对话。传 task_id 自动持久化对话历史（同 Board 任务下连续对话）。不传 task_id 则无状态。",
             json!({
                 "type": "object",
                 "properties": {
@@ -1045,7 +1111,11 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                             },
                             "required": ["role", "content"]
                         },
-                        "description": "对话消息数组（多轮时传完整历史）"
+                        "description": "本轮新消息。传 task_id 时历史自动加载，只需传新消息"
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "关联 Board 任务 ID。传此参数自动加载/保存对话历史，实现跨会话连续对话"
                     },
                     "context": {
                         "type": "string",
@@ -1066,6 +1136,20 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     }
                 },
                 "required": ["messages"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_router_chat_history",
+            "查看与某 Board 任务关联的 Gemini 对话历史",
+            json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "Board 任务 ID"
+                    }
+                },
+                "required": ["task_id"]
             }),
         ),
 
