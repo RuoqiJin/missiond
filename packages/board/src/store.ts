@@ -210,8 +210,9 @@ export const useTaskCenterStore = create<TaskCenterState>()(
       const { tasks } = get();
       const task = tasks.find((t) => t.id === taskId);
       if (!task) return;
+      const ACTIVE = new Set(['open', 'running', 'verifying', 'blocked', 'failed']);
       const siblings = tasks
-        .filter((t) => t.parentId === task.parentId && t.status === 'open')
+        .filter((t) => t.parentId === task.parentId && ACTIVE.has(t.status))
         .sort((a, b) => a.order - b.order);
       const oldIndex = siblings.findIndex((t) => t.id === taskId);
       if (oldIndex === -1 || oldIndex === newIndex) return;
@@ -225,11 +226,12 @@ export const useTaskCenterStore = create<TaskCenterState>()(
         tasks: tasks.map((t) => updatedIds.has(t.id) ? { ...t, order: updatedIds.get(t.id)! } : t),
       });
 
-      const newOrder = updatedIds.get(taskId);
-      if (newOrder !== undefined) {
-        api.updateTask(taskId, { orderIdx: newOrder } as never)
-          .catch((err) => console.error('[TaskCenter] reorderTask sync failed:', err));
-      }
+      // Persist all affected siblings, not just the moved one
+      Promise.all(
+        Array.from(updatedIds.entries()).map(([id, order]) =>
+          api.updateTask(id, { orderIdx: order } as never)
+        )
+      ).catch((err) => console.error('[TaskCenter] reorderTask sync failed:', err));
     },
 
     setFilters: (partial) => set({ filters: { ...get().filters, ...partial } }),

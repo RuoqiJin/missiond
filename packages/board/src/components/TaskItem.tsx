@@ -35,6 +35,10 @@ export function TaskItem({
   const [subInput, setSubInput] = useState('');
   const isDone = task.status === 'done';
   const isSkipped = task.status === 'skipped';
+  const isRunning = task.status === 'running';
+  const isVerifying = task.status === 'verifying';
+  const isBlocked = task.status === 'blocked';
+  const isFailed = task.status === 'failed';
   const isInactive = isDone || isSkipped;
 
   const {
@@ -125,9 +129,13 @@ export function TaskItem({
               ? 'bg-green-500/20 border-green-500/40 text-green-400'
               : isSkipped
                 ? 'bg-neutral-500/20 border-neutral-500/40 text-neutral-400'
-                : allChildrenDone
-                  ? 'border-green-500/40 hover:border-green-500/60'
-                  : 'border-neutral-700 hover:border-neutral-500',
+                : isRunning
+                  ? 'border-blue-500/40 animate-pulse'
+                  : isFailed
+                    ? 'bg-red-500/20 border-red-500/40 text-red-400'
+                    : allChildrenDone
+                      ? 'border-green-500/40 hover:border-green-500/60'
+                      : 'border-neutral-700 hover:border-neutral-500',
           )}
         >
           {isDone && <Check className="w-3 h-3" />}
@@ -140,10 +148,14 @@ export function TaskItem({
             {!isInactive && <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', priorityConf.dotColor)} />}
             <span className={cn(
               'text-sm truncate',
-              isDone ? 'line-through text-neutral-600' : isSkipped ? 'text-neutral-500 italic' : 'text-white',
+              isDone ? 'line-through text-neutral-600' : isSkipped ? 'text-neutral-500 italic' : isFailed ? 'text-red-400' : 'text-white',
             )}>
               {task.title}
             </span>
+            {isRunning && <span className="text-[10px] px-1.5 py-0 h-4 rounded bg-blue-500/20 text-blue-400 border border-blue-500/30 shrink-0">Running</span>}
+            {isVerifying && <span className="text-[10px] px-1.5 py-0 h-4 rounded bg-yellow-500/20 text-yellow-400 border border-yellow-500/30 shrink-0">Verifying</span>}
+            {isBlocked && <span className="text-[10px] px-1.5 py-0 h-4 rounded bg-orange-500/20 text-orange-400 border border-orange-500/30 shrink-0">Blocked</span>}
+            {isFailed && <span className="text-[10px] px-1.5 py-0 h-4 rounded bg-red-500/20 text-red-400 border border-red-500/30 shrink-0">Failed</span>}
 
             {hasChildren && !isInactive && (
               <span className={cn(
