@@ -1631,6 +1631,28 @@ pub fn all_tools() -> Vec<ToolDefinition> {
             }),
         ),
         ToolDefinition::new(
+            "mission_board_claim",
+            "认领任务。原子操作：仅当任务状态为 open 且未被其他执行者认领时成功。防止多个 Claude Code 实例重复执行同一任务。认领成功后任务状态自动变为 running。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "taskId": {
+                        "type": "string",
+                        "description": "要认领的任务 ID"
+                    },
+                    "executorId": {
+                        "type": "string",
+                        "description": "执行者标识 (如 slot ID 或会话标识)。不填则用 MCP session ID"
+                    },
+                    "executorType": {
+                        "type": "string",
+                        "description": "执行者类型: pty_slot (自动化工位) 或 manual_session (人工交互)。默认 manual_session"
+                    }
+                },
+                "required": ["taskId"]
+            }),
+        ),
+        ToolDefinition::new(
             "mission_board_note_add",
             "为任务添加进度笔记。用于记录阶段进度、完成摘要或一般备注。",
             json!({
