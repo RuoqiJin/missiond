@@ -1300,7 +1300,9 @@ impl AppState {
             }
 
             "mission_task_ack" => {
-                let tasks = self.mission.db().ack_completed_tasks()?;
+                let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
+                let since = args_val.get("since").and_then(|v| v.as_i64());
+                let tasks = self.mission.db().ack_completed_tasks(since)?;
                 Ok(ToolResult::json(&tasks))
             }
 
@@ -4777,12 +4779,15 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
         }
     }
 
+    // Submit task dispatch — always runs, not gated by memory_paused
+    dispatch_queued_submit_tasks(state).await;
+
     if !memory_paused {
         // Check if memory slots are stuck in non-Idle state for too long
         check_slot_stuck(state, MEMORY_SLOT_ID, &state.memory_slot_busy_since, &state.extraction_state).await;
         check_slot_stuck(state, MEMORY_SLOW_SLOT_ID, &state.slow_slot_busy_since, &state.slow_extraction_state).await;
 
-        // Unified priority scheduler: submit > realtime > deep > consolidation
+        // Memory scheduler: realtime > deep > consolidation
         schedule_memory_tasks(state).await;
     }
 
@@ -7197,9 +7202,11 @@ async fn main() -> Result<()> {
                 }
             }
             _ = state.submit_notify.notified() => {
-                // Submit task created/completed — run unified scheduler
+                // Submit task created/completed — always dispatch submit tasks (not gated by memory_paused)
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                dispatch_queued_submit_tasks(&state).await;
+                // Also run memory scheduler if not paused
                 if !state.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     schedule_memory_tasks(&state).await;
                 }
             }
@@ -7502,6 +7509,10 @@ async fn main() -> Result<()> {
                                     }
                                 }
                             }
+                            // Always signal submit dispatcher when any slot becomes Idle,
+                            // even if no running task was closed (e.g., after memory extraction).
+                            // This ensures queued submit tasks get dispatched promptly.
+                            state.submit_notify.notify_one();
                         }
                     }
                     Ok(_) => {} // Other PTY events not needed for logging
