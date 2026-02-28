@@ -616,6 +616,9 @@ pub struct SkillTopic {
     /// Phase 3: JSON-serialized Vec<SkillAction> (executable actions)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actions_json: Option<String>,
+    /// Phase 4: JSON-serialized Vec<ContextHook> (pre-flight probes)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_hooks_json: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -634,6 +637,29 @@ pub struct SkillBlock {
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Skill execution statistics (aggregated per action)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillExecutionStat {
+    pub action_id: String,
+    pub total: i64,
+    pub successes: i64,
+    pub failures: i64,
+    pub avg_duration_ms: Option<f64>,
+    pub last_run: String,
+}
+
+/// Skill version snapshot (for rollback)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillVersion {
+    pub id: i64,
+    pub topic: String,
+    pub content: String,
+    pub checksum: String,
+    pub created_at: String,
 }
 
 /// Skill FTS search result

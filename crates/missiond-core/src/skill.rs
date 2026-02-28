@@ -29,6 +29,9 @@ pub struct SkillMeta {
     /// Phase 3: executable action declarations
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actions: Option<Vec<SkillAction>>,
+    /// Phase 4: pre-flight context hooks
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_hooks: Option<Vec<ContextHook>>,
 }
 
 /// Skill dependency declaration (Phase 2: cross-domain context aggregation)
@@ -55,17 +58,33 @@ pub struct SkillAction {
     pub requires_approval: bool,
 }
 
+/// Context hook — pre-flight probe executed before workflow (Phase 4)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextHook {
+    pub tool: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
+    pub save_as: String,
+}
+
 /// A single step in a workflow
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowStep {
+    /// Step identifier for fallback references
+    #[serde(default)]
+    pub id: Option<String>,
     pub name: Option<String>,
     pub tool: String,
     #[serde(default)]
     pub params: serde_json::Value,
+    /// Error handling: "stop" (default) | "skip" | "retry" | "fallback:step_id"
     #[serde(default = "default_on_error")]
     pub on_error: String,
     #[serde(default)]
     pub save_as: Option<String>,
+    /// Max retry attempts when on_error = "retry" (exponential backoff 1s, 2s, 4s...)
+    #[serde(default)]
+    pub max_retries: u32,
 }
 
 fn default_on_error() -> String { "stop".to_string() }
@@ -153,6 +172,9 @@ struct Frontmatter {
     /// Phase 3: executable action declarations
     #[serde(default)]
     actions: Option<Vec<SkillAction>>,
+    /// Phase 4: pre-flight context hooks
+    #[serde(default, rename = "context_hooks")]
+    context_hooks: Option<Vec<ContextHook>>,
 }
 
 /// In-memory skill index
@@ -371,6 +393,7 @@ fn parse_skill_file(path: &Path) -> Option<SkillMeta> {
         path: path.to_path_buf(),
         requires: fm.requires,
         actions: fm.actions,
+        context_hooks: fm.context_hooks,
     })
 }
 
@@ -597,10 +620,15 @@ pub fn ingest_skills(db: &crate::db::MissionDB, skills_dir: &Path) -> usize {
             .as_ref()
             .and_then(|a| serde_json::to_string(a).ok());
 
+        let context_hooks_json = skill
+            .context_hooks
+            .as_ref()
+            .and_then(|h| serde_json::to_string(h).ok());
+
         let file_path_str = skill.path.to_string_lossy().to_string();
 
         // Upsert topic
-        if let Err(e) = db.skill_topic_upsert(
+        if let Err(e) = db.skill_topic_upsert_full(
             &skill.name,
             skill.description.as_deref(),
             aka_json.as_deref(),
@@ -608,6 +636,7 @@ pub fn ingest_skills(db: &crate::db::MissionDB, skills_dir: &Path) -> usize {
             &file_path_str,
             requires_json.as_deref(),
             actions_json.as_deref(),
+            context_hooks_json.as_deref(),
         ) {
             warn!(topic = %skill.name, error = %e, "Failed to upsert skill topic");
             continue;
@@ -733,8 +762,16 @@ pub fn materialize_topic(db: &crate::db::MissionDB, topic: &str) -> Result<Strin
         }
     }
 
-    // Write to file
+    // Snapshot current content before overwriting (Phase 4: rollback)
     let file_path = &topic_meta.file_path;
+    if let Ok(existing) = std::fs::read_to_string(file_path) {
+        if !existing.is_empty() {
+            let old_checksum = format!("{:x}", md5_hash(existing.as_bytes()));
+            let _ = db.skill_version_save(topic, &existing, &old_checksum);
+        }
+    }
+
+    // Write to file
     if let Some(parent) = std::path::Path::new(file_path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }

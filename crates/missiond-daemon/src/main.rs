@@ -865,9 +865,34 @@ impl AppState {
             &exec_id, skill_name, action_id,
             workflow.steps.len() as i32, "manual",
         );
+        let exec_start = std::time::Instant::now();
+
+        // Step 5b: Execute context hooks (pre-flight probes, best-effort)
+        let mut context: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        if let Some(ref hooks_json) = topic.context_hooks_json {
+            if let Ok(hooks) = serde_json::from_str::<Vec<missiond_core::ContextHook>>(hooks_json) {
+                for hook in &hooks {
+                    let hook_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        self.call_tool(&hook.tool, hook.params.clone()),
+                    ).await;
+                    match hook_result {
+                        Ok(result) => {
+                            let output = result.content.first()
+                                .map(|c| match c { missiond_mcp::ToolContent::Text { text } => text.clone() })
+                                .unwrap_or_default();
+                            context.insert(hook.save_as.clone(), output);
+                            debug!(hook = %hook.tool, save_as = %hook.save_as, "Context hook completed");
+                        }
+                        Err(_) => {
+                            warn!(hook = %hook.tool, "Context hook timed out (10s), skipping");
+                        }
+                    }
+                }
+            }
+        }
 
         // Step 6: Sequential execution
-        let mut context: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
         // Apply param_overrides to context
         if let Some(overrides) = param_overrides {
@@ -879,8 +904,10 @@ impl AppState {
         }
 
         let mut results: Vec<WorkflowStepResult> = Vec::new();
+        let mut i = 0usize;
 
-        for (i, step) in workflow.steps.iter().enumerate() {
+        while i < workflow.steps.len() {
+            let step = &workflow.steps[i];
             info!(exec_id = %exec_id, step = i, tool = %step.tool, "Executing workflow step");
 
             // Resolve ${var} references in params
@@ -922,17 +949,92 @@ impl AppState {
 
             // Error handling
             if is_error {
-                match step.on_error.as_str() {
+                let on_error = step.on_error.as_str();
+                match on_error {
                     "skip" => {
                         warn!(step = i, tool = %step.tool, "Step failed, skipping");
-                        continue;
+                    }
+                    "retry" => {
+                        let max = step.max_retries.max(1);
+                        let mut succeeded = false;
+                        for attempt in 1..=max {
+                            let backoff_secs = 1u64 << (attempt - 1).min(4);
+                            warn!(step = i, tool = %step.tool, attempt, max, backoff_secs, "Retrying step");
+                            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                            let retry_params = resolve_vars(&step.params, &context);
+                            let retry_result = match tokio::time::timeout(
+                                std::time::Duration::from_secs(STEP_TIMEOUT_SECS),
+                                self.call_tool(&step.tool, retry_params),
+                            ).await {
+                                Ok(r) => r,
+                                Err(_) => {
+                                    let mut r = ToolResult::text("Retry timed out".to_string());
+                                    r.is_error = Some(true);
+                                    r
+                                }
+                            };
+                            if !retry_result.is_error.unwrap_or(false) {
+                                let retry_output = retry_result.content.first()
+                                    .map(|c| match c { missiond_mcp::ToolContent::Text { text } => text.clone() })
+                                    .unwrap_or_default();
+                                if let Some(ref key) = step.save_as {
+                                    context.insert(key.clone(), retry_output.clone());
+                                }
+                                if let Some(last) = results.last_mut() {
+                                    last.success = true;
+                                    last.output = retry_output;
+                                }
+                                succeeded = true;
+                                break;
+                            }
+                        }
+                        if !succeeded {
+                            let duration_ms = exec_start.elapsed().as_millis() as i64;
+                            let _ = db.skill_execution_update_with_duration(
+                                &exec_id, "failed", (i + 1) as i32,
+                                Some(&serde_json::to_string(&context).unwrap_or_default()),
+                                Some(&format!("Failed after {} retries: {}", max, output)),
+                                Some(duration_ms),
+                            );
+                            return Ok(WorkflowResult::Failed {
+                                steps_completed: i + 1,
+                                error_step: i,
+                                error: format!("Failed after {} retries: {}", max, output),
+                                results,
+                            });
+                        }
+                    }
+                    s if s.starts_with("fallback:") => {
+                        let target_id = &s["fallback:".len()..];
+                        if let Some(target_idx) = workflow.steps.iter().position(|st| st.id.as_deref() == Some(target_id)) {
+                            warn!(step = i, tool = %step.tool, target = target_id, target_idx, "Falling back");
+                            i = target_idx;
+                            continue; // Jump without incrementing
+                        } else {
+                            let duration_ms = exec_start.elapsed().as_millis() as i64;
+                            let err_msg = format!("Fallback target '{}' not found", target_id);
+                            let _ = db.skill_execution_update_with_duration(
+                                &exec_id, "failed", (i + 1) as i32,
+                                Some(&serde_json::to_string(&context).unwrap_or_default()),
+                                Some(&err_msg),
+                                Some(duration_ms),
+                            );
+                            return Ok(WorkflowResult::Failed {
+                                steps_completed: i + 1,
+                                error_step: i,
+                                error: err_msg,
+                                results,
+                            });
+                        }
                     }
                     _ => {
                         // "stop" (default)
-                        let _ = db.skill_execution_update(
+                        let duration_ms = exec_start.elapsed().as_millis() as i64;
+                        let _ = db.skill_execution_update_with_duration(
                             &exec_id, "failed", (i + 1) as i32,
                             Some(&serde_json::to_string(&context).unwrap_or_default()),
                             Some(&output),
+                            Some(duration_ms),
                         );
                         return Ok(WorkflowResult::Failed {
                             steps_completed: i + 1,
@@ -943,13 +1045,16 @@ impl AppState {
                     }
                 }
             }
+            i += 1;
         }
 
         // Success
-        let _ = db.skill_execution_update(
+        let duration_ms = exec_start.elapsed().as_millis() as i64;
+        let _ = db.skill_execution_update_with_duration(
             &exec_id, "success", workflow.steps.len() as i32,
             Some(&serde_json::to_string(&context).unwrap_or_default()),
             None,
+            Some(duration_ms),
         );
 
         Ok(WorkflowResult::Success {
@@ -2993,6 +3098,63 @@ impl AppState {
                 })))
             }
 
+            // ===== Conversation Events & Agent Trajectory =====
+            "mission_conversation_events" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Args {
+                    session_id: Option<String>,
+                    event_type: Option<String>,
+                    limit: Option<i64>,
+                }
+                let Args { session_id, event_type, limit } =
+                    serde_json::from_value(args).unwrap_or(Args { session_id: None, event_type: None, limit: None });
+                let db = self.mission.db();
+                if let Some(sid) = &session_id {
+                    let events = db.get_conversation_events(sid, event_type.as_deref(), limit.unwrap_or(100))
+                        .map_err(|e| anyhow!("DB error: {}", e))?;
+                    Ok(ToolResult::json(&serde_json::json!({
+                        "sessionId": sid,
+                        "events": events,
+                        "count": events.len(),
+                    })))
+                } else {
+                    // No sessionId → return event type summary
+                    let summary = db.get_event_type_summary(None)
+                        .map_err(|e| anyhow!("DB error: {}", e))?;
+                    let summary_obj: Vec<serde_json::Value> = summary.iter().map(|(t, c)| {
+                        serde_json::json!({ "eventType": t, "count": c })
+                    }).collect();
+                    Ok(ToolResult::json(&serde_json::json!({
+                        "summary": summary_obj,
+                        "totalTypes": summary.len(),
+                    })))
+                }
+            }
+            "mission_agent_trajectory" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Args {
+                    tool_use_id: String,
+                    limit: Option<i64>,
+                }
+                let Args { tool_use_id, limit } = serde_json::from_value(args)?;
+                let msgs = self.mission.db()
+                    .get_agent_trajectory(&tool_use_id, limit.unwrap_or(200))
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                // Extract agentId from first message metadata
+                let agent_id = msgs.first()
+                    .and_then(|m| m.metadata.as_ref())
+                    .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+                    .and_then(|v| v.get("agentId").and_then(|a| a.as_str()).map(|s| s.to_string()));
+                Ok(ToolResult::json(&serde_json::json!({
+                    "toolUseId": tool_use_id,
+                    "agentId": agent_id,
+                    "messages": msgs,
+                    "count": msgs.len(),
+                })))
+            }
+
             // ===== Board Tasks (Personal Task Board) =====
             "mission_board_list" => {
                 let BoardListArgs { status, include_hidden } =
@@ -3506,6 +3668,68 @@ impl AppState {
                 }
 
                 Ok(ToolResult::json_pretty(&all_actions))
+            }
+
+            // ===== Skill Execution Stats (Phase 4) =====
+            "mission_skill_stats" => {
+                #[derive(Deserialize)]
+                struct StatsArgs {
+                    skill: Option<String>,
+                }
+                let args: StatsArgs = serde_json::from_value(args)
+                    .unwrap_or(StatsArgs { skill: None });
+                let db = self.mission.db();
+                let stats = db.skill_execution_stats(args.skill.as_deref())
+                    .map_err(|e| anyhow!("DB: {}", e))?;
+                Ok(ToolResult::json_pretty(&stats))
+            }
+
+            // ===== Skill Version Rollback (Phase 4) =====
+            "mission_skill_rollback" => {
+                #[derive(Deserialize)]
+                struct RollbackArgs {
+                    skill: String,
+                    version_id: Option<i64>,
+                }
+                let args: RollbackArgs = serde_json::from_value(args)?;
+                let db = self.mission.db();
+
+                if let Some(vid) = args.version_id {
+                    // Rollback to specific version
+                    let version = db.skill_version_get(vid)
+                        .map_err(|e| anyhow!("DB: {}", e))?
+                        .ok_or_else(|| anyhow!("Version {} not found", vid))?;
+                    if version.topic != args.skill {
+                        return Ok(ToolResult::error(format!("Version {} belongs to '{}', not '{}'", vid, version.topic, args.skill)));
+                    }
+                    let topic = db.skill_topic_get(&args.skill)
+                        .map_err(|e| anyhow!("DB: {}", e))?
+                        .ok_or_else(|| anyhow!("Skill '{}' not found", args.skill))?;
+                    std::fs::write(&topic.file_path, &version.content)
+                        .map_err(|e| anyhow!("Write error: {}", e))?;
+                    // Re-ingest the skill
+                    let skills_dir = std::path::Path::new(&topic.file_path).parent()
+                        .and_then(|p| p.parent())
+                        .unwrap_or(std::path::Path::new("."));
+                    missiond_core::skill::ingest_skills(db, skills_dir);
+                    Ok(ToolResult::text(format!("Rolled back '{}' to version {} ({})", args.skill, vid, version.created_at)))
+                } else {
+                    // List available versions
+                    let versions = db.skill_version_list(&args.skill, 10)
+                        .map_err(|e| anyhow!("DB: {}", e))?;
+                    if versions.is_empty() {
+                        return Ok(ToolResult::text(format!("No version history for '{}'", args.skill)));
+                    }
+                    let list: Vec<Value> = versions.iter().map(|v| {
+                        serde_json::json!({
+                            "version_id": v.id,
+                            "checksum": v.checksum,
+                            "created_at": v.created_at,
+                            "content_lines": v.content.lines().count(),
+                        })
+                    }).collect();
+                    Ok(ToolResult::json_pretty(&list))
+                }
             }
 
             // ===== Infrastructure Registry =====
@@ -6433,7 +6657,17 @@ fn handle_new_events(state: &AppState, session_id: String, events: Vec<Value>) {
                     timestamp: timestamp.clone(),
                 });
             }
-            _ => {}
+            _ => {
+                // Catch-all: includes demoted parse failures and unknown future types
+                conv_events.push(missiond_core::types::ConversationEvent {
+                    id: 0,
+                    session_id: session_id.clone(),
+                    event_type: format!("unknown:{msg_type}"),
+                    content: None,
+                    raw_data: serde_json::to_string(val).ok(),
+                    timestamp: timestamp.clone(),
+                });
+            }
         }
     }
 
@@ -6460,6 +6694,91 @@ fn handle_new_events(state: &AppState, session_id: String, events: Vec<Value>) {
             _ => {}
         }
     }
+}
+
+/// One-time backfill: scan historical JSONL files and populate conversation_events
+/// for sessions that don't yet have events.
+async fn backfill_conversation_events(state: &AppState) {
+    let db = state.mission.db();
+
+    // Get sessions that already have events (skip them)
+    let sessions_with_events = db.get_sessions_with_events().unwrap_or_default();
+
+    // Get all conversations with jsonl_path
+    let conversations = db.get_conversations_with_jsonl().unwrap_or_default();
+
+    let to_backfill: Vec<_> = conversations
+        .into_iter()
+        .filter(|(id, _)| !sessions_with_events.contains(id))
+        .collect();
+
+    if to_backfill.is_empty() {
+        info!("Event backfill: all sessions already have events, skipping");
+        return;
+    }
+
+    info!(
+        total = to_backfill.len(),
+        "Event backfill: starting for sessions without events"
+    );
+
+    let mut backfilled = 0usize;
+    let mut total_events = 0usize;
+    let mut errors = 0usize;
+
+    for (session_id, jsonl_path) in &to_backfill {
+        let path = std::path::Path::new(jsonl_path);
+        if !path.exists() {
+            continue;
+        }
+
+        // Read entire file as raw JSON values
+        let raw_lines = match missiond_core::cc_tasks::read_new_lines_raw(path, 0).await {
+            Ok((lines, _)) => lines,
+            Err(_) => {
+                errors += 1;
+                continue;
+            }
+        };
+
+        // Filter for event types only (not user/assistant/tool_use/tool_result)
+        let event_lines: Vec<Value> = raw_lines
+            .into_iter()
+            .filter(|val| {
+                let msg_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                matches!(
+                    msg_type,
+                    "progress" | "system" | "queue-operation" | "file-history-snapshot"
+                )
+            })
+            .collect();
+
+        if event_lines.is_empty() {
+            continue;
+        }
+
+        // Reuse existing handle_new_events logic
+        handle_new_events(state, session_id.clone(), event_lines);
+        total_events += 1;
+        backfilled += 1;
+
+        // Yield periodically to avoid blocking the runtime
+        if backfilled % 50 == 0 {
+            info!(
+                progress = backfilled,
+                total = to_backfill.len(),
+                "Event backfill progress"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
+    info!(
+        backfilled,
+        total_events,
+        errors,
+        "Event backfill complete"
+    );
 }
 
 /// Handle a NewMessages watcher event: write conversation messages to DB.
@@ -6935,6 +7254,14 @@ async fn main() -> Result<()> {
                 }
             }
         }
+    }
+
+    // One-time backfill: populate conversation_events from historical JSONL files
+    {
+        let backfill_state = state.clone();
+        tokio::spawn(async move {
+            backfill_conversation_events(&backfill_state).await;
+        });
     }
 
     // Autopilot scheduler + IPC server via select

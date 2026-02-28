@@ -648,6 +648,39 @@ impl MissionDB {
             )"
         )?;
 
+        // Phase 4: Add context_hooks_json column to skill_topics
+        if !skill_columns.iter().any(|c| c == "context_hooks_json") {
+            conn.execute_batch(
+                "ALTER TABLE skill_topics ADD COLUMN context_hooks_json TEXT;"
+            )?;
+        }
+
+        // Phase 4: Add duration_ms to skill_executions
+        {
+            let exec_columns: Vec<String> = conn
+                .prepare("PRAGMA table_info(skill_executions)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !exec_columns.iter().any(|c| c == "duration_ms") {
+                conn.execute_batch(
+                    "ALTER TABLE skill_executions ADD COLUMN duration_ms INTEGER;"
+                )?;
+            }
+        }
+
+        // Phase 4: Skill version snapshots (for rollback)
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS skill_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic TEXT NOT NULL,
+                content TEXT NOT NULL,
+                checksum TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_skill_ver_topic ON skill_versions(topic);"
+        )?;
+
         // KB operation queue — persists kb_analyze consolidation plans for cross-session execution
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS kb_operation_queue (
@@ -2479,14 +2512,29 @@ impl MissionDB {
         requires_json: Option<&str>,
         actions_json: Option<&str>,
     ) -> SqliteResult<()> {
+        self.skill_topic_upsert_full(topic, description, aka, allowed_tools, file_path, requires_json, actions_json, None)
+    }
+
+    /// Upsert a skill topic with context_hooks (Phase 4)
+    pub fn skill_topic_upsert_full(
+        &self,
+        topic: &str,
+        description: Option<&str>,
+        aka: Option<&str>,
+        allowed_tools: Option<&str>,
+        file_path: &str,
+        requires_json: Option<&str>,
+        actions_json: Option<&str>,
+        context_hooks_json: Option<&str>,
+    ) -> SqliteResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO skill_topics (topic, description, aka, allowed_tools, file_path, requires_json, actions_json, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+            "INSERT INTO skill_topics (topic, description, aka, allowed_tools, file_path, requires_json, actions_json, context_hooks_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
              ON CONFLICT(topic) DO UPDATE SET
-                description = ?2, aka = ?3, allowed_tools = ?4, file_path = ?5, requires_json = ?6, actions_json = ?7, updated_at = ?8",
-            params![topic, description, aka, allowed_tools, file_path, requires_json, actions_json, now],
+                description = ?2, aka = ?3, allowed_tools = ?4, file_path = ?5, requires_json = ?6, actions_json = ?7, context_hooks_json = ?8, updated_at = ?9",
+            params![topic, description, aka, allowed_tools, file_path, requires_json, actions_json, context_hooks_json, now],
         )?;
         Ok(())
     }
@@ -2497,7 +2545,7 @@ impl MissionDB {
         conn.query_row(
             "SELECT topic, description, aka, allowed_tools, file_path,
                     hit_count, last_hit_at, fragment_count, total_lines, checksum,
-                    requires_json, actions_json, created_at, updated_at
+                    requires_json, actions_json, context_hooks_json, created_at, updated_at
              FROM skill_topics WHERE topic = ?1",
             params![topic],
             |row| {
@@ -2514,8 +2562,9 @@ impl MissionDB {
                     checksum: row.get(9)?,
                     requires_json: row.get(10)?,
                     actions_json: row.get(11)?,
-                    created_at: row.get(12)?,
-                    updated_at: row.get(13)?,
+                    context_hooks_json: row.get(12)?,
+                    created_at: row.get(13)?,
+                    updated_at: row.get(14)?,
                 })
             },
         )
@@ -2528,7 +2577,7 @@ impl MissionDB {
         let mut stmt = conn.prepare(
             "SELECT topic, description, aka, allowed_tools, file_path,
                     hit_count, last_hit_at, fragment_count, total_lines, checksum,
-                    requires_json, actions_json, created_at, updated_at
+                    requires_json, actions_json, context_hooks_json, created_at, updated_at
              FROM skill_topics ORDER BY topic",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -2545,8 +2594,9 @@ impl MissionDB {
                 checksum: row.get(9)?,
                 requires_json: row.get(10)?,
                 actions_json: row.get(11)?,
-                created_at: row.get(12)?,
-                updated_at: row.get(13)?,
+                context_hooks_json: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
             })
         })?;
         rows.collect()
@@ -2702,7 +2752,7 @@ impl MissionDB {
         let mut stmt = conn.prepare(
             "SELECT topic, description, aka, allowed_tools, file_path,
                     hit_count, last_hit_at, fragment_count, total_lines, checksum,
-                    requires_json, actions_json, created_at, updated_at
+                    requires_json, actions_json, context_hooks_json, created_at, updated_at
              FROM skill_topics
              WHERE LOWER(topic) LIKE ?1
                 OR LOWER(COALESCE(description, '')) LIKE ?1
@@ -2724,8 +2774,9 @@ impl MissionDB {
                 checksum: row.get(9)?,
                 requires_json: row.get(10)?,
                 actions_json: row.get(11)?,
-                created_at: row.get(12)?,
-                updated_at: row.get(13)?,
+                context_hooks_json: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
             })
         })?;
         rows.collect()
@@ -2798,6 +2849,19 @@ impl MissionDB {
         context_json: Option<&str>,
         error: Option<&str>,
     ) -> SqliteResult<()> {
+        self.skill_execution_update_with_duration(id, status, steps_completed, context_json, error, None)
+    }
+
+    /// Update a skill execution with optional duration tracking
+    pub fn skill_execution_update_with_duration(
+        &self,
+        id: &str,
+        status: &str,
+        steps_completed: i32,
+        context_json: Option<&str>,
+        error: Option<&str>,
+        duration_ms: Option<i64>,
+    ) -> SqliteResult<()> {
         let conn = self.conn();
         let completed_at = if status == "success" || status == "failed" || status == "cancelled" {
             Some(chrono::Utc::now().to_rfc3339())
@@ -2805,11 +2869,57 @@ impl MissionDB {
             None
         };
         conn.execute(
-            "UPDATE skill_executions SET status = ?1, steps_completed = ?2, context_json = ?3, error = ?4, completed_at = ?5
-             WHERE id = ?6",
-            params![status, steps_completed, context_json, error, completed_at, id],
+            "UPDATE skill_executions SET status = ?1, steps_completed = ?2, context_json = ?3, error = ?4, completed_at = ?5, duration_ms = ?6
+             WHERE id = ?7",
+            params![status, steps_completed, context_json, error, completed_at, duration_ms, id],
         )?;
         Ok(())
+    }
+
+    /// Get aggregated execution statistics for a skill topic
+    pub fn skill_execution_stats(&self, topic: Option<&str>) -> SqliteResult<Vec<crate::types::SkillExecutionStat>> {
+        let conn = self.read_conn();
+        let row_mapper = |row: &rusqlite::Row| {
+            Ok(crate::types::SkillExecutionStat {
+                action_id: row.get(0)?,
+                total: row.get(1)?,
+                successes: row.get(2)?,
+                failures: row.get(3)?,
+                avg_duration_ms: row.get(4)?,
+                last_run: row.get(5)?,
+            })
+        };
+
+        let mut stats = Vec::new();
+        if let Some(t) = topic {
+            let mut stmt = conn.prepare(
+                "SELECT action_id, COUNT(*) as total,
+                        SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) as successes,
+                        SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failures,
+                        AVG(duration_ms) as avg_duration_ms,
+                        MAX(created_at) as last_run
+                 FROM skill_executions
+                 WHERE skill_topic = ?1
+                 GROUP BY action_id
+                 ORDER BY last_run DESC"
+            )?;
+            let rows = stmt.query_map(params![t], row_mapper)?;
+            for s in rows { stats.push(s?); }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT skill_topic || '/' || action_id as action_id, COUNT(*) as total,
+                        SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) as successes,
+                        SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failures,
+                        AVG(duration_ms) as avg_duration_ms,
+                        MAX(created_at) as last_run
+                 FROM skill_executions
+                 GROUP BY skill_topic, action_id
+                 ORDER BY last_run DESC"
+            )?;
+            let rows = stmt.query_map([], row_mapper)?;
+            for s in rows { stats.push(s?); }
+        }
+        Ok(stats)
     }
 
     /// Check if a skill action is currently running (for concurrency guard)
@@ -2821,6 +2931,65 @@ impl MissionDB {
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    // ============ Skill Version Rollback (Phase 4) ============
+
+    /// Save a skill version snapshot before materialize
+    pub fn skill_version_save(&self, topic: &str, content: &str, checksum: &str) -> SqliteResult<()> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO skill_versions (topic, content, checksum, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![topic, content, checksum, now],
+        )?;
+        // Keep only the 10 most recent versions per topic
+        conn.execute(
+            "DELETE FROM skill_versions WHERE topic = ?1 AND id NOT IN (
+                SELECT id FROM skill_versions WHERE topic = ?1 ORDER BY id DESC LIMIT 10
+            )",
+            params![topic],
+        )?;
+        Ok(())
+    }
+
+    /// List recent versions for a skill topic
+    pub fn skill_version_list(&self, topic: &str, limit: i64) -> SqliteResult<Vec<crate::types::SkillVersion>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, topic, content, checksum, created_at FROM skill_versions
+             WHERE topic = ?1 ORDER BY id DESC LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(params![topic, limit], |row| {
+            Ok(crate::types::SkillVersion {
+                id: row.get(0)?,
+                topic: row.get(1)?,
+                content: row.get(2)?,
+                checksum: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        let mut versions = Vec::new();
+        for v in rows { versions.push(v?); }
+        Ok(versions)
+    }
+
+    /// Get a specific skill version by ID
+    pub fn skill_version_get(&self, id: i64) -> SqliteResult<Option<crate::types::SkillVersion>> {
+        let conn = self.read_conn();
+        conn.query_row(
+            "SELECT id, topic, content, checksum, created_at FROM skill_versions WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(crate::types::SkillVersion {
+                    id: row.get(0)?,
+                    topic: row.get(1)?,
+                    content: row.get(2)?,
+                    checksum: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            },
+        ).optional()
     }
 
     // ============ Message Pipeline Tracking ============
@@ -3268,6 +3437,81 @@ impl MissionDB {
             for e in rows { events.push(e?); }
         }
         Ok(events)
+    }
+
+    /// Get agent trajectory: all agent_* messages linked to a specific tool_use_id
+    pub fn get_agent_trajectory(
+        &self,
+        tool_use_id: &str,
+        limit: i64,
+    ) -> SqliteResult<Vec<ConversationMessage>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata
+             FROM conversation_messages WHERE parent_uuid = ?1 AND role LIKE 'agent_%'
+             ORDER BY id ASC LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(params![tool_use_id, limit], |row| {
+            Self::row_to_conversation_message(row)
+        })?;
+        let mut msgs = Vec::new();
+        for m in rows { msgs.push(m?); }
+        Ok(msgs)
+    }
+
+    /// Get event type summary across all sessions or for a specific session
+    pub fn get_event_type_summary(
+        &self,
+        session_id: Option<&str>,
+    ) -> SqliteResult<Vec<(String, i64)>> {
+        let conn = self.read_conn();
+        let mut summary = Vec::new();
+        if let Some(sid) = session_id {
+            let mut stmt = conn.prepare(
+                "SELECT event_type, COUNT(*) as cnt FROM conversation_events
+                 WHERE session_id = ?1 GROUP BY event_type ORDER BY cnt DESC"
+            )?;
+            let rows = stmt.query_map(params![sid], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for r in rows { summary.push(r?); }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT event_type, COUNT(*) as cnt FROM conversation_events
+                 GROUP BY event_type ORDER BY cnt DESC"
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for r in rows { summary.push(r?); }
+        }
+        Ok(summary)
+    }
+
+    /// Get all session IDs that have at least one event in conversation_events
+    pub fn get_sessions_with_events(&self) -> SqliteResult<std::collections::HashSet<String>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT session_id FROM conversation_events"
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut set = std::collections::HashSet::new();
+        for r in rows { set.insert(r?); }
+        Ok(set)
+    }
+
+    /// Get all conversations with their JSONL paths (for backfill)
+    pub fn get_conversations_with_jsonl(&self) -> SqliteResult<Vec<(String, String)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, jsonl_path FROM conversations WHERE jsonl_path IS NOT NULL AND jsonl_path != ''"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut result = Vec::new();
+        for r in rows { result.push(r?); }
+        Ok(result)
     }
 
     /// Mark a conversation as analyzed
