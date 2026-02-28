@@ -55,9 +55,10 @@ pub use pty::{
 
 // Re-export CC Tasks types
 pub use cc_tasks::{
-    CCInProgressTask, CCMessage, CCMessageLine, CCSession, CCSessionIndex, CCSessionIndexEntry,
-    CCTask, CCTaskChangeEvent, CCTaskStatus, CCTasksOverview, CCTasksWatcher,
-    CCTasksWatcherOptions, TasksByStatus, WatcherEvent,
+    extract_last_assistant_text, jsonl_has_completed_turn, CCInProgressTask, CCMessage,
+    CCMessageLine, CCSession, CCSessionIndex, CCSessionIndexEntry, CCTask, CCTaskChangeEvent,
+    CCTaskStatus, CCTasksOverview, CCTasksWatcher, CCTasksWatcherOptions, TasksByStatus,
+    WatcherEvent,
 };
 
 // Re-export WebSocket types

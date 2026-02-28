@@ -3355,6 +3355,13 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
         check_kb_consolidation(state).await;
     }
 
+    // FTS dirty flag rebuild: after kb_forget sets dirty, rebuild here
+    match state.mission.db().kb_rebuild_fts_if_dirty() {
+        Ok(true) => info!("autopilot: FTS index rebuilt (dirty flag)"),
+        Err(e) => warn!(error = %e, "FTS dirty rebuild failed"),
+        _ => {}
+    }
+
     // Sync KB preferences + hot topics into CLAUDE.md
     sync_claude_md(state);
 
@@ -4099,15 +4106,69 @@ async fn reap_stale_submit_tasks(state: &AppState) {
     }
 
     let now = chrono::Utc::now().timestamp_millis();
-    const SUBMIT_TASK_TIMEOUT_MS: i64 = 15 * 60 * 1000; // 15 minutes
+    const JSONL_CHECK_THRESHOLD_MS: i64 = 2 * 60 * 1000; // 2 minutes: start checking JSONL
+    const SUBMIT_TASK_TIMEOUT_MS: i64 = 15 * 60 * 1000; // 15 minutes: hard timeout
 
     for task in &running {
         let started = task.started_at.unwrap_or(task.created_at);
-        if now - started < SUBMIT_TASK_TIMEOUT_MS {
+        let elapsed = now - started;
+
+        if elapsed < JSONL_CHECK_THRESHOLD_MS {
             continue;
         }
 
-        // Check if the assigned slot is idle (task might have completed but event was missed)
+        // --- JSONL completion detection (compensating path for missed PTY Idle events) ---
+        if elapsed < SUBMIT_TASK_TIMEOUT_MS {
+            if let Some(ref slot_id) = task.slot_id {
+                // Guard 1: slot's current session must match task's session
+                let session_matches = match (
+                    state.mission.db().get_slot_session(slot_id),
+                    &task.session_id,
+                ) {
+                    (Ok(Some(current_session)), Some(task_session)) => current_session == *task_session,
+                    // No session tracking → can't verify, skip JSONL check
+                    _ => false,
+                };
+
+                if session_matches {
+                    if let Some(jsonl_path) = get_task_jsonl_path(state, task) {
+                        let path = std::path::Path::new(&jsonl_path);
+                        if missiond_core::jsonl_has_completed_turn(path).await {
+                            // JSONL confirms turn completed — extract result and close
+                            let result_text = missiond_core::extract_last_assistant_text(path).await
+                                .unwrap_or_else(|| "completed (JSONL turn_duration)".to_string());
+                            // Safe UTF-8 truncation to 4KB
+                            let result_text = if result_text.len() > 4096 {
+                                let mut end = 4096;
+                                while !result_text.is_char_boundary(end) && end > 0 { end -= 1; }
+                                format!("{}...(truncated)", &result_text[..end])
+                            } else {
+                                result_text
+                            };
+                            let _ = state.mission.db().update_task(
+                                &task.id,
+                                &missiond_core::types::TaskUpdate {
+                                    status: Some(missiond_core::types::TaskStatus::Done),
+                                    finished_at: Some(now),
+                                    result: Some(result_text),
+                                    ..Default::default()
+                                },
+                            );
+                            info!(
+                                task_id = %task.id, slot_id = %slot_id,
+                                age_min = elapsed / 60000,
+                                "Submit task closed via JSONL turn_duration compensation"
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
+            // Not yet at hard timeout and JSONL didn't confirm — wait
+            continue;
+        }
+
+        // --- Hard timeout (15 min) ---
         let slot_idle = if let Some(ref sid) = task.slot_id {
             state.pty.get_status(sid).await
                 .map(|s| s.state == missiond_core::pty::SessionState::Idle)
@@ -4117,9 +4178,16 @@ async fn reap_stale_submit_tasks(state: &AppState) {
         };
 
         let (new_status, result_msg) = if slot_idle {
-            (missiond_core::types::TaskStatus::Done, "completed (timeout reaper)")
+            // Try JSONL result even at timeout
+            let jsonl_result = if task.slot_id.is_some() {
+                if let Some(jsonl_path) = get_task_jsonl_path(state, task) {
+                    missiond_core::extract_last_assistant_text(std::path::Path::new(&jsonl_path)).await
+                } else { None }
+            } else { None };
+            (missiond_core::types::TaskStatus::Done,
+             jsonl_result.unwrap_or_else(|| "completed (timeout reaper)".to_string()))
         } else {
-            (missiond_core::types::TaskStatus::Failed, "timed out after 15 minutes")
+            (missiond_core::types::TaskStatus::Failed, "timed out after 15 minutes".to_string())
         };
 
         let _ = state.mission.db().update_task(
@@ -4127,7 +4195,7 @@ async fn reap_stale_submit_tasks(state: &AppState) {
             &missiond_core::types::TaskUpdate {
                 status: Some(new_status),
                 finished_at: Some(now),
-                result: Some(result_msg.to_string()),
+                result: Some(result_msg),
                 ..Default::default()
             },
         );
@@ -4135,10 +4203,18 @@ async fn reap_stale_submit_tasks(state: &AppState) {
             task_id = %task.id,
             slot_id = ?task.slot_id,
             status = ?new_status,
-            age_min = (now - started) / 60000,
+            age_min = elapsed / 60000,
             "Reaped stale submit task"
         );
     }
+}
+
+/// Get the JSONL path for a task's slot session
+fn get_task_jsonl_path(state: &AppState, task: &missiond_core::types::Task) -> Option<String> {
+    let slot_id = task.slot_id.as_ref()?;
+    let session_uuid = state.mission.db().get_slot_session(slot_id).ok()??;
+    let conv = state.mission.db().get_conversation(&session_uuid).ok()??;
+    conv.jsonl_path
 }
 
 /// Threshold for considering the memory slot stuck (10 minutes).
@@ -5908,15 +5984,29 @@ async fn main() -> Result<()> {
                         }
 
                         // Close Running submit tasks assigned to this slot when it returns to Idle.
-                        // Minimum execution time: tasks running < 10s are NOT auto-closed,
+                        // Minimum execution time: tasks running < 30s are NOT auto-closed,
                         // because the slot may have just given a brief acknowledgment before
                         // starting multi-step work. The 15-min reaper handles the fallback.
                         if new_state == SessionState::Idle && prev_state != SessionState::Idle {
                             if let Ok(running_tasks) = state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Running) {
                                 let now = chrono::Utc::now().timestamp_millis();
                                 const MIN_EXECUTION_MS: i64 = 30_000; // 30 seconds minimum (MiniMax M2.5 needs longer to start tool calls)
-                                // Get last response from this slot (if any)
-                                let last_resp = state.slot_last_responses.write().await.remove(slot_id.as_str());
+                                // Get PTY last response as fallback
+                                let pty_resp = state.slot_last_responses.write().await.remove(slot_id.as_str());
+                                // Try JSONL extraction for more accurate result
+                                let jsonl_resp = match state.mission.db().get_slot_session(slot_id.as_str()) {
+                                    Ok(Some(session_uuid)) => {
+                                        match state.mission.db().get_conversation(&session_uuid) {
+                                            Ok(Some(conv)) => {
+                                                if let Some(ref jsonl_path) = conv.jsonl_path {
+                                                    missiond_core::extract_last_assistant_text(std::path::Path::new(jsonl_path)).await
+                                                } else { None }
+                                            }
+                                            _ => None,
+                                        }
+                                    }
+                                    _ => None,
+                                };
                                 for task in &running_tasks {
                                     if task.slot_id.as_deref() == Some(slot_id.as_str()) {
                                         let started = task.started_at.unwrap_or(task.created_at);
@@ -5928,7 +6018,15 @@ async fn main() -> Result<()> {
                                             );
                                             continue;
                                         }
-                                        let result_text = last_resp.clone().unwrap_or_else(|| "completed".to_string());
+                                        // Prefer JSONL result > PTY result > default
+                                        let result_text = jsonl_resp.clone()
+                                            .or_else(|| {
+                                                if pty_resp.is_some() {
+                                                    warn!(task_id = %task.id, "JSONL result unavailable, falling back to PTY");
+                                                }
+                                                pty_resp.clone()
+                                            })
+                                            .unwrap_or_else(|| "completed".to_string());
                                         // Safe UTF-8 truncation to 4KB
                                         let result_text = if result_text.len() > 4096 {
                                             let mut end = 4096;
@@ -5946,7 +6044,9 @@ async fn main() -> Result<()> {
                                                 ..Default::default()
                                             },
                                         );
-                                        info!(task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed, "Submit task closed: slot returned to Idle");
+                                        info!(task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,
+                                            jsonl_result = jsonl_resp.is_some(),
+                                            "Submit task closed: slot returned to Idle");
                                     }
                                 }
                             }

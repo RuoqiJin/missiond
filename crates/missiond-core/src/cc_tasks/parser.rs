@@ -61,6 +61,138 @@ where
     Ok(())
 }
 
+/// Extract the last assistant text from a JSONL file.
+/// Reads from end of file for efficiency (avoids loading entire file).
+/// Returns None if no assistant text found or file is unreadable.
+pub async fn extract_last_assistant_text(file_path: &Path) -> Option<String> {
+    let file = fs::File::open(file_path).await.ok()?;
+    let metadata = file.metadata().await.ok()?;
+    let file_size = metadata.len();
+    if file_size == 0 {
+        return None;
+    }
+
+    // Read last 64KB chunk from end — sufficient for most assistant responses
+    const TAIL_SIZE: u64 = 64 * 1024;
+    let seek_pos = file_size.saturating_sub(TAIL_SIZE);
+    let mut reader = BufReader::new(file);
+    reader.seek(SeekFrom::Start(seek_pos)).await.ok()?;
+
+    // If we seeked into the middle of a line, skip the partial first line
+    if seek_pos > 0 {
+        let mut partial = String::new();
+        reader.read_line(&mut partial).await.ok()?;
+    }
+
+    let mut last_assistant_text: Option<String> = None;
+    let mut lines = reader.lines();
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Parse line — skip broken/half-written lines
+        let msg: CCMessageLine = match serde_json::from_str(&line) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if msg.message.role != "assistant" {
+            continue;
+        }
+        // Extract text from content (string or array of content blocks)
+        if let Some(text) = extract_text_from_content(&msg.message.content) {
+            if !text.is_empty() {
+                last_assistant_text = Some(text);
+            }
+        }
+    }
+
+    last_assistant_text
+}
+
+/// Extract text from Claude message content value.
+/// Content can be a plain string or an array of content blocks.
+fn extract_text_from_content(content: &serde_json::Value) -> Option<String> {
+    match content {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(blocks) => {
+            let mut texts = Vec::new();
+            for block in blocks {
+                if let Some(block_type) = block.get("type").and_then(|t| t.as_str()) {
+                    if block_type == "text" {
+                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                            texts.push(text.to_string());
+                        }
+                    }
+                }
+            }
+            if texts.is_empty() {
+                None
+            } else {
+                Some(texts.join("\n"))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Check if a JSONL file has a completed turn (turn_duration) with no subsequent user message.
+/// Used as a compensating signal when PTY state machine misses Idle events (e.g. after compaction).
+/// Reads from end of file for efficiency.
+pub async fn jsonl_has_completed_turn(file_path: &Path) -> bool {
+    let file = match fs::File::open(file_path).await {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let metadata = match file.metadata().await {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    let file_size = metadata.len();
+    if file_size == 0 {
+        return false;
+    }
+
+    // Read last 32KB — turn_duration + any trailing user message should fit
+    const TAIL_SIZE: u64 = 32 * 1024;
+    let seek_pos = file_size.saturating_sub(TAIL_SIZE);
+    let mut reader = BufReader::new(file);
+    if reader.seek(SeekFrom::Start(seek_pos)).await.is_err() {
+        return false;
+    }
+    // Skip partial first line if we seeked into the middle
+    if seek_pos > 0 {
+        let mut partial = String::new();
+        let _ = reader.read_line(&mut partial).await;
+    }
+
+    let mut saw_turn_duration = false;
+    let mut saw_user_after = false;
+    let mut lines = reader.lines();
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let val: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue, // skip half-written lines
+        };
+        let msg_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let subtype = val.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+
+        if msg_type == "system" && subtype == "turn_duration" {
+            saw_turn_duration = true;
+            saw_user_after = false; // reset — only care about user messages AFTER this
+        } else if saw_turn_duration && (msg_type == "human" || msg_type == "user") {
+            saw_user_after = true; // new user message sent after turn completed — turn is not final
+        }
+    }
+
+    // Turn completed and no new user message followed
+    saw_turn_duration && !saw_user_after
+}
+
 /// Convert index entry to CCSession with tasks
 pub async fn entry_to_session(entry: &CCSessionIndexEntry) -> CCSession {
     let tasks = parse_last_todos(Path::new(&entry.full_path), 100).await;
