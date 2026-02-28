@@ -47,6 +47,11 @@ pub enum WatcherEvent {
         jsonl_path: String,
         messages: Vec<CCMessageLine>,
     },
+    /// New system events detected in a JSONL file (progress, system, queue-operation, etc.)
+    NewEvents {
+        session_id: String,
+        events: Vec<serde_json::Value>,
+    },
 }
 
 /// Claude Code Tasks Watcher
@@ -353,14 +358,14 @@ impl CCTasksWatcher {
                             .map(|p| p.to_string_lossy().to_string())
                             .unwrap_or_default();
 
-                        // Still emit NewMessages even without a registered session
+                        // Still emit NewMessages/NewEvents even without a registered session
                         let from_pos = {
                             let positions = file_positions.read().await;
                             positions.get(&file_path_str).copied().unwrap_or(0)
                         };
 
-                        if let Ok((new_lines, new_pos)) =
-                            read_new_lines(file_path, from_pos).await
+                        if let Ok((raw_lines, new_pos)) =
+                            read_new_lines_raw(file_path, from_pos).await
                         {
                             if new_pos > from_pos {
                                 file_positions
@@ -368,22 +373,43 @@ impl CCTasksWatcher {
                                     .await
                                     .insert(file_path_str.clone(), new_pos);
 
-                                let messages: Vec<CCMessageLine> = new_lines
-                                    .into_iter()
-                                    .filter(|m| {
-                                        matches!(
-                                            m.message_type.as_str(),
-                                            "user" | "assistant" | "tool_result" | "tool_use"
-                                        )
-                                    })
-                                    .collect();
+                                let mut messages: Vec<CCMessageLine> = Vec::new();
+                                let mut events: Vec<serde_json::Value> = Vec::new();
+
+                                for val in raw_lines {
+                                    let msg_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                    match msg_type {
+                                        "user" | "assistant" | "tool_result" | "tool_use" => {
+                                            let raw_backup = val.clone();
+                                            match serde_json::from_value::<CCMessageLine>(val) {
+                                                Ok(msg) => messages.push(msg),
+                                                Err(e) => {
+                                                    warn!(error = %e, "JSONL message parse failed, demoting to event");
+                                                    events.push(raw_backup);
+                                                }
+                                            }
+                                        }
+                                        "progress" | "system" | "queue-operation" | "file-history-snapshot" => {
+                                            events.push(val);
+                                        }
+                                        _ => {
+                                            events.push(val);
+                                        }
+                                    }
+                                }
 
                                 if !messages.is_empty() {
                                     let _ = event_tx.send(WatcherEvent::NewMessages {
-                                        session_id,
+                                        session_id: session_id.clone(),
                                         project_path,
-                                        jsonl_path: file_path_str,
+                                        jsonl_path: file_path_str.clone(),
                                         messages,
+                                    });
+                                }
+                                if !events.is_empty() {
+                                    let _ = event_tx.send(WatcherEvent::NewEvents {
+                                        session_id,
+                                        events,
                                     });
                                 }
                             }
@@ -401,23 +427,40 @@ impl CCTasksWatcher {
             positions.get(&file_path_str).copied().unwrap_or(0)
         };
 
-        if let Ok((new_lines, new_pos)) = read_new_lines(file_path, from_pos).await {
+        if let Ok((raw_lines, new_pos)) = read_new_lines_raw(file_path, from_pos).await {
             if new_pos > from_pos {
                 file_positions
                     .write()
                     .await
                     .insert(file_path_str.clone(), new_pos);
 
-                // Filter to conversation-relevant messages (incl. tool_use for progress tracking)
-                let messages: Vec<CCMessageLine> = new_lines
-                    .into_iter()
-                    .filter(|m| {
-                        matches!(
-                            m.message_type.as_str(),
-                            "user" | "assistant" | "tool_result" | "tool_use"
-                        )
-                    })
-                    .collect();
+                // Route by message type: conversation messages vs system events
+                let mut messages: Vec<CCMessageLine> = Vec::new();
+                let mut events: Vec<serde_json::Value> = Vec::new();
+
+                for val in raw_lines {
+                    let msg_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    match msg_type {
+                        "user" | "assistant" | "tool_result" | "tool_use" => {
+                            // Clone before from_value (which consumes) so we can demote on failure
+                            let raw_backup = val.clone();
+                            match serde_json::from_value::<CCMessageLine>(val) {
+                                Ok(msg) => messages.push(msg),
+                                Err(e) => {
+                                    warn!(error = %e, "JSONL message parse failed, demoting to event");
+                                    events.push(raw_backup);
+                                }
+                            }
+                        }
+                        "progress" | "system" | "queue-operation" | "file-history-snapshot" => {
+                            events.push(val);
+                        }
+                        _ => {
+                            // Unknown type — preserve as event for future compatibility
+                            events.push(val);
+                        }
+                    }
+                }
 
                 if !messages.is_empty() {
                     let _ = event_tx.send(WatcherEvent::NewMessages {
@@ -425,6 +468,12 @@ impl CCTasksWatcher {
                         project_path: session.project_path.clone(),
                         jsonl_path: file_path_str.clone(),
                         messages,
+                    });
+                }
+                if !events.is_empty() {
+                    let _ = event_tx.send(WatcherEvent::NewEvents {
+                        session_id: session.session_id.clone(),
+                        events,
                     });
                 }
             }

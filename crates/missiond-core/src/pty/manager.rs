@@ -212,13 +212,47 @@ impl PTYManager {
                 .ok_or_else(|| anyhow!("Slot not initialized: {}", slot.id))?
         };
 
-        // Check for existing running session
+        // Idempotent spawn: if session claims "running" but process is dead, clean up and proceed
         {
             let sessions = self.sessions.read().await;
             if let Some(session) = sessions.get(&slot.id) {
-                let session = session.read().await;
-                if session.is_running() {
-                    return Err(anyhow!("PTY session already running: {}", slot.id));
+                let session_guard = session.read().await;
+                if session_guard.is_running() {
+                    // Verify the process is actually alive
+                    if let Some(pid) = session_guard.pid().await {
+                        let alive = tokio::process::Command::new("kill")
+                            .args(["-0", &pid.to_string()])
+                            .output()
+                            .await
+                            .map(|o| o.status.success())
+                            .unwrap_or(false);
+                        if alive {
+                            return Err(anyhow!("PTY session already running: {}", slot.id));
+                        }
+                        // Process is dead (zombie) — fall through to clean up
+                        warn!(slot_id = %slot.id, pid = pid, "PTY session claims running but process is dead, cleaning up");
+                    }
+                    // Drop read guard before acquiring write
+                    drop(session_guard);
+                    drop(sessions);
+                    // Clean up zombie session
+                    let mut sessions_w = self.sessions.write().await;
+                    if let Some(session) = sessions_w.remove(&slot.id) {
+                        let mut s = session.write().await;
+                        let _ = s.close().await;
+                    }
+                    // Update agent_info
+                    let mut agent_info = self.agent_info.write().await;
+                    if let Some(info) = agent_info.get_mut(&slot.id) {
+                        info.state = SessionState::Exited;
+                        info.pid = None;
+                    }
+                } else {
+                    // Session exists but not running — clean it up
+                    drop(session_guard);
+                    drop(sessions);
+                    let mut sessions_w = self.sessions.write().await;
+                    sessions_w.remove(&slot.id);
                 }
             }
         }

@@ -613,6 +613,9 @@ pub struct SkillTopic {
     /// Phase 2: JSON-serialized SkillRequires (dependency declarations)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requires_json: Option<String>,
+    /// Phase 3: JSON-serialized Vec<SkillAction> (executable actions)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actions_json: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -724,6 +727,20 @@ pub struct ConversationMessage {
     pub timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<String>,
+}
+
+/// A non-dialog system event from JSONL (turn_duration, compact_boundary, hook_progress, etc.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationEvent {
+    pub id: i64,
+    pub session_id: String,
+    pub event_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_data: Option<String>,
+    pub timestamp: String,
 }
 
 // ============ Slot Task History ============

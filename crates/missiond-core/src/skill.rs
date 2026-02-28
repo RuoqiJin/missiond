@@ -81,6 +81,63 @@ pub struct WorkflowBlock {
 
 fn default_workflow_type() -> String { "sequential".to_string() }
 
+/// Workflow execution result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status")]
+pub enum WorkflowResult {
+    /// Dry-run preview of steps
+    #[serde(rename = "preview")]
+    Preview { steps: Vec<WorkflowStepPreview> },
+    /// Execution completed successfully
+    #[serde(rename = "success")]
+    Success { steps_completed: usize, results: Vec<WorkflowStepResult> },
+    /// Execution failed at a step
+    #[serde(rename = "failed")]
+    Failed { steps_completed: usize, error_step: usize, error: String, results: Vec<WorkflowStepResult> },
+    /// Waiting for user approval
+    #[serde(rename = "pending_approval")]
+    PendingApproval { action_id: String, skill: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowStepPreview {
+    pub name: Option<String>,
+    pub tool: String,
+    pub params: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowStepResult {
+    pub name: Option<String>,
+    pub tool: String,
+    pub success: bool,
+    pub output: String,
+}
+
+/// Resolve `${var}` references in a JSON value using a context map
+pub fn resolve_vars(value: &serde_json::Value, context: &std::collections::HashMap<String, String>) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(s) => {
+            let mut result = s.clone();
+            for (key, val) in context {
+                result = result.replace(&format!("${{{}}}", key), val);
+            }
+            serde_json::Value::String(result)
+        }
+        serde_json::Value::Object(map) => {
+            let new_map: serde_json::Map<String, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), resolve_vars(v, context)))
+                .collect();
+            serde_json::Value::Object(new_map)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(|v| resolve_vars(v, context)).collect())
+        }
+        other => other.clone(),
+    }
+}
+
 /// YAML frontmatter structure (for deserialization)
 #[derive(Debug, Deserialize)]
 struct Frontmatter {
@@ -313,6 +370,7 @@ fn parse_skill_file(path: &Path) -> Option<SkillMeta> {
         allowed_tools: fm.allowed_tools,
         path: path.to_path_buf(),
         requires: fm.requires,
+        actions: fm.actions,
     })
 }
 
@@ -338,6 +396,76 @@ fn strip_frontmatter(content: &str) -> String {
     } else {
         content.to_string()
     }
+}
+
+/// Parse workflow blocks from skill content body.
+/// Extracts ```workflow code fences and parses YAML content into WorkflowBlock structs.
+pub fn parse_workflow_blocks(content: &str) -> Vec<WorkflowBlock> {
+    let mut blocks = Vec::new();
+    let mut in_workflow = false;
+    let mut header_line = String::new();
+    let mut yaml_buf = String::new();
+
+    for line in content.lines() {
+        if !in_workflow {
+            let trimmed = line.trim();
+            if trimmed.starts_with("```workflow") {
+                in_workflow = true;
+                // Extract header attributes: ```workflow id="deploy_backend" type="sequential"
+                header_line = trimmed["```workflow".len()..].trim().to_string();
+                yaml_buf.clear();
+            }
+        } else if line.trim() == "```" {
+            // End of workflow block — parse it
+            in_workflow = false;
+            if let Some(block) = parse_single_workflow(&header_line, &yaml_buf) {
+                blocks.push(block);
+            } else {
+                warn!(header = %header_line, "Failed to parse workflow block");
+            }
+        } else {
+            yaml_buf.push_str(line);
+            yaml_buf.push('\n');
+        }
+    }
+
+    blocks
+}
+
+/// Parse a single workflow block from header attributes + YAML body
+fn parse_single_workflow(header: &str, yaml_body: &str) -> Option<WorkflowBlock> {
+    // Parse header key="value" pairs
+    let id = extract_attr(header, "id")?;
+    let workflow_type = extract_attr(header, "type").unwrap_or_else(|| "sequential".to_string());
+
+    // Parse YAML body for steps
+    #[derive(Deserialize)]
+    struct WorkflowYaml {
+        #[serde(default)]
+        steps: Vec<WorkflowStep>,
+    }
+
+    let parsed: WorkflowYaml = serde_yaml::from_str(yaml_body).ok()?;
+
+    if parsed.steps.is_empty() || parsed.steps.len() > 10 {
+        warn!(id = %id, steps = parsed.steps.len(), "Workflow must have 1-10 steps");
+        return None;
+    }
+
+    Some(WorkflowBlock {
+        id,
+        r#type: workflow_type,
+        steps: parsed.steps,
+    })
+}
+
+/// Extract key="value" from header string
+fn extract_attr(header: &str, key: &str) -> Option<String> {
+    let pattern = format!("{}=\"", key);
+    let start = header.find(&pattern)? + pattern.len();
+    let rest = &header[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 fn register_lookup(lookup: &mut HashMap<String, usize>, meta: &SkillMeta, idx: usize) {
@@ -464,6 +592,11 @@ pub fn ingest_skills(db: &crate::db::MissionDB, skills_dir: &Path) -> usize {
             .as_ref()
             .and_then(|r| serde_json::to_string(r).ok());
 
+        let actions_json = skill
+            .actions
+            .as_ref()
+            .and_then(|a| serde_json::to_string(a).ok());
+
         let file_path_str = skill.path.to_string_lossy().to_string();
 
         // Upsert topic
@@ -474,6 +607,7 @@ pub fn ingest_skills(db: &crate::db::MissionDB, skills_dir: &Path) -> usize {
             skill.allowed_tools.as_deref(),
             &file_path_str,
             requires_json.as_deref(),
+            actions_json.as_deref(),
         ) {
             warn!(topic = %skill.name, error = %e, "Failed to upsert skill topic");
             continue;

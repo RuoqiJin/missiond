@@ -767,6 +767,47 @@ pub fn all_tools() -> Vec<ToolDefinition> {
             }),
         ),
 
+        // ===== Skill Execution (Phase 3) =====
+        ToolDefinition::new(
+            "mission_skill_exec",
+            "执行 Skill 中定义的 workflow。顺序执行 MCP 工具步骤，支持 dry_run 预览。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "skill": {
+                        "type": "string",
+                        "description": "Skill 名称（如 backend-deploy）"
+                    },
+                    "action": {
+                        "type": "string",
+                        "description": "Action ID（对应 workflow block id）"
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "预览模式，只返回步骤不执行（默认 false）"
+                    },
+                    "params": {
+                        "type": "object",
+                        "description": "运行时参数覆盖（注入为 ${key} 变量）"
+                    }
+                },
+                "required": ["skill", "action"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_skill_actions",
+            "列出可执行的 Skill Actions。可按 skill 名筛选。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "skill": {
+                        "type": "string",
+                        "description": "按 Skill 名筛选（空=列出全部）"
+                    }
+                }
+            }),
+        ),
+
         // ===== Infrastructure Registry =====
         ToolDefinition::new(
             "mission_infra_list",
