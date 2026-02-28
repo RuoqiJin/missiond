@@ -7556,27 +7556,59 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Autopilot scheduler + IPC server via select
-    let mut autopilot_interval = tokio::time::interval(std::time::Duration::from_secs(60));
-    info!("Autopilot scheduler started (60s interval)");
-
-    loop {
-        tokio::select! {
-            result = listener.accept() => {
-                let stream = result?;
-                let reader = BufReader::new(stream);
-                let conn_state = state.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_ipc_connection(conn_state, reader).await {
-                        warn!(error = %e, "IPC connection error");
+    // --- P0: IPC listener in dedicated task (never starved by other work) ---
+    // Previously inside the main select! loop — a single slow branch (e.g. 120s PTY spawn)
+    // would starve accept(), causing Board 502 timeouts. Now fully isolated.
+    {
+        let ipc_state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok(stream) => {
+                        let reader = BufReader::new(stream);
+                        let conn_state = ipc_state.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_ipc_connection(conn_state, reader).await {
+                                warn!(error = %e, "IPC connection error");
+                            }
+                        });
                     }
-                });
+                    Err(e) => {
+                        // Previously used `result?` which killed the entire event loop on
+                        // transient errors (e.g. fd exhaustion). Now we log and retry.
+                        warn!(error = %e, "IPC accept error, retrying in 100ms");
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }
             }
-            _ = autopilot_interval.tick() => {
-                if let Err(e) = autopilot_tick(&state).await {
+        });
+    }
+    info!("IPC listener started (isolated task)");
+
+    // --- P1: Autopilot in dedicated task (long operations won't starve IPC) ---
+    // autopilot_tick() calls check_slot_context_levels() which can block up to
+    // N × 123s (3s kill wait + 120s spawn timeout per slot). Running in its own
+    // task ensures the event-driven loop below remains responsive.
+    {
+        let auto_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if let Err(e) = autopilot_tick(&auto_state).await {
                     warn!(error = %e, "Autopilot tick failed");
                 }
             }
+        });
+    }
+    info!("Autopilot scheduler started (60s interval, isolated task)");
+
+    // Event-driven loop: handles notifications and event streams.
+    // IPC accept and autopilot are now isolated — this loop only processes
+    // lightweight event-driven work.
+    loop {
+        tokio::select! {
             _ = state.extraction_notify.notified() => {
                 // Fast lane extraction completed — run unified scheduler
                 if !state.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
