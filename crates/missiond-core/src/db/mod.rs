@@ -14,7 +14,7 @@ use crate::types::{
     CreateAgentQuestionInput, CreateBoardTaskInput, EventType, InboxMessage, KBOperation,
     KBOperationRow, KBRememberInput, KBRememberResult, KnowledgeEntry, SkillBlock,
     SkillSearchResult, SkillTopic, SlotTask, Task, TaskEvent, TaskStatus, TaskUpdate,
-    UpdateBoardTaskInput,
+    ToolCallRecord, UpdateBoardTaskInput,
 };
 
 const SCHEMA: &str = r#"
@@ -771,6 +771,28 @@ impl MissionDB {
             );
             CREATE INDEX IF NOT EXISTS idx_conv_event_session ON conversation_events(session_id);
             CREATE INDEX IF NOT EXISTS idx_conv_event_type ON conversation_events(event_type);"
+        )?;
+
+        // Conversation tool calls — structured extraction of tool_use/tool_result pairs
+        // for audit trail (Summary-to-Drilldown architecture)
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS conversation_tool_calls (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                message_id INTEGER,
+                tool_name TEXT NOT NULL,
+                input_summary TEXT,
+                raw_input TEXT,
+                output_summary TEXT,
+                raw_output TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                duration_ms INTEGER,
+                timestamp TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES conversations(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_tc_session ON conversation_tool_calls(session_id);
+            CREATE INDEX IF NOT EXISTS idx_tc_name ON conversation_tool_calls(tool_name);
+            CREATE INDEX IF NOT EXISTS idx_tc_status ON conversation_tool_calls(status);"
         )?;
 
         Ok(())
@@ -3559,6 +3581,145 @@ impl MissionDB {
         let mut msgs = Vec::new();
         for m in rows { msgs.push(m?); }
         Ok(msgs)
+    }
+
+    // ============ Conversation Tool Calls (Audit) ============
+
+    /// Insert a tool call record (from tool_use block in assistant message)
+    pub fn insert_tool_call(&self, tc: &ToolCallRecord) -> SqliteResult<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT OR IGNORE INTO conversation_tool_calls (id, session_id, message_id, tool_name, input_summary, raw_input, output_summary, raw_output, status, duration_ms, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                tc.id, tc.session_id, tc.message_id, tc.tool_name,
+                tc.input_summary, tc.raw_input, tc.output_summary, tc.raw_output,
+                tc.status, tc.duration_ms, tc.timestamp,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Batch insert tool call records
+    pub fn insert_tool_calls_batch(&self, calls: &[ToolCallRecord]) -> SqliteResult<usize> {
+        if calls.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn();
+        let tx = conn.unchecked_transaction()?;
+        let mut count = 0usize;
+        for tc in calls {
+            tx.execute(
+                "INSERT OR IGNORE INTO conversation_tool_calls (id, session_id, message_id, tool_name, input_summary, raw_input, output_summary, raw_output, status, duration_ms, timestamp)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    tc.id, tc.session_id, tc.message_id, tc.tool_name,
+                    tc.input_summary, tc.raw_input, tc.output_summary, tc.raw_output,
+                    tc.status, tc.duration_ms, tc.timestamp,
+                ],
+            )?;
+            if tx.changes() > 0 {
+                count += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(count)
+    }
+
+    /// Update tool call with output (from tool_result block in user message)
+    pub fn update_tool_call_output(&self, tool_use_id: &str, output_summary: &str, raw_output: &str, status: &str) -> SqliteResult<bool> {
+        let conn = self.conn();
+        let changes = conn.execute(
+            "UPDATE conversation_tool_calls SET output_summary = ?1, raw_output = ?2, status = ?3 WHERE id = ?4",
+            params![output_summary, raw_output, status, tool_use_id],
+        )?;
+        Ok(changes > 0)
+    }
+
+    /// Get tool calls for a session (for audit trace)
+    pub fn get_tool_calls_by_session(&self, session_id: &str, tool_filter: Option<&[String]>, limit: i64) -> SqliteResult<Vec<ToolCallRecord>> {
+        let conn = self.read_conn();
+        let mut calls = Vec::new();
+        if let Some(filter) = tool_filter {
+            if filter.is_empty() {
+                return Ok(calls);
+            }
+            let placeholders: Vec<String> = (0..filter.len()).map(|i| format!("?{}", i + 2)).collect();
+            let sql = format!(
+                "SELECT * FROM conversation_tool_calls WHERE session_id = ?1 AND tool_name IN ({}) ORDER BY rowid ASC LIMIT ?{}",
+                placeholders.join(","),
+                filter.len() + 2
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            params_vec.push(Box::new(session_id.to_string()));
+            for f in filter {
+                params_vec.push(Box::new(f.clone()));
+            }
+            params_vec.push(Box::new(limit));
+            let refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+            let rows = stmt.query_map(refs.as_slice(), |row| Self::row_to_tool_call(row))?;
+            for r in rows { calls.push(r?); }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT * FROM conversation_tool_calls WHERE session_id = ?1 ORDER BY rowid ASC LIMIT ?2"
+            )?;
+            let rows = stmt.query_map(params![session_id, limit], |row| Self::row_to_tool_call(row))?;
+            for r in rows { calls.push(r?); }
+        }
+        Ok(calls)
+    }
+
+    /// Get a single tool call by ID (for audit detail drilldown)
+    pub fn get_tool_call_by_id(&self, tool_use_id: &str) -> SqliteResult<Option<ToolCallRecord>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare("SELECT * FROM conversation_tool_calls WHERE id = ?1")?;
+        let mut rows = stmt.query(params![tool_use_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::row_to_tool_call(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get tool call statistics for a session
+    pub fn get_tool_call_stats(&self, session_id: &str) -> SqliteResult<Vec<(String, i64, i64, i64)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT tool_name,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
+                    SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_count
+             FROM conversation_tool_calls WHERE session_id = ?1
+             GROUP BY tool_name ORDER BY total DESC"
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut stats = Vec::new();
+        for r in rows { stats.push(r?); }
+        Ok(stats)
+    }
+
+    fn row_to_tool_call(row: &rusqlite::Row) -> SqliteResult<ToolCallRecord> {
+        Ok(ToolCallRecord {
+            id: row.get("id")?,
+            session_id: row.get("session_id")?,
+            message_id: row.get("message_id")?,
+            tool_name: row.get("tool_name")?,
+            input_summary: row.get("input_summary")?,
+            raw_input: row.get("raw_input")?,
+            output_summary: row.get("output_summary")?,
+            raw_output: row.get("raw_output")?,
+            status: row.get("status")?,
+            duration_ms: row.get("duration_ms")?,
+            timestamp: row.get("timestamp")?,
+        })
     }
 
     /// Batch insert conversation events (system events from JSONL: turn_duration, etc.)
