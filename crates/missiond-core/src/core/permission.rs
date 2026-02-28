@@ -225,7 +225,7 @@ impl PermissionPolicy {
             return true;
         }
 
-        // Prefix wildcard: xjp_secret_*
+        // Prefix wildcard: mcp_secret_*
         if pattern.ends_with('*') {
             let prefix = &pattern[..pattern.len() - 1];
             if tool_name.starts_with(prefix) {
@@ -241,7 +241,7 @@ impl PermissionPolicy {
             }
         }
 
-        // Middle wildcard: xjp_*_get
+        // Middle wildcard: mcp_*_get
         if pattern.contains('*') {
             // Convert pattern to regex
             let regex_pattern = format!("^{}$", pattern.replace('*', ".*"));

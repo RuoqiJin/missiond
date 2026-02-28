@@ -15,7 +15,7 @@
 //!
 //! # Usage
 //!
-//! Add to ~/.xjp-mission/config.yaml:
+//! Add to ~/.missiond/config.yaml:
 //! ```yaml
 //! sync:
 //!   upstream_url: "ws://relay.example.com:9121/sync"
