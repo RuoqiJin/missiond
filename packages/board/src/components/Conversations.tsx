@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Search, RefreshCw, MessageSquare, User, Bot, Wrench, ArrowLeft, ChevronRight, ChevronDown, GitBranch, Terminal, Brain } from 'lucide-react';
+import { Search, RefreshCw, MessageSquare, User, Bot, Wrench, ArrowLeft, ChevronRight, ChevronDown, GitBranch, Terminal, Brain, Timer, Layers, Zap } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 
@@ -33,6 +33,14 @@ interface ConversationMessage {
   metadata: string | null;
 }
 
+interface ConversationEvent {
+  id: number;
+  sessionId: string;
+  eventType: string;
+  content: string | null;
+  timestamp: string;
+}
+
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const mins = Math.floor(diff / 60000);
@@ -62,6 +70,8 @@ const ROLE_CONFIG: Record<string, { icon: typeof User; color: string; label: str
   tool_use: { icon: Wrench, color: 'text-amber-400', label: '工具调用' },
   tool_result: { icon: Wrench, color: 'text-neutral-500', label: '工具结果' },
   thinking: { icon: Brain, color: 'text-purple-400', label: '思考' },
+  agent_user: { icon: User, color: 'text-cyan-400', label: 'Agent 用户' },
+  agent_assistant: { icon: Bot, color: 'text-teal-400', label: 'Agent AI' },
 };
 
 function ImageBlock({ jsonlPath, messageUuid, imageIndex }: {
@@ -197,6 +207,29 @@ function MessageBubble({ msg, jsonlPath }: { msg: ConversationMessage; jsonlPath
   );
 }
 
+/** Render a system event inline in the message timeline */
+function EventBubble({ event }: { event: ConversationEvent }) {
+  const { icon: Icon, color, label } = (() => {
+    const t = event.eventType;
+    if (t === 'turn_duration') return { icon: Timer, color: 'text-neutral-500', label: 'Turn' };
+    if (t === 'compact_boundary') return { icon: Layers, color: 'text-yellow-500', label: 'Context 压缩' };
+    if (t.startsWith('queue:')) return { icon: Zap, color: 'text-neutral-600', label: t.replace('queue:', 'Queue: ') };
+    if (t === 'hook_progress') return { icon: Zap, color: 'text-neutral-600', label: 'Hook' };
+    return { icon: Terminal, color: 'text-neutral-600', label: t };
+  })();
+
+  return (
+    <div className="flex items-center gap-2 py-0.5 opacity-50 hover:opacity-80 transition-opacity">
+      <Icon className={cn('w-3 h-3 flex-shrink-0', color)} />
+      <span className={cn('text-[10px] font-mono', color)}>{label}</span>
+      {event.content && (
+        <span className="text-[10px] text-neutral-600 truncate">{event.content}</span>
+      )}
+      <span className="text-[10px] text-neutral-700 ml-auto flex-shrink-0">{formatTime(event.timestamp)}</span>
+    </div>
+  );
+}
+
 function ConversationListItem({
   conv,
   active,
@@ -294,6 +327,7 @@ function ConversationListItem({
 export function Conversations() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
+  const [events, setEvents] = useState<ConversationEvent[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [jsonlPath, setJsonlPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -336,10 +370,12 @@ export function Conversations() {
       if (res.ok) {
         const data = await res.json();
         setMessages(data.messages || []);
+        setEvents(data.events || []);
         setJsonlPath(data.conversation?.jsonlPath || null);
       }
     } catch {
       setMessages([]);
+      setEvents([]);
       setJsonlPath(null);
     }
     setLoadingMessages(false);
@@ -378,21 +414,37 @@ export function Conversations() {
     [conversations, selectedId],
   );
 
-  // Group messages by date
-  const groupedMessages = useMemo(() => {
-    const groups: { date: string; messages: ConversationMessage[] }[] = [];
+  // Merge messages and important events into a unified timeline grouped by date
+  type TimelineItem = { type: 'message'; data: ConversationMessage } | { type: 'event'; data: ConversationEvent };
+  const groupedTimeline = useMemo(() => {
+    // Filter events: only show important ones inline (turn_duration, compact_boundary, queue ops)
+    // Skip high-frequency noise (bash_progress, mcp_progress, hook_progress, waiting_for_task)
+    const importantEvents = events.filter((e) => {
+      const t = e.eventType;
+      return t === 'turn_duration' || t === 'compact_boundary' || t.startsWith('queue:');
+    });
+
+    // Merge into timeline sorted by timestamp
+    const timeline: TimelineItem[] = [
+      ...messages.map((m) => ({ type: 'message' as const, data: m })),
+      ...importantEvents.map((e) => ({ type: 'event' as const, data: e })),
+    ];
+    timeline.sort((a, b) => new Date(a.data.timestamp).getTime() - new Date(b.data.timestamp).getTime());
+
+    // Group by date
+    const groups: { date: string; items: TimelineItem[] }[] = [];
     let currentDate = '';
-    for (const msg of messages) {
-      const date = formatDate(msg.timestamp);
+    for (const item of timeline) {
+      const date = formatDate(item.data.timestamp);
       if (date !== currentDate) {
         currentDate = date;
-        groups.push({ date, messages: [msg] });
+        groups.push({ date, items: [item] });
       } else {
-        groups[groups.length - 1].messages.push(msg);
+        groups[groups.length - 1].items.push(item);
       }
     }
     return groups;
-  }, [messages]);
+  }, [messages, events]);
 
   const counts = useMemo(() => {
     const active = conversations.filter((c) => c.status === 'active').length;
@@ -621,25 +673,48 @@ export function Conversations() {
               </div>
             </div>
 
-            {/* Messages */}
+            {/* Messages + Events Timeline */}
             <div className="flex-1 overflow-auto px-4 py-2">
               {loadingMessages ? (
                 <div className="text-center py-8 text-neutral-600 text-xs">加载消息...</div>
               ) : messages.length === 0 ? (
                 <div className="text-center py-8 text-neutral-600 text-xs">暂无消息</div>
               ) : (
-                groupedMessages.map((group) => (
-                  <div key={group.date}>
-                    <div className="flex items-center gap-3 my-3">
-                      <div className="flex-1 h-px bg-neutral-800/50" />
-                      <span className="text-[10px] text-neutral-600">{group.date}</span>
-                      <div className="flex-1 h-px bg-neutral-800/50" />
+                <>
+                  {/* Event stats summary */}
+                  {events.length > 0 && (
+                    <div className="flex items-center gap-3 px-1 py-1.5 mb-2 text-[10px] text-neutral-600 border border-neutral-800/50 rounded">
+                      <Layers className="w-3 h-3" />
+                      <span>{events.length} 系统事件</span>
+                      {(() => {
+                        const turns = events.filter((e) => e.eventType === 'turn_duration');
+                        if (turns.length === 0) return null;
+                        const totalMs = turns.reduce((sum, e) => sum + (parseInt(e.content?.replace('ms', '') || '0') || 0), 0);
+                        return <span>{turns.length} turns, 总计 {(totalMs / 1000).toFixed(1)}s</span>;
+                      })()}
+                      {(() => {
+                        const compacts = events.filter((e) => e.eventType === 'compact_boundary').length;
+                        return compacts > 0 ? <span>{compacts} 次压缩</span> : null;
+                      })()}
                     </div>
-                    {group.messages.map((msg) => (
-                      <MessageBubble key={msg.id} msg={msg} jsonlPath={jsonlPath} />
-                    ))}
-                  </div>
-                ))
+                  )}
+                  {groupedTimeline.map((group) => (
+                    <div key={group.date}>
+                      <div className="flex items-center gap-3 my-3">
+                        <div className="flex-1 h-px bg-neutral-800/50" />
+                        <span className="text-[10px] text-neutral-600">{group.date}</span>
+                        <div className="flex-1 h-px bg-neutral-800/50" />
+                      </div>
+                      {group.items.map((item) =>
+                        item.type === 'message' ? (
+                          <MessageBubble key={`msg-${item.data.id}`} msg={item.data as ConversationMessage} jsonlPath={jsonlPath} />
+                        ) : (
+                          <EventBubble key={`evt-${item.data.id}`} event={item.data as ConversationEvent} />
+                        )
+                      )}
+                    </div>
+                  ))}
+                </>
               )}
             </div>
           </>

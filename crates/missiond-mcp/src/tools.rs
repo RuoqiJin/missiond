@@ -1154,7 +1154,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_kb_execute_plan",
-            "执行 KB 操作队列中的 pending 操作。delete 自动执行，merge/distill 建议派发工位。",
+            "执行 KB 操作队列中的 pending 操作。delete/update/category_fix/recategorize 自动执行，merge/distill 派发工位。",
             json!({
                 "type": "object",
                 "properties": {
@@ -1336,6 +1336,10 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     "sinceId": {
                         "type": "integer",
                         "description": "增量拉取：只返回 ID 大于此值的消息"
+                    },
+                    "includeRaw": {
+                        "type": "boolean",
+                        "description": "是否返回完整消息（含 rawContent/model/metadata）。默认 false（精简模式，保护 LLM 上下文）"
                     }
                 },
                 "required": ["sessionId"]
