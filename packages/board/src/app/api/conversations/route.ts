@@ -9,10 +9,19 @@ export async function GET(req: NextRequest) {
     // Get messages for a specific conversation
     if (sessionId) {
       const tail = req.nextUrl.searchParams.get('tail') || '200';
-      const result = await callTool('mission_conversation_get', {
-        sessionId,
-        tail: Number(tail),
-      });
+      // Fetch messages and events in parallel
+      const [msgResult, eventsResult] = await Promise.all([
+        callTool('mission_conversation_get', {
+          sessionId,
+          tail: Number(tail),
+          includeRaw: true,
+        }),
+        callTool('mission_conversation_events', {
+          sessionId,
+          limit: 500,
+        }).catch(() => ({ events: [] })),
+      ]);
+      const result = { ...(msgResult as Record<string, unknown>), events: (eventsResult as Record<string, unknown>)?.events || [] };
       return NextResponse.json(result);
     }
 

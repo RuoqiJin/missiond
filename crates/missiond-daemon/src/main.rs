@@ -2468,9 +2468,23 @@ impl AppState {
                                     Some(missiond_core::types::KBOperation {
                                         operation: operation.to_string(),
                                         target_keys: keys,
-                                        rationale: a.get("reason").and_then(|v| v.as_str())
-                                            .or_else(|| a.get("rationale").and_then(|v| v.as_str()))
-                                            .map(|s| s.to_string()),
+                                        rationale: {
+                                            let reason = a.get("reason").and_then(|v| v.as_str())
+                                                .or_else(|| a.get("rationale").and_then(|v| v.as_str()));
+                                            // For update ops, embed new_entry in rationale JSON
+                                            if operation == "update" || operation == "recategorize" || operation == "category_fix" {
+                                                let mut meta = serde_json::Map::new();
+                                                if let Some(r) = reason {
+                                                    meta.insert("reason".into(), serde_json::json!(r));
+                                                }
+                                                if let Some(ne) = a.get("new_entry") {
+                                                    meta.insert("new_entry".into(), ne.clone());
+                                                }
+                                                Some(serde_json::to_string(&meta).unwrap_or_default())
+                                            } else {
+                                                reason.map(|s| s.to_string())
+                                            }
+                                        },
                                     })
                                 }).collect();
                                 if !ops.is_empty() {
@@ -2562,10 +2576,34 @@ impl AppState {
                             }
                             Ok(format!("Deleted {}/{} keys", deleted, target_keys.len()))
                         }
-                        "category_fix" | "recategorize" => {
-                            // Category fix: target_keys[0] = key, rationale contains new category
-                            // This is a simplification — actual merge logic would be more complex
-                            Ok(format!("Category fix for {} keys (manual execution recommended)", target_keys.len()))
+                        "update" | "category_fix" | "recategorize" => {
+                            // Update category/summary directly from rationale (contains new_entry JSON)
+                            let meta: serde_json::Value = op.rationale.as_deref()
+                                .and_then(|r| serde_json::from_str(r).ok())
+                                .unwrap_or_default();
+                            let new_entry = meta.get("new_entry");
+                            let key = target_keys.first().map(|k| k.as_str())
+                                .or_else(|| new_entry.and_then(|ne| ne.get("key").and_then(|v| v.as_str())));
+                            let category = new_entry.and_then(|ne| ne.get("category").and_then(|v| v.as_str()));
+                            let summary = new_entry.and_then(|ne| ne.get("summary").and_then(|v| v.as_str()));
+
+                            match (key, category) {
+                                (Some(key), Some(cat)) => {
+                                    let input = missiond_core::types::KBRememberInput {
+                                        category: cat.to_string(),
+                                        key: key.to_string(),
+                                        summary: summary.unwrap_or("").to_string(),
+                                        detail: new_entry.and_then(|ne| ne.get("detail").cloned()),
+                                        source: Some("consolidation".to_string()),
+                                        confidence: new_entry.and_then(|ne| ne.get("confidence").and_then(|v| v.as_f64())),
+                                    };
+                                    match self.mission.db().kb_remember(&input) {
+                                        Ok(r) => Ok(format!("Updated key={} category={} action={}", key, cat, r.action)),
+                                        Err(e) => Err(format!("Failed to update: {}", e)),
+                                    }
+                                }
+                                _ => Err("update operation requires new_entry with key and category in rationale".to_string()),
+                            }
                         }
                         "merge" | "distill" => {
                             // Auto-dispatch: fetch entries, build prompt, submit to slot-memory-slow
@@ -3121,31 +3159,50 @@ impl AppState {
                     session_id: String,
                     tail: Option<i64>,
                     since_id: Option<i64>,
+                    include_raw: Option<bool>,
                 }
-                let Args { session_id, tail, since_id } = serde_json::from_value(args)?;
+                let Args { session_id, tail, since_id, include_raw } = serde_json::from_value(args)?;
                 let db = self.mission.db();
                 let conv = db.get_conversation(&session_id)
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 let msgs = db.get_conversation_messages(&session_id, since_id, tail.unwrap_or(50))
                     .map_err(|e| anyhow!("DB error: {}", e))?;
-                // Strip raw_content for LLM consumption (avoid base64 images flooding context)
-                let msgs_lite: Vec<serde_json::Value> = msgs.iter().map(|m| {
-                    serde_json::json!({
-                        "id": m.id,
-                        "role": m.role,
-                        "content": m.content,
-                        "timestamp": m.timestamp,
-                        "messageUuid": m.message_uuid,
-                        "parentUuid": m.parent_uuid,
-                    })
-                }).collect();
+                let messages: Vec<serde_json::Value> = if include_raw.unwrap_or(false) {
+                    // Full messages for frontend (includes rawContent/model/metadata for image rendering)
+                    msgs.iter().map(|m| {
+                        serde_json::json!({
+                            "id": m.id,
+                            "sessionId": m.session_id,
+                            "role": m.role,
+                            "content": m.content,
+                            "rawContent": m.raw_content,
+                            "messageUuid": m.message_uuid,
+                            "parentUuid": m.parent_uuid,
+                            "model": m.model,
+                            "timestamp": m.timestamp,
+                            "metadata": m.metadata,
+                        })
+                    }).collect()
+                } else {
+                    // Lite messages for LLM consumption (strip base64 images to protect context)
+                    msgs.iter().map(|m| {
+                        serde_json::json!({
+                            "id": m.id,
+                            "role": m.role,
+                            "content": m.content,
+                            "timestamp": m.timestamp,
+                            "messageUuid": m.message_uuid,
+                            "parentUuid": m.parent_uuid,
+                        })
+                    }).collect()
+                };
                 // Include child (subagent) conversations summary
                 let children = db.get_child_conversations(&session_id)
                     .unwrap_or_default();
                 let mut result = serde_json::json!({
                     "conversation": conv,
-                    "messages": msgs_lite,
-                    "count": msgs_lite.len(),
+                    "messages": messages,
+                    "count": messages.len(),
                 });
                 if !children.is_empty() {
                     let child_summaries: Vec<serde_json::Value> = children.iter().map(|c| {
@@ -5431,6 +5488,8 @@ async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
     let mut any_dispatched = false;
     // Collect unique roles from queued tasks for auto-spawn
     let queued_roles: HashSet<String> = queued.iter().map(|t| t.role.clone()).collect();
+    // Track slots used in this dispatch round to avoid sending multiple tasks to the same slot
+    let mut used_slots: HashSet<String> = HashSet::new();
 
     for task in &queued {
         let slots = state.mission.list_slots();
@@ -5445,8 +5504,11 @@ async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
                 .collect()
         };
 
-        // Phase 1: Try idle slots
+        // Phase 1: Try idle slots (skip slots already used in this round)
         for slot_id in &candidates {
+            if used_slots.contains(slot_id) {
+                continue;
+            }
             let status = match state.pty.get_status(slot_id).await {
                 Some(s) => s,
                 None => continue,
@@ -5468,6 +5530,7 @@ async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
                         },
                     );
                     info!(task_id = %task.id, slot_id = %slot_id, role = %task.role, "Autopilot: dispatched queued submit task");
+                    used_slots.insert(slot_id.clone());
                     dispatched = true;
                     any_dispatched = true;
                     break;
@@ -7342,6 +7405,7 @@ async fn main() -> Result<()> {
                             if let Ok(running_tasks) = state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Running) {
                                 let now = chrono::Utc::now().timestamp_millis();
                                 const MIN_EXECUTION_MS: i64 = 5_000; // 5 seconds: filter PTY startup noise
+                                const MIN_JSONL_EXECUTION_MS: i64 = 3_000; // 3 seconds: even with JSONL, prevent stale turn confirmation
                                 // Get PTY last response as fallback
                                 let pty_resp = state.slot_last_responses.write().await.remove(slot_id.as_str());
                                 // Try JSONL extraction for more accurate result
@@ -7371,6 +7435,16 @@ async fn main() -> Result<()> {
                                     if task.slot_id.as_deref() == Some(slot_id.as_str()) {
                                         let started = task.started_at.unwrap_or(task.created_at);
                                         let elapsed = now - started;
+                                        // Guard: prevent stale JSONL turn confirmation from closing tasks prematurely.
+                                        // Even with JSONL confirmation, require 3s minimum to ensure the slot
+                                        // has actually started processing THIS task (not a previous extraction).
+                                        if elapsed < MIN_JSONL_EXECUTION_MS {
+                                            debug!(
+                                                task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,
+                                                "Submit task NOT closed: too short even for JSONL ({elapsed}ms < {MIN_JSONL_EXECUTION_MS}ms)"
+                                            );
+                                            continue;
+                                        }
                                         if elapsed < MIN_EXECUTION_MS && !jsonl_confirmed {
                                             debug!(
                                                 task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,
