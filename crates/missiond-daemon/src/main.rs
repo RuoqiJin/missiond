@@ -5957,11 +5957,30 @@ async fn check_realtime_extraction(state: &AppState) {
         match pty.send(MEMORY_SLOT_ID, prompt, 300_000).await {
             Ok(res) => {
                 info!(duration_ms = res.duration_ms, "realtime extraction send() returned");
-                let _ = mission.db().slot_task_set_running(&slot_task_id_clone);
+                // send() blocks until slot finishes and returns to Idle.
+                // Complete extraction directly — don't enter WaitingForSlotIdle
+                // (race condition: Idle transition may have already fired and been
+                // ignored due to phase_age < 3s guard).
                 let mut es = extraction_state.write().await;
-                if es.phase == ExtractionPhase::Sending {
-                    es.phase = ExtractionPhase::WaitingForSlotIdle;
-                    es.phase_started_at = chrono::Utc::now().timestamp();
+                if es.phase == ExtractionPhase::Sending || es.phase == ExtractionPhase::WaitingForSlotIdle {
+                    // Advance watermarks for processed sessions
+                    if !es.watermark_targets.is_empty() {
+                        let db = mission.db();
+                        for (session_id, timestamp) in &es.watermark_targets {
+                            let _ = db.update_realtime_forwarded_at(session_id, timestamp);
+                        }
+                        info!(sessions = es.watermark_targets.len(), "Realtime: advanced watermarks (send-complete)");
+                        es.watermark_targets.clear();
+                    }
+                    // Mark slot task completed
+                    let _ = mission.db().slot_task_set_completed(&slot_task_id_clone, 0);
+                    info!(duration_ms = res.duration_ms, "Realtime extraction complete (send-path)");
+                    es.phase = ExtractionPhase::Idle;
+                    es.active_type = None;
+                    es.current_task_id = None;
+                    es.current_slot_task_id = None;
+                    es.is_checkpoint = false;
+                    es.checkpoint_message_id = None;
                 }
             }
             Err(e) => {
@@ -5974,7 +5993,6 @@ async fn check_realtime_extraction(state: &AppState) {
                 es.current_slot_task_id = None;
                 es.is_checkpoint = false;
                 es.checkpoint_message_id = None;
-                // Watermark not advanced on failure — messages stay pending for retry
                 es.watermark_targets.clear();
             }
         }
@@ -6161,11 +6179,33 @@ async fn check_deep_analysis(state: &AppState) {
             match pty.send(MEMORY_SLOW_SLOT_ID, &prompt, 900_000).await {
                 Ok(res) => {
                     info!(conv_id = %conv_id, duration_ms = res.duration_ms, "Deep analysis send() returned");
-                    let _ = mission.db().slot_task_set_running(&slot_task_id);
+                    // send() blocks until slot finishes — complete directly
                     let mut es = extraction_state.write().await;
-                    if es.phase == ExtractionPhase::Sending {
-                        es.phase = ExtractionPhase::WaitingForSlotIdle;
-                        es.phase_started_at = chrono::Utc::now().timestamp();
+                    if es.phase == ExtractionPhase::Sending || es.phase == ExtractionPhase::WaitingForSlotIdle {
+                        // Mark deep analysis conversation as analyzed
+                        let deep_cid = es.current_deep_conv_id.clone();
+                        let is_ckpt = es.is_checkpoint;
+                        let ckpt_msg_id = es.checkpoint_message_id.take();
+                        if let Some(cid) = &deep_cid {
+                            if is_ckpt {
+                                if let Some(msg_id) = ckpt_msg_id {
+                                    let _ = mission.db().update_deep_checkpoint(cid, msg_id);
+                                    info!(conv_id = %cid, msg_id, "Deep checkpoint: advanced watermark (send-path)");
+                                }
+                            } else {
+                                let _ = mission.db().mark_analysis_complete(cid, CURRENT_ANALYSIS_VERSION);
+                                info!(conv_id = %cid, "Deep analysis: marked complete (send-path)");
+                            }
+                        }
+                        let _ = mission.db().slot_task_set_completed(&slot_task_id, 0);
+                        info!(conv_id = %conv_id, duration_ms = res.duration_ms, "Deep analysis complete (send-path)");
+                        es.phase = ExtractionPhase::Idle;
+                        es.active_type = None;
+                        es.current_task_id = None;
+                        es.current_slot_task_id = None;
+                        es.current_deep_conv_id = None;
+                        es.is_checkpoint = false;
+                        es.checkpoint_message_id = None;
                     }
                 }
                 Err(e) => {
@@ -6284,11 +6324,17 @@ async fn check_kb_consolidation(state: &AppState) {
         match pty.send(MEMORY_SLOW_SLOT_ID, prompt, 900_000).await {
             Ok(res) => {
                 info!(duration_ms = res.duration_ms, "KB consolidation send() returned");
-                let _ = mission.db().slot_task_set_running(&slot_task_id);
+                // send() blocks until slot finishes — complete directly
                 let mut es = extraction_state.write().await;
-                if es.phase == ExtractionPhase::Sending {
-                    es.phase = ExtractionPhase::WaitingForSlotIdle;
-                    es.phase_started_at = chrono::Utc::now().timestamp();
+                if es.phase == ExtractionPhase::Sending || es.phase == ExtractionPhase::WaitingForSlotIdle {
+                    let _ = mission.db().slot_task_set_completed(&slot_task_id, 0);
+                    info!(duration_ms = res.duration_ms, "KB consolidation complete (send-path)");
+                    es.phase = ExtractionPhase::Idle;
+                    es.active_type = None;
+                    es.current_task_id = None;
+                    es.current_slot_task_id = None;
+                    es.is_checkpoint = false;
+                    es.checkpoint_message_id = None;
                 }
             }
             Err(e) => {
