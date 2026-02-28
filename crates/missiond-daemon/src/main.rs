@@ -5,6 +5,8 @@
 //! - Provide a stable WebSocket endpoint for attach + tasks events
 //! - Expose an IPC JSON-RPC endpoint for MCP proxy processes
 
+mod events_sync;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -3122,13 +3124,24 @@ impl AppState {
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 let msgs = db.get_conversation_messages(&session_id, since_id, tail.unwrap_or(50))
                     .map_err(|e| anyhow!("DB error: {}", e))?;
+                // Strip raw_content for LLM consumption (avoid base64 images flooding context)
+                let msgs_lite: Vec<serde_json::Value> = msgs.iter().map(|m| {
+                    serde_json::json!({
+                        "id": m.id,
+                        "role": m.role,
+                        "content": m.content,
+                        "timestamp": m.timestamp,
+                        "messageUuid": m.message_uuid,
+                        "parentUuid": m.parent_uuid,
+                    })
+                }).collect();
                 // Include child (subagent) conversations summary
                 let children = db.get_child_conversations(&session_id)
                     .unwrap_or_default();
                 let mut result = serde_json::json!({
                     "conversation": conv,
-                    "messages": msgs,
-                    "count": msgs.len(),
+                    "messages": msgs_lite,
+                    "count": msgs_lite.len(),
                 });
                 if !children.is_empty() {
                     let child_summaries: Vec<serde_json::Value> = children.iter().map(|c| {
@@ -3153,9 +3166,18 @@ impl AppState {
                 let msgs = self.mission.db()
                     .search_conversation_messages(&query, limit.unwrap_or(20))
                     .map_err(|e| anyhow!("DB error: {}", e))?;
+                let msgs_lite: Vec<serde_json::Value> = msgs.iter().map(|m| {
+                    serde_json::json!({
+                        "id": m.id,
+                        "sessionId": m.session_id,
+                        "role": m.role,
+                        "content": m.content,
+                        "timestamp": m.timestamp,
+                    })
+                }).collect();
                 Ok(ToolResult::json(&serde_json::json!({
-                    "results": msgs,
-                    "count": msgs.len(),
+                    "results": msgs_lite,
+                    "count": msgs_lite.len(),
                     "query": query,
                 })))
             }
@@ -3209,11 +3231,20 @@ impl AppState {
                     .and_then(|m| m.metadata.as_ref())
                     .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
                     .and_then(|v| v.get("agentId").and_then(|a| a.as_str()).map(|s| s.to_string()));
+                // Strip raw_content for LLM consumption
+                let msgs_lite: Vec<serde_json::Value> = msgs.iter().map(|m| {
+                    serde_json::json!({
+                        "id": m.id,
+                        "role": m.role,
+                        "content": m.content,
+                        "timestamp": m.timestamp,
+                    })
+                }).collect();
                 Ok(ToolResult::json(&serde_json::json!({
                     "toolUseId": tool_use_id,
                     "agentId": agent_id,
-                    "messages": msgs,
-                    "count": msgs.len(),
+                    "messages": msgs_lite,
+                    "count": msgs_lite.len(),
                 })))
             }
 
@@ -6518,364 +6549,8 @@ fn truncate_message_content(msg: &mut Value, max_bytes: usize) {
 /// Content can be a plain string or an array of content blocks.
 /// Storage layer: NO truncation. Full content preserved for analysis pipelines.
 /// Truncation happens at the API/display layer only.
-fn extract_text_content(content: &Value) -> String {
-    match content {
-        Value::String(s) => s.clone(),
-        Value::Array(arr) => arr
-            .iter()
-            .filter_map(|item| {
-                let block_type = item.get("type")?.as_str()?;
-                match block_type {
-                    "text" => item.get("text")?.as_str().map(String::from),
-                    "image" => {
-                        let media_type = item.pointer("/source/media_type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown");
-                        Some(format!("[图片: {media_type}]"))
-                    }
-                    "tool_use" => {
-                        let name = item
-                            .get("name")
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("unknown");
-                        // Full parameters — no truncation in storage layer
-                        let input_str = item.get("input").map(|input| {
-                            if let Value::Object(map) = input {
-                                map.iter()
-                                    .map(|(k, v)| {
-                                        let val = match v {
-                                            Value::String(s) => format!("\"{}\"", s),
-                                            _ => v.to_string(),
-                                        };
-                                        format!("{k}: {val}")
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            } else {
-                                input.to_string()
-                            }
-                        }).unwrap_or_default();
-                        if input_str.is_empty() {
-                            Some(format!("[Tool: {name}]"))
-                        } else {
-                            Some(format!("[Tool: {name}] {input_str}"))
-                        }
-                    }
-                    "thinking" => {
-                        let text = item.get("thinking")?.as_str()?;
-                        Some(format!("[thinking] {text}"))
-                    }
-                    "tool_result" => {
-                        // Full tool result content — no truncation in storage layer
-                        let text = if let Some(Value::String(s)) = item.get("content") {
-                            s.clone()
-                        } else if let Some(Value::Array(inner)) = item.get("content") {
-                            inner
-                                .iter()
-                                .filter_map(|i| {
-                                    let t = i.get("type")?.as_str()?;
-                                    match t {
-                                        "text" => i.get("text")?.as_str().map(String::from),
-                                        "tool_reference" => {
-                                            let name = i.get("tool_name").and_then(|n| n.as_str()).unwrap_or("?");
-                                            Some(format!("[ref: {name}]"))
-                                        }
-                                        _ => None,
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        } else {
-                            String::new()
-                        };
-                        if text.is_empty() {
-                            if let Some(err) = item.get("error").and_then(|e| e.as_str()) {
-                                Some(format!("[error: {err}]"))
-                            } else {
-                                Some("[tool_result]".to_string())
-                            }
-                        } else {
-                            Some(text)
-                        }
-                    }
-                    _ => None,
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
-}
-
-/// Store raw content JSON for DB storage.
-/// Full preservation including base64 images — user requires complete data capture.
-fn sanitize_raw_content(content: &Value) -> Option<String> {
-    serde_json::to_string(content).ok()
-}
-
-/// Handle NewEvents from JSONL watcher: progress, system, queue-operation, file-history-snapshot.
-/// - agent_progress → conversation_messages with agent_* roles
-/// - everything else → conversation_events table
-fn handle_new_events(state: &AppState, session_id: String, events: Vec<Value>) {
-    let db = state.mission.db();
-    let mut conv_events: Vec<missiond_core::types::ConversationEvent> = Vec::new();
-    let mut agent_messages: Vec<missiond_core::types::ConversationMessage> = Vec::new();
-
-    for val in &events {
-        let msg_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        let timestamp = val.get("timestamp").and_then(|t| t.as_str()).unwrap_or("").to_string();
-
-        match msg_type {
-            "progress" => {
-                let data_type = val.pointer("/data/type").and_then(|v| v.as_str()).unwrap_or("");
-                match data_type {
-                    "agent_progress" => {
-                        let agent_id = val.pointer("/data/agentId")
-                            .and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let parent_tool_use_id = val.get("parentToolUseID")
-                            .and_then(|v| v.as_str()).map(String::from);
-
-                        if let Some(inner_msg) = val.pointer("/data/message") {
-                            if let Some(message) = inner_msg.get("message") {
-                                let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("assistant");
-                                let agent_role = format!("agent_{role}");
-                                let content_val = message.get("content").cloned().unwrap_or(Value::Null);
-                                let text_content = extract_text_content(&content_val);
-                                let model = message.get("model").and_then(|m| m.as_str()).map(String::from);
-                                let inner_timestamp = inner_msg.get("timestamp")
-                                    .and_then(|t| t.as_str())
-                                    .unwrap_or(&timestamp)
-                                    .to_string();
-
-                                if !text_content.is_empty() {
-                                    let uuid = val.get("uuid").and_then(|u| u.as_str())
-                                        .map(String::from)
-                                        .unwrap_or_else(|| format!("agent-{}-{}", agent_id, inner_timestamp));
-
-                                    let prompt = val.pointer("/data/prompt")
-                                        .and_then(|p| p.as_str())
-                                        .filter(|s| !s.is_empty());
-                                    let metadata = {
-                                        let mut meta = serde_json::Map::new();
-                                        meta.insert("agentId".to_string(), Value::String(agent_id.clone()));
-                                        if let Some(p) = prompt {
-                                            meta.insert("prompt".to_string(), Value::String(p.to_string()));
-                                        }
-                                        serde_json::to_string(&meta).ok()
-                                    };
-
-                                    agent_messages.push(missiond_core::types::ConversationMessage {
-                                        id: 0,
-                                        session_id: session_id.clone(),
-                                        role: agent_role,
-                                        content: text_content,
-                                        raw_content: serde_json::to_string(&content_val).ok(),
-                                        message_uuid: Some(uuid),
-                                        parent_uuid: parent_tool_use_id.clone(),
-                                        model,
-                                        timestamp: inner_timestamp,
-                                        metadata,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    "hook_progress" => {
-                        let hook_name = val.pointer("/data/hookName")
-                            .and_then(|v| v.as_str()).unwrap_or("");
-                        let hook_event = val.pointer("/data/hookEvent")
-                            .and_then(|v| v.as_str()).unwrap_or("");
-                        conv_events.push(missiond_core::types::ConversationEvent {
-                            id: 0,
-                            session_id: session_id.clone(),
-                            event_type: "hook_progress".to_string(),
-                            content: Some(format!("{hook_event}:{hook_name}")),
-                            raw_data: serde_json::to_string(val).ok(),
-                            timestamp: timestamp.clone(),
-                        });
-                    }
-                    _ => {
-                        conv_events.push(missiond_core::types::ConversationEvent {
-                            id: 0,
-                            session_id: session_id.clone(),
-                            event_type: format!("progress:{data_type}"),
-                            content: None,
-                            raw_data: serde_json::to_string(val).ok(),
-                            timestamp: timestamp.clone(),
-                        });
-                    }
-                }
-            }
-            "system" => {
-                let subtype = val.get("subtype").and_then(|s| s.as_str()).unwrap_or("system");
-                let content = match subtype {
-                    "turn_duration" => {
-                        let duration_ms = val.get("durationMs").and_then(|d| d.as_i64()).unwrap_or(0);
-                        Some(format!("{}ms", duration_ms))
-                    }
-                    "compact_boundary" => {
-                        let pre_tokens = val.pointer("/compactMetadata/preTokens")
-                            .and_then(|v| v.as_i64()).unwrap_or(0);
-                        let trigger = val.pointer("/compactMetadata/trigger")
-                            .and_then(|v| v.as_str()).unwrap_or("unknown");
-                        Some(format!("trigger={trigger}, preTokens={pre_tokens}"))
-                    }
-                    _ => val.get("content").and_then(|c| c.as_str()).map(String::from),
-                };
-                conv_events.push(missiond_core::types::ConversationEvent {
-                    id: 0,
-                    session_id: session_id.clone(),
-                    event_type: subtype.to_string(),
-                    content,
-                    raw_data: serde_json::to_string(val).ok(),
-                    timestamp: timestamp.clone(),
-                });
-            }
-            "queue-operation" => {
-                let operation = val.get("operation").and_then(|o| o.as_str()).unwrap_or("");
-                let content = val.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
-                conv_events.push(missiond_core::types::ConversationEvent {
-                    id: 0,
-                    session_id: session_id.clone(),
-                    event_type: format!("queue:{operation}"),
-                    content: if content.is_empty() { None } else { Some(content) },
-                    raw_data: serde_json::to_string(val).ok(),
-                    timestamp: timestamp.clone(),
-                });
-            }
-            "file-history-snapshot" => {
-                conv_events.push(missiond_core::types::ConversationEvent {
-                    id: 0,
-                    session_id: session_id.clone(),
-                    event_type: "file_history_snapshot".to_string(),
-                    content: None,
-                    raw_data: serde_json::to_string(val).ok(),
-                    timestamp: timestamp.clone(),
-                });
-            }
-            _ => {
-                // Catch-all: includes demoted parse failures and unknown future types
-                conv_events.push(missiond_core::types::ConversationEvent {
-                    id: 0,
-                    session_id: session_id.clone(),
-                    event_type: format!("unknown:{msg_type}"),
-                    content: None,
-                    raw_data: serde_json::to_string(val).ok(),
-                    timestamp: timestamp.clone(),
-                });
-            }
-        }
-    }
-
-    if !agent_messages.is_empty() {
-        match db.insert_conversation_messages_batch(&agent_messages) {
-            Ok(ids) if !ids.is_empty() => {
-                info!(session = %session_id, count = ids.len(), "Logged agent sub-conversation messages");
-            }
-            Err(e) => {
-                warn!(session = %session_id, error = %e, "Failed to insert agent messages");
-            }
-            _ => {}
-        }
-    }
-
-    if !conv_events.is_empty() {
-        match db.insert_conversation_events_batch(&conv_events) {
-            Ok(count) if count > 0 => {
-                info!(session = %session_id, count, "Logged conversation events");
-            }
-            Err(e) => {
-                warn!(session = %session_id, error = %e, "Failed to insert conversation events");
-            }
-            _ => {}
-        }
-    }
-}
-
-/// One-time backfill: scan historical JSONL files and populate conversation_events
-/// for sessions that don't yet have events.
-async fn backfill_conversation_events(state: &AppState) {
-    let db = state.mission.db();
-
-    // Get sessions that already have events (skip them)
-    let sessions_with_events = db.get_sessions_with_events().unwrap_or_default();
-
-    // Get all conversations with jsonl_path
-    let conversations = db.get_conversations_with_jsonl().unwrap_or_default();
-
-    let to_backfill: Vec<_> = conversations
-        .into_iter()
-        .filter(|(id, _)| !sessions_with_events.contains(id))
-        .collect();
-
-    if to_backfill.is_empty() {
-        info!("Event backfill: all sessions already have events, skipping");
-        return;
-    }
-
-    info!(
-        total = to_backfill.len(),
-        "Event backfill: starting for sessions without events"
-    );
-
-    let mut backfilled = 0usize;
-    let mut total_events = 0usize;
-    let mut errors = 0usize;
-
-    for (session_id, jsonl_path) in &to_backfill {
-        let path = std::path::Path::new(jsonl_path);
-        if !path.exists() {
-            continue;
-        }
-
-        // Read entire file as raw JSON values
-        let raw_lines = match missiond_core::cc_tasks::read_new_lines_raw(path, 0).await {
-            Ok((lines, _)) => lines,
-            Err(_) => {
-                errors += 1;
-                continue;
-            }
-        };
-
-        // Filter for event types only (not user/assistant/tool_use/tool_result)
-        let event_lines: Vec<Value> = raw_lines
-            .into_iter()
-            .filter(|val| {
-                let msg_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                matches!(
-                    msg_type,
-                    "progress" | "system" | "queue-operation" | "file-history-snapshot"
-                )
-            })
-            .collect();
-
-        if event_lines.is_empty() {
-            continue;
-        }
-
-        // Reuse existing handle_new_events logic
-        handle_new_events(state, session_id.clone(), event_lines);
-        total_events += 1;
-        backfilled += 1;
-
-        // Yield periodically to avoid blocking the runtime
-        if backfilled % 50 == 0 {
-            info!(
-                progress = backfilled,
-                total = to_backfill.len(),
-                "Event backfill progress"
-            );
-            tokio::task::yield_now().await;
-        }
-    }
-
-    info!(
-        backfilled,
-        total_events,
-        errors,
-        "Event backfill complete"
-    );
-}
+// extract_text_content, sanitize_raw_content, handle_new_events, backfill_conversation_events
+// → moved to events_sync.rs
 
 /// Handle a NewMessages watcher event: write conversation messages to DB.
 fn handle_new_messages(
@@ -6946,7 +6621,7 @@ fn handle_new_messages(
 
     let batch: Vec<missiond_core::types::ConversationMessage> = messages.iter()
         .filter_map(|msg| {
-            let text_content = extract_text_content(&msg.message.content);
+            let text_content = events_sync::extract_text_content(&msg.message.content);
             // Detect special content types from JSONL content blocks
             let content_types: Vec<&str> = msg.message.content.as_array()
                 .map(|arr| arr.iter()
@@ -6974,7 +6649,7 @@ fn handle_new_messages(
             } else {
                 msg.message.role.clone()
             };
-            let raw_content = sanitize_raw_content(&msg.message.content);
+            let raw_content = events_sync::sanitize_raw_content(&msg.message.content);
             Some(missiond_core::types::ConversationMessage {
                 id: 0,
                 session_id: session_id.clone(),
@@ -7357,7 +7032,7 @@ async fn main() -> Result<()> {
     {
         let backfill_state = state.clone();
         tokio::spawn(async move {
-            backfill_conversation_events(&backfill_state).await;
+            events_sync::backfill_conversation_events(backfill_state.mission.db()).await;
         });
     }
 
@@ -7484,7 +7159,7 @@ async fn main() -> Result<()> {
                         }
                     }
                     Ok(WatcherEvent::NewEvents { session_id, events }) => {
-                        handle_new_events(&state, session_id, events);
+                        events_sync::handle_new_events(state.mission.db(), session_id, events);
                     }
                     Ok(WatcherEvent::SessionInactive(session)) => {
                         // Skip already-compacted sessions (replaced by context compaction)

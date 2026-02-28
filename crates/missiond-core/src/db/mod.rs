@@ -3488,6 +3488,18 @@ impl MissionDB {
         Ok(summary)
     }
 
+    /// Delete old progress/hook events older than cutoff timestamp
+    pub fn cleanup_old_events(&self, cutoff: &str) -> SqliteResult<usize> {
+        let conn = self.conn();
+        let deleted = conn.execute(
+            "DELETE FROM conversation_events
+             WHERE event_type IN ('progress:bash_progress', 'progress:mcp_progress', 'hook_progress', 'progress:waiting_for_task')
+             AND timestamp < ?1",
+            params![cutoff],
+        )?;
+        Ok(deleted)
+    }
+
     /// Get all session IDs that have at least one event in conversation_events
     pub fn get_sessions_with_events(&self) -> SqliteResult<std::collections::HashSet<String>> {
         let conn = self.read_conn();
