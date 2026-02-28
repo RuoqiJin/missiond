@@ -1299,6 +1299,11 @@ impl AppState {
                 Ok(ToolResult::json(&tasks))
             }
 
+            "mission_task_ack" => {
+                let tasks = self.mission.db().ack_completed_tasks()?;
+                Ok(ToolResult::json(&tasks))
+            }
+
             // ===== Process control =====
             "mission_spawn" => {
                 let SpawnArgs {
@@ -5633,10 +5638,12 @@ async fn reap_stale_submit_tasks(state: &AppState) {
                                 &missiond_core::types::TaskUpdate {
                                     status: Some(missiond_core::types::TaskStatus::Done),
                                     finished_at: Some(now),
-                                    result: Some(result_text),
+                                    result: Some(result_text.clone()),
                                     ..Default::default()
                                 },
                             );
+                            // Update associated kb_operation
+                            let _ = state.mission.db().kb_ops_complete_by_task_id(&task.id, "done", Some(&result_text));
                             info!(
                                 task_id = %task.id, slot_id = %slot_id,
                                 age_min = elapsed / 60000,
@@ -5678,10 +5685,15 @@ async fn reap_stale_submit_tasks(state: &AppState) {
             &missiond_core::types::TaskUpdate {
                 status: Some(new_status),
                 finished_at: Some(now),
-                result: Some(result_msg),
+                result: Some(result_msg.clone()),
                 ..Default::default()
             },
         );
+        // Update associated kb_operation (done or failed depending on task status)
+        let kb_status = if new_status == missiond_core::types::TaskStatus::Done { "done" } else { "failed" };
+        if let Ok(true) = state.mission.db().kb_ops_complete_by_task_id(&task.id, kb_status, Some(&result_msg)) {
+            info!(task_id = %task.id, kb_status = kb_status, "KB operation updated via reaper");
+        }
         warn!(
             task_id = %task.id,
             slot_id = ?task.slot_id,
@@ -7474,10 +7486,14 @@ async fn main() -> Result<()> {
                                             &missiond_core::types::TaskUpdate {
                                                 status: Some(missiond_core::types::TaskStatus::Done),
                                                 finished_at: Some(now),
-                                                result: Some(result_text),
+                                                result: Some(result_text.clone()),
                                                 ..Default::default()
                                             },
                                         );
+                                        // Update associated kb_operation if this task was dispatched from kb_execute_plan
+                                        if let Ok(true) = state.mission.db().kb_ops_complete_by_task_id(&task.id, "done", Some(&result_text)) {
+                                            info!(task_id = %task.id, "KB operation marked done via task completion");
+                                        }
                                         info!(task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,
                                             jsonl_result = jsonl_resp.is_some(),
                                             "Submit task closed: slot returned to Idle");
