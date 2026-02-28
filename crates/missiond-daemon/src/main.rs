@@ -2011,6 +2011,21 @@ impl AppState {
                     "key": key,
                 })))
             }
+            "mission_kb_batch_forget" => {
+                let keys: Vec<String> = serde_json::from_value(
+                    args.get("keys").cloned().unwrap_or(serde_json::Value::Array(vec![]))
+                ).map_err(|e| anyhow!("Invalid keys: {}", e))?;
+                if keys.is_empty() {
+                    return Ok(ToolResult::error("keys array is empty"));
+                }
+                let count = self.mission.db()
+                    .kb_batch_forget(&keys)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json(&serde_json::json!({
+                    "deleted_count": count,
+                    "requested_keys": keys.len(),
+                })))
+            }
             "mission_kb_search" => {
                 let KBSearchArgs { query, category } = serde_json::from_value(args)
                     .unwrap_or(KBSearchArgs { query: None, category: None });
@@ -3440,6 +3455,148 @@ impl AppState {
                     "agentId": agent_id,
                     "messages": msgs_lite,
                     "count": msgs_lite.len(),
+                })))
+            }
+
+            // ===== Audit (Conversation Tool Call Analysis) =====
+            "mission_audit_trace" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Args {
+                    session_id: String,
+                    tool_filter: Option<Vec<String>>,
+                    include_reasoning: Option<bool>,
+                }
+                let Args { session_id, tool_filter, include_reasoning } = serde_json::from_value(args)?;
+                let db = self.mission.db();
+                let conv = db.get_conversation(&session_id)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                let calls = db.get_tool_calls_by_session(
+                    &session_id,
+                    tool_filter.as_deref(),
+                    10000,
+                ).map_err(|e| anyhow!("DB error: {}", e))?;
+
+                // Build Markdown trace
+                let mut md = String::new();
+                let slot_id = conv.as_ref().and_then(|c| c.slot_id.as_deref()).unwrap_or("N/A");
+                let model = conv.as_ref().and_then(|c| c.model.as_deref()).unwrap_or("N/A");
+                let success_count = calls.iter().filter(|c| c.status == "success").count();
+                let error_count = calls.iter().filter(|c| c.status == "error").count();
+                let pending_count = calls.iter().filter(|c| c.status == "pending").count();
+
+                md.push_str(&format!("# Audit Trace: {session_id}\n"));
+                md.push_str(&format!("Slot: {slot_id} | Model: {model}\n"));
+                md.push_str(&format!("Tool Calls: {} (Success: {success_count}, Error: {error_count}, Pending: {pending_count})\n\n---\n\n", calls.len()));
+
+                // Optionally interleave reasoning from conversation_messages
+                if include_reasoning.unwrap_or(false) {
+                    let msgs = db.get_conversation_messages(&session_id, None, 10000)
+                        .unwrap_or_default();
+                    // Build timeline: messages + tool calls sorted by timestamp
+                    let mut msg_idx = 0;
+                    for tc in &calls {
+                        // Print assistant reasoning before this tool call
+                        while msg_idx < msgs.len() && msgs[msg_idx].timestamp <= tc.timestamp {
+                            let m = &msgs[msg_idx];
+                            if m.role == "assistant" && !m.content.starts_with("[Tool:") && !m.content.starts_with("[thinking]") {
+                                let content = if m.content.len() > 200 {
+                                    format!("{}...", &m.content[..m.content.char_indices().nth(200).map(|(i,_)| i).unwrap_or(m.content.len())])
+                                } else {
+                                    m.content.clone()
+                                };
+                                md.push_str(&format!("[{}] 💭 {}\n\n", &tc.timestamp[11..19.min(tc.timestamp.len())], content));
+                            }
+                            msg_idx += 1;
+                        }
+                        format_tool_call_trace(&mut md, tc);
+                    }
+                } else {
+                    for tc in &calls {
+                        format_tool_call_trace(&mut md, tc);
+                    }
+                }
+
+                if !calls.is_empty() {
+                    md.push_str("\n💡 Use mission_audit_detail(toolId: \"<id>\") for full I/O payload.\n");
+                }
+
+                Ok(ToolResult::text(&md))
+            }
+            "mission_audit_detail" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Args {
+                    tool_id: String,
+                }
+                let Args { tool_id } = serde_json::from_value(args)?;
+                let db = self.mission.db();
+                let tc = db.get_tool_call_by_id(&tool_id)
+                    .map_err(|e| anyhow!("DB error: {}", e))?
+                    .ok_or_else(|| anyhow!("Tool call not found: {}", tool_id))?;
+
+                // Parse raw_input/raw_output back to JSON for clean display
+                let input: serde_json::Value = tc.raw_input.as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or(serde_json::Value::Null);
+                let output: serde_json::Value = tc.raw_output.as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or(serde_json::Value::Null);
+
+                Ok(ToolResult::json(&serde_json::json!({
+                    "id": tc.id,
+                    "toolName": tc.tool_name,
+                    "timestamp": tc.timestamp,
+                    "status": tc.status,
+                    "input": input,
+                    "output": output,
+                    "inputSummary": tc.input_summary,
+                    "outputSummary": tc.output_summary,
+                })))
+            }
+            "mission_audit_stats" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Args {
+                    session_id: String,
+                }
+                let Args { session_id } = serde_json::from_value(args)?;
+                let db = self.mission.db();
+                let stats = db.get_tool_call_stats(&session_id)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+
+                let mut by_tool = serde_json::Map::new();
+                let mut total = 0i64;
+                let mut total_success = 0i64;
+                let mut total_error = 0i64;
+                for (name, count, success, error) in &stats {
+                    by_tool.insert(name.clone(), serde_json::json!({
+                        "count": count,
+                        "success": success,
+                        "error": error,
+                    }));
+                    total += count;
+                    total_success += success;
+                    total_error += error;
+                }
+
+                // Get first/last timestamps
+                let calls = db.get_tool_calls_by_session(&session_id, None, 10000)
+                    .unwrap_or_default();
+                let first_ts = calls.first().map(|c| c.timestamp.as_str()).unwrap_or("N/A");
+                let last_ts = calls.last().map(|c| c.timestamp.as_str()).unwrap_or("N/A");
+
+                Ok(ToolResult::json(&serde_json::json!({
+                    "sessionId": session_id,
+                    "totalCalls": total,
+                    "byTool": by_tool,
+                    "byStatus": {
+                        "success": total_success,
+                        "error": total_error,
+                        "pending": total - total_success - total_error,
+                    },
+                    "firstCall": first_ts,
+                    "lastCall": last_ts,
                 })))
             }
 
@@ -6503,19 +6660,20 @@ async fn check_kb_consolidation(state: &AppState) {
     let prompt = "[kb-consolidation] 知识库自治整理任务（Board-Aware 模式）。\n\n\
         执行流：\n\
         1. 对 memory 分类调用 mission_kb_analyze(mode=\"consolidation_plan\", target_category=\"memory\", include_board_context=true)\n\
-        2. 遍历返回的 JSON plan.actions：\n\
-           - merge/distill: 先 mission_kb_remember 写入 new_entry，再 mission_kb_batch_forget 删 target_keys\n\
+        2. 预检: 遍历 plan.actions，用 mission_kb_get 验证每个 target_key 确实存在，跳过不存在的 key\n\
+        3. 遍历 plan.actions 执行：\n\
+           - merge/distill: 先 mission_kb_remember 写入 new_entry，再 mission_kb_batch_forget(keys: target_keys) 批量删除\n\
            - update: 如有 linked_task_id，记录关联（暂存到 reason 中即可）\n\
-           - delete: 直接 mission_kb_batch_forget 删 target_keys\n\
-        3. 再对 preference 分类执行同样流程（include_board_context=true）\n\
-        4. 遍历并执行 actions\n\
+           - delete: 直接 mission_kb_batch_forget(keys: target_keys) 批量删除\n\
+        4. 再对 preference 分类执行同样流程（include_board_context=true）\n\
         5. 完成后回复 '[DONE] 整理了 N 个分类，合并 M 条，蒸馏 K 条，删除 J 条'\n\n\
         规则:\n\
         - 不操作 memory:bugfix（有 30 天 Auto-GC）\n\
         - 坚决执行 mission_kb_analyze 返回的 actions，无需二次判断\n\
         - distill = 从已完成项目的多条流水账提取精华，升维到 architecture/feature\n\
         - 如果 plan.actions 为空数组，说明该分类不需要整理，跳过\n\
-        - 如果 mission_kb_analyze 返回了 parse_warning（非 JSON），降级为手动分析";
+        - 如果 mission_kb_analyze 返回了 parse_warning（非 JSON），降级为手动分析\n\
+        - 删除操作必须使用 mission_kb_batch_forget 批量删除，禁止逐条调用 mission_kb_forget";
 
     // Generate task_id and tag session
     let task_id = uuid::Uuid::new_v4().to_string();
@@ -6840,6 +6998,35 @@ fn truncate_message_content(msg: &mut Value, max_bytes: usize) {
 // extract_text_content, sanitize_raw_content, handle_new_events, backfill_conversation_events
 // → moved to events_sync.rs
 
+/// Format a single tool call entry for the audit trace Markdown.
+fn format_tool_call_trace(md: &mut String, tc: &missiond_core::types::ToolCallRecord) {
+    let time = if tc.timestamp.len() >= 19 {
+        &tc.timestamp[11..19]
+    } else {
+        &tc.timestamp
+    };
+    let id_short = if tc.id.len() > 15 {
+        format!("{}...", &tc.id[..12])
+    } else {
+        tc.id.clone()
+    };
+    let status_icon = match tc.status.as_str() {
+        "success" => "✅",
+        "error" => "❌",
+        "pending" => "⏳",
+        _ => "❓",
+    };
+    md.push_str(&format!("[{time}] 🛠️ {} ({id_short})\n", tc.tool_name));
+    if let Some(ref summary) = tc.input_summary {
+        md.push_str(&format!("  ├─ Input: {summary}\n"));
+    }
+    let output_display = tc
+        .output_summary
+        .as_deref()
+        .unwrap_or(if tc.status == "pending" { "awaiting result" } else { "N/A" });
+    md.push_str(&format!("  └─ Output: [{status_icon}] {output_display}\n\n"));
+}
+
 /// Handle a NewMessages watcher event: write conversation messages to DB.
 fn handle_new_messages(
     state: &AppState,
@@ -6964,6 +7151,41 @@ fn handle_new_messages(
             error!(session = %session_id, error = %e, "Failed to insert conversation messages");
         }
         _ => {}
+    }
+
+    // ── Audit: extract tool_use/tool_result into conversation_tool_calls ──
+    {
+        let mut tool_calls = Vec::new();
+        let mut tool_results = Vec::new();
+        for msg in &messages {
+            let role = &msg.message.role;
+            let content = &msg.message.content;
+            if role == "assistant" {
+                tool_calls.extend(events_sync::extract_tool_calls_from_assistant(
+                    &session_id,
+                    &msg.timestamp,
+                    content,
+                ));
+            } else if role == "user" {
+                tool_results.extend(events_sync::extract_tool_results_from_user(content));
+            }
+        }
+        if !tool_calls.is_empty() {
+            match db.insert_tool_calls_batch(&tool_calls) {
+                Ok(count) if count > 0 => {
+                    info!(session = %session_id, count, "Extracted tool calls for audit");
+                }
+                Err(e) => {
+                    warn!(session = %session_id, error = %e, "Failed to insert tool calls");
+                }
+                _ => {}
+            }
+        }
+        for (tool_use_id, summary, raw, status) in &tool_results {
+            if let Err(e) = db.update_tool_call_output(tool_use_id, summary, raw, status) {
+                warn!(tool_use_id, error = %e, "Failed to update tool call output");
+            }
+        }
     }
 
     // ── Token usage ledger ─────────────────────────────────────────
@@ -7323,6 +7545,14 @@ async fn main() -> Result<()> {
         let backfill_state = state.clone();
         tokio::spawn(async move {
             events_sync::backfill_conversation_events(backfill_state.mission.db()).await;
+        });
+    }
+
+    // One-time backfill: populate conversation_tool_calls from existing conversation_messages
+    {
+        let backfill_state = state.clone();
+        tokio::spawn(async move {
+            events_sync::backfill_tool_calls(backfill_state.mission.db()).await;
         });
     }
 
