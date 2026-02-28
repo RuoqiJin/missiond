@@ -187,10 +187,15 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_task_ack",
-            "消费已完成但未通知的 submit task。原子操作：返回任务列表并标记已通知。供 UserPromptSubmit hook 调用。",
+            "获取已完成的 submit task 通知。传 since（epoch毫秒）返回增量结果，各 session 独立 watermark 互不干扰。供 UserPromptSubmit hook 调用。",
             json!({
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "since": {
+                        "type": "integer",
+                        "description": "返回 finished_at > since 的任务（epoch 毫秒）。不传返回最近 1 小时。"
+                    }
+                }
             }),
         ),
         // ===== Process Control =====

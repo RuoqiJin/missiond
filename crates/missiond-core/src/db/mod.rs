@@ -493,6 +493,22 @@ impl MissionDB {
             )?;
         }
 
+        // Add conversation_type: 'user' | 'meta' | 'worker' | 'subagent'
+        let has_conv_type: bool = conn
+            .prepare("SELECT conversation_type FROM conversations LIMIT 0")
+            .is_ok();
+        if !has_conv_type {
+            conn.execute_batch(
+                "ALTER TABLE conversations ADD COLUMN conversation_type TEXT NOT NULL DEFAULT 'user';"
+            )?;
+            // Backfill from slot_id and id patterns
+            conn.execute_batch(
+                "UPDATE conversations SET conversation_type = 'meta' WHERE slot_id IN ('slot-memory', 'slot-memory-slow');
+                 UPDATE conversations SET conversation_type = 'worker' WHERE slot_id IS NOT NULL AND conversation_type = 'user' AND slot_id NOT IN ('slot-memory', 'slot-memory-slow');
+                 UPDATE conversations SET conversation_type = 'subagent' WHERE id LIKE 'agent-%';"
+            )?;
+        }
+
         // Slot task history table
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS slot_tasks (
@@ -882,31 +898,29 @@ impl MissionDB {
         Ok(tasks)
     }
 
-    /// Atomically consume completed/failed tasks that haven't been notified yet.
-    /// Returns the tasks and marks them as notified in one transaction.
-    pub fn ack_completed_tasks(&self) -> SqliteResult<Vec<Task>> {
-        let conn = self.conn();
-        let now = chrono::Utc::now().timestamp();
-
-        // Single transaction: SELECT + UPDATE
-        let tx = conn.unchecked_transaction()?;
-        let tasks: Vec<Task> = {
-            let mut stmt = tx.prepare(
-                "SELECT * FROM tasks WHERE status IN ('done', 'failed') AND notified_at IS NULL ORDER BY finished_at ASC"
+    /// Get completed/failed tasks since a given timestamp (per-session watermark model).
+    /// Each caller tracks its own watermark — no global consume, no cross-session interference.
+    pub fn ack_completed_tasks(&self, since: Option<i64>) -> SqliteResult<Vec<Task>> {
+        let conn = self.read_conn();
+        if let Some(since_ts) = since {
+            let mut stmt = conn.prepare(
+                "SELECT * FROM tasks WHERE status IN ('done', 'failed') AND finished_at > ?1 ORDER BY finished_at ASC"
             )?;
-            let mapped = stmt.query_map([], |row| Self::row_to_task(row))?;
-            let result: Vec<Task> = mapped.filter_map(|r| r.ok()).collect();
-            result
-        };
-
-        if !tasks.is_empty() {
-            let ids: Vec<String> = tasks.iter().map(|t| format!("'{}'", t.id)).collect();
-            tx.execute_batch(
-                &format!("UPDATE tasks SET notified_at = {} WHERE id IN ({})", now, ids.join(","))
+            let tasks = stmt.query_map(params![since_ts], |row| Self::row_to_task(row))?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(tasks)
+        } else {
+            // No watermark: return all completed tasks from last 1 hour (millis)
+            let cutoff = chrono::Utc::now().timestamp_millis() - 3_600_000;
+            let mut stmt = conn.prepare(
+                "SELECT * FROM tasks WHERE status IN ('done', 'failed') AND finished_at > ?1 ORDER BY finished_at ASC"
             )?;
+            let tasks = stmt.query_map(params![cutoff], |row| Self::row_to_task(row))?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(tasks)
         }
-        tx.commit()?;
-        Ok(tasks)
     }
 
     fn row_to_task(row: &rusqlite::Row) -> SqliteResult<Task> {
