@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS board_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_board_tasks_status ON board_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_board_tasks_parent ON board_tasks(parent_id);
-CREATE INDEX IF NOT EXISTS idx_board_tasks_claim ON board_tasks(claim_executor_id);
+-- idx_board_tasks_claim created in migration (column may not exist yet on existing DBs)
 
 -- Board task notes (progress tracking)
 CREATE TABLE IF NOT EXISTS board_task_notes (

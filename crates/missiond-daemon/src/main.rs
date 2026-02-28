@@ -5557,8 +5557,11 @@ async fn capture_slot_session_uuid(
                     let mut updated = conv;
                     updated.slot_id = Some(slot_id.to_string());
                     updated.source = "pty_jsonl".to_string();
+                    updated.conversation_type = missiond_core::db::derive_conversation_type(
+                        Some(slot_id), &session_uuid
+                    );
                     let _ = state.mission.db().upsert_conversation(&updated);
-                    info!(session = %session_uuid, "Retroactively tagged conversation with slot_id");
+                    info!(session = %session_uuid, slot_id = %slot_id, "Retroactively tagged conversation with slot_id and conversation_type");
                 }
             }
         }

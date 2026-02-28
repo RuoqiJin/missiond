@@ -346,7 +346,6 @@ export function Conversations() {
       const params = new URLSearchParams();
       if (statusFilter) params.set('status', statusFilter);
       params.set('limit', '100');
-      params.set('conversation_type', viewMode === 'system' ? 'system' : 'user');
       const res = await fetch(`/api/conversations?${params}`);
       if (res.ok) {
         const data = await res.json();
@@ -363,7 +362,7 @@ export function Conversations() {
       // silent
     }
     setLoading(false);
-  }, [statusFilter, viewMode]);
+  }, [statusFilter]);
 
   const fetchMessages = useCallback(async (sessionId: string) => {
     setLoadingMessages(true);
