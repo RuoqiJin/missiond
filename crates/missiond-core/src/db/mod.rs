@@ -354,6 +354,15 @@ impl MissionDB {
             )?;
         }
 
+        // Flow Engine: add flow_phase, flow_context, flow_template columns
+        if !columns.iter().any(|c| c == "flow_phase") {
+            conn.execute_batch(
+                "ALTER TABLE board_tasks ADD COLUMN flow_phase TEXT;
+                 ALTER TABLE board_tasks ADD COLUMN flow_context TEXT;
+                 ALTER TABLE board_tasks ADD COLUMN flow_template TEXT;"
+            )?;
+        }
+
         // Phase T: Task Claim — add claim fields for conflict prevention
         if !columns.iter().any(|c| c == "claim_executor_id") {
             conn.execute_batch(
@@ -1250,6 +1259,9 @@ impl MissionDB {
             claim_executor_id: None,
             claim_executor_type: None,
             claimed_at: None,
+            flow_phase: None,
+            flow_context: None,
+            flow_template: None,
         };
 
         self.insert_board_task(&task)?;
@@ -1398,6 +1410,11 @@ impl MissionDB {
             fields.push("order_idx = ?".to_string());
             values.push(Box::new(idx));
         }
+
+        // Flow Engine fields
+        push_field!(flow_phase, "flow_phase");
+        push_field!(flow_context, "flow_context");
+        push_field!(flow_template, "flow_template");
 
         let sql = format!(
             "UPDATE board_tasks SET {} WHERE id = ?",
@@ -1624,6 +1641,9 @@ impl MissionDB {
             claim_executor_id: row.get("claim_executor_id").unwrap_or(None),
             claim_executor_type: row.get("claim_executor_type").unwrap_or(None),
             claimed_at: row.get("claimed_at").unwrap_or(None),
+            flow_phase: row.get("flow_phase").unwrap_or(None),
+            flow_context: row.get("flow_context").unwrap_or(None),
+            flow_template: row.get("flow_template").unwrap_or(None),
         })
     }
 

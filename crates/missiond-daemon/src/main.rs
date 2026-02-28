@@ -3614,11 +3614,31 @@ impl AppState {
             "mission_board_create" => {
                 let input: missiond_core::types::CreateBoardTaskInput =
                     serde_json::from_value(args)?;
-                let task = self
+                let mut task = self
                     .mission
                     .db()
                     .create_board_task(&input)
                     .map_err(|e| anyhow!("DB error: {}", e))?;
+
+                // If flowTemplate is set, initialize flow fields
+                if input.flow_template.is_some() {
+                    let flow_phase = "investigate".to_string();
+                    let flow_ctx = serde_json::to_string(&missiond_core::types::FlowContext::default())
+                        .unwrap_or_else(|_| "{}".to_string());
+                    let updated = self.mission.db().update_board_task(
+                        &task.id,
+                        &missiond_core::types::UpdateBoardTaskInput {
+                            flow_phase: Some(flow_phase),
+                            flow_context: Some(flow_ctx),
+                            flow_template: input.flow_template.clone(),
+                            ..Default::default()
+                        },
+                    ).map_err(|e| anyhow!("DB error setting flow: {}", e))?;
+                    if let Some(t) = updated {
+                        task = t;
+                    }
+                }
+
                 Ok(ToolResult::json_pretty(&task))
             }
             "mission_board_update" => {
@@ -4744,6 +4764,105 @@ impl AppState {
                 Ok(ToolResult::json_pretty(&summary))
             }
 
+            // ===== Engineering Flow =====
+            "mission_submit_phase_result" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct SubmitPhaseArgs {
+                    task_id: String,
+                    artifact_type: String,
+                    content: String,
+                }
+                let args: SubmitPhaseArgs = serde_json::from_value(args)?;
+
+                // Get the task
+                let task = self.mission.db()
+                    .get_board_task(&args.task_id)
+                    .map_err(|e| anyhow!("DB error: {}", e))?
+                    .ok_or_else(|| anyhow!("Task not found: {}", args.task_id))?;
+
+                // Verify task has a flow phase
+                let phase_str = task.flow_phase.as_deref()
+                    .ok_or_else(|| anyhow!("Task {} is not a flow task (flow_phase is null)", args.task_id))?;
+
+                let phase = missiond_core::types::EngineeringPhase::from_str(phase_str)
+                    .ok_or_else(|| anyhow!("Unknown flow phase: {}", phase_str))?;
+
+                // Validate artifact_type matches current phase
+                let expected_artifact = match &phase {
+                    missiond_core::types::EngineeringPhase::Investigate => "investigation_report",
+                    missiond_core::types::EngineeringPhase::Plan => "execution_plan",
+                    missiond_core::types::EngineeringPhase::Execute => "execution_result",
+                    missiond_core::types::EngineeringPhase::Finalize => "commit_hash",
+                    other => return Ok(ToolResult::text(format!(
+                        "Error: Phase '{}' is a daemon phase or Done — cannot submit artifacts for it.",
+                        other.display_name()
+                    ))),
+                };
+
+                if args.artifact_type != expected_artifact {
+                    return Ok(ToolResult::text(format!(
+                        "Error: Task is currently in '{}' phase. Expected artifact_type is '{}', but got '{}'. \
+                         Please submit the correct artifact type to proceed.",
+                        phase.display_name(), expected_artifact, args.artifact_type
+                    )));
+                }
+
+                // Load existing flow context
+                let mut ctx: missiond_core::types::FlowContext = task.flow_context
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+
+                // Store artifact in context
+                match args.artifact_type.as_str() {
+                    "investigation_report" => ctx.investigation_report = Some(args.content.clone()),
+                    "execution_plan" => ctx.execution_plan = Some(args.content.clone()),
+                    "execution_result" => ctx.execution_result = Some(args.content.clone()),
+                    "commit_hash" => ctx.commit_hash = Some(args.content.clone()),
+                    _ => {}
+                }
+
+                // Advance to next phase
+                let next_phase = phase.next().unwrap_or(missiond_core::types::EngineeringPhase::Done);
+                let next_phase_str = next_phase.as_str().to_string();
+                let ctx_json = serde_json::to_string(&ctx)?;
+
+                // Atomic update: flow_context + flow_phase
+                let update = missiond_core::types::UpdateBoardTaskInput {
+                    flow_phase: Some(next_phase_str.clone()),
+                    flow_context: Some(ctx_json),
+                    ..Default::default()
+                };
+                self.mission.db()
+                    .update_board_task(&task.id, &update)
+                    .map_err(|e| anyhow!("DB error updating flow: {}", e))?;
+
+                // Write progress note
+                let note_input = missiond_core::types::AddBoardTaskNoteInput {
+                    task_id: task.id.clone(),
+                    content: format!(
+                        "✅ Flow phase '{}' completed → '{}'\nArtifact: {} ({} chars)",
+                        phase.display_name(),
+                        next_phase.display_name(),
+                        args.artifact_type,
+                        args.content.len()
+                    ),
+                    note_type: Some("progress".to_string()),
+                    author: Some("flow-engine".to_string()),
+                };
+                let _ = self.mission.db().add_board_task_note(&note_input);
+
+                Ok(ToolResult::text(format!(
+                    "Phase '{}' completed. Artifact '{}' saved ({} chars). \
+                     Flow advanced to '{}'. Please wait for the next instruction.",
+                    phase.display_name(),
+                    args.artifact_type,
+                    args.content.len(),
+                    next_phase.display_name()
+                )))
+            }
+
             // ===== Slot Task History =====
             "mission_slot_history" => {
                 #[derive(Deserialize)]
@@ -5059,6 +5178,18 @@ async fn check_slot_context_levels(state: &AppState) {
 
 /// Extract context percentage from PTY screen text.
 /// Looks for "Context left until auto-compact: XX%" pattern.
+/// Truncate a string at a safe UTF-8 char boundary.
+fn truncate_safe(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 fn extract_context_percentage(screen: &str) -> Option<u32> {
     // The status bar text: "Context left until auto-compact: 12%"
     for line in screen.lines().rev() {
@@ -5181,6 +5312,16 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
             None => continue,
         };
 
+        // ===== Flow task handling =====
+        if task.flow_phase.is_some() {
+            if let Err(e) = execute_flow_task(state, &task, &slot_id).await {
+                warn!(task_id = %task.id, error = %e, "Flow task error");
+            }
+            continue;
+        }
+
+        // ===== Normal (non-flow) task handling =====
+
         // Build prompt: template > "title\n\ndescription"
         let prompt = if let Some(ref tmpl) = task.prompt_template {
             tmpl.clone()
@@ -5229,50 +5370,8 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
         }
 
         // Check if PTY session exists, spawn if needed
-        let pty_status = state.pty.get_status(&slot_id).await;
-        if pty_status.is_none() {
-            // Try to find slot config and spawn
-            let slot = state.mission.list_slots().into_iter().find(|s| s.config.id == slot_id);
-            if let Some(slot) = slot {
-                let pty_slot = missiond_core::PTYSlot {
-                    id: slot.config.id.clone(),
-                    role: slot.config.role.clone(),
-                    cwd: slot.config.cwd.as_deref().map(PathBuf::from),
-                };
-                let slot_env = slot.config.env.as_ref();
-                let mcp_config = slot.config.mcp_config.map(PathBuf::from);
-                let (extra_env, session_file) = build_slot_tracking_env(&slot_id, slot_env).await;
-                if let Err(e) = state.pty.spawn(&pty_slot, PTYSpawnOptions {
-                    auto_restart: false,
-                    wait_for_idle: true,
-                    timeout_secs: Some(120),
-                    mcp_config,
-                    dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
-                    extra_env,
-                }).await {
-                    warn!(task_id = %task.id, slot_id = %slot_id, error = %e, "Autopilot: failed to spawn PTY");
-                    // Revert to open for retry
-                    let _ = state.mission.db().update_board_task(
-                        &task.id,
-                        &missiond_core::types::UpdateBoardTaskInput {
-                            status: Some("open".to_string()),
-                            ..Default::default()
-                        },
-                    );
-                    continue;
-                }
-                capture_slot_session_uuid(state, &slot_id, &session_file).await;
-            } else {
-                warn!(task_id = %task.id, slot_id = %slot_id, "Autopilot: slot not found, skipping");
-                let _ = state.mission.db().update_board_task(
-                    &task.id,
-                    &missiond_core::types::UpdateBoardTaskInput {
-                        status: Some("open".to_string()),
-                        ..Default::default()
-                    },
-                );
-                continue;
-            }
+        if !ensure_autopilot_pty(state, &task, &slot_id).await {
+            continue;
         }
 
         // Inject answered questions as context (Phase 2 linkage)
@@ -5367,6 +5466,525 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Execute a flow-enabled Board task through the Engineering Flow Engine.
+/// Handles all phase types: slot phases (send to PTY), daemon phases (call Gemini), and Done.
+async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardTask, slot_id: &str) -> Result<()> {
+    let phase_str = task.flow_phase.as_deref().unwrap_or("investigate");
+    let phase = missiond_core::types::EngineeringPhase::from_str(phase_str)
+        .ok_or_else(|| anyhow!("Unknown flow phase: {}", phase_str))?;
+
+    let mut ctx: missiond_core::types::FlowContext = task.flow_context
+        .as_ref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+
+    info!(task_id = %task.id, phase = %phase_str, slot_id, "Flow engine: processing phase");
+
+    match phase {
+        // === Done phase: mark task complete ===
+        missiond_core::types::EngineeringPhase::Done => {
+            let _ = state.mission.db().update_board_task(
+                &task.id,
+                &missiond_core::types::UpdateBoardTaskInput {
+                    status: Some("done".to_string()),
+                    ..Default::default()
+                },
+            );
+            let _ = state.mission.db().add_board_task_note(
+                &missiond_core::types::AddBoardTaskNoteInput {
+                    task_id: task.id.clone(),
+                    content: "✅ Flow Engine: 全部阶段完成，任务标记 done".to_string(),
+                    note_type: Some("progress".to_string()),
+                    author: Some("flow-engine".to_string()),
+                },
+            );
+            info!(task_id = %task.id, "Flow engine: task completed (all phases done)");
+        }
+
+        // === Daemon phases: call Gemini directly ===
+        p if p.is_daemon_phase() => {
+            // Claim task as running
+            let _ = state.mission.db().update_board_task(
+                &task.id,
+                &missiond_core::types::UpdateBoardTaskInput {
+                    status: Some("running".to_string()),
+                    ..Default::default()
+                },
+            );
+
+            let (gemini_prompt, artifact_field) = match p {
+                missiond_core::types::EngineeringPhase::ConsultGemini1 => {
+                    let report = ctx.investigation_report.as_deref().unwrap_or("(无调查报告)");
+                    (
+                        format!(
+                            "# 架构咨询\n\n## 任务\n{}\n\n## 描述\n{}\n\n## 代码调查报告\n{}\n\n请给出架构层面的解决方案和建议。重点关注：\n1. 技术选型与现有架构的兼容性\n2. 潜在的风险和边界情况\n3. 推荐的实现路径",
+                            task.title, task.description, report
+                        ),
+                        "gemini_advice_1"
+                    )
+                }
+                missiond_core::types::EngineeringPhase::ConsultGemini2 => {
+                    let plan = ctx.execution_plan.as_deref().unwrap_or("(无执行方案)");
+                    let advice1 = ctx.gemini_advice_1.as_deref().unwrap_or("");
+                    (
+                        format!(
+                            "# 执行方案审查\n\n## 任务\n{}\n\n## 第一轮架构建议\n{}\n\n## 执行方案\n{}\n\n请审查此方案，指出：\n1. 遗漏或风险点\n2. 与第一轮建议的一致性\n3. 优化建议",
+                            task.title, advice1, plan
+                        ),
+                        "gemini_advice_2"
+                    )
+                }
+                _ => return Ok(()),
+            };
+
+            // Call Gemini via router API
+            let gemini_response = call_gemini_for_flow(state, &task.id, &gemini_prompt).await;
+
+            match gemini_response {
+                Ok(response) => {
+                    // Store artifact
+                    match artifact_field {
+                        "gemini_advice_1" => ctx.gemini_advice_1 = Some(response.clone()),
+                        "gemini_advice_2" => ctx.gemini_advice_2 = Some(response.clone()),
+                        _ => {}
+                    }
+
+                    // Advance phase
+                    let next_phase = p.next().unwrap_or(missiond_core::types::EngineeringPhase::Done);
+                    let _ = state.mission.db().update_board_task(
+                        &task.id,
+                        &missiond_core::types::UpdateBoardTaskInput {
+                            flow_phase: Some(next_phase.as_str().to_string()),
+                            flow_context: Some(serde_json::to_string(&ctx).unwrap_or_default()),
+                            status: Some("open".to_string()), // Back to open for next tick
+                            ..Default::default()
+                        },
+                    );
+
+                    let _ = state.mission.db().add_board_task_note(
+                        &missiond_core::types::AddBoardTaskNoteInput {
+                            task_id: task.id.clone(),
+                            content: format!(
+                                "✅ {} 完成 → 进入 {}\n\nGemini 回复摘要 (前500字):\n{}",
+                                p.display_name(),
+                                next_phase.display_name(),
+                                &truncate_safe(&response, 500)
+                            ),
+                            note_type: Some("progress".to_string()),
+                            author: Some("flow-engine".to_string()),
+                        },
+                    );
+
+                    info!(task_id = %task.id, from = %phase_str, to = %next_phase.as_str(), "Flow engine: daemon phase completed");
+                }
+                Err(e) => {
+                    warn!(task_id = %task.id, phase = %phase_str, error = %e, "Flow engine: Gemini call failed");
+                    // Revert to open for retry
+                    let _ = state.mission.db().update_board_task(
+                        &task.id,
+                        &missiond_core::types::UpdateBoardTaskInput {
+                            status: Some("open".to_string()),
+                            ..Default::default()
+                        },
+                    );
+                    let _ = state.mission.db().add_board_task_note(
+                        &missiond_core::types::AddBoardTaskNoteInput {
+                            task_id: task.id.clone(),
+                            content: format!("❌ {} Gemini 调用失败: {}", p.display_name(), e),
+                            note_type: Some("note".to_string()),
+                            author: Some("flow-engine".to_string()),
+                        },
+                    );
+                }
+            }
+        }
+
+        // === Slot phases: send prompt to PTY ===
+        p if p.is_slot_phase() => {
+            // Claim the task
+            match state.mission.db().claim_board_task(&task.id, slot_id, "pty_slot") {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    debug!(task_id = %task.id, slot_id, "Flow engine: task already claimed, skipping");
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!(task_id = %task.id, error = %e, "Flow engine: failed to claim task");
+                    return Ok(());
+                }
+            }
+
+            // Ensure PTY is running
+            if !ensure_autopilot_pty(state, task, slot_id).await {
+                return Ok(());
+            }
+
+            // Build phase-specific prompt
+            let prompt = build_flow_phase_prompt(task, &p, &ctx);
+
+            let timeout_ms = p.timeout_secs() * 1000;
+            info!(task_id = %task.id, phase = %phase_str, timeout_ms, "Flow engine: sending phase prompt to PTY");
+
+            match state.pty.send(slot_id, &prompt, timeout_ms).await {
+                Ok(res) => {
+                    let _ = state.mission.db().add_board_task_note(
+                        &missiond_core::types::AddBoardTaskNoteInput {
+                            task_id: task.id.clone(),
+                            content: format!(
+                                "**Flow Phase {} PTY 响应** ({}ms)\n\n{}",
+                                p.display_name(),
+                                res.duration_ms,
+                                &truncate_safe(&res.response, 2000)
+                            ),
+                            note_type: Some("progress".to_string()),
+                            author: Some("flow-engine".to_string()),
+                        },
+                    );
+
+                    // Phase advancement is handled by submit_phase_result MCP tool.
+                    // After PTY response, check if phase was already advanced.
+                    let updated_task = state.mission.db().get_board_task(&task.id);
+                    if let Ok(Some(updated)) = updated_task {
+                        let current_phase = updated.flow_phase.as_deref().unwrap_or(phase_str);
+                        if current_phase != phase_str {
+                            // Phase was advanced by submit_phase_result → set open for next tick
+                            let _ = state.mission.db().update_board_task(
+                                &task.id,
+                                &missiond_core::types::UpdateBoardTaskInput {
+                                    status: Some("open".to_string()),
+                                    ..Default::default()
+                                },
+                            );
+                            info!(task_id = %task.id, from = %phase_str, to = %current_phase, "Flow engine: phase advanced by slot");
+                        } else {
+                            // Slot didn't call submit_phase_result — possible stuck
+                            warn!(task_id = %task.id, phase = %phase_str, "Flow engine: slot completed PTY but didn't submit phase result");
+                            // Back to open so next tick can retry
+                            let _ = state.mission.db().update_board_task(
+                                &task.id,
+                                &missiond_core::types::UpdateBoardTaskInput {
+                                    status: Some("open".to_string()),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                    }
+
+                    // Reset slot failure count
+                    {
+                        let mut fail_map = state.slot_fail_counts.lock().unwrap();
+                        fail_map.remove(slot_id);
+                    }
+                }
+                Err(e) => {
+                    warn!(task_id = %task.id, phase = %phase_str, error = %e, "Flow engine: PTY send failed");
+                    let _ = state.mission.db().add_board_task_note(
+                        &missiond_core::types::AddBoardTaskNoteInput {
+                            task_id: task.id.clone(),
+                            content: format!("❌ Flow Phase {} PTY 失败: {}", p.display_name(), e),
+                            note_type: Some("note".to_string()),
+                            author: Some("flow-engine".to_string()),
+                        },
+                    );
+                    // Revert to open for retry
+                    let _ = state.mission.db().update_board_task(
+                        &task.id,
+                        &missiond_core::types::UpdateBoardTaskInput {
+                            status: Some("open".to_string()),
+                            ..Default::default()
+                        },
+                    );
+                    // Track failure
+                    {
+                        let mut fail_map = state.slot_fail_counts.lock().unwrap();
+                        let entry = fail_map.entry(slot_id.to_string()).or_insert((0, 0));
+                        entry.0 += 1;
+                        entry.1 = chrono::Utc::now().timestamp();
+                    }
+                }
+            }
+        }
+
+        _ => {}
+    }
+
+    Ok(())
+}
+
+/// Call Gemini via the router API for flow daemon phases.
+/// Uses the same HTTP client + credentials as mission_router_chat.
+async fn call_gemini_for_flow(state: &AppState, task_id: &str, prompt: &str) -> Result<String> {
+    let (base_url, jwt) = resolve_llm_credentials().await?;
+    let model = "gemini-3.1-pro";
+
+    // Get or create conversation for this task (maintains Gemini context across phases)
+    let conv_id = state.mission.db().router_chat_get_or_create(task_id, model)
+        .map_err(|e| anyhow!("Failed to get/create router chat conversation: {}", e))?;
+
+    // Load history for context continuity
+    let mut messages = state.mission.db().router_chat_load_history(&conv_id)
+        .unwrap_or_default();
+    let history_count = messages.len();
+
+    // Append current user message
+    messages.push(serde_json::json!({"role": "user", "content": prompt}));
+
+    let url = format!("{}/v1/chat/completions", base_url);
+    let body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "max_tokens": 16384,
+    });
+
+    info!(task_id, conv_id = %conv_id, msg_count = messages.len(), "Flow engine: calling Gemini");
+
+    let resp = state.http_client.post(&url)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", jwt))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| anyhow!("Gemini request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("Gemini returned {}: {}", status, err_body));
+    }
+
+    let result: serde_json::Value = resp.json().await
+        .map_err(|e| anyhow!("Failed to parse Gemini response: {}", e))?;
+
+    let content = result
+        .pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(empty response)")
+        .to_string();
+
+    // Save messages to conversation history
+    let new_msgs: Vec<(String, String)> = messages.iter().skip(history_count)
+        .map(|m| {
+            let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("user").to_string();
+            let msg_content = m.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            (role, msg_content)
+        })
+        .chain(std::iter::once(("assistant".to_string(), content.clone())))
+        .collect();
+
+    if let Err(e) = state.mission.db().router_chat_append_messages(&conv_id, &new_msgs) {
+        warn!(conv_id = %conv_id, error = %e, "Flow engine: failed to save Gemini chat history");
+    }
+
+    Ok(content)
+}
+
+/// Ensure a PTY session is running for the given slot (autopilot task execution).
+/// Returns true if PTY is available, false if spawn failed.
+async fn ensure_autopilot_pty(state: &AppState, task: &missiond_core::types::BoardTask, slot_id: &str) -> bool {
+    // Check if session is already running
+    if let Some(info) = state.pty.get_status(slot_id).await {
+        if info.state != SessionState::Exited {
+            return true;
+        }
+    }
+
+    // Find slot config
+    let slot = state.mission.list_slots()
+        .into_iter()
+        .find(|s| s.config.id == slot_id);
+
+    let Some(slot) = slot else {
+        warn!(task_id = %task.id, slot_id, "Autopilot: slot not found, skipping");
+        let _ = state.mission.db().update_board_task(
+            &task.id,
+            &missiond_core::types::UpdateBoardTaskInput {
+                status: Some("open".to_string()),
+                ..Default::default()
+            },
+        );
+        return false;
+    };
+
+    let pty_slot = missiond_core::PTYSlot {
+        id: slot.config.id.clone(),
+        role: slot.config.role.clone(),
+        cwd: slot.config.cwd.as_deref().map(PathBuf::from),
+    };
+    let slot_env = slot.config.env.as_ref();
+    let mcp_config = slot.config.mcp_config.clone().map(PathBuf::from);
+    let (extra_env, session_file) = build_slot_tracking_env(slot_id, slot_env).await;
+
+    match state.pty.spawn(&pty_slot, PTYSpawnOptions {
+        auto_restart: false,
+        wait_for_idle: true,
+        timeout_secs: Some(120),
+        mcp_config,
+        dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+        extra_env,
+    }).await {
+        Ok(_) => {
+            capture_slot_session_uuid(state, slot_id, &session_file).await;
+            info!(task_id = %task.id, slot_id, "Autopilot: PTY spawned for task");
+            true
+        }
+        Err(e) => {
+            warn!(task_id = %task.id, slot_id, error = %e, "Autopilot: failed to spawn PTY");
+            let _ = state.mission.db().update_board_task(
+                &task.id,
+                &missiond_core::types::UpdateBoardTaskInput {
+                    status: Some("open".to_string()),
+                    ..Default::default()
+                },
+            );
+            false
+        }
+    }
+}
+
+/// Build phase-specific prompt for the AI slot to execute.
+fn build_flow_phase_prompt(
+    task: &missiond_core::types::BoardTask,
+    phase: &missiond_core::types::EngineeringPhase,
+    ctx: &missiond_core::types::FlowContext,
+) -> String {
+    let task_id = &task.id;
+
+    match phase {
+        missiond_core::types::EngineeringPhase::Investigate => {
+            format!(
+                r#"# 工程任务调查阶段
+
+## 任务
+**{title}**
+
+{description}
+
+## 你的工作
+1. 阅读任务描述，理解需求
+2. 调查相关代码，找到关键文件和依赖
+3. 分析现有架构，识别影响范围
+4. 记录发现的问题和约束条件
+
+## 完成后
+调用 `mission_submit_phase_result` 提交调查报告：
+```
+taskId: "{task_id}"
+artifactType: "investigation_report"
+content: "<你的调查报告，包含关键文件、架构分析、问题清单>"
+```"#,
+                title = task.title,
+                description = task.description,
+                task_id = task_id,
+            )
+        }
+
+        missiond_core::types::EngineeringPhase::Plan => {
+            let gemini_advice = ctx.gemini_advice_1.as_deref().unwrap_or("(无 Gemini 建议)");
+            let investigation = ctx.investigation_report.as_deref().unwrap_or("(无调查报告)");
+            format!(
+                r#"# 执行方案制定阶段
+
+## 任务
+**{title}**
+
+{description}
+
+## 前置信息
+
+### 调查报告
+{investigation}
+
+### Gemini 架构建议
+{gemini_advice}
+
+## 你的工作
+1. 综合调查报告和 Gemini 建议，制定详细执行方案
+2. 进行第二轮精确调查（验证 Gemini 建议的可行性）
+3. 列出具体的代码变更清单（文件、函数、改动内容）
+4. 识别风险点和回退方案
+
+## 完成后
+调用 `mission_submit_phase_result` 提交执行方案：
+```
+taskId: "{task_id}"
+artifactType: "execution_plan"
+content: "<详细执行方案，包含变更清单、风险分析、实施步骤>"
+```"#,
+                title = task.title,
+                description = task.description,
+                investigation = investigation,
+                gemini_advice = gemini_advice,
+                task_id = task_id,
+            )
+        }
+
+        missiond_core::types::EngineeringPhase::Execute => {
+            let plan = ctx.execution_plan.as_deref().unwrap_or("(无执行方案)");
+            let gemini_advice2 = ctx.gemini_advice_2.as_deref().unwrap_or("(无 Gemini 审查意见)");
+            format!(
+                r#"# 执行阶段
+
+## 任务
+**{title}**
+
+## 执行方案
+{plan}
+
+## Gemini 方案审查意见
+{gemini_advice2}
+
+## 你的工作
+1. 根据执行方案和 Gemini 审查意见，开始编码实现
+2. 遇到问题记录在 execution_result 中
+3. 确保代码质量：类型安全、错误处理、测试
+
+## 完成后
+调用 `mission_submit_phase_result` 提交执行结果：
+```
+taskId: "{task_id}"
+artifactType: "execution_result"
+content: "<执行结果摘要：完成的变更、测试结果、遗留问题>"
+```"#,
+                title = task.title,
+                plan = plan,
+                gemini_advice2 = gemini_advice2,
+                task_id = task_id,
+            )
+        }
+
+        missiond_core::types::EngineeringPhase::Finalize => {
+            let result = ctx.execution_result.as_deref().unwrap_or("(无执行结果)");
+            format!(
+                r#"# 收尾阶段
+
+## 任务
+**{title}**
+
+## 执行结果
+{result}
+
+## 你的工作
+1. 创建 git commit（描述清晰的 commit message）
+2. 如有需要，更新相关 Skill 文件记录新知识
+3. 确认所有变更已提交
+
+## 完成后
+调用 `mission_submit_phase_result` 提交 commit hash：
+```
+taskId: "{task_id}"
+artifactType: "commit_hash"
+content: "<commit hash 或提交摘要>"
+```"#,
+                title = task.title,
+                result = result,
+                task_id = task_id,
+            )
+        }
+
+        _ => format!("Flow phase {:?} — no prompt template available", phase),
+    }
 }
 
 const MEMORY_SLOT_ID: &str = "slot-memory";           // Fast lane (realtime)
