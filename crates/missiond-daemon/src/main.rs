@@ -1530,8 +1530,10 @@ impl AppState {
                 self.pty.kill(&slot_id).await?;
                 // Requeue any Running submit tasks assigned to this slot
                 let requeued = self.mission.db().requeue_running_tasks_for_slot(&slot_id).unwrap_or(0);
+                // Release any board task claims held by this slot
+                let claims_released = self.mission.db().release_board_claims_by_executor(&slot_id).unwrap_or(0);
                 Ok(ToolResult::json(
-                    &serde_json::json!({ "success": true, "slotId": slot_id, "requeuedTasks": requeued }),
+                    &serde_json::json!({ "success": true, "slotId": slot_id, "requeuedTasks": requeued, "claimsReleased": claims_released }),
                 ))
             }
             "mission_pty_screen" => {
@@ -4825,6 +4827,8 @@ async fn check_slot_context_levels(state: &AppState) {
                     Err(e) => warn!(slot_id = %slot.config.id, error = %e, "Failed to requeue tasks after low-context restart"),
                     _ => {}
                 }
+                // Release any board task claims held by this slot
+                let _ = state.mission.db().release_board_claims_by_executor(&slot.config.id);
                 // Wait for exit
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
@@ -5015,14 +5019,18 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
 
         info!(task_id = %task.id, slot_id = %slot_id, title = %task.title, "Autopilot: executing task");
 
-        // Mark task as running before sending
-        let _ = state.mission.db().update_board_task(
-            &task.id,
-            &missiond_core::types::UpdateBoardTaskInput {
-                status: Some("running".to_string()),
-                ..Default::default()
-            },
-        );
+        // Atomically claim the task (CAS: only succeeds if open + unclaimed)
+        match state.mission.db().claim_board_task(&task.id, &slot_id, "pty_slot") {
+            Ok(Some(_)) => {} // Successfully claimed
+            Ok(None) => {
+                debug!(task_id = %task.id, slot_id = %slot_id, "Autopilot: task already claimed, skipping");
+                continue;
+            }
+            Err(e) => {
+                warn!(task_id = %task.id, error = %e, "Autopilot: failed to claim task");
+                continue;
+            }
+        }
 
         // Check if PTY session exists, spawn if needed
         let pty_status = state.pty.get_status(&slot_id).await;
@@ -5929,6 +5937,8 @@ async fn check_slot_stuck(
         Err(e) => warn!(slot_id, error = %e, "Failed to requeue tasks after slot restart"),
         _ => {}
     }
+    // Release board task claims held by this slot
+    let _ = state.mission.db().release_board_claims_by_executor(slot_id);
 
     // Allow next tick to respawn
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
