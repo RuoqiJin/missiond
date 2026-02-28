@@ -18,6 +18,10 @@ export interface Task {
   createdAt: string;
   updatedAt: string;
   order: number;
+  // Task claim fields (conflict prevention)
+  claimExecutorId?: string;
+  claimExecutorType?: 'pty_slot' | 'manual_session';
+  claimedAt?: string;
 }
 
 export interface TaskFormData {
