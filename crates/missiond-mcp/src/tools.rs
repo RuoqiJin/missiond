@@ -1004,6 +1004,21 @@ pub fn all_tools() -> Vec<ToolDefinition> {
             }),
         ),
         ToolDefinition::new(
+            "mission_kb_batch_forget",
+            "批量删除知识条目。一次删除多个 key，比逐条 forget 高效。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "keys": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "要删除的 key 列表"
+                    }
+                },
+                "required": ["keys"]
+            }),
+        ),
+        ToolDefinition::new(
             "mission_kb_search",
             "搜索知识库。传 query 全文搜索，不传则列出最近条目。",
             json!({
@@ -1443,6 +1458,59 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     }
                 },
                 "required": ["toolUseId"]
+            }),
+        ),
+
+        // ===== Audit (Conversation Tool Call Analysis) =====
+        ToolDefinition::new(
+            "mission_audit_trace",
+            "生成对话的工具调用审计轨迹（Markdown 格式）。紧凑摘要，适合发给其他 AI 审查。用 toolFilter 筛选特定工具，用 includeReasoning 包含 assistant 推理文本。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "sessionId": {
+                        "type": "string",
+                        "description": "会话 ID"
+                    },
+                    "toolFilter": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "只看指定工具（如 [\"mission_kb_analyze\", \"mission_kb_forget\"]）"
+                    },
+                    "includeReasoning": {
+                        "type": "boolean",
+                        "description": "包含 assistant 推理文本（默认 false）"
+                    }
+                },
+                "required": ["sessionId"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_audit_detail",
+            "获取单次工具调用的完整输入输出（下钻查看）。配合 mission_audit_trace 使用。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "toolId": {
+                        "type": "string",
+                        "description": "tool_use_id（从 audit_trace 中获取）"
+                    }
+                },
+                "required": ["toolId"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_audit_stats",
+            "获取会话的工具调用统计（按工具名分组，含成功/失败计数）。快速判断工作量和错误率。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "sessionId": {
+                        "type": "string",
+                        "description": "会话 ID"
+                    }
+                },
+                "required": ["sessionId"]
             }),
         ),
 
