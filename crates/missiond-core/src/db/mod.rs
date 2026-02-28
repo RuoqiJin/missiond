@@ -3862,6 +3862,58 @@ impl MissionDB {
         Ok(set)
     }
 
+    /// Count tool calls still in 'pending' status (missing output)
+    pub fn count_pending_tool_calls(&self) -> SqliteResult<i64> {
+        let conn = self.read_conn();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM conversation_tool_calls WHERE status = 'pending'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Get session IDs that have pending tool calls (for output patching)
+    pub fn get_sessions_with_pending_tool_calls(&self) -> SqliteResult<Vec<String>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT session_id FROM conversation_tool_calls WHERE status = 'pending'"
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut result = Vec::new();
+        for r in rows { result.push(r?); }
+        Ok(result)
+    }
+
+    /// Get all session IDs that have at least one tool call in conversation_tool_calls
+    pub fn get_sessions_with_tool_calls(&self) -> SqliteResult<std::collections::HashSet<String>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT session_id FROM conversation_tool_calls"
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut set = std::collections::HashSet::new();
+        for r in rows { set.insert(r?); }
+        Ok(set)
+    }
+
+    /// Get raw messages for tool call backfill (assistant+user roles with raw_content)
+    pub fn get_messages_for_tool_call_backfill(&self, session_id: &str) -> SqliteResult<Vec<(String, String, String)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT role, raw_content, timestamp FROM conversation_messages
+             WHERE session_id = ?1 AND raw_content IS NOT NULL AND raw_content != ''
+             AND role IN ('assistant', 'user', 'thinking', 'system', 'tool_result')
+             ORDER BY id ASC"
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?;
+        let mut result = Vec::new();
+        for r in rows { result.push(r?); }
+        Ok(result)
+    }
+
     /// Get all conversations with their JSONL paths (for backfill)
     pub fn get_conversations_with_jsonl(&self) -> SqliteResult<Vec<(String, String)>> {
         let conn = self.read_conn();
