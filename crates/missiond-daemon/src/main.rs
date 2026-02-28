@@ -1159,11 +1159,13 @@ impl AppState {
                             match self.pty.send_fire_and_forget(candidate_id, &prompt).await {
                                 Ok(()) => {
                                     let now = chrono::Utc::now().timestamp_millis();
+                                    let slot_session = self.mission.db().get_slot_session(candidate_id).ok().flatten();
                                     let _ = self.mission.db().update_task(
                                         &task_id,
                                         &missiond_core::types::TaskUpdate {
                                             status: Some(missiond_core::types::TaskStatus::Running),
                                             slot_id: Some(candidate_id.to_string()),
+                                            session_id: slot_session,
                                             started_at: Some(now),
                                             ..Default::default()
                                         },
@@ -1219,11 +1221,13 @@ impl AppState {
                                 match self.pty.send_fire_and_forget(candidate_id, &prompt).await {
                                     Ok(()) => {
                                         let now = chrono::Utc::now().timestamp_millis();
+                                        let slot_session = self.mission.db().get_slot_session(candidate_id).ok().flatten();
                                         let _ = self.mission.db().update_task(
                                             &task_id,
                                             &missiond_core::types::TaskUpdate {
                                                 status: Some(missiond_core::types::TaskStatus::Running),
                                                 slot_id: Some(candidate_id.to_string()),
+                                                session_id: slot_session,
                                                 started_at: Some(now),
                                                 ..Default::default()
                                             },

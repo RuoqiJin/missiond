@@ -210,8 +210,10 @@ export function TaskListView() {
 
   const { roots, childrenMap, doneCountMap } = useMemo(() => buildTree(filtered), [filtered]);
 
+  const ACTIVE_STATUSES = new Set(['open', 'running', 'verifying', 'blocked', 'failed']);
+
   const openRoots = useMemo(() =>
-    roots.filter((t) => t.status === 'open').sort((a, b) => a.order - b.order),
+    roots.filter((t) => ACTIVE_STATUSES.has(t.status)).sort((a, b) => a.order - b.order),
     [roots],
   );
 

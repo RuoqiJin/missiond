@@ -35,11 +35,24 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'clear-done') {
-      const result = await callTool('mission_board_list', { status: 'done', includeHidden: true }) as Record<string, unknown>[];
-      for (const task of result) {
+      const allTasks = await callTool('mission_board_list', { includeHidden: true }) as Record<string, unknown>[];
+      const doneTasks = allTasks.filter(t => t.status === 'done');
+
+      // Only delete done tasks whose entire subtree is also done/skipped
+      const hasActiveDescendant = (taskId: string): boolean => {
+        const children = allTasks.filter(t => t.parentId === taskId);
+        return children.some(c => {
+          const s = c.status as string;
+          if (s !== 'done' && s !== 'skipped') return true;
+          return hasActiveDescendant(c.id as string);
+        });
+      };
+
+      const safeTasks = doneTasks.filter(t => !hasActiveDescendant(t.id as string));
+      for (const task of safeTasks) {
         await callTool('mission_board_delete', { id: task.id });
       }
-      return NextResponse.json({ deleted: result.length });
+      return NextResponse.json({ deleted: safeTasks.length, skipped: doneTasks.length - safeTasks.length });
     }
 
     const body = await req.json();

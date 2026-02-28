@@ -1511,7 +1511,7 @@ impl MissionDB {
         id: &str,
     ) -> SqliteResult<Option<BoardTaskWithNotes>> {
         if let Some(task) = self.get_board_task(id)? {
-            let notes = self.get_board_task_notes(id)?;
+            let notes = self.get_board_task_notes(&task.id)?;
             Ok(Some(BoardTaskWithNotes { task, notes }))
         } else {
             Ok(None)
