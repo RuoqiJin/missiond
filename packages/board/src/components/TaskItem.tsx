@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { GripVertical, Calendar, Check, Minus, ChevronRight, ChevronDown, Plus } from 'lucide-react';
+import { GripVertical, Calendar, Check, Minus, ChevronRight, ChevronDown, Plus, Lock } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { CATEGORY_CONFIG, PRIORITY_CONFIG } from '../constants';
@@ -156,6 +156,12 @@ export function TaskItem({
             {isVerifying && <span className="text-[10px] px-1.5 py-0 h-4 rounded bg-yellow-500/20 text-yellow-400 border border-yellow-500/30 shrink-0">Verifying</span>}
             {isBlocked && <span className="text-[10px] px-1.5 py-0 h-4 rounded bg-orange-500/20 text-orange-400 border border-orange-500/30 shrink-0">Blocked</span>}
             {isFailed && <span className="text-[10px] px-1.5 py-0 h-4 rounded bg-red-500/20 text-red-400 border border-red-500/30 shrink-0">Failed</span>}
+            {task.claimExecutorId && (
+              <span className="flex items-center gap-0.5 text-[10px] px-1.5 py-0 h-4 rounded bg-purple-500/20 text-purple-400 border border-purple-500/30 shrink-0" title={`Claimed by ${task.claimExecutorId} (${task.claimExecutorType || 'unknown'})`}>
+                <Lock className="w-2.5 h-2.5" />
+                {task.claimExecutorType === 'pty_slot' ? task.claimExecutorId : 'Session'}
+              </span>
+            )}
 
             {hasChildren && !isInactive && (
               <span className={cn(
