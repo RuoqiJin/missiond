@@ -808,6 +808,41 @@ pub fn all_tools() -> Vec<ToolDefinition> {
             }),
         ),
 
+        // ===== Skill Execution Stats (Phase 4) =====
+        ToolDefinition::new(
+            "mission_skill_stats",
+            "查看 Skill workflow 执行统计（成功率、平均耗时）。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "skill": {
+                        "type": "string",
+                        "description": "Skill 名称（空=全部 skill 汇总）"
+                    }
+                }
+            }),
+        ),
+
+        // ===== Skill Version Rollback (Phase 4) =====
+        ToolDefinition::new(
+            "mission_skill_rollback",
+            "回滚 Skill 到历史版本。不指定 version_id 则列出可用版本。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "skill": {
+                        "type": "string",
+                        "description": "Skill 名称（如 backend-deploy）"
+                    },
+                    "version_id": {
+                        "type": "integer",
+                        "description": "版本 ID（不指定则列出最近版本）"
+                    }
+                },
+                "required": ["skill"]
+            }),
+        ),
+
         // ===== Infrastructure Registry =====
         ToolDefinition::new(
             "mission_infra_list",
@@ -1322,6 +1357,47 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     }
                 },
                 "required": ["query"]
+            }),
+        ),
+
+        // ===== Conversation Events & Agent Trajectory =====
+        ToolDefinition::new(
+            "mission_conversation_events",
+            "查询会话系统事件（turn_duration/compact_boundary/hook_progress/bash_progress 等）。不传 sessionId 时返回事件类型汇总。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "sessionId": {
+                        "type": "string",
+                        "description": "会话 ID。不传则返回全局事件类型统计"
+                    },
+                    "eventType": {
+                        "type": "string",
+                        "description": "按事件类型过滤（如 turn_duration, compact_boundary, hook_progress）"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "最大返回数（默认 100）"
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_agent_trajectory",
+            "查询子 Agent 的完整思维链。通过 toolUseId 获取该 Agent 调用下的所有交互消息。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "toolUseId": {
+                        "type": "string",
+                        "description": "父 tool_use ID（对应 parentToolUseID）"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "最大返回数（默认 200）"
+                    }
+                },
+                "required": ["toolUseId"]
             }),
         ),
 

@@ -31,7 +31,7 @@ pub use crate::core::{
 pub use types::{
     CreateTaskInput, Credential, EventType, InboxMessage, InfraConfig, InfraServer,
     KBOperation, KBOperationRow, KBRememberInput, KnowledgeEntry, SkillBlock, SkillSearchResult,
-    SkillTopic, Slot, SlotConfig, SlotsConfig, Task, TaskEvent, TaskStatus, TaskUpdate,
+    SkillExecutionStat, SkillTopic, SkillVersion, Slot, SlotConfig, SlotsConfig, Task, TaskEvent, TaskStatus, TaskUpdate,
 };
 
 // Re-export database
@@ -74,6 +74,6 @@ pub use ipc::{
 
 // Re-export Skill types
 pub use skill::{
-    SkillAction, SkillIndex, SkillMeta, SkillRequires, WorkflowBlock, WorkflowResult,
+    ContextHook, SkillAction, SkillIndex, SkillMeta, SkillRequires, WorkflowBlock, WorkflowResult,
     WorkflowStep, WorkflowStepPreview, WorkflowStepResult, parse_workflow_blocks, resolve_vars,
 };
