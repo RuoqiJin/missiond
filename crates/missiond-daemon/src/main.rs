@@ -105,9 +105,14 @@ struct McpClientState {
     pending: Arc<tokio::sync::Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Value>>>>,
     next_id: Arc<std::sync::atomic::AtomicU64>,
     reader_alive: Arc<std::sync::atomic::AtomicBool>,
+    /// Call counter for max-uses recycling
+    call_count: Arc<std::sync::atomic::AtomicU64>,
     /// Keep child alive — kill_on_drop fires when this Arc reaches zero.
     _child: Arc<tokio::sync::Mutex<tokio::process::Child>>,
 }
+
+/// Max calls before recycling the MCP process (prevents state pollution)
+const MCP_MAX_USES: u64 = 200;
 
 impl McpProcessClient {
     fn new(config_path: PathBuf) -> Self {
@@ -118,30 +123,51 @@ impl McpProcessClient {
         // Phase 1: Get or create client state (short lock)
         let client = {
             let mut guard = self.state.lock().await;
-            if guard.is_none() || !guard.as_ref().unwrap().reader_alive.load(std::sync::atomic::Ordering::Relaxed) {
-                if guard.is_some() {
-                    warn!("xjp-mcp process died, respawning");
+            let needs_respawn = match guard.as_ref() {
+                None => true,
+                Some(s) => {
+                    !s.reader_alive.load(std::sync::atomic::Ordering::Relaxed)
+                        || s.call_count.load(std::sync::atomic::Ordering::Relaxed) >= MCP_MAX_USES
+                }
+            };
+            if needs_respawn {
+                if let Some(ref old) = *guard {
+                    let reason = if !old.reader_alive.load(std::sync::atomic::Ordering::Relaxed) {
+                        "process died"
+                    } else {
+                        "max-uses reached"
+                    };
+                    warn!("xjp-mcp recycling: {}", reason);
                 }
                 *guard = Some(Self::spawn(&self.config_path).await?);
             }
             guard.as_ref().unwrap().clone()
         }; // Lock released here!
 
+        client.call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         // Phase 2: Send request (no outer lock held)
         let id = client.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = tokio::sync::oneshot::channel();
         client.pending.lock().await.insert(id, tx);
 
-        {
+        let send_result = {
             let mut stdin = client.stdin.lock().await;
             let req = serde_json::json!({
                 "jsonrpc": "2.0", "id": id, "method": "tools/call",
                 "params": {"name": tool_name, "arguments": tool_args}
             });
-            stdin.write_all(req.to_string().as_bytes()).await?;
-            stdin.write_all(b"\n").await?;
-            stdin.flush().await?;
-        } // stdin lock released
+            let r1 = stdin.write_all(req.to_string().as_bytes()).await;
+            let r2 = stdin.write_all(b"\n").await;
+            let r3 = stdin.flush().await;
+            r1.and(r2).and(r3)
+        }; // stdin lock released
+
+        // Handle Broken Pipe: mark process dead for next call to respawn
+        if let Err(e) = send_result {
+            client.reader_alive.store(false, std::sync::atomic::Ordering::Relaxed);
+            return Err(anyhow!("xjp-mcp stdin write failed (Broken Pipe?): {}", e));
+        }
 
         // Phase 3: Wait for response (completely lock-free)
         let resp = tokio::time::timeout(
@@ -271,6 +297,7 @@ impl McpProcessClient {
             pending,
             next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             reader_alive,
+            call_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             _child: Arc::new(tokio::sync::Mutex::new(child)),
         })
     }
@@ -301,6 +328,8 @@ struct AppState {
     extraction_notify: Arc<tokio::sync::Notify>,
     /// Signal to re-check slow lane extractions immediately.
     slow_extraction_notify: Arc<tokio::sync::Notify>,
+    /// Signal to re-dispatch queued submit tasks (fired on task creation/completion).
+    submit_notify: Arc<tokio::sync::Notify>,
     /// Last KB auto-GC timestamp (epoch secs). 0 = never run.
     last_auto_gc_at: Arc<std::sync::atomic::AtomicI64>,
     /// Last KB consolidation timestamp (epoch secs). 0 = never run.
@@ -881,7 +910,9 @@ impl AppState {
                             let output = result.content.first()
                                 .map(|c| match c { missiond_mcp::ToolContent::Text { text } => text.clone() })
                                 .unwrap_or_default();
-                            context.insert(hook.save_as.clone(), output);
+                            // Escape ${...} in hook output to prevent injection into resolve_vars()
+                            let safe_output = output.replace("${", "$\\{");
+                            context.insert(hook.save_as.clone(), safe_output);
                             debug!(hook = %hook.tool, save_as = %hook.save_as, "Context hook completed");
                         }
                         Err(_) => {
@@ -905,9 +936,33 @@ impl AppState {
 
         let mut results: Vec<WorkflowStepResult> = Vec::new();
         let mut i = 0usize;
+        let mut visit_counts: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+        const MAX_STEP_VISITS: u32 = 5; // absolute ceiling per step
 
         while i < workflow.steps.len() {
             let step = &workflow.steps[i];
+
+            // Guard: prevent infinite fallback loops
+            let visits = visit_counts.entry(i).or_insert(0);
+            *visits += 1;
+            if *visits > MAX_STEP_VISITS {
+                let duration_ms = exec_start.elapsed().as_millis() as i64;
+                let err_msg = format!("Step {} ('{}') visited {} times — infinite loop detected", i, step.tool, visits);
+                warn!(%err_msg);
+                let _ = db.skill_execution_update_with_duration(
+                    &exec_id, "failed", (i + 1) as i32,
+                    Some(&serde_json::to_string(&context).unwrap_or_default()),
+                    Some(&err_msg),
+                    Some(duration_ms),
+                );
+                return Ok(WorkflowResult::Failed {
+                    steps_completed: i,
+                    error_step: i,
+                    error: err_msg,
+                    results,
+                });
+            }
+
             info!(exec_id = %exec_id, step = i, tool = %step.tool, "Executing workflow step");
 
             // Resolve ${var} references in params
@@ -1190,6 +1245,8 @@ impl AppState {
                 } else {
                     result["dispatched"] = serde_json::json!(false);
                     result["hint"] = serde_json::json!("No idle slot found, task queued for autopilot dispatch");
+                    // Signal unified scheduler to dispatch immediately
+                    self.submit_notify.notify_one();
                 }
                 Ok(ToolResult::json(&result))
             }
@@ -2576,6 +2633,11 @@ impl AppState {
                             }));
                         }
                     }
+                }
+
+                // Signal unified scheduler to dispatch any newly created submit tasks
+                if results.iter().any(|r| r.get("status").and_then(|s| s.as_str()) == Some("dispatched")) {
+                    self.submit_notify.notify_one();
                 }
 
                 // Get remaining count
@@ -4623,15 +4685,8 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
         check_slot_stuck(state, MEMORY_SLOT_ID, &state.memory_slot_busy_since, &state.extraction_state).await;
         check_slot_stuck(state, MEMORY_SLOW_SLOT_ID, &state.slow_slot_busy_since, &state.slow_extraction_state).await;
 
-        // User-submitted tasks take priority over daemon-internal extraction
-        dispatch_queued_submit_tasks(state).await;
-
-        // Fast lane: realtime extraction on slot-memory
-        check_realtime_extraction(state).await;
-
-        // Slow lane: deep analysis + kb consolidation on slot-memory-slow
-        check_deep_analysis(state).await;
-        check_kb_consolidation(state).await;
+        // Unified priority scheduler: submit > realtime > deep > consolidation
+        schedule_memory_tasks(state).await;
     }
 
     // FTS dirty flag rebuild: after kb_forget sets dirty, rebuild here
@@ -5303,30 +5358,50 @@ async fn ensure_memory_slot(state: &AppState) -> bool {
     ensure_memory_slot_by_id(state, MEMORY_SLOT_ID).await
 }
 
+/// Unified priority scheduler for memory slots.
+/// Enforces strict priority: Submit Tasks > Realtime Extraction > Deep Analysis > KB Consolidation.
+/// Called from autopilot_tick (60s fallback) and event-driven paths (immediate).
+async fn schedule_memory_tasks(state: &AppState) {
+    // P1: Submit tasks — highest priority, dispatch to any idle memory slot
+    dispatch_queued_submit_tasks(state).await;
+
+    // P2: Fast lane — realtime extraction on slot-memory
+    // (only runs if slot-memory wasn't grabbed by P1)
+    check_realtime_extraction(state).await;
+
+    // P3: Slow lane — deep analysis + consolidation on slot-memory-slow
+    // (independent of fast lane, only blocked if P1 grabbed slot-memory-slow)
+    check_deep_analysis(state).await;
+    check_kb_consolidation(state).await;
+}
+
 /// Dispatch queued tasks from the `tasks` table (created by mission_submit).
-/// Runs every autopilot tick (60s). Finds queued tasks, matches them to idle slots.
-async fn dispatch_queued_submit_tasks(state: &AppState) {
+/// Returns true if at least one task was dispatched.
+/// Part of the unified priority scheduler — called before extraction checks.
+async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
     let queued = match state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Queued) {
         Ok(tasks) => tasks,
         Err(e) => {
             warn!(error = %e, "Failed to query queued submit tasks");
-            return;
+            return false;
         }
     };
 
     if queued.is_empty() {
-        return;
+        return false;
     }
 
     info!(count = queued.len(), "Autopilot: found queued submit tasks");
 
+    let mut any_dispatched = false;
+    // Collect unique roles from queued tasks for auto-spawn
+    let queued_roles: HashSet<String> = queued.iter().map(|t| t.role.clone()).collect();
+
     for task in &queued {
-        // Find an idle slot: prefer task.slot_id if set, else match by role
         let slots = state.mission.list_slots();
         let mut dispatched = false;
 
         let candidates: Vec<String> = if let Some(ref target) = task.slot_id {
-            // Specific slot requested
             vec![target.clone()]
         } else {
             slots.iter()
@@ -5335,6 +5410,7 @@ async fn dispatch_queued_submit_tasks(state: &AppState) {
                 .collect()
         };
 
+        // Phase 1: Try idle slots
         for slot_id in &candidates {
             let status = match state.pty.get_status(slot_id).await {
                 Some(s) => s,
@@ -5344,7 +5420,6 @@ async fn dispatch_queued_submit_tasks(state: &AppState) {
                 continue;
             }
 
-            // Try fire-and-forget dispatch
             match state.pty.send_fire_and_forget(slot_id, &task.prompt).await {
                 Ok(()) => {
                     let now = chrono::Utc::now().timestamp_millis();
@@ -5359,6 +5434,7 @@ async fn dispatch_queued_submit_tasks(state: &AppState) {
                     );
                     info!(task_id = %task.id, slot_id = %slot_id, role = %task.role, "Autopilot: dispatched queued submit task");
                     dispatched = true;
+                    any_dispatched = true;
                     break;
                 }
                 Err(e) => {
@@ -5368,9 +5444,39 @@ async fn dispatch_queued_submit_tasks(state: &AppState) {
         }
 
         if !dispatched {
-            debug!(task_id = %task.id, role = %task.role, "Autopilot: no idle slot for queued task, will retry next tick");
+            debug!(task_id = %task.id, role = %task.role, "Autopilot: no idle slot for queued task");
         }
     }
+
+    // Phase 2: Auto-spawn exited/no-session slots for roles with undispatched tasks
+    if !any_dispatched {
+        let slots = state.mission.list_slots();
+        for role in &queued_roles {
+            for slot in slots.iter().filter(|s| s.config.role == *role) {
+                let slot_id = &slot.config.id;
+                let status = state.pty.get_status(slot_id).await;
+                let is_spawnable = match &status {
+                    Some(s) => s.state == missiond_core::pty::SessionState::Exited,
+                    None => true,
+                };
+                if !is_spawnable { continue; }
+
+                // Spawn in background — will fire submit_notify when idle
+                let state_clone = state.clone();
+                let slot_id_clone = slot_id.clone();
+                info!(slot_id = %slot_id, role = %role, "Autopilot: auto-spawning slot for queued submit tasks");
+                tokio::spawn(async move {
+                    if ensure_memory_slot_by_id(&state_clone, &slot_id_clone).await {
+                        // Slot is now idle — signal re-dispatch
+                        state_clone.submit_notify.notify_one();
+                    }
+                });
+                break; // One spawn attempt per role
+            }
+        }
+    }
+
+    any_dispatched
 }
 
 /// Reap submit tasks stuck in Running state for too long (15 min).
@@ -5686,13 +5792,8 @@ async fn check_realtime_extraction(state: &AppState) {
         return;
     }
 
-    // P1: Yield to pending submit tasks — let dispatch_queued_submit_tasks handle them first
-    if let Ok(queued) = state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Queued) {
-        if queued.iter().any(|t| t.role == "memory") {
-            debug!("realtime: skipping, queued submit tasks for memory role take priority");
-            return;
-        }
-    }
+    // Priority enforcement: unified scheduler guarantees submit tasks run before this.
+    // Skip if slot-memory is occupied by a running submit task.
     if let Ok(running) = state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Running) {
         if running.iter().any(|t| t.slot_id.as_deref() == Some(MEMORY_SLOT_ID)) {
             debug!("realtime: skipping, running submit task on memory slot");
@@ -5852,13 +5953,8 @@ async fn check_deep_analysis(state: &AppState) {
         return;
     }
 
-    // P1: Yield to pending submit tasks on slow slot
-    if let Ok(queued) = state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Queued) {
-        if queued.iter().any(|t| t.role == "memory") {
-            debug!("deep_analysis: skipping, queued submit tasks for memory role take priority");
-            return;
-        }
-    }
+    // Priority enforcement: unified scheduler guarantees submit tasks run before this.
+    // Skip if slow slot is occupied by a running submit task.
     if let Ok(running) = state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Running) {
         if running.iter().any(|t| t.slot_id.as_deref() == Some(MEMORY_SLOW_SLOT_ID)) {
             debug!("deep_analysis: skipping, running submit task on slow slot");
@@ -7206,6 +7302,7 @@ async fn main() -> Result<()> {
         claude_md_hash: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         extraction_notify: Arc::new(tokio::sync::Notify::new()),
         slow_extraction_notify: Arc::new(tokio::sync::Notify::new()),
+        submit_notify: Arc::new(tokio::sync::Notify::new()),
         last_auto_gc_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         last_kb_consolidation_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         memory_paused: Arc::new(std::sync::atomic::AtomicBool::new(
@@ -7286,18 +7383,24 @@ async fn main() -> Result<()> {
                 }
             }
             _ = state.extraction_notify.notified() => {
-                // Fast lane event-driven: realtime extraction completed, check for more
+                // Fast lane extraction completed — run unified scheduler
                 if !state.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    check_realtime_extraction(&state).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    schedule_memory_tasks(&state).await;
                 }
             }
             _ = state.slow_extraction_notify.notified() => {
-                // Slow lane event-driven: deep analysis/consolidation completed, check for more
+                // Slow lane extraction completed — run unified scheduler
                 if !state.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    check_deep_analysis(&state).await;
-                    check_kb_consolidation(&state).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    schedule_memory_tasks(&state).await;
+                }
+            }
+            _ = state.submit_notify.notified() => {
+                // Submit task created/completed — run unified scheduler
+                if !state.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    schedule_memory_tasks(&state).await;
                 }
             }
             event = conv_logger_rx.recv() => {
@@ -7579,6 +7682,8 @@ async fn main() -> Result<()> {
                                         info!(task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,
                                             jsonl_result = jsonl_resp.is_some(),
                                             "Submit task closed: slot returned to Idle");
+                                        // Signal unified scheduler to dispatch next queued task
+                                        state.submit_notify.notify_one();
                                     }
                                 }
                             }

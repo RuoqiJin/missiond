@@ -763,10 +763,25 @@ pub fn materialize_topic(db: &crate::db::MissionDB, topic: &str) -> Result<Strin
     }
 
     // Snapshot current content before overwriting (Phase 4: rollback)
+    // Also detect external modifications (split-brain prevention)
     let file_path = &topic_meta.file_path;
     if let Ok(existing) = std::fs::read_to_string(file_path) {
         if !existing.is_empty() {
             let old_checksum = format!("{:x}", md5_hash(existing.as_bytes()));
+
+            // Split-brain check: if file was modified externally since last ingest,
+            // refuse to overwrite and require explicit ingest first
+            if let Some(ref db_checksum) = topic_meta.checksum {
+                if *db_checksum != old_checksum {
+                    return Err(format!(
+                        "Conflict: '{}' was modified externally (file checksum {} != DB checksum {}). \
+                         Run ingest first to sync, or use mission_skill_rollback to restore.",
+                        topic, &old_checksum[..8.min(old_checksum.len())],
+                        &db_checksum[..8.min(db_checksum.len())]
+                    ));
+                }
+            }
+
             let _ = db.skill_version_save(topic, &existing, &old_checksum);
         }
     }
