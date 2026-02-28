@@ -5,6 +5,7 @@
 //! - backfill_conversation_events: one-time historical data backfill on startup
 
 use missiond_core::db::MissionDB;
+use missiond_core::types::ToolCallRecord;
 use serde_json::Value;
 use tracing::{info, warn};
 
@@ -108,6 +109,183 @@ pub fn extract_text_content(content: &Value) -> String {
 /// Full preservation including base64 images — user requires complete data capture.
 pub fn sanitize_raw_content(content: &Value) -> Option<String> {
     serde_json::to_string(content).ok()
+}
+
+/// Stable replacement for str::floor_char_boundary (unstable).
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Generate a concise input summary for audit trace display.
+fn generate_input_summary(input: &Value) -> String {
+    let map = match input.as_object() {
+        Some(m) => m,
+        None => return input.to_string().chars().take(200).collect(),
+    };
+    let parts: Vec<String> = map
+        .iter()
+        .filter(|(_, v)| !v.is_null())
+        .map(|(k, v)| {
+            let val = match v {
+                Value::String(s) => {
+                    if s.len() > 80 {
+                        format!("\"{}...\"", &s[..floor_char_boundary(s, 77)])
+                    } else {
+                        format!("\"{s}\"")
+                    }
+                }
+                Value::Array(arr) => format!("[{} items]", arr.len()),
+                Value::Object(_) => "{...}".to_string(),
+                _ => v.to_string(),
+            };
+            format!("{k}: {val}")
+        })
+        .collect();
+    parts.join(", ")
+}
+
+/// Generate a concise output summary from tool_result content.
+fn generate_output_summary(content: &Value) -> String {
+    // Check for error pattern
+    if let Some(obj) = content.as_object() {
+        if let Some(err) = obj.get("error").and_then(|e| e.as_str()) {
+            return format!("Error: {}", &err[..err.len().min(100)]);
+        }
+        if obj.get("deleted").and_then(|d| d.as_bool()) == Some(true) {
+            return "Deleted".to_string();
+        }
+        if let Some(actions) = obj.get("actions").and_then(|a| a.as_array()) {
+            return format!("{} actions", actions.len());
+        }
+        if let Some(id) = obj.get("id").and_then(|i| i.as_str()) {
+            return format!("Created: {}", &id[..id.len().min(20)]);
+        }
+    }
+    // Array of results (e.g. batch operations)
+    if let Some(arr) = content.as_array() {
+        if arr.is_empty() {
+            return "Empty result".to_string();
+        }
+        // Check first item for common patterns
+        if let Some(first) = arr.first().and_then(|v| v.as_object()) {
+            if first.contains_key("deleted") {
+                let deleted = arr.iter().filter(|v| v.get("deleted").and_then(|d| d.as_bool()) == Some(true)).count();
+                return format!("{} deleted", deleted);
+            }
+        }
+        return format!("{} items", arr.len());
+    }
+    if let Some(s) = content.as_str() {
+        if s.len() > 100 {
+            return format!("{}...", &s[..floor_char_boundary(s, 97)]);
+        }
+        return s.to_string();
+    }
+    "Success".to_string()
+}
+
+/// Extract tool_use blocks from an assistant message's content blocks.
+/// Returns ToolCallRecord entries with status=pending (output filled later).
+pub fn extract_tool_calls_from_assistant(
+    session_id: &str,
+    timestamp: &str,
+    content: &Value,
+) -> Vec<ToolCallRecord> {
+    let blocks = match content.as_array() {
+        Some(arr) => arr,
+        None => return Vec::new(),
+    };
+    blocks
+        .iter()
+        .filter_map(|block| {
+            if block.get("type")?.as_str()? != "tool_use" {
+                return None;
+            }
+            let id = block.get("id")?.as_str()?.to_string();
+            let name = block.get("name")?.as_str()?.to_string();
+            let input = block.get("input").cloned().unwrap_or(Value::Null);
+            Some(ToolCallRecord {
+                id,
+                session_id: session_id.to_string(),
+                message_id: None,
+                tool_name: name,
+                input_summary: Some(generate_input_summary(&input)),
+                raw_input: serde_json::to_string(&input).ok(),
+                output_summary: None,
+                raw_output: None,
+                status: "pending".to_string(),
+                duration_ms: None,
+                timestamp: timestamp.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Extract tool_result blocks from a user message's content blocks.
+/// Returns (tool_use_id, output_summary, raw_output, status) tuples for updating.
+pub fn extract_tool_results_from_user(content: &Value) -> Vec<(String, String, String, String)> {
+    let blocks = match content.as_array() {
+        Some(arr) => arr,
+        None => return Vec::new(),
+    };
+    blocks
+        .iter()
+        .filter_map(|block| {
+            if block.get("type")?.as_str()? != "tool_result" {
+                return None;
+            }
+            let tool_use_id = block.get("tool_use_id")?.as_str()?.to_string();
+            let result_content = block.get("content").cloned().unwrap_or(Value::Null);
+            let is_error = block
+                .get("is_error")
+                .and_then(|e| e.as_bool())
+                .unwrap_or(false);
+
+            // Parse result content for summary
+            let parsed = if let Some(s) = result_content.as_str() {
+                // Try to parse string as JSON
+                serde_json::from_str::<Value>(s).unwrap_or(Value::String(s.to_string()))
+            } else if let Some(arr) = result_content.as_array() {
+                // Extract text from content blocks
+                let text: String = arr
+                    .iter()
+                    .filter_map(|item| {
+                        if item.get("type")?.as_str()? == "text" {
+                            item.get("text")?.as_str().map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if text.is_empty() {
+                    result_content.clone()
+                } else {
+                    serde_json::from_str::<Value>(&text)
+                        .unwrap_or(Value::String(text))
+                }
+            } else {
+                result_content.clone()
+            };
+
+            let summary = if is_error {
+                let err_text = parsed.as_str().unwrap_or("unknown error");
+                format!("Error: {}", &err_text[..err_text.len().min(100)])
+            } else {
+                generate_output_summary(&parsed)
+            };
+            let status = if is_error { "error" } else { "success" };
+            let raw = serde_json::to_string(&result_content).unwrap_or_default();
+            Some((tool_use_id, summary, raw, status.to_string()))
+        })
+        .collect()
 }
 
 /// Handle NewEvents from JSONL watcher: progress, system, queue-operation, file-history-snapshot.
@@ -428,4 +606,137 @@ pub async fn backfill_conversation_events(db: &MissionDB) {
         Err(e) => warn!(error = %e, "Failed to cleanup old events"),
         _ => {}
     }
+}
+
+/// One-time backfill: scan historical conversation_messages and populate conversation_tool_calls
+/// for sessions that don't yet have tool call records.
+pub async fn backfill_tool_calls(db: &MissionDB) {
+    // Sessions already backfilled — skip
+    let sessions_with_tc = db.get_sessions_with_tool_calls().unwrap_or_default();
+
+    // All conversations
+    let conversations = db.get_conversations_with_jsonl().unwrap_or_default();
+    let to_backfill: Vec<_> = conversations
+        .into_iter()
+        .filter(|(id, _)| !sessions_with_tc.contains(id))
+        .collect();
+
+    if to_backfill.is_empty() {
+        info!("Tool call backfill: all sessions already have tool calls, skipping");
+        return;
+    }
+
+    info!(
+        total = to_backfill.len(),
+        "Tool call backfill: starting for sessions without tool calls"
+    );
+
+    let mut backfilled = 0usize;
+    let mut total_tc = 0usize;
+    let mut total_results = 0usize;
+
+    for (session_id, _jsonl_path) in &to_backfill {
+        // Read stored messages from DB (raw_content has the full JSON content array)
+        let messages = match db.get_messages_for_tool_call_backfill(session_id) {
+            Ok(msgs) => msgs,
+            Err(_) => continue,
+        };
+
+        if messages.is_empty() {
+            continue;
+        }
+
+        let mut tool_calls = Vec::new();
+        let mut tool_results = Vec::new();
+
+        for (role, raw_content, timestamp) in &messages {
+            // Parse raw_content as JSON
+            let content: Value = match serde_json::from_str(raw_content) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            if role == "assistant" {
+                tool_calls.extend(extract_tool_calls_from_assistant(session_id, timestamp, &content));
+            } else if role == "user" || role == "system" || role == "tool_result" {
+                // "system" = slot sessions where user messages are stored as system role
+                // "tool_result" = stored as separate role in DB
+                tool_results.extend(extract_tool_results_from_user(&content));
+            }
+        }
+
+        if tool_calls.is_empty() && tool_results.is_empty() {
+            continue;
+        }
+
+        // Insert tool calls
+        if !tool_calls.is_empty() {
+            match db.insert_tool_calls_batch(&tool_calls) {
+                Ok(count) => total_tc += count,
+                Err(e) => {
+                    warn!(session = %session_id, error = %e, "Tool call backfill: insert failed");
+                    continue;
+                }
+            }
+        }
+
+        // Update tool results
+        for (tool_use_id, summary, raw, status) in &tool_results {
+            if let Err(e) = db.update_tool_call_output(tool_use_id, summary, raw, status) {
+                warn!(tool_use_id, error = %e, "Tool call backfill: update output failed");
+            } else {
+                total_results += 1;
+            }
+        }
+
+        backfilled += 1;
+
+        if backfilled % 50 == 0 {
+            info!(
+                progress = backfilled,
+                total = to_backfill.len(),
+                tool_calls = total_tc,
+                "Tool call backfill progress"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
+    // Second pass: update pending tool calls that are missing output
+    // (previous backfill may have inserted tool_use but missed tool_result)
+    let pending_count = db.count_pending_tool_calls().unwrap_or(0);
+    if pending_count > 0 {
+        info!(pending_count, "Tool call backfill: updating pending tool calls with missing output");
+        let sessions_with_pending = db.get_sessions_with_pending_tool_calls().unwrap_or_default();
+        let mut patched = 0usize;
+        for session_id in &sessions_with_pending {
+            let messages = match db.get_messages_for_tool_call_backfill(session_id) {
+                Ok(msgs) => msgs,
+                Err(_) => continue,
+            };
+            for (role, raw_content, _ts) in &messages {
+                if role != "user" && role != "system" && role != "tool_result" {
+                    continue;
+                }
+                let content: Value = match serde_json::from_str(raw_content) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let results = extract_tool_results_from_user(&content);
+                for (tool_use_id, summary, raw, status) in &results {
+                    if let Ok(true) = db.update_tool_call_output(tool_use_id, summary, raw, status) {
+                        patched += 1;
+                    }
+                }
+            }
+        }
+        info!(patched, "Tool call backfill: patched pending tool calls with output");
+    }
+
+    info!(
+        backfilled,
+        total_tc,
+        total_results,
+        "Tool call backfill complete"
+    );
 }
