@@ -1585,6 +1585,10 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     "hidden": {
                         "type": "boolean",
                         "description": "隐藏任务（续费等手动处理项），不在默认列表中显示"
+                    },
+                    "flowTemplate": {
+                        "type": "string",
+                        "description": "Flow 模板名（如 engineering）。设置后任务进入 Flow Engine 模式"
                     }
                 },
                 "required": ["title"]
@@ -1651,6 +1655,14 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     "hidden": {
                         "type": "boolean",
                         "description": "隐藏任务（续费等手动处理项）"
+                    },
+                    "flowPhase": {
+                        "type": "string",
+                        "description": "Flow 当前阶段: investigate, consult_gemini_1, plan, consult_gemini_2, execute, finalize, done"
+                    },
+                    "flowTemplate": {
+                        "type": "string",
+                        "description": "Flow 模板名（如 engineering）"
                     }
                 },
                 "required": ["id"]
@@ -1757,6 +1769,31 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                         "description": "起始时间(ISO 8601)，统计该时间之后完成/失败的任务和新增 KB。不传则统计全部"
                     }
                 }
+            }),
+        ),
+        // ===== Engineering Flow =====
+        ToolDefinition::new(
+            "mission_submit_phase_result",
+            "工程任务流程中，完成当前阶段后调用此工具提交产出物。系统自动推进到下一阶段。\
+             仅在 flow 任务（flow_phase 非空）的 Slot 阶段使用。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "taskId": {
+                        "type": "string",
+                        "description": "Board 任务 ID"
+                    },
+                    "artifactType": {
+                        "type": "string",
+                        "enum": ["investigation_report", "execution_plan", "execution_result", "commit_hash"],
+                        "description": "产出物类型，必须与当前阶段匹配"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "产出物内容"
+                    }
+                },
+                "required": ["taskId", "artifactType", "content"]
             }),
         ),
         // ===== Slot Task History =====
