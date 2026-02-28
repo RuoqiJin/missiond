@@ -4981,69 +4981,79 @@ async fn handle_ipc_request(state: AppState, request: Request) -> Response {
 /// kill and restart the slot to avoid degraded performance from context compression.
 async fn check_slot_context_levels(state: &AppState) {
     let slots = state.mission.list_slots();
-    for slot in &slots {
-        let status = state.pty.get_status(&slot.config.id).await;
-        let Some(info) = status else { continue };
-        // Only check running slots
-        if info.state == SessionState::Exited {
-            continue;
-        }
+    // P2: Spawn each slot's check+restart concurrently so total time = max(per-slot)
+    // instead of sum(per-slot). Previously N low-context slots blocked N × 123s.
+    let mut handles = Vec::new();
+    for slot in slots {
+        let state = state.clone();
+        handles.push(tokio::spawn(async move {
+            let status = state.pty.get_status(&slot.config.id).await;
+            let Some(info) = status else { return };
+            // Only check running slots
+            if info.state == SessionState::Exited {
+                return;
+            }
 
-        let screen = match state.pty.get_screen(&slot.config.id).await {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
+            let screen = match state.pty.get_screen(&slot.config.id).await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
 
-        // Look for "Context left until auto-compact: XX%"
-        if let Some(pct) = extract_context_percentage(&screen) {
-            if pct < 10 {
-                warn!(
-                    slot_id = %slot.config.id,
-                    context_pct = pct,
-                    "Slot context critically low, restarting"
-                );
-                // Kill the slot
-                if let Err(e) = state.pty.kill(&slot.config.id).await {
-                    warn!(error = %e, slot_id = %slot.config.id, "Failed to kill low-context slot");
-                    continue;
-                }
-                // Requeue any Running submit tasks assigned to this slot
-                match state.mission.db().requeue_running_tasks_for_slot(&slot.config.id) {
-                    Ok(n) if n > 0 => warn!(slot_id = %slot.config.id, count = n, "Requeued running submit tasks after low-context restart"),
-                    Err(e) => warn!(slot_id = %slot.config.id, error = %e, "Failed to requeue tasks after low-context restart"),
-                    _ => {}
-                }
-                // Release any board task claims held by this slot
-                let _ = state.mission.db().release_board_claims_by_executor(&slot.config.id);
-                // Wait for exit
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-                // Respawn
-                let pty_slot = missiond_core::PTYSlot {
-                    id: slot.config.id.clone(),
-                    role: slot.config.role.clone(),
-                    cwd: slot.config.cwd.as_deref().map(PathBuf::from),
-                };
-                let mcp_config = slot.config.mcp_config.clone().map(PathBuf::from);
-                let (extra_env, session_file) = build_slot_tracking_env(&slot.config.id, slot.config.env.as_ref()).await;
-                match state.pty.spawn(&pty_slot, PTYSpawnOptions {
-                    auto_restart: false,
-                    wait_for_idle: true,
-                    timeout_secs: Some(120),
-                    mcp_config,
-                    dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
-                    extra_env,
-                }).await {
-                    Ok(_) => {
-                        capture_slot_session_uuid(state, &slot.config.id, &session_file).await;
-                        info!(slot_id = %slot.config.id, "Slot restarted due to low context");
+            // Look for "Context left until auto-compact: XX%"
+            if let Some(pct) = extract_context_percentage(&screen) {
+                if pct < 10 {
+                    warn!(
+                        slot_id = %slot.config.id,
+                        context_pct = pct,
+                        "Slot context critically low, restarting"
+                    );
+                    // Kill the slot
+                    if let Err(e) = state.pty.kill(&slot.config.id).await {
+                        warn!(error = %e, slot_id = %slot.config.id, "Failed to kill low-context slot");
+                        return;
                     }
-                    Err(e) => {
-                        warn!(error = %e, slot_id = %slot.config.id, "Failed to respawn slot after context kill");
+                    // Requeue any Running submit tasks assigned to this slot
+                    match state.mission.db().requeue_running_tasks_for_slot(&slot.config.id) {
+                        Ok(n) if n > 0 => warn!(slot_id = %slot.config.id, count = n, "Requeued running submit tasks after low-context restart"),
+                        Err(e) => warn!(slot_id = %slot.config.id, error = %e, "Failed to requeue tasks after low-context restart"),
+                        _ => {}
+                    }
+                    // Release any board task claims held by this slot
+                    let _ = state.mission.db().release_board_claims_by_executor(&slot.config.id);
+                    // Wait for exit
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+                    // Respawn
+                    let pty_slot = missiond_core::PTYSlot {
+                        id: slot.config.id.clone(),
+                        role: slot.config.role.clone(),
+                        cwd: slot.config.cwd.as_deref().map(PathBuf::from),
+                    };
+                    let mcp_config = slot.config.mcp_config.clone().map(PathBuf::from);
+                    let (extra_env, session_file) = build_slot_tracking_env(&slot.config.id, slot.config.env.as_ref()).await;
+                    match state.pty.spawn(&pty_slot, PTYSpawnOptions {
+                        auto_restart: false,
+                        wait_for_idle: true,
+                        timeout_secs: Some(120),
+                        mcp_config,
+                        dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+                        extra_env,
+                    }).await {
+                        Ok(_) => {
+                            capture_slot_session_uuid(&state, &slot.config.id, &session_file).await;
+                            info!(slot_id = %slot.config.id, "Slot restarted due to low context");
+                        }
+                        Err(e) => {
+                            warn!(error = %e, slot_id = %slot.config.id, "Failed to respawn slot after context kill");
+                        }
                     }
                 }
             }
-        }
+        }));
+    }
+    // Wait for all slot checks to complete concurrently
+    for handle in handles {
+        let _ = handle.await;
     }
 }
 
@@ -7604,67 +7614,86 @@ async fn main() -> Result<()> {
     }
     info!("Autopilot scheduler started (60s interval, isolated task)");
 
-    // Event-driven loop: handles notifications and event streams.
-    // IPC accept and autopilot are now isolated — this loop only processes
-    // lightweight event-driven work.
-    loop {
-        tokio::select! {
-            _ = state.extraction_notify.notified() => {
-                // Fast lane extraction completed — run unified scheduler
-                if !state.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    schedule_memory_tasks(&state).await;
-                }
-            }
-            _ = state.slow_extraction_notify.notified() => {
-                // Slow lane extraction completed — run unified scheduler
-                if !state.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    schedule_memory_tasks(&state).await;
-                }
-            }
-            _ = state.submit_notify.notified() => {
-                // Submit task created/completed — always dispatch submit tasks (not gated by memory_paused)
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                dispatch_queued_submit_tasks(&state).await;
-                // Also run memory scheduler if not paused
-                if !state.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
-                    schedule_memory_tasks(&state).await;
-                }
-            }
-            event = conv_logger_rx.recv() => {
-                match event {
-                    Ok(WatcherEvent::NewMessages { session_id, project_path, jsonl_path, messages }) => {
-                        let mut is_pty = state.pty_session_uuids.read().await.contains(&session_id);
+    // --- P3: All event handlers in dedicated tasks ---
+    // No more select! loop — each concern runs independently.
 
-                        // Compaction detection: if session is unknown, check if it replaced an active slot session
+    // Fast lane extraction notification
+    {
+        let s = state.clone();
+        tokio::spawn(async move {
+            loop {
+                s.extraction_notify.notified().await;
+                if !s.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    schedule_memory_tasks(&s).await;
+                }
+            }
+        });
+    }
+
+    // Slow lane extraction notification
+    {
+        let s = state.clone();
+        tokio::spawn(async move {
+            loop {
+                s.slow_extraction_notify.notified().await;
+                if !s.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    schedule_memory_tasks(&s).await;
+                }
+            }
+        });
+    }
+
+    // Submit task dispatch notification
+    {
+        let s = state.clone();
+        tokio::spawn(async move {
+            loop {
+                s.submit_notify.notified().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                dispatch_queued_submit_tasks(&s).await;
+                if !s.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
+                    schedule_memory_tasks(&s).await;
+                }
+            }
+        });
+    }
+
+    // Conversation logger event stream
+    {
+        let s = state.clone();
+        tokio::spawn(async move {
+            loop {
+                match conv_logger_rx.recv().await {
+                    Ok(WatcherEvent::NewMessages { session_id, project_path, jsonl_path, messages }) => {
+                        let mut is_pty = s.pty_session_uuids.read().await.contains(&session_id);
+
+                        // Compaction detection
                         let mut compaction_task_id: Option<String> = None;
                         if !is_pty {
-                            if let Some((slot_id, old_uuid, old_task_id)) = detect_compaction(&state, &session_id, &project_path) {
+                            if let Some((slot_id, old_uuid, old_task_id)) = detect_compaction(&s, &session_id, &project_path) {
                                 info!(
                                     slot_id = %slot_id,
                                     old_session = %old_uuid,
                                     new_session = %session_id,
                                     "Compaction detected: session replaced by context compaction"
                                 );
-                                let db = state.mission.db();
-                                // Mark old session as compacted (not completed)
+                                let db = s.mission.db();
                                 let _ = db.mark_conversation_compacted(&old_uuid);
-                                // Update slot→session mapping
                                 let _ = db.set_slot_session(&slot_id, &session_id);
-                                state.pty_session_uuids.write().await.remove(&old_uuid);
-                                state.pty_session_uuids.write().await.insert(session_id.clone());
+                                s.pty_session_uuids.write().await.remove(&old_uuid);
+                                s.pty_session_uuids.write().await.insert(session_id.clone());
                                 compaction_task_id = old_task_id;
                                 is_pty = true;
                             }
                         }
 
-                        // --- Progress tracking: extract tool_use/tool_result for in-memory stats ---
+                        // Progress tracking
                         if is_pty {
-                            if let Ok(Some(slot_id)) = state.mission.db().get_slot_for_session(&session_id) {
-                                let mut progress = state.slot_progress.write().await;
+                            if let Ok(Some(slot_id)) = s.mission.db().get_slot_for_session(&session_id) {
+                                let mut progress = s.slot_progress.write().await;
                                 let sp = progress.entry(slot_id).or_default();
-                                // Session switch detection: reset counters when session changes
                                 if sp.session_id != session_id {
                                     *sp = SlotProgress { session_id: session_id.clone(), ..Default::default() };
                                 }
@@ -7701,78 +7730,77 @@ async fn main() -> Result<()> {
                             }
                         }
 
-                        // Filter out tool_use before DB insertion (keep existing DB behavior)
                         let db_messages: Vec<_> = messages.into_iter()
                             .filter(|m| m.message_type != "tool_use")
                             .collect();
-                        handle_new_messages(&state, session_id.clone(), project_path, jsonl_path, db_messages, is_pty);
+                        handle_new_messages(&s, session_id.clone(), project_path, jsonl_path, db_messages, is_pty);
 
-                        // Transfer task_id AFTER conversation creation (so the row exists)
                         if let Some(tid) = compaction_task_id {
-                            let _ = state.mission.db().set_conversation_task_id(&session_id, &tid);
+                            let _ = s.mission.db().set_conversation_task_id(&session_id, &tid);
                         }
                     }
                     Ok(WatcherEvent::NewEvents { session_id, events }) => {
-                        events_sync::handle_new_events(state.mission.db(), session_id, events);
+                        events_sync::handle_new_events(s.mission.db(), session_id, events);
                     }
                     Ok(WatcherEvent::SessionInactive(session)) => {
-                        // Skip already-compacted sessions (replaced by context compaction)
-                        if let Ok(Some(conv)) = state.mission.db().get_conversation(&session.session_id) {
+                        if let Ok(Some(conv)) = s.mission.db().get_conversation(&session.session_id) {
                             if conv.status == "compacted" {
                                 debug!(session = %session.session_id, "Skipping inactive check for compacted session");
                                 continue;
                             }
                         }
-                        // Mark conversation as completed so deep analysis can pick it up
-                        if let Err(e) = state.mission.db().complete_conversation(&session.session_id) {
+                        if let Err(e) = s.mission.db().complete_conversation(&session.session_id) {
                             warn!(session = %session.session_id, error = %e, "Failed to complete conversation");
                         } else {
                             info!(session = %session.session_id, "Conversation marked completed");
                         }
                     }
-                    Ok(_) => {} // Other events handled by WS server
+                    Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         warn!(skipped = n, "Conversation logger lagged");
                     }
-                    Err(_) => {} // Channel closed, ignore
+                    Err(_) => {}
                 }
             }
-            pty_event = pty_logger_rx.recv() => {
-                match pty_event {
+        });
+    }
+
+    // PTY manager event stream
+    {
+        let s = state.clone();
+        tokio::spawn(async move {
+            loop {
+                match pty_logger_rx.recv().await {
                     Ok(missiond_core::ManagerEvent::TextComplete { slot_id, turn_id, content, timestamp }) => {
-                        // Save last response for submit task result tracking
                         if !content.is_empty() {
-                            state.slot_last_responses.write().await.insert(slot_id.clone(), content.clone());
+                            s.slot_last_responses.write().await.insert(slot_id.clone(), content.clone());
                         }
-                        handle_pty_text_complete(&state, slot_id, turn_id, content, timestamp);
+                        handle_pty_text_complete(&s, slot_id, turn_id, content, timestamp);
                     }
                     Ok(missiond_core::ManagerEvent::Exited { slot_id, exit_code }) => {
                         info!(slot_id = %slot_id, exit_code = exit_code, "PTY session exited");
-                        // Clean up UUID mapping for exited slot
-                        let old_uuid = state.mission.db().get_slot_session(&slot_id).unwrap_or(None);
+                        let old_uuid = s.mission.db().get_slot_session(&slot_id).unwrap_or(None);
                         if let Some(ref uuid) = old_uuid {
-                            let _ = state.mission.db().complete_conversation(uuid);
-                            state.pty_session_uuids.write().await.remove(uuid);
+                            let _ = s.mission.db().complete_conversation(uuid);
+                            s.pty_session_uuids.write().await.remove(uuid);
                         }
-                        state.mission.db().clear_slot_session(&slot_id);
+                        s.mission.db().clear_slot_session(&slot_id);
                     }
                     Ok(missiond_core::ManagerEvent::StateChange { ref slot_id, new_state, prev_state }) => {
                         // Route memory slot state changes to the correct lane
                         let lane = if slot_id == MEMORY_SLOT_ID {
-                            Some(("fast", &state.extraction_state, &state.memory_slot_busy_since, &state.extraction_notify))
+                            Some(("fast", &s.extraction_state, &s.memory_slot_busy_since, &s.extraction_notify))
                         } else if slot_id == MEMORY_SLOW_SLOT_ID {
-                            Some(("slow", &state.slow_extraction_state, &state.slow_slot_busy_since, &state.slow_extraction_notify))
+                            Some(("slow", &s.slow_extraction_state, &s.slow_slot_busy_since, &s.slow_extraction_notify))
                         } else {
                             None
                         };
                         if let Some((lane_name, es_lock, busy_since, notify)) = lane {
                             if new_state == SessionState::Idle {
                                 busy_since.store(0, std::sync::atomic::Ordering::SeqCst);
-                                // Release extraction gate when slot returns to Idle
                                 let mut es = es_lock.write().await;
                                 if es.phase == ExtractionPhase::WaitingForSlotIdle || es.phase == ExtractionPhase::Sending {
                                     let phase_age = chrono::Utc::now().timestamp() - es.phase_started_at;
-                                    // Ignore spurious Idle transitions from slot spawn (< 3s)
                                     if phase_age < 3 {
                                         debug!(lane = lane_name, phase_age, "Ignoring early Idle transition (likely spawn init)");
                                     } else {
@@ -7783,10 +7811,9 @@ async fn main() -> Result<()> {
                                             phase_age,
                                             "Extraction complete: slot returned to Idle"
                                         );
-                                        // Fast lane: advance watermarks for processed sessions
                                         if is_realtime {
                                             if !es.watermark_targets.is_empty() {
-                                                let db = state.mission.db();
+                                                let db = s.mission.db();
                                                 for (session_id, timestamp) in &es.watermark_targets {
                                                     let _ = db.update_realtime_forwarded_at(session_id, timestamp);
                                                 }
@@ -7794,21 +7821,18 @@ async fn main() -> Result<()> {
                                                 es.watermark_targets.clear();
                                             }
                                         }
-                                        // Slow lane: mark deep analysis conversation as analyzed
                                         if matches!(es.active_type, Some("deep_analysis")) {
                                             if let Some(conv_id) = es.current_deep_conv_id.take() {
                                                 if es.is_checkpoint {
-                                                    // Checkpoint: advance watermark, don't mark fully analyzed
                                                     if let Some(msg_id) = es.checkpoint_message_id.take() {
-                                                        if let Err(e) = state.mission.db().update_deep_checkpoint(&conv_id, msg_id) {
+                                                        if let Err(e) = s.mission.db().update_deep_checkpoint(&conv_id, msg_id) {
                                                             warn!(conv_id = %conv_id, error = %e, "Failed to advance checkpoint watermark");
                                                         } else {
                                                             info!(conv_id = %conv_id, msg_id, "Deep analysis checkpoint: advanced watermark");
                                                         }
                                                     }
                                                 } else {
-                                                    // Full analysis (completed session)
-                                                    if let Err(e) = state.mission.db().mark_analysis_complete(&conv_id, CURRENT_ANALYSIS_VERSION) {
+                                                    if let Err(e) = s.mission.db().mark_analysis_complete(&conv_id, CURRENT_ANALYSIS_VERSION) {
                                                         warn!(conv_id = %conv_id, error = %e, "Failed to mark analysis complete");
                                                     } else {
                                                         info!(conv_id = %conv_id, version = CURRENT_ANALYSIS_VERSION, "Deep analysis: marked complete");
@@ -7816,9 +7840,8 @@ async fn main() -> Result<()> {
                                                 }
                                             }
                                         }
-                                        // Mark slot task completed in history
                                         if let Some(ref st_id) = es.current_slot_task_id {
-                                            let _ = state.mission.db().slot_task_set_completed(st_id, 0);
+                                            let _ = s.mission.db().slot_task_set_completed(st_id, 0);
                                         }
                                         es.phase = ExtractionPhase::Idle;
                                         es.active_type = None;
@@ -7826,7 +7849,6 @@ async fn main() -> Result<()> {
                                         es.current_slot_task_id = None;
                                         es.is_checkpoint = false;
                                         es.checkpoint_message_id = None;
-                                        // Event-driven: signal main loop to re-check this lane
                                         notify.notify_one();
                                     }
                                 }
@@ -7838,21 +7860,16 @@ async fn main() -> Result<()> {
                             }
                         }
 
-                        // Close Running submit tasks assigned to this slot when it returns to Idle.
-                        // Guard: tasks running < 5s are only closed if JSONL confirms turn_duration.
-                        // This prevents premature closure on PTY startup noise while allowing
-                        // genuinely fast tasks (e.g. simple KB operations) to close promptly.
+                        // Close Running submit tasks when slot returns to Idle
                         if new_state == SessionState::Idle && prev_state != SessionState::Idle {
-                            if let Ok(running_tasks) = state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Running) {
+                            if let Ok(running_tasks) = s.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Running) {
                                 let now = chrono::Utc::now().timestamp_millis();
-                                const MIN_EXECUTION_MS: i64 = 5_000; // 5 seconds: filter PTY startup noise
-                                const MIN_JSONL_EXECUTION_MS: i64 = 3_000; // 3 seconds: even with JSONL, prevent stale turn confirmation
-                                // Get PTY last response as fallback
-                                let pty_resp = state.slot_last_responses.write().await.remove(slot_id.as_str());
-                                // Try JSONL extraction for more accurate result
-                                let jsonl_resp = match state.mission.db().get_slot_session(slot_id.as_str()) {
+                                const MIN_EXECUTION_MS: i64 = 5_000;
+                                const MIN_JSONL_EXECUTION_MS: i64 = 3_000;
+                                let pty_resp = s.slot_last_responses.write().await.remove(slot_id.as_str());
+                                let jsonl_resp = match s.mission.db().get_slot_session(slot_id.as_str()) {
                                     Ok(Some(session_uuid)) => {
-                                        match state.mission.db().get_conversation(&session_uuid) {
+                                        match s.mission.db().get_conversation(&session_uuid) {
                                             Ok(Some(conv)) => {
                                                 if let Some(ref jsonl_path) = conv.jsonl_path {
                                                     missiond_core::extract_last_assistant_text(std::path::Path::new(jsonl_path)).await
@@ -7863,8 +7880,7 @@ async fn main() -> Result<()> {
                                     }
                                     _ => None,
                                 };
-                                // Check JSONL turn_duration for fast tasks that complete under the guard
-                                let jsonl_confirmed = if let Some(jsonl_path) = get_task_jsonl_path(&state, &missiond_core::types::Task {
+                                let jsonl_confirmed = if let Some(jsonl_path) = get_task_jsonl_path(&s, &missiond_core::types::Task {
                                     id: String::new(), role: String::new(), prompt: String::new(),
                                     status: missiond_core::types::TaskStatus::Running,
                                     slot_id: Some(slot_id.to_string()), session_id: None,
@@ -7876,9 +7892,6 @@ async fn main() -> Result<()> {
                                     if task.slot_id.as_deref() == Some(slot_id.as_str()) {
                                         let started = task.started_at.unwrap_or(task.created_at);
                                         let elapsed = now - started;
-                                        // Guard: prevent stale JSONL turn confirmation from closing tasks prematurely.
-                                        // Even with JSONL confirmation, require 3s minimum to ensure the slot
-                                        // has actually started processing THIS task (not a previous extraction).
                                         if elapsed < MIN_JSONL_EXECUTION_MS {
                                             debug!(
                                                 task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,
@@ -7893,7 +7906,6 @@ async fn main() -> Result<()> {
                                             );
                                             continue;
                                         }
-                                        // Prefer JSONL result > PTY result > default
                                         let result_text = jsonl_resp.clone()
                                             .or_else(|| {
                                                 if pty_resp.is_some() {
@@ -7902,7 +7914,6 @@ async fn main() -> Result<()> {
                                                 pty_resp.clone()
                                             })
                                             .unwrap_or_else(|| "completed".to_string());
-                                        // Safe UTF-8 truncation to 4KB
                                         let result_text = if result_text.len() > 4096 {
                                             let mut end = 4096;
                                             while !result_text.is_char_boundary(end) && end > 0 { end -= 1; }
@@ -7910,7 +7921,7 @@ async fn main() -> Result<()> {
                                         } else {
                                             result_text
                                         };
-                                        let _ = state.mission.db().update_task(
+                                        let _ = s.mission.db().update_task(
                                             &task.id,
                                             &missiond_core::types::TaskUpdate {
                                                 status: Some(missiond_core::types::TaskStatus::Done),
@@ -7919,31 +7930,35 @@ async fn main() -> Result<()> {
                                                 ..Default::default()
                                             },
                                         );
-                                        // Update associated kb_operation if this task was dispatched from kb_execute_plan
-                                        if let Ok(true) = state.mission.db().kb_ops_complete_by_task_id(&task.id, "done", Some(&result_text)) {
+                                        if let Ok(true) = s.mission.db().kb_ops_complete_by_task_id(&task.id, "done", Some(&result_text)) {
                                             info!(task_id = %task.id, "KB operation marked done via task completion");
                                         }
                                         info!(task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,
                                             jsonl_result = jsonl_resp.is_some(),
                                             "Submit task closed: slot returned to Idle");
-                                        // Signal unified scheduler to dispatch next queued task
-                                        state.submit_notify.notify_one();
+                                        s.submit_notify.notify_one();
                                     }
                                 }
                             }
-                            // Always signal submit dispatcher when any slot becomes Idle,
-                            // even if no running task was closed (e.g., after memory extraction).
-                            // This ensures queued submit tasks get dispatched promptly.
-                            state.submit_notify.notify_one();
+                            // Always signal submit dispatcher when any slot becomes Idle
+                            s.submit_notify.notify_one();
                         }
                     }
-                    Ok(_) => {} // Other PTY events not needed for logging
+                    Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         warn!(skipped = n, "PTY logger lagged");
                     }
                     Err(_) => {}
                 }
             }
-        }
+        });
     }
+
+    info!("All event handlers started (isolated tasks)");
+
+    // Keep main alive — all work is in spawned tasks above.
+    // Ctrl+C or SIGTERM triggers graceful shutdown.
+    tokio::signal::ctrl_c().await.ok();
+    info!("Received shutdown signal, exiting");
+    Ok(())
 }
