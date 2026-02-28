@@ -789,6 +789,32 @@ pub struct ConversationEvent {
     pub timestamp: String,
 }
 
+// ============ Conversation Tool Calls (Audit) ============
+
+/// A structured tool call record extracted from JSONL tool_use/tool_result pairs.
+/// Used for audit trail (Summary-to-Drilldown architecture).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallRecord {
+    pub id: String,              // tool_use_id from Claude API
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<i64>, // FK to conversation_messages
+    pub tool_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_input: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_output: Option<String>,
+    pub status: String,          // pending, success, error
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    pub timestamp: String,
+}
+
 // ============ Slot Task History ============
 
 /// A task dispatched to a slot by the daemon (for tracking history)
