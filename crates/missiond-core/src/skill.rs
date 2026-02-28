@@ -316,6 +316,252 @@ fn extract_key_sections(body: &str) -> String {
     result
 }
 
+// ========== Skill Engine: Ingest + Materialize ==========
+
+/// Parsed section from a SKILL.md file
+#[derive(Debug)]
+pub struct ParsedSection {
+    pub title: String,
+    pub content: String,
+    pub sort_order: i32,
+}
+
+/// Parse a skill file body into sections by `#` headings
+pub fn parse_sections(body: &str) -> Vec<ParsedSection> {
+    let mut sections = Vec::new();
+    let mut current_title = String::new();
+    let mut current_content = String::new();
+    let mut sort_order = 0i32;
+
+    for line in body.lines() {
+        // Detect heading (# or ##, but not ### which is subsection)
+        if (line.starts_with("# ") || line.starts_with("## ")) && !line.starts_with("### ") {
+            // Save previous section if exists
+            if !current_title.is_empty() {
+                sections.push(ParsedSection {
+                    title: current_title.clone(),
+                    content: current_content.trim().to_string(),
+                    sort_order,
+                });
+                sort_order += 1;
+            }
+            current_title = line.to_string();
+            current_content = String::new();
+        } else if line == "---" && !current_title.is_empty() {
+            // Horizontal rule as section separator - flush current
+            sections.push(ParsedSection {
+                title: current_title.clone(),
+                content: current_content.trim().to_string(),
+                sort_order,
+            });
+            sort_order += 1;
+            current_title = String::new();
+            current_content = String::new();
+        } else {
+            current_content.push_str(line);
+            current_content.push('\n');
+        }
+    }
+
+    // Don't forget the last section
+    if !current_title.is_empty() {
+        sections.push(ParsedSection {
+            title: current_title,
+            content: current_content.trim().to_string(),
+            sort_order,
+        });
+    }
+
+    sections
+}
+
+/// Ingest all SKILL.md files into the database.
+/// Scans ~/.claude/skills/, parses frontmatter + sections, writes to skill_topics + skill_blocks.
+pub fn ingest_skills(db: &crate::db::MissionDB, skills_dir: &Path) -> usize {
+    let index = SkillIndex::build(skills_dir);
+    let skills = index.list();
+    let mut ingested = 0;
+
+    for skill in skills {
+        let content = match std::fs::read_to_string(&skill.path) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(path = %skill.path.display(), error = %e, "Failed to read skill file");
+                continue;
+            }
+        };
+
+        let aka_json = skill
+            .aka
+            .as_ref()
+            .map(|a| serde_json::to_string(a).unwrap_or_default());
+
+        let file_path_str = skill.path.to_string_lossy().to_string();
+
+        // Upsert topic
+        if let Err(e) = db.skill_topic_upsert(
+            &skill.name,
+            skill.description.as_deref(),
+            aka_json.as_deref(),
+            skill.allowed_tools.as_deref(),
+            &file_path_str,
+        ) {
+            warn!(topic = %skill.name, error = %e, "Failed to upsert skill topic");
+            continue;
+        }
+
+        // Delete existing blocks for this topic (full re-ingest)
+        if let Err(e) = db.skill_blocks_delete_topic(&skill.name) {
+            warn!(topic = %skill.name, error = %e, "Failed to clear old blocks");
+            continue;
+        }
+
+        // Parse body into sections
+        let body = strip_frontmatter(&content);
+        let sections = parse_sections(&body);
+
+        for section in &sections {
+            if section.content.is_empty() && section.title.trim_start_matches('#').trim().is_empty()
+            {
+                continue;
+            }
+            if let Err(e) = db.skill_block_insert(
+                &skill.name,
+                "section",
+                Some(&section.title),
+                &section.content,
+                section.sort_order,
+            ) {
+                warn!(
+                    topic = %skill.name,
+                    section = %section.title,
+                    error = %e,
+                    "Failed to insert skill block"
+                );
+            }
+        }
+
+        // Update line count
+        let total_lines = content.lines().count() as i32;
+        let checksum = format!("{:x}", md5_hash(content.as_bytes()));
+        let _ = db.skill_topic_update_stats(&skill.name, total_lines, &checksum);
+
+        debug!(
+            topic = %skill.name,
+            sections = sections.len(),
+            lines = total_lines,
+            "Ingested skill"
+        );
+        ingested += 1;
+    }
+
+    // Rebuild FTS after bulk ingest
+    if let Err(e) = db.skill_rebuild_fts() {
+        warn!(error = %e, "Failed to rebuild skill FTS after ingest");
+    }
+
+    tracing::info!(count = ingested, "Skill ingest complete");
+    ingested
+}
+
+/// Simple hash for checksum (no crypto needed)
+fn md5_hash(data: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Materialize a single topic from DB to SKILL.md
+pub fn materialize_topic(db: &crate::db::MissionDB, topic: &str) -> Result<String, String> {
+    let topic_meta = db
+        .skill_topic_get(topic)
+        .map_err(|e| format!("DB error: {}", e))?
+        .ok_or_else(|| format!("Topic not found: {}", topic))?;
+
+    let blocks = db
+        .skill_blocks_for_topic(topic)
+        .map_err(|e| format!("DB error: {}", e))?;
+
+    // Build frontmatter
+    let mut output = String::from("---\n");
+    output.push_str(&format!("name: {}\n", topic));
+    if let Some(ref desc) = topic_meta.description {
+        output.push_str(&format!("description: {}\n", desc));
+    }
+    if let Some(ref tools) = topic_meta.allowed_tools {
+        output.push_str(&format!("allowed-tools: {}\n", tools));
+    }
+    if let Some(ref aka) = topic_meta.aka {
+        // aka is stored as JSON array string
+        if let Ok(aliases) = serde_json::from_str::<Vec<String>>(aka) {
+            if !aliases.is_empty() {
+                output.push_str(&format!(
+                    "aka: [{}]\n",
+                    aliases.join(", ")
+                ));
+            }
+        }
+    }
+    output.push_str("---\n\n");
+
+    // Separate sections and fragments
+    let sections: Vec<_> = blocks.iter().filter(|b| b.block_type == "section").collect();
+    let fragments: Vec<_> = blocks.iter().filter(|b| b.block_type == "fragment").collect();
+
+    // Write sections
+    for block in &sections {
+        if let Some(ref title) = block.title {
+            output.push_str(title);
+            output.push('\n');
+        }
+        if !block.content.is_empty() {
+            output.push_str(&block.content);
+            output.push_str("\n\n");
+        }
+        output.push_str("---\n\n");
+    }
+
+    // Write fragments as appendix
+    if !fragments.is_empty() {
+        output.push_str("## 待整理碎片\n\n");
+        for block in &fragments {
+            output.push_str(&format!("- {}\n", block.content.replace('\n', " ")));
+        }
+    }
+
+    // Write to file
+    let file_path = &topic_meta.file_path;
+    if let Some(parent) = std::path::Path::new(file_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(file_path, &output).map_err(|e| format!("Write error: {}", e))?;
+
+    // Update stats
+    let total_lines = output.lines().count() as i32;
+    let checksum = format!("{:x}", md5_hash(output.as_bytes()));
+    let _ = db.skill_topic_update_stats(topic, total_lines, &checksum);
+
+    Ok(output)
+}
+
+/// Materialize all topics from DB to SKILL.md files
+pub fn materialize_all(db: &crate::db::MissionDB) -> Result<usize, String> {
+    let topics = db
+        .skill_topic_list()
+        .map_err(|e| format!("DB error: {}", e))?;
+
+    let mut count = 0;
+    for topic in &topics {
+        match materialize_topic(db, &topic.topic) {
+            Ok(_) => count += 1,
+            Err(e) => warn!(topic = %topic.topic, error = %e, "Failed to materialize"),
+        }
+    }
+    tracing::info!(count, "Materialized all skills");
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -561,6 +561,61 @@ pub struct KBRememberResult {
     pub similarity: Option<f64>,
 }
 
+// ============ Skill Engine Types ============
+
+/// Skill topic metadata (maps to skill_topics table)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillTopic {
+    pub topic: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aka: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_tools: Option<String>,
+    pub file_path: String,
+    pub hit_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_hit_at: Option<String>,
+    pub fragment_count: i64,
+    pub total_lines: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checksum: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Skill block (section or fragment)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillBlock {
+    pub id: String,
+    pub topic: String,
+    pub block_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub content: String,
+    pub sort_order: i32,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Skill FTS search result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillSearchResult {
+    pub topic: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+    pub file_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 /// A credential stored alongside a knowledge entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

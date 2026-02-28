@@ -678,6 +678,73 @@ pub fn all_tools() -> Vec<ToolDefinition> {
             }),
         ),
 
+        // ===== Skill Engine (CQRS write tools) =====
+        ToolDefinition::new(
+            "mission_skill_upsert",
+            "创建或更新 Skill 的某个章节。写入 DB 后自动生成 SKILL.md 文件。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "description": "Skill 主题名 (如 missiond, deployment)"
+                    },
+                    "section_title": {
+                        "type": "string",
+                        "description": "章节标题 (如 '# API', '## 配置')"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "章节的 Markdown 内容"
+                    },
+                    "sort_order": {
+                        "type": "integer",
+                        "description": "章节排序（默认追加到末尾）"
+                    }
+                },
+                "required": ["topic", "section_title", "content"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_skill_record",
+            "快速记录一条知识碎片到指定 Skill。低认知负担，积累后可用 optimize 合并整理。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "description": "Skill 主题名"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "碎片内容"
+                    }
+                },
+                "required": ["topic", "content"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_skill_render",
+            "从 DB 重新生成 SKILL.md 文件。可指定 topic 单个渲染或全量重建。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "description": "主题名（空=全部重建）"
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_skill_topics",
+            "列出所有 Skill 主题及统计信息（命中次数、碎片数、行数）。",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+        ),
+
         // ===== Infrastructure Registry =====
         ToolDefinition::new(
             "mission_infra_list",

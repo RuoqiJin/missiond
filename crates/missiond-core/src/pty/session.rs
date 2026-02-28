@@ -26,7 +26,7 @@ struct TermSize {
 
 impl Dimensions for TermSize {
     fn total_lines(&self) -> usize {
-        self.rows
+        self.rows + 10_000 // scrollback capacity
     }
 
     fn screen_lines(&self) -> usize {
@@ -453,23 +453,36 @@ impl PTYSession {
         buf.iter().copied().collect()
     }
 
-    /// Get last N lines
+    /// Get last N lines (visible + scrollback)
     pub async fn get_last_lines(&self, n: usize) -> Vec<String> {
         let term = self.term.lock().await;
         let grid = term.grid();
         let mut lines = Vec::new();
 
-        let total_lines = grid.total_lines();
-        let start = if total_lines > n { total_lines - n } else { 0 };
+        let screen_lines = grid.screen_lines();
+        let history = grid.history_size();
+        let available = screen_lines + history;
+        let n = n.min(available);
 
-        for y in start..total_lines {
+        // How many scrollback lines we need above visible area
+        let scroll_needed = n.saturating_sub(screen_lines).min(history);
+        let visible_start = if n > screen_lines { 0 } else { screen_lines - n };
+
+        // Read scrollback lines (oldest first: Line(-scroll_needed) .. Line(-1))
+        for i in (1..=scroll_needed).rev() {
+            let line = alacritty_terminal::index::Line(-(i as i32));
+            let row = &grid[line];
+            let text: String = row.into_iter().map(|cell| cell.c).collect();
+            lines.push(text.trim_end().to_string());
+        }
+
+        // Read visible lines
+        for y in visible_start..screen_lines {
             let Ok(line_idx) = i32::try_from(y) else { break };
             let line = alacritty_terminal::index::Line(line_idx);
-            if y < grid.total_lines() {
-                let row = &grid[line];
-                let text: String = row.into_iter().map(|cell| cell.c).collect();
-                lines.push(text.trim_end().to_string());
-            }
+            let row = &grid[line];
+            let text: String = row.into_iter().map(|cell| cell.c).collect();
+            lines.push(text.trim_end().to_string());
         }
 
         lines
@@ -780,26 +793,23 @@ impl PTYSession {
                 let is_alt = term_guard.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN);
                 let grid = term_guard.grid();
                 let mut lines = Vec::new();
-                let total_lines = grid.total_lines();
                 let rows = grid.screen_lines();
-                let start = if total_lines > rows { total_lines - rows } else { 0 };
-                for y in start..total_lines {
+                // Read visible area only: Line(0) to Line(screen_lines - 1)
+                for y in 0..rows {
                     let Ok(line_idx) = i32::try_from(y) else { break };
                     let line = alacritty_terminal::index::Line(line_idx);
-                    if y < total_lines {
-                        let row = &grid[line];
-                        // Skip wide-char spacer cells (CJK/emoji second cells)
-                        let text: String = row
-                            .into_iter()
-                            .filter(|cell| {
-                                !cell.flags.contains(
-                                    alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER,
-                                )
-                            })
-                            .map(|cell| cell.c)
-                            .collect();
-                        lines.push(text.trim_end().to_string());
-                    }
+                    let row = &grid[line];
+                    // Skip wide-char spacer cells (CJK/emoji second cells)
+                    let text: String = row
+                        .into_iter()
+                        .filter(|cell| {
+                            !cell.flags.contains(
+                                alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER,
+                            )
+                        })
+                        .map(|cell| cell.c)
+                        .collect();
+                    lines.push(text.trim_end().to_string());
                 }
                 (lines, is_alt)
             };
