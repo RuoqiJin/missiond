@@ -309,6 +309,15 @@ pub struct BoardTask {
     pub order_idx: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// Runtime claim: who is currently executing this task (Slot ID or MCP session ID)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_executor_id: Option<String>,
+    /// Executor type: "pty_slot" or "manual_session"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_executor_type: Option<String>,
+    /// When was this task claimed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claimed_at: Option<String>,
 }
 
 fn default_max_retries() -> i64 { 2 }
@@ -374,6 +383,12 @@ pub struct UpdateBoardTaskInput {
     pub hidden: Option<bool>,
     #[serde(default)]
     pub order_idx: Option<i64>,
+    /// Claim executor ID (set via claim_board_task, cleared on status change away from running)
+    #[serde(default)]
+    pub claim_executor_id: Option<String>,
+    /// Claim executor type: "pty_slot" or "manual_session"
+    #[serde(default)]
+    pub claim_executor_type: Option<String>,
 }
 
 // ============ Board Task Notes ============

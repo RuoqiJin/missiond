@@ -86,10 +86,14 @@ CREATE TABLE IF NOT EXISTS board_tasks (
   max_retries INTEGER NOT NULL DEFAULT 2,
   order_idx INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  claim_executor_id TEXT,
+  claim_executor_type TEXT,
+  claimed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_board_tasks_status ON board_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_board_tasks_parent ON board_tasks(parent_id);
+CREATE INDEX IF NOT EXISTS idx_board_tasks_claim ON board_tasks(claim_executor_id);
 
 -- Board task notes (progress tracking)
 CREATE TABLE IF NOT EXISTS board_task_notes (
@@ -347,6 +351,19 @@ impl MissionDB {
             conn.execute_batch(
                 "ALTER TABLE board_tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
                  ALTER TABLE board_tasks ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 2;"
+            )?;
+        }
+
+        // Phase T: Task Claim — add claim fields for conflict prevention
+        if !columns.iter().any(|c| c == "claim_executor_id") {
+            conn.execute_batch(
+                "ALTER TABLE board_tasks ADD COLUMN claim_executor_id TEXT;
+                 ALTER TABLE board_tasks ADD COLUMN claim_executor_type TEXT;
+                 ALTER TABLE board_tasks ADD COLUMN claimed_at TEXT;"
+            )?;
+            // Index for fast lookup by executor (zombie cleanup)
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_board_tasks_claim ON board_tasks(claim_executor_id);"
             )?;
         }
 
@@ -1208,6 +1225,9 @@ impl MissionDB {
             order_idx: max_order + 1,
             created_at: now.clone(),
             updated_at: now,
+            claim_executor_id: None,
+            claim_executor_type: None,
+            claimed_at: None,
         };
 
         self.insert_board_task(&task)?;
@@ -1320,6 +1340,28 @@ impl MissionDB {
         push_field!(assignee, "assignee");
         push_field!(prompt_template, "prompt_template");
 
+        // Explicit claim update (for manual claim via MCP tool)
+        if let Some(ref eid) = update.claim_executor_id {
+            fields.push("claim_executor_id = ?".to_string());
+            values.push(Box::new(eid.clone()));
+        }
+        if let Some(ref etype) = update.claim_executor_type {
+            fields.push("claim_executor_type = ?".to_string());
+            values.push(Box::new(etype.clone()));
+        }
+
+        // Auto-clear claim when status changes away from 'running'
+        if let Some(ref status_str) = update.status {
+            if status_str != "running" {
+                // Clear claim fields when transitioning to any non-running status
+                if update.claim_executor_id.is_none() {
+                    fields.push("claim_executor_id = NULL".to_string());
+                    fields.push("claim_executor_type = NULL".to_string());
+                    fields.push("claimed_at = NULL".to_string());
+                }
+            }
+        }
+
         if let Some(auto_exec) = update.auto_execute {
             fields.push("auto_execute = ?".to_string());
             values.push(Box::new(auto_exec as i32));
@@ -1399,18 +1441,65 @@ impl MissionDB {
         }
     }
 
+    /// Atomically claim a board task (CAS: only succeeds if open + unclaimed).
+    /// Returns Ok(Some(task)) on success, Ok(None) if task not found or already claimed.
+    pub fn claim_board_task(
+        &self,
+        id: &str,
+        executor_id: &str,
+        executor_type: &str,
+    ) -> SqliteResult<Option<BoardTask>> {
+        let full_id = match self.resolve_board_task_id(id)? {
+            Some(fid) => fid,
+            None => return Ok(None),
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn();
+        let rows = conn.execute(
+            "UPDATE board_tasks
+             SET claim_executor_id = ?1, claim_executor_type = ?2, claimed_at = ?3,
+                 status = 'running', updated_at = ?3
+             WHERE id = ?4 AND status = 'open' AND claim_executor_id IS NULL",
+            params![executor_id, executor_type, now, full_id],
+        )?;
+        drop(conn);
+        if rows == 0 {
+            return Ok(None); // Already claimed or not open
+        }
+        self.get_board_task(&full_id)
+    }
+
+    /// Release all claims held by a specific executor (zombie cleanup on disconnect/exit).
+    /// Resets claimed tasks back to 'open'.
+    pub fn release_board_claims_by_executor(&self, executor_id: &str) -> SqliteResult<usize> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn();
+        let count = conn.execute(
+            "UPDATE board_tasks
+             SET claim_executor_id = NULL, claim_executor_type = NULL, claimed_at = NULL,
+                 status = 'open', updated_at = ?1
+             WHERE claim_executor_id = ?2 AND status = 'running'",
+            params![now, executor_id],
+        )?;
+        if count > 0 {
+            tracing::info!(count, executor_id, "Released board claims for disconnected executor");
+        }
+        Ok(count)
+    }
+
     /// Recover stale running tasks: if a task has been 'running' for > N minutes,
     /// reset it to 'open' (daemon may have restarted mid-execution).
     pub fn recover_stale_running_tasks(&self, stale_minutes: i64) -> SqliteResult<usize> {
         let conn = self.conn();
         let count = conn.execute(
-            "UPDATE board_tasks SET status = 'open', updated_at = ?1
+            "UPDATE board_tasks SET status = 'open', claim_executor_id = NULL,
+                 claim_executor_type = NULL, claimed_at = NULL, updated_at = ?1
              WHERE status = 'running'
                AND julianday('now') - julianday(updated_at) > ?2 / 1440.0",
             params![chrono::Utc::now().to_rfc3339(), stale_minutes as f64],
         )?;
         if count > 0 {
-            tracing::warn!(count, stale_minutes, "Recovered stale running tasks");
+            tracing::warn!(count, stale_minutes, "Recovered stale running tasks (claims cleared)");
         }
         Ok(count)
     }
@@ -1510,6 +1599,9 @@ impl MissionDB {
             order_idx: row.get("order_idx")?,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
+            claim_executor_id: row.get("claim_executor_id").unwrap_or(None),
+            claim_executor_type: row.get("claim_executor_type").unwrap_or(None),
+            claimed_at: row.get("claimed_at").unwrap_or(None),
         })
     }
 
@@ -3287,11 +3379,13 @@ impl MissionDB {
             "INSERT INTO conversations (id, project, slot_id, source, model, git_branch, jsonl_path, parent_session_id, task_id, message_count, started_at, ended_at, status, analyzed_at, conversation_type)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET
+                slot_id = COALESCE(?3, slot_id),
                 model = COALESCE(?5, model),
                 git_branch = COALESCE(?6, git_branch),
                 message_count = ?10,
                 ended_at = ?12,
-                status = ?13",
+                status = ?13,
+                conversation_type = COALESCE(?15, conversation_type)",
             params![
                 conv.id, conv.project, conv.slot_id, conv.source, conv.model,
                 conv.git_branch, conv.jsonl_path, conv.parent_session_id, conv.task_id,
