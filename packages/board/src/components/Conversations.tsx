@@ -19,6 +19,7 @@ interface Conversation {
   startedAt: string;
   endedAt: string | null;
   status: string;
+  conversationType: string;
 }
 
 interface ConversationMessage {
@@ -335,6 +336,7 @@ export function Conversations() {
   const [search, setSearch] = useState('');
   const [searchResults, setSearchResults] = useState<ConversationMessage[] | null>(null);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'user' | 'system'>('user');
   const [showList, setShowList] = useState(true); // mobile: toggle list/detail
   const [expandedParents, setExpandedParents] = useState<Set<string>>(new Set());
 
@@ -344,6 +346,7 @@ export function Conversations() {
       const params = new URLSearchParams();
       if (statusFilter) params.set('status', statusFilter);
       params.set('limit', '100');
+      params.set('conversation_type', viewMode === 'system' ? 'system' : 'user');
       const res = await fetch(`/api/conversations?${params}`);
       if (res.ok) {
         const data = await res.json();
@@ -360,7 +363,7 @@ export function Conversations() {
       // silent
     }
     setLoading(false);
-  }, [statusFilter]);
+  }, [statusFilter, viewMode]);
 
   const fetchMessages = useCallback(async (sessionId: string) => {
     setLoadingMessages(true);
@@ -491,6 +494,34 @@ export function Conversations() {
         'w-80 flex-shrink-0 border-r border-neutral-800 flex flex-col',
         !showList && 'hidden md:flex',
       )}>
+        {/* View mode tabs */}
+        <div className="flex border-b border-neutral-800">
+          <button
+            onClick={() => setViewMode('user')}
+            className={cn(
+              'flex-1 py-2 text-xs font-medium transition-colors flex items-center justify-center gap-1.5',
+              viewMode === 'user'
+                ? 'text-neutral-200 border-b-2 border-blue-500'
+                : 'text-neutral-500 hover:text-neutral-400',
+            )}
+          >
+            <MessageSquare className="w-3 h-3" />
+            对话
+          </button>
+          <button
+            onClick={() => setViewMode('system')}
+            className={cn(
+              'flex-1 py-2 text-xs font-medium transition-colors flex items-center justify-center gap-1.5',
+              viewMode === 'system'
+                ? 'text-neutral-200 border-b-2 border-orange-500'
+                : 'text-neutral-500 hover:text-neutral-400',
+            )}
+          >
+            <Layers className="w-3 h-3" />
+            系统
+          </button>
+        </div>
+
         {/* Search bar */}
         <div className="p-3 border-b border-neutral-800/50 space-y-2">
           <div className="relative">
