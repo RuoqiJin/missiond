@@ -23,7 +23,63 @@ pub struct SkillMeta {
     pub allowed_tools: Option<String>,
     /// Absolute path to the skill file
     pub path: PathBuf,
+    /// Phase 2: dependency declarations
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires: Option<SkillRequires>,
+    /// Phase 3: executable action declarations
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actions: Option<Vec<SkillAction>>,
 }
+
+/// Skill dependency declaration (Phase 2: cross-domain context aggregation)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SkillRequires {
+    /// Prerequisite skill names (resolved recursively, max 2 layers)
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// Infrastructure server IDs (looked up from servers.yaml)
+    #[serde(default)]
+    pub infra: Vec<String>,
+    /// KB category prefixes (e.g., "memory:ops") for filtered search
+    #[serde(default)]
+    pub kb: Vec<String>,
+}
+
+/// Action declaration in frontmatter (Phase 3: executable skills)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillAction {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub requires_approval: bool,
+}
+
+/// A single step in a workflow
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowStep {
+    pub name: Option<String>,
+    pub tool: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
+    #[serde(default = "default_on_error")]
+    pub on_error: String,
+    #[serde(default)]
+    pub save_as: Option<String>,
+}
+
+fn default_on_error() -> String { "stop".to_string() }
+
+/// Parsed workflow block from ```workflow code fence
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowBlock {
+    pub id: String,
+    #[serde(default = "default_workflow_type")]
+    pub r#type: String,
+    pub steps: Vec<WorkflowStep>,
+}
+
+fn default_workflow_type() -> String { "sequential".to_string() }
 
 /// YAML frontmatter structure (for deserialization)
 #[derive(Debug, Deserialize)]
@@ -34,6 +90,12 @@ struct Frontmatter {
     aka: Option<Vec<String>>,
     #[serde(rename = "allowed-tools")]
     allowed_tools: Option<String>,
+    /// Phase 2: dependency declarations
+    #[serde(default)]
+    requires: Option<SkillRequires>,
+    /// Phase 3: executable action declarations
+    #[serde(default)]
+    actions: Option<Vec<SkillAction>>,
 }
 
 /// In-memory skill index
@@ -250,6 +312,7 @@ fn parse_skill_file(path: &Path) -> Option<SkillMeta> {
         aka: fm.aka,
         allowed_tools: fm.allowed_tools,
         path: path.to_path_buf(),
+        requires: fm.requires,
     })
 }
 
@@ -396,6 +459,11 @@ pub fn ingest_skills(db: &crate::db::MissionDB, skills_dir: &Path) -> usize {
             .as_ref()
             .map(|a| serde_json::to_string(a).unwrap_or_default());
 
+        let requires_json = skill
+            .requires
+            .as_ref()
+            .and_then(|r| serde_json::to_string(r).ok());
+
         let file_path_str = skill.path.to_string_lossy().to_string();
 
         // Upsert topic
@@ -405,6 +473,7 @@ pub fn ingest_skills(db: &crate::db::MissionDB, skills_dir: &Path) -> usize {
             aka_json.as_deref(),
             skill.allowed_tools.as_deref(),
             &file_path_str,
+            requires_json.as_deref(),
         ) {
             warn!(topic = %skill.name, error = %e, "Failed to upsert skill topic");
             continue;

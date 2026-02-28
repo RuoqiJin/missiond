@@ -11,9 +11,10 @@ use std::collections::HashSet;
 use crate::types::{
     AddBoardTaskNoteInput, AgentQuestion, AgentQuestionStatus, BoardNoteType, BoardTask,
     BoardTaskNote, BoardTaskStatus, BoardTaskWithNotes, Conversation, ConversationMessage,
-    CreateAgentQuestionInput, CreateBoardTaskInput, EventType, InboxMessage, KBRememberInput,
-    KBRememberResult, KnowledgeEntry, SkillBlock, SkillSearchResult, SkillTopic, SlotTask, Task,
-    TaskEvent, TaskStatus, TaskUpdate, UpdateBoardTaskInput,
+    CreateAgentQuestionInput, CreateBoardTaskInput, EventType, InboxMessage, KBOperation,
+    KBOperationRow, KBRememberInput, KBRememberResult, KnowledgeEntry, SkillBlock,
+    SkillSearchResult, SkillTopic, SlotTask, Task, TaskEvent, TaskStatus, TaskUpdate,
+    UpdateBoardTaskInput,
 };
 
 const SCHEMA: &str = r#"
@@ -482,6 +483,16 @@ impl MissionDB {
             )?;
         }
 
+        // Add chat_type for distinguishing PTY vs router_chat conversations
+        let has_chat_type: bool = conn
+            .prepare("SELECT chat_type FROM conversations LIMIT 0")
+            .is_ok();
+        if !has_chat_type {
+            conn.execute_batch(
+                "ALTER TABLE conversations ADD COLUMN chat_type TEXT DEFAULT 'pty';"
+            )?;
+        }
+
         // Slot task history table
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS slot_tasks (
@@ -601,6 +612,38 @@ impl MissionDB {
                 );"
             )?;
         }
+
+        // Phase 2: Add requires_json column to skill_topics for dependency declarations
+        let skill_columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(skill_topics)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        if !skill_columns.iter().any(|c| c == "requires_json") {
+            conn.execute_batch(
+                "ALTER TABLE skill_topics ADD COLUMN requires_json TEXT;"
+            )?;
+        }
+
+        // KB operation queue — persists kb_analyze consolidation plans for cross-session execution
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS kb_operation_queue (
+                id TEXT PRIMARY KEY,
+                plan_id TEXT NOT NULL,
+                task_id TEXT,
+                operation TEXT NOT NULL,
+                target_keys TEXT NOT NULL,
+                rationale TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                priority INTEGER NOT NULL DEFAULT 0,
+                result TEXT,
+                created_at TEXT NOT NULL,
+                executed_at TEXT,
+                error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_kb_op_status ON kb_operation_queue(status);
+            CREATE INDEX IF NOT EXISTS idx_kb_op_plan ON kb_operation_queue(plan_id);"
+        )?;
 
         Ok(())
     }
@@ -2260,6 +2303,130 @@ impl MissionDB {
         Ok(deleted)
     }
 
+    // ============ KB Operation Queue ============
+
+    /// Save a consolidation plan from kb_analyze into the operation queue
+    pub fn kb_ops_save_plan(
+        &self,
+        plan_id: &str,
+        task_id: Option<&str>,
+        operations: &[KBOperation],
+    ) -> SqliteResult<usize> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut saved = 0;
+        for (i, op) in operations.iter().enumerate() {
+            let id = format!("{}-{}", plan_id, i);
+            conn.execute(
+                "INSERT OR REPLACE INTO kb_operation_queue
+                 (id, plan_id, task_id, operation, target_keys, rationale, status, priority, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8)",
+                params![
+                    id,
+                    plan_id,
+                    task_id,
+                    op.operation,
+                    serde_json::to_string(&op.target_keys).unwrap_or_default(),
+                    op.rationale,
+                    i as i32,
+                    now,
+                ],
+            )?;
+            saved += 1;
+        }
+        Ok(saved)
+    }
+
+    /// List operations by plan_id or all pending
+    pub fn kb_ops_list(
+        &self,
+        plan_id: Option<&str>,
+        status: Option<&str>,
+    ) -> SqliteResult<Vec<KBOperationRow>> {
+        let conn = self.conn();
+        let (sql, params_vec): (String, Vec<Box<dyn rusqlite::ToSql>>) = match (plan_id, status) {
+            (Some(pid), Some(s)) => (
+                "SELECT id, plan_id, task_id, operation, target_keys, rationale, status, priority, result, created_at, executed_at, error
+                 FROM kb_operation_queue WHERE plan_id = ?1 AND status = ?2 ORDER BY priority".to_string(),
+                vec![Box::new(pid.to_string()) as Box<dyn rusqlite::ToSql>, Box::new(s.to_string())],
+            ),
+            (Some(pid), None) => (
+                "SELECT id, plan_id, task_id, operation, target_keys, rationale, status, priority, result, created_at, executed_at, error
+                 FROM kb_operation_queue WHERE plan_id = ?1 ORDER BY priority".to_string(),
+                vec![Box::new(pid.to_string()) as Box<dyn rusqlite::ToSql>],
+            ),
+            (None, Some(s)) => (
+                "SELECT id, plan_id, task_id, operation, target_keys, rationale, status, priority, result, created_at, executed_at, error
+                 FROM kb_operation_queue WHERE status = ?1 ORDER BY created_at DESC, priority".to_string(),
+                vec![Box::new(s.to_string()) as Box<dyn rusqlite::ToSql>],
+            ),
+            (None, None) => (
+                "SELECT id, plan_id, task_id, operation, target_keys, rationale, status, priority, result, created_at, executed_at, error
+                 FROM kb_operation_queue ORDER BY created_at DESC, priority".to_string(),
+                vec![],
+            ),
+        };
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_refs.as_slice(), |row| {
+            Ok(KBOperationRow {
+                id: row.get(0)?,
+                plan_id: row.get(1)?,
+                task_id: row.get(2)?,
+                operation: row.get(3)?,
+                target_keys: row.get(4)?,
+                rationale: row.get(5)?,
+                status: row.get(6)?,
+                priority: row.get(7)?,
+                result: row.get(8)?,
+                created_at: row.get(9)?,
+                executed_at: row.get(10)?,
+                error: row.get(11)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Update operation status
+    pub fn kb_ops_update_status(
+        &self,
+        op_id: &str,
+        status: &str,
+        result: Option<&str>,
+        error: Option<&str>,
+    ) -> SqliteResult<bool> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        let executed_at = if status == "done" || status == "failed" { Some(now.as_str()) } else { None };
+        let updated = conn.execute(
+            "UPDATE kb_operation_queue SET status = ?1, result = ?2, error = ?3, executed_at = ?4 WHERE id = ?5",
+            params![status, result, error, executed_at, op_id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// Get queue status summary for a plan
+    pub fn kb_ops_plan_summary(&self, plan_id: &str) -> SqliteResult<serde_json::Value> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT status, COUNT(*) FROM kb_operation_queue WHERE plan_id = ?1 GROUP BY status"
+        )?;
+        let mut summary = serde_json::Map::new();
+        let mut total = 0i64;
+        stmt.query_map(params![plan_id], |row| {
+            let s: String = row.get(0)?;
+            let c: i64 = row.get(1)?;
+            Ok((s, c))
+        })?.for_each(|r| {
+            if let Ok((s, c)) = r {
+                summary.insert(s, serde_json::json!(c));
+                total += c;
+            }
+        });
+        summary.insert("total".to_string(), serde_json::json!(total));
+        Ok(serde_json::Value::Object(summary))
+    }
+
     // ============ Skill Engine ============
 
     /// Upsert a skill topic (metadata)
@@ -2270,15 +2437,16 @@ impl MissionDB {
         aka: Option<&str>,
         allowed_tools: Option<&str>,
         file_path: &str,
+        requires_json: Option<&str>,
     ) -> SqliteResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO skill_topics (topic, description, aka, allowed_tools, file_path, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+            "INSERT INTO skill_topics (topic, description, aka, allowed_tools, file_path, requires_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
              ON CONFLICT(topic) DO UPDATE SET
-                description = ?2, aka = ?3, allowed_tools = ?4, file_path = ?5, updated_at = ?6",
-            params![topic, description, aka, allowed_tools, file_path, now],
+                description = ?2, aka = ?3, allowed_tools = ?4, file_path = ?5, requires_json = ?6, updated_at = ?7",
+            params![topic, description, aka, allowed_tools, file_path, requires_json, now],
         )?;
         Ok(())
     }
@@ -2289,7 +2457,7 @@ impl MissionDB {
         conn.query_row(
             "SELECT topic, description, aka, allowed_tools, file_path,
                     hit_count, last_hit_at, fragment_count, total_lines, checksum,
-                    created_at, updated_at
+                    requires_json, created_at, updated_at
              FROM skill_topics WHERE topic = ?1",
             params![topic],
             |row| {
@@ -2304,8 +2472,9 @@ impl MissionDB {
                     fragment_count: row.get(7)?,
                     total_lines: row.get(8)?,
                     checksum: row.get(9)?,
-                    created_at: row.get(10)?,
-                    updated_at: row.get(11)?,
+                    requires_json: row.get(10)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
                 })
             },
         )
@@ -2318,7 +2487,7 @@ impl MissionDB {
         let mut stmt = conn.prepare(
             "SELECT topic, description, aka, allowed_tools, file_path,
                     hit_count, last_hit_at, fragment_count, total_lines, checksum,
-                    created_at, updated_at
+                    requires_json, created_at, updated_at
              FROM skill_topics ORDER BY topic",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -2333,8 +2502,9 @@ impl MissionDB {
                 fragment_count: row.get(7)?,
                 total_lines: row.get(8)?,
                 checksum: row.get(9)?,
-                created_at: row.get(10)?,
-                updated_at: row.get(11)?,
+                requires_json: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
             })
         })?;
         rows.collect()
@@ -2490,7 +2660,7 @@ impl MissionDB {
         let mut stmt = conn.prepare(
             "SELECT topic, description, aka, allowed_tools, file_path,
                     hit_count, last_hit_at, fragment_count, total_lines, checksum,
-                    created_at, updated_at
+                    requires_json, created_at, updated_at
              FROM skill_topics
              WHERE LOWER(topic) LIKE ?1
                 OR LOWER(COALESCE(description, '')) LIKE ?1
@@ -2510,8 +2680,9 @@ impl MissionDB {
                 fragment_count: row.get(7)?,
                 total_lines: row.get(8)?,
                 checksum: row.get(9)?,
-                created_at: row.get(10)?,
-                updated_at: row.get(11)?,
+                requires_json: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
             })
         })?;
         rows.collect()
@@ -3207,6 +3378,7 @@ impl MissionDB {
             analysis_version: row.get("analysis_version").unwrap_or(0),
             analysis_retries: row.get("analysis_retries").unwrap_or(0),
             deep_analyzed_message_id: row.get("deep_analyzed_message_id").unwrap_or(0),
+            chat_type: row.get("chat_type").unwrap_or(None),
         })
     }
 
@@ -3223,6 +3395,70 @@ impl MissionDB {
             timestamp: row.get("timestamp")?,
             metadata: row.get("metadata")?,
         })
+    }
+
+    // ============ Router Chat Sessions ============
+
+    /// Find or create a router_chat conversation for a given task_id
+    pub fn router_chat_get_or_create(&self, task_id: &str, model: &str) -> SqliteResult<String> {
+        let conn = self.conn();
+        // Find existing active router_chat conversation for this task
+        let existing: Option<String> = conn.query_row(
+            "SELECT id FROM conversations WHERE task_id = ?1 AND chat_type = 'router_chat' AND status = 'active' LIMIT 1",
+            params![task_id],
+            |row| row.get(0),
+        ).optional()?;
+
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+
+        // Create new
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO conversations (id, source, model, task_id, chat_type, message_count, started_at, status)
+             VALUES (?1, 'router_chat', ?2, ?3, 'router_chat', 0, ?4, 'active')",
+            params![id, model, task_id, now],
+        )?;
+        Ok(id)
+    }
+
+    /// Load router_chat message history as OpenAI-format messages array
+    pub fn router_chat_load_history(&self, conv_id: &str) -> SqliteResult<Vec<serde_json::Value>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT role, content FROM conversation_messages WHERE session_id = ?1 ORDER BY id ASC"
+        )?;
+        let msgs: Vec<serde_json::Value> = stmt.query_map(params![conv_id], |row| {
+            let role: String = row.get(0)?;
+            let content: String = row.get(1)?;
+            Ok(serde_json::json!({"role": role, "content": content}))
+        })?.filter_map(|r| r.ok()).collect();
+        Ok(msgs)
+    }
+
+    /// Append messages to a router_chat conversation
+    pub fn router_chat_append_messages(
+        &self,
+        conv_id: &str,
+        messages: &[(String, String)], // (role, content) pairs
+    ) -> SqliteResult<()> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        for (role, content) in messages {
+            conn.execute(
+                "INSERT INTO conversation_messages (session_id, role, content, timestamp)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![conv_id, role, content, now],
+            )?;
+        }
+        // Update message count
+        conn.execute(
+            "UPDATE conversations SET message_count = (SELECT COUNT(*) FROM conversation_messages WHERE session_id = ?1) WHERE id = ?1",
+            params![conv_id],
+        )?;
+        Ok(())
     }
 
     // ============ Slot Task History ============
