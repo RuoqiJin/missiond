@@ -198,6 +198,20 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                 }
             }),
         ),
+        ToolDefinition::new(
+            "mission_task_track",
+            "全链路追踪 submit task。一个调用返回：任务状态、工位状态、PTY 进度、最后响应。替代 mission_task + pty_status + pty_screen 组合查询。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "taskId": {
+                        "type": "string",
+                        "description": "任务 ID"
+                    }
+                },
+                "required": ["taskId"]
+            }),
+        ),
         // ===== Process Control =====
         ToolDefinition::new(
             "mission_spawn",
@@ -948,7 +962,8 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                 "properties": {
                     "category": {
                         "type": "string",
-                        "description": "分类: preference, memory, memory:architecture, memory:bugfix, memory:debug, memory:ops, memory:feature, project"
+                        "enum": ["preference", "memory", "memory:architecture", "memory:bugfix", "memory:debug", "memory:ops", "memory:feature", "memory:decision", "memory:platform", "project", "architecture", "decision", "feature", "infra", "procedure"],
+                        "description": "分类"
                     },
                     "key": {
                         "type": "string",
@@ -1167,19 +1182,20 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_kb_execute_plan",
-            "执行 KB 操作队列中的 pending 操作。delete/update/category_fix/recategorize 自动执行，merge/distill 派发工位。",
+            "执行 KB 操作队列中的 pending 操作。delete/update/category_fix/recategorize 自动执行，merge/distill 派发工位。自动清理 24h 前的 stale ops。",
             json!({
                 "type": "object",
                 "properties": {
                     "plan_id": {
                         "type": "string",
-                        "description": "执行特定批次的操作"
+                        "description": "执行特定批次的操作（必须指定，防止跨 plan 混合执行）"
                     },
                     "limit": {
                         "type": "integer",
                         "description": "每次最多执行 N 个操作（默认 5）"
                     }
-                }
+                },
+                "required": ["plan_id"]
             }),
         ),
 
@@ -1360,7 +1376,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_conversation_search",
-            "按内容搜索对话消息（跨会话），返回匹配消息及上下文。",
+            "按内容搜索对话消息（跨会话），返回匹配消息及上下文。支持按角色/slot/会话过滤。",
             json!({
                 "type": "object",
                 "properties": {
@@ -1371,6 +1387,18 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     "limit": {
                         "type": "integer",
                         "description": "最大返回数（默认 20）"
+                    },
+                    "role": {
+                        "type": "string",
+                        "description": "按消息角色过滤: user, assistant, tool_use, tool_result, thinking, system"
+                    },
+                    "sessionId": {
+                        "type": "string",
+                        "description": "限定在特定会话中搜索"
+                    },
+                    "excludeSessionId": {
+                        "type": "string",
+                        "description": "排除特定会话（避免自引用）"
                     }
                 },
                 "required": ["query"]

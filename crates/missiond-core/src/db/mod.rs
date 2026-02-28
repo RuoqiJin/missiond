@@ -198,6 +198,17 @@ pub fn extract_parent_session_id(jsonl_path: &str) -> Option<String> {
     }
 }
 
+/// Derive conversation_type from slot_id and session_id.
+/// "meta" = memory slots, "subagent" = agent-* IDs, "worker" = other slots, "user" = direct CLI.
+pub fn derive_conversation_type(slot_id: Option<&str>, session_id: &str) -> String {
+    match slot_id {
+        Some("slot-memory" | "slot-memory-slow") => "meta".to_string(),
+        Some(_) => "worker".to_string(),
+        None if session_id.starts_with("agent-") => "subagent".to_string(),
+        None => "user".to_string(),
+    }
+}
+
 /// SQLite database operations class
 pub struct MissionDB {
     conn: std::sync::Mutex<Connection>,
@@ -418,8 +429,7 @@ impl MissionDB {
                  SET analyzed_at = COALESCE(analyzed_at, ended_at),
                      analysis_version = 1
                  WHERE status = 'completed'
-                   AND slot_id IS NULL
-                   AND id NOT LIKE 'agent-%'
+                   AND conversation_type = 'user'
                    AND analyzed_at IS NULL",
                 [],
             )?;
@@ -506,6 +516,9 @@ impl MissionDB {
                 "UPDATE conversations SET conversation_type = 'meta' WHERE slot_id IN ('slot-memory', 'slot-memory-slow');
                  UPDATE conversations SET conversation_type = 'worker' WHERE slot_id IS NOT NULL AND conversation_type = 'user' AND slot_id NOT IN ('slot-memory', 'slot-memory-slow');
                  UPDATE conversations SET conversation_type = 'subagent' WHERE id LIKE 'agent-%';"
+            )?;
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_conv_type ON conversations(conversation_type);"
             )?;
         }
 
@@ -3086,8 +3099,7 @@ impl MissionDB {
         let mut stmt = conn.prepare(
             "SELECT * FROM conversations
              WHERE status = 'completed'
-               AND slot_id IS NULL
-               AND id NOT LIKE 'agent-%'
+               AND conversation_type = 'user'
                AND ended_at < datetime('now', '-5 minutes')
                AND analysis_retries < ?1
                AND (analyzed_at IS NULL OR analysis_version < ?2)
@@ -3096,8 +3108,7 @@ impl MissionDB {
 
              SELECT * FROM conversations
              WHERE status = 'active'
-               AND slot_id IS NULL
-               AND id NOT LIKE 'agent-%'
+               AND conversation_type = 'user'
                AND analysis_retries < ?1
                AND (SELECT COUNT(*) FROM conversation_messages m
                     WHERE m.session_id = conversations.id
@@ -3119,8 +3130,7 @@ impl MissionDB {
             "SELECT EXISTS(
                 SELECT 1 FROM conversations
                 WHERE status = 'completed'
-                  AND slot_id IS NULL
-                  AND id NOT LIKE 'agent-%'
+                  AND conversation_type = 'user'
                   AND ended_at < datetime('now', '-5 minutes')
                   AND analysis_retries < ?1
                   AND (analyzed_at IS NULL OR analysis_version < ?2)
@@ -3129,8 +3139,7 @@ impl MissionDB {
 
                 SELECT 1 FROM conversations
                 WHERE status = 'active'
-                  AND slot_id IS NULL
-                  AND id NOT LIKE 'agent-%'
+                  AND conversation_type = 'user'
                   AND analysis_retries < ?1
                   AND (SELECT COUNT(*) FROM conversation_messages m
                        WHERE m.session_id = conversations.id
@@ -3149,8 +3158,7 @@ impl MissionDB {
             "SELECT COUNT(*) FROM (
                 SELECT id FROM conversations
                 WHERE status = 'completed'
-                  AND slot_id IS NULL
-                  AND id NOT LIKE 'agent-%'
+                  AND conversation_type = 'user'
                   AND ended_at < datetime('now', '-5 minutes')
                   AND analysis_retries < ?1
                   AND (analyzed_at IS NULL OR analysis_version < ?2)
@@ -3159,8 +3167,7 @@ impl MissionDB {
 
                 SELECT id FROM conversations
                 WHERE status = 'active'
-                  AND slot_id IS NULL
-                  AND id NOT LIKE 'agent-%'
+                  AND conversation_type = 'user'
                   AND analysis_retries < ?1
                   AND (SELECT COUNT(*) FROM conversation_messages m
                        WHERE m.session_id = conversations.id
@@ -3178,8 +3185,7 @@ impl MissionDB {
         conn.query_row(
             "SELECT COUNT(DISTINCT c.id) FROM conversations c
              JOIN conversation_messages m ON c.id = m.session_id
-             WHERE c.slot_id IS NULL
-               AND c.id NOT LIKE 'agent-%'
+             WHERE c.conversation_type = 'user'
                AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)
                AND m.role IN ('user', 'assistant')",
             [],
@@ -3194,8 +3200,7 @@ impl MissionDB {
             "SELECT c.id, COUNT(*) as cnt, MIN(m.timestamp) as oldest
              FROM conversations c
              JOIN conversation_messages m ON c.id = m.session_id
-             WHERE c.slot_id IS NULL
-               AND c.id NOT LIKE 'agent-%'
+             WHERE c.conversation_type = 'user'
                AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)
                AND m.role IN ('user', 'assistant')
              GROUP BY c.id
@@ -3216,8 +3221,7 @@ impl MissionDB {
         let mut stmt = conn.prepare(
             "SELECT id, COALESCE(ended_at, '[active]'), analysis_retries FROM conversations
              WHERE status = 'completed'
-               AND slot_id IS NULL
-               AND id NOT LIKE 'agent-%'
+               AND conversation_type = 'user'
                AND ended_at < datetime('now', '-5 minutes')
                AND analysis_retries < ?1
                AND (analyzed_at IS NULL OR analysis_version < ?2)
@@ -3226,8 +3230,7 @@ impl MissionDB {
 
              SELECT id, '[checkpoint]', analysis_retries FROM conversations
              WHERE status = 'active'
-               AND slot_id IS NULL
-               AND id NOT LIKE 'agent-%'
+               AND conversation_type = 'user'
                AND analysis_retries < ?1
                AND (SELECT COUNT(*) FROM conversation_messages m
                     WHERE m.session_id = conversations.id
@@ -3281,8 +3284,8 @@ impl MissionDB {
     pub fn upsert_conversation(&self, conv: &Conversation) -> SqliteResult<()> {
         let conn = self.conn();
         conn.execute(
-            "INSERT INTO conversations (id, project, slot_id, source, model, git_branch, jsonl_path, parent_session_id, task_id, message_count, started_at, ended_at, status, analyzed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "INSERT INTO conversations (id, project, slot_id, source, model, git_branch, jsonl_path, parent_session_id, task_id, message_count, started_at, ended_at, status, analyzed_at, conversation_type)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET
                 model = COALESCE(?5, model),
                 git_branch = COALESCE(?6, git_branch),
@@ -3293,7 +3296,7 @@ impl MissionDB {
                 conv.id, conv.project, conv.slot_id, conv.source, conv.model,
                 conv.git_branch, conv.jsonl_path, conv.parent_session_id, conv.task_id,
                 conv.message_count, conv.started_at, conv.ended_at, conv.status,
-                conv.analyzed_at,
+                conv.analyzed_at, conv.conversation_type,
             ],
         )?;
         Ok(())
@@ -3372,37 +3375,46 @@ impl MissionDB {
         }
     }
 
-    /// List conversations, optionally filtered by status.
-    /// Subagent sessions (id LIKE 'agent-%') are excluded from the main list — they fold under parents.
-    /// When no status filter: always includes ALL active main conversations + recent completed ones up to limit.
-    pub fn list_conversations(&self, status: Option<&str>, limit: i64) -> SqliteResult<Vec<Conversation>> {
+    /// List conversations, optionally filtered by status and conversation_type.
+    /// conv_type: None = user+worker (default), Some("meta") = system, Some("system") = meta+worker, Some("all") = everything.
+    pub fn list_conversations(&self, status: Option<&str>, limit: i64, conv_type: Option<&str>) -> SqliteResult<Vec<Conversation>> {
         let conn = self.read_conn();
         let mut convs = Vec::new();
+        let type_clause = match conv_type {
+            Some("all") => String::new(),
+            Some("meta") => " AND conversation_type = 'meta'".to_string(),
+            Some("worker") => " AND conversation_type = 'worker'".to_string(),
+            Some("system") => " AND conversation_type IN ('meta', 'worker')".to_string(),
+            _ => " AND conversation_type IN ('user', 'worker')".to_string(),
+        };
         if let Some(s) = status {
-            let mut stmt = conn.prepare(
-                "SELECT * FROM conversations WHERE status = ?1 AND id NOT LIKE 'agent-%' ORDER BY started_at DESC LIMIT ?2"
-            )?;
+            let sql = format!(
+                "SELECT * FROM conversations WHERE status = ?1{} ORDER BY started_at DESC LIMIT ?2",
+                type_clause
+            );
+            let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map(params![s, limit], |row| Self::row_to_conversation(row))?;
             for c in rows { convs.push(c?); }
         } else {
-            // Always include ALL active main conversations first
             {
-                let mut stmt = conn.prepare(
-                    "SELECT * FROM conversations WHERE status = 'active' AND id NOT LIKE 'agent-%' ORDER BY started_at DESC"
-                )?;
+                let sql = format!(
+                    "SELECT * FROM conversations WHERE status = 'active'{} ORDER BY started_at DESC",
+                    type_clause
+                );
+                let mut stmt = conn.prepare(&sql)?;
                 let rows = stmt.query_map([], |row| Self::row_to_conversation(row))?;
                 for c in rows { convs.push(c?); }
             }
-            // Fill remaining limit with non-active main conversations
             let remaining = limit - convs.len() as i64;
             if remaining > 0 {
-                let mut stmt = conn.prepare(
-                    "SELECT * FROM conversations WHERE status != 'active' AND id NOT LIKE 'agent-%' ORDER BY started_at DESC LIMIT ?1"
-                )?;
+                let sql = format!(
+                    "SELECT * FROM conversations WHERE status != 'active'{} ORDER BY started_at DESC LIMIT ?1",
+                    type_clause
+                );
+                let mut stmt = conn.prepare(&sql)?;
                 let rows = stmt.query_map(params![remaining], |row| Self::row_to_conversation(row))?;
                 for c in rows { convs.push(c?); }
             }
-            // Sort all: active first, then by started_at DESC
             convs.sort_by(|a, b| {
                 let a_active = a.status == "active";
                 let b_active = b.status == "active";
@@ -3717,8 +3729,7 @@ impl MissionDB {
             "SELECT m.*, COALESCE(c.project, '') as c_project, c.memory_forwarded_at
              FROM conversation_messages m
              JOIN conversations c ON c.id = m.session_id
-             WHERE c.slot_id IS NULL
-               AND c.id NOT LIKE 'agent-%'
+             WHERE c.conversation_type = 'user'
                AND m.timestamp >= ?1
                AND m.timestamp > COALESCE(c.memory_forwarded_at, ?1)
                AND m.role IN ('user', 'assistant')
@@ -3764,8 +3775,7 @@ impl MissionDB {
             "SELECT m.*, COALESCE(c.project, '') as c_project, c.user_voice_forwarded_at
              FROM conversation_messages m
              JOIN conversations c ON c.id = m.session_id
-             WHERE c.slot_id IS NULL
-               AND c.id NOT LIKE 'agent-%'
+             WHERE c.conversation_type = 'user'
                AND m.timestamp > COALESCE(c.user_voice_forwarded_at, c.started_at)
                AND m.role = 'user'
              ORDER BY m.timestamp ASC"
@@ -3819,8 +3829,7 @@ impl MissionDB {
                     ROW_NUMBER() OVER(PARTITION BY m.session_id ORDER BY m.timestamp ASC) as rn
                 FROM conversation_messages m
                 JOIN conversations c ON c.id = m.session_id
-                WHERE c.slot_id IS NULL
-                  AND c.id NOT LIKE 'agent-%'
+                WHERE c.conversation_type = 'user'
                   AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)
                   AND m.role IN ('user', 'assistant')
             )
@@ -3881,6 +3890,7 @@ impl MissionDB {
             analysis_retries: row.get("analysis_retries").unwrap_or(0),
             deep_analyzed_message_id: row.get("deep_analyzed_message_id").unwrap_or(0),
             chat_type: row.get("chat_type").unwrap_or(None),
+            conversation_type: row.get("conversation_type").unwrap_or_else(|_| "user".to_string()),
         })
     }
 
