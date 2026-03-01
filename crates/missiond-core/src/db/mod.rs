@@ -3511,9 +3511,11 @@ impl MissionDB {
         }
     }
 
-    /// List conversations, optionally filtered by status and conversation_type.
+    /// List conversations, optionally filtered by status, conversation_type, and task_id.
     /// conv_type: None = user+worker (default), Some("meta") = system, Some("system") = meta+worker, Some("all") = everything.
-    pub fn list_conversations(&self, status: Option<&str>, limit: i64, conv_type: Option<&str>) -> SqliteResult<Vec<Conversation>> {
+    /// List conversations, optionally filtered by status, conversation_type, and task_id.
+    /// conv_type: None = user+worker (default), Some("meta") = system, Some("system") = meta+worker, Some("all") = everything.
+    pub fn list_conversations(&self, status: Option<&str>, limit: i64, conv_type: Option<&str>, task_id: Option<&str>) -> SqliteResult<Vec<Conversation>> {
         let conn = self.read_conn();
         let mut convs = Vec::new();
         let type_clause = match conv_type {
@@ -3523,6 +3525,19 @@ impl MissionDB {
             Some("system") => " AND conversation_type IN ('meta', 'worker')".to_string(),
             _ => " AND conversation_type IN ('user', 'worker')".to_string(),
         };
+
+        // Fast path: filter by task_id (returns all matching conversations)
+        if let Some(tid) = task_id {
+            let sql = format!(
+                "SELECT * FROM conversations WHERE task_id = ?1{} ORDER BY started_at ASC LIMIT ?2",
+                if matches!(conv_type, Some("all")) { String::new() } else { type_clause.clone() }
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params![tid, limit], |row| Self::row_to_conversation(row))?;
+            for c in rows { convs.push(c?); }
+            return Ok(convs);
+        }
+
         if let Some(s) = status {
             let sql = format!(
                 "SELECT * FROM conversations WHERE status = ?1{} ORDER BY started_at DESC LIMIT ?2",
