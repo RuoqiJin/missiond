@@ -5876,6 +5876,25 @@ async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardT
             // Build phase-specific prompt
             let prompt = build_flow_phase_prompt(task, &p, &ctx);
 
+            // Inject answered Q&A context (Phase 0: Decision Engine prerequisite)
+            let prompt = {
+                let answered = state.mission.db().list_questions_for_task(&task.id).unwrap_or_default();
+                if answered.is_empty() {
+                    prompt
+                } else {
+                    let qa_block: String = answered.iter()
+                        .filter(|q| q.answer.is_some())
+                        .map(|q| format!("Q: {}\nA: {}", q.question, q.answer.as_deref().unwrap_or("")))
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    if qa_block.is_empty() {
+                        prompt
+                    } else {
+                        format!("[用户已回答的问题]\n{}\n\n{}", qa_block, prompt)
+                    }
+                }
+            };
+
             let timeout_ms = p.timeout_secs() * 1000;
             info!(task_id = %task.id, phase = %phase_str, timeout_ms, "Flow engine: sending phase prompt to PTY");
 
