@@ -375,6 +375,8 @@ struct AppState {
     slow_extraction_notify: Arc<tokio::sync::Notify>,
     /// Signal to re-dispatch queued submit tasks (fired on task creation/completion).
     submit_notify: Arc<tokio::sync::Notify>,
+    /// Signal for Decision Engine: re-check target=master pending questions immediately.
+    decision_notify: Arc<tokio::sync::Notify>,
     /// Last KB auto-GC timestamp (epoch secs). 0 = never run.
     last_auto_gc_at: Arc<std::sync::atomic::AtomicI64>,
     /// Last KB consolidation timestamp (epoch secs). 0 = never run.
@@ -744,6 +746,15 @@ struct QuestionCreateArgs {
     slot_id: Option<String>,
     #[serde(default)]
     session_id: Option<String>,
+    /// Decision target: "user" or "master"
+    #[serde(default)]
+    target: Option<String>,
+    /// Structured options/choices
+    #[serde(default)]
+    options: Option<String>,
+    /// Decision type: architecture/implementation/debug/investigation/risk/preference
+    #[serde(default)]
+    decision_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -4957,6 +4968,9 @@ impl AppState {
                     task_id: String,
                     artifact_type: String,
                     content: String,
+                    /// Slot flags uncertainty — triggers Decision Engine soft intercept
+                    #[serde(default)]
+                    requires_master_decision: Option<String>,
                 }
                 let args: SubmitPhaseArgs = serde_json::from_value(args)?;
 
@@ -5038,6 +5052,28 @@ impl AppState {
                 };
                 let _ = self.mission.db().add_board_task_note(&note_input);
 
+                // Soft intercept: if slot flagged uncertainty, create question for Decision Engine
+                if let Some(ref concern) = args.requires_master_decision {
+                    let q_input = missiond_core::types::CreateAgentQuestionInput {
+                        question: format!("[Flow {} → {}] {}", phase.display_name(), next_phase.display_name(), concern),
+                        context: Some(format!("Slot flagged uncertainty during phase transition. Artifact: {} ({} chars)", args.artifact_type, args.content.len())),
+                        task_id: Some(task.id.clone()),
+                        slot_id: None,
+                        session_id: None,
+                        target: Some("master".to_string()),
+                        options: None,
+                        decision_type: Some("implementation".to_string()),
+                    };
+                    match self.mission.db().create_agent_question(&q_input) {
+                        Ok(q) => {
+                            info!(task_id = %task.id, question_id = %q.id, "Soft intercept: created master decision question");
+                            // Signal Decision Engine
+                            self.decision_notify.notify_one();
+                        }
+                        Err(e) => warn!(error = %e, "Failed to create soft intercept question"),
+                    }
+                }
+
                 Ok(ToolResult::text(format!(
                     "Phase '{}' completed. Artifact '{}' saved ({} chars). \
                      Flow advanced to '{}'. Please wait for the next instruction.",
@@ -5089,12 +5125,20 @@ impl AppState {
                     task_id: args.task_id,
                     slot_id: args.slot_id,
                     session_id: args.session_id,
+                    target: args.target,
+                    options: args.options,
+                    decision_type: args.decision_type,
                 };
                 let q = self
                     .mission
                     .db()
                     .create_agent_question(&input)
                     .map_err(|e| anyhow!("DB error: {}", e))?;
+                // Signal Decision Engine if target=master
+                if q.target == "master" {
+                    self.decision_notify.notify_one();
+                    info!(question_id = %q.id, "Decision Engine notified: new master question");
+                }
                 Ok(ToolResult::json_pretty(&q))
             }
             "mission_question_list" => {
@@ -5421,6 +5465,36 @@ fn extract_context_percentage(screen: &str) -> Option<u32> {
         }
     }
     None
+}
+
+/// Decision Engine: process pending questions targeted at master.
+/// Phase 1: scaffolding only — logs pending questions for future routing.
+/// Phase 2 will implement the full Tier 1/2/3 responsibility chain.
+async fn process_pending_master_questions(state: &AppState) {
+    // Query pending questions with target=master
+    let questions = match state.mission.db().list_agent_questions(Some("pending")) {
+        Ok(qs) => qs.into_iter().filter(|q| q.target == "master").collect::<Vec<_>>(),
+        Err(e) => {
+            warn!(error = %e, "Decision Engine: failed to list pending master questions");
+            return;
+        }
+    };
+
+    if questions.is_empty() {
+        return;
+    }
+
+    info!(
+        count = questions.len(),
+        "Decision Engine: {} pending master question(s) awaiting routing (Phase 2)",
+        questions.len()
+    );
+
+    // Phase 2 will implement:
+    // - Tier 1: KB FTS5 policy:decision lookup
+    // - Tier 2: Gemini consultation with ESCALATE_TIER_3
+    // - Tier 3: slot-decision workstation dispatch
+    // For now, log and leave for autopilot_tick sweeper
 }
 
 async fn autopilot_tick(state: &AppState) -> Result<()> {
@@ -8421,6 +8495,7 @@ async fn main() -> Result<()> {
         extraction_notify: Arc::new(tokio::sync::Notify::new()),
         slow_extraction_notify: Arc::new(tokio::sync::Notify::new()),
         submit_notify: Arc::new(tokio::sync::Notify::new()),
+        decision_notify: Arc::new(tokio::sync::Notify::new()),
         last_auto_gc_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         last_kb_consolidation_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         memory_paused: Arc::new(std::sync::atomic::AtomicBool::new(
@@ -8578,6 +8653,19 @@ async fn main() -> Result<()> {
                 if !s.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
                     schedule_memory_tasks(&s).await;
                 }
+            }
+        });
+    }
+
+    // Decision Engine notification channel
+    {
+        let s = state.clone();
+        tokio::spawn(async move {
+            loop {
+                s.decision_notify.notified().await;
+                // Debounce: coalesce rapid signals
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                process_pending_master_questions(&s).await;
             }
         });
     }

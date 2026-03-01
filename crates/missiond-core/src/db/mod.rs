@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS board_task_notes (
 );
 CREATE INDEX IF NOT EXISTS idx_board_task_notes_task ON board_task_notes(task_id);
 
--- Agent questions (pending decisions for user)
+-- Agent questions (pending decisions for user/master)
 CREATE TABLE IF NOT EXISTS agent_questions (
     id TEXT PRIMARY KEY,
     task_id TEXT,
@@ -117,10 +117,15 @@ CREATE TABLE IF NOT EXISTS agent_questions (
     context TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'pending',
     answer TEXT,
+    target TEXT NOT NULL DEFAULT 'user',
+    options TEXT,
+    decision_type TEXT NOT NULL DEFAULT 'implementation',
+    retry_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agent_questions_status ON agent_questions(status);
+CREATE INDEX IF NOT EXISTS idx_agent_questions_target ON agent_questions(target, status);
 
 -- Knowledge base (Jarvis Memory)
 CREATE TABLE IF NOT EXISTS knowledge (
@@ -803,6 +808,22 @@ impl MissionDB {
             CREATE INDEX IF NOT EXISTS idx_tc_name ON conversation_tool_calls(tool_name);
             CREATE INDEX IF NOT EXISTS idx_tc_status ON conversation_tool_calls(status);"
         )?;
+
+        // Decision Engine: add target/options/decision_type/retry_count to agent_questions
+        let aq_columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(agent_questions)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        if !aq_columns.iter().any(|c| c == "target") {
+            conn.execute_batch(
+                "ALTER TABLE agent_questions ADD COLUMN target TEXT NOT NULL DEFAULT 'user';
+                 ALTER TABLE agent_questions ADD COLUMN options TEXT;
+                 ALTER TABLE agent_questions ADD COLUMN decision_type TEXT NOT NULL DEFAULT 'implementation';
+                 ALTER TABLE agent_questions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
+                 CREATE INDEX IF NOT EXISTS idx_agent_questions_target ON agent_questions(target, status);"
+            )?;
+        }
 
         Ok(())
     }
@@ -1747,17 +1768,22 @@ impl MissionDB {
             context: input.context.clone().unwrap_or_default(),
             status: AgentQuestionStatus::Pending,
             answer: None,
+            target: input.target.clone().unwrap_or_else(|| "user".to_string()),
+            options: input.options.clone(),
+            decision_type: input.decision_type.clone().unwrap_or_else(|| "implementation".to_string()),
+            retry_count: 0,
             created_at: now.clone(),
             updated_at: now,
         };
         let conn = self.conn();
         conn.execute(
-            "INSERT INTO agent_questions (id, task_id, slot_id, session_id, question, context, status, answer, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO agent_questions (id, task_id, slot_id, session_id, question, context, status, answer, target, options, decision_type, retry_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 q.id, q.task_id, q.slot_id, q.session_id,
                 q.question, q.context, q.status.as_str(),
-                q.answer, q.created_at, q.updated_at,
+                q.answer, q.target, q.options, q.decision_type,
+                q.retry_count, q.created_at, q.updated_at,
             ],
         )?;
 
@@ -1898,6 +1924,10 @@ impl MissionDB {
             context: row.get("context")?,
             status,
             answer: row.get("answer")?,
+            target: row.get::<_, Option<String>>("target")?.unwrap_or_else(|| "user".to_string()),
+            options: row.get("options")?,
+            decision_type: row.get::<_, Option<String>>("decision_type")?.unwrap_or_else(|| "implementation".to_string()),
+            retry_count: row.get::<_, Option<i64>>("retry_count")?.unwrap_or(0),
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
         })
@@ -2560,7 +2590,7 @@ impl MissionDB {
             "DELETE FROM knowledge WHERE access_count = 0 \
              AND last_accessed_at IS NULL \
              AND julianday('now') - julianday(updated_at) > 14 \
-             AND category NOT IN ('preference', 'memory:decision', 'memory:architecture', 'project')",
+             AND category NOT IN ('preference', 'memory:decision', 'memory:architecture', 'project', 'policy:decision')",
             [],
         )?;
 
