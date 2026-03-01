@@ -631,9 +631,24 @@ pub struct AgentQuestion {
     pub status: AgentQuestionStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
+    /// Decision target: "user" (human) or "master" (daemon decision engine)
+    #[serde(default = "default_target_user")]
+    pub target: String,
+    /// Structured options for decision (JSON array of choices)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<String>,
+    /// Decision type: architecture/implementation/debug/investigation/risk/preference
+    #[serde(default = "default_decision_type")]
+    pub decision_type: String,
+    /// Retry count for anti-loop protection
+    #[serde(default)]
+    pub retry_count: i64,
     pub created_at: String,
     pub updated_at: String,
 }
+
+fn default_target_user() -> String { "user".to_string() }
+fn default_decision_type() -> String { "implementation".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -647,6 +662,15 @@ pub struct CreateAgentQuestionInput {
     pub slot_id: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Decision target: "user" or "master" (for Decision Engine)
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Structured options/choices (JSON array)
+    #[serde(default)]
+    pub options: Option<String>,
+    /// Decision type: architecture/implementation/debug/investigation/risk/preference
+    #[serde(default)]
+    pub decision_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1802,7 +1802,8 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ToolDefinition::new(
             "mission_submit_phase_result",
             "工程任务流程中，完成当前阶段后调用此工具提交产出物。系统自动推进到下一阶段。\
-             仅在 flow 任务（flow_phase 非空）的 Slot 阶段使用。",
+             仅在 flow 任务（flow_phase 非空）的 Slot 阶段使用。\
+             如果对结果没信心，可用 requiresMasterDecision 触发主控审核。",
             json!({
                 "type": "object",
                 "properties": {
@@ -1818,6 +1819,10 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     "content": {
                         "type": "string",
                         "description": "产出物内容"
+                    },
+                    "requiresMasterDecision": {
+                        "type": "string",
+                        "description": "如果对当前产出物拿不准，在此填写困惑描述，触发 Decision Engine 软拦截审核"
                     }
                 },
                 "required": ["taskId", "artifactType", "content"]
@@ -1857,7 +1862,8 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ToolDefinition::new(
             "mission_question_create",
             "Agent 遇到阻断问题时登记待决策项。持久化到 DB，显示在用户 Board UI。\
-             Agent 可稍后用 mission_question_list 检查是否已回答。",
+             Agent 可稍后用 mission_question_list 检查是否已回答。\
+             设置 target=master 可触发 Decision Engine 自动决策。",
             json!({
                 "type": "object",
                 "properties": {
@@ -1880,6 +1886,22 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     "sessionId": {
                         "type": "string",
                         "description": "提问的会话 ID（可选）"
+                    },
+                    "target": {
+                        "type": "string",
+                        "enum": ["user", "master"],
+                        "description": "决策目标：user(人类) 或 master(Decision Engine 自动决策)",
+                        "default": "user"
+                    },
+                    "options": {
+                        "type": "string",
+                        "description": "结构化选项（JSON 数组，如 [\"方案A\", \"方案B\"]）"
+                    },
+                    "decisionType": {
+                        "type": "string",
+                        "enum": ["architecture", "implementation", "debug", "investigation", "risk", "preference"],
+                        "description": "决策类型，影响路由：architecture→Gemini, debug→决策工位, preference→KB",
+                        "default": "implementation"
                     }
                 },
                 "required": ["question"]
