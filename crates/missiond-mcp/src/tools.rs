@@ -1348,7 +1348,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         // ===== Conversation Log =====
         ToolDefinition::new(
             "mission_conversation_list",
-            "列出对话会话。显示 ID、项目、消息数、开始时间。可按状态过滤。",
+            "列出对话会话。显示 ID、项目、消息数、开始时间。可按状态、类型、任务 ID 过滤。",
             json!({
                 "type": "object",
                 "properties": {
@@ -1359,6 +1359,14 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     "limit": {
                         "type": "integer",
                         "description": "最大返回数（默认 20）"
+                    },
+                    "conversationType": {
+                        "type": "string",
+                        "description": "按类型过滤: user, worker, meta, system(meta+worker), all"
+                    },
+                    "taskId": {
+                        "type": "string",
+                        "description": "按 Board 任务 ID 过滤，返回该任务关联的所有会话（PTY、Gemini 咨询等）"
                     }
                 }
             }),
@@ -1511,6 +1519,25 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     }
                 },
                 "required": ["sessionId"]
+            }),
+        ),
+
+        ToolDefinition::new(
+            "mission_audit_export",
+            "一键导出 Board 任务的完整审计链：任务详情 + FlowContext + Board Notes + 所有关联会话及消息。输出 Markdown 格式，适合发给外部 AI 审查。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "taskId": {
+                        "type": "string",
+                        "description": "Board 任务 ID"
+                    },
+                    "includeMessages": {
+                        "type": "boolean",
+                        "description": "是否包含关联会话的消息内容（默认 true）"
+                    }
+                },
+                "required": ["taskId"]
             }),
         ),
 

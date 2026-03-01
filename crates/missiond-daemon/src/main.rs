@@ -3331,16 +3331,18 @@ impl AppState {
             // ===== Conversation Logs =====
             "mission_conversation_list" => {
                 #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
                 struct Args {
                     status: Option<String>,
                     #[serde(default, deserialize_with = "lenient::option_i64")]
                     limit: Option<i64>,
                     conversation_type: Option<String>,
+                    task_id: Option<String>,
                 }
-                let Args { status, limit, conversation_type } =
-                    serde_json::from_value(args).unwrap_or(Args { status: None, limit: None, conversation_type: None });
+                let Args { status, limit, conversation_type, task_id } =
+                    serde_json::from_value(args).unwrap_or(Args { status: None, limit: None, conversation_type: None, task_id: None });
                 let convs = self.mission.db()
-                    .list_conversations(status.as_deref(), limit.unwrap_or(20), conversation_type.as_deref())
+                    .list_conversations(status.as_deref(), limit.unwrap_or(20), conversation_type.as_deref(), task_id.as_deref())
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 Ok(ToolResult::json_pretty(&convs))
             }
@@ -3664,6 +3666,121 @@ impl AppState {
                     "firstCall": first_ts,
                     "lastCall": last_ts,
                 })))
+            }
+
+            "mission_audit_export" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Args {
+                    task_id: String,
+                    #[serde(default, deserialize_with = "lenient::option_bool")]
+                    include_messages: Option<bool>,
+                }
+                let Args { task_id, include_messages } = serde_json::from_value(args)?;
+                let include_msgs = include_messages.unwrap_or(true);
+                let db = self.mission.db();
+
+                // 1. Get board task with notes
+                let task = db.get_board_task(&task_id)
+                    .map_err(|e| anyhow!("DB error: {}", e))?
+                    .ok_or_else(|| anyhow!("Task not found: {}", task_id))?;
+                let notes = db.get_board_task_notes(&task_id)
+                    .unwrap_or_default();
+
+                // 2. Find all conversations linked to this task
+                let linked_convs = db.list_conversations(None, 100, Some("all"), Some(&task_id))
+                    .unwrap_or_default();
+
+                // 3. Build export document
+                let mut md = String::new();
+                md.push_str(&format!("# Audit Export: {}\n\n", task.title));
+                md.push_str(&format!("**Task ID**: `{}`\n", task.id));
+                md.push_str(&format!("**Status**: {} | **Priority**: {}\n", task.status.as_str(), task.priority));
+                md.push_str(&format!("**Project**: {} | **Assignee**: {}\n", task.project.as_deref().unwrap_or("N/A"), task.assignee.as_deref().unwrap_or("N/A")));
+                md.push_str(&format!("**Created**: {} | **Updated**: {}\n", task.created_at, task.updated_at));
+                if let Some(ref fp) = task.flow_phase {
+                    md.push_str(&format!("**Flow Phase**: {} | **Template**: {}\n", fp, task.flow_template.as_deref().unwrap_or("N/A")));
+                }
+                md.push_str(&format!("\n## Description\n\n{}\n", task.description));
+
+                // 4. FlowContext
+                if let Some(ref fc_str) = task.flow_context {
+                    md.push_str("\n---\n\n## FlowContext\n\n```json\n");
+                    // Pretty-print the JSON
+                    if let Ok(fc_val) = serde_json::from_str::<serde_json::Value>(fc_str) {
+                        md.push_str(&serde_json::to_string_pretty(&fc_val).unwrap_or_else(|_| fc_str.clone()));
+                    } else {
+                        md.push_str(fc_str);
+                    }
+                    md.push_str("\n```\n");
+                }
+
+                // 5. Board Notes
+                if !notes.is_empty() {
+                    md.push_str("\n---\n\n## Board Notes\n\n");
+                    for note in &notes {
+                        md.push_str(&format!("### [{}] `{}` ({}, {})\n\n",
+                            &note.created_at[..19.min(note.created_at.len())],
+                            &note.id[..8.min(note.id.len())],
+                            note.author.as_deref().unwrap_or("unknown"),
+                            note.note_type.as_str(),
+                        ));
+                        md.push_str(&note.content);
+                        md.push_str("\n\n");
+                    }
+                }
+
+                // 6. Linked Conversations
+                md.push_str("\n---\n\n## Linked Conversations\n\n");
+                if linked_convs.is_empty() {
+                    md.push_str("(no conversations linked to this task)\n");
+                } else {
+                    md.push_str(&format!("Found {} conversation(s):\n\n", linked_convs.len()));
+                    for conv in &linked_convs {
+                        md.push_str(&format!("### Session `{}`\n\n", conv.id));
+                        md.push_str(&format!("- **Type**: {} / {}\n", conv.chat_type.as_deref().unwrap_or("N/A"), conv.conversation_type));
+                        md.push_str(&format!("- **Slot**: {}\n", conv.slot_id.as_deref().unwrap_or("N/A")));
+                        md.push_str(&format!("- **Model**: {}\n", conv.model.as_deref().unwrap_or("N/A")));
+                        md.push_str(&format!("- **Messages**: {}\n", conv.message_count));
+                        md.push_str(&format!("- **Started**: {} | **Ended**: {}\n", conv.started_at, conv.ended_at.as_deref().unwrap_or("(active)")));
+
+                        if include_msgs {
+                            let msgs = db.get_conversation_messages(&conv.id, None, 500)
+                                .unwrap_or_default();
+                            if !msgs.is_empty() {
+                                md.push_str("\n#### Messages\n\n");
+                                for m in &msgs {
+                                    let ts = &m.timestamp[11..19.min(m.timestamp.len())];
+                                    let content_preview = if m.content.len() > 500 {
+                                        let end = m.content.char_indices().nth(500).map(|(i,_)| i).unwrap_or(m.content.len());
+                                        format!("{}... ({} chars total)", &m.content[..end], m.content.len())
+                                    } else {
+                                        m.content.clone()
+                                    };
+                                    md.push_str(&format!("**[{}] {}**{}\n\n{}\n\n",
+                                        ts,
+                                        m.role,
+                                        m.model.as_deref().map(|model| format!(" ({})", model)).unwrap_or_default(),
+                                        content_preview,
+                                    ));
+                                }
+                            }
+                        }
+
+                        // Include child sessions (subagents)
+                        let children = db.get_child_conversations(&conv.id).unwrap_or_default();
+                        if !children.is_empty() {
+                            md.push_str(&format!("\n#### Subagents ({})\n\n", children.len()));
+                            for child in &children {
+                                md.push_str(&format!("- `{}` — {} msgs, {}\n",
+                                    child.id, child.message_count, child.status));
+                            }
+                        }
+                        md.push_str("\n");
+                    }
+                }
+
+                Ok(ToolResult::text(&md))
             }
 
             // ===== Board Tasks (Personal Task Board) =====
@@ -5249,6 +5366,38 @@ async fn check_slot_context_levels(state: &AppState) {
 /// Extract context percentage from PTY screen text.
 /// Looks for "Context left until auto-compact: XX%" pattern.
 /// Truncate a string at a safe UTF-8 char boundary.
+/// Strip prompt echo from PTY response.
+/// When a prompt is sent to PTY via bracketed paste, the terminal echoes it back.
+/// This removes lines that appear in the prompt from the response to reduce noise.
+fn strip_prompt_echo(response: &str, prompt: &str) -> String {
+    // Build a set of significant prompt lines (skip short/empty ones)
+    let prompt_lines: std::collections::HashSet<&str> = prompt.lines()
+        .map(|l| l.trim())
+        .filter(|l| l.len() > 20) // Only match substantial lines to avoid false positives
+        .collect();
+
+    if prompt_lines.is_empty() {
+        return response.to_string();
+    }
+
+    let mut result = Vec::new();
+    let mut consecutive_echo = 0;
+    for line in response.lines() {
+        let trimmed = line.trim();
+        if prompt_lines.contains(trimmed) {
+            consecutive_echo += 1;
+            // Allow up to 2 echo lines for context, skip the rest
+            if consecutive_echo <= 2 {
+                continue;
+            }
+        } else {
+            consecutive_echo = 0;
+        }
+        result.push(line);
+    }
+    result.join("\n")
+}
+
 fn truncate_safe(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
@@ -5442,6 +5591,11 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
         // Check if PTY session exists, spawn if needed
         if !ensure_autopilot_pty(state, &task, &slot_id).await {
             continue;
+        }
+
+        // Link PTY session to task for audit trail
+        if let Ok(Some(session_uuid)) = state.mission.db().get_slot_session(&slot_id) {
+            let _ = state.mission.db().set_conversation_task_id(&session_uuid, &task.id);
         }
 
         // Inject answered questions as context (Phase 2 linkage)
@@ -5714,6 +5868,11 @@ async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardT
                 return Ok(());
             }
 
+            // Link PTY session to task for audit trail
+            if let Ok(Some(session_uuid)) = state.mission.db().get_slot_session(slot_id) {
+                let _ = state.mission.db().set_conversation_task_id(&session_uuid, &task.id);
+            }
+
             // Build phase-specific prompt
             let prompt = build_flow_phase_prompt(task, &p, &ctx);
 
@@ -5722,6 +5881,8 @@ async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardT
 
             match state.pty.send(slot_id, &prompt, timeout_ms).await {
                 Ok(res) => {
+                    // Strip prompt echo from PTY response to reduce noise in board notes
+                    let clean_response = strip_prompt_echo(&res.response, &prompt);
                     let _ = state.mission.db().add_board_task_note(
                         &missiond_core::types::AddBoardTaskNoteInput {
                             task_id: task.id.clone(),
@@ -5729,7 +5890,7 @@ async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardT
                                 "**Flow Phase {} PTY 响应** ({}ms)\n\n{}",
                                 p.display_name(),
                                 res.duration_ms,
-                                &truncate_safe(&res.response, 2000)
+                                &truncate_safe(&clean_response, 2000)
                             ),
                             note_type: Some("progress".to_string()),
                             author: Some("flow-engine".to_string()),
