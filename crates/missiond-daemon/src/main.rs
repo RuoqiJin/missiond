@@ -397,6 +397,8 @@ struct AppState {
     http_client: reqwest::Client,
     /// Persistent xjp-mcp client (lazy-initialized, auto-reconnect on crash).
     xjp_mcp: Arc<McpProcessClient>,
+    /// Flow engine reentry guard: task IDs currently being processed.
+    flow_in_progress: Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
 fn default_mission_home() -> PathBuf {
@@ -5539,6 +5541,29 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
 /// Execute a flow-enabled Board task through the Engineering Flow Engine.
 /// Handles all phase types: slot phases (send to PTY), daemon phases (call Gemini), and Done.
 async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardTask, slot_id: &str) -> Result<()> {
+    // Reentry guard: skip if this task is already being processed
+    {
+        let mut in_progress = state.flow_in_progress.lock().unwrap();
+        if !in_progress.insert(task.id.clone()) {
+            debug!(task_id = %task.id, "Flow engine: task already in progress, skipping");
+            return Ok(());
+        }
+    }
+    // RAII guard to remove task from in-progress set on exit
+    struct FlowGuard {
+        set: Arc<std::sync::Mutex<HashSet<String>>>,
+        id: String,
+    }
+    impl Drop for FlowGuard {
+        fn drop(&mut self) {
+            self.set.lock().unwrap().remove(&self.id);
+        }
+    }
+    let _guard = FlowGuard {
+        set: state.flow_in_progress.clone(),
+        id: task.id.clone(),
+    };
+
     let phase_str = task.flow_phase.as_deref().unwrap_or("investigate");
     let phase = missiond_core::types::EngineeringPhase::from_str(phase_str)
         .ok_or_else(|| anyhow!("Unknown flow phase: {}", phase_str))?;
@@ -5912,6 +5937,36 @@ async fn ensure_autopilot_pty(state: &AppState, task: &missiond_core::types::Boa
 }
 
 /// Build phase-specific prompt for the AI slot to execute.
+/// Write a flow artifact to a temp file, return the file path.
+/// Falls back to inline if file write fails.
+fn write_flow_artifact(task_id: &str, name: &str, content: &str) -> Option<String> {
+    let dir = format!("/tmp/missiond-flow/{}", task_id);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return None;
+    }
+    let path = format!("{}/{}.md", dir, name);
+    if std::fs::write(&path, content).is_ok() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+/// Format an artifact reference: file path instruction if written, or inline fallback.
+fn artifact_ref(task_id: &str, name: &str, label: &str, content: &str) -> String {
+    if content.len() < 500 {
+        // Short content: inline is fine
+        return format!("### {}\n{}", label, content);
+    }
+    match write_flow_artifact(task_id, name, content) {
+        Some(path) => format!(
+            "### {}\n内容已保存到文件，请先读取：\n```\ncat {}\n```",
+            label, path
+        ),
+        None => format!("### {}\n{}", label, content),
+    }
+}
+
 fn build_flow_phase_prompt(
     task: &missiond_core::types::BoardTask,
     phase: &missiond_core::types::EngineeringPhase,
@@ -5949,8 +6004,10 @@ content: "<你的调查报告，包含关键文件、架构分析、问题清单
         }
 
         missiond_core::types::EngineeringPhase::Plan => {
-            let gemini_advice = ctx.gemini_advice_1.as_deref().unwrap_or("(无 Gemini 建议)");
             let investigation = ctx.investigation_report.as_deref().unwrap_or("(无调查报告)");
+            let gemini_advice = ctx.gemini_advice_1.as_deref().unwrap_or("(无 Gemini 建议)");
+            let inv_ref = artifact_ref(task_id, "investigation_report", "调查报告", investigation);
+            let gem_ref = artifact_ref(task_id, "gemini_advice_1", "Gemini 架构建议", gemini_advice);
             format!(
                 r#"# 执行方案制定阶段
 
@@ -5961,11 +6018,9 @@ content: "<你的调查报告，包含关键文件、架构分析、问题清单
 
 ## 前置信息
 
-### 调查报告
-{investigation}
+{inv_ref}
 
-### Gemini 架构建议
-{gemini_advice}
+{gem_ref}
 
 ## 你的工作
 1. 综合调查报告和 Gemini 建议，制定详细执行方案
@@ -5982,8 +6037,8 @@ content: "<详细执行方案，包含变更清单、风险分析、实施步骤
 ```"#,
                 title = task.title,
                 description = task.description,
-                investigation = investigation,
-                gemini_advice = gemini_advice,
+                inv_ref = inv_ref,
+                gem_ref = gem_ref,
                 task_id = task_id,
             )
         }
@@ -5991,17 +6046,17 @@ content: "<详细执行方案，包含变更清单、风险分析、实施步骤
         missiond_core::types::EngineeringPhase::Execute => {
             let plan = ctx.execution_plan.as_deref().unwrap_or("(无执行方案)");
             let gemini_advice2 = ctx.gemini_advice_2.as_deref().unwrap_or("(无 Gemini 审查意见)");
+            let plan_ref = artifact_ref(task_id, "execution_plan", "执行方案", plan);
+            let gem2_ref = artifact_ref(task_id, "gemini_advice_2", "Gemini 方案审查意见", gemini_advice2);
             format!(
                 r#"# 执行阶段
 
 ## 任务
 **{title}**
 
-## 执行方案
-{plan}
+{plan_ref}
 
-## Gemini 方案审查意见
-{gemini_advice2}
+{gem2_ref}
 
 ## 你的工作
 1. 根据执行方案和 Gemini 审查意见，开始编码实现
@@ -6016,22 +6071,22 @@ artifactType: "execution_result"
 content: "<执行结果摘要：完成的变更、测试结果、遗留问题>"
 ```"#,
                 title = task.title,
-                plan = plan,
-                gemini_advice2 = gemini_advice2,
+                plan_ref = plan_ref,
+                gem2_ref = gem2_ref,
                 task_id = task_id,
             )
         }
 
         missiond_core::types::EngineeringPhase::Finalize => {
             let result = ctx.execution_result.as_deref().unwrap_or("(无执行结果)");
+            let result_ref = artifact_ref(task_id, "execution_result", "执行结果", result);
             format!(
                 r#"# 收尾阶段
 
 ## 任务
 **{title}**
 
-## 执行结果
-{result}
+{result_ref}
 
 ## 你的工作
 1. 创建 git commit（描述清晰的 commit message）
@@ -6046,7 +6101,7 @@ artifactType: "commit_hash"
 content: "<commit hash 或提交摘要>"
 ```"#,
                 title = task.title,
-                result = result,
+                result_ref = result_ref,
                 task_id = task_id,
             )
         }
@@ -8214,6 +8269,7 @@ async fn main() -> Result<()> {
         xjp_mcp: Arc::new(McpProcessClient::new(
             default_mission_home().join("xjp-mcp-config.json"),
         )),
+        flow_in_progress: Arc::new(std::sync::Mutex::new(HashSet::new())),
     };
 
     // Auto-spawn slots with auto_start: true
