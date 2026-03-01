@@ -7,6 +7,49 @@
 
 mod events_sync;
 
+/// Lenient serde deserializers for MCP tool parameters.
+/// Claude models often pass numbers as strings ("10" instead of 10)
+/// and arrays as JSON strings ("[\"a\"]" instead of ["a"]).
+mod lenient {
+    use serde::{self, Deserialize, Deserializer};
+
+    pub fn option_i64<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum V {
+            N(i64),
+            S(String),
+        }
+        match Option::<V>::deserialize(d)? {
+            None => Ok(None),
+            Some(V::N(n)) => Ok(Some(n)),
+            Some(V::S(s)) => s
+                .trim()
+                .parse()
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+        }
+    }
+
+    pub fn option_bool<'de, D: Deserializer<'de>>(d: D) -> Result<Option<bool>, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum V {
+            B(bool),
+            S(String),
+        }
+        match Option::<V>::deserialize(d)? {
+            None => Ok(None),
+            Some(V::B(b)) => Ok(Some(b)),
+            Some(V::S(s)) => match s.as_str() {
+                "true" | "1" => Ok(Some(true)),
+                "false" | "0" => Ok(Some(false)),
+                _ => Err(serde::de::Error::custom(format!("invalid bool: {s}"))),
+            },
+        }
+    }
+}
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -509,9 +552,9 @@ struct CancelArgs {
 struct SpawnArgs {
     #[serde(rename = "slotId")]
     slot_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient::option_bool")]
     visible: Option<bool>,
-    #[serde(rename = "autoRestart", default)]
+    #[serde(rename = "autoRestart", default, deserialize_with = "lenient::option_bool")]
     auto_restart: Option<bool>,
 }
 
@@ -525,13 +568,13 @@ struct KillArgs {
 struct RestartArgs {
     #[serde(rename = "slotId")]
     slot_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient::option_bool")]
     visible: Option<bool>,
 }
 
 #[derive(Deserialize)]
 struct InboxArgs {
-    #[serde(rename = "unreadOnly", default)]
+    #[serde(rename = "unreadOnly", default, deserialize_with = "lenient::option_bool")]
     unread_only: Option<bool>,
     #[serde(default)]
     limit: Option<usize>,
@@ -541,11 +584,11 @@ struct InboxArgs {
 struct PTYSpawnArgs {
     #[serde(rename = "slotId")]
     slot_id: String,
-    #[serde(rename = "waitForIdle", default)]
+    #[serde(rename = "waitForIdle", default, deserialize_with = "lenient::option_bool")]
     wait_for_idle: Option<bool>,
     #[serde(rename = "timeoutSecs", default)]
     timeout_secs: Option<u64>,
-    #[serde(rename = "autoRestart", default)]
+    #[serde(rename = "autoRestart", default, deserialize_with = "lenient::option_bool")]
     auto_restart: Option<bool>,
     #[serde(rename = "mcpConfigPath", default)]
     mcp_config_path: Option<String>,
@@ -556,7 +599,7 @@ struct PTYSendArgs {
     #[serde(rename = "slotId")]
     slot_id: String,
     message: String,
-    #[serde(rename = "waitForResponse", default)]
+    #[serde(rename = "waitForResponse", default, deserialize_with = "lenient::option_bool")]
     wait_for_response: Option<bool>,
     #[serde(rename = "timeoutMs", default)]
     timeout_ms: Option<u64>,
@@ -638,7 +681,7 @@ struct AddAutoAllowArgs {
 struct CCSessionsArgs {
     #[serde(rename = "projectPath")]
     project_path: Option<String>,
-    #[serde(rename = "activeOnly", default)]
+    #[serde(rename = "activeOnly", default, deserialize_with = "lenient::option_bool")]
     active_only: Option<bool>,
 }
 
@@ -666,7 +709,7 @@ struct CCTriggerSwarmArgs {
 struct BoardListArgs {
     #[serde(default)]
     status: Option<String>,
-    #[serde(default, rename = "includeHidden")]
+    #[serde(default, rename = "includeHidden", deserialize_with = "lenient::option_bool")]
     include_hidden: Option<bool>,
 }
 
@@ -808,7 +851,7 @@ struct KBDiscoverArgs {
 #[derive(Deserialize)]
 struct KBGCArgs {
     action: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient::option_i64")]
     days: Option<i64>,
 }
 
@@ -1283,6 +1326,7 @@ impl AppState {
                 #[derive(Deserialize)]
                 struct Args {
                     status: Option<String>,
+                    #[serde(default, deserialize_with = "lenient::option_i64")]
                     limit: Option<i64>,
                 }
                 let args: Args = serde_json::from_value(args).unwrap_or(Args { status: None, limit: None });
@@ -2012,9 +2056,20 @@ impl AppState {
                 })))
             }
             "mission_kb_batch_forget" => {
-                let keys: Vec<String> = serde_json::from_value(
-                    args.get("keys").cloned().unwrap_or(serde_json::Value::Array(vec![]))
-                ).map_err(|e| anyhow!("Invalid keys: {}", e))?;
+                let keys_val = args.get("keys").cloned().unwrap_or(Value::Array(vec![]));
+                let keys: Vec<String> = match serde_json::from_value::<Vec<String>>(keys_val.clone()) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        // Claude may pass JSON string "[\"a\",\"b\"]" or comma-separated "a,b,c"
+                        if let Some(s) = keys_val.as_str() {
+                            serde_json::from_str::<Vec<String>>(s).unwrap_or_else(|_| {
+                                s.split(',').map(|k| k.trim().to_string()).filter(|k| !k.is_empty()).collect()
+                            })
+                        } else {
+                            return Ok(ToolResult::error("keys: expected array or JSON string"));
+                        }
+                    }
+                };
                 if keys.is_empty() {
                     return Ok(ToolResult::error("keys array is empty"));
                 }
@@ -3103,6 +3158,7 @@ impl AppState {
             "mission_memory_pause" => {
                 #[derive(Deserialize)]
                 struct Args {
+                    #[serde(default, deserialize_with = "lenient::option_bool")]
                     paused: Option<bool>,
                 }
                 let args: Args = serde_json::from_value(args).unwrap_or(Args { paused: None });
@@ -3275,6 +3331,7 @@ impl AppState {
                 #[derive(Deserialize)]
                 struct Args {
                     status: Option<String>,
+                    #[serde(default, deserialize_with = "lenient::option_i64")]
                     limit: Option<i64>,
                     conversation_type: Option<String>,
                 }
@@ -3290,8 +3347,11 @@ impl AppState {
                 #[serde(rename_all = "camelCase")]
                 struct Args {
                     session_id: String,
+                    #[serde(default, deserialize_with = "lenient::option_i64")]
                     tail: Option<i64>,
+                    #[serde(default, deserialize_with = "lenient::option_i64")]
                     since_id: Option<i64>,
+                    #[serde(default, deserialize_with = "lenient::option_bool")]
                     include_raw: Option<bool>,
                 }
                 let Args { session_id, tail, since_id, include_raw } = serde_json::from_value(args)?;
@@ -3355,6 +3415,7 @@ impl AppState {
                 #[serde(rename_all = "camelCase")]
                 struct Args {
                     query: String,
+                    #[serde(default, deserialize_with = "lenient::option_i64")]
                     limit: Option<i64>,
                     role: Option<String>,
                     session_id: Option<String>,
@@ -3399,6 +3460,7 @@ impl AppState {
                 struct Args {
                     session_id: Option<String>,
                     event_type: Option<String>,
+                    #[serde(default, deserialize_with = "lenient::option_i64")]
                     limit: Option<i64>,
                 }
                 let Args { session_id, event_type, limit } =
@@ -3430,6 +3492,7 @@ impl AppState {
                 #[serde(rename_all = "camelCase")]
                 struct Args {
                     tool_use_id: String,
+                    #[serde(default, deserialize_with = "lenient::option_i64")]
                     limit: Option<i64>,
                 }
                 let Args { tool_use_id, limit } = serde_json::from_value(args)?;
@@ -3465,6 +3528,7 @@ impl AppState {
                 struct Args {
                     session_id: String,
                     tool_filter: Option<Vec<String>>,
+                    #[serde(default, deserialize_with = "lenient::option_bool")]
                     include_reasoning: Option<bool>,
                 }
                 let Args { session_id, tool_filter, include_reasoning } = serde_json::from_value(args)?;
@@ -3824,6 +3888,7 @@ impl AppState {
                 struct ContextResolveArgs {
                     query: String,
                     skill: Option<String>,
+                    #[serde(default, deserialize_with = "lenient::option_bool")]
                     include_board: Option<bool>,
                 }
                 let args: ContextResolveArgs = serde_json::from_value(args)?;
@@ -4183,6 +4248,7 @@ impl AppState {
                 #[derive(Deserialize)]
                 struct RollbackArgs {
                     skill: String,
+                    #[serde(default, deserialize_with = "lenient::option_i64")]
                     version_id: Option<i64>,
                 }
                 let args: RollbackArgs = serde_json::from_value(args)?;
@@ -4871,7 +4937,9 @@ impl AppState {
                     slot_id: Option<String>,
                     task_type: Option<String>,
                     status: Option<String>,
+                    #[serde(default, deserialize_with = "lenient::option_i64")]
                     limit: Option<i64>,
+                    #[serde(default, deserialize_with = "lenient::option_bool")]
                     stats: Option<bool>,
                 }
                 let args: SlotHistoryArgs = serde_json::from_value(args)?;
