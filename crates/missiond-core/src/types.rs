@@ -321,7 +321,7 @@ impl EngineeringPhase {
         match self {
             Self::Investigate | Self::Plan => 900,        // 15min
             Self::ConsultGemini1 | Self::ConsultGemini2 => 120, // 2min
-            Self::Execute => 1800,                         // 30min
+            Self::Execute => 3600,                         // 60min (复杂任务需要更多时间)
             Self::Finalize => 600,                         // 10min
             Self::Done => 0,
         }

@@ -277,7 +277,16 @@ pub fn extract_tool_results_from_user(content: &Value) -> Vec<(String, String, S
 
             let summary = if is_error {
                 let err_text = parsed.as_str().unwrap_or("unknown error");
-                format!("Error: {}", &err_text[..err_text.len().min(100)])
+                let truncated = if err_text.len() <= 100 {
+                    err_text
+                } else {
+                    let mut end = 100;
+                    while end > 0 && !err_text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    &err_text[..end]
+                };
+                format!("Error: {}", truncated)
             } else {
                 generate_output_summary(&parsed)
             };
