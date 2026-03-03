@@ -962,7 +962,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                 "properties": {
                     "category": {
                         "type": "string",
-                        "enum": ["preference", "memory", "memory:architecture", "memory:bugfix", "memory:debug", "memory:ops", "memory:feature", "memory:decision", "memory:platform", "project", "architecture", "decision", "feature", "infra", "procedure"],
+                        "enum": ["preference", "memory", "memory:architecture", "memory:bugfix", "memory:debug", "memory:ops", "memory:feature", "memory:decision", "memory:platform", "project", "architecture", "decision", "policy:decision", "feature", "infra", "procedure"],
                         "description": "分类"
                     },
                     "key": {
@@ -1909,13 +1909,35 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_question_list",
-            "列出待决策问题。默认返回全部，可按 status 筛选（pending/answered/dismissed）。",
+            "列出待决策问题。可按 status/target/limit 筛选。",
             json!({
                 "type": "object",
                 "properties": {
                     "status": {
                         "type": "string",
                         "description": "按状态筛选: pending, answered, dismissed"
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "按决策目标筛选: user, master"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "返回条数上限"
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_decision_stats",
+            "Decision Engine 统计数据：各 Tier 命中率、待处理数、降级数",
+            json!({
+                "type": "object",
+                "properties": {
+                    "hours": {
+                        "type": "integer",
+                        "description": "统计时间窗口（小时），默认 24",
+                        "default": 24
                     }
                 }
             }),
@@ -1993,6 +2015,45 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     "trace_id": {
                         "type": "string",
                         "description": "Trace ID（不传则返回最新一条）"
+                    }
+                }
+            }),
+        ),
+        // ── AIOps Incidents ──
+        ToolDefinition::new(
+            "mission_incident_test",
+            "手动注入一条测试 Incident，触发 Reactor 处理流程（防抖→入库→创建 Board 任务）。用于验证 AIOps 管道。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "severity": {
+                        "type": "string",
+                        "description": "严重等级: critical / high / warning（默认 warning）"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Incident 标题（默认 'Test incident'）"
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "来源: health_check / deploy_center / sentry / manual（默认 manual）"
+                    },
+                    "server_id": {
+                        "type": "string",
+                        "description": "关联的 infra server ID（可选）"
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_incident_list",
+            "列出最近的 AIOps Incident 记录（含关联的 Board 任务 ID）。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "number",
+                        "description": "返回条数（默认 20，最大 100）"
                     }
                 }
             }),

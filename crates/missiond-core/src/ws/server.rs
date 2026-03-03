@@ -40,6 +40,8 @@ pub struct WSServerOptions {
     pub cc_tasks_watcher: Option<Arc<Mutex<CCTasksWatcher>>>,
     /// Screenshot broker (optional, for browser-based PTY screenshots)
     pub screenshot_broker: Option<Arc<super::ScreenshotBroker>>,
+    /// AIOps incident event bus sender (optional, for webhook endpoints)
+    pub incident_tx: Option<tokio::sync::mpsc::Sender<crate::types::MissionIncident>>,
 }
 
 /// PTY WebSocket Server
@@ -50,6 +52,61 @@ pub struct PTYWebSocketServer {
     screenshot_broker: Option<Arc<super::ScreenshotBroker>>,
     shutdown_tx: Option<broadcast::Sender<()>>,
     jarvis_trace: JarvisTraceStore,
+    incident_tx: Option<tokio::sync::mpsc::Sender<crate::types::MissionIncident>>,
+}
+
+// ── AIOps Webhook Parsers ──
+
+/// Parse Deploy Center failure webhook into an incident.
+/// Returns None for non-failure events (e.g. deploy success).
+fn parse_deploy_webhook(body: &str) -> Option<crate::types::MissionIncident> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let event = v["event"].as_str()?;
+
+    if event != "deploy_failed" {
+        return None;
+    }
+
+    let project = v["project"].as_str().unwrap_or("unknown");
+    let error_msg = v["error_message"].as_str().unwrap_or("无详情");
+
+    Some(crate::types::MissionIncident {
+        id: format!("inc-{}", uuid::Uuid::new_v4()),
+        severity: crate::types::IncidentSeverity::High,
+        source: crate::types::IncidentSource::DeployCenter,
+        title: format!("部署失败: {}", project),
+        description: format!(
+            "项目 {} 部署失败。\n错误: {}\n\n建议操作：\n1. 检查构建日志\n2. 检查 Deploy Agent 状态\n3. 检查 GHCR 镜像是否推送成功",
+            project, error_msg,
+        ),
+        server_id: None,
+        raw_payload: v,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+/// Parse test webhook — always produces a Warning incident for pipeline validation.
+fn parse_test_webhook(body: &str) -> Option<crate::types::MissionIncident> {
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::json!({}));
+    let title = v["title"].as_str().unwrap_or("Webhook test incident");
+    let severity_str = v["severity"].as_str().unwrap_or("warning");
+
+    let severity = match severity_str {
+        "critical" => crate::types::IncidentSeverity::Critical,
+        "high" => crate::types::IncidentSeverity::High,
+        _ => crate::types::IncidentSeverity::Warning,
+    };
+
+    Some(crate::types::MissionIncident {
+        id: format!("inc-{}", uuid::Uuid::new_v4()),
+        severity,
+        source: crate::types::IncidentSource::Manual,
+        title: title.to_string(),
+        description: format!("Webhook test: {}", title),
+        server_id: v["server_id"].as_str().map(|s| s.to_string()),
+        raw_payload: v,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,6 +231,7 @@ impl PTYWebSocketServer {
             screenshot_broker: options.screenshot_broker,
             shutdown_tx: None,
             jarvis_trace: JarvisTraceStore::new(),
+            incident_tx: options.incident_tx,
         }
     }
 
@@ -196,6 +254,7 @@ impl PTYWebSocketServer {
         let cc_tasks_watcher = self.cc_tasks_watcher.clone();
         let screenshot_broker = self.screenshot_broker.clone();
         let jarvis_trace = self.jarvis_trace.clone();
+        let incident_tx = self.incident_tx.clone();
 
         tokio::spawn(async move {
             let mut shutdown_rx = shutdown_tx.subscribe();
@@ -208,8 +267,9 @@ impl PTYWebSocketServer {
                                 let cc_tasks_watcher = cc_tasks_watcher.clone();
                                 let screenshot_broker = screenshot_broker.clone();
                                 let jarvis_trace = jarvis_trace.clone();
+                                let incident_tx = incident_tx.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace).await {
+                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx).await {
                                         error!(?e, ?addr, "WebSocket connection error");
                                     }
                                 });
@@ -320,6 +380,63 @@ impl PTYWebSocketServer {
 
         let body = String::from_utf8_lossy(&body_buf[..content_length.min(body_buf.len())]).to_string();
         Ok((headers_str, body))
+    }
+
+    /// Handle POST /webhooks/* — AIOps incident webhook receiver
+    async fn handle_webhook(
+        mut stream: TcpStream,
+        request_line: &str,
+        incident_tx: Option<tokio::sync::mpsc::Sender<crate::types::MissionIncident>>,
+    ) -> anyhow::Result<()> {
+        let tx = match incident_tx {
+            Some(tx) => tx,
+            None => {
+                Self::send_http_error(&mut stream, 503, "Service Unavailable", r#"{"error":"incident bus not configured"}"#).await?;
+                return Ok(());
+            }
+        };
+
+        let (_headers, body) = Self::read_http_request(&mut stream).await?;
+
+        // Extract path from request line (e.g. "POST /webhooks/deploy HTTP/1.1")
+        let path = request_line.split_whitespace().nth(1).unwrap_or("");
+
+        let incident = match path {
+            "/webhooks/deploy" => parse_deploy_webhook(&body),
+            "/webhooks/test" => parse_test_webhook(&body),
+            _ => {
+                Self::send_http_error(&mut stream, 404, "Not Found", r#"{"error":"unknown webhook path"}"#).await?;
+                return Ok(());
+            }
+        };
+
+        match incident {
+            Some(inc) => {
+                let inc_id = inc.id.clone();
+                if let Err(e) = tx.try_send(inc) {
+                    warn!("Webhook: incident channel full, dropping: {}", e);
+                }
+                let resp_body = serde_json::json!({"ok": true, "incident_id": inc_id}).to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_body.len(), resp_body
+                );
+                stream.write_all(response.as_bytes()).await?;
+                stream.shutdown().await?;
+            }
+            None => {
+                // Non-alert event (e.g. deploy success) → silent 200
+                let resp_body = r#"{"ok":true,"action":"ignored"}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_body.len(), resp_body
+                );
+                stream.write_all(response.as_bytes()).await?;
+                stream.shutdown().await?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Handle POST /v1/chat/completions — OpenAI-compatible SSE endpoint
@@ -534,6 +651,7 @@ impl PTYWebSocketServer {
         cc_tasks_watcher: Option<Arc<Mutex<CCTasksWatcher>>>,
         screenshot_broker: Option<Arc<super::ScreenshotBroker>>,
         jarvis_trace: JarvisTraceStore,
+        incident_tx: Option<tokio::sync::mpsc::Sender<crate::types::MissionIncident>>,
     ) -> anyhow::Result<()> {
         // Peek at first bytes to detect non-WebSocket HTTP requests
         let mut peek_buf = [0u8; 512];
@@ -543,6 +661,10 @@ impl PTYWebSocketServer {
             // Health check
             if request_line.starts_with("GET /health") && !request_line.contains("Upgrade:") {
                 return Self::handle_health(stream).await;
+            }
+            // AIOps webhook endpoint
+            if request_line.starts_with("POST /webhooks/") {
+                return Self::handle_webhook(stream, &request_line, incident_tx).await;
             }
             // Chat completions SSE endpoint
             if request_line.starts_with("POST /v1/chat/completions") {

@@ -10,6 +10,10 @@ categories.workspace = true
 description = "Core library for missiond - PTY management, semantic terminal parsing, and Claude Code orchestration"
 readme = "../../README.md"
 
+[features]
+default = []
+embeddings = ["dep:fastembed"]
+
 [dependencies]
 # Async runtime
 tokio = { workspace = true, features = ["sync", "time", "process", "io-util", "fs", "macros", "rt"] }
@@ -59,6 +63,9 @@ ab_glyph.workspace = true
 
 # Database
 rusqlite = { workspace = true }
+
+# Embeddings (feature-gated, requires glibc — not available on MUSL)
+fastembed = { workspace = true, optional = true }
 
 # WebSocket
 tokio-tungstenite = { workspace = true }

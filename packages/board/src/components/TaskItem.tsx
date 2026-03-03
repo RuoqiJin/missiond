@@ -60,7 +60,7 @@ export function TaskItem({
     transition,
   };
   const categoryConf = CATEGORY_CONFIG[task.category];
-  const priorityConf = PRIORITY_CONFIG[task.priority];
+  const priorityConf = PRIORITY_CONFIG[task.priority] ?? PRIORITY_CONFIG.medium;
   const isOverdue = task.dueDate && !isDone && new Date(task.dueDate) < new Date();
   const hasChildren = childCount > 0;
   const allChildrenDone = hasChildren && doneChildCount === childCount;
@@ -230,8 +230,8 @@ export function TaskItem({
 }
 
 export function TaskItemOverlay({ task }: { task: Task }) {
-  const priorityConf = PRIORITY_CONFIG[task.priority];
-  const categoryConf = CATEGORY_CONFIG[task.category];
+  const priorityConf = PRIORITY_CONFIG[task.priority] ?? PRIORITY_CONFIG.medium;
+  const categoryConf = CATEGORY_CONFIG[task.category] ?? CATEGORY_CONFIG.other;
 
   return (
     <div className="bg-neutral-900 border border-blue-500/40 rounded-lg px-3 py-2.5 shadow-xl shadow-blue-500/10 w-[400px]">

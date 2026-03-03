@@ -27,6 +27,42 @@ pub fn extract_text_content(content: &Value) -> String {
                             .unwrap_or("unknown");
                         Some(format!("[图片: {media_type}]"))
                     }
+                    "document" => {
+                        let title = item
+                            .get("title")
+                            .or_else(|| item.get("name"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
+                        let label = if title.is_empty() {
+                            "[文档]".to_string()
+                        } else {
+                            format!("[文档: {title}]")
+                        };
+                        // Try to extract text from document source
+                        let text = item
+                            .get("source")
+                            .and_then(|s| {
+                                let st = s.get("type").and_then(|t| t.as_str())?;
+                                if st == "text" {
+                                    s.get("data").and_then(|d| d.as_str()).map(String::from)
+                                } else {
+                                    None
+                                }
+                            })
+                            .or_else(|| {
+                                item.get("content").and_then(|c| c.as_str()).map(String::from)
+                            });
+                        if let Some(text) = text {
+                            Some(format!("{label}\n{text}"))
+                        } else {
+                            let media_type = item.pointer("/source/media_type").and_then(|m| m.as_str());
+                            if let Some(mt) = media_type {
+                                Some(format!("{label} ({mt})"))
+                            } else {
+                                Some(label)
+                            }
+                        }
+                    }
                     "tool_use" => {
                         let name = item
                             .get("name")
@@ -112,7 +148,7 @@ pub fn sanitize_raw_content(content: &Value) -> Option<String> {
 }
 
 /// Stable replacement for str::floor_char_boundary (unstable).
-fn floor_char_boundary(s: &str, index: usize) -> usize {
+pub fn floor_char_boundary(s: &str, index: usize) -> usize {
     if index >= s.len() {
         return s.len();
     }

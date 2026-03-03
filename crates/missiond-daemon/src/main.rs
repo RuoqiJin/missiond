@@ -403,6 +403,12 @@ struct AppState {
     xjp_mcp: Arc<McpProcessClient>,
     /// Flow engine reentry guard: task IDs currently being processed.
     flow_in_progress: Arc<std::sync::Mutex<HashSet<String>>>,
+    /// Embedding service for semantic search (None if feature disabled or init failed).
+    embedding_service: Option<Arc<missiond_core::embedding::EmbeddingService>>,
+    /// In-memory embedding cache for policy:decision entries (id, vector).
+    embedding_cache: missiond_core::embedding::EmbeddingCache,
+    /// AIOps: incident event bus sender (try_send only, capacity 100).
+    incident_tx: tokio::sync::mpsc::Sender<missiond_core::types::MissionIncident>,
 }
 
 fn default_mission_home() -> PathBuf {
@@ -763,6 +769,10 @@ struct QuestionCreateArgs {
 struct QuestionListArgs {
     #[serde(default)]
     status: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -2055,16 +2065,41 @@ impl AppState {
                     source: args.source,
                     confidence: args.confidence,
                 };
-                let entry = self.mission.db()
+                let result = self.mission.db()
                     .kb_remember(&input)
                     .map_err(|e| anyhow!("DB error: {}", e))?;
-                Ok(ToolResult::json_pretty(&entry))
+                // Generate and store embedding if service available
+                if let Some(ref emb_svc) = self.embedding_service {
+                    let detail_text = result.entry.detail.as_ref()
+                        .map(|d| serde_json::to_string(d).unwrap_or_default())
+                        .unwrap_or_default();
+                    let embed_text = format!("{} {}", result.entry.summary, detail_text);
+                    if let Some(vec) = emb_svc.embed(&embed_text) {
+                        let _ = self.mission.db().kb_set_embedding(&result.entry.id, &vec);
+                        // Update in-memory cache if policy:decision
+                        if result.entry.category.starts_with("policy:decision") {
+                            let mut guard = self.embedding_cache.write().await;
+                            guard.retain(|(id, _)| id != &result.entry.id);
+                            guard.push((result.entry.id.clone(), vec));
+                        }
+                    }
+                }
+                Ok(ToolResult::json_pretty(&result))
             }
             "mission_kb_forget" => {
                 let KBKeyArgs { key } = serde_json::from_value(args)?;
+                // Get entry ID before deletion for cache invalidation
+                let entry_id = self.mission.db().kb_get_id_by_key(&key).ok().flatten();
                 let deleted = self.mission.db()
                     .kb_forget(&key)
                     .map_err(|e| anyhow!("DB error: {}", e))?;
+                // Remove from embedding cache if deleted
+                if deleted {
+                    if let Some(id) = entry_id {
+                        let mut guard = self.embedding_cache.write().await;
+                        guard.retain(|(eid, _)| eid != &id);
+                    }
+                }
                 Ok(ToolResult::json(&serde_json::json!({
                     "deleted": deleted,
                     "key": key,
@@ -3107,7 +3142,7 @@ impl AppState {
             // State auto-committed by Daemon on extraction completion — no manual done() needed.
             "mission_memory_pending" | "mission_memory_pending_user" => {
                 let db = self.mission.db();
-                const PENDING_MSG_LIMIT: usize = 50;
+                const PENDING_MSG_LIMIT: usize = 60;
                 let pending = db.get_pending_realtime_messages_with_limit(PENDING_MSG_LIMIT)
                     .map_err(|e| anyhow!("DB error: {}", e))?;
 
@@ -3125,11 +3160,19 @@ impl AppState {
                         if msg.role == "user" {
                             user_count += 1;
                             output.push_str(&format!("[#{}][{}] ★ user: {}\n\n", msg.id, msg.timestamp, msg.content));
+                        } else if msg.role == "tool_result" {
+                            // Tool results: file contents, command outputs — truncate to 1000 chars
+                            let content = if msg.content.len() > 1000 {
+                                let end = events_sync::floor_char_boundary(&msg.content, 1000);
+                                format!("{}…({}字符)", &msg.content[..end], msg.content.len())
+                            } else {
+                                msg.content.clone()
+                            };
+                            output.push_str(&format!("[#{}][{}] tool_result: {}\n\n", msg.id, msg.timestamp, content));
                         } else {
                             // Assistant messages: truncate to reduce payload
                             let content = if msg.content.len() > 500 {
-                                let mut end = 500;
-                                while !msg.content.is_char_boundary(end) && end > 0 { end -= 1; }
+                                let end = events_sync::floor_char_boundary(&msg.content, 500);
                                 format!("{}…", &msg.content[..end])
                             } else {
                                 msg.content.clone()
@@ -3149,7 +3192,8 @@ impl AppState {
                 let header = format!(
                     "[realtime-extract] {} 个会话, {} 条消息 (其中 {} 条用户消息){}\n\n\
                      ★ = 用户原话，优先级最高。每句用户消息都是刻意的。\n\
-                     assistant 消息仅提供上下文，不需逐条分析。\n\n\
+                     assistant 消息仅提供上下文，不需逐条分析。\n\
+                     tool_result 消息包含工具输出（文件内容、命令结果），提供操作上下文。\n\n\
                      提取规则:\n\
                      - 用户偏好/纠正/否定 → category: preference (最高优先)\n\
                      - 架构决策/技术事实 → category: memory 或子分类\n\
@@ -5195,12 +5239,12 @@ impl AppState {
                 Ok(ToolResult::json_pretty(&q))
             }
             "mission_question_list" => {
-                let QuestionListArgs { status } =
-                    serde_json::from_value(args).unwrap_or(QuestionListArgs { status: None });
+                let QuestionListArgs { status, target, limit } =
+                    serde_json::from_value(args).unwrap_or(QuestionListArgs { status: None, target: None, limit: None });
                 let questions = self
                     .mission
                     .db()
-                    .list_agent_questions(status.as_deref())
+                    .list_agent_questions(status.as_deref(), target.as_deref(), limit)
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 Ok(ToolResult::json_pretty(&questions))
             }
@@ -5243,6 +5287,62 @@ impl AppState {
                     Some(q) => Ok(ToolResult::json_pretty(&q)),
                     None => Ok(ToolResult::error("Question not found")),
                 }
+            }
+
+            "mission_decision_stats" => {
+                let hours = args.get("hours").and_then(|v| v.as_i64()).unwrap_or(24);
+                let stats = self.mission.db().decision_stats(hours)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json_pretty(&stats))
+            }
+
+            // ── AIOps Incidents ──
+            "mission_incident_test" => {
+                let severity_str = args.get("severity").and_then(|v| v.as_str()).unwrap_or("warning");
+                let severity = match severity_str {
+                    "critical" => missiond_core::types::IncidentSeverity::Critical,
+                    "high" => missiond_core::types::IncidentSeverity::High,
+                    _ => missiond_core::types::IncidentSeverity::Warning,
+                };
+                let source_str = args.get("source").and_then(|v| v.as_str()).unwrap_or("manual");
+                let source = match source_str {
+                    "health_check" => missiond_core::types::IncidentSource::HealthCheck,
+                    "deploy_center" => missiond_core::types::IncidentSource::DeployCenter,
+                    "sentry" => missiond_core::types::IncidentSource::Sentry,
+                    _ => missiond_core::types::IncidentSource::Manual,
+                };
+                let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("Test incident").to_string();
+                let server_id = args.get("server_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+                let incident = missiond_core::types::MissionIncident {
+                    id: format!("inc-{}", uuid::Uuid::new_v4()),
+                    severity,
+                    source,
+                    title: title.clone(),
+                    description: format!("Manual test incident: {}", title),
+                    server_id,
+                    raw_payload: json!({"test": true, "injected_at": chrono::Utc::now().to_rfc3339()}),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                };
+
+                if let Err(e) = self.incident_tx.try_send(incident.clone()) {
+                    warn!("Incident channel full, dropping incident: {}", e);
+                    Ok(ToolResult::error(format!("Incident channel full: {}", e)))
+                } else {
+                    Ok(ToolResult::json_pretty(&json!({
+                        "status": "injected",
+                        "incident_id": incident.id,
+                        "severity": severity_str,
+                        "title": incident.title,
+                    })))
+                }
+            }
+            "mission_incident_list" => {
+                let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as i64;
+                let limit = limit.min(100);
+                let incidents = self.mission.db().list_incidents(limit)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json_pretty(&incidents))
             }
 
             // ── Jarvis Trace ──
@@ -5524,13 +5624,210 @@ fn extract_context_percentage(screen: &str) -> Option<u32> {
     None
 }
 
+/// Decision routing result from each tier
+struct TierResult {
+    hit: bool,
+    detail: serde_json::Value,
+}
+
+/// Save routing trace JSON to the question record
+fn save_routing_trace(state: &AppState, question_id: &str, resolved_tier: &str, path: &[serde_json::Value], latency_ms: u128) {
+    let trace = serde_json::json!({
+        "resolved_tier": resolved_tier,
+        "path": path,
+        "latency_ms": latency_ms,
+    });
+    let _ = state.mission.db().set_question_routing_trace(question_id, &trace.to_string());
+}
+
+// ============ AIOps CronSensor ============
+
+/// Phase 2: Concurrent health scan of all servers with healthEndpoint configured.
+/// Uses JoinSet for parallel HTTP GET with 5s timeout per server.
+async fn health_scan(state: &AppState) {
+    let servers = &state.infra.servers;
+    let mut set = tokio::task::JoinSet::new();
+
+    for server in servers {
+        let endpoint = match &server.health_endpoint {
+            Some(e) => e.clone(),
+            None => continue,
+        };
+        let client = state.http_client.clone();
+        let server_id = server.id.clone();
+        let server_name = server.name.clone();
+
+        set.spawn(async move {
+            let healthy = match client
+                .get(&endpoint)
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await
+            {
+                Ok(resp) => resp.status().is_success(),
+                Err(_) => false,
+            };
+            (server_id, server_name, endpoint, healthy)
+        });
+    }
+
+    while let Some(result) = set.join_next().await {
+        let (server_id, server_name, endpoint, healthy) = match result {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = %e, "Health check task panicked");
+                continue;
+            }
+        };
+
+        if !healthy {
+            let incident = missiond_core::types::MissionIncident {
+                id: format!("inc-{}", uuid::Uuid::new_v4()),
+                severity: missiond_core::types::IncidentSeverity::High,
+                source: missiond_core::types::IncidentSource::HealthCheck,
+                title: format!("{} 健康检查失败", server_name),
+                description: format!(
+                    "服务器 {} ({}) 的健康端点 {} 无响应或返回非 200。\n\n\
+                     建议操作：\n\
+                     1. mission_reachability(target=\"{}\") 确认网络连通性\n\
+                     2. mission_os_diagnose(target=\"{}\") 检查系统状态\n\
+                     3. 检查 Docker 容器状态",
+                    server_name, server_id, endpoint, server_id, server_id
+                ),
+                server_id: Some(server_id.clone()),
+                raw_payload: json!({
+                    "endpoint": endpoint,
+                    "server_id": server_id,
+                    "server_name": server_name,
+                }),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            };
+
+            if let Err(e) = state.incident_tx.try_send(incident) {
+                warn!(server_id = %server_id, "Incident channel full, dropping health check: {}", e);
+            }
+        }
+    }
+}
+
+// ============ AIOps Reactor ============
+
+/// Process a single incident from the event bus:
+/// 1. Dedupe check (5-minute window on dedupe_key)
+/// 2. Insert into DB
+/// 3. Create a high-priority Board task for slot-ops
+async fn process_incident(state: &AppState, incident: missiond_core::types::MissionIncident) {
+    let db = state.mission.db();
+    let dedupe_key = format!("{}:{}", incident.source, incident.title);
+
+    // 5-minute dedupe window — drop duplicate incidents
+    match db.has_recent_incident(&dedupe_key, 300) {
+        Ok(true) => {
+            debug!(
+                dedupe_key = %dedupe_key,
+                "Incident dedupe: dropping duplicate within 5min window"
+            );
+            return;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            warn!(error = %e, "Incident dedupe check failed, proceeding anyway");
+        }
+    }
+
+    // Truncate raw_payload for prompt safety (max 2000 chars)
+    let raw_str = incident.raw_payload.to_string();
+    let truncated_payload = if raw_str.len() > 2000 {
+        format!("{}... (truncated, {} total)", &raw_str[..2000], raw_str.len())
+    } else {
+        raw_str
+    };
+
+    // Build Board task description with structured context
+    let description = format!(
+        "## AIOps 自动检测到异常\n\n\
+         **严重等级**: {severity}\n\
+         **来源**: {source}\n\
+         **服务器**: {server}\n\
+         **时间**: {time}\n\n\
+         ### 描述\n{desc}\n\n\
+         ### 原始数据\n```json\n{payload}\n```",
+        severity = incident.severity,
+        source = incident.source,
+        server = incident.server_id.as_deref().unwrap_or("N/A"),
+        time = incident.created_at,
+        desc = incident.description,
+        payload = truncated_payload,
+    );
+
+    // Determine priority and auto-execute from severity
+    // Warning → Board backlog only (autoExecute=false), High/Critical → auto-dispatch to slot-ops
+    let (priority, auto_execute) = match incident.severity {
+        missiond_core::types::IncidentSeverity::Critical => ("urgent", true),
+        missiond_core::types::IncidentSeverity::High => ("high", true),
+        missiond_core::types::IncidentSeverity::Warning => ("medium", false),
+    };
+
+    // Create board task
+    let task_input = missiond_core::types::CreateBoardTaskInput {
+        title: format!("[AIOps] {}", incident.title),
+        description: Some(description),
+        priority: Some(priority.to_string()),
+        category: Some("ops".to_string()),
+        assignee: Some("slot-ops".to_string()),
+        auto_execute: Some(auto_execute),
+        server: incident.server_id.clone(),
+        project: None,
+        due_date: None,
+        parent_id: None,
+        prompt_template: None,
+        hidden: None,
+        flow_template: None,
+    };
+
+    let board_task_id = match db.create_board_task(&task_input) {
+        Ok(task) => {
+            info!(
+                incident_id = %incident.id,
+                board_task_id = %task.id,
+                severity = %incident.severity,
+                title = %incident.title,
+                "AIOps: incident → board task created"
+            );
+            Some(task.id)
+        }
+        Err(e) => {
+            error!(error = %e, "AIOps: failed to create board task for incident");
+            None
+        }
+    };
+
+    // Fire submit_notify so Autopilot picks up the new task
+    state.submit_notify.notify_one();
+
+    // Insert incident record into DB
+    if let Err(e) = db.insert_incident(
+        &incident.id,
+        &incident.severity.to_string(),
+        &incident.source.to_string(),
+        &incident.title,
+        &incident.description,
+        incident.server_id.as_deref(),
+        Some(&incident.raw_payload.to_string()),
+        board_task_id.as_deref(),
+        &dedupe_key,
+    ) {
+        warn!(error = %e, "AIOps: failed to insert incident record");
+    }
+}
+
 /// Decision Engine: process pending questions targeted at master.
-/// Phase 1: scaffolding only — logs pending questions for future routing.
-/// Phase 2 will implement the full Tier 1/2/3 responsibility chain.
+/// Routes through Tier 1 (KB) → Tier 2 (Gemini) → Tier 3 (slot-decision) responsibility chain.
+/// Records routing_trace for each decision for observability.
 async fn process_pending_master_questions(state: &AppState) {
     // Query pending questions with target=master
-    let questions = match state.mission.db().list_agent_questions(Some("pending")) {
-        Ok(qs) => qs.into_iter().filter(|q| q.target == "master").collect::<Vec<_>>(),
+    let questions = match state.mission.db().list_agent_questions(Some("pending"), Some("master"), None) {
+        Ok(qs) => qs,
         Err(e) => {
             warn!(error = %e, "Decision Engine: failed to list pending master questions");
             return;
@@ -5548,11 +5845,16 @@ async fn process_pending_master_questions(state: &AppState) {
     );
 
     for question in questions {
+        let start = std::time::Instant::now();
+        let mut path: Vec<serde_json::Value> = Vec::new();
+
         // Anti-loop: retry_count >= 3 → downgrade to user
         if question.retry_count >= 3 {
             warn!(question_id = %question.id, retries = question.retry_count,
                 "Decision Engine: retry limit reached, downgrading to user");
+            path.push(serde_json::json!({"tier": "anti-loop", "status": "downgraded", "reason": format!("retry_count={}", question.retry_count)}));
             let _ = state.mission.db().downgrade_question_to_user(&question.id);
+            save_routing_trace(state, &question.id, "downgraded", &path, start.elapsed().as_millis());
             continue;
         }
 
@@ -5561,37 +5863,127 @@ async fn process_pending_master_questions(state: &AppState) {
             "debug" | "investigation" => {
                 // Direct to Tier 3 — text LLM can't solve these
                 info!(question_id = %question.id, dt = %question.decision_type, "Decision Engine: → Tier 3 (fast-lane)");
-                decision_tier3_dispatch(state, &question).await
+                path.push(serde_json::json!({"tier": "T3", "status": "fast-lane", "reason": format!("decision_type={}", question.decision_type)}));
+                let r = decision_tier3_dispatch(state, &question).await;
+                if let Ok(ref tr) = r {
+                    path.push(tr.detail.clone());
+                    save_routing_trace(state, &question.id, "T3", &path, start.elapsed().as_millis());
+                }
+                r.map(|tr| tr.hit)
             }
             "architecture" | "risk" => {
                 // Direct to Tier 2 — skip muscle memory
                 info!(question_id = %question.id, dt = %question.decision_type, "Decision Engine: → Tier 2 (fast-lane)");
-                decision_tier2_gemini(state, &question).await
+                path.push(serde_json::json!({"tier": "T2", "status": "fast-lane", "reason": format!("decision_type={}", question.decision_type)}));
+                let r = decision_tier2_gemini(state, &question).await;
+                if let Ok(ref tr) = r {
+                    path.push(tr.detail.clone());
+                    if tr.hit {
+                        save_routing_trace(state, &question.id, "T2", &path, start.elapsed().as_millis());
+                    } else {
+                        // T2 escalated but no T3 for this fast-lane — downgrade
+                        path.push(serde_json::json!({"tier": "T2", "status": "escalated_no_t3"}));
+                        save_routing_trace(state, &question.id, "T2-escalated", &path, start.elapsed().as_millis());
+                    }
+                }
+                r.map(|tr| tr.hit)
             }
             "preference" => {
                 // Tier 1 only — if miss, downgrade to user (don't let Gemini guess)
                 info!(question_id = %question.id, "Decision Engine: → Tier 1 (preference exclusive)");
-                match decision_tier1_kb(state, &question).await {
-                    Ok(true) => Ok(true),
-                    _ => {
-                        info!(question_id = %question.id, "Tier 1 miss for preference → downgrade to user");
+                let r = decision_tier1_kb(state, &question).await;
+                match r {
+                    Ok(ref tr) => {
+                        path.push(tr.detail.clone());
+                        if tr.hit {
+                            save_routing_trace(state, &question.id, "T1", &path, start.elapsed().as_millis());
+                        } else {
+                            info!(question_id = %question.id, "Tier 1 miss for preference → downgrade to user");
+                            path.push(serde_json::json!({"tier": "preference", "status": "downgraded", "reason": "t1_miss_preference_exclusive"}));
+                            let _ = state.mission.db().downgrade_question_to_user(&question.id);
+                            save_routing_trace(state, &question.id, "downgraded", &path, start.elapsed().as_millis());
+                        }
+                    }
+                    Err(_) => {
+                        path.push(serde_json::json!({"tier": "T1", "status": "error"}));
                         let _ = state.mission.db().downgrade_question_to_user(&question.id);
-                        Ok(false)
+                        save_routing_trace(state, &question.id, "downgraded", &path, start.elapsed().as_millis());
                     }
                 }
+                r.map(|tr| tr.hit)
             }
             _ => {
                 // "implementation" and others: full pass-through Tier 1 → 2 → 3
                 info!(question_id = %question.id, "Decision Engine: → full pass-through (implementation)");
-                match decision_tier1_kb(state, &question).await {
-                    Ok(true) => Ok(true), // Tier 1 hit
-                    _ => {
+
+                // Tier 1
+                let t1 = decision_tier1_kb(state, &question).await;
+                match t1 {
+                    Ok(tr) if tr.hit => {
+                        path.push(tr.detail);
+                        save_routing_trace(state, &question.id, "T1", &path, start.elapsed().as_millis());
+                        Ok(true)
+                    }
+                    Ok(tr) => {
+                        path.push(tr.detail);
                         // Tier 2
-                        match decision_tier2_gemini(state, &question).await {
-                            Ok(true) => Ok(true), // Gemini decided
-                            _ => {
+                        let t2 = decision_tier2_gemini(state, &question).await;
+                        match t2 {
+                            Ok(tr2) if tr2.hit => {
+                                path.push(tr2.detail);
+                                save_routing_trace(state, &question.id, "T2", &path, start.elapsed().as_millis());
+                                Ok(true)
+                            }
+                            Ok(tr2) => {
+                                path.push(tr2.detail);
                                 // Tier 3
-                                decision_tier3_dispatch(state, &question).await
+                                let t3 = decision_tier3_dispatch(state, &question).await;
+                                match t3 {
+                                    Ok(ref tr3) => {
+                                        path.push(tr3.detail.clone());
+                                        save_routing_trace(state, &question.id, "T3", &path, start.elapsed().as_millis());
+                                    }
+                                    Err(ref e) => {
+                                        path.push(serde_json::json!({"tier": "T3", "status": "error", "reason": e.to_string()}));
+                                        save_routing_trace(state, &question.id, "error", &path, start.elapsed().as_millis());
+                                    }
+                                }
+                                t3.map(|tr3| tr3.hit)
+                            }
+                            Err(e) => {
+                                path.push(serde_json::json!({"tier": "T2", "status": "error", "reason": e.to_string()}));
+                                // Still try Tier 3
+                                let t3 = decision_tier3_dispatch(state, &question).await;
+                                match t3 {
+                                    Ok(ref tr3) => {
+                                        path.push(tr3.detail.clone());
+                                        save_routing_trace(state, &question.id, "T3", &path, start.elapsed().as_millis());
+                                    }
+                                    Err(ref e2) => {
+                                        path.push(serde_json::json!({"tier": "T3", "status": "error", "reason": e2.to_string()}));
+                                        save_routing_trace(state, &question.id, "error", &path, start.elapsed().as_millis());
+                                    }
+                                }
+                                t3.map(|tr3| tr3.hit)
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        path.push(serde_json::json!({"tier": "T1", "status": "error", "reason": e.to_string()}));
+                        // Still try Tier 2 → 3
+                        let t2 = decision_tier2_gemini(state, &question).await;
+                        match t2 {
+                            Ok(tr2) if tr2.hit => {
+                                path.push(tr2.detail);
+                                save_routing_trace(state, &question.id, "T2", &path, start.elapsed().as_millis());
+                                Ok(true)
+                            }
+                            _ => {
+                                if let Ok(ref tr2) = t2 { path.push(tr2.detail.clone()); }
+                                let t3 = decision_tier3_dispatch(state, &question).await;
+                                if let Ok(ref tr3) = t3 { path.push(tr3.detail.clone()); }
+                                save_routing_trace(state, &question.id, if t3.is_ok() { "T3" } else { "error" }, &path, start.elapsed().as_millis());
+                                t3.map(|tr3| tr3.hit)
                             }
                         }
                     }
@@ -5606,20 +5998,144 @@ async fn process_pending_master_questions(state: &AppState) {
     }
 }
 
-/// Tier 1: KB FTS5 search policy:decision + keyword overlap validation
-async fn decision_tier1_kb(state: &AppState, question: &missiond_core::types::AgentQuestion) -> Result<bool> {
-    let results = state.mission.db().kb_search(&question.question, Some("policy:decision"))
+/// Tier 1: Hybrid KB search (FTS5 + semantic vectors via RRF fusion)
+///
+/// When embedding service is available:
+///   Path A: FTS5 → Top 20 (with rank)
+///   Path B: Cosine similarity on in-memory vectors → Top 20
+///   Merge via RRF (k=60), hit if cosine > 0.60 AND rrf above threshold
+///
+/// Fallback (embedding unavailable): FTS5 + keyword overlap ≥ 30%
+async fn decision_tier1_kb(state: &AppState, question: &missiond_core::types::AgentQuestion) -> Result<TierResult> {
+    // Path A: FTS5 search with ranked results
+    let fts_results = state.mission.db()
+        .kb_search_ranked(&question.question, Some("policy:decision"), 20)
         .unwrap_or_default();
 
-    if results.is_empty() {
-        debug!(question_id = %question.id, "Tier 1: no policy:decision entries found");
-        return Ok(false);
+    let fts_ids: Vec<(String, usize)> = fts_results.iter()
+        .map(|(e, rank)| (e.id.clone(), *rank))
+        .collect();
+
+    // Path B: Semantic vector search (if embedding service available)
+    let query_embedding = state.embedding_service.as_ref()
+        .and_then(|svc| svc.embed(&question.question));
+
+    let cache_guard = state.embedding_cache.read().await;
+    let has_vectors = query_embedding.is_some() && !cache_guard.is_empty();
+
+    if fts_ids.is_empty() && !has_vectors {
+        debug!(question_id = %question.id, "Tier 1: no policy:decision entries and no vectors");
+        return Ok(TierResult {
+            hit: false,
+            detail: serde_json::json!({"tier": "T1", "status": "missed", "reason": "no_entries"}),
+        });
     }
 
-    // Take top-1 result
-    let top = &results[0];
+    // Hybrid merge if we have both FTS and vector signals
+    if let Some(ref q_emb) = query_embedding {
+        if !cache_guard.is_empty() {
+            let hybrid = missiond_core::embedding::hybrid_search(
+                q_emb,
+                &cache_guard,
+                &fts_ids,
+                20,   // top_k
+                60,   // rrf_k
+            );
+            drop(cache_guard); // Release read lock
 
-    // Keyword overlap check: question tokens ∩ rule summary tokens ≥ 30%
+            if hybrid.is_empty() {
+                return Ok(TierResult {
+                    hit: false,
+                    detail: serde_json::json!({"tier": "T1", "status": "missed", "reason": "hybrid_empty"}),
+                });
+            }
+
+            let top = &hybrid[0];
+            let cosine = top.cosine_sim.unwrap_or(0.0);
+            let cosine_str = format!("{:.3}", cosine);
+            let rrf_str = format!("{:.4}", top.rrf_score);
+
+            // Hit criteria: cosine > 0.60 AND rrf_score above minimum threshold
+            let cosine_ok = cosine > 0.60;
+            let rrf_threshold = 1.0 / 61.0; // Must appear in at least one top-1 position
+            let rrf_ok = top.rrf_score >= rrf_threshold;
+
+            if !cosine_ok || !rrf_ok {
+                debug!(
+                    question_id = %question.id,
+                    cosine = %cosine_str, rrf = %rrf_str,
+                    "Tier 1: hybrid match below threshold"
+                );
+                return Ok(TierResult {
+                    hit: false,
+                    detail: serde_json::json!({
+                        "tier": "T1",
+                        "status": "missed",
+                        "method": "hybrid",
+                        "reason": "below_threshold",
+                        "semantic_similarity": cosine_str,
+                        "rrf_score": rrf_str,
+                        "fts_rank": top.fts_rank,
+                        "vec_rank": top.vec_rank,
+                    }),
+                });
+            }
+
+            // Fetch the actual KB entry
+            let entry = fts_results.iter()
+                .find(|(e, _)| e.id == top.id)
+                .map(|(e, _)| e.clone());
+            let entry = match entry {
+                Some(e) => e,
+                None => {
+                    // Entry found by vector but not by FTS — fetch from DB
+                    state.mission.db().kb_get_by_id(&top.id)
+                        .unwrap_or(None)
+                        .ok_or_else(|| anyhow!("KB entry {} not found", top.id))?
+                }
+            };
+
+            // Hit — answer
+            let answer = format!("[主控裁决·肌肉记忆] {}", entry.summary);
+            info!(
+                question_id = %question.id,
+                cosine = %cosine_str, rrf = %rrf_str,
+                rule_key = %entry.key,
+                "Tier 1: hybrid hit, answering"
+            );
+
+            state.mission.db().answer_agent_question(&question.id, &answer)
+                .map_err(|e| anyhow!("Failed to answer: {}", e))?;
+            state.submit_notify.notify_one();
+
+            return Ok(TierResult {
+                hit: true,
+                detail: serde_json::json!({
+                    "tier": "T1",
+                    "status": "decided",
+                    "method": "hybrid",
+                    "rule_key": entry.key,
+                    "semantic_similarity": cosine_str,
+                    "fts_rank": top.fts_rank,
+                    "vec_rank": top.vec_rank,
+                    "rrf_score": rrf_str,
+                }),
+            });
+        }
+    }
+    drop(cache_guard);
+
+    // Fallback: FTS-only path (when embeddings are disabled or cache empty)
+    if fts_results.is_empty() {
+        return Ok(TierResult {
+            hit: false,
+            detail: serde_json::json!({"tier": "T1", "status": "missed", "reason": "fts_empty"}),
+        });
+    }
+
+    let top = &fts_results[0].0;
+
+    // Keyword overlap check (original logic)
     let q_tokens: std::collections::HashSet<&str> = question.question
         .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
         .filter(|w| w.len() > 1)
@@ -5630,31 +6146,46 @@ async fn decision_tier1_kb(state: &AppState, question: &missiond_core::types::Ag
         .collect();
 
     if q_tokens.is_empty() {
-        return Ok(false);
+        return Ok(TierResult {
+            hit: false,
+            detail: serde_json::json!({"tier": "T1", "status": "missed", "method": "fts_only", "reason": "empty_tokens"}),
+        });
     }
 
     let overlap = q_tokens.intersection(&rule_tokens).count();
     let coverage = overlap as f64 / q_tokens.len() as f64;
+    let coverage_str = format!("{:.0}%", coverage * 100.0);
 
     if coverage < 0.3 {
-        debug!(question_id = %question.id, coverage = %format!("{:.0}%", coverage * 100.0),
-            "Tier 1: keyword overlap below 30%, passing to next tier");
-        return Ok(false);
+        debug!(question_id = %question.id, coverage = %coverage_str,
+            "Tier 1: FTS keyword overlap below 30%, passing to next tier");
+        return Ok(TierResult {
+            hit: false,
+            detail: serde_json::json!({
+                "tier": "T1", "status": "missed", "method": "fts_only",
+                "coverage": coverage_str, "rule_key": top.key,
+            }),
+        });
     }
 
-    // High confidence hit — answer the question
     let answer = format!("[主控裁决·肌肉记忆] {}", top.summary);
-    info!(question_id = %question.id, coverage = %format!("{:.0}%", coverage * 100.0),
-        rule_key = %top.key, "Tier 1: policy:decision hit, answering");
+    info!(question_id = %question.id, coverage = %coverage_str,
+        rule_key = %top.key, "Tier 1: FTS-only hit, answering");
 
     state.mission.db().answer_agent_question(&question.id, &answer)
-        .map_err(|e| anyhow!("Failed to answer question: {}", e))?;
+        .map_err(|e| anyhow!("Failed to answer: {}", e))?;
     state.submit_notify.notify_one();
-    Ok(true)
+    Ok(TierResult {
+        hit: true,
+        detail: serde_json::json!({
+            "tier": "T1", "status": "decided", "method": "fts_only",
+            "coverage": coverage_str, "rule_key": top.key,
+        }),
+    })
 }
 
 /// Tier 2: Call Gemini with structured JSON contract
-async fn decision_tier2_gemini(state: &AppState, question: &missiond_core::types::AgentQuestion) -> Result<bool> {
+async fn decision_tier2_gemini(state: &AppState, question: &missiond_core::types::AgentQuestion) -> Result<TierResult> {
     // Build context: task description + question + phase + recent notes
     let mut context_parts = Vec::new();
 
@@ -5725,16 +6256,25 @@ async fn decision_tier2_gemini(state: &AppState, question: &missiond_core::types
                     state.mission.db().answer_agent_question(&question.id, &answer)
                         .map_err(|e| anyhow!("Failed to answer: {}", e))?;
                     state.submit_notify.notify_one();
-                    return Ok(true);
+                    return Ok(TierResult {
+                        hit: true,
+                        detail: serde_json::json!({"tier": "T2", "status": "decided", "action": "DECIDE", "reasoning": reasoning}),
+                    });
                 } else if action == "ESCALATE_TIER_3" {
                     info!(question_id = %question.id, reason = %reasoning, "Tier 2: Gemini escalated to Tier 3");
-                    return Ok(false);
+                    return Ok(TierResult {
+                        hit: false,
+                        detail: serde_json::json!({"tier": "T2", "status": "escalated", "action": "ESCALATE_TIER_3", "reasoning": reasoning}),
+                    });
                 }
             }
 
             // Parsing failed — treat as escalation
             warn!(question_id = %question.id, "Tier 2: Gemini response not valid JSON, escalating");
-            Ok(false)
+            Ok(TierResult {
+                hit: false,
+                detail: serde_json::json!({"tier": "T2", "status": "escalated", "reason": "parse_failed"}),
+            })
         }
         Err(e) => {
             warn!(question_id = %question.id, error = %e, "Tier 2: Gemini call failed");
@@ -5744,7 +6284,7 @@ async fn decision_tier2_gemini(state: &AppState, question: &missiond_core::types
 }
 
 /// Tier 3: Dispatch to slot-decision workstation via slot_tasks
-async fn decision_tier3_dispatch(state: &AppState, question: &missiond_core::types::AgentQuestion) -> Result<bool> {
+async fn decision_tier3_dispatch(state: &AppState, question: &missiond_core::types::AgentQuestion) -> Result<TierResult> {
     let slot_id = "slot-decision";
 
     // Build investigation prompt
@@ -5823,7 +6363,10 @@ async fn decision_tier3_dispatch(state: &AppState, question: &missiond_core::typ
         Ok(_) => {
             info!(question_id = %question.id, slot_task_id = %slot_task.id,
                 "Tier 3: dispatched to slot-decision");
-            Ok(true)
+            Ok(TierResult {
+                hit: true,
+                detail: serde_json::json!({"tier": "T3", "status": "dispatched", "slot_task_id": slot_task.id}),
+            })
         }
         Err(e) => {
             warn!(question_id = %question.id, error = %e, "Tier 3: failed to send to slot-decision");
@@ -8988,18 +9531,22 @@ async fn main() -> Result<()> {
     // PTY conversation logger: subscribe to manager events
     let mut pty_logger_rx = pty.subscribe();
 
+    // AIOps: incident event bus (capacity 100, try_send only — "宁丢不阻塞")
+    let (incident_tx, incident_rx) = tokio::sync::mpsc::channel::<missiond_core::types::MissionIncident>(100);
+
     // Screenshot broker (coordinates browser-based PTY screenshots)
     let screenshot_broker = missiond_core::ws::ScreenshotBroker::new(
         std::time::Duration::from_secs(5),
     );
 
-    // WebSocket server (PTY attach + Tasks events)
+    // WebSocket server (PTY attach + Tasks events + AIOps webhooks)
     let ws_port = ws_port();
     let mut ws_server = PTYWebSocketServer::new(WSServerOptions {
         port: ws_port,
         pty_manager: Some(Arc::clone(&pty)),
         cc_tasks_watcher: Some(Arc::clone(&cc_tasks)),
         screenshot_broker: Some(Arc::clone(&screenshot_broker)),
+        incident_tx: Some(incident_tx.clone()),
     });
     if let Err(e) = ws_server.start().await {
         // Match Node behavior: continue running even if WS is unavailable (e.g. port in use).
@@ -9105,6 +9652,9 @@ async fn main() -> Result<()> {
             default_mission_home().join("xjp-mcp-config.json"),
         )),
         flow_in_progress: Arc::new(std::sync::Mutex::new(HashSet::new())),
+        embedding_service: missiond_core::embedding::EmbeddingService::new().map(Arc::new),
+        embedding_cache: missiond_core::embedding::new_cache(),
+        incident_tx: incident_tx.clone(),
     };
 
     // Auto-spawn slots with auto_start: true
@@ -9140,6 +9690,43 @@ async fn main() -> Result<()> {
         let backfill_state = state.clone();
         tokio::spawn(async move {
             events_sync::backfill_tool_calls(backfill_state.mission.db()).await;
+        });
+    }
+
+    // One-time backfill: generate embeddings for policy:decision KB entries + warm cache
+    if state.embedding_service.is_some() {
+        let emb_state = state.clone();
+        tokio::spawn(async move {
+            let db = emb_state.mission.db();
+            let emb_svc = emb_state.embedding_service.as_ref().unwrap();
+            match db.kb_entries_missing_embedding(Some("policy:decision")) {
+                Ok(missing) if !missing.is_empty() => {
+                    info!(count = missing.len(), "Backfilling embeddings for policy:decision entries");
+                    let mut stored = 0usize;
+                    for (id, summary, detail) in &missing {
+                        let text = format!("{} {}", summary, detail);
+                        if let Some(vec) = emb_svc.embed(&text) {
+                            if let Err(e) = db.kb_set_embedding(id, &vec) {
+                                warn!(id = %id, error = %e, "Failed to store embedding");
+                            } else {
+                                stored += 1;
+                            }
+                        }
+                    }
+                    info!(stored, "Embedding backfill complete");
+                }
+                Ok(_) => {}
+                Err(e) => warn!(error = %e, "Failed to scan for missing embeddings"),
+            }
+            // Warm the in-memory cache with all policy:decision embeddings
+            match db.kb_load_embeddings("policy:decision") {
+                Ok(all) => {
+                    let mut guard = emb_state.embedding_cache.write().await;
+                    *guard = all;
+                    info!(count = guard.len(), "Embedding cache warmed");
+                }
+                Err(e) => warn!(error = %e, "Failed to warm embedding cache"),
+            }
         });
     }
 
@@ -9248,6 +9835,31 @@ async fn main() -> Result<()> {
                 process_pending_master_questions(&s).await;
             }
         });
+    }
+
+    // AIOps Reactor: consume incident events, debounce, triage, create board tasks
+    {
+        let s = state.clone();
+        let mut rx = incident_rx;
+        tokio::spawn(async move {
+            while let Some(incident) = rx.recv().await {
+                process_incident(&s, incident).await;
+            }
+        });
+    }
+
+    // AIOps CronSensor: health scan every 5 minutes
+    {
+        let s = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                health_scan(&s).await;
+            }
+        });
+        info!("AIOps health scanner started (300s interval)");
     }
 
     // Conversation logger event stream
