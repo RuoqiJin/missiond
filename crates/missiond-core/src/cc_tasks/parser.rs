@@ -238,7 +238,9 @@ pub async fn get_file_size(file_path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Read new content from file since last position
+/// Read new content from file since last position.
+/// Only advances the position up to the last complete line (ending with \n),
+/// so partially-written lines are retried on the next read.
 pub async fn read_new_lines(
     file_path: &Path,
     from_position: u64,
@@ -256,7 +258,13 @@ pub async fn read_new_lines(
     let mut buffer = vec![0u8; (file_size - from_position) as usize];
     file.read_exact(&mut buffer).await?;
 
-    let content = String::from_utf8_lossy(&buffer);
+    // Only process up to the last newline — anything after is a partial line
+    let safe_end = match buffer.iter().rposition(|&b| b == b'\n') {
+        Some(pos) => pos + 1,
+        None => return Ok((Vec::new(), from_position)), // no complete line yet
+    };
+
+    let content = String::from_utf8_lossy(&buffer[..safe_end]);
     let mut lines = Vec::new();
 
     for line in content.lines() {
@@ -268,11 +276,12 @@ pub async fn read_new_lines(
         }
     }
 
-    Ok((lines, file_size))
+    Ok((lines, from_position + safe_end as u64))
 }
 
 /// Read new content from file since last position — returns raw JSON values.
 /// Unlike read_new_lines, this captures ALL JSONL line types (progress, system, etc.)
+/// Only advances the position up to the last complete line (ending with \n).
 pub async fn read_new_lines_raw(
     file_path: &Path,
     from_position: u64,
@@ -290,7 +299,13 @@ pub async fn read_new_lines_raw(
     let mut buffer = vec![0u8; (file_size - from_position) as usize];
     file.read_exact(&mut buffer).await?;
 
-    let content = String::from_utf8_lossy(&buffer);
+    // Only process up to the last newline — anything after is a partial line
+    let safe_end = match buffer.iter().rposition(|&b| b == b'\n') {
+        Some(pos) => pos + 1,
+        None => return Ok((Vec::new(), from_position)), // no complete line yet
+    };
+
+    let content = String::from_utf8_lossy(&buffer[..safe_end]);
     let mut lines = Vec::new();
 
     for line in content.lines() {
@@ -302,7 +317,7 @@ pub async fn read_new_lines_raw(
         }
     }
 
-    Ok((lines, file_size))
+    Ok((lines, from_position + safe_end as u64))
 }
 
 /// Diff two task arrays to find changes

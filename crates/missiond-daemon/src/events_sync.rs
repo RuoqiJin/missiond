@@ -192,7 +192,7 @@ fn generate_output_summary(content: &Value) -> String {
     // Check for error pattern
     if let Some(obj) = content.as_object() {
         if let Some(err) = obj.get("error").and_then(|e| e.as_str()) {
-            return format!("Error: {}", &err[..err.len().min(100)]);
+            return format!("Error: {}", &err[..floor_char_boundary(err, 100)]);
         }
         if obj.get("deleted").and_then(|d| d.as_bool()) == Some(true) {
             return "Deleted".to_string();
@@ -201,7 +201,7 @@ fn generate_output_summary(content: &Value) -> String {
             return format!("{} actions", actions.len());
         }
         if let Some(id) = obj.get("id").and_then(|i| i.as_str()) {
-            return format!("Created: {}", &id[..id.len().min(20)]);
+            return format!("Created: {}", &id[..floor_char_boundary(id, 20)]);
         }
     }
     // Array of results (e.g. batch operations)

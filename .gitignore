@@ -37,3 +37,4 @@ docs/designs/
 
 # Misc
 *.md.bak
+.fastembed_cache/
