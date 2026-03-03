@@ -77,7 +77,7 @@ impl CCTasksWatcher {
         });
         let projects_dir = claude_home.join("projects");
 
-        let (event_tx, _) = broadcast::channel(100);
+        let (event_tx, _) = broadcast::channel(4096);
 
         Self {
             projects_dir,

@@ -187,6 +187,15 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_conv_msg_session ON conversation_messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_conv_msg_timestamp ON conversation_messages(timestamp);
+
+-- Auto-update message_count on conversations when messages are inserted
+CREATE TRIGGER IF NOT EXISTS trg_msg_count_insert
+AFTER INSERT ON conversation_messages
+BEGIN
+    UPDATE conversations
+    SET message_count = message_count + 1
+    WHERE id = NEW.session_id;
+END;
 "#;
 
 /// Extract parent session ID from a subagent's jsonl_path.
@@ -3866,13 +3875,7 @@ impl MissionDB {
                 inserted_ids.push(tx.last_insert_rowid());
             }
         }
-        if !inserted_ids.is_empty() {
-            // Update message count once at the end
-            tx.execute(
-                "UPDATE conversations SET message_count = (SELECT COUNT(*) FROM conversation_messages WHERE session_id = ?1) WHERE id = ?1",
-                params![session_id],
-            )?;
-        }
+        // message_count is auto-updated by trg_msg_count_insert trigger
         tx.commit()?;
         Ok(inserted_ids)
     }
