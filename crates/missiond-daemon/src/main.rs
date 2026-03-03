@@ -5783,6 +5783,7 @@ async fn process_incident(state: &AppState, incident: missiond_core::types::Miss
         prompt_template: None,
         hidden: None,
         flow_template: None,
+        depends_on: None,
     };
 
     let board_task_id = match db.create_board_task(&task_input) {
@@ -6689,6 +6690,42 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
             None => continue,
         };
 
+        // ===== DAG dependency check =====
+        if !task.depends_on.is_empty() {
+            match state.mission.db().check_dependencies(&task.depends_on) {
+                Ok(missiond_core::types::DependencyStatus::Ready) => {
+                    // All deps done — proceed
+                }
+                Ok(missiond_core::types::DependencyStatus::Pending) => {
+                    debug!(task_id = %task.id, "Autopilot: DAG deps pending, skipping");
+                    continue;
+                }
+                Ok(missiond_core::types::DependencyStatus::Blocked(reason)) => {
+                    warn!(task_id = %task.id, reason = %reason, "Autopilot: DAG dep failed, blocking task");
+                    let _ = state.mission.db().update_board_task(
+                        &task.id,
+                        &missiond_core::types::UpdateBoardTaskInput {
+                            status: Some("blocked".to_string()),
+                            ..Default::default()
+                        },
+                    );
+                    let _ = state.mission.db().add_board_task_note(
+                        &missiond_core::types::AddBoardTaskNoteInput {
+                            task_id: task.id.clone(),
+                            content: format!("因前置任务失败或取消，本任务自动阻塞。\n原因：{}", reason),
+                            note_type: Some("note".to_string()),
+                            author: Some("autopilot".to_string()),
+                        },
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    warn!(task_id = %task.id, error = %e, "Autopilot: DAG check failed, skipping");
+                    continue;
+                }
+            }
+        }
+
         // ===== Flow task handling =====
         if task.flow_phase.is_some() {
             if let Err(e) = execute_flow_task(state, &task, &slot_id).await {
@@ -6773,6 +6810,34 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
                     format!("[决策与指示 (Decisions & Directives)]\n{}\n\n{}", qa_block, full_prompt)
                 }
             }
+        };
+
+        // Inject predecessor task context (DAG handover)
+        let full_prompt = if !task.depends_on.is_empty() {
+            let mut handover_blocks = Vec::new();
+            for dep_id in &task.depends_on {
+                if let Ok(Some(dep_with_notes)) = state.mission.db().get_board_task_with_notes(dep_id) {
+                    // Find last summary note from predecessor
+                    let summary = dep_with_notes.notes.iter()
+                        .rev()
+                        .find(|n| n.note_type == missiond_core::types::BoardNoteType::Summary)
+                        .map(|n| n.content.clone());
+                    if let Some(text) = summary {
+                        handover_blocks.push(format!(
+                            "### {} (已完成)\n> {}",
+                            dep_with_notes.task.title,
+                            text.lines().collect::<Vec<_>>().join("\n> ")
+                        ));
+                    }
+                }
+            }
+            if handover_blocks.is_empty() {
+                full_prompt
+            } else {
+                format!("## 前置任务产出上下文\n{}\n\n{}", handover_blocks.join("\n\n"), full_prompt)
+            }
+        } else {
+            full_prompt
         };
 
         // Append Decision Engine help suffix for all autopilot tasks

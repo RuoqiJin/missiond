@@ -1616,6 +1616,11 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     "flowTemplate": {
                         "type": "string",
                         "description": "Flow 模板名（如 engineering）。设置后任务进入 Flow Engine 模式"
+                    },
+                    "dependsOn": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "DAG 依赖：前置任务 ID 列表。所有前置任务完成后才会自动执行"
                     }
                 },
                 "required": ["title"]
@@ -1690,6 +1695,11 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     "flowTemplate": {
                         "type": "string",
                         "description": "Flow 模板名（如 engineering）"
+                    },
+                    "dependsOn": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "DAG 依赖：前置任务 ID 列表"
                     }
                 },
                 "required": ["id"]

@@ -381,6 +381,13 @@ impl MissionDB {
             )?;
         }
 
+        // Pipeline DAG: add depends_on column
+        if !columns.iter().any(|c| c == "depends_on") {
+            conn.execute_batch(
+                "ALTER TABLE board_tasks ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]';"
+            )?;
+        }
+
         // Knowledge Base: create FTS index if knowledge table exists but FTS doesn't
         let has_knowledge: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='knowledge'",
@@ -1247,9 +1254,10 @@ impl MissionDB {
     /// Insert a new board task
     pub fn insert_board_task(&self, task: &BoardTask) -> SqliteResult<()> {
         let conn = self.conn();
+        let depends_on_json = serde_json::to_string(&task.depends_on).unwrap_or_else(|_| "[]".to_string());
         conn.execute(
-            "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, hidden, retry_count, max_retries, order_idx, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, hidden, retry_count, max_retries, order_idx, created_at, updated_at, depends_on)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 task.id,
                 task.title,
@@ -1270,6 +1278,7 @@ impl MissionDB {
                 task.order_idx,
                 task.created_at,
                 task.updated_at,
+                depends_on_json,
             ],
         )?;
         Ok(())
@@ -1325,6 +1334,7 @@ impl MissionDB {
             flow_phase: None,
             flow_context: None,
             flow_template: None,
+            depends_on: input.depends_on.clone().unwrap_or_default(),
         };
 
         self.insert_board_task(&task)?;
@@ -1478,6 +1488,12 @@ impl MissionDB {
         push_field!(flow_phase, "flow_phase");
         push_field!(flow_context, "flow_context");
         push_field!(flow_template, "flow_template");
+
+        // DAG dependency
+        if let Some(ref deps) = update.depends_on {
+            fields.push("depends_on = ?".to_string());
+            values.push(Box::new(serde_json::to_string(deps).unwrap_or_else(|_| "[]".to_string())));
+        }
 
         let sql = format!(
             "UPDATE board_tasks SET {} WHERE id = ?",
@@ -1677,6 +1693,37 @@ impl MissionDB {
         Ok(result as i64)
     }
 
+    /// Check whether all DAG dependencies of a task are satisfied.
+    pub fn check_dependencies(&self, depends_on: &[String]) -> SqliteResult<crate::types::DependencyStatus> {
+        use crate::types::DependencyStatus;
+        if depends_on.is_empty() {
+            return Ok(DependencyStatus::Ready);
+        }
+        let conn = self.read_conn();
+        for dep_id in depends_on {
+            let row: Option<String> = conn.query_row(
+                "SELECT status FROM board_tasks WHERE id = ?1",
+                params![dep_id],
+                |row| row.get(0),
+            ).optional()?;
+            match row.as_deref() {
+                Some("done") => {} // satisfied
+                Some("failed") | Some("skipped") => {
+                    // Get title for human-readable reason
+                    let title: String = conn.query_row(
+                        "SELECT title FROM board_tasks WHERE id = ?1",
+                        params![dep_id],
+                        |row| row.get(0),
+                    ).unwrap_or_else(|_| dep_id.clone());
+                    return Ok(DependencyStatus::Blocked(format!("{} ({})", title, row.unwrap())));
+                }
+                Some(_) => return Ok(DependencyStatus::Pending), // open, running, blocked, verifying
+                None => return Ok(DependencyStatus::Blocked(format!("依赖任务 {} 不存在", dep_id))),
+            }
+        }
+        Ok(DependencyStatus::Ready)
+    }
+
     fn row_to_board_task(row: &rusqlite::Row) -> SqliteResult<BoardTask> {
         let status_str: String = row.get("status")?;
         let status = BoardTaskStatus::from_str(&status_str).unwrap_or(BoardTaskStatus::Open);
@@ -1709,6 +1756,10 @@ impl MissionDB {
             flow_phase: row.get("flow_phase").unwrap_or(None),
             flow_context: row.get("flow_context").unwrap_or(None),
             flow_template: row.get("flow_template").unwrap_or(None),
+            depends_on: {
+                let raw: String = row.get("depends_on").unwrap_or_else(|_| "[]".to_string());
+                serde_json::from_str(&raw).unwrap_or_default()
+            },
         })
     }
 

@@ -1195,6 +1195,68 @@ impl PTYSession {
         }
     }
 
+    /// Poll screen after paste to confirm Claude Code has received the pasted text.
+    /// Takes a pre-paste snapshot of the prompt line, then polls until the screen changes.
+    /// Claude Code shows "[Pasted text #N +M lines]" for multi-line pastes.
+    /// Falls back after 10s timeout.
+    async fn wait_for_paste_confirmation(&self, pre_paste_prompt: &str) {
+        let slot_id = &self.slot_id;
+        // Initial settle time for TUI to begin processing the paste
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        for attempt in 0..38 {
+            // Poll every 250ms, up to ~10s total (500ms initial + 38*250ms = ~10s)
+            let screen = self.get_screen_text().await;
+
+            // Check 1: Claude Code shows "[Pasted text #N" for multi-line pastes
+            if screen.contains("[Pasted text") {
+                tracing::debug!(slot = %slot_id, attempt, "Paste confirmed: [Pasted text] detected");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                return;
+            }
+
+            // Check 2: the prompt line changed from pre-paste snapshot (single-line paste)
+            // Find the last prompt line (starts with ❯ or >)
+            let current_prompt = screen
+                .lines()
+                .rev()
+                .find(|l| {
+                    let trimmed = l.trim();
+                    trimmed.starts_with('❯') || trimmed.starts_with('>')
+                })
+                .unwrap_or("")
+                .trim();
+            if !current_prompt.is_empty() && current_prompt != pre_paste_prompt {
+                tracing::debug!(
+                    slot = %slot_id, attempt,
+                    before = %pre_paste_prompt,
+                    after = %current_prompt,
+                    "Paste confirmed: prompt line changed"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                return;
+            }
+
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        tracing::warn!(slot = %slot_id, "Paste confirmation timed out after 10s, sending Enter anyway");
+    }
+
+    /// Capture the current prompt line content (for pre-paste snapshot).
+    async fn capture_prompt_line(&self) -> String {
+        let screen = self.get_screen_text().await;
+        screen
+            .lines()
+            .rev()
+            .find(|l| {
+                let trimmed = l.trim();
+                trimmed.starts_with('❯') || trimmed.starts_with('>')
+            })
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    }
+
     /// Send message (fire-and-forget): paste + enter, return immediately
     pub async fn send_fire_and_forget(&self, message: &str) -> Result<()> {
         let prev_state = self.state().await;
@@ -1239,10 +1301,13 @@ impl PTYSession {
             });
         }
 
+        // Snapshot prompt line before paste for change detection
+        let pre_paste_prompt = self.capture_prompt_line().await;
         // Send message using bracketed paste mode
         let paste_payload = format!("\x1b[200~{}\x1b[201~", message);
         self.write(&paste_payload).await?;
-        tokio::time::sleep(Duration::from_millis(1000)).await;
+        // Poll screen to confirm paste was received before sending Enter.
+        self.wait_for_paste_confirmation(&pre_paste_prompt).await;
         self.write("\r").await?;
 
         Ok(())
@@ -1276,12 +1341,14 @@ impl PTYSession {
         // Subscribe to events BEFORE sending so we never miss the Complete event.
         let mut rx = self.event_tx.subscribe();
 
+        // Snapshot prompt line before paste for change detection
+        let pre_paste_prompt = self.capture_prompt_line().await;
         // Send message using bracketed paste mode so multi-line text is treated as one paste.
         // Write paste markers + content in one call to avoid fragmentation.
         let paste_payload = format!("\x1b[200~{}\x1b[201~", message);
         self.write(&paste_payload).await?;
-        // Wait for Claude Code TUI to finish processing the paste before sending Enter.
-        tokio::time::sleep(Duration::from_millis(1000)).await;
+        // Poll screen to confirm paste was received before sending Enter.
+        self.wait_for_paste_confirmation(&pre_paste_prompt).await;
         self.write("\r").await?;
 
         // Wait for TextOutputEvent::Complete — emitted by state_check_loop when
