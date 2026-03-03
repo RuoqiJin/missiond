@@ -381,6 +381,8 @@ struct AppState {
     last_auto_gc_at: Arc<std::sync::atomic::AtomicI64>,
     /// Last KB consolidation timestamp (epoch secs). 0 = never run.
     last_kb_consolidation_at: Arc<std::sync::atomic::AtomicI64>,
+    /// Last decision harvest checkpoint timestamp (epoch secs). 0 = never run.
+    last_decision_harvest_at: Arc<std::sync::atomic::AtomicI64>,
     /// Pause switch for memory extraction tasks (realtime, deep_analysis, sync, GC).
     memory_paused: Arc<std::sync::atomic::AtomicBool>,
     /// Epoch secs when memory was paused. 0 = not paused. Used for TTL auto-resume.
@@ -5759,6 +5761,21 @@ async fn decision_tier3_dispatch(state: &AppState, question: &missiond_core::typ
     if let Some(ref task_id) = question.task_id {
         if let Ok(Some(task)) = state.mission.db().get_board_task(task_id) {
             prompt_parts.push(format!("关联任务：{} ({})", task.title, task_id));
+            // Flow phase — lets Tier 3 judge decision invasiveness by stage
+            if let Some(ref fp) = task.flow_phase {
+                prompt_parts.push(format!("当前 Flow 阶段：{}", fp));
+            }
+            // Last 5 Board notes — prevents Tier 3 from repeating failed approaches
+            if let Ok(notes) = state.mission.db().get_board_task_notes(task_id) {
+                let recent: Vec<_> = notes.iter().rev().take(5).collect();
+                if !recent.is_empty() {
+                    let notes_text = recent.iter()
+                        .map(|n| format!("[{}] {}", &n.created_at[..19.min(n.created_at.len())], n.content))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    prompt_parts.push(format!("最近进展（Board Notes）：\n{}", notes_text));
+                }
+            }
         }
     }
     prompt_parts.push(format!(
@@ -5906,7 +5923,7 @@ async fn harvest_decisions_for_task(state: &AppState, task_id: &str, task_title:
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    // 3. Call Gemini to generalize
+    // 3. Call Gemini to generalize (with Few-Shot examples for quality)
     let prompt = format!(
         "以下是刚成功完成的任务「{}」中的具体技术决策（均已通过代码落地验证）。\n\
         请将每条决策提炼为一条普适的架构/决策规则。\n\n\
@@ -5914,10 +5931,15 @@ async fn harvest_decisions_for_task(state: &AppState, task_id: &str, task_title:
         1. 剥离具体变量名、版本号、文件路径，保留问题特征和决策原则\n\
         2. 每条规则输出为 JSON 对象，包含 key、summary、detail\n\
         3. key：动宾结构连字符短语（如 resolve-dependency-conflict-legacy）\n\
-        4. summary：[触发条件词簇] → [核心原则] → [动作]，富含可能出现在提问中的名词\n\
-        5. detail：JSON 字符串 {{\"scenario\": \"...\", \"decision\": \"...\", \"reasoning\": \"...\"}}\n\
+        4. summary：`[触发条件词簇] → [核心原则] → [动作]`，必须包含触发该问题的所有可能同义词、报错关键字和核心名词\n\
+        5. detail：JSON 对象 {{\"scenario\": \"...\", \"decision\": \"...\", \"reasoning\": \"...\"}}\n\
         6. 如果多条决策本质相同，合并为一条\n\
-        7. 输出格式：JSON 数组 [{{...}}, ...]\n\n\
+        7. 只输出 JSON 数组，不要包含任何其他文本\n\n\
+        **Few-Shot 示例（必须严格遵循此格式）：**\n\
+        错误示范 summary：'遇到依赖冲突时选择兼容方案。'\n\
+        正确示范 summary：'遇到 第三方 API 接口 废弃 deprecated 过期 报错 不兼容 时，优先采用 降级 兼容 强行覆盖 旧版本 原则，切勿 大规模重构 业务逻辑'\n\
+        正确示范完整条目：\n\
+        {{\"key\":\"handle-third-party-api-deprecation\",\"summary\":\"遇到 第三方 API 接口 废弃 deprecated 过期 报错 不兼容 时，优先采用 降级 兼容 强行覆盖 旧版本 原则，切勿 大规模重构 业务逻辑\",\"detail\":{{\"scenario\":\"调用外部依赖或第三方 SDK 时发现其 API 已废弃导致编译或运行报错\",\"decision\":\"寻找最小侵入性的兼容方案（如编写 adapter、忽略警告或锁死旧版本）\",\"reasoning\":\"保持主线业务稳定性，避免因外部环境变化引发不可控的级联重构\"}}}}\n\n\
         决策记录：\n{}", task_title, qa_text
     );
 
@@ -5929,20 +5951,22 @@ async fn harvest_decisions_for_task(state: &AppState, task_id: &str, task_title:
         }
     };
 
-    // 4. Parse Gemini response and write to KB
-    // Strip markdown code fences if present
-    let clean = gemini_response
-        .trim()
-        .strip_prefix("```json").or_else(|| gemini_response.trim().strip_prefix("```"))
-        .unwrap_or(gemini_response.trim())
-        .strip_suffix("```")
-        .unwrap_or(gemini_response.trim())
-        .trim();
+    // 4. Parse Gemini response — extract JSON array robustly
+    // Gemini may wrap JSON in markdown fences or natural language text
+    let json_text = if let Some(start) = gemini_response.find('[') {
+        if let Some(end) = gemini_response.rfind(']') {
+            &gemini_response[start..=end]
+        } else {
+            gemini_response.trim()
+        }
+    } else {
+        gemini_response.trim()
+    };
 
-    let rules: Vec<serde_json::Value> = match serde_json::from_str(clean) {
+    let rules: Vec<serde_json::Value> = match serde_json::from_str(json_text) {
         Ok(r) => r,
         Err(e) => {
-            warn!(task_id, error = %e, resp = %clean, "Decision harvester: failed to parse Gemini JSON");
+            warn!(task_id, error = %e, resp = %json_text, "Decision harvester: failed to parse Gemini JSON");
             return;
         }
     };
@@ -6056,6 +6080,26 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
 
     // Decision Engine reaper: 15min timeout for master questions
     reap_stale_decision_tasks(state).await;
+
+    // Decision Engine: checkpoint harvester (every 24h, tasks with ≥3 unharvested decisions)
+    {
+        let now = chrono::Utc::now().timestamp();
+        let last = state.last_decision_harvest_at.load(std::sync::atomic::Ordering::Relaxed);
+        if now - last > 86400 {
+            state.last_decision_harvest_at.store(now, std::sync::atomic::Ordering::Relaxed);
+            if let Ok(tasks) = state.mission.db().find_tasks_with_unharvested_decisions(3) {
+                for (task_id, task_title, count) in &tasks {
+                    info!(task_id, count, "Decision harvester checkpoint: incremental harvest");
+                    let state_clone = state.clone();
+                    let tid = task_id.clone();
+                    let tt = task_title.clone();
+                    tokio::spawn(async move {
+                        harvest_decisions_for_task(&state_clone, &tid, &tt).await;
+                    });
+                }
+            }
+        }
+    }
 
     // Reaper: timeout Running submit tasks after 15 minutes
     reap_stale_submit_tasks(state).await;
@@ -9033,6 +9077,7 @@ async fn main() -> Result<()> {
         decision_notify: Arc::new(tokio::sync::Notify::new()),
         last_auto_gc_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         last_kb_consolidation_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        last_decision_harvest_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         memory_paused: Arc::new(std::sync::atomic::AtomicBool::new(
             home.join("memory_paused").exists()
         )),

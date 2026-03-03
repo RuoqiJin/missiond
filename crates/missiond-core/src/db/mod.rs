@@ -1948,6 +1948,28 @@ impl MissionDB {
         rows.collect()
     }
 
+    /// Find board tasks with ≥ min_count answered master questions (for checkpoint harvesting)
+    pub fn find_tasks_with_unharvested_decisions(&self, min_count: usize) -> SqliteResult<Vec<(String, String, usize)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT bt.id, bt.title, COUNT(aq.id) as q_count
+             FROM board_tasks bt
+             JOIN agent_questions aq ON aq.task_id = bt.id
+             WHERE bt.status NOT IN ('done', 'skipped', 'failed')
+               AND aq.target = 'master' AND aq.status = 'answered'
+             GROUP BY bt.id
+             HAVING q_count >= ?1"
+        )?;
+        let rows = stmt.query_map(params![min_count as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? as usize,
+            ))
+        })?;
+        rows.collect()
+    }
+
     fn row_to_agent_question(row: &rusqlite::Row) -> SqliteResult<AgentQuestion> {
         let status_str: String = row.get("status")?;
         let status =
