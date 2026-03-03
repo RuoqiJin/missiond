@@ -930,6 +930,9 @@ pub struct Conversation {
     /// Classification: "user" | "meta" | "worker" | "subagent"
     #[serde(default = "default_conversation_type")]
     pub conversation_type: String,
+    /// Last message write time (for compaction detection)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
 }
 
 fn default_conversation_type() -> String { "user".to_string() }
