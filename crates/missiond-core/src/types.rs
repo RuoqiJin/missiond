@@ -20,7 +20,7 @@ pub enum SlotTrait {
 }
 
 /// Configuration for a slot (workstation)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlotConfig {
     pub id: String,

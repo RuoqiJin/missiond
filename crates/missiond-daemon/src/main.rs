@@ -10453,6 +10453,120 @@ async fn main() -> Result<()> {
 
     info!("All event handlers started (isolated tasks)");
 
+    // ---- Slots hot-reload: SIGHUP + fsnotify ----
+
+    // Helper: reload slots and auto-start newly added ones
+    async fn handle_slots_reload(state: &AppState) {
+        match state.mission.reload_slots_config() {
+            Ok(result) => {
+                if result.has_changes() {
+                    // Auto-start newly added slots with auto_start: true
+                    for slot_id in &result.added {
+                        if let Some(slot) = state.mission.get_slot(slot_id) {
+                            if slot.config.auto_start == Some(true) {
+                                info!(slot_id = %slot_id, "Auto-starting newly added slot");
+                                match state.mission.spawn_agent(
+                                    slot_id,
+                                    Some(missiond_core::SpawnOptions {
+                                        visible: false,
+                                        auto_restart: true,
+                                    }),
+                                ).await {
+                                    Ok(_) => info!(slot_id = %slot_id, "Auto-started new slot"),
+                                    Err(e) => warn!(slot_id = %slot_id, error = %e, "Failed to auto-start new slot"),
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to reload slots.yaml");
+            }
+        }
+    }
+
+    // SIGHUP handler (Unix only)
+    #[cfg(unix)]
+    {
+        let sig_state = state.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sighup = signal(SignalKind::hangup()).expect("Failed to register SIGHUP handler");
+            loop {
+                sighup.recv().await;
+                info!("SIGHUP received, reloading slots.yaml");
+                handle_slots_reload(&sig_state).await;
+            }
+        });
+    }
+
+    // fsnotify watcher for slots.yaml
+    {
+        let watch_state = state.clone();
+        let watch_path = slots_path.clone();
+        tokio::spawn(async move {
+            use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(16);
+
+            let mut watcher = match RecommendedWatcher::new(
+                move |res: Result<Event, notify::Error>| {
+                    if let Ok(event) = res {
+                        let _ = tx.blocking_send(event);
+                    }
+                },
+                Config::default(),
+            ) {
+                Ok(w) => w,
+                Err(e) => {
+                    error!(error = %e, "Failed to create slots.yaml file watcher");
+                    return;
+                }
+            };
+
+            // Watch the parent directory (NonRecursive) to catch file renames/creates
+            let watch_dir = watch_path.parent().unwrap_or(&watch_path);
+            if let Err(e) = watcher.watch(watch_dir, RecursiveMode::NonRecursive) {
+                error!(error = %e, path = %watch_dir.display(), "Failed to watch slots.yaml directory");
+                return;
+            }
+
+            info!(path = %watch_path.display(), "Watching slots.yaml for changes");
+
+            // Debounce: wait 500ms after last event before reloading
+            let mut debounce_timer: Option<tokio::time::Instant> = None;
+
+            loop {
+                tokio::select! {
+                    Some(event) = rx.recv() => {
+                        // Only react to modifications/creates of the actual slots.yaml file
+                        let is_slots_file = event.paths.iter().any(|p| {
+                            p.file_name().map(|n| n == "slots.yaml").unwrap_or(false)
+                        });
+                        let is_relevant = matches!(
+                            event.kind,
+                            EventKind::Modify(_) | EventKind::Create(_)
+                        );
+                        if is_slots_file && is_relevant {
+                            debounce_timer = Some(tokio::time::Instant::now() + std::time::Duration::from_millis(500));
+                        }
+                    }
+                    _ = async {
+                        match debounce_timer {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        debounce_timer = None;
+                        info!("slots.yaml changed on disk, reloading");
+                        handle_slots_reload(&watch_state).await;
+                    }
+                }
+            }
+        });
+    }
+
     // Keep main alive — all work is in spawned tasks above.
     // Ctrl+C or SIGTERM triggers graceful shutdown.
     tokio::signal::ctrl_c().await.ok();
