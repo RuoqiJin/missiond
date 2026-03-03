@@ -5789,6 +5789,62 @@ async fn decision_tier3_dispatch(state: &AppState, question: &missiond_core::typ
     }
 }
 
+/// Decision Engine: reap stale decision tasks (15min timeout)
+/// Three recovery actions: downgrade question to user, kill PTY, board warning note
+async fn reap_stale_decision_tasks(state: &AppState) {
+    let stale_questions = match state.mission.db().find_stale_master_questions(900) {
+        Ok(qs) => qs,
+        Err(e) => {
+            warn!(error = %e, "Decision reaper: failed to query stale master questions");
+            return;
+        }
+    };
+    if stale_questions.is_empty() {
+        return;
+    }
+
+    // Kill slot-decision PTY once (shared across all stale questions)
+    let slot_id = "slot-decision";
+    if let Some(status) = state.pty.get_status(slot_id).await {
+        if status.state != missiond_core::pty::SessionState::Exited {
+            info!(slot_id = %slot_id, "Decision reaper: killing slot-decision PTY");
+            let _ = state.pty.kill(slot_id).await;
+        }
+    }
+
+    // Force-fail all stale decision slot_tasks
+    if let Ok(stale_tasks) = state.mission.db().find_stale_decision_tasks(900) {
+        for task in &stale_tasks {
+            let _ = state.mission.db().slot_task_set_failed(
+                &task.id,
+                "Decision reaper: 15min timeout, forced termination",
+            );
+        }
+    }
+
+    for question in &stale_questions {
+        warn!(question_id = %question.id, question = %question.question,
+            "Decision reaper: master question pending > 15min, forcing recovery");
+
+        // 1. Downgrade question target from master → user
+        if let Err(e) = state.mission.db().downgrade_question_to_user(&question.id) {
+            warn!(question_id = %question.id, error = %e, "Decision reaper: downgrade failed");
+        }
+
+        // 2. Write warning note to associated board task
+        if let Some(ref task_id) = question.task_id {
+            let _ = state.mission.db().add_board_task_note(
+                &missiond_core::types::AddBoardTaskNoteInput {
+                    task_id: task_id.clone(),
+                    content: "🚨 [决策引擎告警] 影子决策工位调查超时（15min），进程已强制终止。问题已转交人工，请 Master 尽快介入排查。".to_string(),
+                    note_type: Some("warning".to_string()),
+                    author: Some("decision-engine".to_string()),
+                },
+            );
+        }
+    }
+}
+
 async fn autopilot_tick(state: &AppState) -> Result<()> {
     // Check PTY slots for low context — restart if < 10%
     check_slot_context_levels(state).await;
@@ -5851,6 +5907,9 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
         Err(e) => warn!(error = %e, "Slot task reaper failed"),
         _ => {}
     }
+
+    // Decision Engine reaper: 15min timeout for master questions
+    reap_stale_decision_tasks(state).await;
 
     // Reaper: timeout Running submit tasks after 15 minutes
     reap_stale_submit_tasks(state).await;
@@ -5978,10 +6037,16 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
                 if qa_block.is_empty() {
                     full_prompt
                 } else {
-                    format!("[用户已回答的问题]\n{}\n\n{}", qa_block, full_prompt)
+                    format!("[决策与指示 (Decisions & Directives)]\n{}\n\n{}", qa_block, full_prompt)
                 }
             }
         };
+
+        // Append Decision Engine help suffix for all autopilot tasks
+        let full_prompt = format!(
+            "{}\n\n---\n注：若遇架构选择或反复 debug 失败的死胡同，请调 `mission_question_create(target=\"master\", decisionType=\"...\")` 呼叫主控裁决，附带 options 方案。",
+            full_prompt
+        );
 
         // Send prompt and wait for response
         let timeout_ms = 600_000; // 10 minutes
@@ -6256,7 +6321,7 @@ async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardT
                     if qa_block.is_empty() {
                         prompt
                     } else {
-                        format!("[用户已回答的问题]\n{}\n\n{}", qa_block, prompt)
+                        format!("[决策与指示 (Decisions & Directives)]\n{}\n\n{}", qa_block, prompt)
                     }
                 }
             };
@@ -6520,7 +6585,7 @@ fn build_flow_phase_prompt(
 ) -> String {
     let task_id = &task.id;
 
-    match phase {
+    let mut base = match phase {
         missiond_core::types::EngineeringPhase::Investigate => {
             format!(
                 r#"# 工程任务调查阶段
@@ -6653,7 +6718,27 @@ content: "<commit hash 或提交摘要>"
         }
 
         _ => format!("Flow phase {:?} — no prompt template available", phase),
+    };
+
+    // Inject Decision Engine help protocol for all slot phases
+    if phase.is_slot_phase() {
+        let protocol = r#"
+
+---
+【主控求助协议】
+当你遇到**阻断性困境**时，严禁自行盲目尝试超过 3 次或随意猜测架构意图。调用 `mission_question_create(target="master")` 呼叫主控。
+**呼叫条件与 decisionType 映射（严格遵守）：**
+1. `architecture`：涉及引入新依赖、修改数据库表、变更核心状态机（必须呼叫）
+2. `risk`：发现方案可能破坏现有功能或数据（必须呼叫）
+3. `implementation`：有两种可行方案无法权衡（附带 options）
+4. `investigation`：遇到不熟悉的黑盒 API（附带已查阅的上下文）
+5. `debug`：同一致命报错尝试修复 2 次仍失败（附带报错和尝试记录）
+
+**参数要求：** 必须在 `options` 中提供分析或候选项（如 "A: 修改基类, B: 新增 wrapper"），不能只抛出问题。"#;
+        base.push_str(protocol);
     }
+
+    base
 }
 
 const MEMORY_SLOT_ID: &str = "slot-memory";           // Fast lane (realtime)
