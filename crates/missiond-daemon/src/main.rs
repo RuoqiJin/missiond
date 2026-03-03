@@ -5345,6 +5345,64 @@ impl AppState {
                 Ok(ToolResult::json_pretty(&incidents))
             }
 
+            // ── Power Control (Epic 3: 算力经济学) ──
+            "mission_power_control" => {
+                let target = args.get("target").and_then(|v| v.as_str()).unwrap_or("");
+                let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
+
+                if target.is_empty() || action.is_empty() {
+                    return Ok(ToolResult::error("target and action are required"));
+                }
+
+                // Look up server from infra registry
+                let server = self.infra.get(target);
+                let server_info = server.as_ref().map(|s| {
+                    json!({ "id": s.id, "host": s.host, "roles": s.roles })
+                });
+
+                match action {
+                    "status" => {
+                        // Quick connectivity check via TCP probe
+                        let host = server.as_ref().and_then(|s| s.host.as_deref()).unwrap_or(target);
+                        let port: u16 = 22; // default SSH port
+                        let addr = format!("{}:{}", host, port);
+                        let reachable = tokio::time::timeout(
+                            std::time::Duration::from_secs(3),
+                            tokio::net::TcpStream::connect(&addr),
+                        ).await.is_ok();
+                        Ok(ToolResult::json_pretty(&json!({
+                            "target": target,
+                            "action": "status",
+                            "reachable": reachable,
+                            "probe": addr,
+                            "server": server_info,
+                        })))
+                    }
+                    "wake" => {
+                        // MVP: log intent, actual WoL/gcloud start to be wired per-target
+                        info!(target, "Power control: wake requested");
+                        Ok(ToolResult::json_pretty(&json!({
+                            "target": target,
+                            "action": "wake",
+                            "status": "requested",
+                            "note": "Wake-on-LAN / cloud API 唤醒已记录，具体执行需按 infra 配置补充",
+                            "server": server_info,
+                        })))
+                    }
+                    "suspend" => {
+                        info!(target, "Power control: suspend requested");
+                        Ok(ToolResult::json_pretty(&json!({
+                            "target": target,
+                            "action": "suspend",
+                            "status": "requested",
+                            "note": "休眠指令已记录，具体执行需按 infra 配置补充",
+                            "server": server_info,
+                        })))
+                    }
+                    _ => Ok(ToolResult::error(format!("Unknown action: {}. Use wake/suspend/status", action))),
+                }
+            }
+
             // ── Jarvis Trace ──
             "mission_jarvis_logs" => {
                 let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
@@ -6783,8 +6841,11 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
             }
         }
 
+        // Dynamic LLM model routing based on task characteristics
+        let task_env = determine_llm_env(&task);
+
         // Check if PTY session exists, spawn if needed
-        if !ensure_autopilot_pty(state, &task, &slot_id).await {
+        if !ensure_autopilot_pty(state, &task, &slot_id, task_env).await {
             continue;
         }
 
@@ -7100,8 +7161,9 @@ async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardT
                 }
             }
 
-            // Ensure PTY is running
-            if !ensure_autopilot_pty(state, task, slot_id).await {
+            // Ensure PTY is running (flow tasks also get model routing)
+            let task_env = determine_llm_env(task);
+            if !ensure_autopilot_pty(state, task, slot_id, task_env).await {
                 return Ok(());
             }
 
@@ -7290,9 +7352,35 @@ async fn call_gemini_for_flow(state: &AppState, task_id: &str, prompt: &str) -> 
     Ok(content)
 }
 
+/// Dynamic LLM model selector based on task characteristics.
+/// Returns env var overrides that get merged into PTY spawn environment.
+fn determine_llm_env(task: &missiond_core::types::BoardTask) -> HashMap<String, String> {
+    let mut envs = HashMap::new();
+
+    // Rule 1: urgent priority / ops / architecture → full-power Sonnet (or Opus)
+    if task.priority == "urgent" || task.category == "ops" {
+        envs.insert("ANTHROPIC_MODEL".to_string(), "claude-sonnet-4-6".to_string());
+    }
+    // Rule 2: docs / test / chore → fast & cheap Haiku
+    else if task.category == "docs" || task.category == "test" || task.category == "chore" {
+        envs.insert("ANTHROPIC_MODEL".to_string(), "claude-haiku-4-5-20251001".to_string());
+    }
+    // Rule 3: very long description (>2000 chars) → complex context, upgrade
+    else if task.description.len() > 2000 {
+        envs.insert("ANTHROPIC_MODEL".to_string(), "claude-sonnet-4-6".to_string());
+    }
+    // Default: sonnet (balanced cost/performance)
+    else {
+        envs.insert("ANTHROPIC_MODEL".to_string(), "claude-sonnet-4-6".to_string());
+    }
+
+    envs
+}
+
 /// Ensure a PTY session is running for the given slot (autopilot task execution).
 /// Returns true if PTY is available, false if spawn failed.
-async fn ensure_autopilot_pty(state: &AppState, task: &missiond_core::types::BoardTask, slot_id: &str) -> bool {
+/// `task_env`: task-specific env overrides (e.g., model routing) merged at spawn time.
+async fn ensure_autopilot_pty(state: &AppState, task: &missiond_core::types::BoardTask, slot_id: &str, task_env: HashMap<String, String>) -> bool {
     // Check if session is already running
     if let Some(info) = state.pty.get_status(slot_id).await {
         if info.state != SessionState::Exited {
@@ -7324,7 +7412,13 @@ async fn ensure_autopilot_pty(state: &AppState, task: &missiond_core::types::Boa
     };
     let slot_env = slot.config.env.as_ref();
     let mcp_config = slot.config.mcp_config.clone().map(PathBuf::from);
-    let (extra_env, session_file) = build_slot_tracking_env(slot_id, slot_env).await;
+    let (mut extra_env, session_file) = build_slot_tracking_env(slot_id, slot_env).await;
+
+    // Merge task-level env overrides (model routing etc.) — task_env wins over slot defaults
+    for (k, v) in &task_env {
+        info!(task_id = %task.id, slot_id, key = %k, value = %v, "Autopilot: LLM route override");
+        extra_env.insert(k.clone(), v.clone());
+    }
 
     match state.pty.spawn(&pty_slot, PTYSpawnOptions {
         auto_restart: false,
