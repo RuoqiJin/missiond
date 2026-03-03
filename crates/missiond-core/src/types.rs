@@ -439,9 +439,23 @@ pub struct BoardTask {
     /// Engineering flow: template name (e.g. "engineering")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flow_template: Option<String>,
+    /// DAG dependency: IDs of tasks that must be done before this task can execute
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
 }
 
 fn default_max_retries() -> i64 { 2 }
+
+/// Result of checking whether a task's DAG dependencies are satisfied
+#[derive(Debug, Clone)]
+pub enum DependencyStatus {
+    /// All dependencies are done
+    Ready,
+    /// Some dependencies are still open/running
+    Pending,
+    /// A dependency has failed or been skipped — block the downstream task
+    Blocked(String),
+}
 
 /// Input for creating a board task
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -473,6 +487,9 @@ pub struct CreateBoardTaskInput {
     /// Engineering flow: template name (e.g. "engineering"). Sets initial phase to "investigate".
     #[serde(default, rename = "flowTemplate")]
     pub flow_template: Option<String>,
+    /// DAG dependency: IDs of tasks that must complete before this task
+    #[serde(default, rename = "dependsOn")]
+    pub depends_on: Option<Vec<String>>,
 }
 
 /// Partial update for a board task
@@ -522,6 +539,9 @@ pub struct UpdateBoardTaskInput {
     /// Engineering flow: template name
     #[serde(default)]
     pub flow_template: Option<String>,
+    /// DAG dependency: IDs of tasks that must complete before this task
+    #[serde(default, rename = "dependsOn")]
+    pub depends_on: Option<Vec<String>>,
 }
 
 // ============ Board Task Notes ============
