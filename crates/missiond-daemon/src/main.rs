@@ -5052,6 +5052,32 @@ impl AppState {
                 };
                 let _ = self.mission.db().add_board_task_note(&note_input);
 
+                // Hard intercept: Plan → Execute transition requires risk review
+                if phase == missiond_core::types::EngineeringPhase::Plan {
+                    let plan_summary = if args.content.len() > 500 {
+                        format!("{}...", &args.content[..args.content.char_indices().nth(500).map(|(i,_)| i).unwrap_or(args.content.len())])
+                    } else {
+                        args.content.clone()
+                    };
+                    let q_input = missiond_core::types::CreateAgentQuestionInput {
+                        question: format!("[硬拦截] Plan→Execute 执行方案审核：{}", task.title),
+                        context: Some(format!("执行方案摘要：\n{}", plan_summary)),
+                        task_id: Some(task.id.clone()),
+                        slot_id: None,
+                        session_id: None,
+                        target: Some("master".to_string()),
+                        options: None,
+                        decision_type: Some("risk".to_string()),
+                    };
+                    match self.mission.db().create_agent_question(&q_input) {
+                        Ok(q) => {
+                            info!(task_id = %task.id, question_id = %q.id, "Hard intercept: Plan→Execute risk review created");
+                            self.decision_notify.notify_one();
+                        }
+                        Err(e) => warn!(error = %e, "Failed to create hard intercept question"),
+                    }
+                }
+
                 // Soft intercept: if slot flagged uncertainty, create question for Decision Engine
                 if let Some(ref concern) = args.requires_master_decision {
                     let q_input = missiond_core::types::CreateAgentQuestionInput {
@@ -5067,7 +5093,6 @@ impl AppState {
                     match self.mission.db().create_agent_question(&q_input) {
                         Ok(q) => {
                             info!(task_id = %task.id, question_id = %q.id, "Soft intercept: created master decision question");
-                            // Signal Decision Engine
                             self.decision_notify.notify_one();
                         }
                         Err(e) => warn!(error = %e, "Failed to create soft intercept question"),
@@ -5171,7 +5196,11 @@ impl AppState {
                     .answer_agent_question(&id, &answer)
                     .map_err(|e| anyhow!("DB error: {}", e))?
                 {
-                    Some(q) => Ok(ToolResult::json_pretty(&q)),
+                    Some(q) => {
+                        // Signal scheduler for instant slot recovery after question answered
+                        self.submit_notify.notify_one();
+                        Ok(ToolResult::json_pretty(&q))
+                    }
                     None => Ok(ToolResult::error("Question not found")),
                 }
             }
@@ -5486,15 +5515,278 @@ async fn process_pending_master_questions(state: &AppState) {
 
     info!(
         count = questions.len(),
-        "Decision Engine: {} pending master question(s) awaiting routing (Phase 2)",
+        "Decision Engine: {} pending master question(s) to route",
         questions.len()
     );
 
-    // Phase 2 will implement:
-    // - Tier 1: KB FTS5 policy:decision lookup
-    // - Tier 2: Gemini consultation with ESCALATE_TIER_3
-    // - Tier 3: slot-decision workstation dispatch
-    // For now, log and leave for autopilot_tick sweeper
+    for question in questions {
+        // Anti-loop: retry_count >= 3 → downgrade to user
+        if question.retry_count >= 3 {
+            warn!(question_id = %question.id, retries = question.retry_count,
+                "Decision Engine: retry limit reached, downgrading to user");
+            let _ = state.mission.db().downgrade_question_to_user(&question.id);
+            continue;
+        }
+
+        // Route by decision_type (forced fast-lane)
+        let result = match question.decision_type.as_str() {
+            "debug" | "investigation" => {
+                // Direct to Tier 3 — text LLM can't solve these
+                info!(question_id = %question.id, dt = %question.decision_type, "Decision Engine: → Tier 3 (fast-lane)");
+                decision_tier3_dispatch(state, &question).await
+            }
+            "architecture" | "risk" => {
+                // Direct to Tier 2 — skip muscle memory
+                info!(question_id = %question.id, dt = %question.decision_type, "Decision Engine: → Tier 2 (fast-lane)");
+                decision_tier2_gemini(state, &question).await
+            }
+            "preference" => {
+                // Tier 1 only — if miss, downgrade to user (don't let Gemini guess)
+                info!(question_id = %question.id, "Decision Engine: → Tier 1 (preference exclusive)");
+                match decision_tier1_kb(state, &question).await {
+                    Ok(true) => Ok(true),
+                    _ => {
+                        info!(question_id = %question.id, "Tier 1 miss for preference → downgrade to user");
+                        let _ = state.mission.db().downgrade_question_to_user(&question.id);
+                        Ok(false)
+                    }
+                }
+            }
+            _ => {
+                // "implementation" and others: full pass-through Tier 1 → 2 → 3
+                info!(question_id = %question.id, "Decision Engine: → full pass-through (implementation)");
+                match decision_tier1_kb(state, &question).await {
+                    Ok(true) => Ok(true), // Tier 1 hit
+                    _ => {
+                        // Tier 2
+                        match decision_tier2_gemini(state, &question).await {
+                            Ok(true) => Ok(true), // Gemini decided
+                            _ => {
+                                // Tier 3
+                                decision_tier3_dispatch(state, &question).await
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        if let Err(e) = result {
+            warn!(question_id = %question.id, error = %e, "Decision Engine: routing failed");
+            let _ = state.mission.db().increment_question_retry(&question.id);
+        }
+    }
+}
+
+/// Tier 1: KB FTS5 search policy:decision + keyword overlap validation
+async fn decision_tier1_kb(state: &AppState, question: &missiond_core::types::AgentQuestion) -> Result<bool> {
+    let results = state.mission.db().kb_search(&question.question, Some("policy:decision"))
+        .unwrap_or_default();
+
+    if results.is_empty() {
+        debug!(question_id = %question.id, "Tier 1: no policy:decision entries found");
+        return Ok(false);
+    }
+
+    // Take top-1 result
+    let top = &results[0];
+
+    // Keyword overlap check: question tokens ∩ rule summary tokens ≥ 30%
+    let q_tokens: std::collections::HashSet<&str> = question.question
+        .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+        .filter(|w| w.len() > 1)
+        .collect();
+    let rule_tokens: std::collections::HashSet<&str> = top.summary
+        .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+        .filter(|w| w.len() > 1)
+        .collect();
+
+    if q_tokens.is_empty() {
+        return Ok(false);
+    }
+
+    let overlap = q_tokens.intersection(&rule_tokens).count();
+    let coverage = overlap as f64 / q_tokens.len() as f64;
+
+    if coverage < 0.3 {
+        debug!(question_id = %question.id, coverage = %format!("{:.0}%", coverage * 100.0),
+            "Tier 1: keyword overlap below 30%, passing to next tier");
+        return Ok(false);
+    }
+
+    // High confidence hit — answer the question
+    let answer = format!("[主控裁决·肌肉记忆] {}", top.summary);
+    info!(question_id = %question.id, coverage = %format!("{:.0}%", coverage * 100.0),
+        rule_key = %top.key, "Tier 1: policy:decision hit, answering");
+
+    state.mission.db().answer_agent_question(&question.id, &answer)
+        .map_err(|e| anyhow!("Failed to answer question: {}", e))?;
+    state.submit_notify.notify_one();
+    Ok(true)
+}
+
+/// Tier 2: Call Gemini with structured JSON contract
+async fn decision_tier2_gemini(state: &AppState, question: &missiond_core::types::AgentQuestion) -> Result<bool> {
+    // Build context: task description + question + phase + recent notes
+    let mut context_parts = Vec::new();
+
+    // 1. Task description (if linked)
+    if let Some(ref task_id) = question.task_id {
+        if let Ok(Some(task)) = state.mission.db().get_board_task(task_id) {
+            context_parts.push(format!("## 任务目标\n**{}**\n{}", task.title, task.description));
+            if let Some(ref fp) = task.flow_phase {
+                context_parts.push(format!("## 当前阶段\n{}", fp));
+            }
+            // Last 3 board notes
+            if let Ok(notes) = state.mission.db().get_board_task_notes(task_id) {
+                let recent: Vec<_> = notes.iter().rev().take(3).collect();
+                if !recent.is_empty() {
+                    let notes_text = recent.iter()
+                        .map(|n| format!("[{}] {}", n.created_at, n.content))
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    context_parts.push(format!("## 最近进展\n{}", notes_text));
+                }
+            }
+        }
+    }
+
+    // 2. Question + options
+    context_parts.push(format!("## 待决策问题\n{}", question.question));
+    if !question.context.is_empty() {
+        context_parts.push(format!("## 补充上下文\n{}", question.context));
+    }
+    if let Some(ref opts) = question.options {
+        context_parts.push(format!("## 候选选项\n{}", opts));
+    }
+
+    let user_prompt = context_parts.join("\n\n");
+    let system_prompt = "你是一个高级架构决策大脑。请基于提供的上下文，对当前遭遇的困境做出决断。\
+        你必须且只能输出严格的 JSON 格式。\
+        如果你可以直接做出决定，请输出：{\"action\": \"DECIDE\", \"decision\": \"你的具体决策\", \"reasoning\": \"简要理由\"}。\
+        如果该问题需要动态运行代码、查看报错日志或全局搜索未知的代码库才能决定，你必须弃权并输出：{\"action\": \"ESCALATE_TIER_3\", \"decision\": \"\", \"reasoning\": \"需要阅读源码\"}。";
+
+    let full_prompt = format!("{}\n\n---\n\n{}", system_prompt, user_prompt);
+
+    // Reuse call_gemini_for_flow with a decision-specific conversation key
+    let conv_key = format!("decision-{}", question.id);
+    let response = call_gemini_for_flow(state, &conv_key, &full_prompt).await;
+
+    match response {
+        Ok(text) => {
+            // Parse JSON response
+            // Try to extract JSON from the response (Gemini may wrap in markdown)
+            let json_text = if let Some(start) = text.find('{') {
+                if let Some(end) = text.rfind('}') {
+                    &text[start..=end]
+                } else {
+                    &text
+                }
+            } else {
+                &text
+            };
+
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_text) {
+                let action = parsed.get("action").and_then(|a| a.as_str()).unwrap_or("");
+                let decision = parsed.get("decision").and_then(|d| d.as_str()).unwrap_or("");
+                let reasoning = parsed.get("reasoning").and_then(|r| r.as_str()).unwrap_or("");
+
+                if action == "DECIDE" && !decision.is_empty() {
+                    let answer = format!("[主控裁决·Gemini] {}\n\n理由：{}", decision, reasoning);
+                    info!(question_id = %question.id, "Tier 2: Gemini decided");
+                    state.mission.db().answer_agent_question(&question.id, &answer)
+                        .map_err(|e| anyhow!("Failed to answer: {}", e))?;
+                    state.submit_notify.notify_one();
+                    return Ok(true);
+                } else if action == "ESCALATE_TIER_3" {
+                    info!(question_id = %question.id, reason = %reasoning, "Tier 2: Gemini escalated to Tier 3");
+                    return Ok(false);
+                }
+            }
+
+            // Parsing failed — treat as escalation
+            warn!(question_id = %question.id, "Tier 2: Gemini response not valid JSON, escalating");
+            Ok(false)
+        }
+        Err(e) => {
+            warn!(question_id = %question.id, error = %e, "Tier 2: Gemini call failed");
+            Err(e)
+        }
+    }
+}
+
+/// Tier 3: Dispatch to slot-decision workstation via slot_tasks
+async fn decision_tier3_dispatch(state: &AppState, question: &missiond_core::types::AgentQuestion) -> Result<bool> {
+    let slot_id = "slot-decision";
+
+    // Build investigation prompt
+    let mut prompt_parts = vec![
+        "【最高优先任务】主干线工位在执行任务时遇到了阻塞。".to_string(),
+        format!("阻塞问题：{}", question.question),
+    ];
+    if !question.context.is_empty() {
+        prompt_parts.push(format!("补充上下文：{}", question.context));
+    }
+    if let Some(ref opts) = question.options {
+        prompt_parts.push(format!("候选选项：{}", opts));
+    }
+    if let Some(ref task_id) = question.task_id {
+        if let Ok(Some(task)) = state.mission.db().get_board_task(task_id) {
+            prompt_parts.push(format!("关联任务：{} ({})", task.title, task_id));
+        }
+    }
+    prompt_parts.push(format!(
+        "\n你的唯一目标是：通过阅读代码、运行测试等方式，查明真相并给出明确的决策。\n\
+         **警告**：你是只读/诊断性质的工位，禁止进行任何实质性的业务代码修改。\n\
+         当你得出结论后，请立刻调用 `mission_question_answer(id=\"{}\", answer=\"你的结论\")` 提交结果。",
+        question.id
+    ));
+
+    let prompt = prompt_parts.join("\n");
+    let prompt_summary = if prompt.len() > 200 {
+        let end = prompt.char_indices().nth(200).map(|(i,_)| i).unwrap_or(prompt.len());
+        format!("{}...", &prompt[..end])
+    } else {
+        prompt.clone()
+    };
+
+    // Ensure slot-decision PTY is running (reuse memory slot spawn pattern)
+    if !ensure_memory_slot_by_id(state, slot_id).await {
+        return Err(anyhow!("Failed to ensure slot-decision PTY"));
+    }
+
+    // Create slot_task for tracking
+    let now = chrono::Utc::now().to_rfc3339();
+    let slot_task = missiond_core::types::SlotTask {
+        id: uuid::Uuid::new_v4().to_string(),
+        slot_id: slot_id.to_string(),
+        task_type: "decision".to_string(),
+        status: "running".to_string(),
+        prompt_summary: Some(prompt_summary),
+        source_sessions: None,
+        output_count: 0,
+        created_at: now.clone(),
+        started_at: Some(now),
+        completed_at: None,
+        duration_ms: None,
+        error: None,
+        conversation_id: None,
+    };
+    let _ = state.mission.db().insert_slot_task(&slot_task);
+
+    // Send prompt to slot-decision PTY
+    let timeout_ms = 300_000; // 5 min
+    match state.pty.send(slot_id, &prompt, timeout_ms).await {
+        Ok(_) => {
+            info!(question_id = %question.id, slot_task_id = %slot_task.id,
+                "Tier 3: dispatched to slot-decision");
+            Ok(true)
+        }
+        Err(e) => {
+            warn!(question_id = %question.id, error = %e, "Tier 3: failed to send to slot-decision");
+            Err(anyhow!("Tier 3 dispatch failed: {}", e))
+        }
+    }
 }
 
 async fn autopilot_tick(state: &AppState) -> Result<()> {

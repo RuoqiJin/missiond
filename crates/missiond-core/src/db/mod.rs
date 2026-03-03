@@ -1911,6 +1911,28 @@ impl MissionDB {
         self.get_agent_question(id)
     }
 
+    /// Decision Engine: downgrade question target from master to user
+    pub fn downgrade_question_to_user(&self, id: &str) -> SqliteResult<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE agent_questions SET target = 'user', updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Decision Engine: increment retry_count for a question
+    pub fn increment_question_retry(&self, id: &str) -> SqliteResult<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE agent_questions SET retry_count = retry_count + 1, updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
     fn row_to_agent_question(row: &rusqlite::Row) -> SqliteResult<AgentQuestion> {
         let status_str: String = row.get("status")?;
         let status =
