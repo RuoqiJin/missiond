@@ -12,6 +12,7 @@
 pub mod cc_tasks;
 pub mod core;
 pub mod db;
+pub mod embedding;
 pub mod ipc;
 pub mod pty;
 pub mod semantic;

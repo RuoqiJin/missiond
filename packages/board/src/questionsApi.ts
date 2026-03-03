@@ -1,4 +1,4 @@
-import type { AgentQuestion } from './types';
+import type { AgentQuestion, DecisionStats } from './types';
 
 const BASE = '/api/questions';
 
@@ -14,6 +14,18 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 export async function fetchQuestions(status?: string): Promise<AgentQuestion[]> {
   const params = status ? `?status=${status}` : '';
   return request<AgentQuestion[]>(`${BASE}${params}`);
+}
+
+export async function fetchMasterQuestions(status?: string, limit?: number): Promise<AgentQuestion[]> {
+  const params = new URLSearchParams();
+  params.set('target', 'master');
+  if (status) params.set('status', status);
+  if (limit) params.set('limit', String(limit));
+  return request<AgentQuestion[]>(`${BASE}?${params.toString()}`);
+}
+
+export async function fetchDecisionStats(hours = 24): Promise<DecisionStats> {
+  return request<DecisionStats>(`/api/decisions/stats?hours=${hours}`);
 }
 
 export async function answerQuestion(id: string, answer: string): Promise<AgentQuestion> {

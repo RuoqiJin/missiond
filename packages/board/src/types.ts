@@ -54,6 +54,49 @@ export interface AgentQuestion {
   context: string;
   status: QuestionStatus;
   answer?: string;
+  target: string;           // "user" | "master"
+  options?: string;         // JSON array of choices
+  decisionType: string;     // architecture/implementation/debug/investigation/risk/preference
+  retryCount: number;
+  routingTrace?: string;    // JSON: { resolvedTier, path[], latencyMs }
   createdAt: string;
   updatedAt: string;
+}
+
+// ============ Decision Engine Types ============
+
+export interface RoutingTrace {
+  resolved_tier: string;     // "T1" | "T2" | "T3" | "downgraded" | "error"
+  path: TierStep[];
+  latency_ms: number;
+}
+
+export interface TierStep {
+  tier: string;
+  status: string;   // "decided" | "missed" | "fast-lane" | "escalated" | "dispatched" | "downgraded"
+  reason?: string;
+  coverage?: string;
+  rule_key?: string;
+  action?: string;
+  reasoning?: string;
+  slot_task_id?: string;
+  // Hybrid search telemetry (Tier 1 with embeddings)
+  method?: string;               // "hybrid" | "fts_only"
+  semantic_similarity?: string;  // e.g. "0.823"
+  fts_rank?: number;
+  vec_rank?: number;
+  rrf_score?: string;            // e.g. "0.0451"
+}
+
+export interface DecisionStats {
+  total: number;
+  answered: number;
+  pending: number;
+  dismissed: number;
+  downgraded: number;
+  t1Hits: number;
+  t2Hits: number;
+  t3Hits: number;
+  t1HitRate: string;
+  hours: number;
 }

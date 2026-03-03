@@ -11,8 +11,8 @@ use std::collections::HashSet;
 use crate::types::{
     AddBoardTaskNoteInput, AgentQuestion, AgentQuestionStatus, BoardNoteType, BoardTask,
     BoardTaskNote, BoardTaskStatus, BoardTaskWithNotes, Conversation, ConversationMessage,
-    CreateAgentQuestionInput, CreateBoardTaskInput, EventType, InboxMessage, KBOperation,
-    KBOperationRow, KBRememberInput, KBRememberResult, KnowledgeEntry, SkillBlock,
+    CreateAgentQuestionInput, CreateBoardTaskInput, EventType, InboxMessage, IncidentRow,
+    KBOperation, KBOperationRow, KBRememberInput, KBRememberResult, KnowledgeEntry, SkillBlock,
     SkillSearchResult, SkillTopic, SlotTask, Task, TaskEvent, TaskStatus, TaskUpdate,
     ToolCallRecord, UpdateBoardTaskInput,
 };
@@ -125,7 +125,7 @@ CREATE TABLE IF NOT EXISTS agent_questions (
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agent_questions_status ON agent_questions(status);
-CREATE INDEX IF NOT EXISTS idx_agent_questions_target ON agent_questions(target, status);
+-- Note: idx_agent_questions_target is created in migration block (target column added via ALTER TABLE)
 
 -- Knowledge base (Jarvis Memory)
 CREATE TABLE IF NOT EXISTS knowledge (
@@ -608,6 +608,17 @@ impl MissionDB {
             )?;
         }
 
+        // Add embedding column to knowledge table for semantic vector search
+        let has_embedding: bool = conn
+            .prepare("SELECT embedding FROM knowledge LIMIT 0")
+            .is_ok();
+        if !has_embedding {
+            conn.execute_batch(
+                "ALTER TABLE knowledge ADD COLUMN embedding BLOB;"
+            )?;
+            tracing::info!("Migration: added embedding column to knowledge table");
+        }
+
         // Token usage ledger — append-only event stream for cost analysis
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS token_usage_ledger (
@@ -825,6 +836,31 @@ impl MissionDB {
             )?;
         }
 
+        // Decision Engine Phase 2: add routing_trace to agent_questions
+        if !aq_columns.iter().any(|c| c == "routing_trace") {
+            conn.execute_batch(
+                "ALTER TABLE agent_questions ADD COLUMN routing_trace TEXT;"
+            )?;
+        }
+
+        // AIOps: incidents table for proactive monitoring
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS incidents (
+                id TEXT PRIMARY KEY,
+                severity TEXT NOT NULL,
+                source TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                server_id TEXT,
+                raw_payload TEXT,
+                board_task_id TEXT,
+                dedupe_key TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_incidents_created ON incidents(created_at);
+            CREATE INDEX IF NOT EXISTS idx_incidents_dedupe ON incidents(dedupe_key, created_at);"
+        )?;
+
         Ok(())
     }
 
@@ -902,47 +938,51 @@ impl MissionDB {
 
     /// Get a task by ID
     pub fn get_task(&self, id: &str) -> SqliteResult<Option<Task>> {
-        let conn = self.conn();
-        // Support short ID prefix matching (like git short hashes)
-        if id.len() < 36 {
-            let prefix = format!("{}%", id);
-            let mut stmt = conn.prepare("SELECT * FROM tasks WHERE id LIKE ? ORDER BY created_at DESC LIMIT 2")?;
-            let tasks: Vec<Task> = stmt
-                .query_map(params![prefix], |row| Self::row_to_task(row))?
-                .filter_map(|r| r.ok())
-                .collect();
-            match tasks.len() {
-                1 => Ok(Some(tasks.into_iter().next().unwrap())),
-                _ => Ok(None), // 0 = not found, 2+ = ambiguous
-            }
-        } else {
-            let mut stmt = conn.prepare("SELECT * FROM tasks WHERE id = ?")?;
-            let mut rows = stmt.query(params![id])?;
-            if let Some(row) = rows.next()? {
-                Ok(Some(Self::row_to_task(row)?))
+        tokio::task::block_in_place(|| {
+            let conn = self.read_conn();
+            // Support short ID prefix matching (like git short hashes)
+            if id.len() < 36 {
+                let prefix = format!("{}%", id);
+                let mut stmt = conn.prepare("SELECT * FROM tasks WHERE id LIKE ? ORDER BY created_at DESC LIMIT 2")?;
+                let tasks: Vec<Task> = stmt
+                    .query_map(params![prefix], |row| Self::row_to_task(row))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                match tasks.len() {
+                    1 => Ok(Some(tasks.into_iter().next().unwrap())),
+                    _ => Ok(None), // 0 = not found, 2+ = ambiguous
+                }
             } else {
-                Ok(None)
+                let mut stmt = conn.prepare("SELECT * FROM tasks WHERE id = ?")?;
+                let mut rows = stmt.query(params![id])?;
+                if let Some(row) = rows.next()? {
+                    Ok(Some(Self::row_to_task(row)?))
+                } else {
+                    Ok(None)
+                }
             }
-        }
+        })
     }
 
     /// Get all tasks by status
     pub fn get_tasks_by_status(&self, status: TaskStatus) -> SqliteResult<Vec<Task>> {
-        let conn = self.conn();
-        let mut stmt = conn
-            .prepare("SELECT * FROM tasks WHERE status = ? ORDER BY created_at ASC")?;
-        let rows = stmt.query_map(params![status.as_str()], |row| Self::row_to_task(row))?;
+        tokio::task::block_in_place(|| {
+            let conn = self.read_conn();
+            let mut stmt = conn
+                .prepare("SELECT * FROM tasks WHERE status = ? ORDER BY created_at ASC")?;
+            let rows = stmt.query_map(params![status.as_str()], |row| Self::row_to_task(row))?;
 
-        let mut tasks = Vec::new();
-        for task in rows {
-            tasks.push(task?);
-        }
-        Ok(tasks)
+            let mut tasks = Vec::new();
+            for task in rows {
+                tasks.push(task?);
+            }
+            Ok(tasks)
+        })
     }
 
     /// Get queued tasks by role
     pub fn get_queued_tasks_by_role(&self, role: &str) -> SqliteResult<Vec<Task>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM tasks WHERE status = 'queued' AND role = ? ORDER BY created_at ASC",
         )?;
@@ -968,16 +1008,18 @@ impl MissionDB {
 
     /// Get all tasks (for listing)
     pub fn get_all_tasks(&self, limit: i64) -> SqliteResult<Vec<Task>> {
-        let conn = self.conn();
-        let mut stmt = conn
-            .prepare("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?")?;
-        let rows = stmt.query_map(params![limit], |row| Self::row_to_task(row))?;
+        tokio::task::block_in_place(|| {
+            let conn = self.read_conn();
+            let mut stmt = conn
+                .prepare("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?")?;
+            let rows = stmt.query_map(params![limit], |row| Self::row_to_task(row))?;
 
-        let mut tasks = Vec::new();
-        for task in rows {
-            tasks.push(task?);
-        }
-        Ok(tasks)
+            let mut tasks = Vec::new();
+            for task in rows {
+                tasks.push(task?);
+            }
+            Ok(tasks)
+        })
     }
 
     /// Get completed/failed tasks since a given timestamp (per-session watermark model).
@@ -1052,7 +1094,7 @@ impl MissionDB {
             "SELECT * FROM inbox ORDER BY created_at DESC LIMIT ?"
         };
 
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map(params![limit], |row| Self::row_to_inbox_message(row))?;
 
@@ -1106,7 +1148,7 @@ impl MissionDB {
 
     /// Get events by task ID
     pub fn get_events_by_task(&self, task_id: &str) -> SqliteResult<Vec<TaskEvent>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn
             .prepare("SELECT * FROM events WHERE task_id = ? ORDER BY id ASC")?;
         let rows = stmt.query_map(params![task_id], |row| Self::row_to_event(row))?;
@@ -1137,7 +1179,7 @@ impl MissionDB {
 
     /// Get session ID for a slot
     pub fn get_slot_session(&self, slot_id: &str) -> SqliteResult<Option<String>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn
             .prepare("SELECT session_id FROM slot_sessions WHERE slot_id = ?")?;
         let mut rows = stmt.query(params![slot_id])?;
@@ -1176,7 +1218,7 @@ impl MissionDB {
 
     /// Get all slot sessions
     pub fn get_all_slot_sessions(&self) -> SqliteResult<Vec<(String, String)>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn
             .prepare("SELECT slot_id, session_id FROM slot_sessions")?;
         let rows = stmt.query_map([], |row| {
@@ -1192,7 +1234,7 @@ impl MissionDB {
 
     /// Get slot_id for a given session_id (reverse lookup)
     pub fn get_slot_for_session(&self, session_id: &str) -> SqliteResult<Option<String>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT slot_id FROM slot_sessions WHERE session_id = ?1",
             params![session_id],
@@ -1568,7 +1610,7 @@ impl MissionDB {
     /// (auto_execute=true, status=open, due_date <= now, has assignee)
     pub fn list_autopilot_tasks(&self) -> SqliteResult<Vec<BoardTask>> {
         let now = chrono::Utc::now().to_rfc3339();
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM board_tasks
              WHERE auto_execute = 1
@@ -1587,42 +1629,44 @@ impl MissionDB {
 
     /// Board summary: status counts + pending questions + recent activity
     pub fn board_summary(&self, since: Option<&str>) -> SqliteResult<serde_json::Value> {
-        let conn = self.conn();
-        let since_clause = since.unwrap_or("2000-01-01T00:00:00Z");
+        tokio::task::block_in_place(|| {
+            let conn = self.read_conn();
+            let since_clause = since.unwrap_or("2000-01-01T00:00:00Z");
 
-        // Status counts (since timestamp for completed/failed, all-time for open/running/blocked)
-        let open: i64 = conn.query_row("SELECT COUNT(*) FROM board_tasks WHERE status = 'open'", [], |r| r.get(0))?;
-        let running: i64 = conn.query_row("SELECT COUNT(*) FROM board_tasks WHERE status = 'running'", [], |r| r.get(0))?;
-        let blocked: i64 = conn.query_row("SELECT COUNT(*) FROM board_tasks WHERE status = 'blocked'", [], |r| r.get(0))?;
-        let completed: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM board_tasks WHERE status = 'done' AND updated_at >= ?1",
-            params![since_clause], |r| r.get(0),
-        )?;
-        let failed: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM board_tasks WHERE status = 'failed' AND updated_at >= ?1",
-            params![since_clause], |r| r.get(0),
-        )?;
+            // Status counts (since timestamp for completed/failed, all-time for open/running/blocked)
+            let open: i64 = conn.query_row("SELECT COUNT(*) FROM board_tasks WHERE status = 'open'", [], |r| r.get(0))?;
+            let running: i64 = conn.query_row("SELECT COUNT(*) FROM board_tasks WHERE status = 'running'", [], |r| r.get(0))?;
+            let blocked: i64 = conn.query_row("SELECT COUNT(*) FROM board_tasks WHERE status = 'blocked'", [], |r| r.get(0))?;
+            let completed: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM board_tasks WHERE status = 'done' AND updated_at >= ?1",
+                params![since_clause], |r| r.get(0),
+            )?;
+            let failed: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM board_tasks WHERE status = 'failed' AND updated_at >= ?1",
+                params![since_clause], |r| r.get(0),
+            )?;
 
-        // Pending questions
-        let pending_questions: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM agent_questions WHERE status = 'pending'", [], |r| r.get(0),
-        )?;
+            // Pending questions
+            let pending_questions: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM agent_questions WHERE status = 'pending'", [], |r| r.get(0),
+            )?;
 
-        // Recent KB entries (since timestamp)
-        let new_kb: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM knowledge WHERE created_at >= ?1",
-            params![since_clause], |r| r.get(0),
-        ).unwrap_or(0);
+            // Recent KB entries (since timestamp)
+            let new_kb: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM knowledge WHERE created_at >= ?1",
+                params![since_clause], |r| r.get(0),
+            ).unwrap_or(0);
 
-        Ok(serde_json::json!({
-            "open": open,
-            "running": running,
-            "blocked": blocked,
-            "completed": completed,
-            "failed": failed,
-            "pendingQuestions": pending_questions,
-            "newKBEntries": new_kb,
-        }))
+            Ok(serde_json::json!({
+                "open": open,
+                "running": running,
+                "blocked": blocked,
+                "completed": completed,
+                "failed": failed,
+                "pendingQuestions": pending_questions,
+                "newKBEntries": new_kb,
+            }))
+        })
     }
 
     /// Clear all done board tasks
@@ -1772,6 +1816,7 @@ impl MissionDB {
             options: input.options.clone(),
             decision_type: input.decision_type.clone().unwrap_or_else(|| "implementation".to_string()),
             retry_count: 0,
+            routing_trace: None,
             created_at: now.clone(),
             updated_at: now,
         };
@@ -1800,7 +1845,7 @@ impl MissionDB {
     }
 
     pub fn get_agent_question(&self, id: &str) -> SqliteResult<Option<AgentQuestion>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn
             .prepare("SELECT * FROM agent_questions WHERE id = ?1")?;
         let mut rows = stmt.query(params![id])?;
@@ -1814,32 +1859,39 @@ impl MissionDB {
     pub fn list_agent_questions(
         &self,
         status: Option<&str>,
+        target: Option<&str>,
+        limit: Option<usize>,
     ) -> SqliteResult<Vec<AgentQuestion>> {
-        let conn = self.conn();
-        let mut questions = Vec::new();
+        let conn = self.read_conn();
+        let mut sql = "SELECT * FROM agent_questions WHERE 1=1".to_string();
+        let mut param_values: Vec<String> = Vec::new();
+
         if let Some(s) = status {
-            let mut stmt = conn.prepare(
-                "SELECT * FROM agent_questions WHERE status = ?1 ORDER BY created_at DESC",
-            )?;
-            let rows = stmt.query_map(params![s], |row| Self::row_to_agent_question(row))?;
-            for q in rows {
-                questions.push(q?);
-            }
-        } else {
-            let mut stmt = conn.prepare(
-                "SELECT * FROM agent_questions ORDER BY created_at DESC",
-            )?;
-            let rows = stmt.query_map([], |row| Self::row_to_agent_question(row))?;
-            for q in rows {
-                questions.push(q?);
-            }
+            param_values.push(s.to_string());
+            sql.push_str(&format!(" AND status = ?{}", param_values.len()));
+        }
+        if let Some(t) = target {
+            param_values.push(t.to_string());
+            sql.push_str(&format!(" AND target = ?{}", param_values.len()));
+        }
+        sql.push_str(" ORDER BY created_at DESC");
+        if let Some(l) = limit {
+            sql.push_str(&format!(" LIMIT {}", l));
+        }
+
+        let mut stmt = conn.prepare(&sql)?;
+        let params_refs: Vec<&dyn rusqlite::ToSql> = param_values.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params_refs.as_slice(), |row| Self::row_to_agent_question(row))?;
+        let mut questions = Vec::new();
+        for q in rows {
+            questions.push(q?);
         }
         Ok(questions)
     }
 
     /// List answered questions linked to a specific board task
     pub fn list_questions_for_task(&self, task_id: &str) -> SqliteResult<Vec<AgentQuestion>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM agent_questions WHERE task_id = ?1 AND status = 'answered' ORDER BY created_at ASC",
         )?;
@@ -1911,6 +1963,17 @@ impl MissionDB {
         self.get_agent_question(id)
     }
 
+    /// Decision Engine: set routing trace JSON for a question
+    pub fn set_question_routing_trace(&self, id: &str, trace_json: &str) -> SqliteResult<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE agent_questions SET routing_trace = ?1, updated_at = ?2 WHERE id = ?3",
+            params![trace_json, now, id],
+        )?;
+        Ok(())
+    }
+
     /// Decision Engine: downgrade question target from master to user
     pub fn downgrade_question_to_user(&self, id: &str) -> SqliteResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
@@ -1970,6 +2033,73 @@ impl MissionDB {
         rows.collect()
     }
 
+    /// Decision Engine: aggregate statistics for monitoring dashboard
+    pub fn decision_stats(&self, hours: i64) -> SqliteResult<serde_json::Value> {
+        let conn = self.read_conn();
+        let cutoff = (chrono::Utc::now() - chrono::TimeDelta::hours(hours)).to_rfc3339();
+
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM agent_questions WHERE target = 'master' AND created_at > ?1",
+            params![cutoff], |row| row.get(0),
+        ).unwrap_or(0);
+
+        let answered: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM agent_questions WHERE target = 'master' AND status = 'answered' AND created_at > ?1",
+            params![cutoff], |row| row.get(0),
+        ).unwrap_or(0);
+
+        let pending: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM agent_questions WHERE target = 'master' AND status = 'pending'",
+            [], |row| row.get(0),
+        ).unwrap_or(0);
+
+        let dismissed: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM agent_questions WHERE target = 'master' AND status = 'dismissed' AND created_at > ?1",
+            params![cutoff], |row| row.get(0),
+        ).unwrap_or(0);
+
+        // Count by resolved_tier from routing_trace
+        let t1_hits: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM agent_questions WHERE routing_trace LIKE '%\"resolved_tier\":\"T1\"%' AND created_at > ?1",
+            params![cutoff], |row| row.get(0),
+        ).unwrap_or(0);
+
+        let t2_hits: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM agent_questions WHERE routing_trace LIKE '%\"resolved_tier\":\"T2\"%' AND created_at > ?1",
+            params![cutoff], |row| row.get(0),
+        ).unwrap_or(0);
+
+        let t3_hits: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM agent_questions WHERE routing_trace LIKE '%\"resolved_tier\":\"T3\"%' AND created_at > ?1",
+            params![cutoff], |row| row.get(0),
+        ).unwrap_or(0);
+
+        let downgraded: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM agent_questions WHERE routing_trace LIKE '%\"resolved_tier\":\"downgraded\"%' AND created_at > ?1",
+            params![cutoff], |row| row.get(0),
+        ).unwrap_or(0);
+
+        let resolved = t1_hits + t2_hits + t3_hits;
+        let t1_hit_rate = if resolved > 0 {
+            format!("{:.0}%", (t1_hits as f64 / resolved as f64) * 100.0)
+        } else {
+            "N/A".to_string()
+        };
+
+        Ok(serde_json::json!({
+            "total": total,
+            "answered": answered,
+            "pending": pending,
+            "dismissed": dismissed,
+            "downgraded": downgraded,
+            "t1Hits": t1_hits,
+            "t2Hits": t2_hits,
+            "t3Hits": t3_hits,
+            "t1HitRate": t1_hit_rate,
+            "hours": hours,
+        }))
+    }
+
     fn row_to_agent_question(row: &rusqlite::Row) -> SqliteResult<AgentQuestion> {
         let status_str: String = row.get("status")?;
         let status =
@@ -1987,6 +2117,7 @@ impl MissionDB {
             options: row.get("options")?,
             decision_type: row.get::<_, Option<String>>("decision_type")?.unwrap_or_else(|| "implementation".to_string()),
             retry_count: row.get::<_, Option<i64>>("retry_count")?.unwrap_or(0),
+            routing_trace: row.get("routing_trace")?,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
         })
@@ -2248,6 +2379,111 @@ impl MissionDB {
         } else {
             Ok(None)
         }
+    }
+
+    // ── Embedding storage methods ──────────────────────────────────
+
+    /// Store embedding BLOB for a knowledge entry (f32 little-endian bytes)
+    pub fn kb_set_embedding(&self, id: &str, embedding: &[f32]) -> SqliteResult<()> {
+        let conn = self.conn();
+        let bytes = crate::embedding::f32_vec_to_bytes(embedding);
+        conn.execute(
+            "UPDATE knowledge SET embedding = ?1 WHERE id = ?2",
+            params![bytes, id],
+        )?;
+        Ok(())
+    }
+
+    /// Load all embeddings for a given category (e.g. "policy:decision").
+    /// Returns Vec<(id, embedding)> for entries with non-NULL embeddings.
+    pub fn kb_load_embeddings(&self, category: &str) -> SqliteResult<Vec<(String, Vec<f32>)>> {
+        let conn = self.read_conn();
+        let like_pattern = format!("{}:%", category);
+        let mut stmt = conn.prepare(
+            "SELECT id, embedding FROM knowledge
+             WHERE (category = ?1 OR category LIKE ?2) AND embedding IS NOT NULL"
+        )?;
+        let rows = stmt.query_map(params![category, like_pattern], |row| {
+            let id: String = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((id, blob))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            let (id, blob) = row?;
+            result.push((id, crate::embedding::bytes_to_f32_vec(&blob)));
+        }
+        Ok(result)
+    }
+
+    /// List knowledge entries where embedding IS NULL (for backfill).
+    /// Returns (id, summary, detail_text).
+    pub fn kb_entries_missing_embedding(&self, category: Option<&str>) -> SqliteResult<Vec<(String, String, String)>> {
+        let conn = self.read_conn();
+        let mut entries = Vec::new();
+        if let Some(cat) = category {
+            let like_pattern = format!("{}:%", cat);
+            let mut stmt = conn.prepare(
+                "SELECT id, summary, COALESCE(detail, '') FROM knowledge
+                 WHERE (category = ?1 OR category LIKE ?2) AND embedding IS NULL"
+            )?;
+            let rows = stmt.query_map(params![cat, like_pattern], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+            for row in rows {
+                entries.push(row?);
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id, summary, COALESCE(detail, '') FROM knowledge WHERE embedding IS NULL"
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+            for row in rows {
+                entries.push(row?);
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Get a knowledge entry by its ID (for hybrid search result lookup)
+    pub fn kb_get_by_id(&self, id: &str) -> SqliteResult<Option<KnowledgeEntry>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare("SELECT * FROM knowledge WHERE id = ?1")?;
+        let mut rows = stmt.query(params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::row_to_knowledge_entry(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get a knowledge entry ID by key (lightweight, no access bump)
+    pub fn kb_get_id_by_key(&self, key: &str) -> SqliteResult<Option<String>> {
+        let conn = self.read_conn();
+        conn.query_row(
+            "SELECT id FROM knowledge WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        ).optional()
+    }
+
+    /// Search knowledge with ranked results (for hybrid search RRF fusion).
+    /// Returns (entry, rank_position) where rank is 0-based.
+    pub fn kb_search_ranked(
+        &self,
+        query: &str,
+        category: Option<&str>,
+        limit: usize,
+    ) -> SqliteResult<Vec<(KnowledgeEntry, usize)>> {
+        let results = self.kb_search(query, category)?;
+        Ok(results
+            .into_iter()
+            .take(limit)
+            .enumerate()
+            .map(|(i, e)| (e, i))
+            .collect())
     }
 
     /// Search knowledge via FTS, with LIKE fallback for Chinese text
@@ -2514,19 +2750,21 @@ impl MissionDB {
 
     /// Get KB category counts for summary string
     pub fn kb_summary(&self) -> SqliteResult<Vec<(String, i64)>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT category, COUNT(*) as cnt FROM knowledge GROUP BY category ORDER BY cnt DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?;
-        rows.collect()
+        tokio::task::block_in_place(|| {
+            let conn = self.read_conn();
+            let mut stmt = conn.prepare(
+                "SELECT category, COUNT(*) as cnt FROM knowledge GROUP BY category ORDER BY cnt DESC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            rows.collect()
+        })
     }
 
     /// Get top N hot keys by access_count (for instructions injection)
     pub fn kb_hot_keys(&self, limit: i64) -> SqliteResult<Vec<String>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT key FROM knowledge ORDER BY access_count DESC, updated_at DESC LIMIT ?1",
         )?;
@@ -2536,7 +2774,7 @@ impl MissionDB {
 
     /// Find stale entries: never accessed and older than N days
     pub fn kb_find_stale(&self, days: i64) -> SqliteResult<Vec<KnowledgeEntry>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM knowledge WHERE access_count = 0 \
              AND last_accessed_at IS NULL \
@@ -2798,7 +3036,7 @@ impl MissionDB {
 
     /// Get queue status summary for a plan
     pub fn kb_ops_plan_summary(&self, plan_id: &str) -> SqliteResult<serde_json::Value> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT status, COUNT(*) FROM kb_operation_queue WHERE plan_id = ?1 GROUP BY status"
         )?;
@@ -2860,7 +3098,7 @@ impl MissionDB {
 
     /// Get a skill topic by name
     pub fn skill_topic_get(&self, topic: &str) -> SqliteResult<Option<SkillTopic>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT topic, description, aka, allowed_tools, file_path,
                     hit_count, last_hit_at, fragment_count, total_lines, checksum,
@@ -2892,7 +3130,7 @@ impl MissionDB {
 
     /// List all skill topics
     pub fn skill_topic_list(&self) -> SqliteResult<Vec<SkillTopic>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT topic, description, aka, allowed_tools, file_path,
                     hit_count, last_hit_at, fragment_count, total_lines, checksum,
@@ -3002,7 +3240,7 @@ impl MissionDB {
 
     /// Get all active blocks for a topic, ordered by sort_order
     pub fn skill_blocks_for_topic(&self, topic: &str) -> SqliteResult<Vec<SkillBlock>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, topic, block_type, title, content, sort_order, status, created_at, updated_at
              FROM skill_blocks
@@ -3064,7 +3302,7 @@ impl MissionDB {
 
     /// Search skill topics by name/aka (exact + fuzzy)
     pub fn skill_search_topics(&self, query: &str) -> SqliteResult<Vec<SkillTopic>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let query_lower = query.to_lowercase();
         let pattern = format!("%{}%", query_lower);
 
@@ -3243,7 +3481,7 @@ impl MissionDB {
 
     /// Check if a skill action is currently running (for concurrency guard)
     pub fn skill_execution_is_running(&self, skill_topic: &str, action_id: &str) -> SqliteResult<bool> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM skill_executions WHERE skill_topic = ?1 AND action_id = ?2 AND status = 'running'",
             params![skill_topic, action_id],
@@ -3318,7 +3556,7 @@ impl MissionDB {
     /// Get conversations pending deep analysis (conversation-level watermark).
     /// Returns completed user conversations that haven't been analyzed at the current version.
     pub fn get_pending_deep_analysis(&self, current_version: i32, max_retries: i32) -> SqliteResult<Vec<Conversation>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM conversations
              WHERE status = 'completed'
@@ -3348,7 +3586,7 @@ impl MissionDB {
 
     /// Lightweight check: are there any conversations pending deep analysis?
     pub fn has_pending_deep_analysis(&self, current_version: i32, max_retries: i32) -> SqliteResult<bool> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM conversations
@@ -3529,7 +3767,7 @@ impl MissionDB {
 
     /// Get child (subagent) conversations for a parent session.
     pub fn get_child_conversations(&self, parent_session_id: &str) -> SqliteResult<Vec<Conversation>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM conversations WHERE parent_session_id = ?1 ORDER BY started_at ASC"
         )?;
@@ -4065,7 +4303,7 @@ impl MissionDB {
 
     /// Get conversations that are completed but not yet analyzed
     pub fn get_unanalyzed_conversations(&self) -> SqliteResult<Vec<Conversation>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM conversations WHERE status = 'completed' AND analyzed_at IS NULL ORDER BY started_at DESC"
         )?;
@@ -4153,39 +4391,41 @@ impl MissionDB {
     /// Get conversation messages not yet forwarded to memory analysis.
     /// Returns messages from today (UTC) for user CLI sessions only (no PTY, no subagents).
     pub fn get_pending_memory_messages(&self, today: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
-        // Single JOIN query: get all pending messages at once
-        // Excludes: PTY sessions (slot_id IS NOT NULL), subagent sessions (id LIKE 'agent-%')
-        let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT m.*, COALESCE(c.project, '') as c_project, c.memory_forwarded_at
-             FROM conversation_messages m
-             JOIN conversations c ON c.id = m.session_id
-             WHERE c.conversation_type = 'user'
-               AND m.timestamp >= ?1
-               AND m.timestamp > COALESCE(c.memory_forwarded_at, ?1)
-               AND m.role IN ('user', 'assistant')
-             ORDER BY c.started_at DESC, m.id ASC"
-        )?;
+        tokio::task::block_in_place(|| {
+            // Single JOIN query: get all pending messages at once
+            // Excludes: PTY sessions (slot_id IS NOT NULL), subagent sessions (id LIKE 'agent-%')
+            let conn = self.read_conn();
+            let mut stmt = conn.prepare(
+                "SELECT m.*, COALESCE(c.project, '') as c_project, c.memory_forwarded_at
+                 FROM conversation_messages m
+                 JOIN conversations c ON c.id = m.session_id
+                 WHERE c.conversation_type = 'user'
+                   AND m.timestamp >= ?1
+                   AND m.timestamp > COALESCE(c.memory_forwarded_at, ?1)
+                   AND m.role IN ('user', 'assistant')
+                 ORDER BY c.started_at DESC, m.id ASC"
+            )?;
 
-        let mut results: Vec<(String, String, Vec<ConversationMessage>)> = Vec::new();
+            let mut results: Vec<(String, String, Vec<ConversationMessage>)> = Vec::new();
 
-        let rows = stmt.query_map(params![today], |row| {
-            let msg = Self::row_to_conversation_message(row)?;
-            let project: String = row.get("c_project")?;
-            Ok((msg, project))
-        })?;
+            let rows = stmt.query_map(params![today], |row| {
+                let msg = Self::row_to_conversation_message(row)?;
+                let project: String = row.get("c_project")?;
+                Ok((msg, project))
+            })?;
 
-        for row in rows {
-            let (msg, project) = row?;
-            let session_id = msg.session_id.clone();
-            if let Some(entry) = results.iter_mut().find(|(id, _, _)| id == &session_id) {
-                entry.2.push(msg);
-            } else {
-                results.push((session_id, project, vec![msg]));
+            for row in rows {
+                let (msg, project) = row?;
+                let session_id = msg.session_id.clone();
+                if let Some(entry) = results.iter_mut().find(|(id, _, _)| id == &session_id) {
+                    entry.2.push(msg);
+                } else {
+                    results.push((session_id, project, vec![msg]));
+                }
             }
-        }
 
-        Ok(results)
+            Ok(results)
+        })
     }
 
     /// Update memory_forwarded_at for a conversation
@@ -4201,7 +4441,7 @@ impl MissionDB {
     /// Get pending USER-ONLY messages for user-voice extraction.
     /// Same logic as get_pending_memory_messages but only returns role='user'.
     pub fn get_pending_user_voice_messages(&self) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
-        let conn = self.conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT m.*, COALESCE(c.project, '') as c_project, c.user_voice_forwarded_at
              FROM conversation_messages m
@@ -4251,44 +4491,47 @@ impl MissionDB {
     }
 
     /// Get pending realtime messages with a configurable limit.
-    /// Fair-queuing: each session gets at most 10 messages per batch, ordered by oldest first.
+    /// Fair-queuing: each session gets at most 15 messages per batch, ordered by oldest first.
+    /// Includes tool_result messages (file contents, command outputs) for richer memory extraction.
     pub fn get_pending_realtime_messages_with_limit(&self, limit: usize) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "WITH ranked AS (
-                SELECT m.*, COALESCE(c.project, '') as c_project,
-                    ROW_NUMBER() OVER(PARTITION BY m.session_id ORDER BY m.timestamp ASC) as rn
-                FROM conversation_messages m
-                JOIN conversations c ON c.id = m.session_id
-                WHERE c.conversation_type = 'user'
-                  AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)
-                  AND m.role IN ('user', 'assistant')
-            )
-            SELECT * FROM ranked
-            WHERE rn <= 10
-            ORDER BY timestamp ASC
-            LIMIT ?1"
-        )?;
+        tokio::task::block_in_place(|| {
+            let conn = self.read_conn();
+            let mut stmt = conn.prepare(
+                "WITH ranked AS (
+                    SELECT m.*, COALESCE(c.project, '') as c_project,
+                        ROW_NUMBER() OVER(PARTITION BY m.session_id ORDER BY m.timestamp ASC) as rn
+                    FROM conversation_messages m
+                    JOIN conversations c ON c.id = m.session_id
+                    WHERE c.conversation_type = 'user'
+                      AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)
+                      AND m.role IN ('user', 'assistant', 'tool_result')
+                )
+                SELECT * FROM ranked
+                WHERE rn <= 15
+                ORDER BY timestamp ASC
+                LIMIT ?1"
+            )?;
 
-        let mut results: Vec<(String, String, Vec<ConversationMessage>)> = Vec::new();
+            let mut results: Vec<(String, String, Vec<ConversationMessage>)> = Vec::new();
 
-        let rows = stmt.query_map(params![limit as i64], |row| {
-            let msg = Self::row_to_conversation_message(row)?;
-            let project: String = row.get("c_project")?;
-            Ok((msg, project))
-        })?;
+            let rows = stmt.query_map(params![limit as i64], |row| {
+                let msg = Self::row_to_conversation_message(row)?;
+                let project: String = row.get("c_project")?;
+                Ok((msg, project))
+            })?;
 
-        for row in rows {
-            let (msg, project) = row?;
-            let session_id = msg.session_id.clone();
-            if let Some(entry) = results.iter_mut().find(|(id, _, _)| id == &session_id) {
-                entry.2.push(msg);
-            } else {
-                results.push((session_id, project, vec![msg]));
+            for row in rows {
+                let (msg, project) = row?;
+                let session_id = msg.session_id.clone();
+                if let Some(entry) = results.iter_mut().find(|(id, _, _)| id == &session_id) {
+                    entry.2.push(msg);
+                } else {
+                    results.push((session_id, project, vec![msg]));
+                }
             }
-        }
 
-        Ok(results)
+            Ok(results)
+        })
     }
 
     /// Update realtime_forwarded_at watermark for a conversation.
@@ -4644,6 +4887,68 @@ impl MissionDB {
             error: row.get("error")?,
             conversation_id: row.get("conversation_id")?,
         })
+    }
+
+    // ============ AIOps Incidents ============
+
+    /// Insert an incident record.
+    pub fn insert_incident(
+        &self,
+        id: &str,
+        severity: &str,
+        source: &str,
+        title: &str,
+        description: &str,
+        server_id: Option<&str>,
+        raw_payload: Option<&str>,
+        board_task_id: Option<&str>,
+        dedupe_key: &str,
+    ) -> SqliteResult<()> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO incidents (id, severity, source, title, description, server_id, raw_payload, board_task_id, dedupe_key, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![id, severity, source, title, description, server_id, raw_payload, board_task_id, dedupe_key, now],
+        )?;
+        Ok(())
+    }
+
+    /// Check if an incident with the same dedupe_key was recorded within the window.
+    pub fn has_recent_incident(&self, dedupe_key: &str, window_secs: i64) -> SqliteResult<bool> {
+        let conn = self.read_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM incidents
+             WHERE dedupe_key = ?1
+               AND julianday(?2) - julianday(created_at) < ?3 / 86400.0",
+            params![dedupe_key, now, window_secs as f64],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// List recent incidents.
+    pub fn list_incidents(&self, limit: i64) -> SqliteResult<Vec<IncidentRow>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, severity, source, title, description, server_id, board_task_id, dedupe_key, created_at
+             FROM incidents ORDER BY created_at DESC LIMIT ?1"
+        )?;
+        let rows = stmt.query_map(params![limit], |row| {
+            Ok(IncidentRow {
+                id: row.get("id")?,
+                severity: row.get("severity")?,
+                source: row.get("source")?,
+                title: row.get("title")?,
+                description: row.get("description")?,
+                server_id: row.get("server_id")?,
+                board_task_id: row.get("board_task_id")?,
+                dedupe_key: row.get("dedupe_key")?,
+                created_at: row.get("created_at")?,
+            })
+        })?;
+        rows.collect()
     }
 
     // ── Token Usage Ledger ──────────────────────────────────────────

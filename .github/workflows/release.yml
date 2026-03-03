@@ -84,7 +84,11 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release --target ${{ matrix.target }} -p missiond-daemon
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+            cargo build --release --target ${{ matrix.target }} -p missiond-daemon --no-default-features
+          else
+            cargo build --release --target ${{ matrix.target }} -p missiond-daemon
+          fi
           cargo build --release --target ${{ matrix.target }} -p missiond-mcp
 
       - name: Prepare artifacts (Unix)

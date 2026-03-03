@@ -4,8 +4,12 @@ import { callTool } from '@/lib/missiond';
 export async function GET(req: NextRequest) {
   try {
     const status = req.nextUrl.searchParams.get('status') || undefined;
+    const target = req.nextUrl.searchParams.get('target') || undefined;
+    const limitStr = req.nextUrl.searchParams.get('limit');
     const args: Record<string, unknown> = {};
     if (status) args.status = status;
+    if (target) args.target = target;
+    if (limitStr) args.limit = parseInt(limitStr, 10);
     const questions = await callTool('mission_question_list', args);
     return NextResponse.json(questions);
   } catch (err) {
