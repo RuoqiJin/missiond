@@ -3293,7 +3293,7 @@ impl AppState {
                 let kb_stats = db.kb_stats()
                     .map(|s| serde_json::json!({
                         "total": s["total"],
-                        "categories": s["categoryRollup"],
+                        "categories": s.get("categoryRollup").unwrap_or(&s["categories"]),
                         "subcategories": s["categories"],
                         "neverAccessed": s["neverAccessed"],
                         "mostAccessed": s["mostAccessed"],
@@ -5657,6 +5657,20 @@ fn strip_prompt_echo(response: &str, prompt: &str) -> String {
     result.join("\n")
 }
 
+/// Detect OAuth/auth errors in PTY response content.
+/// Claude Code outputs these messages when the OAuth token has expired.
+fn is_auth_error(response: &str) -> bool {
+    // Check first 2000 chars — auth errors appear at the start of output
+    let check = &response[..response.len().min(2000)];
+    let lower = check.to_lowercase();
+    lower.contains("oauth token has expired")
+        || lower.contains("please run /login")
+        || lower.contains("unauthorized")
+        || lower.contains("authentication required")
+        || lower.contains("token expired")
+        || lower.contains("auth error")
+}
+
 fn truncate_safe(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
@@ -6911,6 +6925,43 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
         let timeout_ms = 600_000; // 10 minutes
         match state.pty.send(&slot_id, &full_prompt, timeout_ms).await {
             Ok(res) => {
+                // Check for auth errors in successful PTY response
+                if is_auth_error(&res.response) {
+                    warn!(slot_id = %slot_id, task_id = %task.id, "Autopilot: auth error detected in PTY response, treating as failure");
+                    let _ = state.mission.db().add_board_task_note(
+                        &missiond_core::types::AddBoardTaskNoteInput {
+                            task_id: task.id.clone(),
+                            content: format!("⚠️ **Auth Error** — slot {} OAuth token 可能已过期，需要 `/login`\n\n{}", slot_id, &truncate_safe(&res.response, 500)),
+                            note_type: Some("note".to_string()),
+                            author: Some("autopilot".to_string()),
+                        },
+                    );
+                    // Treat as failure: increment slot_fail_counts
+                    {
+                        let mut fail_map = state.slot_fail_counts.lock().unwrap();
+                        let entry = fail_map.entry(slot_id.clone()).or_insert((0, 0));
+                        entry.0 += 1;
+                        entry.1 = chrono::Utc::now().timestamp();
+                        if entry.0 >= 2 {
+                            warn!(slot_id = %slot_id, failures = entry.0, "Slot auth-throttled: OAuth expired, needs /login");
+                        }
+                    }
+                    // Back to open for retry (don't mark done)
+                    let new_retry = task.retry_count + 1;
+                    if new_retry >= task.max_retries {
+                        let _ = state.mission.db().update_board_task(
+                            &task.id,
+                            &missiond_core::types::UpdateBoardTaskInput {
+                                status: Some("failed".to_string()),
+                                ..Default::default()
+                            },
+                        );
+                    } else {
+                        let _ = state.mission.db().increment_board_task_retry(&task.id, new_retry);
+                    }
+                    continue;
+                }
+
                 // Record result as a board note
                 let note_content = format!("**Autopilot 执行完成** ({}ms)\n\n{}", res.duration_ms, res.response);
                 let _ = state.mission.db().add_board_task_note(
@@ -7669,13 +7720,14 @@ fn detect_compaction(
             continue;
         }
         // The old session should have been written to recently (within 10 min)
-        // to avoid false positives with stale slot sessions
-        if let Some(ref started) = Some(&old_conv.started_at) {
-            if let Ok(start_time) = chrono::DateTime::parse_from_rfc3339(started) {
-                let age = chrono::Utc::now().signed_duration_since(start_time);
-                if age > chrono::Duration::hours(2) {
-                    continue; // Too old to be a live compaction
-                }
+        // to avoid false positives with stale slot sessions.
+        // Use updated_at (last message time) when available, fall back to started_at.
+        let last_active = old_conv.updated_at.as_deref()
+            .unwrap_or(&old_conv.started_at);
+        if let Ok(t) = chrono::DateTime::parse_from_rfc3339(last_active) {
+            let age = chrono::Utc::now().signed_duration_since(t);
+            if age > chrono::Duration::minutes(10) {
+                continue; // No messages in last 10 min — not a live compaction
             }
         }
         return Some((
@@ -9374,6 +9426,7 @@ fn handle_new_messages(
             deep_analyzed_message_id: 0,
             chat_type: None,
             conversation_type: missiond_core::db::derive_conversation_type(slot_id.as_deref(), &session_id),
+            updated_at: None,
         };
         if let Err(e) = db.upsert_conversation(&conv) {
             error!(session = %session_id, error = %e, "Failed to create conversation");
@@ -9543,6 +9596,7 @@ fn handle_pty_text_complete(
             deep_analyzed_message_id: 0,
             chat_type: None,
             conversation_type: missiond_core::db::derive_conversation_type(Some(&slot_id), &session_id),
+            updated_at: None,
         };
         if let Err(e) = db.upsert_conversation(&conv) {
             error!(slot = %slot_id, error = %e, "Failed to create PTY conversation");
@@ -10118,7 +10172,24 @@ async fn main() -> Result<()> {
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(skipped = n, "Conversation logger lagged");
+                        warn!(skipped = n, "Conversation logger lagged — triggering reconciliation");
+                        // Reconcile: re-scan active sessions' JSONL to recover lost messages
+                        let reconcile_state = s.clone();
+                        tokio::spawn(async move {
+                            let db = reconcile_state.mission.db();
+                            let convs = db.list_conversations(Some("active"), 100, Some("all"), None)
+                                .unwrap_or_default();
+                            let mut reconciled = 0usize;
+                            for conv in &convs {
+                                if let Some(ref path) = conv.jsonl_path {
+                                    events_sync::reconcile_conversation_messages(db, &conv.id, path).await;
+                                    reconciled += 1;
+                                }
+                            }
+                            if reconciled > 0 {
+                                info!(reconciled, "Lag reconciliation complete");
+                            }
+                        });
                     }
                     Err(_) => {}
                 }

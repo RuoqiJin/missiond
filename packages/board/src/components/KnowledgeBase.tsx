@@ -20,9 +20,14 @@ interface KBEntry {
 
 const CATEGORY_CONFIG: Record<string, { label: string; icon: typeof Brain; color: string; bg: string }> = {
   memory: { label: '记忆', icon: Brain, color: 'text-purple-400', bg: 'bg-purple-500/10' },
-  infra: { label: '基础设施', icon: Server, color: 'text-blue-400', bg: 'bg-blue-500/10' },
+  architecture: { label: '架构', icon: Server, color: 'text-cyan-400', bg: 'bg-cyan-500/10' },
+  policy: { label: '策略', icon: Settings, color: 'text-rose-400', bg: 'bg-rose-500/10' },
   preference: { label: '偏好', icon: Settings, color: 'text-amber-400', bg: 'bg-amber-500/10' },
+  infra: { label: '基础设施', icon: Server, color: 'text-blue-400', bg: 'bg-blue-500/10' },
   project: { label: '项目', icon: FolderKanban, color: 'text-green-400', bg: 'bg-green-500/10' },
+  decision: { label: '决策', icon: Brain, color: 'text-orange-400', bg: 'bg-orange-500/10' },
+  feature: { label: '功能', icon: FolderKanban, color: 'text-emerald-400', bg: 'bg-emerald-500/10' },
+  ops: { label: '运维', icon: Server, color: 'text-indigo-400', bg: 'bg-indigo-500/10' },
 };
 
 const RENEWAL_KEYWORDS = [
@@ -173,7 +178,10 @@ export function KnowledgeBase() {
       result = result.filter(isRenewalEntry);
     }
     if (activeCategory) {
-      result = result.filter((e) => e.category === activeCategory);
+      result = result.filter((e) =>
+        e.category === activeCategory ||
+        e.category.startsWith(`${activeCategory}:`)
+      );
     }
     if (search) {
       const q = search.toLowerCase();
@@ -187,17 +195,19 @@ export function KnowledgeBase() {
     return result;
   }, [entries, activeCategory, search, viewMode]);
 
-  // Group by category
+  // Group by root category (memory:debug → memory)
   const grouped = useMemo(() => {
     const groups: Record<string, KBEntry[]> = {};
     for (const entry of filtered) {
-      if (!groups[entry.category]) groups[entry.category] = [];
-      groups[entry.category].push(entry);
+      const root = entry.category.split(':')[0];
+      if (!groups[root]) groups[root] = [];
+      groups[root].push(entry);
     }
-    // Sort categories: memory first, then infra, preference, project
-    const order = ['memory', 'infra', 'preference', 'project'];
-    return order
-      .filter((cat) => groups[cat])
+    const order = Object.keys(CATEGORY_CONFIG);
+    // Known categories first, then any remaining
+    const known = order.filter((cat) => groups[cat]);
+    const unknown = Object.keys(groups).filter((cat) => !order.includes(cat));
+    return [...known, ...unknown]
       .map((cat) => ({ category: cat, entries: groups[cat] }));
   }, [filtered]);
 
@@ -208,7 +218,8 @@ export function KnowledgeBase() {
       : entries.filter(isRenewalEntry);
     const counts: Record<string, number> = {};
     for (const entry of base) {
-      counts[entry.category] = (counts[entry.category] || 0) + 1;
+      const root = entry.category.split(':')[0];
+      counts[root] = (counts[root] || 0) + 1;
     }
     return { categoryCounts: counts, viewTotal: base.length };
   }, [entries, viewMode]);

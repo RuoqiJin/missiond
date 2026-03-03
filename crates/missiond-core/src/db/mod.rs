@@ -167,7 +167,8 @@ CREATE TABLE IF NOT EXISTS conversations (
     started_at TEXT NOT NULL,
     ended_at TEXT,
     status TEXT DEFAULT 'active',
-    analyzed_at TEXT
+    analyzed_at TEXT,
+    updated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_conv_status ON conversations(status);
 
@@ -188,12 +189,13 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
 CREATE INDEX IF NOT EXISTS idx_conv_msg_session ON conversation_messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_conv_msg_timestamp ON conversation_messages(timestamp);
 
--- Auto-update message_count on conversations when messages are inserted
+-- Auto-update message_count and updated_at on conversations when messages are inserted
 CREATE TRIGGER IF NOT EXISTS trg_msg_count_insert
 AFTER INSERT ON conversation_messages
 BEGIN
     UPDATE conversations
-    SET message_count = message_count + 1
+    SET message_count = message_count + 1,
+        updated_at = NEW.timestamp
     WHERE id = NEW.session_id;
 END;
 "#;
@@ -566,6 +568,17 @@ impl MissionDB {
             )?;
             conn.execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_conv_type ON conversations(conversation_type);"
+            )?;
+        }
+
+        // Add updated_at for tracking last message write time (compaction detection)
+        if !conv_columns.iter().any(|c| c == "updated_at") {
+            conn.execute_batch(
+                "ALTER TABLE conversations ADD COLUMN updated_at TEXT;"
+            )?;
+            // Backfill: set updated_at = started_at for existing rows
+            conn.execute_batch(
+                "UPDATE conversations SET updated_at = started_at WHERE updated_at IS NULL;"
             )?;
         }
 
@@ -3858,7 +3871,6 @@ impl MissionDB {
         if messages.is_empty() {
             return Ok(Vec::new());
         }
-        let session_id = &messages[0].session_id;
         let conn = self.conn();
         let tx = conn.unchecked_transaction()?;
         let mut inserted_ids = Vec::new();
@@ -4619,6 +4631,7 @@ impl MissionDB {
             deep_analyzed_message_id: row.get("deep_analyzed_message_id").unwrap_or(0),
             chat_type: row.get("chat_type").unwrap_or(None),
             conversation_type: row.get("conversation_type").unwrap_or_else(|_| "user".to_string()),
+            updated_at: row.get("updated_at").unwrap_or(None),
         })
     }
 

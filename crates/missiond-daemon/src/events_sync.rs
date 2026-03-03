@@ -785,3 +785,92 @@ pub async fn backfill_tool_calls(db: &MissionDB) {
         "Tool call backfill complete"
     );
 }
+
+/// Reconcile conversation_messages for a single session by re-reading its JSONL file.
+/// Used as a compensating action when broadcast lag causes message loss.
+/// INSERT OR IGNORE ensures idempotency via UNIQUE index on message_uuid.
+pub async fn reconcile_conversation_messages(db: &MissionDB, session_id: &str, jsonl_path: &str) {
+    use missiond_core::cc_tasks::parse_jsonl_stream;
+    use std::path::Path;
+
+    let path = Path::new(jsonl_path);
+    if !path.exists() {
+        return;
+    }
+
+    // Check if slot session (affects role mapping)
+    let is_slot_session = db.get_slot_for_session(session_id).unwrap_or(None).is_some();
+
+    let mut batch: Vec<missiond_core::types::ConversationMessage> = Vec::new();
+    let sid = session_id.to_string();
+
+    let result = parse_jsonl_stream(path, |msg| {
+        // Skip tool_use lines (same filter as handle_new_messages)
+        if msg.message_type == "tool_use" {
+            return;
+        }
+
+        let text_content = extract_text_content(&msg.message.content);
+        let content_types: Vec<&str> = msg.message.content.as_array()
+            .map(|arr| arr.iter()
+                .filter_map(|b| b.get("type").and_then(|t| t.as_str()))
+                .collect())
+            .unwrap_or_default();
+        let is_tool_result = !content_types.is_empty() && content_types.iter().all(|t| *t == "tool_result");
+        let is_thinking = !content_types.is_empty() && content_types.iter().all(|t| *t == "thinking");
+
+        if text_content.is_empty() && !is_tool_result {
+            return;
+        }
+        let content = if text_content.is_empty() {
+            "[tool_result]".to_string()
+        } else {
+            text_content
+        };
+        let role = if is_tool_result {
+            "tool_result".to_string()
+        } else if is_thinking {
+            "thinking".to_string()
+        } else if msg.message.role == "user" && is_slot_session {
+            "system".to_string()
+        } else {
+            msg.message.role.clone()
+        };
+        let raw_content = sanitize_raw_content(&msg.message.content);
+
+        batch.push(missiond_core::types::ConversationMessage {
+            id: 0,
+            session_id: sid.clone(),
+            role,
+            content,
+            raw_content,
+            message_uuid: Some(msg.uuid.clone()),
+            parent_uuid: msg.parent_uuid.clone(),
+            model: msg.message.model.clone(),
+            timestamp: msg.timestamp.clone(),
+            metadata: None,
+        });
+    }).await;
+
+    if let Err(e) = result {
+        warn!(session = %session_id, error = %e, "Reconcile: failed to parse JSONL");
+        return;
+    }
+
+    if batch.is_empty() {
+        return;
+    }
+
+    match db.insert_conversation_messages_batch(&batch) {
+        Ok(ids) if !ids.is_empty() => {
+            info!(session = %session_id, recovered = ids.len(), total = batch.len(),
+                "Reconcile: recovered missing messages after broadcast lag");
+        }
+        Err(e) => {
+            warn!(session = %session_id, error = %e, "Reconcile: batch insert failed");
+        }
+        _ => {
+            // All messages already existed — no gap
+        }
+    }
+}
