@@ -7250,6 +7250,34 @@ async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardT
 
             match state.pty.send(slot_id, &prompt, timeout_ms).await {
                 Ok(res) => {
+                    // Check for auth errors
+                    if is_auth_error(&res.response) {
+                        warn!(task_id = %task.id, slot_id, phase = %phase_str, "Flow engine: auth error detected in PTY response");
+                        let _ = state.mission.db().add_board_task_note(
+                            &missiond_core::types::AddBoardTaskNoteInput {
+                                task_id: task.id.clone(),
+                                content: format!("⚠️ **Auth Error** — slot {} OAuth token 过期，Flow phase {} 中止", slot_id, p.display_name()),
+                                note_type: Some("note".to_string()),
+                                author: Some("flow-engine".to_string()),
+                            },
+                        );
+                        // Back to open for retry + track failure
+                        let _ = state.mission.db().update_board_task(
+                            &task.id,
+                            &missiond_core::types::UpdateBoardTaskInput {
+                                status: Some("open".to_string()),
+                                ..Default::default()
+                            },
+                        );
+                        {
+                            let mut fail_map = state.slot_fail_counts.lock().unwrap();
+                            let entry = fail_map.entry(slot_id.to_string()).or_insert((0, 0));
+                            entry.0 += 1;
+                            entry.1 = chrono::Utc::now().timestamp();
+                        }
+                        return Ok(());
+                    }
+
                     // Strip prompt echo from PTY response to reduce noise in board notes
                     let clean_response = strip_prompt_echo(&res.response, &prompt);
                     let _ = state.mission.db().add_board_task_note(
@@ -8698,6 +8726,18 @@ async fn check_realtime_extraction(state: &AppState) {
     tokio::spawn(async move {
         match pty.send(MEMORY_SLOT_ID, prompt, 300_000).await {
             Ok(res) => {
+                if is_auth_error(&res.response) {
+                    warn!("Realtime extraction: auth error on {}, aborting", MEMORY_SLOT_ID);
+                    let _ = mission.db().slot_task_set_failed(&slot_task_id_clone, "OAuth token expired");
+                    let mut es = extraction_state.write().await;
+                    es.phase = ExtractionPhase::Idle;
+                    es.active_type = None;
+                    es.current_task_id = None;
+                    es.current_slot_task_id = None;
+                    es.is_checkpoint = false;
+                    es.checkpoint_message_id = None;
+                    return;
+                }
                 info!(duration_ms = res.duration_ms, "realtime extraction send() returned");
                 // send() blocks until slot finishes and returns to Idle.
                 // Complete extraction directly — don't enter WaitingForSlotIdle
@@ -8911,6 +8951,19 @@ async fn check_deep_analysis(state: &AppState) {
         tokio::spawn(async move {
             match pty.send(MEMORY_SLOW_SLOT_ID, &prompt, 900_000).await {
                 Ok(res) => {
+                    if is_auth_error(&res.response) {
+                        warn!(conv_id = %conv_id, "Deep analysis: auth error on {}, aborting", MEMORY_SLOW_SLOT_ID);
+                        let _ = mission.db().slot_task_set_failed(&slot_task_id, "OAuth token expired");
+                        let mut es = extraction_state.write().await;
+                        es.phase = ExtractionPhase::Idle;
+                        es.active_type = None;
+                        es.current_task_id = None;
+                        es.current_slot_task_id = None;
+                        es.current_deep_conv_id = None;
+                        es.is_checkpoint = false;
+                        es.checkpoint_message_id = None;
+                        return;
+                    }
                     info!(conv_id = %conv_id, duration_ms = res.duration_ms, "Deep analysis send() returned");
                     // send() blocks until slot finishes — complete directly
                     let mut es = extraction_state.write().await;
@@ -9057,6 +9110,18 @@ async fn check_kb_consolidation(state: &AppState) {
     tokio::spawn(async move {
         match pty.send(MEMORY_SLOW_SLOT_ID, prompt, 900_000).await {
             Ok(res) => {
+                if is_auth_error(&res.response) {
+                    warn!("KB consolidation: auth error on {}, aborting", MEMORY_SLOW_SLOT_ID);
+                    let _ = mission.db().slot_task_set_failed(&slot_task_id, "OAuth token expired");
+                    let mut es = extraction_state.write().await;
+                    es.phase = ExtractionPhase::Idle;
+                    es.active_type = None;
+                    es.current_task_id = None;
+                    es.current_slot_task_id = None;
+                    es.is_checkpoint = false;
+                    es.checkpoint_message_id = None;
+                    return;
+                }
                 info!(duration_ms = res.duration_ms, "KB consolidation send() returned");
                 // send() blocks until slot finishes — complete directly
                 let mut es = extraction_state.write().await;
