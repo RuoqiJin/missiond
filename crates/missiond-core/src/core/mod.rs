@@ -17,4 +17,4 @@ pub use inbox::Inbox;
 pub use mission_control::{ExecutionMode, MissionControl, MissionControlOptions};
 pub use permission::{PermissionConfig, PermissionDecision, PermissionPolicy, PermissionRule};
 pub use process_manager::{AgentProcess, AgentStatus, ExecuteResult, ProcessManager, SpawnOptions};
-pub use slot_manager::SlotManager;
+pub use slot_manager::{SlotManager, SlotReloadResult};

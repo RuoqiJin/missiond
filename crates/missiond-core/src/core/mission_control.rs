@@ -62,6 +62,7 @@ pub struct MissionControl {
     #[allow(dead_code)]
     logs_dir: PathBuf,
     default_mode: RwLock<ExecutionMode>,
+    slots_config_path: PathBuf,
 }
 
 impl MissionControl {
@@ -94,6 +95,7 @@ impl MissionControl {
         let permission_policy = PermissionPolicy::new(&permission_config_path);
 
         // Load slots config
+        let slots_config_path = options.slots_config_path.clone();
         let mc = Self {
             db,
             slot_manager,
@@ -103,15 +105,16 @@ impl MissionControl {
             started: RwLock::new(false),
             logs_dir,
             default_mode: RwLock::new(default_mode),
+            slots_config_path: slots_config_path.clone(),
         };
 
-        mc.load_slots_config(&options.slots_config_path)?;
+        mc.load_slots_config(&slots_config_path)?;
 
         info!("MissionControl initialized");
         Ok(mc)
     }
 
-    /// Load slots configuration
+    /// Load slots configuration (initial load)
     fn load_slots_config(&self, config_path: &Path) -> Result<()> {
         let content = std::fs::read_to_string(config_path)?;
         let config: SlotsConfig = serde_yaml::from_str(&content)?;
@@ -128,6 +131,35 @@ impl MissionControl {
 
         info!(count = config.slots.len(), "Slots loaded");
         Ok(())
+    }
+
+    /// Reload slots configuration (hot-reload).
+    /// Returns diff of what changed. Only initializes process state for newly added slots.
+    pub fn reload_slots_config(&self) -> Result<super::SlotReloadResult> {
+        let content = std::fs::read_to_string(&self.slots_config_path)?;
+        let config: SlotsConfig = serde_yaml::from_str(&content)?;
+
+        let result = self.slot_manager.reload_slots(config.slots);
+
+        // Initialize process state for newly added slots only
+        for slot_id in &result.added {
+            if let Some(slot) = self.slot_manager.get_slot(slot_id) {
+                self.process_manager.init_slot(&slot);
+            }
+        }
+
+        if result.has_changes() {
+            info!(
+                added = result.added.len(),
+                removed = result.removed.len(),
+                updated = result.updated.len(),
+                "Slots reloaded"
+            );
+        } else {
+            info!("Slots reload: no changes detected");
+        }
+
+        Ok(result)
     }
 
     /// Start the service
@@ -426,6 +458,11 @@ impl MissionControl {
     /// List all slots
     pub fn list_slots(&self) -> Vec<Slot> {
         self.slot_manager.get_all_slots()
+    }
+
+    /// Get a slot by ID
+    pub fn get_slot(&self, slot_id: &str) -> Option<Slot> {
+        self.slot_manager.get_slot(slot_id)
     }
 
     /// Reset a slot's session

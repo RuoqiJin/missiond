@@ -4,7 +4,7 @@
 
 use crate::db::MissionDB;
 use crate::types::{Slot, SlotConfig};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info};
 
@@ -107,6 +107,52 @@ impl SlotManager {
         }
     }
 
+    /// Reload slots with diff-based update.
+    /// Preserves session_id for existing slots. Returns what changed.
+    pub fn reload_slots(&self, configs: Vec<SlotConfig>) -> SlotReloadResult {
+        let mut slots = self.slots.write().unwrap();
+
+        let new_ids: HashSet<String> = configs.iter().map(|c| c.id.clone()).collect();
+        let old_ids: HashSet<String> = slots.keys().cloned().collect();
+
+        let mut added = Vec::new();
+        let mut removed = Vec::new();
+        let mut updated = Vec::new();
+
+        // Remove slots no longer in config
+        for id in old_ids.difference(&new_ids) {
+            slots.remove(id);
+            removed.push(id.clone());
+            info!(slot_id = %id, "Slot removed (hot-reload)");
+        }
+
+        // Add or update slots
+        for mut config in configs {
+            config.apply_default_traits();
+
+            if let Some(existing) = slots.get_mut(&config.id) {
+                // Update config, preserve session_id
+                if existing.config != config {
+                    existing.config = config.clone();
+                    updated.push(config.id.clone());
+                    info!(slot_id = %config.id, "Slot config updated (hot-reload)");
+                }
+            } else {
+                // New slot
+                let saved_session_id = self.db.get_slot_session(&config.id).ok().flatten();
+                let slot = Slot {
+                    config: config.clone(),
+                    session_id: saved_session_id,
+                };
+                slots.insert(config.id.clone(), slot);
+                added.push(config.id.clone());
+                info!(slot_id = %config.id, role = %config.role, "Slot added (hot-reload)");
+            }
+        }
+
+        SlotReloadResult { added, removed, updated }
+    }
+
     /// Get statistics (config stats only, no process state)
     pub fn get_stats(&self) -> SlotStats {
         let slots = self.slots.read().unwrap();
@@ -128,6 +174,20 @@ impl SlotManager {
 pub struct SlotStats {
     pub total: usize,
     pub by_role: HashMap<String, usize>,
+}
+
+/// Result of a slot reload operation
+#[derive(Debug, Clone)]
+pub struct SlotReloadResult {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub updated: Vec<String>,
+}
+
+impl SlotReloadResult {
+    pub fn has_changes(&self) -> bool {
+        !self.added.is_empty() || !self.removed.is_empty() || !self.updated.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -233,6 +293,84 @@ mod tests {
         manager.reset_session("slot-1");
         let slot = manager.get_slot("slot-1").unwrap();
         assert!(slot.session_id.is_none());
+    }
+
+    #[test]
+    fn test_reload_slots() {
+        let db = create_test_db();
+        let manager = SlotManager::new(db);
+
+        // Initial load
+        manager.load_slots(vec![
+            SlotConfig {
+                id: "slot-1".to_string(),
+                role: "worker".to_string(),
+                description: "Worker 1".to_string(),
+                cwd: None,
+                mcp_config: None,
+                auto_start: None,
+                dangerously_skip_permissions: None,
+                traits: vec![],
+                env: None,
+            },
+            SlotConfig {
+                id: "slot-2".to_string(),
+                role: "worker".to_string(),
+                description: "Worker 2".to_string(),
+                cwd: None,
+                mcp_config: None,
+                auto_start: None,
+                dangerously_skip_permissions: None,
+                traits: vec![],
+                env: None,
+            },
+        ]);
+
+        // Set a session on slot-1 to verify it's preserved
+        manager.update_session("slot-1", "session-xyz");
+
+        // Reload: remove slot-2, add slot-3, update slot-1's role
+        let result = manager.reload_slots(vec![
+            SlotConfig {
+                id: "slot-1".to_string(),
+                role: "specialist".to_string(), // changed
+                description: "Worker 1".to_string(),
+                cwd: None,
+                mcp_config: None,
+                auto_start: None,
+                dangerously_skip_permissions: None,
+                traits: vec![],
+                env: None,
+            },
+            SlotConfig {
+                id: "slot-3".to_string(),
+                role: "coder".to_string(),
+                description: "New coder".to_string(),
+                cwd: None,
+                mcp_config: None,
+                auto_start: None,
+                dangerously_skip_permissions: None,
+                traits: vec![],
+                env: None,
+            },
+        ]);
+
+        assert_eq!(result.added, vec!["slot-3"]);
+        assert_eq!(result.removed, vec!["slot-2"]);
+        assert_eq!(result.updated, vec!["slot-1"]);
+        assert!(result.has_changes());
+
+        // Verify slot-1 session preserved
+        let slot1 = manager.get_slot("slot-1").unwrap();
+        assert_eq!(slot1.session_id, Some("session-xyz".to_string()));
+        assert_eq!(slot1.config.role, "specialist");
+
+        // Verify slot-2 removed
+        assert!(manager.get_slot("slot-2").is_none());
+
+        // Verify slot-3 added
+        let slot3 = manager.get_slot("slot-3").unwrap();
+        assert_eq!(slot3.config.role, "coder");
     }
 
     #[test]

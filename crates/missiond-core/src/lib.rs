@@ -25,7 +25,7 @@ pub mod ws;
 pub use crate::core::{
     AgentProcess, AgentStatus, ExecuteResult, ExecutionMode, Inbox, MissionControl,
     MissionControlOptions, PermissionConfig, PermissionDecision as CorePermissionDecision,
-    PermissionPolicy, PermissionRule, ProcessManager, SlotManager, SpawnOptions,
+    PermissionPolicy, PermissionRule, ProcessManager, SlotManager, SlotReloadResult, SpawnOptions,
 };
 
 // Re-export core types
