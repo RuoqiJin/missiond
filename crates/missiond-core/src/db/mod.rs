@@ -1933,6 +1933,21 @@ impl MissionDB {
         Ok(())
     }
 
+    /// Decision Engine: find pending master questions older than max_age_secs
+    pub fn find_stale_master_questions(&self, max_age_secs: i64) -> SqliteResult<Vec<AgentQuestion>> {
+        let conn = self.read_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM agent_questions
+             WHERE target = 'master' AND status = 'pending'
+               AND julianday(?1) - julianday(created_at) > ?2 / 86400.0"
+        )?;
+        let rows = stmt.query_map(params![now, max_age_secs as f64], |row| {
+            Self::row_to_agent_question(row)
+        })?;
+        rows.collect()
+    }
+
     fn row_to_agent_question(row: &rusqlite::Row) -> SqliteResult<AgentQuestion> {
         let status_str: String = row.get("status")?;
         let status =
@@ -4539,6 +4554,35 @@ impl MissionDB {
                AND julianday(?1) - julianday(created_at) > ?2 / 86400.0",
             params![now, max_age_secs as f64],
         )
+    }
+
+    /// Find stale decision slot tasks (for Decision Engine timeout recovery)
+    pub fn find_stale_decision_tasks(&self, max_age_secs: i64) -> SqliteResult<Vec<SlotTask>> {
+        let conn = self.read_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM slot_tasks
+             WHERE task_type = 'decision' AND status IN ('pending', 'running')
+               AND julianday(?1) - julianday(created_at) > ?2 / 86400.0"
+        )?;
+        let rows = stmt.query_map(params![now, max_age_secs as f64], |row| {
+            Ok(SlotTask {
+                id: row.get("id")?,
+                slot_id: row.get("slot_id")?,
+                task_type: row.get("task_type")?,
+                status: row.get("status")?,
+                prompt_summary: row.get("prompt_summary")?,
+                source_sessions: row.get("source_sessions")?,
+                output_count: row.get::<_, Option<i64>>("output_count")?.unwrap_or(0),
+                created_at: row.get("created_at")?,
+                started_at: row.get("started_at")?,
+                completed_at: row.get("completed_at")?,
+                duration_ms: row.get("duration_ms")?,
+                error: row.get("error")?,
+                conversation_id: row.get("conversation_id")?,
+            })
+        })?;
+        rows.collect()
     }
 
     /// Startup cleanup: force-fail all pending/running tasks (leftover from previous daemon).
