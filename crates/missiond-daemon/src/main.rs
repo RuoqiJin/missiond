@@ -3842,6 +3842,10 @@ impl AppState {
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow!("Missing 'id' field"))?
                     .to_string();
+                let is_marking_done = args_val.get("status")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s == "done")
+                    .unwrap_or(false);
                 let update: missiond_core::types::UpdateBoardTaskInput =
                     serde_json::from_value(args_val)?;
                 let task = self
@@ -3850,7 +3854,18 @@ impl AppState {
                     .update_board_task(&id, &update)
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 match task {
-                    Some(t) => Ok(ToolResult::json_pretty(&t)),
+                    Some(t) => {
+                        // Decision Engine: harvest decisions when task marked done
+                        if is_marking_done {
+                            let state = self.clone();
+                            let task_id = t.id.clone();
+                            let task_title = t.title.clone();
+                            tokio::spawn(async move {
+                                harvest_decisions_for_task(&state, &task_id, &task_title).await;
+                            });
+                        }
+                        Ok(ToolResult::json_pretty(&t))
+                    }
                     None => Ok(ToolResult::error("Task not found")),
                 }
             }
@@ -3886,7 +3901,18 @@ impl AppState {
                     .toggle_board_task(&id)
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 match task {
-                    Some(t) => Ok(ToolResult::json_pretty(&t)),
+                    Some(t) => {
+                        // Decision Engine: harvest decisions when toggled to done
+                        if t.status == missiond_core::types::BoardTaskStatus::Done {
+                            let state = self.clone();
+                            let task_id = t.id.clone();
+                            let task_title = t.title.clone();
+                            tokio::spawn(async move {
+                                harvest_decisions_for_task(&state, &task_id, &task_title).await;
+                            });
+                        }
+                        Ok(ToolResult::json_pretty(&t))
+                    }
                     None => Ok(ToolResult::error("Task not found")),
                 }
             }
@@ -5845,6 +5871,126 @@ async fn reap_stale_decision_tasks(state: &AppState) {
     }
 }
 
+/// Decision Engine Phase 4: Harvest successful decisions into policy:decision KB entries.
+/// Triggered when a Board task is marked done — scans answered master questions,
+/// calls Gemini to generalize into reusable rules, writes to KB.
+async fn harvest_decisions_for_task(state: &AppState, task_id: &str, task_title: &str) {
+    // 1. Scan answered master questions for this task
+    let questions = match state.mission.db().list_questions_for_task(task_id) {
+        Ok(qs) => qs,
+        Err(e) => {
+            warn!(task_id, error = %e, "Decision harvester: failed to query questions");
+            return;
+        }
+    };
+
+    // Filter to only master-targeted questions (decision engine handled)
+    let master_questions: Vec<_> = questions.iter()
+        .filter(|q| q.target == "master" && q.answer.is_some())
+        .collect();
+
+    if master_questions.is_empty() {
+        debug!(task_id, "Decision harvester: no master decisions to harvest");
+        return;
+    }
+
+    info!(task_id, count = master_questions.len(), "Decision harvester: harvesting decisions");
+
+    // 2. Build Q&A summary for Gemini
+    let qa_text: String = master_questions.iter()
+        .map(|q| {
+            let dt = &q.decision_type;
+            let answer = q.answer.as_deref().unwrap_or("");
+            format!("- [{}] Q: {}\n  A: {}", dt, q.question, answer)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    // 3. Call Gemini to generalize
+    let prompt = format!(
+        "以下是刚成功完成的任务「{}」中的具体技术决策（均已通过代码落地验证）。\n\
+        请将每条决策提炼为一条普适的架构/决策规则。\n\n\
+        **要求：**\n\
+        1. 剥离具体变量名、版本号、文件路径，保留问题特征和决策原则\n\
+        2. 每条规则输出为 JSON 对象，包含 key、summary、detail\n\
+        3. key：动宾结构连字符短语（如 resolve-dependency-conflict-legacy）\n\
+        4. summary：[触发条件词簇] → [核心原则] → [动作]，富含可能出现在提问中的名词\n\
+        5. detail：JSON 字符串 {{\"scenario\": \"...\", \"decision\": \"...\", \"reasoning\": \"...\"}}\n\
+        6. 如果多条决策本质相同，合并为一条\n\
+        7. 输出格式：JSON 数组 [{{...}}, ...]\n\n\
+        决策记录：\n{}", task_title, qa_text
+    );
+
+    let gemini_response = match call_gemini_for_flow(state, task_id, &prompt).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(task_id, error = %e, "Decision harvester: Gemini call failed");
+            return;
+        }
+    };
+
+    // 4. Parse Gemini response and write to KB
+    // Strip markdown code fences if present
+    let clean = gemini_response
+        .trim()
+        .strip_prefix("```json").or_else(|| gemini_response.trim().strip_prefix("```"))
+        .unwrap_or(gemini_response.trim())
+        .strip_suffix("```")
+        .unwrap_or(gemini_response.trim())
+        .trim();
+
+    let rules: Vec<serde_json::Value> = match serde_json::from_str(clean) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(task_id, error = %e, resp = %clean, "Decision harvester: failed to parse Gemini JSON");
+            return;
+        }
+    };
+
+    let mut written = 0;
+    for rule in &rules {
+        let key = rule.get("key").and_then(|v| v.as_str()).unwrap_or_default();
+        let summary = rule.get("summary").and_then(|v| v.as_str()).unwrap_or_default();
+        let detail = rule.get("detail");
+
+        if key.is_empty() || summary.is_empty() {
+            continue;
+        }
+
+        let input = missiond_core::types::KBRememberInput {
+            category: "policy:decision".to_string(),
+            key: key.to_string(),
+            summary: summary.to_string(),
+            detail: detail.cloned(),
+            source: Some("decision-harvester".to_string()),
+            confidence: Some(0.8),
+        };
+
+        match state.mission.db().kb_remember(&input) {
+            Ok(result) => {
+                info!(key, action = %result.action, "Decision harvester: wrote policy:decision");
+                written += 1;
+            }
+            Err(e) => {
+                warn!(key, error = %e, "Decision harvester: kb_remember failed");
+            }
+        }
+    }
+
+    if written > 0 {
+        // Write a board note about the harvest
+        let _ = state.mission.db().add_board_task_note(
+            &missiond_core::types::AddBoardTaskNoteInput {
+                task_id: task_id.to_string(),
+                content: format!("🧠 [决策引擎] 从 {} 条主控决策中提炼了 {} 条 policy:decision 规则，已写入肌肉记忆。",
+                    master_questions.len(), written),
+                note_type: Some("progress".to_string()),
+                author: Some("decision-harvester".to_string()),
+            },
+        );
+    }
+}
+
 async fn autopilot_tick(state: &AppState) -> Result<()> {
     // Check PTY slots for low context — restart if < 10%
     check_slot_context_levels(state).await;
@@ -6179,6 +6325,14 @@ async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardT
                 },
             );
             info!(task_id = %task.id, "Flow engine: task completed (all phases done)");
+
+            // Decision Engine: harvest decisions from completed task
+            let state_clone = state.clone();
+            let task_id = task.id.clone();
+            let task_title = task.title.clone();
+            tokio::spawn(async move {
+                harvest_decisions_for_task(&state_clone, &task_id, &task_title).await;
+            });
         }
 
         // === Daemon phases: call Gemini directly ===
@@ -7896,7 +8050,11 @@ async fn check_deep_analysis(state: &AppState) {
              6. 运维链路审计 — 会话中是否有重复的多步手动操作（SSH→查日志→重启→再查）？\
              这些操作链可以封装为 MCP 工具一步完成。记录具体步骤序列和建议的工具名，存 category: memory:ops\n\
              7. 调试经验提炼 — 调试过程中走了哪些弯路（错误假设→验证失败→换方向）？\
-             根因最终是什么？总结「正确排查路径」供下次遇到类似问题时参考，存 category: memory:debug\n\n\
+             根因最终是什么？总结「正确排查路径」供下次遇到类似问题时参考，存 category: memory:debug\n\
+             8. 架构决策模式 (policy:decision) — 用户在面对技术选项、报错排查或架构设计时的规律性偏好。\
+             必须提炼为泛化规则（剥离具体变量名/版本号），而非单次操作记录。\
+             summary 格式：[触发条件词簇] → [核心原则] → [动作]，富含可能出现在提问中的名词。\
+             存 category: policy:decision\n\n\
              不要提取: 单条消息的偏好/决策/事实（realtime 已处理）、当天工作日志、版本细节。\n\
              绝对禁止写入 category: infra（基础设施由 servers.yaml 管理）。",
             session_id = conv.id,
