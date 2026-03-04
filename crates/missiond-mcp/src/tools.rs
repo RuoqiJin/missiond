@@ -1399,25 +1399,21 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_conversation_search",
-            "按内容搜索对话消息（跨会话），返回匹配消息及上下文。支持按角色/slot/会话过滤。",
+            "混合语义搜索对话（FTS5 + Embedding RRF 双路融合）。返回会话级结果，含摘要、匹配分数和示例消息。传 sessionId 时退化为单会话消息搜索。",
             json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "搜索关键词"
+                        "description": "搜索关键词（支持中英混合，语义搜索自动启用）"
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "最大返回数（默认 20）"
-                    },
-                    "role": {
-                        "type": "string",
-                        "description": "按消息角色过滤: user, assistant, tool_use, tool_result, thinking, system"
+                        "description": "最大返回会话数（默认 10）"
                     },
                     "sessionId": {
                         "type": "string",
-                        "description": "限定在特定会话中搜索"
+                        "description": "限定在特定会话中搜索（退化为消息级搜索）"
                     },
                     "excludeSessionId": {
                         "type": "string",
@@ -1425,6 +1421,15 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     }
                 },
                 "required": ["query"]
+            }),
+        ),
+
+        ToolDefinition::new(
+            "mission_trigger_backfill",
+            "触发对话摘要 + 向量回填。后台 Worker 按批处理存量会话（LLM 摘要 + Embedding），包括 provider 切换后的重新 embedding。可多次调用查看剩余量。",
+            json!({
+                "type": "object",
+                "properties": {}
             }),
         ),
 
@@ -1806,6 +1811,49 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                         "description": "起始时间(ISO 8601)，统计该时间之后完成/失败的任务和新增 KB。不传则统计全部"
                     }
                 }
+            }),
+        ),
+        // ===== Task Decompose =====
+        ToolDefinition::new(
+            "mission_board_decompose",
+            "一键拆分任务。派 Opus 工位调查代码后，自动创建带 DAG 依赖链的子任务序列，关键节点插入 user_review 检查点。\
+             工位会 Read/Grep 调查相关代码、查 KB/Skill，然后调 mission_board_create 创建子任务。\
+             返回 submit task ID（异步执行）。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "taskId": {
+                        "type": "string",
+                        "description": "要拆分的父任务 ID"
+                    },
+                    "slotId": {
+                        "type": "string",
+                        "description": "执行拆分的工位 ID (默认 slot-coder-1)"
+                    },
+                    "hints": {
+                        "type": "string",
+                        "description": "用户对拆分方向的提示（如: 重点关注性能、先调查数据库schema）"
+                    }
+                },
+                "required": ["taskId"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_board_retry",
+            "重试失败/阻塞的任务。重置任务状态为 open 并解除 claim，可选级联重置所有下游任务。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "taskId": {
+                        "type": "string",
+                        "description": "要重试的任务 ID"
+                    },
+                    "resetDownstream": {
+                        "type": "boolean",
+                        "description": "是否同时重置所有下游依赖任务 (默认 true)"
+                    }
+                },
+                "required": ["taskId"]
             }),
         ),
         // ===== Engineering Flow =====

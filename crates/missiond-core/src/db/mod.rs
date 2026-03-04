@@ -89,7 +89,8 @@ CREATE TABLE IF NOT EXISTS board_tasks (
   updated_at TEXT NOT NULL,
   claim_executor_id TEXT,
   claim_executor_type TEXT,
-  claimed_at TEXT
+  claimed_at TEXT,
+  lease_expires_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_board_tasks_status ON board_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_board_tasks_parent ON board_tasks(parent_id);
@@ -399,6 +400,12 @@ impl MissionDB {
             )?;
         }
 
+        if !columns.iter().any(|c| c == "lease_expires_at") {
+            conn.execute_batch(
+                "ALTER TABLE board_tasks ADD COLUMN lease_expires_at TEXT;"
+            )?;
+        }
+
         // Knowledge Base: create FTS index if knowledge table exists but FTS doesn't
         let has_knowledge: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='knowledge'",
@@ -646,6 +653,46 @@ impl MissionDB {
                 "ALTER TABLE knowledge ADD COLUMN embedding BLOB;"
             )?;
             tracing::info!("Migration: added embedding column to knowledge table");
+        }
+
+        // Add llm_summary, embedding_provider, embedding to conversations for semantic search
+        if !conv_columns.iter().any(|c| c == "llm_summary") {
+            conn.execute_batch(
+                "ALTER TABLE conversations ADD COLUMN llm_summary TEXT;
+                 ALTER TABLE conversations ADD COLUMN embedding_provider TEXT;
+                 ALTER TABLE conversations ADD COLUMN embedding BLOB;"
+            )?;
+            tracing::info!("Migration: added llm_summary/embedding_provider/embedding to conversations");
+        }
+
+        // Conversation messages FTS5 index for full-text search
+        let has_conv_msg_fts: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='conversation_msg_fts'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_conv_msg_fts {
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE conversation_msg_fts USING fts5(
+                    content,
+                    content='conversation_messages', content_rowid='id',
+                    tokenize='unicode61'
+                );
+                INSERT INTO conversation_msg_fts(rowid, content)
+                    SELECT id, content FROM conversation_messages;
+                CREATE TRIGGER IF NOT EXISTS trg_conv_msg_fts_insert
+                AFTER INSERT ON conversation_messages
+                BEGIN
+                    INSERT INTO conversation_msg_fts(rowid, content) VALUES (NEW.id, NEW.content);
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_conv_msg_fts_delete
+                AFTER DELETE ON conversation_messages
+                BEGIN
+                    INSERT INTO conversation_msg_fts(conversation_msg_fts, rowid, content)
+                        VALUES('delete', OLD.id, OLD.content);
+                END;"
+            )?;
+            tracing::info!("Migration: created conversation_msg_fts with existing data backfill");
         }
 
         // Token usage ledger — append-only event stream for cost analysis
@@ -1357,6 +1404,7 @@ impl MissionDB {
             flow_context: None,
             flow_template: None,
             depends_on: input.depends_on.clone().unwrap_or_default(),
+            lease_expires_at: None,
         };
 
         self.insert_board_task(&task)?;
@@ -1627,21 +1675,65 @@ impl MissionDB {
         Ok(count)
     }
 
-    /// Recover stale running tasks: if a task has been 'running' for > N minutes,
-    /// reset it to 'open' (daemon may have restarted mid-execution).
-    pub fn recover_stale_running_tasks(&self, stale_minutes: i64) -> SqliteResult<usize> {
+    /// Recover stale running tasks using lease-based expiration.
+    /// Tasks with an expired lease (lease_expires_at < now) are reset to 'open'.
+    /// Tasks without a lease fall back to the old N-minute timeout based on updated_at.
+    pub fn recover_stale_running_tasks(&self, fallback_stale_minutes: i64) -> SqliteResult<usize> {
+        let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn();
-        let count = conn.execute(
+        // Recover tasks with expired lease
+        let leased = conn.execute(
+            "UPDATE board_tasks SET status = 'open', claim_executor_id = NULL,
+                 claim_executor_type = NULL, claimed_at = NULL, lease_expires_at = NULL, updated_at = ?1
+             WHERE status = 'running'
+               AND lease_expires_at IS NOT NULL
+               AND lease_expires_at < ?1",
+            params![now],
+        )?;
+        // Fallback: recover tasks without lease using old time-based check
+        let unleased = conn.execute(
             "UPDATE board_tasks SET status = 'open', claim_executor_id = NULL,
                  claim_executor_type = NULL, claimed_at = NULL, updated_at = ?1
              WHERE status = 'running'
+               AND lease_expires_at IS NULL
                AND julianday('now') - julianday(updated_at) > ?2 / 1440.0",
-            params![chrono::Utc::now().to_rfc3339(), stale_minutes as f64],
+            params![now, fallback_stale_minutes as f64],
         )?;
+        let count = leased + unleased;
         if count > 0 {
-            tracing::warn!(count, stale_minutes, "Recovered stale running tasks (claims cleared)");
+            tracing::warn!(count, leased, unleased, "Recovered stale running tasks (lease-based + fallback)");
         }
         Ok(count)
+    }
+
+    /// Set or renew the lease expiration for a running board task.
+    pub fn set_board_task_lease(&self, task_id: &str, lease_expires_at: &str) -> SqliteResult<usize> {
+        let conn = self.conn();
+        let count = conn.execute(
+            "UPDATE board_tasks SET lease_expires_at = ?1, updated_at = ?2
+             WHERE id = ?3 AND status = 'running'",
+            params![lease_expires_at, chrono::Utc::now().to_rfc3339(), task_id],
+        )?;
+        Ok(count)
+    }
+
+    /// List board tasks currently in 'running' state with auto_execute.
+    /// Used by smart watchdog to detect orphaned tasks (slot idle but task still running).
+    pub fn list_running_autopilot_tasks(&self) -> SqliteResult<Vec<BoardTask>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM board_tasks
+             WHERE auto_execute = 1
+               AND status = 'running'
+               AND claim_executor_id IS NOT NULL
+             ORDER BY claimed_at ASC"
+        )?;
+        let rows = stmt.query_map([], |row| Self::row_to_board_task(row))?;
+        let mut tasks = Vec::new();
+        for task in rows {
+            tasks.push(task?);
+        }
+        Ok(tasks)
     }
 
     /// List board tasks eligible for autopilot execution
@@ -1746,6 +1838,67 @@ impl MissionDB {
         Ok(DependencyStatus::Ready)
     }
 
+    /// Find all downstream tasks that depend on the given task (direct + transitive).
+    /// Used by mission_board_retry to cascade-reset downstream tasks.
+    pub fn find_downstream_tasks(&self, task_id: &str) -> SqliteResult<Vec<String>> {
+        let conn = self.read_conn();
+        let mut all_tasks: Vec<BoardTask> = Vec::new();
+        let mut stmt = conn.prepare("SELECT * FROM board_tasks WHERE depends_on != '[]'")?;
+        let rows = stmt.query_map([], |row| Self::row_to_board_task(row))?;
+        for row in rows {
+            all_tasks.push(row?);
+        }
+
+        let mut downstream = Vec::new();
+        let mut queue = vec![task_id.to_string()];
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(task_id.to_string());
+
+        while let Some(current) = queue.pop() {
+            for t in &all_tasks {
+                if t.depends_on.iter().any(|d| d.starts_with(&current) || current.starts_with(d)) {
+                    if visited.insert(t.id.clone()) {
+                        downstream.push(t.id.clone());
+                        queue.push(t.id.clone());
+                    }
+                }
+            }
+        }
+        Ok(downstream)
+    }
+
+    /// Reset a task and optionally all downstream tasks to open status.
+    pub fn retry_board_task(&self, task_id: &str, reset_downstream: bool) -> SqliteResult<Vec<String>> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn();
+
+        // Reset target task
+        conn.execute(
+            "UPDATE board_tasks SET status = 'open', claim_executor_id = NULL, claim_executor_type = NULL, claimed_at = NULL, updated_at = ?1 WHERE id = ?2",
+            params![now, task_id],
+        )?;
+
+        let mut reset_ids = vec![task_id.to_string()];
+
+        if reset_downstream {
+            // Need read_conn for find_downstream, but we hold conn. Use a separate scope.
+            drop(conn);
+            let downstream = self.find_downstream_tasks(task_id)?;
+            if !downstream.is_empty() {
+                let conn = self.conn();
+                for ds_id in &downstream {
+                    conn.execute(
+                        "UPDATE board_tasks SET status = 'open', claim_executor_id = NULL, claim_executor_type = NULL, claimed_at = NULL, updated_at = ?1 WHERE id = ?2",
+                        params![now, ds_id],
+                    )?;
+                }
+                reset_ids.extend(downstream);
+            }
+        }
+
+        Ok(reset_ids)
+    }
+
     fn row_to_board_task(row: &rusqlite::Row) -> SqliteResult<BoardTask> {
         let status_str: String = row.get("status")?;
         let status = BoardTaskStatus::from_str(&status_str).unwrap_or(BoardTaskStatus::Open);
@@ -1782,6 +1935,7 @@ impl MissionDB {
                 let raw: String = row.get("depends_on").unwrap_or_else(|_| "[]".to_string());
                 serde_json::from_str(&raw).unwrap_or_default()
             },
+            lease_expires_at: row.get("lease_expires_at").unwrap_or(None),
         })
     }
 
@@ -1972,13 +2126,26 @@ impl MissionDB {
         rows.collect()
     }
 
-    /// Increment retry_count and set status back to open for retry
+    /// Increment retry_count and set status back to open for retry.
+    /// Also clears claim fields so CAS re-claim can succeed.
     pub fn increment_board_task_retry(&self, task_id: &str, new_retry: i64) -> SqliteResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "UPDATE board_tasks SET retry_count = ?1, status = 'open', updated_at = ?2 WHERE id = ?3",
+            "UPDATE board_tasks SET retry_count = ?1, status = 'open', claim_executor_id = NULL, claim_executor_type = NULL, claimed_at = NULL, updated_at = ?2 WHERE id = ?3",
             params![new_retry, now, task_id],
+        )?;
+        Ok(())
+    }
+
+    /// Release CAS claim and revert task to open.
+    /// Used when PTY spawn times out or other pre-send failures occur.
+    pub fn unclaim_board_task(&self, task_id: &str) -> SqliteResult<()> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE board_tasks SET status = 'open', claim_executor_id = NULL, claim_executor_type = NULL, claimed_at = NULL, updated_at = ?1 WHERE id = ?2",
+            params![now, task_id],
         )?;
         Ok(())
     }
@@ -3998,17 +4165,165 @@ impl MissionDB {
         Ok(msgs)
     }
 
-    /// Search conversation messages by content
+    /// Search conversation messages: FTS5 first, LIKE fallback for Chinese substrings.
     pub fn search_conversation_messages(&self, query: &str, limit: i64) -> SqliteResult<Vec<ConversationMessage>> {
-        let pattern = format!("%{}%", query);
+        let conn = self.read_conn();
+
+        // Phase 1: FTS5 search
+        let fts_query = Self::sanitize_conv_fts_query(query);
+        let fts_results = {
+            let mut stmt = conn.prepare(
+                "SELECT m.* FROM conversation_messages m
+                 JOIN conversation_msg_fts f ON m.id = f.rowid
+                 WHERE conversation_msg_fts MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2"
+            )?;
+            let rows = stmt.query_map(params![fts_query, limit], |row| Self::row_to_conversation_message(row))?;
+            let mut msgs = Vec::new();
+            for m in rows { msgs.push(m?); }
+            msgs
+        };
+
+        // Phase 2: LIKE fallback if FTS5 returns nothing (common for Chinese substrings)
+        if fts_results.is_empty() {
+            let pattern = format!("%{}%", query);
+            let mut stmt = conn.prepare(
+                "SELECT * FROM conversation_messages WHERE content LIKE ?1 ORDER BY timestamp DESC LIMIT ?2"
+            )?;
+            let rows = stmt.query_map(params![pattern, limit], |row| Self::row_to_conversation_message(row))?;
+            let mut msgs = Vec::new();
+            for m in rows { msgs.push(m?); }
+            return Ok(msgs);
+        }
+
+        Ok(fts_results)
+    }
+
+    /// FTS5 search grouped by session — returns (session_id, hit_count) ranked by total hits.
+    /// Used for hybrid search RRF fusion.
+    pub fn search_conversation_sessions_fts(&self, query: &str, limit: i64) -> SqliteResult<Vec<(String, usize)>> {
+        let conn = self.read_conn();
+        let fts_query = Self::sanitize_conv_fts_query(query);
+
+        // FTS5 search grouped by session
+        let fts_results = {
+            let mut stmt = conn.prepare(
+                "SELECT m.session_id, COUNT(*) as hits FROM conversation_messages m
+                 JOIN conversation_msg_fts f ON m.id = f.rowid
+                 WHERE conversation_msg_fts MATCH ?1
+                 GROUP BY m.session_id
+                 ORDER BY hits DESC
+                 LIMIT ?2"
+            )?;
+            let rows = stmt.query_map(params![fts_query, limit], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, usize>(1)?))
+            })?;
+            let mut results = Vec::new();
+            for r in rows { results.push(r?); }
+            results
+        };
+
+        // LIKE fallback if FTS5 returns nothing
+        if fts_results.is_empty() {
+            let pattern = format!("%{}%", query);
+            let mut stmt = conn.prepare(
+                "SELECT session_id, COUNT(*) as hits FROM conversation_messages
+                 WHERE content LIKE ?1
+                 GROUP BY session_id
+                 ORDER BY hits DESC
+                 LIMIT ?2"
+            )?;
+            let rows = stmt.query_map(params![pattern, limit], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, usize>(1)?))
+            })?;
+            let mut results = Vec::new();
+            for r in rows { results.push(r?); }
+            return Ok(results);
+        }
+
+        Ok(fts_results)
+    }
+
+    /// Sanitize query for conversation FTS5 MATCH: split words, wrap in quotes, join with OR.
+    fn sanitize_conv_fts_query(query: &str) -> String {
+        let terms: Vec<String> = query.split_whitespace()
+            .map(|t| format!("\"{}\"", t.replace('"', "")))
+            .collect();
+        if terms.is_empty() {
+            format!("\"{}\"", query.replace('"', ""))
+        } else {
+            terms.join(" OR ")
+        }
+    }
+
+    /// Store LLM-generated summary for a conversation.
+    pub fn set_conversation_summary(&self, id: &str, summary: &str) -> SqliteResult<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE conversations SET llm_summary = ?1 WHERE id = ?2",
+            params![summary, id],
+        )?;
+        Ok(())
+    }
+
+    /// Store conversation embedding + provider identifier.
+    pub fn set_conversation_embedding(&self, id: &str, embedding: &[f32], provider: &str) -> SqliteResult<()> {
+        let conn = self.conn();
+        let bytes = crate::embedding::f32_vec_to_bytes(embedding);
+        conn.execute(
+            "UPDATE conversations SET embedding = ?1, embedding_provider = ?2 WHERE id = ?3",
+            params![bytes, provider, id],
+        )?;
+        Ok(())
+    }
+
+    /// Load all conversation embeddings matching a specific provider. For cache warming.
+    pub fn load_conversation_embeddings(&self, provider: &str) -> SqliteResult<Vec<(String, Vec<f32>)>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
-            "SELECT * FROM conversation_messages WHERE content LIKE ?1 ORDER BY timestamp DESC LIMIT ?2"
+            "SELECT id, embedding FROM conversations WHERE embedding IS NOT NULL AND embedding_provider = ?1"
         )?;
-        let rows = stmt.query_map(params![pattern, limit], |row| Self::row_to_conversation_message(row))?;
-        let mut msgs = Vec::new();
-        for m in rows { msgs.push(m?); }
-        Ok(msgs)
+        let rows = stmt.query_map(params![provider], |row| {
+            let id: String = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((id, blob))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            let (id, blob) = row?;
+            result.push((id, crate::embedding::bytes_to_f32_vec(&blob)));
+        }
+        Ok(result)
+    }
+
+    /// List conversation IDs that are completed but missing LLM summary (for backfill).
+    pub fn conversations_missing_summary(&self, limit: i64) -> SqliteResult<Vec<String>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM conversations
+             WHERE llm_summary IS NULL AND status = 'completed' AND message_count >= 6
+             ORDER BY started_at DESC LIMIT ?1"
+        )?;
+        let rows = stmt.query_map(params![limit], |row| row.get::<_, String>(0))?;
+        let mut ids = Vec::new();
+        for r in rows { ids.push(r?); }
+        Ok(ids)
+    }
+
+    /// List conversation IDs with embeddings from a different provider (for re-embedding on provider switch).
+    pub fn conversations_stale_embedding(&self, current_provider: &str, limit: i64) -> SqliteResult<Vec<String>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM conversations
+             WHERE llm_summary IS NOT NULL AND embedding_provider IS NOT NULL
+               AND embedding_provider != ?1
+             ORDER BY started_at DESC LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(params![current_provider, limit], |row| row.get::<_, String>(0))?;
+        let mut ids = Vec::new();
+        for r in rows { ids.push(r?); }
+        Ok(ids)
     }
 
     // ============ Conversation Tool Calls (Audit) ============
@@ -4632,6 +4947,8 @@ impl MissionDB {
             chat_type: row.get("chat_type").unwrap_or(None),
             conversation_type: row.get("conversation_type").unwrap_or_else(|_| "user".to_string()),
             updated_at: row.get("updated_at").unwrap_or(None),
+            llm_summary: row.get("llm_summary").unwrap_or(None),
+            embedding_provider: row.get("embedding_provider").unwrap_or(None),
         })
     }
 
