@@ -14,6 +14,15 @@ function mapToBackend(data: Record<string, unknown>): Record<string, unknown> {
 
 export async function GET(req: NextRequest) {
   try {
+    const id = req.nextUrl.searchParams.get('id');
+    if (id) {
+      // Get single task with notes
+      const task = await callTool('mission_board_get', { id });
+      if (!task) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+      const mapped = task as Record<string, unknown>;
+      const { notes, ...rest } = mapped;
+      return NextResponse.json({ ...mapToFrontend(rest), notes });
+    }
     const status = req.nextUrl.searchParams.get('status') || undefined;
     const args: Record<string, unknown> = { includeHidden: true };
     if (status) args.status = status;
@@ -32,6 +41,12 @@ export async function POST(req: NextRequest) {
     if (action === 'toggle' && id) {
       const result = await callTool('mission_board_toggle', { id });
       return NextResponse.json(mapToFrontend(result as Record<string, unknown>));
+    }
+
+    if (action === 'add-note' && id) {
+      const body = await req.json();
+      const note = await callTool('mission_board_note_add', { taskId: id, content: body.content, noteType: body.noteType, author: body.author });
+      return NextResponse.json(note);
     }
 
     if (action === 'clear-done') {

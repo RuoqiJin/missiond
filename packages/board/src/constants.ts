@@ -5,6 +5,7 @@ export const CATEGORY_CONFIG: Record<TaskCategory, { label: string; className: s
   dev: { label: '开发', className: 'bg-blue-500/10 text-blue-400 border-blue-500/20' },
   infra: { label: '基建', className: 'bg-purple-500/10 text-purple-400 border-purple-500/20' },
   test: { label: '测试', className: 'bg-green-500/10 text-green-400 border-green-500/20' },
+  research: { label: '研究', className: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20' },
   other: { label: '其他', className: 'bg-neutral-500/10 text-neutral-400 border-neutral-500/20' },
 };
 
