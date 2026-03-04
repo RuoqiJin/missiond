@@ -2889,7 +2889,9 @@ impl MissionDB {
             .collect())
     }
 
-    /// Search knowledge via FTS, with LIKE fallback for Chinese text
+    /// Search knowledge via FTS, with LIKE fallback for Chinese text.
+    /// NOTE: Does NOT bump access_count. Callers that represent user-initiated searches
+    /// should explicitly call `kb_update_access_stats()` on the results.
     pub fn kb_search(&self, query: &str, category: Option<&str>) -> SqliteResult<Vec<KnowledgeEntry>> {
         // Phase 1: FTS5 search (works well for English / space-separated tokens)
         let results = self.kb_search_fts(query, category)?;
@@ -2899,11 +2901,6 @@ impl MissionDB {
         } else {
             results
         };
-
-        // Update access_count + last_accessed_at for all matched entries
-        if !results.is_empty() {
-            self.kb_update_access_stats(&results)?;
-        }
 
         Ok(results)
     }
