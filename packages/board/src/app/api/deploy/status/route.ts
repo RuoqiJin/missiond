@@ -60,8 +60,8 @@ export async function GET() {
     // Get slot status for deploy slots
     let slotStatuses: Array<{ slotId: string; state: string; taskTitle?: string; duration?: number }> = [];
     try {
-      const slots = (await callTool('mission_agents')) as Array<{ slotId: string; state: string }>;
-      const deploySlots = slots.filter((s) => s.slotId.includes('deploy'));
+      const slots = (await callTool('mission_agents')) as Array<{ slotId: string; status: string; role: string }>;
+      const deploySlots = slots.filter((s) => s.role === 'deploy' || s.slotId.includes('deploy'));
       for (const slot of deploySlots) {
         const runningTask = runningTasks.find((t) => t.claimExecutorId === slot.slotId);
         const duration = runningTask?.claimedAt
@@ -69,7 +69,7 @@ export async function GET() {
           : undefined;
         slotStatuses.push({
           slotId: slot.slotId,
-          state: slot.state,
+          state: slot.status,
           taskTitle: runningTask?.title,
           duration,
         });
