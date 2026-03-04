@@ -4,20 +4,20 @@
 
 @layer base {
   :root {
-    --background: 0 0% 4%;
-    --foreground: 0 0% 95%;
-    --muted: 0 0% 15%;
-    --muted-foreground: 0 0% 64%;
-    --popover: 0 0% 10%;
-    --popover-foreground: 0 0% 95%;
-    --border: 0 0% 18%;
-    --input: 0 0% 18%;
+    --background: 220 6% 10%;
+    --foreground: 220 5% 95%;
+    --muted: 220 5% 18%;
+    --muted-foreground: 220 5% 64%;
+    --popover: 220 6% 12%;
+    --popover-foreground: 220 5% 95%;
+    --border: 220 5% 20%;
+    --input: 220 5% 20%;
     --primary: 24 95% 53%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 0 0% 15%;
-    --secondary-foreground: 0 0% 95%;
-    --accent: 0 0% 15%;
-    --accent-foreground: 0 0% 95%;
+    --secondary: 220 5% 18%;
+    --secondary-foreground: 220 5% 95%;
+    --accent: 220 5% 18%;
+    --accent-foreground: 220 5% 95%;
     --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 100%;
     --ring: 24 95% 53%;

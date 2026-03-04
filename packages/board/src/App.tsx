@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Activity, Crosshair, FlaskConical } from 'lucide-react';
+import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Activity, Crosshair, FlaskConical, Rocket } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
@@ -17,8 +17,9 @@ import { PendingQuestions } from './components/PendingQuestions';
 import { MemoryDashboard } from './components/MemoryDashboard';
 import { DecisionDashboard } from './components/DecisionDashboard';
 import { ResearchBoard } from './components/ResearchBoard';
+import { DeployDashboard } from './components/DeployDashboard';
 
-type Tab = 'board' | 'terminal' | 'knowledge' | 'conversations' | 'memory' | 'decisions' | 'research';
+type Tab = 'board' | 'terminal' | 'knowledge' | 'conversations' | 'memory' | 'decisions' | 'research' | 'deploy';
 
 interface SlotDef { id: string; label: string; role: string; running?: boolean }
 
@@ -73,7 +74,7 @@ export default function App() {
 
   if (!mounted) {
     return (
-      <div className="min-h-screen bg-[#0a0a0a] p-4 sm:p-8">
+      <div className="min-h-screen bg-background p-4 sm:p-8">
         <Skeleton className="h-7 w-32 bg-neutral-800 mb-6" />
         <Skeleton className="h-10 bg-neutral-800/50 rounded-lg mb-4" />
         <div className="space-y-2">
@@ -86,7 +87,7 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-[#0a0a0a]">
+    <div className="h-screen flex flex-col bg-background">
       {/* Top bar with tabs */}
       <div className="flex items-center justify-between px-4 sm:px-8 pt-4 pb-2">
         <div className="flex items-center gap-4">
@@ -165,6 +166,16 @@ export default function App() {
               Decisions
             </button>
             <button
+              onClick={() => setTab('deploy')}
+              className={cn(
+                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
+                tab === 'deploy' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
+              )}
+            >
+              <Rocket className="w-3 h-3" />
+              Deploy
+            </button>
+            <button
               onClick={() => setTab('research')}
               className={cn(
                 'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
@@ -230,6 +241,8 @@ export default function App() {
         <Conversations />
       ) : tab === 'decisions' ? (
         <DecisionDashboard />
+      ) : tab === 'deploy' ? (
+        <DeployDashboard />
       ) : tab === 'research' ? (
         <ResearchBoard />
       ) : (
