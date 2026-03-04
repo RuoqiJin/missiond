@@ -1075,6 +1075,8 @@ pub enum IncidentSource {
     DeployCenter,
     Sentry,
     Manual,
+    /// PTY slot detected an anomaly (e.g., MCP tool unavailable)
+    PtySlot,
 }
 
 impl std::fmt::Display for IncidentSource {
@@ -1084,6 +1086,7 @@ impl std::fmt::Display for IncidentSource {
             Self::DeployCenter => write!(f, "deploy_center"),
             Self::Sentry => write!(f, "sentry"),
             Self::Manual => write!(f, "manual"),
+            Self::PtySlot => write!(f, "pty_slot"),
         }
     }
 }
