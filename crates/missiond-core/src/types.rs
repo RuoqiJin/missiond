@@ -442,6 +442,10 @@ pub struct BoardTask {
     /// DAG dependency: IDs of tasks that must be done before this task can execute
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
+    /// Lease expiration for running tasks (heartbeat mechanism).
+    /// Tasks running past this time are considered stale and recoverable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at: Option<String>,
 }
 
 fn default_max_retries() -> i64 { 2 }
@@ -933,6 +937,12 @@ pub struct Conversation {
     /// Last message write time (for compaction detection)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
+    /// LLM-generated conversation summary for semantic search
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm_summary: Option<String>,
+    /// Embedding provider identifier (e.g. "fastembed-bge-small-zh-v1.5")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding_provider: Option<String>,
 }
 
 fn default_conversation_type() -> String { "user".to_string() }

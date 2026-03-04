@@ -39,6 +39,14 @@ static YN_CLEANUP_PATTERN: Lazy<Regex> =
 static SKILL_CONFIRM_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?i)Use skill "([^"]+)""#).unwrap());
 
+/// Built-in tool type line pattern: "Read file", "Bash command", "Edit file", "Write file", etc.
+static BUILTIN_TOOL_TYPE_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?m)^\s*(Read|Write|Edit|MultiEdit|Bash|NotebookEdit)\s+(file|command|files?)?\s*$").unwrap());
+
+/// Built-in tool call pattern: Read(path), Search(pattern: ...), Glob(pattern: ...), etc.
+static BUILTIN_TOOL_CALL_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?m)(Read|Write|Edit|Bash|Grep|Glob|Search|LSP|Agent|NotebookEdit)\s*\(").unwrap());
+
 /// Claude Code confirm parser
 ///
 /// Parses confirmation dialogs and formats responses:
@@ -118,6 +126,28 @@ impl ClaudeCodeConfirmParser {
             let skill_name = caps.get(1)?.as_str().to_string();
             return Some(ToolInfo {
                 name: format!("Skill({})", skill_name),
+                mcp_server: None,
+                params: HashMap::new(),
+            });
+        }
+
+        // Try built-in tool type line: "Read file", "Bash command", etc.
+        if let Some(caps) = BUILTIN_TOOL_TYPE_PATTERN.captures(text) {
+            let tool_name = caps.get(1)?.as_str().to_string();
+            return Some(ToolInfo {
+                name: tool_name,
+                mcp_server: None,
+                params: HashMap::new(),
+            });
+        }
+
+        // Try built-in tool call pattern: Read(...), Search(...), Glob(...), etc.
+        if let Some(caps) = BUILTIN_TOOL_CALL_PATTERN.captures(text) {
+            let tool_name = caps.get(1)?.as_str().to_string();
+            // Normalize Search → Grep
+            let tool_name = if tool_name == "Search" { "Grep".to_string() } else { tool_name };
+            return Some(ToolInfo {
+                name: tool_name,
                 mcp_server: None,
                 params: HashMap::new(),
             });

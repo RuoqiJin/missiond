@@ -389,6 +389,8 @@ struct AppState {
     memory_paused_at: Arc<std::sync::atomic::AtomicI64>,
     /// Per-slot consecutive failure count for autopilot throttling.
     slot_fail_counts: Arc<std::sync::Mutex<HashMap<String, (i32, i64)>>>,  // (count, last_fail_at)
+    /// Per-slot current model (ANTHROPIC_MODEL) for env-change detection.
+    slot_current_model: Arc<std::sync::Mutex<HashMap<String, String>>>,
     /// Screenshot broker for browser-based PTY screenshots.
     screenshot_broker: Arc<missiond_core::ws::ScreenshotBroker>,
     /// Jarvis request trace store for debugging.
@@ -404,11 +406,25 @@ struct AppState {
     /// Flow engine reentry guard: task IDs currently being processed.
     flow_in_progress: Arc<std::sync::Mutex<HashSet<String>>>,
     /// Embedding service for semantic search (None if feature disabled or init failed).
-    embedding_service: Option<Arc<missiond_core::embedding::EmbeddingService>>,
+    /// Supports pluggable providers: OllamaProvider (preferred) or FastEmbed (fallback).
+    embedding_service: Option<Arc<dyn missiond_core::embedding::EmbeddingProvider>>,
     /// In-memory embedding cache for policy:decision entries (id, vector).
     embedding_cache: missiond_core::embedding::EmbeddingCache,
+    /// In-memory embedding cache for conversation summaries (session_id, vector).
+    conversation_embedding_cache: missiond_core::embedding::EmbeddingCache,
+    /// Embedding worker channel: event-driven summary + embedding generation.
+    embedding_tx: tokio::sync::mpsc::Sender<EmbeddingTask>,
     /// AIOps: incident event bus sender (try_send only, capacity 100).
     incident_tx: tokio::sync::mpsc::Sender<missiond_core::types::MissionIncident>,
+}
+
+/// Event-driven embedding tasks — the Worker sleeps until triggered.
+#[derive(Debug)]
+enum EmbeddingTask {
+    /// Generate summary + embedding for a single completed session.
+    ProcessSession(String),
+    /// Batch backfill all legacy conversations (triggered via MCP tool).
+    BackfillLegacy,
 }
 
 fn default_mission_home() -> PathBuf {
@@ -3478,39 +3494,157 @@ impl AppState {
                     query: String,
                     #[serde(default, deserialize_with = "lenient::option_i64")]
                     limit: Option<i64>,
-                    role: Option<String>,
                     session_id: Option<String>,
                     exclude_session_id: Option<String>,
                 }
-                let Args { query, limit, role, session_id, exclude_session_id } = serde_json::from_value(args)?;
-                let mut msgs = self.mission.db()
-                    .search_conversation_messages(&query, limit.unwrap_or(20) * 3) // over-fetch for post-filter
-                    .map_err(|e| anyhow!("DB error: {}", e))?;
-                let limit = limit.unwrap_or(20) as usize;
-                // Post-filter by role/session
-                if let Some(ref r) = role {
-                    msgs.retain(|m| m.role == *r);
-                }
+                let Args { query, limit, session_id, exclude_session_id } = serde_json::from_value(args)?;
+                let top_k = limit.unwrap_or(10) as usize;
+                let db = self.mission.db();
+
+                // ── Path A: single-session message search (legacy behavior) ──
                 if let Some(ref sid) = session_id {
+                    let mut msgs = db.search_conversation_messages(&query, (top_k * 3) as i64)
+                        .map_err(|e| anyhow!("DB error: {}", e))?;
                     msgs.retain(|m| m.session_id == *sid);
+                    msgs.truncate(top_k);
+                    let msgs_lite: Vec<serde_json::Value> = msgs.iter().map(|m| {
+                        serde_json::json!({
+                            "id": m.id, "sessionId": m.session_id,
+                            "role": m.role, "content": m.content, "timestamp": m.timestamp,
+                        })
+                    }).collect();
+                    return Ok(ToolResult::json(&serde_json::json!({
+                        "results": msgs_lite, "count": msgs_lite.len(), "query": query,
+                        "mode": "single_session",
+                    })));
                 }
-                if let Some(ref ex_sid) = exclude_session_id {
-                    msgs.retain(|m| m.session_id != *ex_sid);
+
+                // ── Path B: hybrid session-level search (FTS5 + embedding RRF) ──
+
+                // 1. FTS5: message-level search → session ranking
+                let fts_sessions = db.search_conversation_sessions_fts(&query, (top_k * 3) as i64)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                let fts_ranked: Vec<(String, usize)> = fts_sessions.into_iter()
+                    .enumerate()
+                    .map(|(rank, (sid, _hits))| (sid, rank))
+                    .collect();
+
+                // 2. Vector: embed query → cosine sim against conversation embedding cache
+                let query_embedding = self.embedding_service.as_ref()
+                    .and_then(|svc| svc.embed(&query));
+                let cache = self.conversation_embedding_cache.read().await;
+                let vec_ranked: Vec<(String, usize, f32)> = if let Some(ref qe) = query_embedding {
+                    let mut scores: Vec<(usize, f32)> = cache.iter()
+                        .enumerate()
+                        .map(|(i, (_, vec))| (i, missiond_core::embedding::cosine_similarity(qe, vec)))
+                        .collect();
+                    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    scores.iter()
+                        .take(top_k * 3)
+                        .enumerate()
+                        .map(|(rank, (idx, sim))| (cache[*idx].0.clone(), rank, *sim))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                drop(cache);
+
+                // 3. RRF merge
+                let rrf_k = 60;
+                let mut session_scores: std::collections::HashMap<String, (Option<usize>, Option<usize>, Option<f32>)> =
+                    std::collections::HashMap::new();
+                for (sid, rank) in &fts_ranked {
+                    session_scores.entry(sid.clone()).or_insert((None, None, None)).0 = Some(*rank);
                 }
-                msgs.truncate(limit);
-                let msgs_lite: Vec<serde_json::Value> = msgs.iter().map(|m| {
-                    serde_json::json!({
-                        "id": m.id,
-                        "sessionId": m.session_id,
-                        "role": m.role,
-                        "content": m.content,
-                        "timestamp": m.timestamp,
+                for (sid, rank, sim) in &vec_ranked {
+                    let entry = session_scores.entry(sid.clone()).or_insert((None, None, None));
+                    entry.1 = Some(*rank);
+                    entry.2 = Some(*sim);
+                }
+
+                let mut ranked: Vec<(String, f64, Option<usize>, Option<usize>, Option<f32>)> = session_scores
+                    .into_iter()
+                    .map(|(sid, (fts_r, vec_r, sim))| {
+                        let score = missiond_core::embedding::rrf_score(fts_r, vec_r, rrf_k);
+                        (sid, score, fts_r, vec_r, sim)
                     })
-                }).collect();
+                    .collect();
+                ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+                // Exclude session if requested
+                if let Some(ref ex_sid) = exclude_session_id {
+                    ranked.retain(|(sid, _, _, _, _)| sid != ex_sid);
+                }
+                ranked.truncate(top_k);
+
+                // 4. Enrich: fetch conversation metadata + sample messages
+                let mut results = Vec::new();
+                for (sid, rrf, fts_r, vec_r, sim) in &ranked {
+                    let conv = db.get_conversation(sid).ok().flatten();
+                    let sample_msgs = db.get_conversation_messages(sid, None, 5)
+                        .unwrap_or_default();
+                    let sample: Vec<serde_json::Value> = sample_msgs.iter().map(|m| {
+                        serde_json::json!({
+                            "role": m.role,
+                            "content": if m.content.len() > 300 {
+                                format!("{}…", &m.content[..char_boundary_at(&m.content, 300)])
+                            } else {
+                                m.content.clone()
+                            },
+                        })
+                    }).collect();
+
+                    results.push(serde_json::json!({
+                        "sessionId": sid,
+                        "rrfScore": rrf,
+                        "ftsRank": fts_r,
+                        "vecRank": vec_r,
+                        "cosineSim": sim,
+                        "project": conv.as_ref().and_then(|c| c.project.as_deref()),
+                        "status": conv.as_ref().map(|c| c.status.as_str()),
+                        "slotId": conv.as_ref().and_then(|c| c.slot_id.as_deref()),
+                        "llmSummary": conv.as_ref().and_then(|c| c.llm_summary.as_deref()),
+                        "messageCount": conv.as_ref().map(|c| c.message_count),
+                        "startedAt": conv.as_ref().map(|c| &c.started_at),
+                        "sampleMessages": sample,
+                    }));
+                }
+
                 Ok(ToolResult::json(&serde_json::json!({
-                    "results": msgs_lite,
-                    "count": msgs_lite.len(),
+                    "results": results,
+                    "count": results.len(),
                     "query": query,
+                    "mode": "hybrid_rrf",
+                    "ftsHits": fts_ranked.len(),
+                    "vecHits": vec_ranked.len(),
+                })))
+            }
+
+            "mission_trigger_backfill" => {
+                let db = self.mission.db();
+                let total = db.conversations_missing_summary(9999).map(|v| v.len()).unwrap_or(0);
+                let stale = self.embedding_service.as_ref()
+                    .and_then(|svc| db.conversations_stale_embedding(svc.provider_id(), 9999).ok())
+                    .map(|v| v.len())
+                    .unwrap_or(0);
+                let provider = self.embedding_service.as_ref()
+                    .map(|svc| svc.provider_id().to_string())
+                    .unwrap_or_else(|| "none".to_string());
+
+                if total == 0 && stale == 0 {
+                    return Ok(ToolResult::json(&serde_json::json!({
+                        "status": "nothing_to_do",
+                        "provider": provider,
+                    })));
+                }
+
+                let _ = self.embedding_tx.try_send(EmbeddingTask::BackfillLegacy);
+                Ok(ToolResult::json(&serde_json::json!({
+                    "status": "triggered",
+                    "missingSummary": total,
+                    "staleProvider": stale,
+                    "currentProvider": provider,
+                    "note": "后台 Worker 已启动回填，每批 20 条，间隔 2 秒。可多次调用此工具查看剩余量。",
                 })))
             }
 
@@ -5032,6 +5166,201 @@ impl AppState {
                 Ok(ToolResult::json_pretty(&summary))
             }
 
+            // ===== Task Decompose =====
+            "mission_board_decompose" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct DecomposeArgs {
+                    task_id: String,
+                    slot_id: Option<String>,
+                    hints: Option<String>,
+                }
+                let args: DecomposeArgs = serde_json::from_value(args)?;
+                let slot_id = args.slot_id.unwrap_or_else(|| "slot-coder-1".to_string());
+
+                // Get the task
+                let task = self.mission.db()
+                    .get_board_task(&args.task_id)
+                    .map_err(|e| anyhow!("DB error: {}", e))?
+                    .ok_or_else(|| anyhow!("Task not found: {}", args.task_id))?;
+
+                // Validate: must be open
+                if task.status != missiond_core::types::BoardTaskStatus::Open {
+                    return Ok(ToolResult::text(format!(
+                        "Error: 任务状态为 {:?}，只能拆分 open 状态的任务", task.status
+                    )));
+                }
+
+                // Check if already has subtasks
+                let subtasks = self.mission.db()
+                    .list_board_tasks(None, true)
+                    .map_err(|e| anyhow!("DB error: {}", e))?
+                    .into_iter()
+                    .filter(|t| t.parent_id.as_deref() == Some(&task.id))
+                    .count();
+                if subtasks > 0 {
+                    return Ok(ToolResult::text(format!(
+                        "Error: 任务已有 {} 个子任务，不能重复拆分。如需重新拆分，请先删除现有子任务。", subtasks
+                    )));
+                }
+
+                // Build decompose prompt
+                let hints_section = args.hints
+                    .map(|h| format!("\n### 用户提示\n{}", h))
+                    .unwrap_or_default();
+
+                // Inject context from Skills + KB
+                let context = self.skills.build_context(&task.title);
+                let context_section = if context.contains("No matching skills") {
+                    String::new()
+                } else {
+                    format!("\n### 相关知识\n{}", context)
+                };
+
+                let decompose_prompt = format!(
+                    r#"## 任务拆分指令
+
+你需要将以下 Board 任务拆分为可执行的子任务序列。
+
+### 父任务
+- ID: {task_id}
+- 标题: {title}
+- 描述: {description}
+{hints}{context}
+
+### 拆分规范
+
+1. **调查先行**: 第一个子任务必须是调查/分析相关代码和基建
+2. **检查点**: 在"方案确定"后插入一个 user_review 子任务（让用户审批方案再继续）
+3. **原子化**: 每个子任务应该是一个独立的、可验证的工作单元
+4. **依赖链**: 用 dependsOn 串联，确保执行顺序
+
+### 操作步骤
+
+对每个子任务，调用 `mission_board_create`:
+- title: 清晰的动作描述
+- description: 包含具体文件路径、预期产出
+- parentId: "{task_id}"
+- dependsOn: [前置任务ID]（第一个子任务不需要）
+- category: 继承父任务 "{category}"
+- priority: 继承父任务 "{priority}"
+- project: "{project}"
+
+**执行型子任务** (工位干活):
+- assignee: "slot-coder-1"
+- autoExecute: true
+
+**审批型子任务** (用户检查点):
+- autoExecute: false
+- title 以 "[Review]" 开头
+- description 写明: 需要审批什么、审批后用 mission_board_toggle 放行下游
+
+### 完成后
+
+在父任务添加一条备注 (mission_board_note_add):
+- taskId: "{task_id}"
+- noteType: "summary"
+- content: 列出所有子任务 ID + 标题 + 依赖链"#,
+                    task_id = task.id,
+                    title = task.title,
+                    description = task.description,
+                    hints = hints_section,
+                    context = context_section,
+                    category = task.category,
+                    priority = task.priority,
+                    project = task.project.as_deref().unwrap_or(""),
+                );
+
+                // Submit as a task to the slot
+                let submit_task_id = self.mission.submit("coder", &decompose_prompt)?;
+
+                // Store target slot
+                let _ = self.mission.db().update_task(
+                    &submit_task_id,
+                    &missiond_core::types::TaskUpdate {
+                        slot_id: Some(slot_id.clone()),
+                        ..Default::default()
+                    },
+                );
+
+                // Try immediate dispatch
+                if let Some(status) = self.pty.get_status(&slot_id).await {
+                    if status.state == missiond_core::pty::SessionState::Idle {
+                        if let Ok(()) = self.pty.send_fire_and_forget(&slot_id, &decompose_prompt).await {
+                            let now = chrono::Utc::now().timestamp_millis();
+                            let slot_session = self.mission.db().get_slot_session(&slot_id).ok().flatten();
+                            let _ = self.mission.db().update_task(
+                                &submit_task_id,
+                                &missiond_core::types::TaskUpdate {
+                                    status: Some(missiond_core::types::TaskStatus::Running),
+                                    slot_id: Some(slot_id.clone()),
+                                    session_id: slot_session,
+                                    started_at: Some(now),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                    }
+                }
+
+                // Write note on parent task
+                let _ = self.mission.db().add_board_task_note(
+                    &missiond_core::types::AddBoardTaskNoteInput {
+                        task_id: task.id.clone(),
+                        content: format!("🔀 任务拆分已启动 → submit task {} → slot {}", submit_task_id, slot_id),
+                        note_type: Some("progress".to_string()),
+                        author: Some("decompose".to_string()),
+                    },
+                );
+
+                Ok(ToolResult::text(format!(
+                    "✅ 拆分任务已派发\n- Submit Task: {}\n- 工位: {}\n- 父任务: {} ({})\n\n工位将调查代码后自动创建子任务。用 mission_task_track(taskId: \"{}\") 追踪进度。",
+                    submit_task_id, slot_id, task.title, task.id, submit_task_id
+                )))
+            }
+
+            "mission_board_retry" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct RetryArgs {
+                    task_id: String,
+                    #[serde(default = "default_true")]
+                    reset_downstream: bool,
+                }
+                fn default_true() -> bool { true }
+
+                let args: RetryArgs = serde_json::from_value(args)?;
+
+                // Verify task exists
+                let task = self.mission.db()
+                    .get_board_task(&args.task_id)
+                    .map_err(|e| anyhow!("DB error: {}", e))?
+                    .ok_or_else(|| anyhow!("Task not found: {}", args.task_id))?;
+
+                let reset_ids = self.mission.db()
+                    .retry_board_task(&args.task_id, args.reset_downstream)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+
+                // Write note
+                let _ = self.mission.db().add_board_task_note(
+                    &missiond_core::types::AddBoardTaskNoteInput {
+                        task_id: task.id.clone(),
+                        content: format!(
+                            "🔄 任务重试\n- 重置任务数: {}\n- 级联下游: {}",
+                            reset_ids.len(),
+                            if args.reset_downstream { "是" } else { "否" }
+                        ),
+                        note_type: Some("progress".to_string()),
+                        author: Some("retry".to_string()),
+                    },
+                );
+
+                Ok(ToolResult::text(format!(
+                    "✅ 已重试任务 '{}'\n- 重置任务数: {}\n- 重置的任务 ID: {:?}",
+                    task.title, reset_ids.len(), reset_ids
+                )))
+            }
+
             // ===== Engineering Flow =====
             "mission_submit_phase_result" => {
                 #[derive(Deserialize)]
@@ -5216,11 +5545,31 @@ impl AppState {
             // ===== Agent Questions (Pending Decisions) =====
             "mission_question_create" => {
                 let args: QuestionCreateArgs = serde_json::from_value(args)?;
+                // Best-effort context injection: if task_id is missing, try to infer
+                // from running autopilot tasks (single running task → unambiguous)
+                let inferred_task_id = if args.task_id.is_none() {
+                    match self.mission.db().list_running_autopilot_tasks() {
+                        Ok(running) if running.len() == 1 => {
+                            let tid = running[0].id.clone();
+                            let sid = running[0].claim_executor_id.clone();
+                            info!(inferred_task_id = %tid, "question_create: auto-injected task_id from running autopilot task");
+                            Some((Some(tid), sid))
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let (task_id, slot_id) = if let Some((tid, sid)) = inferred_task_id {
+                    (tid, args.slot_id.or(sid))
+                } else {
+                    (args.task_id, args.slot_id)
+                };
                 let input = missiond_core::types::CreateAgentQuestionInput {
                     question: args.question,
                     context: args.context,
-                    task_id: args.task_id,
-                    slot_id: args.slot_id,
+                    task_id,
+                    slot_id,
                     session_id: args.session_id,
                     target: args.target,
                     options: args.options,
@@ -5660,8 +6009,8 @@ fn strip_prompt_echo(response: &str, prompt: &str) -> String {
 /// Detect OAuth/auth errors in PTY response content.
 /// Claude Code outputs these messages when the OAuth token has expired.
 fn is_auth_error(response: &str) -> bool {
-    // Check first 2000 chars — auth errors appear at the start of output
-    let check = &response[..response.len().min(2000)];
+    // Check first ~2000 bytes — auth errors appear at the start of output
+    let check = &response[..char_boundary_at(response, 2000)];
     let lower = check.to_lowercase();
     lower.contains("oauth token has expired")
         || lower.contains("please run /login")
@@ -6744,7 +7093,60 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
         );
     }
 
-    // Recover stale running tasks (daemon restart or PTY crash)
+    // === Smart watchdog: recover running tasks where slot is already idle ===
+    // This catches orphaned tasks much faster than the 15-min time-based fallback.
+    // Scenario: daemon restart loses the in-flight send() call, slot finishes but
+    // no one reads the result — task stays 'running' forever.
+    match state.mission.db().list_running_autopilot_tasks() {
+        Ok(running) if !running.is_empty() => {
+            debug!(count = running.len(), "Watchdog: checking running autopilot tasks");
+            for rt in &running {
+                let slot_id = rt.claim_executor_id.as_deref().unwrap_or("");
+                if slot_id.is_empty() { continue; }
+
+                let claimed_age = rt.claimed_at.as_deref()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds())
+                    .unwrap_or(0);
+
+                if claimed_age <= 120 { continue; } // Too fresh, might still be in send()
+
+                if let Some(info) = state.pty.get_status(slot_id).await {
+                    if info.state == SessionState::Idle {
+                        warn!(
+                            task_id = %rt.id, slot_id, age_secs = claimed_age,
+                            "Watchdog: slot idle but task still running — recovering orphaned task"
+                        );
+                        let _ = state.mission.db().unclaim_board_task(&rt.id);
+                        let _ = state.mission.db().add_board_task_note(
+                            &missiond_core::types::AddBoardTaskNoteInput {
+                                task_id: rt.id.clone(),
+                                content: format!(
+                                    "🔄 **看门狗回收** — 工位 {} 已 idle 但任务仍在 running（{}s），可能是 daemon 重启导致 send() 丢失。已 unclaim，下次 tick 重新执行。",
+                                    slot_id, claimed_age
+                                ),
+                                note_type: Some("note".to_string()),
+                                author: Some("watchdog".to_string()),
+                            },
+                        );
+                    }
+                } else {
+                    // No PTY session at all — slot not even spawned, definitely orphaned
+                    warn!(
+                        task_id = %rt.id, slot_id, age_secs = claimed_age,
+                        "Watchdog: no PTY session for slot — recovering orphaned task"
+                    );
+                    let _ = state.mission.db().unclaim_board_task(&rt.id);
+                }
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "Watchdog: failed to list running autopilot tasks");
+        }
+        _ => {}
+    }
+
+    // Time-based fallback: recover running tasks stuck > 15 min (catch-all)
     let _ = state.mission.db().recover_stale_running_tasks(15);
 
     let tasks = state.mission.db().list_autopilot_tasks()
@@ -6844,7 +7246,11 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
 
         // Atomically claim the task (CAS: only succeeds if open + unclaimed)
         match state.mission.db().claim_board_task(&task.id, &slot_id, "pty_slot") {
-            Ok(Some(_)) => {} // Successfully claimed
+            Ok(Some(_)) => {
+                // Set lease: normal autopilot tasks get 20 minutes
+                let lease = (chrono::Utc::now() + chrono::TimeDelta::minutes(20)).to_rfc3339();
+                let _ = state.mission.db().set_board_task_lease(&task.id, &lease);
+            }
             Ok(None) => {
                 debug!(task_id = %task.id, slot_id = %slot_id, "Autopilot: task already claimed, skipping");
                 continue;
@@ -6915,10 +7321,32 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
             full_prompt
         };
 
-        // Append Decision Engine help suffix for all autopilot tasks
+        // Append Decision Engine help suffix for all autopilot tasks (with taskId for context linkage)
         let full_prompt = format!(
-            "{}\n\n---\n注：若遇架构选择或反复 debug 失败的死胡同，请调 `mission_question_create(target=\"master\", decisionType=\"...\")` 呼叫主控裁决，附带 options 方案。",
+            "{}\n\n---\n注：若遇架构选择或反复 debug 失败的死胡同，请调 `mission_question_create(target=\"master\", taskId=\"{}\", decisionType=\"...\")` 呼叫主控裁决，附带 options 方案。",
+            full_prompt, task.id
+        );
+
+        // Ops task focus: prevent slot from getting sidetracked into code investigation
+        let full_prompt = if task.category == "ops" {
+            format!(
+                "{}\n\n---\n⚠️ **运维任务执行规范**：\n\
+                1. 严格按「建议操作」列表依次执行诊断工具（mission_reachability、mission_os_diagnose 等 MCP 工具）\n\
+                2. 不要去调查或修改代码，不要理会 IDE/LSP 诊断\n\
+                3. 诊断完成后给出简明结论：问题原因 + 当前状态 + 是否需要人工介入",
+                full_prompt
+            )
+        } else {
             full_prompt
+        };
+
+        // Inject task ID + self-close instruction so slot can close the task itself
+        // This makes the system resilient to daemon restarts during send()
+        let full_prompt = format!(
+            "{}\n\n---\n📋 **Board Task ID**: `{}`\n\
+            任务完成后，你必须调用 `mission_board_update(id=\"{}\", status=\"done\")` 关闭此任务，\
+            并用 `mission_board_note_add(taskId=\"{}\", content=\"...\", noteType=\"summary\")` 写入诊断摘要。",
+            full_prompt, task.id, task.id, task.id
         );
 
         // Send prompt and wait for response
@@ -6972,20 +7400,45 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
                         author: Some("autopilot".to_string()),
                     },
                 );
-                // Mark task as done
-                let _ = state.mission.db().update_board_task(
-                    &task.id,
-                    &missiond_core::types::UpdateBoardTaskInput {
-                        status: Some("done".to_string()),
-                        ..Default::default()
-                    },
-                );
+                // CAS guard: only mark done if task is still in 'running' state.
+                // If task was auto-blocked by mission_question_create, preserve 'blocked' status.
+                let current_status = state.mission.db().get_board_task(&task.id)
+                    .ok().flatten()
+                    .map(|t| t.status);
+                match current_status {
+                    Some(missiond_core::types::BoardTaskStatus::Done) => {
+                        // Slot already self-closed the task
+                        info!(task_id = %task.id, duration_ms = res.duration_ms, "Autopilot: task already done (self-closed)");
+                    }
+                    Some(missiond_core::types::BoardTaskStatus::Blocked) => {
+                        // Task was blocked by pending questions — do NOT overwrite
+                        let _ = state.mission.db().add_board_task_note(
+                            &missiond_core::types::AddBoardTaskNoteInput {
+                                task_id: task.id.clone(),
+                                content: "⚠️ PTY 执行已返回，但任务有未回答的 pending questions，保持 blocked 状态。".to_string(),
+                                note_type: Some("note".to_string()),
+                                author: Some("autopilot".to_string()),
+                            },
+                        );
+                        warn!(task_id = %task.id, "Autopilot: pty.send completed but task is blocked — preserving blocked status");
+                    }
+                    _ => {
+                        // Normal case: running → done
+                        let _ = state.mission.db().update_board_task(
+                            &task.id,
+                            &missiond_core::types::UpdateBoardTaskInput {
+                                status: Some("done".to_string()),
+                                ..Default::default()
+                            },
+                        );
+                        info!(task_id = %task.id, duration_ms = res.duration_ms, "Autopilot: task completed");
+                    }
+                }
                 // Reset slot failure count on success
                 {
                     let mut fail_map = state.slot_fail_counts.lock().unwrap();
                     fail_map.remove(&slot_id);
                 }
-                info!(task_id = %task.id, duration_ms = res.duration_ms, "Autopilot: task completed");
             }
             Err(e) => {
                 // Record failure as a note
@@ -7101,7 +7554,7 @@ async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardT
 
         // === Daemon phases: call Gemini directly ===
         p if p.is_daemon_phase() => {
-            // Claim task as running
+            // Claim task as running + set lease
             let _ = state.mission.db().update_board_task(
                 &task.id,
                 &missiond_core::types::UpdateBoardTaskInput {
@@ -7109,6 +7562,8 @@ async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardT
                     ..Default::default()
                 },
             );
+            let lease = (chrono::Utc::now() + chrono::TimeDelta::seconds(p.timeout_secs() as i64 + 60)).to_rfc3339();
+            let _ = state.mission.db().set_board_task_lease(&task.id, &lease);
 
             let (gemini_prompt, artifact_field) = match p {
                 missiond_core::types::EngineeringPhase::ConsultGemini1 => {
@@ -7147,17 +7602,17 @@ async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardT
                         _ => {}
                     }
 
-                    // Advance phase
+                    // Advance phase — unclaim so next tick can re-claim for next phase
                     let next_phase = p.next().unwrap_or(missiond_core::types::EngineeringPhase::Done);
                     let _ = state.mission.db().update_board_task(
                         &task.id,
                         &missiond_core::types::UpdateBoardTaskInput {
                             flow_phase: Some(next_phase.as_str().to_string()),
                             flow_context: Some(serde_json::to_string(&ctx).unwrap_or_default()),
-                            status: Some("open".to_string()), // Back to open for next tick
                             ..Default::default()
                         },
                     );
+                    let _ = state.mission.db().unclaim_board_task(&task.id);
 
                     let _ = state.mission.db().add_board_task_note(
                         &missiond_core::types::AddBoardTaskNoteInput {
@@ -7177,14 +7632,7 @@ async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardT
                 }
                 Err(e) => {
                     warn!(task_id = %task.id, phase = %phase_str, error = %e, "Flow engine: Gemini call failed");
-                    // Revert to open for retry
-                    let _ = state.mission.db().update_board_task(
-                        &task.id,
-                        &missiond_core::types::UpdateBoardTaskInput {
-                            status: Some("open".to_string()),
-                            ..Default::default()
-                        },
-                    );
+                    let _ = state.mission.db().unclaim_board_task(&task.id);
                     let _ = state.mission.db().add_board_task_note(
                         &missiond_core::types::AddBoardTaskNoteInput {
                             task_id: task.id.clone(),
@@ -7201,7 +7649,11 @@ async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardT
         p if p.is_slot_phase() => {
             // Claim the task
             match state.mission.db().claim_board_task(&task.id, slot_id, "pty_slot") {
-                Ok(Some(_)) => {}
+                Ok(Some(_)) => {
+                    // Set lease based on phase timeout (e.g. Execute = 60min)
+                    let lease = (chrono::Utc::now() + chrono::TimeDelta::seconds(p.timeout_secs() as i64 + 300)).to_rfc3339();
+                    let _ = state.mission.db().set_board_task_lease(&task.id, &lease);
+                }
                 Ok(None) => {
                     debug!(task_id = %task.id, slot_id, "Flow engine: task already claimed, skipping");
                     return Ok(());
@@ -7262,13 +7714,7 @@ async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardT
                             },
                         );
                         // Back to open for retry + track failure
-                        let _ = state.mission.db().update_board_task(
-                            &task.id,
-                            &missiond_core::types::UpdateBoardTaskInput {
-                                status: Some("open".to_string()),
-                                ..Default::default()
-                            },
-                        );
+                        let _ = state.mission.db().unclaim_board_task(&task.id);
                         {
                             let mut fail_map = state.slot_fail_counts.lock().unwrap();
                             let entry = fail_map.entry(slot_id.to_string()).or_insert((0, 0));
@@ -7300,26 +7746,13 @@ async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardT
                     if let Ok(Some(updated)) = updated_task {
                         let current_phase = updated.flow_phase.as_deref().unwrap_or(phase_str);
                         if current_phase != phase_str {
-                            // Phase was advanced by submit_phase_result → set open for next tick
-                            let _ = state.mission.db().update_board_task(
-                                &task.id,
-                                &missiond_core::types::UpdateBoardTaskInput {
-                                    status: Some("open".to_string()),
-                                    ..Default::default()
-                                },
-                            );
+                            // Phase was advanced by submit_phase_result → unclaim for next tick
+                            let _ = state.mission.db().unclaim_board_task(&task.id);
                             info!(task_id = %task.id, from = %phase_str, to = %current_phase, "Flow engine: phase advanced by slot");
                         } else {
                             // Slot didn't call submit_phase_result — possible stuck
                             warn!(task_id = %task.id, phase = %phase_str, "Flow engine: slot completed PTY but didn't submit phase result");
-                            // Back to open so next tick can retry
-                            let _ = state.mission.db().update_board_task(
-                                &task.id,
-                                &missiond_core::types::UpdateBoardTaskInput {
-                                    status: Some("open".to_string()),
-                                    ..Default::default()
-                                },
-                            );
+                            let _ = state.mission.db().unclaim_board_task(&task.id);
                         }
                     }
 
@@ -7340,13 +7773,7 @@ async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardT
                         },
                     );
                     // Revert to open for retry
-                    let _ = state.mission.db().update_board_task(
-                        &task.id,
-                        &missiond_core::types::UpdateBoardTaskInput {
-                            status: Some("open".to_string()),
-                            ..Default::default()
-                        },
-                    );
+                    let _ = state.mission.db().unclaim_board_task(&task.id);
                     // Track failure
                     {
                         let mut fail_map = state.slot_fail_counts.lock().unwrap();
@@ -7463,7 +7890,19 @@ async fn ensure_autopilot_pty(state: &AppState, task: &missiond_core::types::Boa
     // Check if session is already running
     if let Some(info) = state.pty.get_status(slot_id).await {
         if info.state != SessionState::Exited {
-            return true;
+            // Check if model env changed — kill PTY and respawn if different
+            let new_model = task_env.get("ANTHROPIC_MODEL").cloned().unwrap_or_default();
+            let model_changed = {
+                let models = state.slot_current_model.lock().unwrap();
+                models.get(slot_id).map(|m| m != &new_model).unwrap_or(false)
+            };
+            if model_changed && !new_model.is_empty() {
+                info!(task_id = %task.id, slot_id, new_model = %new_model, "Autopilot: model changed, killing PTY for respawn");
+                let _ = state.pty.kill(slot_id).await;
+                // Fall through to spawn below
+            } else {
+                return true;
+            }
         }
     }
 
@@ -7474,13 +7913,37 @@ async fn ensure_autopilot_pty(state: &AppState, task: &missiond_core::types::Boa
 
     let Some(slot) = slot else {
         warn!(task_id = %task.id, slot_id, "Autopilot: slot not found, skipping");
-        let _ = state.mission.db().update_board_task(
-            &task.id,
-            &missiond_core::types::UpdateBoardTaskInput {
-                status: Some("open".to_string()),
-                ..Default::default()
+        // Record failure note + increment retry
+        let _ = state.mission.db().add_board_task_note(
+            &missiond_core::types::AddBoardTaskNoteInput {
+                task_id: task.id.clone(),
+                content: format!("❌ Slot `{}` 不存在，无法执行任务。请检查 slots.yaml 配置。", slot_id),
+                note_type: Some("note".to_string()),
+                author: Some("autopilot".to_string()),
             },
         );
+        let new_retry = task.retry_count + 1;
+        if new_retry >= task.max_retries {
+            let _ = state.mission.db().update_board_task(
+                &task.id,
+                &missiond_core::types::UpdateBoardTaskInput {
+                    status: Some("failed".to_string()),
+                    ..Default::default()
+                },
+            );
+            let _ = state.mission.db().add_board_task_note(
+                &missiond_core::types::AddBoardTaskNoteInput {
+                    task_id: task.id.clone(),
+                    content: format!("🛑 Slot `{}` 连续 {} 次不可用，任务标记为 failed。", slot_id, new_retry),
+                    note_type: Some("note".to_string()),
+                    author: Some("autopilot".to_string()),
+                },
+            );
+            warn!(task_id = %task.id, retries = new_retry, "Autopilot: task failed — slot not found after max retries");
+        } else {
+            let _ = state.mission.db().increment_board_task_retry(&task.id, new_retry);
+            let _ = state.mission.db().unclaim_board_task(&task.id);
+        }
         return false;
     };
 
@@ -7509,18 +7972,45 @@ async fn ensure_autopilot_pty(state: &AppState, task: &missiond_core::types::Boa
     }).await {
         Ok(_) => {
             capture_slot_session_uuid(state, slot_id, &session_file).await;
+            // Record current model for future env-change detection
+            if let Some(model) = task_env.get("ANTHROPIC_MODEL") {
+                state.slot_current_model.lock().unwrap().insert(slot_id.to_string(), model.clone());
+            }
             info!(task_id = %task.id, slot_id, "Autopilot: PTY spawned for task");
             true
         }
         Err(e) => {
-            warn!(task_id = %task.id, slot_id, error = %e, "Autopilot: failed to spawn PTY");
-            let _ = state.mission.db().update_board_task(
-                &task.id,
-                &missiond_core::types::UpdateBoardTaskInput {
-                    status: Some("open".to_string()),
-                    ..Default::default()
+            warn!(task_id = %task.id, slot_id, error = %e, "Autopilot: failed to spawn PTY (process may still be loading)");
+            let _ = state.mission.db().add_board_task_note(
+                &missiond_core::types::AddBoardTaskNoteInput {
+                    task_id: task.id.clone(),
+                    content: format!("⏳ PTY spawn 失败（120s 超时）。\n\n{}", e),
+                    note_type: Some("note".to_string()),
+                    author: Some("autopilot".to_string()),
                 },
             );
+            // Retry with backoff or fail
+            let new_retry = task.retry_count + 1;
+            if new_retry >= task.max_retries {
+                let _ = state.mission.db().update_board_task(
+                    &task.id,
+                    &missiond_core::types::UpdateBoardTaskInput {
+                        status: Some("failed".to_string()),
+                        ..Default::default()
+                    },
+                );
+                let _ = state.mission.db().add_board_task_note(
+                    &missiond_core::types::AddBoardTaskNoteInput {
+                        task_id: task.id.clone(),
+                        content: format!("🛑 PTY spawn 连续 {} 次失败，任务标记为 failed。", new_retry),
+                        note_type: Some("note".to_string()),
+                        author: Some("autopilot".to_string()),
+                    },
+                );
+            } else {
+                let _ = state.mission.db().increment_board_task_retry(&task.id, new_retry);
+                let _ = state.mission.db().unclaim_board_task(&task.id);
+            }
             false
         }
     }
@@ -7699,13 +8189,13 @@ content: "<commit hash 或提交摘要>"
         _ => format!("Flow phase {:?} — no prompt template available", phase),
     };
 
-    // Inject Decision Engine help protocol for all slot phases
+    // Inject Decision Engine help protocol for all slot phases (with taskId for auto-linkage)
     if phase.is_slot_phase() {
-        let protocol = r#"
+        let protocol = format!(r#"
 
 ---
 【主控求助协议】
-当你遇到**阻断性困境**时，严禁自行盲目尝试超过 3 次或随意猜测架构意图。调用 `mission_question_create(target="master")` 呼叫主控。
+当你遇到**阻断性困境**时，严禁自行盲目尝试超过 3 次或随意猜测架构意图。调用 `mission_question_create(target="master", taskId="{task_id}")` 呼叫主控。
 **呼叫条件与 decisionType 映射（严格遵守）：**
 1. `architecture`：涉及引入新依赖、修改数据库表、变更核心状态机（必须呼叫）
 2. `risk`：发现方案可能破坏现有功能或数据（必须呼叫）
@@ -7713,8 +8203,8 @@ content: "<commit hash 或提交摘要>"
 4. `investigation`：遇到不熟悉的黑盒 API（附带已查阅的上下文）
 5. `debug`：同一致命报错尝试修复 2 次仍失败（附带报错和尝试记录）
 
-**参数要求：** 必须在 `options` 中提供分析或候选项（如 "A: 修改基类, B: 新增 wrapper"），不能只抛出问题。"#;
-        base.push_str(protocol);
+**参数要求：** 必须在 `options` 中提供分析或候选项（如 "A: 修改基类, B: 新增 wrapper"），不能只抛出问题。"#, task_id = task_id);
+        base.push_str(&protocol);
     }
 
     base
@@ -7801,6 +8291,354 @@ impl LlmConfig {
     fn default_model() -> String {
         "gpt-4o".to_string()
     }
+}
+
+/// Find the largest byte index <= `max` that is a char boundary in `s`.
+/// Stable replacement for nightly-only `str::floor_char_boundary`.
+fn char_boundary_at(s: &str, max: usize) -> usize {
+    if max >= s.len() {
+        return s.len();
+    }
+    let mut i = max;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+// ── Ollama Embedding Provider ────────────────────────────────────────────
+
+/// Embedding provider that calls Ollama's `/api/embed` endpoint.
+/// Preferred over FastEmbed when available (Qwen3-Embedding, higher quality).
+///
+/// Uses `block_in_place` + `Handle::block_on` to bridge sync trait → async HTTP.
+struct OllamaProvider {
+    client: reqwest::Client,
+    base_url: String,
+    model: String,
+    dimension: usize,
+    provider_id_str: String,
+}
+
+impl OllamaProvider {
+    /// Try to connect to Ollama and verify the embedding model is available.
+    /// Returns None if Ollama is unreachable or the model is missing.
+    async fn try_new(client: &reqwest::Client) -> Option<Self> {
+        let base_url = std::env::var("OLLAMA_HOST")
+            .unwrap_or_else(|_| "http://localhost:11434".to_string());
+        let model = std::env::var("MISSIOND_EMBEDDING_MODEL")
+            .unwrap_or_else(|_| "qwen3-embedding".to_string());
+
+        // Health check: verify Ollama is reachable
+        let health = client.get(format!("{}/api/tags", base_url))
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+            .ok()?;
+        if !health.status().is_success() {
+            return None;
+        }
+
+        // Probe: generate one embedding to verify model and detect dimension
+        let probe_vec = Self::embed_one(client, &base_url, &model, "dimension probe").await?;
+        let dimension = probe_vec.len();
+        let provider_id_str = format!("ollama-{}", model);
+
+        info!(
+            model = %model, dimension, provider_id = %provider_id_str,
+            "Ollama embedding provider initialized"
+        );
+
+        Some(Self {
+            client: client.clone(),
+            base_url,
+            model,
+            dimension,
+            provider_id_str,
+        })
+    }
+
+    /// Single embedding via Ollama /api/embed endpoint.
+    async fn embed_one(
+        client: &reqwest::Client,
+        base_url: &str,
+        model: &str,
+        text: &str,
+    ) -> Option<Vec<f32>> {
+        let resp = client.post(format!("{}/api/embed", base_url))
+            .json(&serde_json::json!({
+                "model": model,
+                "input": text,
+            }))
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+            .ok()?;
+
+        if !resp.status().is_success() {
+            tracing::warn!(status = %resp.status(), "Ollama embed request failed");
+            return None;
+        }
+
+        let data: serde_json::Value = resp.json().await.ok()?;
+        // Ollama /api/embed returns { "embeddings": [[f32, ...]] }
+        data.get("embeddings")
+            .and_then(|e| e.get(0))
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect())
+    }
+
+    /// Batch embedding via Ollama /api/embed (supports array input).
+    async fn embed_many(
+        client: &reqwest::Client,
+        base_url: &str,
+        model: &str,
+        texts: &[String],
+    ) -> Vec<Option<Vec<f32>>> {
+        let resp = client.post(format!("{}/api/embed", base_url))
+            .json(&serde_json::json!({
+                "model": model,
+                "input": texts,
+            }))
+            .timeout(std::time::Duration::from_secs(120))
+            .send()
+            .await;
+
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                if let Ok(data) = r.json::<serde_json::Value>().await {
+                    if let Some(embeddings) = data.get("embeddings").and_then(|e| e.as_array()) {
+                        return embeddings.iter().map(|emb| {
+                            emb.as_array().map(|arr| {
+                                arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect()
+                            })
+                        }).collect();
+                    }
+                }
+                texts.iter().map(|_| None).collect()
+            }
+            _ => texts.iter().map(|_| None).collect(),
+        }
+    }
+}
+
+impl missiond_core::embedding::EmbeddingProvider for OllamaProvider {
+    fn provider_id(&self) -> &str {
+        &self.provider_id_str
+    }
+
+    fn dimension(&self) -> usize {
+        self.dimension
+    }
+
+    fn embed(&self, text: &str) -> Option<Vec<f32>> {
+        let client = self.client.clone();
+        let base_url = self.base_url.clone();
+        let model = self.model.clone();
+        let text = text.to_string();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(
+                Self::embed_one(&client, &base_url, &model, &text)
+            )
+        })
+    }
+
+    fn embed_batch(&self, texts: &[String]) -> Vec<Option<Vec<f32>>> {
+        if texts.is_empty() {
+            return Vec::new();
+        }
+        let client = self.client.clone();
+        let base_url = self.base_url.clone();
+        let model = self.model.clone();
+        let texts = texts.to_vec();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(
+                Self::embed_many(&client, &base_url, &model, &texts)
+            )
+        })
+    }
+}
+
+/// Initialize embedding provider: try Ollama first (better quality), fall back to FastEmbed.
+async fn init_embedding_provider(
+    http_client: &reqwest::Client,
+) -> Option<Arc<dyn missiond_core::embedding::EmbeddingProvider>> {
+    // Try Ollama first
+    if let Some(ollama) = OllamaProvider::try_new(http_client).await {
+        return Some(Arc::new(ollama));
+    }
+    info!("Ollama not available, falling back to FastEmbed");
+
+    // Fallback to FastEmbed
+    missiond_core::embedding::EmbeddingService::new()
+        .map(|svc| Arc::new(svc) as Arc<dyn missiond_core::embedding::EmbeddingProvider>)
+}
+
+/// Generate LLM summary + embedding for a completed conversation, store to DB and update cache.
+///
+/// Pipeline:
+/// 1. Fetch last N messages from DB
+/// 2. Call Router LLM for structured summary (fallback: first+last concatenation)
+/// 3. Generate embedding via EmbeddingService
+/// 4. Store summary + embedding to DB
+/// 5. Update in-memory cache
+async fn generate_and_store_conv_embedding(state: &AppState, session_id: &str) {
+    let db = state.mission.db();
+
+    // 1. Fetch messages (last 200 to stay within LLM context budget)
+    debug!(session = %session_id, "Step 1: fetching messages");
+    let messages = match db.get_conversation_messages(session_id, None, 200) {
+        Ok(msgs) if !msgs.is_empty() => msgs,
+        Ok(_) => {
+            debug!(session = %session_id, "No messages for summary generation");
+            return;
+        }
+        Err(e) => {
+            warn!(session = %session_id, error = %e, "Failed to fetch messages for summary");
+            return;
+        }
+    };
+
+    // 2. Build conversation text for LLM (budget: ~8K chars)
+    debug!(session = %session_id, msg_count = messages.len(), "Step 2: building conv_text");
+    let mut conv_text = String::with_capacity(8192);
+    for msg in &messages {
+        let prefix = match msg.role.as_str() {
+            "user" => "U",
+            "assistant" => "A",
+            "tool_use" => "T",
+            "tool_result" => "R",
+            _ => "?",
+        };
+        let content = if msg.content.len() > 500 {
+            format!("{}…", &msg.content[..char_boundary_at(&msg.content, 500)])
+        } else {
+            msg.content.clone()
+        };
+        conv_text.push_str(&format!("[{}] {}\n", prefix, content));
+        if conv_text.len() > 8000 {
+            break;
+        }
+    }
+
+    // 3. Call Router LLM for summary (with fallback)
+    debug!(session = %session_id, text_len = conv_text.len(), "Step 3: calling LLM for summary");
+    let summary = match generate_conv_summary_llm(state, &conv_text).await {
+        Some(s) => {
+            debug!(session = %session_id, summary_len = s.len(), "LLM summary OK");
+            s
+        }
+        None => {
+            debug!(session = %session_id, "LLM summary failed, using fallback");
+            // Fallback: concatenate first 3 + last 3 messages
+            let first3: Vec<&str> = messages.iter().take(3).map(|m| m.content.as_str()).collect();
+            let last3: Vec<&str> = messages.iter().rev().take(3).rev().map(|m| m.content.as_str()).collect();
+            let mut fallback = first3.join("\n");
+            fallback.push_str("\n...\n");
+            fallback.push_str(&last3.join("\n"));
+            if fallback.len() > 2000 {
+                fallback.truncate(char_boundary_at(&fallback, 2000));
+            }
+            fallback
+        }
+    };
+
+    // 4. Store summary to DB
+    debug!(session = %session_id, "Step 4: storing summary");
+    if let Err(e) = db.set_conversation_summary(session_id, &summary) {
+        warn!(session = %session_id, error = %e, "Failed to store conversation summary");
+        return;
+    }
+
+    // 5. Generate embedding from summary (via spawn_blocking to avoid block_in_place deadlock)
+    let embedding_service = match &state.embedding_service {
+        Some(svc) => svc,
+        None => {
+            debug!(session = %session_id, "No embedding service, skipping vector generation");
+            return;
+        }
+    };
+    let provider_id = embedding_service.provider_id().to_string();
+    debug!(session = %session_id, provider = %provider_id, "Step 5: generating embedding");
+    let svc = Arc::clone(embedding_service);
+    let summary_for_embed = summary.clone();
+    let embedding = match tokio::task::spawn_blocking(move || svc.embed(&summary_for_embed)).await {
+        Ok(Some(vec)) => vec,
+        Ok(None) => {
+            warn!(session = %session_id, "Embedding generation returned None");
+            return;
+        }
+        Err(e) => {
+            warn!(session = %session_id, error = %e, "Embedding spawn_blocking panicked");
+            return;
+        }
+    };
+    debug!(session = %session_id, dim = embedding.len(), "Step 5: embedding OK");
+
+    // 6. Store embedding to DB
+    debug!(session = %session_id, "Step 6: storing embedding");
+    if let Err(e) = db.set_conversation_embedding(session_id, &embedding, &provider_id) {
+        warn!(session = %session_id, error = %e, "Failed to store conversation embedding");
+        return;
+    }
+
+    // 7. Update in-memory cache
+    debug!(session = %session_id, "Step 7: updating cache");
+    let mut cache = state.conversation_embedding_cache.write().await;
+    // Remove old entry if exists, then push new
+    cache.retain(|(id, _)| id != session_id);
+    cache.push((session_id.to_string(), embedding));
+
+    info!(session = %session_id, "Conversation summary + embedding generated");
+}
+
+/// Call Router LLM to generate a structured conversation summary.
+/// Returns None if Router is unreachable or response is invalid.
+async fn generate_conv_summary_llm(state: &AppState, conv_text: &str) -> Option<String> {
+    let (base_url, jwt) = resolve_llm_credentials().await.ok()?;
+    let url = format!("{}/v1/chat/completions", base_url);
+
+    let system_prompt = "作为技术专家，请用 200 字以内总结以下排查/开发会话，必须包含：\n\
+        1. 遇到的核心问题或 Bug 表现\n\
+        2. 涉及的代码方法名、文件路径或技术栈\n\
+        3. 最终的解决思路或结论\n\
+        输出纯文本，不要 Markdown 格式。";
+
+    let body = serde_json::json!({
+        "model": "gemini-3-flash-preview",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": conv_text}
+        ],
+        "max_tokens": 512,
+    });
+
+    let resp = state.http_client.post(&url)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", jwt))
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        warn!(status = %status, body = %body, "LLM summary request failed");
+        return None;
+    }
+
+    let result: serde_json::Value = resp.json().await.ok()?;
+    let content = result
+        .pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string());
+
+    if let Some(ref s) = content {
+        debug!(len = s.len(), "LLM summary generated");
+    }
+    content
 }
 
 /// Resolve LLM credentials (base_url, bearer_token) for Router API calls.
@@ -9492,6 +10330,8 @@ fn handle_new_messages(
             chat_type: None,
             conversation_type: missiond_core::db::derive_conversation_type(slot_id.as_deref(), &session_id),
             updated_at: None,
+            llm_summary: None,
+            embedding_provider: None,
         };
         if let Err(e) = db.upsert_conversation(&conv) {
             error!(session = %session_id, error = %e, "Failed to create conversation");
@@ -9662,6 +10502,8 @@ fn handle_pty_text_complete(
             chat_type: None,
             conversation_type: missiond_core::db::derive_conversation_type(Some(&slot_id), &session_id),
             updated_at: None,
+            llm_summary: None,
+            embedding_provider: None,
         };
         if let Err(e) = db.upsert_conversation(&conv) {
             error!(slot = %slot_id, error = %e, "Failed to create PTY conversation");
@@ -9812,6 +10654,9 @@ async fn main() -> Result<()> {
     // AIOps: incident event bus (capacity 100, try_send only — "宁丢不阻塞")
     let (incident_tx, incident_rx) = tokio::sync::mpsc::channel::<missiond_core::types::MissionIncident>(100);
 
+    // Embedding worker channel: event-driven, 0 CPU when idle
+    let (embedding_tx, embedding_rx) = tokio::sync::mpsc::channel::<EmbeddingTask>(256);
+
     // Screenshot broker (coordinates browser-based PTY screenshots)
     let screenshot_broker = missiond_core::ws::ScreenshotBroker::new(
         std::time::Duration::from_secs(5),
@@ -9917,6 +10762,7 @@ async fn main() -> Result<()> {
             }
         })),
         slot_fail_counts: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        slot_current_model: Arc::new(std::sync::Mutex::new(HashMap::new())),
         screenshot_broker: Arc::clone(&screenshot_broker),
         jarvis_trace: ws_server.jarvis_trace_store().clone(),
         slot_last_responses: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -9930,8 +10776,18 @@ async fn main() -> Result<()> {
             default_mission_home().join("xjp-mcp-config.json"),
         )),
         flow_in_progress: Arc::new(std::sync::Mutex::new(HashSet::new())),
-        embedding_service: missiond_core::embedding::EmbeddingService::new().map(Arc::new),
+        embedding_service: {
+            // Build HTTP client first, then init provider (needs it for Ollama probe)
+            // Note: we already have http_client above; reuse pattern via temp client
+            let temp_client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap();
+            init_embedding_provider(&temp_client).await
+        },
         embedding_cache: missiond_core::embedding::new_cache(),
+        conversation_embedding_cache: missiond_core::embedding::new_cache(),
+        embedding_tx: embedding_tx,
         incident_tx: incident_tx.clone(),
     };
 
@@ -10005,6 +10861,113 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => warn!(error = %e, "Failed to warm embedding cache"),
             }
+        });
+    }
+
+    // Warm conversation embedding cache (one-shot)
+    {
+        let conv_state = state.clone();
+        tokio::spawn(async move {
+            let db = conv_state.mission.db();
+            let provider_id = conv_state.embedding_service.as_ref()
+                .map(|svc| svc.provider_id().to_string())
+                .unwrap_or_else(|| missiond_core::embedding::FASTEMBED_PROVIDER_ID.to_string());
+
+            match db.load_conversation_embeddings(&provider_id) {
+                Ok(all) => {
+                    let mut guard = conv_state.conversation_embedding_cache.write().await;
+                    *guard = all;
+                    info!(count = guard.len(), "Conversation embedding cache warmed");
+                }
+                Err(e) => warn!(error = %e, "Failed to warm conversation embedding cache"),
+            }
+        });
+    }
+
+    // Embedding Worker: event-driven actor (sleeps until triggered, 0 CPU idle)
+    {
+        let worker_state = state.clone();
+        let mut rx = embedding_rx;
+        tokio::spawn(async move {
+            info!("Embedding worker started (event-driven)");
+            while let Some(task) = rx.recv().await {
+                let db = worker_state.mission.db();
+                let provider_id = worker_state.embedding_service.as_ref()
+                    .map(|svc| svc.provider_id().to_string())
+                    .unwrap_or_else(|| missiond_core::embedding::FASTEMBED_PROVIDER_ID.to_string());
+
+                match task {
+                    EmbeddingTask::ProcessSession(session_id) => {
+                        if tokio::time::timeout(
+                            std::time::Duration::from_secs(60),
+                            generate_and_store_conv_embedding(&worker_state, &session_id),
+                        ).await.is_err() {
+                            warn!(session = %session_id, "Embedding generation timed out (60s)");
+                        }
+                    }
+                    EmbeddingTask::BackfillLegacy => {
+                        info!("Embedding backfill triggered");
+
+                        // Phase 1: re-embed stale provider vectors
+                        if worker_state.embedding_service.is_some() {
+                            loop {
+                                let stale = db.conversations_stale_embedding(&provider_id, 20).unwrap_or_default();
+                                if stale.is_empty() { break; }
+                                info!(count = stale.len(), provider = %provider_id, "Re-embedding stale batch");
+                                for session_id in &stale {
+                                    if let Ok(Some(conv)) = db.get_conversation(session_id) {
+                                        if let Some(ref summary) = conv.llm_summary {
+                                            let emb_svc = Arc::clone(worker_state.embedding_service.as_ref().unwrap());
+                                            let summary_clone = summary.clone();
+                                            let embed_result = tokio::time::timeout(
+                                                std::time::Duration::from_secs(30),
+                                                tokio::task::spawn_blocking(move || emb_svc.embed(&summary_clone)),
+                                            ).await;
+                                            if let Ok(Ok(Some(vec))) = embed_result {
+                                                let _ = db.set_conversation_embedding(session_id, &vec, &provider_id);
+                                                let mut cache = worker_state.conversation_embedding_cache.write().await;
+                                                cache.retain(|(id, _)| id != session_id);
+                                                cache.push((session_id.clone(), vec));
+                                            } else {
+                                                warn!(session = %session_id, "Stale re-embedding failed or timed out");
+                                            }
+                                        }
+                                    }
+                                }
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            }
+                        }
+
+                        // Phase 2: generate summaries + embeddings for all missing
+                        loop {
+                            let missing = db.conversations_missing_summary(20).unwrap_or_default();
+                            if missing.is_empty() { break; }
+                            info!(count = missing.len(), "Backfill batch: generating summaries");
+                            for (idx, session_id) in missing.iter().enumerate() {
+                                info!(session = %session_id, idx = idx + 1, total = missing.len(), "Processing session");
+                                // Per-session timeout: 60s max (prevents one bad session from blocking the entire worker)
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_secs(60),
+                                    generate_and_store_conv_embedding(&worker_state, session_id),
+                                ).await {
+                                    Ok(()) => {
+                                        info!(session = %session_id, idx = idx + 1, "Session done");
+                                    }
+                                    Err(_) => {
+                                        warn!(session = %session_id, idx = idx + 1, "Embedding generation timed out (60s), skipping");
+                                        // Mark with empty summary to skip on next batch
+                                        let _ = db.set_conversation_summary(session_id, "[timeout]");
+                                    }
+                                }
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+
+                        info!("Embedding backfill complete");
+                    }
+                }
+            }
+            warn!("Embedding worker channel closed");
         });
     }
 
@@ -10233,6 +11196,8 @@ async fn main() -> Result<()> {
                             warn!(session = %session.session_id, error = %e, "Failed to complete conversation");
                         } else {
                             info!(session = %session.session_id, "Conversation marked completed");
+                            // Trigger embedding worker (event-driven, no spawn)
+                            let _ = s.embedding_tx.try_send(EmbeddingTask::ProcessSession(session.session_id.clone()));
                         }
                     }
                     Ok(_) => {}
@@ -10279,6 +11244,8 @@ async fn main() -> Result<()> {
                         let old_uuid = s.mission.db().get_slot_session(&slot_id).unwrap_or(None);
                         if let Some(ref uuid) = old_uuid {
                             let _ = s.mission.db().complete_conversation(uuid);
+                            // Trigger embedding worker (event-driven)
+                            let _ = s.embedding_tx.try_send(EmbeddingTask::ProcessSession(uuid.clone()));
                             s.pty_session_uuids.write().await.remove(uuid);
                         }
                         s.mission.db().clear_slot_session(&slot_id);
@@ -10441,7 +11408,64 @@ async fn main() -> Result<()> {
                             s.submit_notify.notify_one();
                         }
                     }
-                    Ok(_) => {}
+                    Ok(missiond_core::ManagerEvent::ConfirmRequired { slot_id, prompt: _, tool_info }) => {
+                        // Auto-confirm safe tools for PTY slots
+                        let tool_name = tool_info.as_ref()
+                            .and_then(|info| info.tool.as_ref())
+                            .map(|t| t.name.as_str());
+                        let mcp_server = tool_info.as_ref()
+                            .and_then(|info| info.tool.as_ref())
+                            .and_then(|t| t.mcp_server.as_deref());
+
+                        let should_auto_approve = match (tool_name, mcp_server) {
+                            // MissionD's own MCP tools — always safe
+                            (Some(name), Some("missiond")) | (Some(name), Some("mission")) => {
+                                info!(slot_id = %slot_id, tool = name, "Auto-confirming MissionD MCP tool");
+                                true
+                            }
+                            // Read-only tools — always safe
+                            (Some("Read" | "Glob" | "Grep" | "LSP"), _) => {
+                                info!(slot_id = %slot_id, tool = tool_name.unwrap(), "Auto-confirming read-only tool");
+                                true
+                            }
+                            // Code editing tools — auto-approve for worker slots
+                            (Some("Write" | "Edit" | "NotebookEdit"), _) => {
+                                info!(slot_id = %slot_id, tool = tool_name.unwrap(), "Auto-confirming edit tool for worker slot");
+                                true
+                            }
+                            // Bash — auto-approve for worker slots
+                            (Some("Bash"), _) => {
+                                info!(slot_id = %slot_id, tool = "Bash", "Auto-confirming Bash for worker slot");
+                                true
+                            }
+                            // Other MCP tools (xjp-mcp etc) — auto-approve
+                            (Some(name), Some(_server)) => {
+                                info!(slot_id = %slot_id, tool = name, server = _server, "Auto-confirming MCP tool");
+                                true
+                            }
+                            // Unknown tool — still approve (slots are trusted workers)
+                            (Some(name), None) => {
+                                warn!(slot_id = %slot_id, tool = name, "Auto-confirming unknown tool (no MCP server info)");
+                                true
+                            }
+                            // No tool info at all — approve to unblock
+                            (None, _) => {
+                                warn!(slot_id = %slot_id, "Auto-confirming with no tool info");
+                                true
+                            }
+                        };
+
+                        if should_auto_approve {
+                            let pty = s.pty.clone();
+                            let sid = slot_id.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = pty.confirm(&sid, missiond_core::ConfirmResponse::Yes).await {
+                                    warn!(slot_id = %sid, error = %e, "Failed to auto-confirm tool");
+                                }
+                            });
+                        }
+                    }
+                    Ok(missiond_core::ManagerEvent::Spawned { .. }) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         warn!(skipped = n, "PTY logger lagged");
                     }

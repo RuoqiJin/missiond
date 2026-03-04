@@ -59,7 +59,7 @@ export function TaskItem({
     transform: CSS.Transform.toString(transform),
     transition,
   };
-  const categoryConf = CATEGORY_CONFIG[task.category];
+  const categoryConf = CATEGORY_CONFIG[task.category] ?? CATEGORY_CONFIG.other;
   const priorityConf = PRIORITY_CONFIG[task.priority] ?? PRIORITY_CONFIG.medium;
   const isOverdue = task.dueDate && !isDone && new Date(task.dueDate) < new Date();
   const hasChildren = childCount > 0;

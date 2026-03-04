@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
-import type { AgentQuestion, RoutingTrace, DecisionStats } from '@/types';
+import type { AgentQuestion, RoutingTrace, TierStep, DecisionStats } from '@/types';
 import * as questionsApi from '@/questionsApi';
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -163,6 +163,61 @@ function LiveRadar({ questions, selectedId, onSelect }: {
   );
 }
 
+function ScoreBar({ label, value, threshold, color }: {
+  label: string; value: number; threshold?: number; color: string;
+}) {
+  const pct = Math.min(100, value * 100);
+  const passed = threshold ? value >= threshold : true;
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-[9px] text-neutral-500 w-8 shrink-0 text-right font-mono">{label}</span>
+      <div className="flex-1 h-1.5 bg-neutral-800 rounded-full overflow-hidden relative">
+        <div className={cn('h-full rounded-full transition-all', color)} style={{ width: `${pct}%` }} />
+        {threshold && (
+          <div className="absolute top-0 h-full w-px bg-neutral-600" style={{ left: `${threshold * 100}%` }} />
+        )}
+      </div>
+      <span className={cn('text-[9px] font-mono w-10 shrink-0', passed ? 'text-emerald-500' : 'text-red-400')}>
+        {value.toFixed(3)}
+      </span>
+    </div>
+  );
+}
+
+function HybridSearchPanel({ step }: { step: TierStep }) {
+  const cosine = step.semantic_similarity ? parseFloat(step.semantic_similarity) : null;
+  const rrf = step.rrf_score ? parseFloat(step.rrf_score) : null;
+
+  return (
+    <div className="mt-2 p-2 rounded bg-neutral-800/50 border border-neutral-700/50 space-y-1.5">
+      <div className="flex items-center gap-1.5 mb-1">
+        <span className="text-[9px] text-neutral-500 font-medium uppercase">混合检索透视</span>
+        {step.method && (
+          <Badge variant="outline" className={cn('text-[8px] px-1 py-0 h-3',
+            step.method === 'hybrid' ? 'border-emerald-700 text-emerald-600' : 'border-neutral-700 text-neutral-600'
+          )}>
+            {step.method === 'hybrid' ? '混合搜索' : 'FTS5'}
+          </Badge>
+        )}
+      </div>
+      {cosine != null && (
+        <ScoreBar label="cos" value={cosine} threshold={0.6} color="bg-emerald-500/70" />
+      )}
+      {rrf != null && (
+        <ScoreBar label="rrf" value={Math.min(1, rrf * 20)} color="bg-amber-500/70" />
+      )}
+      <div className="flex items-center gap-3 text-[9px] mt-1">
+        {step.fts_rank != null && (
+          <span className="text-blue-500 font-mono">FTS5 #{step.fts_rank + 1}</span>
+        )}
+        {step.vec_rank != null && (
+          <span className="text-purple-500 font-mono">Vec #{step.vec_rank + 1}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function RoutingTraceView({ trace }: { trace: RoutingTrace }) {
   return (
     <div className="p-3 rounded-lg bg-neutral-900 border border-neutral-800">
@@ -173,36 +228,28 @@ function RoutingTraceView({ trace }: { trace: RoutingTrace }) {
       <div className="space-y-1.5">
         {trace.path.map((step, i) => {
           const style = tierStyle(step.tier);
+          const hasHybrid = step.semantic_similarity || step.rrf_score;
           return (
             <div key={i} className="flex items-start gap-2">
               <div className="flex flex-col items-center mt-0.5">
                 <div className={cn('w-2 h-2 rounded-full shrink-0', style.dot)} />
                 {i < trace.path.length - 1 && <div className="w-px h-4 bg-neutral-700 mt-0.5" />}
               </div>
-              <div className="min-w-0">
+              <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
                   <span className={cn('text-[11px] font-medium', style.text)}>{step.tier}</span>
                   <span className="text-[10px] text-neutral-500">{step.status}</span>
                   {step.coverage && <span className="text-[9px] text-neutral-600 font-mono">{step.coverage}</span>}
                 </div>
                 {step.reason && <p className="text-[10px] text-neutral-600 truncate">{step.reason}</p>}
-                {step.reasoning && <p className="text-[10px] text-neutral-500 line-clamp-2">{step.reasoning}</p>}
-                {step.rule_key && <span className="text-[9px] text-neutral-600 font-mono">rule: {step.rule_key}</span>}
-                {step.semantic_similarity && (
-                  <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                    <span className="text-[9px] text-emerald-600 font-mono">cos:{step.semantic_similarity}</span>
-                    {step.fts_rank != null && <span className="text-[9px] text-blue-600 font-mono">fts#{step.fts_rank + 1}</span>}
-                    {step.vec_rank != null && <span className="text-[9px] text-purple-600 font-mono">vec#{step.vec_rank + 1}</span>}
-                    {step.rrf_score && <span className="text-[9px] text-amber-600 font-mono">rrf:{step.rrf_score}</span>}
+                {step.reasoning && (
+                  <div className="mt-1 p-2 rounded bg-blue-500/5 border border-blue-500/10">
+                    <span className="text-[9px] text-blue-400/60 block mb-0.5">Reasoning</span>
+                    <p className="text-[10px] text-neutral-400 line-clamp-4">{step.reasoning}</p>
                   </div>
                 )}
-                {step.method && (
-                  <Badge variant="outline" className={cn('text-[8px] px-1 py-0 h-3 mt-0.5',
-                    step.method === 'hybrid' ? 'border-emerald-700 text-emerald-600' : 'border-neutral-700 text-neutral-600'
-                  )}>
-                    {step.method === 'hybrid' ? '混合搜索' : 'FTS5'}
-                  </Badge>
-                )}
+                {step.rule_key && <span className="text-[9px] text-neutral-600 font-mono">rule: {step.rule_key}</span>}
+                {hasHybrid && <HybridSearchPanel step={step} />}
               </div>
             </div>
           );
@@ -361,6 +408,12 @@ function DecisionXRay({ question, onAnswer, onDismiss, onKillT3 }: {
 function EvolutionForge({ rules, expanded, onToggle }: {
   rules: KBEntry[]; expanded: boolean; onToggle: () => void;
 }) {
+  const sortedRules = useMemo(
+    () => [...rules].sort((a, b) => (b.accessCount ?? 0) - (a.accessCount ?? 0)),
+    [rules],
+  );
+  const topHitCount = sortedRules[0]?.accessCount ?? 0;
+
   return (
     <div className="flex flex-col h-full">
       <button
@@ -373,21 +426,54 @@ function EvolutionForge({ rules, expanded, onToggle }: {
       </button>
       {expanded && (
         <div className="flex-1 overflow-y-auto space-y-1.5 p-1.5">
-          {rules.length === 0 && (
+          {sortedRules.length === 0 && (
             <div className="text-xs text-neutral-600 text-center py-8">暂无 policy:decision 规则</div>
           )}
-          {rules.map(rule => (
-            <div key={rule.key} className="p-2 rounded-lg border border-neutral-800/50 bg-neutral-900/30">
-              <div className="flex items-center gap-1.5 mb-1">
-                <Zap className="w-3 h-3 text-green-500/50" />
-                <span className="text-[10px] font-mono text-neutral-500 truncate">{rule.key}</span>
+          {sortedRules.map(rule => {
+            const hits = rule.accessCount ?? 0;
+            const isHot = hits >= 10;
+            const isTop = hits > 0 && hits === topHitCount;
+            return (
+              <div
+                key={rule.key}
+                className={cn(
+                  'p-2 rounded-lg border transition-all',
+                  isHot
+                    ? 'border-amber-500/30 bg-amber-500/5 shadow-[0_0_8px_rgba(245,158,11,0.08)]'
+                    : 'border-neutral-800/50 bg-neutral-900/30',
+                )}
+              >
+                <div className="flex items-center gap-1.5 mb-1">
+                  <Zap className={cn('w-3 h-3', isHot ? 'text-amber-400' : 'text-green-500/50')} />
+                  <span className="text-[10px] font-mono text-neutral-500 truncate flex-1">{rule.key}</span>
+                  {isTop && hits > 0 && (
+                    <span className="text-[8px] px-1 py-0.5 rounded bg-amber-500/20 text-amber-400 font-semibold uppercase tracking-wide">
+                      Hot
+                    </span>
+                  )}
+                  {isHot && !isTop && (
+                    <span className="text-[8px] px-1 py-0.5 rounded bg-orange-500/10 text-orange-400/70 font-medium">
+                      {hits}x
+                    </span>
+                  )}
+                </div>
+                <p className="text-[11px] text-neutral-300 leading-snug line-clamp-3">{rule.summary}</p>
+                {hits > 0 && (
+                  <div className="flex items-center gap-2 mt-1.5">
+                    <div className="flex-1 h-1 bg-neutral-800 rounded-full overflow-hidden">
+                      <div
+                        className={cn('h-full rounded-full transition-all', isHot ? 'bg-amber-500/60' : 'bg-green-500/40')}
+                        style={{ width: `${Math.min(100, (hits / Math.max(topHitCount, 1)) * 100)}%` }}
+                      />
+                    </div>
+                    <span className={cn('text-[9px]', isHot ? 'text-amber-500' : 'text-neutral-600')}>
+                      {hits} 次命中
+                    </span>
+                  </div>
+                )}
               </div>
-              <p className="text-[11px] text-neutral-300 leading-snug line-clamp-3">{rule.summary}</p>
-              {rule.accessCount != null && rule.accessCount > 0 && (
-                <span className="text-[9px] text-neutral-600 mt-1 block">{rule.accessCount} 次命中</span>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

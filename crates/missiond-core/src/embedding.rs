@@ -1,18 +1,45 @@
-//! Embedding service for semantic search in Decision Engine Tier 1.
+//! Embedding service for semantic search.
 //!
-//! Feature-gated: `embeddings` enables FastEmbed backend (BAAI/bge-small-zh-v1.5),
+//! Architecture:
+//! - `EmbeddingProvider` trait: pluggable interface for any embedding model
+//! - `FastEmbedProvider`: default local backend (BAAI/bge-small-zh-v1.5, 512-dim)
+//! - Future: OllamaProvider (Qwen3-Embedding-0.6B), VoyageProvider, etc.
+//!
+//! Feature-gated: `embeddings` enables FastEmbed backend,
 //! otherwise provides a no-op implementation that falls back to FTS5 only.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// A single cached embedding: (knowledge_id, vector)
+/// A single cached embedding: (id, vector)
 pub type EmbeddingCache = Arc<RwLock<Vec<(String, Vec<f32>)>>>;
 
 /// Create a new empty embedding cache
 pub fn new_cache() -> EmbeddingCache {
     Arc::new(RwLock::new(Vec::new()))
+}
+
+// ── Pluggable Embedding Interface ────────────────────────────────
+
+/// Pluggable embedding provider trait.
+/// Implementations must be Send + Sync for use in async contexts.
+pub trait EmbeddingProvider: Send + Sync {
+    /// Unique identifier for this provider + model combo.
+    /// Used in DB `embedding_provider` column for version isolation.
+    /// e.g. "fastembed-bge-small-zh-v1.5", "ollama-qwen3-0.6b"
+    fn provider_id(&self) -> &str;
+
+    /// Output vector dimension.
+    fn dimension(&self) -> usize;
+
+    /// Generate embedding for a single text. Returns None on failure (graceful degradation).
+    fn embed(&self, text: &str) -> Option<Vec<f32>>;
+
+    /// Batch embed. Default implementation calls embed() in a loop.
+    fn embed_batch(&self, texts: &[String]) -> Vec<Option<Vec<f32>>> {
+        texts.iter().map(|t| self.embed(t)).collect()
+    }
 }
 
 /// Cosine similarity between two vectors
@@ -130,12 +157,18 @@ pub fn f32_vec_to_bytes(vec: &[f32]) -> Vec<u8> {
 
 // ── Feature ON: FastEmbed backend ─────────────────────────────────
 
+// ── Feature ON: FastEmbed backend ─────────────────────────────────
+
 #[cfg(feature = "embeddings")]
 mod backend {
     use std::sync::Mutex;
 
     use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
     use tracing::{info, warn};
+
+    use super::EmbeddingProvider;
+
+    pub const FASTEMBED_PROVIDER_ID: &str = "fastembed-bge-small-zh-v1.5";
 
     pub struct EmbeddingService {
         model: Mutex<TextEmbedding>,
@@ -164,9 +197,18 @@ mod backend {
                 }
             }
         }
+    }
 
-        /// Generate embedding for a single text. Returns 512-dim Vec<f32>.
-        pub fn embed(&self, text: &str) -> Option<Vec<f32>> {
+    impl EmbeddingProvider for EmbeddingService {
+        fn provider_id(&self) -> &str {
+            FASTEMBED_PROVIDER_ID
+        }
+
+        fn dimension(&self) -> usize {
+            512
+        }
+
+        fn embed(&self, text: &str) -> Option<Vec<f32>> {
             let mut model = self.model.lock().ok()?;
             match model.embed(vec![text], None) {
                 Ok(mut embeddings) if !embeddings.is_empty() => Some(embeddings.remove(0)),
@@ -178,8 +220,7 @@ mod backend {
             }
         }
 
-        /// Batch embed multiple texts. Returns Vec of 512-dim vectors.
-        pub fn embed_batch(&self, texts: &[String]) -> Vec<Option<Vec<f32>>> {
+        fn embed_batch(&self, texts: &[String]) -> Vec<Option<Vec<f32>>> {
             if texts.is_empty() {
                 return Vec::new();
             }
@@ -202,6 +243,10 @@ mod backend {
 
 #[cfg(not(feature = "embeddings"))]
 mod backend {
+    use super::EmbeddingProvider;
+
+    pub const FASTEMBED_PROVIDER_ID: &str = "fastembed-bge-small-zh-v1.5";
+
     pub struct EmbeddingService;
 
     impl EmbeddingService {
@@ -209,15 +254,22 @@ mod backend {
             tracing::info!("EmbeddingService: disabled (no embeddings feature)");
             None
         }
+    }
 
-        pub fn embed(&self, _text: &str) -> Option<Vec<f32>> {
-            None
+    impl EmbeddingProvider for EmbeddingService {
+        fn provider_id(&self) -> &str {
+            FASTEMBED_PROVIDER_ID
         }
 
-        pub fn embed_batch(&self, texts: &[String]) -> Vec<Option<Vec<f32>>> {
-            texts.iter().map(|_| None).collect()
+        fn dimension(&self) -> usize {
+            512
+        }
+
+        fn embed(&self, _text: &str) -> Option<Vec<f32>> {
+            None
         }
     }
 }
 
 pub use backend::EmbeddingService;
+pub use backend::FASTEMBED_PROVIDER_ID;
