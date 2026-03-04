@@ -1020,7 +1020,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_kb_search",
-            "搜索知识库。传 query 全文搜索，不传则列出最近条目。",
+            "搜索知识库（FTS5 + Embedding 混合 RRF 语义搜索）。传 query 搜索，不传则列出最近条目。",
             json!({
                 "type": "object",
                 "properties": {
@@ -1273,6 +1273,62 @@ pub fn all_tools() -> Vec<ToolDefinition> {
             }),
         ),
 
+        ToolDefinition::new(
+            "mission_router_chat_list",
+            "列出所有 Gemini 对话。显示 ID、关联任务、模型、消息数、总字符数、估算 token、日期。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "最大返回数（默认 50）"
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_router_chat_delete",
+            "删除 Gemini 对话（含所有消息）。支持按 conversation_id 或 task_id 定位。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "conversation_id": {
+                        "type": "string",
+                        "description": "对话 ID（直接删除）"
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Board 任务 ID（删除该任务关联的所有 Gemini 对话）"
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_router_chat_clear",
+            "清空 Gemini 对话的消息历史（保留对话记录本身，重置消息数为 0）。下次 chat 时从空白开始。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "conversation_id": {
+                        "type": "string",
+                        "description": "对话 ID"
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Board 任务 ID（清空该任务关联的所有 Gemini 对话消息）"
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_router_chat_stats",
+            "Gemini 对话统计：总对话数、总消息数、总字符/估算 token、按模型/按天分布。",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+        ),
+
         // ===== Memory Extraction =====
         ToolDefinition::new(
             "mission_memory_pending",
@@ -1426,7 +1482,15 @@ pub fn all_tools() -> Vec<ToolDefinition> {
 
         ToolDefinition::new(
             "mission_trigger_backfill",
-            "触发对话摘要 + 向量回填。后台 Worker 按批处理存量会话（LLM 摘要 + Embedding），包括 provider 切换后的重新 embedding。可多次调用查看剩余量。",
+            "触发全系统 Embedding 回填（KB 知识库 → Skill 技能 → 对话日志）。后台 Worker 按批处理，包括 provider 切换后的 stale 重刷。返回各系统 missing/stale 统计。可多次调用查看剩余量。",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_embedding_stats",
+            "查看全系统 Embedding 覆盖率统计（KB / Skill / 对话），含 provider 分布、缓存大小。",
             json!({
                 "type": "object",
                 "properties": {}
