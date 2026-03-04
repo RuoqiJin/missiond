@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { GripVertical, Calendar, Check, Minus, ChevronRight, ChevronDown, Plus, Lock } from 'lucide-react';
+import { GripVertical, Calendar, Check, Minus, ChevronRight, ChevronDown, Plus, Lock, Zap, Terminal } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import { CATEGORY_CONFIG, PRIORITY_CONFIG } from '../constants';
-import type { Task } from '../types';
+import { CATEGORY_CONFIG, PRIORITY_CONFIG, FLOW_PHASES, FLOW_PHASE_LABELS } from '../constants';
+import type { Task, FlowPhase } from '../types';
 
 interface TaskItemProps {
   task: Task;
@@ -40,6 +40,8 @@ export function TaskItem({
   const isBlocked = task.status === 'blocked';
   const isFailed = task.status === 'failed';
   const isInactive = isDone || isSkipped;
+  const isAutopilot = !!task.autoExecute;
+  const isLeaseExpired = task.leaseExpiresAt && new Date(task.leaseExpiresAt) < new Date();
 
   const {
     attributes,
@@ -82,6 +84,7 @@ export function TaskItem({
           'hover:bg-neutral-900/80 hover:border-neutral-800',
           isDragging && 'opacity-40',
           isInactive && 'opacity-50',
+          isAutopilot && isRunning && 'border-l-2 border-l-cyan-500',
         )}
       >
         {/* Drag handle */}
@@ -162,6 +165,21 @@ export function TaskItem({
                 {task.claimExecutorType === 'pty_slot' ? task.claimExecutorId : 'Session'}
               </span>
             )}
+            {/* Autopilot indicator — corner silent */}
+            {isAutopilot && !isInactive && (
+              <span title="Autopilot"><Zap className="w-3 h-3 text-neutral-600 group-hover:text-cyan-400 transition-colors shrink-0" /></span>
+            )}
+            {/* Lease heartbeat dot */}
+            {isAutopilot && isRunning && task.leaseExpiresAt && (
+              <span title={isLeaseExpired ? '租约已过期' : `租约至 ${task.leaseExpiresAt}`}>
+                <span
+                  className={cn(
+                    'inline-block w-1.5 h-1.5 rounded-full shrink-0',
+                    isLeaseExpired ? 'bg-red-500 animate-ping' : 'bg-green-500 animate-pulse',
+                  )}
+                />
+              </span>
+            )}
 
             {hasChildren && !isInactive && (
               <span className={cn(
@@ -198,7 +216,26 @@ export function TaskItem({
                   {task.dueDate}
                 </span>
               )}
+              {/* Assignee slot badge */}
+              {task.assignee && (
+                <span className="flex items-center gap-0.5 text-[10px] font-mono text-neutral-500 px-1 h-4 rounded bg-cyan-500/5 border border-cyan-500/10">
+                  <Terminal className="w-2.5 h-2.5" />
+                  {task.assignee.replace('slot-', '')}
+                </span>
+              )}
+              {/* DAG dependency markers */}
+              {task.dependsOn && task.dependsOn.length > 0 && !isDone && (
+                <span className="flex items-center gap-0.5 text-[10px] text-amber-500/70">
+                  <Lock className="w-2.5 h-2.5" />
+                  等待 {task.dependsOn.map(id => `#${id.slice(0, 6)}`).join(', ')}
+                </span>
+              )}
             </div>
+          )}
+
+          {/* Flow Engine micro-bar */}
+          {task.flowTemplate && task.flowPhase && !isInactive && (
+            <FlowMicroBar currentPhase={task.flowPhase} />
           )}
         </div>
       </div>
@@ -225,6 +262,26 @@ export function TaskItem({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Segmented micro-bar for Flow Engine phases — 3px height, cyan palette */
+function FlowMicroBar({ currentPhase }: { currentPhase: FlowPhase }) {
+  const phaseIdx = FLOW_PHASES.indexOf(currentPhase);
+  return (
+    <div className="flex gap-px mt-1.5 ml-3.5 h-[3px] max-w-[160px]" title={FLOW_PHASE_LABELS[currentPhase] || currentPhase}>
+      {FLOW_PHASES.map((phase, i) => (
+        <div
+          key={phase}
+          className={cn(
+            'flex-1 rounded-[1px]',
+            i < phaseIdx ? 'bg-cyan-500' :
+            i === phaseIdx ? 'bg-cyan-400 animate-pulse' :
+            'bg-neutral-700',
+          )}
+        />
+      ))}
     </div>
   );
 }
