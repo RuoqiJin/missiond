@@ -4512,95 +4512,120 @@ impl MissionDB {
         Ok(msgs)
     }
 
-    /// Search conversation messages: FTS5 first, LIKE fallback for Chinese substrings.
+    /// Search conversation messages: AND-first FTS5, OR fallback, then LIKE.
     pub fn search_conversation_messages(&self, query: &str, limit: i64) -> SqliteResult<Vec<ConversationMessage>> {
         let conn = self.read_conn();
+        let (and_query, or_query) = Self::build_conv_fts_queries(query);
 
-        // Phase 1: FTS5 search
-        let fts_query = Self::sanitize_conv_fts_query(query);
-        let fts_results = {
-            let mut stmt = conn.prepare(
-                "SELECT m.* FROM conversation_messages m
-                 JOIN conversation_msg_fts f ON m.id = f.rowid
-                 WHERE conversation_msg_fts MATCH ?1
-                 ORDER BY rank
-                 LIMIT ?2"
-            )?;
-            let rows = stmt.query_map(params![fts_query, limit], |row| Self::row_to_conversation_message(row))?;
+        let fts_sql =
+            "SELECT m.* FROM conversation_messages m
+             JOIN conversation_msg_fts f ON m.id = f.rowid
+             WHERE conversation_msg_fts MATCH ?1
+             ORDER BY bm25(conversation_msg_fts)
+             LIMIT ?2";
+
+        // Phase 1: AND — all terms
+        let results = {
+            let mut stmt = conn.prepare(fts_sql)?;
+            let rows = stmt.query_map(params![and_query, limit], |row| Self::row_to_conversation_message(row))?;
             let mut msgs = Vec::new();
             for m in rows { msgs.push(m?); }
             msgs
         };
+        if !results.is_empty() { return Ok(results); }
 
-        // Phase 2: LIKE fallback if FTS5 returns nothing (common for Chinese substrings)
-        if fts_results.is_empty() {
-            let pattern = format!("%{}%", query);
-            let mut stmt = conn.prepare(
-                "SELECT * FROM conversation_messages WHERE content LIKE ?1 ORDER BY timestamp DESC LIMIT ?2"
-            )?;
-            let rows = stmt.query_map(params![pattern, limit], |row| Self::row_to_conversation_message(row))?;
+        // Phase 2: OR — any term
+        let results = {
+            let mut stmt = conn.prepare(fts_sql)?;
+            let rows = stmt.query_map(params![or_query, limit], |row| Self::row_to_conversation_message(row))?;
             let mut msgs = Vec::new();
             for m in rows { msgs.push(m?); }
-            return Ok(msgs);
-        }
+            msgs
+        };
+        if !results.is_empty() { return Ok(results); }
 
-        Ok(fts_results)
+        // Phase 3: LIKE fallback for Chinese substrings
+        let pattern = format!("%{}%", query);
+        let mut stmt = conn.prepare(
+            "SELECT * FROM conversation_messages WHERE content LIKE ?1 ORDER BY timestamp DESC LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(params![pattern, limit], |row| Self::row_to_conversation_message(row))?;
+        let mut msgs = Vec::new();
+        for m in rows { msgs.push(m?); }
+        Ok(msgs)
     }
 
-    /// FTS5 search grouped by session — returns (session_id, hit_count) ranked by total hits.
-    /// Used for hybrid search RRF fusion.
-    pub fn search_conversation_sessions_fts(&self, query: &str, limit: i64) -> SqliteResult<Vec<(String, usize)>> {
+    /// FTS5 search grouped by session — returns (session_id, best_bm25_score) ranked by BM25.
+    /// Uses AND-first strategy: try all terms AND, fall back to OR, then LIKE.
+    pub fn search_conversation_sessions_fts(&self, query: &str, limit: i64) -> SqliteResult<Vec<(String, f64)>> {
         let conn = self.read_conn();
-        let fts_query = Self::sanitize_conv_fts_query(query);
+        let (and_query, or_query) = Self::build_conv_fts_queries(query);
 
-        // FTS5 search grouped by session
-        let fts_results = {
-            let mut stmt = conn.prepare(
-                "SELECT m.session_id, COUNT(*) as hits FROM conversation_messages m
-                 JOIN conversation_msg_fts f ON m.id = f.rowid
-                 WHERE conversation_msg_fts MATCH ?1
-                 GROUP BY m.session_id
-                 ORDER BY hits DESC
-                 LIMIT ?2"
-            )?;
-            let rows = stmt.query_map(params![fts_query, limit], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, usize>(1)?))
+        let bm25_sql =
+            "SELECT m.session_id, MIN(bm25(conversation_msg_fts)) as best_score
+             FROM conversation_messages m
+             JOIN conversation_msg_fts f ON m.id = f.rowid
+             WHERE conversation_msg_fts MATCH ?1
+             GROUP BY m.session_id
+             ORDER BY best_score ASC
+             LIMIT ?2";
+
+        // Phase 1: AND — all terms must appear
+        let results = {
+            let mut stmt = conn.prepare(bm25_sql)?;
+            let rows = stmt.query_map(params![and_query, limit], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
             })?;
-            let mut results = Vec::new();
-            for r in rows { results.push(r?); }
-            results
+            let mut r = Vec::new();
+            for row in rows { r.push(row?); }
+            r
         };
-
-        // LIKE fallback if FTS5 returns nothing
-        if fts_results.is_empty() {
-            let pattern = format!("%{}%", query);
-            let mut stmt = conn.prepare(
-                "SELECT session_id, COUNT(*) as hits FROM conversation_messages
-                 WHERE content LIKE ?1
-                 GROUP BY session_id
-                 ORDER BY hits DESC
-                 LIMIT ?2"
-            )?;
-            let rows = stmt.query_map(params![pattern, limit], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, usize>(1)?))
-            })?;
-            let mut results = Vec::new();
-            for r in rows { results.push(r?); }
+        if !results.is_empty() {
             return Ok(results);
         }
 
-        Ok(fts_results)
+        // Phase 2: OR — any term matches
+        let results = {
+            let mut stmt = conn.prepare(bm25_sql)?;
+            let rows = stmt.query_map(params![or_query, limit], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })?;
+            let mut r = Vec::new();
+            for row in rows { r.push(row?); }
+            r
+        };
+        if !results.is_empty() {
+            return Ok(results);
+        }
+
+        // Phase 3: LIKE fallback for Chinese substrings
+        let pattern = format!("%{}%", query);
+        let mut stmt = conn.prepare(
+            "SELECT session_id, COUNT(*) as hits FROM conversation_messages
+             WHERE content LIKE ?1
+             GROUP BY session_id
+             ORDER BY hits DESC
+             LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(params![pattern, limit], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })?;
+        let mut results = Vec::new();
+        for r in rows { results.push(r?); }
+        Ok(results)
     }
 
-    /// Sanitize query for conversation FTS5 MATCH: split words, wrap in quotes, join with OR.
-    fn sanitize_conv_fts_query(query: &str) -> String {
+    /// Build FTS5 MATCH queries: AND (strict) + OR (loose) variants.
+    /// Returns (and_query, or_query). Caller tries AND first, falls back to OR.
+    fn build_conv_fts_queries(query: &str) -> (String, String) {
         let terms: Vec<String> = query.split_whitespace()
             .map(|t| format!("\"{}\"", t.replace('"', "")))
             .collect();
         if terms.is_empty() {
-            format!("\"{}\"", query.replace('"', ""))
+            let q = format!("\"{}\"", query.replace('"', ""));
+            (q.clone(), q)
         } else {
-            terms.join(" OR ")
+            (terms.join(" AND "), terms.join(" OR "))
         }
     }
 

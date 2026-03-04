@@ -56,14 +56,16 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm_a * norm_b)
 }
 
-/// RRF (Reciprocal Rank Fusion) score combining two ranked positions.
-/// k=60 is the standard constant.
+/// Weighted RRF: w_fts * 1/(k+rank+1) + w_vec * 1/(k+rank+1).
+/// Default weights: 0.4 FTS + 0.6 Vec (embedding-dominant).
 pub fn rrf_score(fts_rank: Option<usize>, vec_rank: Option<usize>, k: usize) -> f64 {
+    const W_FTS: f64 = 0.4;
+    const W_VEC: f64 = 0.6;
     let fts = fts_rank
-        .map(|r| 1.0 / (k + r + 1) as f64)
+        .map(|r| W_FTS / (k + r + 1) as f64)
         .unwrap_or(0.0);
     let vec = vec_rank
-        .map(|r| 1.0 / (k + r + 1) as f64)
+        .map(|r| W_VEC / (k + r + 1) as f64)
         .unwrap_or(0.0);
     fts + vec
 }

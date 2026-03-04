@@ -3646,12 +3646,12 @@ impl AppState {
 
                 // ── Path B: hybrid session-level search (FTS5 + embedding RRF) ──
 
-                // 1. FTS5: message-level search → session ranking
+                // 1. FTS5: AND-first BM25 search → session ranking
                 let fts_sessions = db.search_conversation_sessions_fts(&query, (top_k * 3) as i64)
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 let fts_ranked: Vec<(String, usize)> = fts_sessions.into_iter()
                     .enumerate()
-                    .map(|(rank, (sid, _hits))| (sid, rank))
+                    .map(|(rank, (sid, _score))| (sid, rank))
                     .collect();
 
                 // 2. Vector: embed query → cosine sim against conversation embedding cache
@@ -8795,7 +8795,7 @@ async fn generate_conv_summary_llm(state: &AppState, conv_text: &str) -> Option<
         输出纯文本，不要 Markdown 格式。";
 
     let body = serde_json::json!({
-        "model": "gemini-3-flash-preview",
+        "model": "gemini-3.1-flash-lite",
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": conv_text}
