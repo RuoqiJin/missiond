@@ -1244,7 +1244,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
                     },
                     "model": {
                         "type": "string",
-                        "description": "模型（默认 gemini-3.1-pro）"
+                        "description": "模型（不传则用 Router 默认最新 Gemini，无需指定版本号）"
                     },
                     "max_tokens": {
                         "type": "integer",

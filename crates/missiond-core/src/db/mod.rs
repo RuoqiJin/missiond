@@ -220,11 +220,13 @@ pub fn extract_parent_session_id(jsonl_path: &str) -> Option<String> {
 }
 
 /// Derive conversation_type from slot_id and session_id.
-/// "meta" = memory slots, "subagent" = agent-* IDs, "worker" = other slots, "user" = direct CLI.
+/// "meta" = memory slots, "compaction" = context compaction shards,
+/// "subagent" = agent-* IDs, "worker" = other slots, "user" = direct CLI.
 pub fn derive_conversation_type(slot_id: Option<&str>, session_id: &str) -> String {
     match slot_id {
         Some("slot-memory" | "slot-memory-slow") => "meta".to_string(),
         Some(_) => "worker".to_string(),
+        None if session_id.contains("-acompact-") => "compaction".to_string(),
         None if session_id.starts_with("agent-") => "subagent".to_string(),
         None => "user".to_string(),
     }
@@ -576,6 +578,17 @@ impl MissionDB {
             conn.execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_conv_type ON conversations(conversation_type);"
             )?;
+        }
+
+        // Backfill: reclassify compaction fragments from 'subagent' to 'compaction'
+        // (agent-acompact-* sessions were previously misclassified by derive_conversation_type)
+        let compaction_fixed: usize = conn.execute(
+            "UPDATE conversations SET conversation_type = 'compaction'
+             WHERE id LIKE '%acompact%' AND conversation_type != 'compaction'",
+            [],
+        )?;
+        if compaction_fixed > 0 {
+            tracing::info!(count = compaction_fixed, "Reclassified compaction fragments from subagent");
         }
 
         // Add updated_at for tracking last message write time (compaction detection)
@@ -967,6 +980,15 @@ impl MissionDB {
                 )?;
                 tracing::info!("Migration: skill_topics embedding columns added");
             }
+        }
+
+        // Session Timeline: add session_timeline + timeline_built_at for compaction fragment merging
+        if !conv_columns.iter().any(|c| c == "session_timeline") {
+            conn.execute_batch(
+                "ALTER TABLE conversations ADD COLUMN session_timeline TEXT;
+                 ALTER TABLE conversations ADD COLUMN timeline_built_at TEXT;"
+            )?;
+            tracing::info!("Migration: added session_timeline + timeline_built_at to conversations");
         }
 
         Ok(())
@@ -4517,10 +4539,13 @@ impl MissionDB {
         let conn = self.read_conn();
         let (and_query, or_query) = Self::build_conv_fts_queries(query);
 
+        // Exclude meta/compaction conversations from search results
         let fts_sql =
             "SELECT m.* FROM conversation_messages m
              JOIN conversation_msg_fts f ON m.id = f.rowid
+             JOIN conversations c ON m.session_id = c.id
              WHERE conversation_msg_fts MATCH ?1
+               AND c.conversation_type NOT IN ('meta', 'compaction')
              ORDER BY f.rank
              LIMIT ?2";
 
@@ -4547,7 +4572,11 @@ impl MissionDB {
         // Phase 3: LIKE fallback for Chinese substrings
         let pattern = format!("%{}%", query);
         let mut stmt = conn.prepare(
-            "SELECT * FROM conversation_messages WHERE content LIKE ?1 ORDER BY timestamp DESC LIMIT ?2"
+            "SELECT m.* FROM conversation_messages m
+             JOIN conversations c ON m.session_id = c.id
+             WHERE m.content LIKE ?1
+               AND c.conversation_type NOT IN ('meta', 'compaction')
+             ORDER BY m.timestamp DESC LIMIT ?2"
         )?;
         let rows = stmt.query_map(params![pattern, limit], |row| Self::row_to_conversation_message(row))?;
         let mut msgs = Vec::new();
@@ -4561,11 +4590,14 @@ impl MissionDB {
         let conn = self.read_conn();
         let (and_query, or_query) = Self::build_conv_fts_queries(query);
 
+        // Exclude meta/compaction conversations from search results
         let bm25_sql =
             "SELECT m.session_id, MIN(f.rank) as best_score
              FROM conversation_messages m
              JOIN conversation_msg_fts f ON m.id = f.rowid
+             JOIN conversations c ON m.session_id = c.id
              WHERE conversation_msg_fts MATCH ?1
+               AND c.conversation_type NOT IN ('meta', 'compaction')
              GROUP BY m.session_id
              ORDER BY best_score ASC
              LIMIT ?2";
@@ -4601,9 +4633,11 @@ impl MissionDB {
         // Phase 3: LIKE fallback for Chinese substrings
         let pattern = format!("%{}%", query);
         let mut stmt = conn.prepare(
-            "SELECT session_id, COUNT(*) as hits FROM conversation_messages
-             WHERE content LIKE ?1
-             GROUP BY session_id
+            "SELECT m.session_id, COUNT(*) as hits FROM conversation_messages m
+             JOIN conversations c ON m.session_id = c.id
+             WHERE m.content LIKE ?1
+               AND c.conversation_type NOT IN ('meta', 'compaction')
+             GROUP BY m.session_id
              ORDER BY hits DESC
              LIMIT ?2"
         )?;
@@ -4639,6 +4673,16 @@ impl MissionDB {
         Ok(())
     }
 
+    /// Clear conversation summary + embedding so it can be regenerated (e.g., after timeline build).
+    pub fn clear_conversation_summary(&self, id: &str) -> SqliteResult<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE conversations SET llm_summary = NULL, embedding = NULL, embedding_provider = NULL WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
     /// Store conversation embedding + provider identifier.
     pub fn set_conversation_embedding(&self, id: &str, embedding: &[f32], provider: &str) -> SqliteResult<()> {
         let conn = self.conn();
@@ -4653,8 +4697,11 @@ impl MissionDB {
     /// Load all conversation embeddings matching a specific provider. For cache warming.
     pub fn load_conversation_embeddings(&self, provider: &str) -> SqliteResult<Vec<(String, Vec<f32>)>> {
         let conn = self.read_conn();
+        // Exclude meta/compaction from search embedding cache — they pollute results
         let mut stmt = conn.prepare(
-            "SELECT id, embedding FROM conversations WHERE embedding IS NOT NULL AND embedding_provider = ?1"
+            "SELECT id, embedding FROM conversations
+             WHERE embedding IS NOT NULL AND embedding_provider = ?1
+               AND conversation_type NOT IN ('meta', 'compaction')"
         )?;
         let rows = stmt.query_map(params![provider], |row| {
             let id: String = row.get(0)?;
@@ -4670,11 +4717,13 @@ impl MissionDB {
     }
 
     /// List conversation IDs that are completed but missing LLM summary (for backfill).
+    /// Excludes meta/compaction/subagent — only user and worker conversations get independent summaries.
     pub fn conversations_missing_summary(&self, limit: i64) -> SqliteResult<Vec<String>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id FROM conversations
              WHERE llm_summary IS NULL AND status = 'completed' AND message_count >= 6
+               AND conversation_type IN ('user', 'worker')
              ORDER BY started_at DESC LIMIT ?1"
         )?;
         let rows = stmt.query_map(params![limit], |row| row.get::<_, String>(0))?;
@@ -4690,12 +4739,73 @@ impl MissionDB {
             "SELECT id FROM conversations
              WHERE llm_summary IS NOT NULL AND embedding_provider IS NOT NULL
                AND embedding_provider != ?1
+               AND conversation_type IN ('user', 'worker')
              ORDER BY started_at DESC LIMIT ?2"
         )?;
         let rows = stmt.query_map(params![current_provider, limit], |row| row.get::<_, String>(0))?;
         let mut ids = Vec::new();
         for r in rows { ids.push(r?); }
         Ok(ids)
+    }
+
+    // ============ Session Timeline Reconstruction ============
+
+    /// Find completed parent conversations that have compaction children but no timeline yet.
+    pub fn conversations_needing_timeline(&self, limit: i64) -> SqliteResult<Vec<String>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT c.parent_session_id
+             FROM conversations c
+             JOIN conversations p ON p.id = c.parent_session_id
+             WHERE c.conversation_type = 'compaction'
+               AND p.status = 'completed'
+               AND p.timeline_built_at IS NULL
+             LIMIT ?1"
+        )?;
+        let rows = stmt.query_map(params![limit], |row| row.get::<_, String>(0))?;
+        let mut ids = Vec::new();
+        for r in rows { ids.push(r?); }
+        Ok(ids)
+    }
+
+    /// Get compaction fragments for a parent session, ordered by started_at.
+    /// Returns (fragment_id, started_at, message_count).
+    pub fn get_compaction_fragments(&self, parent_id: &str) -> SqliteResult<Vec<(String, String, i64)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, started_at, message_count FROM conversations
+             WHERE parent_session_id = ?1 AND conversation_type = 'compaction'
+             ORDER BY started_at ASC, id ASC"
+        )?;
+        let rows = stmt.query_map(params![parent_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+        })?;
+        let mut result = Vec::new();
+        for r in rows { result.push(r?); }
+        Ok(result)
+    }
+
+    /// Get the last assistant message content from a conversation (for compaction summary extraction).
+    pub fn get_last_assistant_content(&self, session_id: &str) -> SqliteResult<Option<String>> {
+        let conn = self.read_conn();
+        conn.query_row(
+            "SELECT content FROM conversation_messages
+             WHERE session_id = ?1 AND role = 'assistant'
+             ORDER BY id DESC LIMIT 1",
+            params![session_id],
+            |row| row.get::<_, String>(0),
+        ).optional()
+    }
+
+    /// Write session_timeline JSON and set timeline_built_at (CAS: only if timeline_built_at IS NULL).
+    pub fn set_session_timeline(&self, parent_id: &str, timeline_json: &str) -> SqliteResult<bool> {
+        let conn = self.conn();
+        let updated = conn.execute(
+            "UPDATE conversations SET session_timeline = ?1, timeline_built_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?2 AND timeline_built_at IS NULL",
+            params![timeline_json, parent_id],
+        )?;
+        Ok(updated > 0)
     }
 
     // ============ Conversation Tool Calls (Audit) ============
@@ -5321,6 +5431,8 @@ impl MissionDB {
             updated_at: row.get("updated_at").unwrap_or(None),
             llm_summary: row.get("llm_summary").unwrap_or(None),
             embedding_provider: row.get("embedding_provider").unwrap_or(None),
+            session_timeline: row.get("session_timeline").unwrap_or(None),
+            timeline_built_at: row.get("timeline_built_at").unwrap_or(None),
         })
     }
 

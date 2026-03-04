@@ -8807,6 +8807,47 @@ async fn generate_and_store_conv_embedding(state: &AppState, session_id: &str) {
     // 2. Build conversation text for LLM (budget: ~8K chars)
     debug!(session = %session_id, msg_count = messages.len(), "Step 2: building conv_text");
     let mut conv_text = String::with_capacity(8192);
+
+    // 2a. If parent has session_timeline, prepend compaction fragment summaries
+    let has_timeline = if let Ok(Some(conv)) = db.get_conversation(session_id) {
+        if let Some(ref tl_json) = conv.session_timeline {
+            if let Ok(timeline) = serde_json::from_str::<Vec<serde_json::Value>>(tl_json) {
+                if !timeline.is_empty() {
+                    conv_text.push_str("=== 会话历史阶段摘要 (compaction fragments) ===\n");
+                    let fragments: Vec<&serde_json::Value> = if timeline.len() > 10 {
+                        // Degradation: first 3 + last 3 + 2 middle samples
+                        let mut selected: Vec<&serde_json::Value> = timeline.iter().take(3).collect();
+                        let mid = timeline.len() / 2;
+                        if mid > 3 && mid < timeline.len() - 3 {
+                            selected.push(&timeline[mid - 1]);
+                            selected.push(&timeline[mid]);
+                        }
+                        selected.extend(timeline.iter().rev().take(3).collect::<Vec<_>>().into_iter().rev());
+                        selected
+                    } else {
+                        timeline.iter().collect()
+                    };
+                    for entry in &fragments {
+                        let idx = entry.get("shard_index").and_then(|v| v.as_u64()).unwrap_or(0);
+                        if let Some(summary) = entry.get("summary").and_then(|v| v.as_str()) {
+                            // Truncate each fragment summary to ~300 tokens (~1200 chars)
+                            let truncated = if summary.len() > 1200 {
+                                &summary[..char_boundary_at(summary, 1200)]
+                            } else {
+                                summary
+                            };
+                            conv_text.push_str(&format!("[阶段{}] {}\n", idx, truncated));
+                        }
+                    }
+                    conv_text.push_str("=== 最近消息 ===\n");
+                    true
+                } else { false }
+            } else { false }
+        } else { false }
+    } else { false };
+
+    // 2b. Append recent messages (reduce budget if timeline was prepended)
+    let msg_budget = if has_timeline { 4000 } else { 8000 };
     for msg in &messages {
         let prefix = match msg.role.as_str() {
             "user" => "U",
@@ -8821,14 +8862,14 @@ async fn generate_and_store_conv_embedding(state: &AppState, session_id: &str) {
             msg.content.clone()
         };
         conv_text.push_str(&format!("[{}] {}\n", prefix, content));
-        if conv_text.len() > 8000 {
+        if conv_text.len() > msg_budget {
             break;
         }
     }
 
     // 3. Call Router LLM for summary (with fallback)
-    debug!(session = %session_id, text_len = conv_text.len(), "Step 3: calling LLM for summary");
-    let summary = match generate_conv_summary_llm(state, &conv_text).await {
+    debug!(session = %session_id, text_len = conv_text.len(), has_timeline, "Step 3: calling LLM for summary");
+    let summary = match generate_conv_summary_llm(state, &conv_text, has_timeline).await {
         Some(s) => {
             debug!(session = %session_id, summary_len = s.len(), "LLM summary OK");
             s
@@ -8899,15 +8940,25 @@ async fn generate_and_store_conv_embedding(state: &AppState, session_id: &str) {
 
 /// Call Router LLM to generate a structured conversation summary.
 /// Returns None if Router is unreachable or response is invalid.
-async fn generate_conv_summary_llm(state: &AppState, conv_text: &str) -> Option<String> {
+async fn generate_conv_summary_llm(state: &AppState, conv_text: &str, has_timeline: bool) -> Option<String> {
     let (base_url, jwt) = resolve_llm_credentials().await.ok()?;
     let url = format!("{}/v1/chat/completions", base_url);
 
-    let system_prompt = "作为技术专家，请用 200 字以内总结以下排查/开发会话，必须包含：\n\
+    let system_prompt = if has_timeline {
+        "作为技术专家，请用 300 字以内总结以下长会话的完整生命周期。\n\
+        会话包含多个阶段摘要(compaction fragments)和最近消息。请覆盖所有阶段，必须包含：\n\
+        1. 会话的整体目标和演进过程\n\
+        2. 各阶段的关键成果或决策\n\
+        3. 涉及的核心技术栈和文件\n\
+        4. 最终结论或未完成事项\n\
+        输出纯文本，不要 Markdown 格式。"
+    } else {
+        "作为技术专家，请用 200 字以内总结以下排查/开发会话，必须包含：\n\
         1. 遇到的核心问题或 Bug 表现\n\
         2. 涉及的代码方法名、文件路径或技术栈\n\
         3. 最终的解决思路或结论\n\
-        输出纯文本，不要 Markdown 格式。";
+        输出纯文本，不要 Markdown 格式。"
+    };
 
     let body = serde_json::json!({
         "model": "gemini-3.1-flash-lite",
@@ -9845,20 +9896,30 @@ async fn check_realtime_extraction(state: &AppState) {
         es.current_slot_task_id = Some(slot_task_id.clone());
     }
 
-    let prompt = "有新的对话内容待分析。调用 mission_memory_pending 获取待分析内容，提取知识存入 KB。\n\n\
-         ⚠️ 作业边界:\n\
-         - 只处理 mission_memory_pending 返回的内容\n\
-         - 禁止调用 mission_conversation_search / mission_conversation_get\n\
-         - 跨会话分析是 deep-analysis 的职责，不在此处执行\n\n\
+    let prompt = "有新的对话内容待分析。\n\n\
+         📋 工作流程:\n\
+         1. 调用 mission_memory_pending 获取待分析内容\n\
+         2. 用 mission_kb_search 去重检查\n\
+         3. 用 mission_kb_remember 存入新知识\n\
+         4. 发现 bug → mission_board_create 上报\n\n\
+         ⚠️ 异常处理（重要）:\n\
+         如果 MCP 工具调用失败、超时或不可用:\n\
+         - 不要尝试用 Bash/sqlite3 等替代方案访问数据库\n\
+         - 不要自行查找或修改文件系统中的 .db 文件\n\
+         - 直接输出: <slot_anomaly type=\"mcp_unavailable\" tool=\"工具名\" error=\"错误描述\"/>\n\
+         - 然后停止工作，等待 orchestrator 恢复\n\
+         orchestrator 会自动检测并处理 MCP 连接问题，你只需上报即可。\n\n\
+         📝 本工位职责:\n\
+         - 数据来源: 仅 mission_memory_pending（跨会话分析归 deep-analysis 工位负责）\n\
+         - 所有数据读写通过 MCP 工具完成，不直接访问文件系统中的数据库\n\n\
          提取目标（按优先级）:\n\
          - 用户偏好/原则/纠正 → category: preference\n\
          - 架构决策/技术事实 → category: memory 或 memory:architecture/memory:decision\n\
          - 已修 bug 根因 → category: memory:bugfix\n\
          - 运维痛点信号 → category: memory:ops\n\
          - 调试弯路经验 → category: memory:debug\n\
-         禁止提取: 基础设施信息/API细节/版本号/通用技术知识/当天日志\n\
-         去重: 提取前 mission_kb_search 检查。\n\
-         问题上报: 发现 bug → mission_board_create。";
+         不提取: 基础设施信息/API细节/版本号/通用技术知识/当天日志\n\
+         去重: 提取前 mission_kb_search 检查。";
 
     info!("Triggering realtime extraction via MCP pull");
 
@@ -10637,6 +10698,8 @@ fn handle_new_messages(
             updated_at: None,
             llm_summary: None,
             embedding_provider: None,
+            session_timeline: None,
+            timeline_built_at: None,
         };
         if let Err(e) = db.upsert_conversation(&conv) {
             error!(session = %session_id, error = %e, "Failed to create conversation");
@@ -10809,6 +10872,8 @@ fn handle_pty_text_complete(
             updated_at: None,
             llm_summary: None,
             embedding_provider: None,
+            session_timeline: None,
+            timeline_built_at: None,
         };
         if let Err(e) = db.upsert_conversation(&conv) {
             error!(slot = %slot_id, error = %e, "Failed to create PTY conversation");
@@ -11211,6 +11276,17 @@ async fn main() -> Result<()> {
         });
     }
 
+    // One-time startup: trigger full backfill (covers timeline build + stale embeds)
+    {
+        let tx = state.embedding_tx.clone();
+        tokio::spawn(async move {
+            // Delay slightly to let caches warm first
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let _ = tx.try_send(EmbeddingTask::BackfillAll);
+            info!("Startup BackfillAll triggered");
+        });
+    }
+
     // Embedding Worker: event-driven actor (sleeps until triggered, 0 CPU idle)
     {
         let worker_state = state.clone();
@@ -11406,6 +11482,64 @@ async fn main() -> Result<()> {
                                     }
                                 }
                                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            }
+                        }
+
+                        // ── Phase 4.5: Build session timelines for compaction fragments ──
+                        // (no embedding needed, runs unconditionally)
+                        {
+                            let needing = db.conversations_needing_timeline(50).unwrap_or_default();
+                            if !needing.is_empty() {
+                                info!(count = needing.len(), "Building session timelines for compaction parents");
+                            }
+                            for parent_id in &needing {
+                                let fragments = match db.get_compaction_fragments(parent_id) {
+                                    Ok(f) => f,
+                                    Err(e) => {
+                                        warn!(parent = %parent_id, error = %e, "Failed to get compaction fragments");
+                                        continue;
+                                    }
+                                };
+                                if fragments.is_empty() { continue; }
+
+                                let mut timeline_entries = Vec::new();
+                                for (idx, (frag_id, started_at, msg_count)) in fragments.iter().enumerate() {
+                                    let summary = db.get_last_assistant_content(frag_id)
+                                        .unwrap_or(None);
+                                    let summary_tokens = summary.as_ref()
+                                        .map(|s| s.len() / 4) // rough token estimate
+                                        .unwrap_or(0);
+                                    timeline_entries.push(serde_json::json!({
+                                        "fragment_id": frag_id,
+                                        "shard_index": idx,
+                                        "started_at": started_at,
+                                        "message_count": msg_count,
+                                        "summary_tokens": summary_tokens,
+                                        "summary": summary,
+                                        "segment_embedding_id": null,
+                                    }));
+                                }
+
+                                let timeline_json = serde_json::to_string(&timeline_entries)
+                                    .unwrap_or_else(|_| "[]".to_string());
+
+                                match db.set_session_timeline(parent_id, &timeline_json) {
+                                    Ok(true) => {
+                                        // Clear old summary so Phase 5 regenerates with timeline context
+                                        let _ = db.clear_conversation_summary(parent_id);
+                                        info!(
+                                            parent = %parent_id,
+                                            fragments = fragments.len(),
+                                            "Session timeline built, summary cleared for regeneration"
+                                        );
+                                    }
+                                    Ok(false) => {
+                                        // CAS failed — another thread already built it
+                                    }
+                                    Err(e) => {
+                                        warn!(parent = %parent_id, error = %e, "Failed to set session timeline");
+                                    }
+                                }
                             }
                         }
 
@@ -11665,6 +11799,35 @@ async fn main() -> Result<()> {
                             warn!(session = %session.session_id, error = %e, "Failed to complete conversation");
                         } else {
                             info!(session = %session.session_id, "Conversation marked completed");
+                            // Build session timeline if this parent has compaction fragments
+                            {
+                                let db = s.mission.db();
+                                let sid = &session.session_id;
+                                let frags = db.get_compaction_fragments(sid).unwrap_or_default();
+                                if !frags.is_empty() {
+                                    let mut entries = Vec::new();
+                                    for (idx, (frag_id, started_at, msg_count)) in frags.iter().enumerate() {
+                                        let summary = db.get_last_assistant_content(frag_id).unwrap_or(None);
+                                        let summary_tokens = summary.as_ref().map(|s| s.len() / 4).unwrap_or(0);
+                                        entries.push(serde_json::json!({
+                                            "fragment_id": frag_id,
+                                            "shard_index": idx,
+                                            "started_at": started_at,
+                                            "message_count": msg_count,
+                                            "summary_tokens": summary_tokens,
+                                            "summary": summary,
+                                            "segment_embedding_id": null,
+                                        }));
+                                    }
+                                    if let Ok(json) = serde_json::to_string(&entries) {
+                                        match db.set_session_timeline(sid, &json) {
+                                            Ok(true) => info!(session = %sid, fragments = frags.len(), "Session timeline built"),
+                                            Ok(false) => debug!(session = %sid, "Session timeline already exists"),
+                                            Err(e) => warn!(session = %sid, error = %e, "Failed to build session timeline"),
+                                        }
+                                    }
+                                }
+                            }
                             // Trigger embedding worker (event-driven, no spawn)
                             let _ = s.embedding_tx.try_send(EmbeddingTask::ProcessSession(session.session_id.clone()));
                         }
