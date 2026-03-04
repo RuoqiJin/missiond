@@ -77,7 +77,7 @@ function groupTasks(tasks: Task[], groupBy: GroupBy): TaskGroup[] {
     const priorityOrder = ['high', 'medium', 'low'];
     order.sort((a, b) => priorityOrder.indexOf(a) - priorityOrder.indexOf(b));
   } else if (groupBy === 'category') {
-    const categoryOrder = ['deploy', 'dev', 'infra', 'test', 'other'];
+    const categoryOrder = ['deploy', 'dev', 'infra', 'test', 'research', 'other'];
     order.sort((a, b) => categoryOrder.indexOf(a) - categoryOrder.indexOf(b));
   }
 
@@ -185,6 +185,8 @@ export function TaskListView() {
 
   const filtered = useMemo(() => {
     return tasks.filter((task) => {
+      // Exclude research tasks (shown in Research tab)
+      if (task.category === 'research') return false;
       // Exclude hidden and skipped tasks from main view
       if (task.hidden) return false;
       if (task.status === 'skipped') return false;

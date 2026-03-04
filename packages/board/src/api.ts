@@ -1,4 +1,4 @@
-import type { Task, TaskFormData } from './types';
+import type { Task, TaskFormData, TaskNote, TaskWithNotes } from './types';
 
 const BASE = '/api/tasks';
 
@@ -47,5 +47,17 @@ export async function toggleTask(id: string): Promise<Task> {
 export async function clearDoneTasks(): Promise<{ deleted: number }> {
   return request<{ deleted: number }>(`${BASE}?action=clear-done`, {
     method: 'POST',
+  });
+}
+
+export async function fetchTaskWithNotes(id: string): Promise<TaskWithNotes> {
+  return request<TaskWithNotes>(`${BASE}?id=${encodeURIComponent(id)}`);
+}
+
+export async function addTaskNote(taskId: string, content: string): Promise<TaskNote> {
+  return request<TaskNote>(`${BASE}?action=add-note&id=${encodeURIComponent(taskId)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content, noteType: 'note' }),
   });
 }

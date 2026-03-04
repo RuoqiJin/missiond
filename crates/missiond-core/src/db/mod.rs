@@ -4521,7 +4521,7 @@ impl MissionDB {
             "SELECT m.* FROM conversation_messages m
              JOIN conversation_msg_fts f ON m.id = f.rowid
              WHERE conversation_msg_fts MATCH ?1
-             ORDER BY bm25(conversation_msg_fts)
+             ORDER BY f.rank
              LIMIT ?2";
 
         // Phase 1: AND — all terms
@@ -4562,7 +4562,7 @@ impl MissionDB {
         let (and_query, or_query) = Self::build_conv_fts_queries(query);
 
         let bm25_sql =
-            "SELECT m.session_id, MIN(bm25(conversation_msg_fts)) as best_score
+            "SELECT m.session_id, MIN(f.rank) as best_score
              FROM conversation_messages m
              JOIN conversation_msg_fts f ON m.id = f.rowid
              WHERE conversation_msg_fts MATCH ?1
