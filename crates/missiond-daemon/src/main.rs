@@ -6339,6 +6339,28 @@ async fn process_incident(state: &AppState, incident: missiond_core::types::Miss
     let db = state.mission.db();
     let dedupe_key = format!("{}:{}", incident.source, incident.title);
 
+    // PtySlot incidents: dispatch remediation to a Claude Code (Opus) slot
+    if matches!(incident.source, missiond_core::types::IncidentSource::PtySlot) {
+        if let Some(slot_id) = incident.raw_payload.get("slot_id").and_then(|v| v.as_str()) {
+            create_pty_remediation_task(state, slot_id, &incident.title, &incident.description);
+            // Still insert incident record below, but skip default Board task creation
+            if let Err(e) = db.insert_incident(
+                &incident.id,
+                &incident.severity.to_string(),
+                &incident.source.to_string(),
+                &incident.title,
+                &incident.description,
+                incident.server_id.as_deref(),
+                Some(&incident.raw_payload.to_string()),
+                None,
+                &dedupe_key,
+            ) {
+                warn!(error = %e, "AIOps: failed to insert incident record");
+            }
+            return;
+        }
+    }
+
     // 5-minute dedupe window — drop duplicate incidents
     match db.has_recent_incident(&dedupe_key, 300) {
         Ok(true) => {
@@ -6438,6 +6460,69 @@ async fn process_incident(state: &AppState, incident: missiond_core::types::Miss
         &dedupe_key,
     ) {
         warn!(error = %e, "AIOps: failed to insert incident record");
+    }
+}
+
+// ============ PTY Auto-Remediation ============
+
+/// Dispatch a remediation Board task to a Claude Code (Opus) slot.
+/// The slot will use MCP tools (pty_screen, pty_send, pty_kill) to observe and fix.
+fn create_pty_remediation_task(
+    state: &AppState,
+    target_slot_id: &str,
+    incident_title: &str,
+    incident_description: &str,
+) {
+    let description = format!(
+        "## PTY 工位自愈任务\n\n\
+         **目标工位**: `{target_slot}`\n\
+         **问题**: {title}\n\n\
+         ### 问题详情\n{desc}\n\n\
+         ### 操作指南\n\
+         1. `mission_pty_screen(slotId=\"{target_slot}\")` 查看目标工位当前屏幕\n\
+         2. `mission_pty_status(slotId=\"{target_slot}\")` 检查工位状态\n\
+         3. 根据屏幕内容判断修复方式：\n\
+            - MCP 不可用 → `mission_pty_kill(slotId=\"{target_slot}\")` 重启（auto_restart 会自动恢复）\n\
+            - 卡在确认提示 → `mission_pty_send(slotId=\"{target_slot}\", message=\"...\")` 发送合适回复\n\
+            - 其他情况 → 先观察，再决定\n\
+         4. 操作后再次 `mission_pty_screen` 确认修复效果\n\
+         5. 重复 observe-act 直到目标工位恢复正常\n\n\
+         **注意**: 如果无法修复，在任务中说明原因即可。",
+        target_slot = target_slot_id,
+        title = incident_title,
+        desc = incident_description,
+    );
+
+    let task_input = missiond_core::types::CreateBoardTaskInput {
+        title: format!("[自愈] {}", incident_title),
+        description: Some(description),
+        priority: Some("high".to_string()),
+        category: Some("ops".to_string()),
+        assignee: Some("slot-coder-1".to_string()),
+        auto_execute: Some(true),
+        server: None,
+        project: None,
+        due_date: None,
+        parent_id: None,
+        prompt_template: None,
+        hidden: None,
+        flow_template: None,
+        depends_on: None,
+    };
+
+    match state.mission.db().create_board_task(&task_input) {
+        Ok(task) => {
+            info!(
+                task_id = %task.id,
+                target_slot = %target_slot_id,
+                "PTY remediation: Board task created for Opus slot"
+            );
+            // Notify autopilot to pick up immediately
+            state.submit_notify.notify_one();
+        }
+        Err(e) => {
+            error!(error = %e, "PTY remediation: failed to create Board task");
+        }
     }
 }
 
@@ -11847,6 +11932,29 @@ async fn main() -> Result<()> {
                                     warn!(slot_id = %sid, error = %e, "Failed to auto-confirm tool");
                                 }
                             });
+                        }
+                    }
+                    Ok(missiond_core::ManagerEvent::McpToolError { slot_id, tool_name, error }) => {
+                        warn!(slot_id = %slot_id, tool = %tool_name, "MCP tool error detected, creating incident");
+                        let incident = missiond_core::types::MissionIncident {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            severity: missiond_core::types::IncidentSeverity::High,
+                            source: missiond_core::types::IncidentSource::PtySlot,
+                            title: format!("MCP 工具不可用: {} ({})", tool_name, slot_id),
+                            description: format!(
+                                "工位 `{}` 调用 MCP 工具 `{}` 失败。\n\n错误信息:\n```\n{}\n```\n\n建议操作: 重启工位或检查 MCP 服务器配置。",
+                                slot_id, tool_name, error
+                            ),
+                            server_id: None,
+                            raw_payload: serde_json::json!({
+                                "slot_id": slot_id,
+                                "tool_name": tool_name,
+                                "error": error,
+                            }),
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                        };
+                        if let Err(e) = s.incident_tx.try_send(incident) {
+                            warn!("Incident channel full, dropping MCP error incident: {}", e);
                         }
                     }
                     Ok(missiond_core::ManagerEvent::Spawned { .. }) => {}

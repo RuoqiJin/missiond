@@ -127,6 +127,12 @@ pub enum ManagerEvent {
         content: String,
         timestamp: i64,
     },
+    /// MCP tool error detected in PTY output
+    McpToolError {
+        slot_id: String,
+        tool_name: String,
+        error: String,
+    },
 }
 
 impl PTYManager {
@@ -377,6 +383,27 @@ impl PTYManager {
                             content,
                             timestamp,
                         });
+                    }
+                    SessionEvent::ToolOutput(tool_output) => {
+                        // Detect MCP tool errors: "No such tool available" or tool_use_error
+                        if let Some(ref output) = tool_output.output {
+                            if output.contains("No such tool available")
+                                || output.contains("tool_use_error")
+                                || output.contains("MCP error")
+                            {
+                                let error_msg = output.chars().take(500).collect::<String>();
+                                tracing::warn!(
+                                    slot_id = %slot_id_for_events,
+                                    tool = %tool_output.tool_name,
+                                    "MCP tool error detected in PTY"
+                                );
+                                let _ = event_tx.send(ManagerEvent::McpToolError {
+                                    slot_id: slot_id_for_events.clone(),
+                                    tool_name: tool_output.tool_name.clone(),
+                                    error: error_msg,
+                                });
+                            }
+                        }
                     }
                     _ => {}
                 }
