@@ -3,6 +3,8 @@ export type TaskPriority = 'high' | 'medium' | 'low';
 export type TaskCategory = 'deploy' | 'dev' | 'infra' | 'test' | 'other';
 export type GroupBy = 'none' | 'category' | 'priority' | 'project';
 
+export type FlowPhase = 'investigate' | 'consult_gemini_1' | 'plan' | 'consult_gemini_2' | 'execute' | 'finalize' | 'done';
+
 export interface Task {
   id: string;
   title: string;
@@ -22,6 +24,14 @@ export interface Task {
   claimExecutorId?: string;
   claimExecutorType?: 'pty_slot' | 'manual_session';
   claimedAt?: string;
+  // Autopilot fields
+  assignee?: string;
+  autoExecute?: boolean;
+  promptTemplate?: string;
+  flowTemplate?: string;
+  flowPhase?: FlowPhase;
+  dependsOn?: string[];
+  leaseExpiresAt?: string;
 }
 
 export interface TaskFormData {
@@ -33,6 +43,12 @@ export interface TaskFormData {
   server?: string;
   dueDate?: string;
   hidden?: boolean;
+  // Autopilot fields
+  assignee?: string;
+  autoExecute?: boolean;
+  promptTemplate?: string;
+  flowTemplate?: string;
+  dependsOn?: string[];
 }
 
 export interface TaskFiltersState {

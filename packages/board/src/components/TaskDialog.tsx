@@ -19,7 +19,7 @@ import {
 } from '@/components/ui/select';
 import { Trash2, SkipForward } from 'lucide-react';
 import { useTaskCenterStore } from '../store';
-import { CATEGORY_CONFIG, PRIORITY_CONFIG, SERVER_OPTIONS } from '../constants';
+import { CATEGORY_CONFIG, PRIORITY_CONFIG, SERVER_OPTIONS, SLOT_OPTIONS, FLOW_TEMPLATE_OPTIONS } from '../constants';
 import type { TaskFormData, TaskCategory, TaskPriority } from '../types';
 
 const defaultForm: TaskFormData = {
@@ -43,6 +43,7 @@ export function TaskDialog() {
   const parentId = useTaskCenterStore((s) => s._addDialogParentId);
 
   const [form, setForm] = useState<TaskFormData>(defaultForm);
+  const [autopilotOpen, setAutopilotOpen] = useState(false);
   const isEditing = !!editingTask;
 
   useEffect(() => {
@@ -56,9 +57,16 @@ export function TaskDialog() {
         server: editingTask.server,
         dueDate: editingTask.dueDate,
         hidden: editingTask.hidden,
+        assignee: editingTask.assignee,
+        autoExecute: editingTask.autoExecute,
+        promptTemplate: editingTask.promptTemplate,
+        flowTemplate: editingTask.flowTemplate,
+        dependsOn: editingTask.dependsOn,
       });
+      setAutopilotOpen(!!(editingTask.autoExecute || editingTask.assignee || editingTask.flowTemplate));
     } else {
       setForm(defaultForm);
+      setAutopilotOpen(false);
     }
   }, [editingTask, isDialogOpen]);
 
@@ -70,6 +78,12 @@ export function TaskDialog() {
       server: form.server || undefined,
       dueDate: form.dueDate || undefined,
       hidden: form.hidden || undefined,
+      // Autopilot fields: only include if section is open
+      assignee: autopilotOpen ? (form.assignee || undefined) : undefined,
+      autoExecute: autopilotOpen ? form.autoExecute : undefined,
+      promptTemplate: autopilotOpen ? (form.promptTemplate?.trim() || undefined) : undefined,
+      flowTemplate: autopilotOpen ? (form.flowTemplate || undefined) : undefined,
+      dependsOn: autopilotOpen && form.dependsOn?.length ? form.dependsOn : undefined,
     };
     if (isEditing) {
       updateTask(editingTask.id, data);
@@ -193,6 +207,93 @@ export function TaskDialog() {
             />
             <span className="text-xs text-neutral-400">隐藏任务（手动处理项，不在默认列表显示）</span>
           </label>
+
+          {/* Autopilot Toggle */}
+          <div className="border-t border-neutral-800 pt-3">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={autopilotOpen}
+                onChange={(e) => {
+                  setAutopilotOpen(e.target.checked);
+                  if (e.target.checked) {
+                    setForm({ ...form, autoExecute: true });
+                  }
+                }}
+                className="rounded border-neutral-700 bg-neutral-800 text-cyan-500 focus:ring-cyan-500/20"
+              />
+              <span className="text-xs text-cyan-400">⚡ 启用无人值守 (Autopilot)</span>
+            </label>
+
+            {/* Autopilot Section — Progressive Disclosure */}
+            {autopilotOpen && (
+              <div className="mt-3 space-y-3 p-3 rounded-md bg-neutral-800/50 border border-cyan-500/10">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label className="text-neutral-400 text-xs">工位分配</Label>
+                    <Select
+                      value={form.assignee || '_none'}
+                      onValueChange={(v) => setForm({ ...form, assignee: v === '_none' ? undefined : v })}
+                    >
+                      <SelectTrigger className="bg-neutral-800 border-neutral-700 text-white font-mono text-xs">
+                        <SelectValue placeholder="选择工位" />
+                      </SelectTrigger>
+                      <SelectContent className="bg-neutral-800 border-neutral-700">
+                        <SelectItem value="_none" className="text-neutral-400 focus:bg-neutral-700 focus:text-white">未分配</SelectItem>
+                        {SLOT_OPTIONS.map((s) => (
+                          <SelectItem key={s} value={s} className="text-white focus:bg-neutral-700 focus:text-white font-mono text-xs">{s}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <Label className="text-neutral-400 text-xs">工作流引擎</Label>
+                    <Select
+                      value={form.flowTemplate || ''}
+                      onValueChange={(v) => setForm({ ...form, flowTemplate: v || undefined })}
+                    >
+                      <SelectTrigger className="bg-neutral-800 border-neutral-700 text-white text-xs">
+                        <SelectValue placeholder="无" />
+                      </SelectTrigger>
+                      <SelectContent className="bg-neutral-800 border-neutral-700">
+                        {FLOW_TEMPLATE_OPTIONS.map((o) => (
+                          <SelectItem key={o.value} value={o.value || '_none'} className="text-white focus:bg-neutral-700 focus:text-white text-xs">{o.label}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-neutral-400 text-xs">前置依赖（Task ID，逗号分隔）</Label>
+                  <Input
+                    value={form.dependsOn?.join(', ') || ''}
+                    onChange={(e) => {
+                      const ids = e.target.value.split(',').map(s => s.trim()).filter(Boolean);
+                      setForm({ ...form, dependsOn: ids.length ? ids : undefined });
+                    }}
+                    placeholder="如: abc123, def456"
+                    className="bg-neutral-800 border-neutral-700 text-white font-mono text-xs"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-neutral-400 text-xs">
+                    执行提示词
+                    <span className="ml-2 text-neutral-500">留空则使用标题+描述</span>
+                  </Label>
+                  <Textarea
+                    value={form.promptTemplate || ''}
+                    onChange={(e) => setForm({ ...form, promptTemplate: e.target.value })}
+                    placeholder="覆盖下发给 Claude 的指令（可选）"
+                    className="bg-neutral-800 border-neutral-700 text-white resize-none font-mono text-xs"
+                    rows={3}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         <DialogFooter className="flex-row justify-between sm:justify-between">

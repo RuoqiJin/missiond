@@ -22,3 +22,37 @@ export const GROUP_OPTIONS: { value: GroupBy; label: string }[] = [
 ];
 
 export const SERVER_OPTIONS = ['私有云', 'ECS', 'GCP', 'Win Agent'] as const;
+
+export const SLOT_OPTIONS = [
+  'slot-coder-1',
+  'slot-coder-2',
+  'slot-memory',
+  'slot-memory-slow',
+  'slot-minimax-1',
+  'slot-decision',
+] as const;
+
+export const FLOW_TEMPLATE_OPTIONS = [
+  { value: '', label: '无（普通任务）' },
+  { value: 'engineering', label: 'Engineering Flow' },
+] as const;
+
+export const FLOW_PHASES = [
+  'investigate',
+  'consult_gemini_1',
+  'plan',
+  'consult_gemini_2',
+  'execute',
+  'finalize',
+  'done',
+] as const;
+
+export const FLOW_PHASE_LABELS: Record<string, string> = {
+  investigate: '调查',
+  consult_gemini_1: '咨询1',
+  plan: '方案',
+  consult_gemini_2: '咨询2',
+  execute: '执行',
+  finalize: '收尾',
+  done: '完成',
+};
