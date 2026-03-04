@@ -24,12 +24,15 @@ export const GROUP_OPTIONS: { value: GroupBy; label: string }[] = [
 export const SERVER_OPTIONS = ['私有云', 'ECS', 'GCP', 'Win Agent'] as const;
 
 export const SLOT_OPTIONS = [
+  'slot-deploy-1',
+  'slot-ops',
   'slot-coder-1',
-  'slot-coder-2',
+  'slot-coder-bypass',
+  'slot-minimax-1',
   'slot-memory',
   'slot-memory-slow',
-  'slot-minimax-1',
   'slot-decision',
+  'slot-jarvis',
 ] as const;
 
 export const FLOW_TEMPLATE_OPTIONS = [

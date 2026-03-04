@@ -7637,6 +7637,36 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
                     let mut fail_map = state.slot_fail_counts.lock().unwrap();
                     fail_map.remove(&slot_id);
                 }
+
+                // Deploy task post-mortem: trigger memory-slow to review
+                if task.category == "deploy" {
+                    let review_state = state.clone();
+                    let review_task_id = task.id.clone();
+                    let review_title = task.title.clone();
+                    let review_slot = slot_id.clone();
+                    tokio::spawn(async move {
+                        if !ensure_memory_slot_by_id(&review_state, MEMORY_SLOW_SLOT_ID).await {
+                            warn!("Cannot spawn memory-slow for deploy review");
+                            return;
+                        }
+                        let prompt = format!(
+                            "部署任务刚刚完成，请复盘：\n\
+                            - 任务: {} (id: {})\n\
+                            - 执行工位: {}\n\n\
+                            请做以下工作：\n\
+                            1. 用 mission_board_get(id=\"{}\") 查看任务详情和 notes\n\
+                            2. 用 mission_conversation_search 搜索该工位最近的部署对话\n\
+                            3. 分析部署过程中是否有：失败重试、手动操作、缺失工具、耗时过长等问题\n\
+                            4. 提炼有价值的经验 → mission_kb_remember(category=\"memory:ops\")\n\
+                            5. 如发现缺失 MCP 工具或 Skill → mission_board_create 建改进任务\n\
+                            6. 如一切顺利，简要记录即可，不需要过度分析",
+                            review_title, review_task_id, review_slot,
+                            review_task_id,
+                        );
+                        let _ = review_state.pty.send(MEMORY_SLOW_SLOT_ID, &prompt, 600_000).await;
+                        info!(task_id = %review_task_id, "Deploy post-mortem review dispatched to memory-slow");
+                    });
+                }
             }
             Err(e) => {
                 // Record failure as a note
