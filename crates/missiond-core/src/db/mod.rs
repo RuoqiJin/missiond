@@ -937,6 +937,38 @@ impl MissionDB {
             CREATE INDEX IF NOT EXISTS idx_incidents_dedupe ON incidents(dedupe_key, created_at);"
         )?;
 
+        // Unified Embedding upgrade: add embedding_provider to KB + clear stale 512d vectors
+        {
+            let kb_columns: Vec<String> = conn
+                .prepare("PRAGMA table_info(knowledge)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !kb_columns.iter().any(|c| c == "embedding_provider") {
+                conn.execute_batch(
+                    "ALTER TABLE knowledge ADD COLUMN embedding_provider TEXT;
+                     UPDATE knowledge SET embedding = NULL;"
+                )?;
+                tracing::info!("Migration: KB embedding_provider column added, stale 512d vectors cleared");
+            }
+        }
+
+        // Unified Embedding upgrade: add embedding + embedding_provider to skill_topics
+        {
+            let st_columns: Vec<String> = conn
+                .prepare("PRAGMA table_info(skill_topics)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !st_columns.iter().any(|c| c == "embedding") {
+                conn.execute_batch(
+                    "ALTER TABLE skill_topics ADD COLUMN embedding BLOB;
+                     ALTER TABLE skill_topics ADD COLUMN embedding_provider TEXT;"
+                )?;
+                tracing::info!("Migration: skill_topics embedding columns added");
+            }
+        }
+
         Ok(())
     }
 
@@ -2623,15 +2655,30 @@ impl MissionDB {
 
     // ── Embedding storage methods ──────────────────────────────────
 
-    /// Store embedding BLOB for a knowledge entry (f32 little-endian bytes)
-    pub fn kb_set_embedding(&self, id: &str, embedding: &[f32]) -> SqliteResult<()> {
+    /// Store embedding BLOB + provider tag for a knowledge entry (f32 little-endian bytes)
+    pub fn kb_set_embedding(&self, id: &str, embedding: &[f32], provider: &str) -> SqliteResult<()> {
         let conn = self.conn();
         let bytes = crate::embedding::f32_vec_to_bytes(embedding);
         conn.execute(
-            "UPDATE knowledge SET embedding = ?1 WHERE id = ?2",
-            params![bytes, id],
+            "UPDATE knowledge SET embedding = ?1, embedding_provider = ?2 WHERE id = ?3",
+            params![bytes, provider, id],
         )?;
         Ok(())
+    }
+
+    /// List KB entries with embedding from a different provider (stale after model switch).
+    pub fn kb_entries_stale_embedding(&self, current_provider: &str, limit: i64) -> SqliteResult<Vec<(String, String, String)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, summary, COALESCE(detail, '') FROM knowledge
+             WHERE embedding IS NOT NULL AND embedding_provider IS NOT NULL
+               AND embedding_provider != ?1
+             LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(params![current_provider, limit], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.collect()
     }
 
     /// Load all embeddings for a given category (e.g. "policy:decision").
@@ -2654,6 +2701,122 @@ impl MissionDB {
             result.push((id, crate::embedding::bytes_to_f32_vec(&blob)));
         }
         Ok(result)
+    }
+
+    /// Load ALL KB embeddings regardless of category (for hybrid search cache).
+    pub fn kb_load_all_embeddings(&self) -> SqliteResult<Vec<(String, Vec<f32>)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((id, blob))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            let (id, blob) = row?;
+            result.push((id, crate::embedding::bytes_to_f32_vec(&blob)));
+        }
+        Ok(result)
+    }
+
+    /// FTS5-based search returning ranked (id, rank) pairs for RRF merge.
+    pub fn kb_search_fts_ranked(&self, query: &str, category: Option<&str>) -> SqliteResult<Vec<(String, usize)>> {
+        let fts_query = query.split_whitespace()
+            .map(|w| format!("\"{}\"", w.replace('"', "")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.read_conn();
+        let mut results = Vec::new();
+        if let Some(cat) = category {
+            let like_pattern = format!("{}:%", cat);
+            let mut stmt = conn.prepare(
+                "SELECT k.id FROM knowledge k
+                 JOIN knowledge_fts f ON k.rowid = f.rowid
+                 WHERE knowledge_fts MATCH ?1 AND (k.category = ?2 OR k.category LIKE ?3)
+                 ORDER BY rank"
+            )?;
+            let rows = stmt.query_map(params![fts_query, cat, like_pattern], |row| {
+                row.get::<_, String>(0)
+            })?;
+            for (rank, id) in rows.enumerate() {
+                results.push((id?, rank));
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT k.id FROM knowledge k
+                 JOIN knowledge_fts f ON k.rowid = f.rowid
+                 WHERE knowledge_fts MATCH ?1
+                 ORDER BY rank"
+            )?;
+            let rows = stmt.query_map(params![fts_query], |row| {
+                row.get::<_, String>(0)
+            })?;
+            for (rank, id) in rows.enumerate() {
+                results.push((id?, rank));
+            }
+        }
+        Ok(results)
+    }
+
+    /// LIKE-based search returning ranked (id, rank) pairs for RRF merge.
+    pub fn kb_search_like_ranked(&self, query: &str, category: Option<&str>) -> SqliteResult<Vec<(String, usize)>> {
+        let keywords: Vec<String> = {
+            let mut kw: Vec<String> = query.split_whitespace()
+                .map(|w| w.to_string())
+                .collect();
+            let trimmed = query.trim();
+            if !trimmed.is_empty() && trimmed.chars().any(|c| !c.is_ascii()) && !kw.contains(&trimmed.to_string()) {
+                kw.insert(0, trimmed.to_string());
+            }
+            kw
+        };
+        if keywords.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut sql = String::from("SELECT id FROM knowledge WHERE (");
+        let mut like_parts: Vec<String> = Vec::new();
+        for (i, _kw) in keywords.iter().enumerate() {
+            let p = i + 1;
+            like_parts.push(format!(
+                "(key LIKE ?{p} OR summary LIKE ?{p} OR COALESCE(detail,'') LIKE ?{p})"
+            ));
+        }
+        sql.push_str(&like_parts.join(" OR "));
+        sql.push(')');
+        if category.is_some() {
+            let p_cat = keywords.len() + 1;
+            let p_like = keywords.len() + 2;
+            sql.push_str(&format!(" AND (category = ?{} OR category LIKE ?{})", p_cat, p_like));
+        }
+        sql.push_str(" ORDER BY access_count DESC, updated_at DESC LIMIT 30");
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(&sql)?;
+        let like_params: Vec<String> = keywords.iter().map(|kw| format!("%{}%", kw)).collect();
+        let mut param_values: Vec<&dyn rusqlite::types::ToSql> = like_params.iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        let cat_owned: String;
+        let cat_like: String;
+        if let Some(cat) = category {
+            cat_owned = cat.to_string();
+            cat_like = format!("{}:%", cat);
+            param_values.push(&cat_owned);
+            param_values.push(&cat_like);
+        }
+        let rows = stmt.query_map(rusqlite::params_from_iter(param_values.iter()), |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut results = Vec::new();
+        for (rank, id) in rows.enumerate() {
+            results.push((id?, rank));
+        }
+        Ok(results)
     }
 
     /// List knowledge entries where embedding IS NULL (for backfill).
@@ -2746,7 +2909,7 @@ impl MissionDB {
     }
 
     /// Batch update access_count and last_accessed_at for search hits
-    fn kb_update_access_stats(&self, entries: &[KnowledgeEntry]) -> SqliteResult<()> {
+    pub fn kb_update_access_stats(&self, entries: &[KnowledgeEntry]) -> SqliteResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         let mut stmt = conn.prepare(
@@ -3054,6 +3217,73 @@ impl MissionDB {
         // Sort by similarity descending
         duplicates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
         Ok(duplicates)
+    }
+
+    /// Get embedding coverage stats across all three systems (KB, Skill, Conversation).
+    pub fn embedding_stats(&self) -> SqliteResult<serde_json::Value> {
+        let conn = self.read_conn();
+
+        // KB stats
+        let kb_total: i64 = conn.query_row("SELECT COUNT(*) FROM knowledge", [], |row| row.get(0))?;
+        let kb_embedded: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM knowledge WHERE embedding IS NOT NULL", [], |row| row.get(0)
+        )?;
+        let kb_providers: Vec<(String, i64)> = {
+            let mut stmt = conn.prepare(
+                "SELECT COALESCE(embedding_provider, 'none'), COUNT(*) FROM knowledge GROUP BY embedding_provider ORDER BY COUNT(*) DESC"
+            )?;
+            let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        // Skill stats
+        let skill_total: i64 = conn.query_row("SELECT COUNT(*) FROM skill_topics", [], |row| row.get(0))?;
+        let skill_embedded: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM skill_topics WHERE embedding IS NOT NULL", [], |row| row.get(0)
+        )?;
+
+        // Conversation stats
+        let conv_total: i64 = conn.query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))?;
+        let conv_summarized: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM conversations WHERE llm_summary IS NOT NULL", [], |row| row.get(0)
+        )?;
+        let conv_embedded: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM conversations WHERE embedding IS NOT NULL", [], |row| row.get(0)
+        )?;
+        let conv_providers: Vec<(String, i64)> = {
+            let mut stmt = conn.prepare(
+                "SELECT COALESCE(embedding_provider, 'none'), COUNT(*) FROM conversations WHERE embedding IS NOT NULL GROUP BY embedding_provider ORDER BY COUNT(*) DESC"
+            )?;
+            let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        let kb_provider_map: std::collections::HashMap<String, i64> = kb_providers.into_iter().collect();
+        let conv_provider_map: std::collections::HashMap<String, i64> = conv_providers.into_iter().collect();
+
+        Ok(serde_json::json!({
+            "kb": {
+                "total": kb_total,
+                "embedded": kb_embedded,
+                "missing": kb_total - kb_embedded,
+                "coverage": if kb_total > 0 { format!("{:.1}%", kb_embedded as f64 / kb_total as f64 * 100.0) } else { "N/A".into() },
+                "providers": kb_provider_map,
+            },
+            "skill": {
+                "total": skill_total,
+                "embedded": skill_embedded,
+                "missing": skill_total - skill_embedded,
+                "coverage": if skill_total > 0 { format!("{:.1}%", skill_embedded as f64 / skill_total as f64 * 100.0) } else { "N/A".into() },
+            },
+            "conversation": {
+                "total": conv_total,
+                "summarized": conv_summarized,
+                "embedded": conv_embedded,
+                "missing": conv_total - conv_embedded,
+                "coverage": if conv_total > 0 { format!("{:.1}%", conv_embedded as f64 / conv_total as f64 * 100.0) } else { "N/A".into() },
+                "providers": conv_provider_map,
+            },
+        }))
     }
 
     /// Get KB statistics for governance
@@ -3616,6 +3846,126 @@ impl MissionDB {
         let conn = self.conn();
         conn.execute_batch("INSERT INTO skill_fts(skill_fts) VALUES('rebuild')")?;
         Ok(())
+    }
+
+    // ── Skill Embedding functions ──────────────────────────────────
+
+    /// Store embedding BLOB + provider tag for a skill topic
+    pub fn skill_set_topic_embedding(&self, topic: &str, embedding: &[f32], provider: &str) -> SqliteResult<()> {
+        let conn = self.conn();
+        let bytes = crate::embedding::f32_vec_to_bytes(embedding);
+        conn.execute(
+            "UPDATE skill_topics SET embedding = ?1, embedding_provider = ?2 WHERE topic = ?3",
+            params![bytes, provider, topic],
+        )?;
+        Ok(())
+    }
+
+    /// Load all topic embeddings (for cache warmup)
+    pub fn skill_load_topic_embeddings(&self) -> SqliteResult<Vec<(String, Vec<f32>)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT topic, embedding FROM skill_topics WHERE embedding IS NOT NULL"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let topic: String = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((topic, blob))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            let (topic, blob) = row?;
+            result.push((topic, crate::embedding::bytes_to_f32_vec(&blob)));
+        }
+        Ok(result)
+    }
+
+    /// List skill topics missing embedding (for backfill).
+    /// Returns (topic, embed_text) where embed_text = "技能主题：{topic}\n{description}\n{all active block content}"
+    pub fn skill_topics_missing_embedding(&self, limit: i64) -> SqliteResult<Vec<(String, String)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT topic, COALESCE(description, '') FROM skill_topics WHERE embedding IS NULL LIMIT ?1"
+        )?;
+        let topics: Vec<(String, String)> = stmt.query_map(params![limit], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?.filter_map(|r| r.ok()).collect();
+
+        let mut results = Vec::new();
+        for (topic, description) in &topics {
+            // Gather all active block content for this topic
+            let mut block_stmt = conn.prepare(
+                "SELECT COALESCE(title, ''), content FROM skill_blocks
+                 WHERE topic = ?1 AND status = 'active' ORDER BY sort_order"
+            )?;
+            let blocks: Vec<(String, String)> = block_stmt.query_map(params![topic], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?.filter_map(|r| r.ok()).collect();
+
+            let mut embed_text = format!("技能主题：{}\n{}", topic, description);
+            for (title, content) in &blocks {
+                if !title.is_empty() {
+                    embed_text.push_str(&format!("\n{}", title));
+                }
+                // Truncate large blocks to keep embed text manageable
+                let truncated = if content.len() > 1000 {
+                    &content[..crate::embedding::char_boundary_at(content, 1000)]
+                } else {
+                    content.as_str()
+                };
+                embed_text.push_str(&format!("\n{}", truncated));
+            }
+            // Cap total embed text at 4000 chars
+            if embed_text.len() > 4000 {
+                embed_text.truncate(crate::embedding::char_boundary_at(&embed_text, 4000));
+            }
+            results.push((topic.clone(), embed_text));
+        }
+        Ok(results)
+    }
+
+    /// List skill topics with embedding from a different provider (stale after model switch)
+    pub fn skill_topics_stale_embedding(&self, current_provider: &str, limit: i64) -> SqliteResult<Vec<(String, String)>> {
+        let conn = self.read_conn();
+        // Get stale topics, then build embed_text same as missing
+        let mut stmt = conn.prepare(
+            "SELECT topic, COALESCE(description, '') FROM skill_topics
+             WHERE embedding IS NOT NULL AND embedding_provider IS NOT NULL
+               AND embedding_provider != ?1
+             LIMIT ?2"
+        )?;
+        let topics: Vec<(String, String)> = stmt.query_map(params![current_provider, limit], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?.filter_map(|r| r.ok()).collect();
+
+        let mut results = Vec::new();
+        for (topic, description) in &topics {
+            let mut block_stmt = conn.prepare(
+                "SELECT COALESCE(title, ''), content FROM skill_blocks
+                 WHERE topic = ?1 AND status = 'active' ORDER BY sort_order"
+            )?;
+            let blocks: Vec<(String, String)> = block_stmt.query_map(params![topic], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?.filter_map(|r| r.ok()).collect();
+
+            let mut embed_text = format!("技能主题：{}\n{}", topic, description);
+            for (title, content) in &blocks {
+                if !title.is_empty() {
+                    embed_text.push_str(&format!("\n{}", title));
+                }
+                let truncated = if content.len() > 1000 {
+                    &content[..crate::embedding::char_boundary_at(content, 1000)]
+                } else {
+                    content.as_str()
+                };
+                embed_text.push_str(&format!("\n{}", truncated));
+            }
+            if embed_text.len() > 4000 {
+                embed_text.truncate(crate::embedding::char_boundary_at(&embed_text, 4000));
+            }
+            results.push((topic.clone(), embed_text));
+        }
+        Ok(results)
     }
 
     /// Insert a skill execution log entry
@@ -5029,6 +5379,163 @@ impl MissionDB {
             params![conv_id],
         )?;
         Ok(())
+    }
+
+    /// List all router_chat conversations with message size stats
+    pub fn router_chat_list(&self, limit: i64) -> SqliteResult<Vec<serde_json::Value>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.task_id, c.model, c.message_count, c.started_at, c.status,
+                    COALESCE((SELECT SUM(LENGTH(m.content)) FROM conversation_messages m WHERE m.session_id = c.id), 0) as total_chars
+             FROM conversations c
+             WHERE c.chat_type = 'router_chat'
+             ORDER BY c.started_at DESC
+             LIMIT ?1"
+        )?;
+        let rows = stmt.query_map(params![limit], |row| {
+            let total_chars: i64 = row.get(6)?;
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "task_id": row.get::<_, Option<String>>(1)?,
+                "model": row.get::<_, Option<String>>(2)?,
+                "message_count": row.get::<_, i64>(3)?,
+                "started_at": row.get::<_, String>(4)?,
+                "status": row.get::<_, String>(5)?,
+                "total_chars": total_chars,
+                "estimated_tokens": total_chars / 4,
+            }))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+    }
+
+    /// Aggregate stats for all router_chat conversations
+    pub fn router_chat_stats(&self) -> SqliteResult<serde_json::Value> {
+        let conn = self.read_conn();
+
+        let (total_convs, total_msgs, total_chars): (i64, i64, i64) = conn.query_row(
+            "SELECT COUNT(DISTINCT c.id),
+                    COUNT(m.id),
+                    COALESCE(SUM(LENGTH(m.content)), 0)
+             FROM conversations c
+             LEFT JOIN conversation_messages m ON m.session_id = c.id
+             WHERE c.chat_type = 'router_chat'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+
+        // By model
+        let mut model_stmt = conn.prepare(
+            "SELECT COALESCE(c.model, 'unknown'), COUNT(DISTINCT c.id), COUNT(m.id), COALESCE(SUM(LENGTH(m.content)), 0)
+             FROM conversations c
+             LEFT JOIN conversation_messages m ON m.session_id = c.id
+             WHERE c.chat_type = 'router_chat'
+             GROUP BY c.model"
+        )?;
+        let by_model: Vec<serde_json::Value> = model_stmt.query_map([], |row| {
+            let chars: i64 = row.get(3)?;
+            Ok(serde_json::json!({
+                "model": row.get::<_, String>(0)?,
+                "conversations": row.get::<_, i64>(1)?,
+                "messages": row.get::<_, i64>(2)?,
+                "total_chars": chars,
+                "estimated_tokens": chars / 4,
+            }))
+        })?.filter_map(|r| r.ok()).collect();
+
+        // By day (last 30 days)
+        let mut day_stmt = conn.prepare(
+            "SELECT DATE(m.timestamp) as day, COUNT(*) as msg_count, SUM(LENGTH(m.content)) as chars
+             FROM conversation_messages m
+             INNER JOIN conversations c ON c.id = m.session_id
+             WHERE c.chat_type = 'router_chat' AND m.timestamp >= DATE('now', '-30 days')
+             GROUP BY day ORDER BY day DESC"
+        )?;
+        let by_day: Vec<serde_json::Value> = day_stmt.query_map([], |row| {
+            let chars: i64 = row.get(2)?;
+            Ok(serde_json::json!({
+                "day": row.get::<_, String>(0)?,
+                "messages": row.get::<_, i64>(1)?,
+                "total_chars": chars,
+                "estimated_tokens": chars / 4,
+            }))
+        })?.filter_map(|r| r.ok()).collect();
+
+        Ok(serde_json::json!({
+            "total_conversations": total_convs,
+            "total_messages": total_msgs,
+            "total_chars": total_chars,
+            "estimated_tokens": total_chars / 4,
+            "by_model": by_model,
+            "by_day": by_day,
+        }))
+    }
+
+    /// Clear all messages from a router_chat conversation (keep the conversation record)
+    pub fn router_chat_clear(&self, conversation_id: &str) -> SqliteResult<i64> {
+        let conn = self.conn();
+        let is_router: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM conversations WHERE id = ?1 AND chat_type = 'router_chat'",
+            params![conversation_id],
+            |row| row.get(0),
+        )?;
+        if !is_router {
+            return Ok(0);
+        }
+        let deleted = conn.execute(
+            "DELETE FROM conversation_messages WHERE session_id = ?1",
+            params![conversation_id],
+        )? as i64;
+        conn.execute(
+            "UPDATE conversations SET message_count = 0 WHERE id = ?1",
+            params![conversation_id],
+        )?;
+        Ok(deleted)
+    }
+
+    /// Clear all messages from router_chat conversations linked to a task
+    pub fn router_chat_clear_by_task(&self, task_id: &str) -> SqliteResult<i64> {
+        let conn = self.conn();
+        let deleted = conn.execute(
+            "DELETE FROM conversation_messages WHERE session_id IN
+             (SELECT id FROM conversations WHERE task_id = ?1 AND chat_type = 'router_chat')",
+            params![task_id],
+        )? as i64;
+        conn.execute(
+            "UPDATE conversations SET message_count = 0
+             WHERE task_id = ?1 AND chat_type = 'router_chat'",
+            params![task_id],
+        )?;
+        Ok(deleted)
+    }
+
+    /// Delete a router_chat conversation and all its messages
+    pub fn router_chat_delete(&self, conversation_id: &str) -> SqliteResult<(i64, i64)> {
+        let conn = self.conn();
+        let msg_deleted = conn.execute(
+            "DELETE FROM conversation_messages WHERE session_id = ?1
+             AND EXISTS (SELECT 1 FROM conversations WHERE id = ?1 AND chat_type = 'router_chat')",
+            params![conversation_id],
+        )? as i64;
+        let conv_deleted = conn.execute(
+            "DELETE FROM conversations WHERE id = ?1 AND chat_type = 'router_chat'",
+            params![conversation_id],
+        )? as i64;
+        Ok((conv_deleted, msg_deleted))
+    }
+
+    /// Delete all router_chat conversations linked to a task
+    pub fn router_chat_delete_by_task(&self, task_id: &str) -> SqliteResult<(i64, i64)> {
+        let conn = self.conn();
+        let msg_deleted = conn.execute(
+            "DELETE FROM conversation_messages WHERE session_id IN
+             (SELECT id FROM conversations WHERE task_id = ?1 AND chat_type = 'router_chat')",
+            params![task_id],
+        )? as i64;
+        let conv_deleted = conn.execute(
+            "DELETE FROM conversations WHERE task_id = ?1 AND chat_type = 'router_chat'",
+            params![task_id],
+        )? as i64;
+        Ok((conv_deleted, msg_deleted))
     }
 
     // ============ Slot Task History ============

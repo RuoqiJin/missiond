@@ -155,6 +155,18 @@ pub fn f32_vec_to_bytes(vec: &[f32]) -> Vec<u8> {
     vec.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
+/// Find the largest char boundary at or before `max` (stable replacement for nightly floor_char_boundary)
+pub fn char_boundary_at(s: &str, max: usize) -> usize {
+    if max >= s.len() {
+        return s.len();
+    }
+    let mut pos = max;
+    while pos > 0 && !s.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    pos
+}
+
 // ── Feature ON: FastEmbed backend ─────────────────────────────────
 
 // ── Feature ON: FastEmbed backend ─────────────────────────────────

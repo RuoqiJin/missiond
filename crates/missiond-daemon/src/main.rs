@@ -412,6 +412,10 @@ struct AppState {
     embedding_cache: missiond_core::embedding::EmbeddingCache,
     /// In-memory embedding cache for conversation summaries (session_id, vector).
     conversation_embedding_cache: missiond_core::embedding::EmbeddingCache,
+    /// In-memory embedding cache for skill topics (topic_name, vector).
+    skill_embedding_cache: missiond_core::embedding::EmbeddingCache,
+    /// In-memory embedding cache for ALL KB entries (for hybrid search).
+    kb_search_cache: missiond_core::embedding::EmbeddingCache,
     /// Embedding worker channel: event-driven summary + embedding generation.
     embedding_tx: tokio::sync::mpsc::Sender<EmbeddingTask>,
     /// AIOps: incident event bus sender (try_send only, capacity 100).
@@ -423,8 +427,12 @@ struct AppState {
 enum EmbeddingTask {
     /// Generate summary + embedding for a single completed session.
     ProcessSession(String),
-    /// Batch backfill all legacy conversations (triggered via MCP tool).
-    BackfillLegacy,
+    /// Incremental: embed a single KB entry after remember/update.
+    ProcessKBEntry(String),
+    /// Incremental: embed a single Skill topic after upsert.
+    ProcessSkillTopic(String),
+    /// Batch backfill all systems: KB → Skills → Conversations.
+    BackfillAll,
 }
 
 fn default_mission_home() -> PathBuf {
@@ -2084,22 +2092,8 @@ impl AppState {
                 let result = self.mission.db()
                     .kb_remember(&input)
                     .map_err(|e| anyhow!("DB error: {}", e))?;
-                // Generate and store embedding if service available
-                if let Some(ref emb_svc) = self.embedding_service {
-                    let detail_text = result.entry.detail.as_ref()
-                        .map(|d| serde_json::to_string(d).unwrap_or_default())
-                        .unwrap_or_default();
-                    let embed_text = format!("{} {}", result.entry.summary, detail_text);
-                    if let Some(vec) = emb_svc.embed(&embed_text) {
-                        let _ = self.mission.db().kb_set_embedding(&result.entry.id, &vec);
-                        // Update in-memory cache if policy:decision
-                        if result.entry.category.starts_with("policy:decision") {
-                            let mut guard = self.embedding_cache.write().await;
-                            guard.retain(|(id, _)| id != &result.entry.id);
-                            guard.push((result.entry.id.clone(), vec));
-                        }
-                    }
-                }
+                // Trigger async embedding update via Worker (avoids block_in_place in MCP handler)
+                let _ = self.embedding_tx.try_send(EmbeddingTask::ProcessKBEntry(result.entry.id.clone()));
                 Ok(ToolResult::json_pretty(&result))
             }
             "mission_kb_forget" => {
@@ -2152,17 +2146,79 @@ impl AppState {
                     .unwrap_or(KBSearchArgs { query: None, category: None });
                 let query = query.unwrap_or_default();
                 if query.is_empty() && category.is_none() {
-                    // No query: return recent entries
                     let entries = self.mission.db()
                         .kb_list(None)
                         .map_err(|e| anyhow!("DB error: {}", e))?;
-                    Ok(ToolResult::json_pretty(&entries))
-                } else {
-                    let results = self.mission.db()
-                        .kb_search(&query, category.as_deref())
-                        .map_err(|e| anyhow!("DB error: {}", e))?;
-                    Ok(ToolResult::json_pretty(&results))
+                    return Ok(ToolResult::json_pretty(&entries));
                 }
+
+                let db = self.mission.db();
+                let top_k = 20usize;
+
+                // 1. FTS5 ranked IDs (fallback to LIKE for Chinese)
+                let mut fts_ranked = db.kb_search_fts_ranked(&query, category.as_deref())
+                    .unwrap_or_default();
+                if fts_ranked.is_empty() {
+                    fts_ranked = db.kb_search_like_ranked(&query, category.as_deref())
+                        .unwrap_or_default();
+                }
+
+                // 2. Embedding cosine similarity against kb_search_cache
+                let query_embedding = self.embedding_service.as_ref()
+                    .and_then(|svc| svc.embed(&query));
+                let cache = self.kb_search_cache.read().await;
+                let vec_ranked: Vec<(String, usize, f32)> = if let Some(ref qe) = query_embedding {
+                    let mut scores: Vec<(usize, f32)> = cache.iter()
+                        .enumerate()
+                        .map(|(i, (_, vec))| (i, missiond_core::embedding::cosine_similarity(qe, vec)))
+                        .collect();
+                    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    scores.iter()
+                        .take(top_k * 3)
+                        .enumerate()
+                        .map(|(rank, (idx, sim))| (cache[*idx].0.clone(), rank, *sim))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                drop(cache);
+
+                // 3. RRF merge
+                let rrf_k = 60;
+                let mut merged: std::collections::HashMap<String, (Option<usize>, Option<usize>, Option<f32>)> =
+                    std::collections::HashMap::new();
+                for (id, rank) in &fts_ranked {
+                    merged.entry(id.clone()).or_insert((None, None, None)).0 = Some(*rank);
+                }
+                for (id, rank, sim) in &vec_ranked {
+                    let entry = merged.entry(id.clone()).or_insert((None, None, None));
+                    entry.1 = Some(*rank);
+                    entry.2 = Some(*sim);
+                }
+                let mut ranked: Vec<(String, f64, Option<usize>, Option<usize>, Option<f32>)> = merged
+                    .into_iter()
+                    .map(|(id, (fts_r, vec_r, sim))| {
+                        let score = missiond_core::embedding::rrf_score(fts_r, vec_r, rrf_k);
+                        (id, score, fts_r, vec_r, sim)
+                    })
+                    .collect();
+                ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                ranked.truncate(top_k);
+
+                // 4. Fetch full KnowledgeEntry objects in RRF order
+                let mut results = Vec::new();
+                for (id, _rrf, _fts_r, _vec_r, _sim) in &ranked {
+                    if let Ok(Some(entry)) = db.kb_get_by_id(id) {
+                        results.push(entry);
+                    }
+                }
+
+                // Update access stats
+                if !results.is_empty() {
+                    let _ = db.kb_update_access_stats(&results);
+                }
+
+                Ok(ToolResult::json_pretty(&results))
             }
             "mission_kb_get" => {
                 let KBKeyArgs { key } = serde_json::from_value(args)?;
@@ -3153,6 +3209,75 @@ impl AppState {
                 Ok(ToolResult::json_pretty(&resp))
             }
 
+            "mission_router_chat_list" => {
+                let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
+                let limit = args_val.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+                let convs = self.mission.db().router_chat_list(limit)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                let count = convs.len();
+                Ok(ToolResult::json_pretty(&serde_json::json!({
+                    "count": count,
+                    "conversations": convs,
+                })))
+            }
+
+            "mission_router_chat_stats" => {
+                let stats = self.mission.db().router_chat_stats()
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json_pretty(&stats))
+            }
+
+            "mission_router_chat_clear" => {
+                let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
+                let conv_id = args_val.get("conversation_id").and_then(|v| v.as_str());
+                let task_id = args_val.get("task_id").and_then(|v| v.as_str());
+                match (conv_id, task_id) {
+                    (Some(cid), _) => {
+                        let cleared = self.mission.db().router_chat_clear(cid)
+                            .map_err(|e| anyhow!("DB error: {}", e))?;
+                        Ok(ToolResult::json(&serde_json::json!({
+                            "conversation_id": cid,
+                            "cleared_messages": cleared,
+                        })))
+                    }
+                    (None, Some(tid)) => {
+                        let cleared = self.mission.db().router_chat_clear_by_task(tid)
+                            .map_err(|e| anyhow!("DB error: {}", e))?;
+                        Ok(ToolResult::json(&serde_json::json!({
+                            "task_id": tid,
+                            "cleared_messages": cleared,
+                        })))
+                    }
+                    _ => Ok(ToolResult::error("需要提供 conversation_id 或 task_id")),
+                }
+            }
+
+            "mission_router_chat_delete" => {
+                let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
+                let conv_id = args_val.get("conversation_id").and_then(|v| v.as_str());
+                let task_id = args_val.get("task_id").and_then(|v| v.as_str());
+                match (conv_id, task_id) {
+                    (Some(cid), _) => {
+                        let (conv_del, msg_del) = self.mission.db().router_chat_delete(cid)
+                            .map_err(|e| anyhow!("DB error: {}", e))?;
+                        Ok(ToolResult::json(&serde_json::json!({
+                            "deleted_conversations": conv_del,
+                            "deleted_messages": msg_del,
+                        })))
+                    }
+                    (None, Some(tid)) => {
+                        let (conv_del, msg_del) = self.mission.db().router_chat_delete_by_task(tid)
+                            .map_err(|e| anyhow!("DB error: {}", e))?;
+                        Ok(ToolResult::json(&serde_json::json!({
+                            "task_id": tid,
+                            "deleted_conversations": conv_del,
+                            "deleted_messages": msg_del,
+                        })))
+                    }
+                    _ => Ok(ToolResult::error("需要提供 conversation_id 或 task_id")),
+                }
+            }
+
             // ===== Memory Extraction =====
             // Message-level pipeline tracking: returns pending messages with IDs.
             // State auto-committed by Daemon on extraction completion — no manual done() needed.
@@ -3622,30 +3747,59 @@ impl AppState {
 
             "mission_trigger_backfill" => {
                 let db = self.mission.db();
-                let total = db.conversations_missing_summary(9999).map(|v| v.len()).unwrap_or(0);
-                let stale = self.embedding_service.as_ref()
-                    .and_then(|svc| db.conversations_stale_embedding(svc.provider_id(), 9999).ok())
-                    .map(|v| v.len())
-                    .unwrap_or(0);
                 let provider = self.embedding_service.as_ref()
                     .map(|svc| svc.provider_id().to_string())
                     .unwrap_or_else(|| "none".to_string());
 
-                if total == 0 && stale == 0 {
+                // Gather stats for all three systems
+                let conv_missing = db.conversations_missing_summary(9999).map(|v| v.len()).unwrap_or(0);
+                let conv_stale = self.embedding_service.as_ref()
+                    .and_then(|svc| db.conversations_stale_embedding(svc.provider_id(), 9999).ok())
+                    .map(|v| v.len())
+                    .unwrap_or(0);
+                let kb_missing = db.kb_entries_missing_embedding(None).map(|v| v.len()).unwrap_or(0);
+                let kb_stale = db.kb_entries_stale_embedding(&provider, 9999).map(|v| v.len()).unwrap_or(0);
+                let skill_missing = db.skill_topics_missing_embedding(9999).map(|v| v.len()).unwrap_or(0);
+                let skill_stale = db.skill_topics_stale_embedding(&provider, 9999).map(|v| v.len()).unwrap_or(0);
+
+                let total = conv_missing + conv_stale + kb_missing + kb_stale + skill_missing + skill_stale;
+                if total == 0 {
                     return Ok(ToolResult::json(&serde_json::json!({
                         "status": "nothing_to_do",
-                        "provider": provider,
+                        "currentProvider": provider,
                     })));
                 }
 
-                let _ = self.embedding_tx.try_send(EmbeddingTask::BackfillLegacy);
+                let _ = self.embedding_tx.try_send(EmbeddingTask::BackfillAll);
                 Ok(ToolResult::json(&serde_json::json!({
                     "status": "triggered",
-                    "missingSummary": total,
-                    "staleProvider": stale,
                     "currentProvider": provider,
-                    "note": "后台 Worker 已启动回填，每批 20 条，间隔 2 秒。可多次调用此工具查看剩余量。",
+                    "kb": { "stale": kb_stale, "missing": kb_missing },
+                    "skill": { "stale": skill_stale, "missing": skill_missing },
+                    "conversation": { "stale": conv_stale, "missing": conv_missing },
                 })))
+            }
+
+            "mission_embedding_stats" => {
+                let db = self.mission.db();
+                let mut stats = db.embedding_stats()
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                // Add cache sizes
+                let kb_cache_size = self.kb_search_cache.read().await.len();
+                let policy_cache_size = self.embedding_cache.read().await.len();
+                let skill_cache_size = self.skill_embedding_cache.read().await.len();
+                let conv_cache_size = self.conversation_embedding_cache.read().await.len();
+                let provider = self.embedding_service.as_ref()
+                    .map(|svc| svc.provider_id())
+                    .unwrap_or("none");
+                stats["cache"] = serde_json::json!({
+                    "kbSearch": kb_cache_size,
+                    "policyDecision": policy_cache_size,
+                    "skill": skill_cache_size,
+                    "conversation": conv_cache_size,
+                });
+                stats["currentProvider"] = serde_json::json!(provider);
+                Ok(ToolResult::json_pretty(&stats))
             }
 
             // ===== Conversation Events & Agent Trajectory =====
@@ -4145,45 +4299,81 @@ impl AppState {
             "mission_skill_search" => {
                 let SkillSearchArgs { query } = serde_json::from_value(args)?;
 
-                // Primary: FTS5 full-text search (covers content, not just name/aka)
                 let db = self.mission.db();
-                let mut seen_topics = std::collections::HashSet::new();
-                let mut results: Vec<Value> = Vec::new();
 
-                // 1. Exact name/aka match from in-memory index (highest priority)
-                for s in self.skills.search(&query).iter().take(5) {
-                    if seen_topics.insert(s.name.clone()) {
-                        results.push(serde_json::json!({
+                // Collect all topic-level scores: (topic, name_bonus, fts_rank, vec_rank, cosine_sim, meta)
+                let mut topic_scores: std::collections::HashMap<String, (f64, Option<usize>, Option<usize>, Option<f32>, Value)> = std::collections::HashMap::new();
+
+                // 1. Name/aka exact match → bonus +0.3
+                for s in self.skills.search(&query).iter().take(10) {
+                    topic_scores.entry(s.name.clone()).or_insert_with(|| {
+                        (0.3, None, None, None, serde_json::json!({
                             "name": s.name,
                             "description": s.description,
                             "aka": s.aka,
                             "path": s.path,
-                            "match_type": "name/aka",
-                        }));
-                    }
+                        }))
+                    });
                 }
 
-                // 2. FTS5 full-text search (content-level matching)
+                // 2. FTS5 full-text search → fts_rank
                 if let Ok(fts_results) = db.skill_search_fts(&query) {
-                    for r in fts_results.iter().take(10) {
-                        if seen_topics.insert(r.topic.clone()) {
-                            results.push(serde_json::json!({
+                    for (rank, r) in fts_results.iter().take(20).enumerate() {
+                        let entry = topic_scores.entry(r.topic.clone()).or_insert_with(|| {
+                            (0.0, None, None, None, serde_json::json!({
                                 "name": r.topic,
                                 "description": r.description,
                                 "path": r.file_path,
-                                "match_type": "content",
                                 "matched_section": r.section_title,
                                 "snippet": r.snippet,
-                            }));
+                            }))
+                        });
+                        if entry.1.is_none() { entry.1 = Some(rank); }
+                    }
+                }
+
+                // 3. Embedding cosine similarity → vec_rank
+                if let Some(ref emb_svc) = self.embedding_service {
+                    let cache_guard = self.skill_embedding_cache.read().await;
+                    if !cache_guard.is_empty() {
+                        if let Some(query_vec) = emb_svc.embed(&query) {
+                            let mut sims: Vec<(usize, f32)> = cache_guard.iter().enumerate()
+                                .map(|(i, (_, vec))| (i, missiond_core::embedding::cosine_similarity(&query_vec, vec)))
+                                .collect();
+                            sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                            for (rank, (idx, sim)) in sims.iter().take(10).enumerate() {
+                                let topic = &cache_guard[*idx].0;
+                                let entry = topic_scores.entry(topic.clone()).or_insert_with(|| {
+                                    (0.0, None, None, None, serde_json::json!({
+                                        "name": topic,
+                                    }))
+                                });
+                                entry.2 = Some(rank);
+                                entry.3 = Some(*sim);
+                            }
                         }
                     }
                 }
 
-                // 3. Track hits for matched topics
-                for r in &results {
-                    if let Some(name) = r.get("name").and_then(|v| v.as_str()) {
-                        let _ = db.skill_topic_hit(name);
-                    }
+                // 4. Calculate final scores: name_bonus + rrf(fts, vec, k=60)
+                let mut scored: Vec<(String, f64, Value)> = topic_scores.into_iter().map(|(topic, (bonus, fts_rank, vec_rank, cosine_sim, mut meta))| {
+                    let rrf = missiond_core::embedding::rrf_score(fts_rank, vec_rank, 60);
+                    let final_score = bonus + rrf;
+                    meta.as_object_mut().map(|obj| {
+                        obj.insert("score".to_string(), serde_json::json!(format!("{:.4}", final_score)));
+                        if let Some(sim) = cosine_sim {
+                            obj.insert("cosine_sim".to_string(), serde_json::json!(format!("{:.3}", sim)));
+                        }
+                    });
+                    (topic, final_score, meta)
+                }).collect();
+                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+                let results: Vec<Value> = scored.iter().take(10).map(|(_, _, meta)| meta.clone()).collect();
+
+                // Track hits
+                for (topic, _, _) in scored.iter().take(5) {
+                    let _ = db.skill_topic_hit(topic);
                 }
 
                 Ok(ToolResult::json_pretty(&results))
@@ -4432,7 +4622,12 @@ impl AppState {
                 }
 
                 // Materialize to file
-                match missiond_core::skill::materialize_topic(db, &args.topic) {
+                let materialize_result = missiond_core::skill::materialize_topic(db, &args.topic);
+
+                // Trigger incremental embedding update
+                let _ = self.embedding_tx.try_send(EmbeddingTask::ProcessSkillTopic(args.topic.clone()));
+
+                match materialize_result {
                     Ok(_) => Ok(ToolResult::text(format!("Section '{}' {} in topic '{}', file regenerated", args.section_title, action, args.topic))),
                     Err(e) => Ok(ToolResult::text(format!("Section {} but materialize failed: {}", action, e))),
                 }
@@ -4467,6 +4662,9 @@ impl AppState {
 
                 // Materialize
                 let _ = missiond_core::skill::materialize_topic(db, &args.topic);
+
+                // Trigger incremental embedding update
+                let _ = self.embedding_tx.try_send(EmbeddingTask::ProcessSkillTopic(args.topic.clone()));
 
                 let mut msg = format!("Fragment recorded for '{}' ({} fragments)", args.topic, frag_count);
                 if frag_count >= 5 {
@@ -8293,17 +8491,9 @@ impl LlmConfig {
     }
 }
 
-/// Find the largest byte index <= `max` that is a char boundary in `s`.
-/// Stable replacement for nightly-only `str::floor_char_boundary`.
+/// Alias to shared char_boundary_at in embedding module
 fn char_boundary_at(s: &str, max: usize) -> usize {
-    if max >= s.len() {
-        return s.len();
-    }
-    let mut i = max;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
+    missiond_core::embedding::char_boundary_at(s, max)
 }
 
 // ── Ollama Embedding Provider ────────────────────────────────────────────
@@ -10787,6 +10977,8 @@ async fn main() -> Result<()> {
         },
         embedding_cache: missiond_core::embedding::new_cache(),
         conversation_embedding_cache: missiond_core::embedding::new_cache(),
+        skill_embedding_cache: missiond_core::embedding::new_cache(),
+        kb_search_cache: missiond_core::embedding::new_cache(),
         embedding_tx: embedding_tx,
         incident_tx: incident_tx.clone(),
     };
@@ -10837,10 +11029,11 @@ async fn main() -> Result<()> {
                 Ok(missing) if !missing.is_empty() => {
                     info!(count = missing.len(), "Backfilling embeddings for policy:decision entries");
                     let mut stored = 0usize;
+                    let provider_id = emb_svc.provider_id();
                     for (id, summary, detail) in &missing {
-                        let text = format!("{} {}", summary, detail);
+                        let text = format!("知识条目：{}\n详情：{}", summary, detail);
                         if let Some(vec) = emb_svc.embed(&text) {
-                            if let Err(e) = db.kb_set_embedding(id, &vec) {
+                            if let Err(e) = db.kb_set_embedding(id, &vec, provider_id) {
                                 warn!(id = %id, error = %e, "Failed to store embedding");
                             } else {
                                 stored += 1;
@@ -10861,6 +11054,15 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => warn!(error = %e, "Failed to warm embedding cache"),
             }
+            // Warm full KB search cache (all categories)
+            match db.kb_load_all_embeddings() {
+                Ok(all) => {
+                    let mut guard = emb_state.kb_search_cache.write().await;
+                    *guard = all;
+                    info!(count = guard.len(), "KB search cache warmed (all categories)");
+                }
+                Err(e) => warn!(error = %e, "Failed to warm KB search cache"),
+            }
         });
     }
 
@@ -10880,6 +11082,16 @@ async fn main() -> Result<()> {
                     info!(count = guard.len(), "Conversation embedding cache warmed");
                 }
                 Err(e) => warn!(error = %e, "Failed to warm conversation embedding cache"),
+            }
+
+            // Skill topic embedding cache
+            match db.skill_load_topic_embeddings() {
+                Ok(all) => {
+                    let mut guard = conv_state.skill_embedding_cache.write().await;
+                    *guard = all;
+                    info!(count = guard.len(), "Skill embedding cache warmed");
+                }
+                Err(e) => warn!(error = %e, "Failed to warm skill embedding cache"),
             }
         });
     }
@@ -10905,23 +11117,167 @@ async fn main() -> Result<()> {
                             warn!(session = %session_id, "Embedding generation timed out (60s)");
                         }
                     }
-                    EmbeddingTask::BackfillLegacy => {
-                        info!("Embedding backfill triggered");
+                    EmbeddingTask::ProcessKBEntry(id) => {
+                        if let Some(ref emb_svc) = worker_state.embedding_service {
+                            if let Ok(Some(entry)) = db.kb_get_by_id(&id) {
+                                let detail_text = entry.detail.as_ref()
+                                    .map(|d| serde_json::to_string(d).unwrap_or_default())
+                                    .unwrap_or_default();
+                                let embed_text = format!("知识条目：{}\n详情：{}", entry.summary, detail_text);
+                                let svc = Arc::clone(emb_svc);
+                                if let Ok(Ok(Some(vec))) = tokio::time::timeout(
+                                    std::time::Duration::from_secs(30),
+                                    tokio::task::spawn_blocking(move || svc.embed(&embed_text)),
+                                ).await {
+                                    let _ = db.kb_set_embedding(&id, &vec, &provider_id);
+                                    // Update policy:decision cache (Decision Engine T1)
+                                    if entry.category.starts_with("policy:decision") {
+                                        let mut guard = worker_state.embedding_cache.write().await;
+                                        guard.retain(|(eid, _)| eid != &id);
+                                        guard.push((id.clone(), vec.clone()));
+                                    }
+                                    // Update full KB search cache
+                                    {
+                                        let mut guard = worker_state.kb_search_cache.write().await;
+                                        guard.retain(|(eid, _)| eid != &id);
+                                        guard.push((id.clone(), vec));
+                                    }
+                                    debug!(kb_id = %id, "KB entry embedding updated");
+                                }
+                            }
+                        }
+                    }
+                    EmbeddingTask::ProcessSkillTopic(topic) => {
+                        if let Some(ref emb_svc) = worker_state.embedding_service {
+                            // Build embed text: topic + description + all active blocks
+                            if let Ok(missing) = db.skill_topics_missing_embedding(1) {
+                                // If not in missing list, build text from DB directly
+                                let embed_text = if let Some((_, text)) = missing.iter().find(|(t, _)| t == &topic) {
+                                    text.clone()
+                                } else {
+                                    // Topic already has embedding but was re-upserted — rebuild text
+                                    format!("技能主题：{}", topic) // minimal fallback
+                                };
+                                let svc = Arc::clone(emb_svc);
+                                if let Ok(Ok(Some(vec))) = tokio::time::timeout(
+                                    std::time::Duration::from_secs(30),
+                                    tokio::task::spawn_blocking(move || svc.embed(&embed_text)),
+                                ).await {
+                                    let _ = db.skill_set_topic_embedding(&topic, &vec, &provider_id);
+                                    let mut cache = worker_state.skill_embedding_cache.write().await;
+                                    cache.retain(|(t, _)| t != &topic);
+                                    cache.push((topic.clone(), vec));
+                                    debug!(topic = %topic, "Skill topic embedding updated");
+                                }
+                            }
+                        }
+                    }
+                    EmbeddingTask::BackfillAll => {
+                        info!("Full embedding backfill triggered");
 
-                        // Phase 1: re-embed stale provider vectors
-                        if worker_state.embedding_service.is_some() {
+                        if let Some(ref emb_svc) = worker_state.embedding_service {
+                            // ── Phase 1: KB stale re-embed ──
+                            loop {
+                                let stale = db.kb_entries_stale_embedding(&provider_id, 20).unwrap_or_default();
+                                if stale.is_empty() { break; }
+                                info!(count = stale.len(), "KB stale re-embedding");
+                                for (id, summary, detail) in &stale {
+                                    let embed_text = format!("知识条目：{}\n详情：{}", summary, detail);
+                                    let svc = Arc::clone(emb_svc);
+                                    if let Ok(Ok(Some(vec))) = tokio::time::timeout(
+                                        std::time::Duration::from_secs(30),
+                                        tokio::task::spawn_blocking(move || svc.embed(&embed_text)),
+                                    ).await {
+                                        let _ = db.kb_set_embedding(id, &vec, &provider_id);
+                                    }
+                                }
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            }
+
+                            // ── Phase 2: KB missing embed ──
+                            loop {
+                                let missing = db.kb_entries_missing_embedding(None).unwrap_or_default();
+                                if missing.is_empty() { break; }
+                                info!(count = missing.len(), "KB missing embedding backfill");
+                                for (id, summary, detail) in &missing {
+                                    let embed_text = format!("知识条目：{}\n详情：{}", summary, detail);
+                                    let svc = Arc::clone(emb_svc);
+                                    if let Ok(Ok(Some(vec))) = tokio::time::timeout(
+                                        std::time::Duration::from_secs(30),
+                                        tokio::task::spawn_blocking(move || svc.embed(&embed_text)),
+                                    ).await {
+                                        let _ = db.kb_set_embedding(id, &vec, &provider_id);
+                                    }
+                                }
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            }
+
+                            // Warm KB caches after backfill
+                            if let Ok(all) = db.kb_load_embeddings("policy:decision") {
+                                let mut guard = worker_state.embedding_cache.write().await;
+                                *guard = all;
+                                info!(count = guard.len(), "KB policy cache refreshed after backfill");
+                            }
+                            if let Ok(all) = db.kb_load_all_embeddings() {
+                                let mut guard = worker_state.kb_search_cache.write().await;
+                                *guard = all;
+                                info!(count = guard.len(), "KB search cache refreshed after backfill");
+                            }
+
+                            // ── Phase 3: Skill stale + missing ──
+                            loop {
+                                let stale = db.skill_topics_stale_embedding(&provider_id, 20).unwrap_or_default();
+                                if stale.is_empty() { break; }
+                                info!(count = stale.len(), "Skill stale re-embedding");
+                                for (topic, embed_text) in &stale {
+                                    let svc = Arc::clone(emb_svc);
+                                    let text = embed_text.clone();
+                                    if let Ok(Ok(Some(vec))) = tokio::time::timeout(
+                                        std::time::Duration::from_secs(30),
+                                        tokio::task::spawn_blocking(move || svc.embed(&text)),
+                                    ).await {
+                                        let _ = db.skill_set_topic_embedding(topic, &vec, &provider_id);
+                                    }
+                                }
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            }
+                            loop {
+                                let missing = db.skill_topics_missing_embedding(20).unwrap_or_default();
+                                if missing.is_empty() { break; }
+                                info!(count = missing.len(), "Skill missing embedding backfill");
+                                for (topic, embed_text) in &missing {
+                                    let svc = Arc::clone(emb_svc);
+                                    let text = embed_text.clone();
+                                    if let Ok(Ok(Some(vec))) = tokio::time::timeout(
+                                        std::time::Duration::from_secs(30),
+                                        tokio::task::spawn_blocking(move || svc.embed(&text)),
+                                    ).await {
+                                        let _ = db.skill_set_topic_embedding(topic, &vec, &provider_id);
+                                    }
+                                }
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            }
+
+                            // Warm Skill cache after backfill
+                            if let Ok(all) = db.skill_load_topic_embeddings() {
+                                let mut guard = worker_state.skill_embedding_cache.write().await;
+                                *guard = all;
+                                info!(count = guard.len(), "Skill embedding cache refreshed after backfill");
+                            }
+
+                            // ── Phase 4: Conversation stale re-embed ──
                             loop {
                                 let stale = db.conversations_stale_embedding(&provider_id, 20).unwrap_or_default();
                                 if stale.is_empty() { break; }
-                                info!(count = stale.len(), provider = %provider_id, "Re-embedding stale batch");
+                                info!(count = stale.len(), provider = %provider_id, "Conv stale re-embedding");
                                 for session_id in &stale {
                                     if let Ok(Some(conv)) = db.get_conversation(session_id) {
                                         if let Some(ref summary) = conv.llm_summary {
-                                            let emb_svc = Arc::clone(worker_state.embedding_service.as_ref().unwrap());
+                                            let svc = Arc::clone(emb_svc);
                                             let summary_clone = summary.clone();
                                             let embed_result = tokio::time::timeout(
                                                 std::time::Duration::from_secs(30),
-                                                tokio::task::spawn_blocking(move || emb_svc.embed(&summary_clone)),
+                                                tokio::task::spawn_blocking(move || svc.embed(&summary_clone)),
                                             ).await;
                                             if let Ok(Ok(Some(vec))) = embed_result {
                                                 let _ = db.set_conversation_embedding(session_id, &vec, &provider_id);
@@ -10929,7 +11285,7 @@ async fn main() -> Result<()> {
                                                 cache.retain(|(id, _)| id != session_id);
                                                 cache.push((session_id.clone(), vec));
                                             } else {
-                                                warn!(session = %session_id, "Stale re-embedding failed or timed out");
+                                                warn!(session = %session_id, "Conv stale re-embedding failed/timed out");
                                             }
                                         }
                                     }
@@ -10938,14 +11294,13 @@ async fn main() -> Result<()> {
                             }
                         }
 
-                        // Phase 2: generate summaries + embeddings for all missing
+                        // ── Phase 5: Conversation missing summary+embed ──
                         loop {
                             let missing = db.conversations_missing_summary(20).unwrap_or_default();
                             if missing.is_empty() { break; }
-                            info!(count = missing.len(), "Backfill batch: generating summaries");
+                            info!(count = missing.len(), "Conv backfill batch");
                             for (idx, session_id) in missing.iter().enumerate() {
                                 info!(session = %session_id, idx = idx + 1, total = missing.len(), "Processing session");
-                                // Per-session timeout: 60s max (prevents one bad session from blocking the entire worker)
                                 match tokio::time::timeout(
                                     std::time::Duration::from_secs(60),
                                     generate_and_store_conv_embedding(&worker_state, session_id),
@@ -10954,8 +11309,7 @@ async fn main() -> Result<()> {
                                         info!(session = %session_id, idx = idx + 1, "Session done");
                                     }
                                     Err(_) => {
-                                        warn!(session = %session_id, idx = idx + 1, "Embedding generation timed out (60s), skipping");
-                                        // Mark with empty summary to skip on next batch
+                                        warn!(session = %session_id, idx = idx + 1, "Conv embedding timed out (60s), skipping");
                                         let _ = db.set_conversation_summary(session_id, "[timeout]");
                                     }
                                 }
@@ -10963,7 +11317,7 @@ async fn main() -> Result<()> {
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         }
 
-                        info!("Embedding backfill complete");
+                        info!("Full embedding backfill complete");
                     }
                 }
             }
