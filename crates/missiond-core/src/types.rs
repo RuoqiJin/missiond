@@ -943,6 +943,12 @@ pub struct Conversation {
     /// Embedding provider identifier (e.g. "fastembed-bge-small-zh-v1.5")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedding_provider: Option<String>,
+    /// JSON array of compaction fragment summaries (session timeline reconstruction)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_timeline: Option<String>,
+    /// Timestamp when timeline was built (CAS guard against duplicate builds)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeline_built_at: Option<String>,
 }
 
 fn default_conversation_type() -> String { "user".to_string() }
