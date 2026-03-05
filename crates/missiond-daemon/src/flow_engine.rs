@@ -15,7 +15,6 @@ use crate::slot_env::{build_slot_tracking_env, capture_slot_session_uuid};
 use crate::decision_harvest::harvest_decisions_for_task;
 use crate::llm_gateway::{call_gemini_for_flow, determine_llm_env};
 use crate::supervisor::{strip_prompt_echo, truncate_safe, is_auth_error};
-use crate::prompts;
 use missiond_core::SessionState;
 use missiond_core::PTYSpawnOptions;
 
@@ -209,7 +208,7 @@ pub(crate) async fn execute_flow_task(state: &AppState, task: &missiond_core::ty
             }
 
             // Build phase-specific prompt
-            let prompt = build_flow_phase_prompt(task, &p, &ctx);
+            let prompt = build_flow_phase_prompt(task, &p, &ctx, &state.prompts);
 
             // Inject answered Q&A context (Phase 0: Decision Engine prerequisite)
             let prompt = {
@@ -491,6 +490,7 @@ pub(crate) fn build_flow_phase_prompt(
     task: &missiond_core::types::BoardTask,
     phase: &missiond_core::types::EngineeringPhase,
     ctx: &missiond_core::types::FlowContext,
+    prompts: &crate::prompts::PromptStore,
 ) -> String {
     let task_id = &task.id;
 
@@ -631,7 +631,7 @@ content: "<commit hash 或提交摘要>"
 
     // Inject Decision Engine help protocol for all slot phases (with taskId for auto-linkage)
     if phase.is_slot_phase() {
-        let protocol = prompts::flow::HELP_PROTOCOL.replace("{task_id}", task_id);
+        let protocol = prompts.help_protocol().replace("{task_id}", task_id);
         base.push_str(&protocol);
     }
 

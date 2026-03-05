@@ -7,9 +7,11 @@ use missiond_core::{
 };
 use tokio::sync::Mutex;
 
+use crate::daemon_stats::DaemonStats;
 use crate::event_bus::EventBus;
 use crate::gemini_client::GeminiClient;
 use crate::mcp_client::McpProcessClient;
+use crate::prompts::PromptStore;
 
 // --- Well-known slot IDs (shared across all daemon modules) ---
 pub(crate) const MEMORY_SLOT_ID: &str = "slot-memory";           // Fast lane (realtime)
@@ -151,6 +153,10 @@ pub(crate) struct AppState {
     pub(crate) event_bus: Arc<EventBus>,
     /// Async DB executor — offloads hot-path SQLite calls to spawn_blocking.
     pub(crate) db_exec: DbExecutor,
+    /// Process-level daemon statistics (counters + histograms).
+    pub(crate) stats: Arc<DaemonStats>,
+    /// Centralized LLM prompts with file-based hot-reload.
+    pub(crate) prompts: Arc<PromptStore>,
 }
 
 /// Event-driven embedding tasks — the Worker sleeps until triggered.

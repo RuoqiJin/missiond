@@ -140,6 +140,7 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
                         },
                     );
                     info!(task_id = %task.id, slot_id = %slot_id, role = %task.role, "Autopilot: dispatched queued submit task");
+                    state.stats.tasks_dispatched.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     used_slots.insert(slot_id.clone());
                     dispatched = true;
                     any_dispatched = true;

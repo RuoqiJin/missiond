@@ -7,7 +7,6 @@ use tracing::{debug, info, warn};
 
 use crate::state::AppState;
 use crate::llm_gateway::call_gemini_for_flow;
-use crate::prompts;
 
 /// Decision Engine Phase 4: Harvest successful decisions into policy:decision KB entries.
 /// Triggered when a Board task is marked done — scans answered master questions,
@@ -45,7 +44,7 @@ pub(crate) async fn harvest_decisions_for_task(state: &AppState, task_id: &str, 
         .join("\n\n");
 
     // 3. Call Gemini to generalize (with Few-Shot examples for quality)
-    let prompt = prompts::decision::HARVEST_TEMPLATE
+    let prompt = state.prompts.harvest_template()
         .replace("{0}", task_title)
         .replace("{1}", &qa_text);
 

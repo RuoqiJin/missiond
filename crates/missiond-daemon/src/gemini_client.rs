@@ -15,6 +15,7 @@
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -54,6 +55,10 @@ pub(crate) struct GeminiClient {
     semaphore: Arc<Semaphore>,
     cli: Option<Arc<GeminiCli>>,
     event_tx: broadcast::Sender<DaemonEvent>,
+    /// Atomic counters for DaemonStats aggregation.
+    pub(crate) request_count: Arc<AtomicU64>,
+    pub(crate) error_count: Arc<AtomicU64>,
+    pub(crate) retry_count: Arc<AtomicU64>,
 }
 
 impl GeminiClient {
@@ -65,6 +70,9 @@ impl GeminiClient {
             semaphore: Arc::new(Semaphore::new(3)),
             cli: None,
             event_tx,
+            request_count: Arc::new(AtomicU64::new(0)),
+            error_count: Arc::new(AtomicU64::new(0)),
+            retry_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -77,6 +85,9 @@ impl GeminiClient {
             semaphore: Arc::new(Semaphore::new(3)),
             cli: Some(Arc::new(cli)),
             event_tx,
+            request_count: Arc::new(AtomicU64::new(0)),
+            error_count: Arc::new(AtomicU64::new(0)),
+            retry_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -96,6 +107,7 @@ impl GeminiClient {
         jwt: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value> {
+        self.request_count.fetch_add(1, Ordering::Relaxed);
         let request_id = uuid::Uuid::new_v4().to_string();
         let caller = current_caller();
         let session_id = current_session_id();
@@ -148,6 +160,7 @@ impl GeminiClient {
                 let err_body = resp.text().await.unwrap_or_default();
                 drop(permit);
                 warn!(body = %err_body, "Gemini 429 RESOURCE_EXHAUSTED, starting retry");
+                self.retry_count.fetch_add(1, Ordering::Relaxed);
                 // Retry path — emit event after retry completes
                 let retry_result = self.retry_with_backoff(http_client, url, jwt, body, 3).await;
                 let api_duration = api_start.elapsed();
@@ -159,6 +172,7 @@ impl GeminiClient {
             drop(permit);
 
             if !resp.status().is_success() {
+                self.error_count.fetch_add(1, Ordering::Relaxed);
                 let status = resp.status();
                 let err_body = resp.text().await.unwrap_or_default();
                 return Err(anyhow!("Router returned {}: {}", status, err_body));
@@ -284,11 +298,13 @@ impl GeminiClient {
                 .map_err(|e| anyhow!("Gemini request failed on retry {}: {}", attempt, e))?;
 
             if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                self.retry_count.fetch_add(1, Ordering::Relaxed);
                 drop(permit); // Release before next sleep
                 if attempt < max_retries {
                     warn!(attempt, "Gemini 429 again, will retry");
                     continue;
                 }
+                self.error_count.fetch_add(1, Ordering::Relaxed);
                 let err_body = resp.text().await.unwrap_or_default();
                 return Err(anyhow!("Gemini 429 after {} retries: {}", max_retries, err_body));
             }
@@ -296,6 +312,7 @@ impl GeminiClient {
             drop(permit);
 
             if !resp.status().is_success() {
+                self.error_count.fetch_add(1, Ordering::Relaxed);
                 let status = resp.status();
                 let err_body = resp.text().await.unwrap_or_default();
                 return Err(anyhow!("Router returned {}: {}", status, err_body));
