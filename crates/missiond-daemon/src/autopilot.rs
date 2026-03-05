@@ -92,9 +92,9 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     // Decision Engine: checkpoint harvester (every 24h, tasks with ≥3 unharvested decisions)
     {
         let now = chrono::Utc::now().timestamp();
-        let last = state.last_decision_harvest_at.load(std::sync::atomic::Ordering::Relaxed);
+        let last = state.mission.db().daemon_state_get("last_decision_harvest_at").unwrap_or(None).unwrap_or(0);
         if now - last > 86400 {
-            state.last_decision_harvest_at.store(now, std::sync::atomic::Ordering::Relaxed);
+            let _ = state.mission.db().daemon_state_set("last_decision_harvest_at", now);
             if let Ok(tasks) = state.mission.db().find_tasks_with_unharvested_decisions(3) {
                 for (task_id, task_title, count) in &tasks {
                     info!(task_id, count, "Decision harvester checkpoint: incremental harvest");

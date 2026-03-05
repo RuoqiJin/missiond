@@ -286,6 +286,20 @@ impl MissionDB {
     }
 
     /// Get the ID of the currently running slot task (if any)
+    /// Get the timestamp (unix epoch seconds) of the last completed task of a given type.
+    /// Returns None if no completed task exists.
+    pub fn last_completed_slot_task_at(&self, task_type: &str) -> SqliteResult<Option<i64>> {
+        let conn = self.read_conn();
+        let completed_at: Option<String> = conn.query_row(
+            "SELECT completed_at FROM slot_tasks WHERE task_type = ?1 AND status = 'completed' ORDER BY completed_at DESC LIMIT 1",
+            params![task_type],
+            |row| row.get(0),
+        ).optional()?;
+        Ok(completed_at.and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.timestamp())
+        }))
+    }
+
     pub fn get_running_slot_task(&self, slot_id: &str) -> SqliteResult<Option<String>> {
         let conn = self.read_conn();
         conn.query_row(
@@ -313,5 +327,30 @@ impl MissionDB {
         })
     }
 
+    // ── daemon_state KV ──
 
+    /// Get a persisted daemon state value (epoch seconds).
+    pub fn daemon_state_get(&self, key: &str) -> SqliteResult<Option<i64>> {
+        let conn = self.read_conn();
+        conn.query_row(
+            "SELECT value FROM daemon_state WHERE key = ?1",
+            params![key],
+            |row| {
+                let v: String = row.get(0)?;
+                Ok(v.parse::<i64>().unwrap_or(0))
+            },
+        ).optional()
+    }
+
+    /// Set a persisted daemon state value (epoch seconds).
+    pub fn daemon_state_set(&self, key: &str, value: i64) -> SqliteResult<()> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO daemon_state (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = ?3",
+            params![key, value.to_string(), now],
+        )?;
+        Ok(())
+    }
 }

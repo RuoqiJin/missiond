@@ -566,9 +566,6 @@ async fn main() -> Result<()> {
         slow_extraction_notify: Arc::new(tokio::sync::Notify::new()),
         submit_notify: Arc::new(tokio::sync::Notify::new()),
         decision_notify: Arc::new(tokio::sync::Notify::new()),
-        last_auto_gc_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-        last_kb_consolidation_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-        last_decision_harvest_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         last_supervisor_patrol_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         memory_paused: Arc::new(std::sync::atomic::AtomicBool::new(
             home.join("memory_paused").exists()

@@ -106,12 +106,6 @@ pub(crate) struct AppState {
     pub(crate) submit_notify: Arc<tokio::sync::Notify>,
     /// Signal for Decision Engine: re-check target=master pending questions immediately.
     pub(crate) decision_notify: Arc<tokio::sync::Notify>,
-    /// Last KB auto-GC timestamp (epoch secs). 0 = never run.
-    pub(crate) last_auto_gc_at: Arc<std::sync::atomic::AtomicI64>,
-    /// Last KB consolidation timestamp (epoch secs). 0 = never run.
-    pub(crate) last_kb_consolidation_at: Arc<std::sync::atomic::AtomicI64>,
-    /// Last decision harvest checkpoint timestamp (epoch secs). 0 = never run.
-    pub(crate) last_decision_harvest_at: Arc<std::sync::atomic::AtomicI64>,
     /// Last supervisor patrol timestamp (epoch secs). 0 = never run.
     pub(crate) last_supervisor_patrol_at: Arc<std::sync::atomic::AtomicI64>,
     /// Pause switch for memory extraction tasks (realtime, deep_analysis, sync, GC).
