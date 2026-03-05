@@ -542,6 +542,7 @@ async fn main() -> Result<()> {
     }
 
     let event_bus_instance = Arc::new(event_bus::EventBus::new(512));
+    let db_exec = missiond_core::DbExecutor::new(mission.db_arc());
 
     let state = AppState {
         mission,
@@ -650,6 +651,7 @@ async fn main() -> Result<()> {
         embedding_tx: embedding_tx,
         incident_tx: incident_tx.clone(),
         event_bus: Arc::clone(&event_bus_instance),
+        db_exec,
     };
 
     // Auto-spawn slots with auto_start: true

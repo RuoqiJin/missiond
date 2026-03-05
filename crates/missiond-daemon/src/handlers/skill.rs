@@ -122,9 +122,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let ContextBuildArgs { query } = serde_json::from_value(args)?;
             let mut context = state.skills.build_context(&query);
 
-            // Also search KB for matching knowledge (multi-factor sort + token budget)
-            let db = state.mission.db();
-            if let Ok(mut entries) = db.kb_search(&query, None) {
+            // Also search KB for matching knowledge (spawn_blocking: FTS5 full KB scan)
+            let q = query.clone();
+            if let Ok(mut entries) = state.db_exec.run(move |db| db.kb_search(&q, None)).await {
                 // Sort by confidence × log(access_count + 1) descending
                 entries.sort_by(|a, b| {
                     let score_a = a.confidence * (a.access_count as f64 + 1.0).ln();
@@ -257,36 +257,37 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 }
             }
 
-            // Step 4: Aggregate KB (by category + query joint search)
-            let mut kb_results: Vec<Value> = Vec::new();
-            let mut kb_seen = std::collections::HashSet::new();
-            for cat in &kb_categories {
-                if let Ok(entries) = db.kb_search(&args.query, Some(cat)) {
-                    for entry in entries.iter().take(5) {
-                        if kb_seen.insert(entry.key.clone()) {
-                            kb_results.push(json!({
-                                "key": entry.key,
-                                "category": entry.category,
-                                "summary": entry.summary,
-                                "matched_by": "category_filter",
-                            }));
+            // Step 4: Aggregate KB (spawn_blocking: FTS5 per-category + fallback)
+            let q = args.query.clone();
+            let cats = kb_categories.clone();
+            let kb_batch = state.db_exec.run(move |db| {
+                let mut results: Vec<(missiond_core::KnowledgeEntry, &'static str)> = Vec::new();
+                for cat in &cats {
+                    if let Ok(entries) = db.kb_search(&q, Some(cat)) {
+                        for entry in entries.into_iter().take(5) {
+                            results.push((entry, "category_filter"));
                         }
                     }
                 }
-            }
-            // Also do a general KB search if no category filter yielded results
-            if kb_results.is_empty() {
-                if let Ok(entries) = db.kb_search(&args.query, None) {
-                    for entry in entries.iter().take(5) {
-                        if kb_seen.insert(entry.key.clone()) {
-                            kb_results.push(json!({
-                                "key": entry.key,
-                                "category": entry.category,
-                                "summary": entry.summary,
-                                "matched_by": "query",
-                            }));
+                if results.is_empty() {
+                    if let Ok(entries) = db.kb_search(&q, None) {
+                        for entry in entries.into_iter().take(5) {
+                            results.push((entry, "query"));
                         }
                     }
+                }
+                Ok(results)
+            }).await.unwrap_or_default();
+            let mut kb_results: Vec<Value> = Vec::new();
+            let mut kb_seen = std::collections::HashSet::new();
+            for (entry, matched_by) in &kb_batch {
+                if kb_seen.insert(entry.key.clone()) {
+                    kb_results.push(json!({
+                        "key": entry.key,
+                        "category": entry.category,
+                        "summary": entry.summary,
+                        "matched_by": matched_by,
+                    }));
                 }
             }
 

@@ -16,16 +16,16 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
     }
 
     // Priority enforcement: unified scheduler guarantees submit tasks run before this.
-    // Skip if slot-memory is occupied by a running submit task.
-    if let Ok(running) = state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Running) {
+    // Skip if slot-memory is occupied by a running submit task (spawn_blocking: batch scan).
+    if let Ok(running) = state.db_exec.run(|db| db.get_tasks_by_status(missiond_core::types::TaskStatus::Running)).await {
         if running.iter().any(|t| t.slot_id.as_deref() == Some(MEMORY_SLOT_ID)) {
             debug!("realtime: skipping, running submit task on memory slot");
             return;
         }
     }
 
-    // Watermark-based check: any conversations with messages beyond their realtime_forwarded_at?
-    let raw_pending = match state.mission.db().get_pending_realtime_messages() {
+    // Watermark-based check (spawn_blocking: complex join + watermark query)
+    let raw_pending = match state.db_exec.run(|db| db.get_pending_realtime_messages()).await {
         Ok(p) if !p.is_empty() => p,
         Ok(_) => {
             debug!("realtime: no pending messages (watermark)");
@@ -216,9 +216,9 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
         return;
     }
 
-    // Priority enforcement: unified scheduler guarantees submit tasks run before this.
+    // Priority enforcement (spawn_blocking: batch scan).
     // Skip if slow slot is occupied by a running submit task.
-    if let Ok(running) = state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Running) {
+    if let Ok(running) = state.db_exec.run(|db| db.get_tasks_by_status(missiond_core::types::TaskStatus::Running)).await {
         if running.iter().any(|t| t.slot_id.as_deref() == Some(MEMORY_SLOW_SLOT_ID)) {
             debug!("deep_analysis: skipping, running submit task on slow slot");
             return;
@@ -238,8 +238,8 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
         }
     }
 
-    let db = state.mission.db();
-    let pending_convs = match db.get_pending_deep_analysis(CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES) {
+    // spawn_blocking: pending deep analysis query
+    let pending_convs = match state.db_exec.run(|db| db.get_pending_deep_analysis(CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES)).await {
         Ok(convs) => convs,
         Err(_) => return,
     };
@@ -248,6 +248,7 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
         return;
     }
 
+    let db = state.mission.db();
     for conv in &pending_convs {
         let is_checkpoint = conv.status == "active";
         let since_id = if is_checkpoint && conv.deep_analyzed_message_id > 0 {

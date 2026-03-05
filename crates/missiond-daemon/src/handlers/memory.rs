@@ -17,10 +17,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         // Message-level pipeline tracking: returns pending messages with IDs.
         // State auto-committed by Daemon on extraction completion — no manual done() needed.
         "mission_memory_pending" | "mission_memory_pending_user" => {
-            let db = state.mission.db();
             const PENDING_MSG_LIMIT: usize = 60;
-            let pending = db.get_pending_realtime_messages_with_limit(PENDING_MSG_LIMIT)
-                .map_err(|e| anyhow!("DB error: {}", e))?;
+            // spawn_blocking: complex join + watermark query
+            let pending = state.db_exec.run(move |db| db.get_pending_realtime_messages_with_limit(PENDING_MSG_LIMIT))
+                .await.map_err(|e| anyhow!("DB error: {}", e))?;
 
             if pending.is_empty() {
                 return Ok(ToolResult::text("没有待分析的新对话内容。"));

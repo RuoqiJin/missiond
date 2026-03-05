@@ -26,8 +26,8 @@ pub(crate) fn save_routing_trace(state: &AppState, question_id: &str, resolved_t
 /// Routes through Tier 1 (KB) → Tier 2 (Gemini) → Tier 3 (slot-decision) responsibility chain.
 /// Records routing_trace for each decision for observability.
 pub(crate) async fn process_pending_master_questions(state: &AppState) {
-    // Query pending questions with target=master
-    let questions = match state.mission.db().list_agent_questions(Some("pending"), Some("master"), None) {
+    // Query pending questions with target=master (spawn_blocking: batch scan)
+    let questions = match state.db_exec.run(|db| db.list_agent_questions(Some("pending"), Some("master"), None)).await {
         Ok(qs) => qs,
         Err(e) => {
             warn!(error = %e, "Decision Engine: failed to list pending master questions");
@@ -208,10 +208,11 @@ pub(crate) async fn process_pending_master_questions(state: &AppState) {
 ///
 /// Fallback (embedding unavailable): FTS5 + keyword overlap ≥ 30%
 pub(crate) async fn decision_tier1_kb(state: &AppState, question: &missiond_core::types::AgentQuestion) -> Result<TierResult> {
-    // Path A: FTS5 search with ranked results
-    let fts_results = state.mission.db()
-        .kb_search_ranked(&question.question, Some("policy:decision"), 20)
-        .unwrap_or_default();
+    // Path A: FTS5 search with ranked results (spawn_blocking: FTS5 heavy)
+    let q_text = question.question.clone();
+    let fts_results = state.db_exec.run(move |db| {
+        db.kb_search_ranked(&q_text, Some("policy:decision"), 20)
+    }).await.unwrap_or_default();
 
     let fts_ids: Vec<(String, usize)> = fts_results.iter()
         .map(|(e, rank)| (e.id.clone(), *rank))
@@ -569,7 +570,8 @@ pub(crate) async fn decision_tier3_dispatch(state: &AppState, question: &mission
 /// Decision Engine: reap stale decision tasks (15min timeout)
 /// Three recovery actions: downgrade question to user, kill PTY, board warning note
 pub(crate) async fn reap_stale_decision_tasks(state: &AppState) {
-    let stale_questions = match state.mission.db().find_stale_master_questions(900) {
+    // spawn_blocking: time-based scan
+    let stale_questions = match state.db_exec.run(|db| db.find_stale_master_questions(900)).await {
         Ok(qs) => qs,
         Err(e) => {
             warn!(error = %e, "Decision reaper: failed to query stale master questions");
