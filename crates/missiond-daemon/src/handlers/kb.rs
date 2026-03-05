@@ -971,7 +971,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
             // Signal unified scheduler to dispatch any newly created submit tasks
             if results.iter().any(|r| r.get("status").and_then(|s| s.as_str()) == Some("dispatched")) {
-                state.submit_notify.notify_one();
+                state.event_bus.publish(crate::event_bus::DaemonEvent::TaskCreated { task_id: String::new() });
             }
 
             // Get remaining count

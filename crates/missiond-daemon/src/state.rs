@@ -7,8 +7,14 @@ use missiond_core::{
 };
 use tokio::sync::Mutex;
 
+use crate::event_bus::EventBus;
 use crate::gemini_client::GeminiClient;
 use crate::mcp_client::McpProcessClient;
+
+// --- Well-known slot IDs (shared across all daemon modules) ---
+pub(crate) const MEMORY_SLOT_ID: &str = "slot-memory";           // Fast lane (realtime)
+pub(crate) const MEMORY_SLOW_SLOT_ID: &str = "slot-memory-slow";  // Slow lane (deep + consolidation)
+pub(crate) const SUPERVISOR_SLOT_ID: &str = "slot-supervisor";    // Supervisor (Opus patrol)
 
 
 /// Extraction phase state machine. Replaces rigid 120s cooldown with
@@ -99,14 +105,7 @@ pub(crate) struct AppState {
     pub(crate) slow_slot_busy_since: Arc<std::sync::atomic::AtomicI64>,
     /// Hash of last synced CLAUDE.md managed section (to avoid unnecessary writes).
     pub(crate) claude_md_hash: Arc<std::sync::atomic::AtomicU64>,
-    /// Signal to re-check fast lane extractions immediately.
-    pub(crate) extraction_notify: Arc<tokio::sync::Notify>,
-    /// Signal to re-check slow lane extractions immediately.
-    pub(crate) slow_extraction_notify: Arc<tokio::sync::Notify>,
-    /// Signal to re-dispatch queued submit tasks (fired on task creation/completion).
-    pub(crate) submit_notify: Arc<tokio::sync::Notify>,
-    /// Signal for Decision Engine: re-check target=master pending questions immediately.
-    pub(crate) decision_notify: Arc<tokio::sync::Notify>,
+    // Notify fields removed — replaced by EventBus (Phase 2 S3/S4)
     /// Last supervisor patrol timestamp (epoch secs). 0 = never run.
     pub(crate) last_supervisor_patrol_at: Arc<std::sync::atomic::AtomicI64>,
     /// Pause switch for memory extraction tasks (realtime, deep_analysis, sync, GC).
@@ -148,6 +147,8 @@ pub(crate) struct AppState {
     pub(crate) embedding_tx: tokio::sync::mpsc::Sender<EmbeddingTask>,
     /// AIOps: incident event bus sender (try_send only, capacity 100).
     pub(crate) incident_tx: tokio::sync::mpsc::Sender<missiond_core::types::MissionIncident>,
+    /// Centralized event bus for inter-module communication (replaces Notify signals).
+    pub(crate) event_bus: Arc<EventBus>,
 }
 
 /// Event-driven embedding tasks — the Worker sleeps until triggered.

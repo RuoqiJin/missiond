@@ -4,7 +4,7 @@ use serde_json::json;
 use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
-use crate::autopilot::call_gemini_for_flow;
+use crate::llm_gateway::call_gemini_for_flow;
 use crate::memory_scheduler::ensure_memory_slot_by_id;
 
 pub(crate) struct TierResult {
@@ -208,7 +208,7 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
     };
 
     // Fire submit_notify so Autopilot picks up the new task
-    state.submit_notify.notify_one();
+    state.event_bus.publish(crate::event_bus::DaemonEvent::TaskCreated { task_id: String::new() });
 
     // Insert incident record into DB
     if let Err(e) = db.insert_incident(
@@ -281,7 +281,7 @@ pub(crate) fn create_pty_remediation_task(
                 "PTY remediation: Board task created for Opus slot"
             );
             // Notify autopilot to pick up immediately
-            state.submit_notify.notify_one();
+            state.event_bus.publish(crate::event_bus::DaemonEvent::TaskCreated { task_id: String::new() });
         }
         Err(e) => {
             error!(error = %e, "PTY remediation: failed to create Board task");
@@ -574,7 +574,7 @@ pub(crate) async fn decision_tier1_kb(state: &AppState, question: &missiond_core
 
             state.mission.db().answer_agent_question(&question.id, &answer)
                 .map_err(|e| anyhow!("Failed to answer: {}", e))?;
-            state.submit_notify.notify_one();
+            state.event_bus.publish(crate::event_bus::DaemonEvent::TaskCreated { task_id: String::new() });
 
             return Ok(TierResult {
                 hit: true,
@@ -642,7 +642,7 @@ pub(crate) async fn decision_tier1_kb(state: &AppState, question: &missiond_core
 
     state.mission.db().answer_agent_question(&question.id, &answer)
         .map_err(|e| anyhow!("Failed to answer: {}", e))?;
-    state.submit_notify.notify_one();
+    state.event_bus.publish(crate::event_bus::DaemonEvent::TaskCreated { task_id: String::new() });
     Ok(TierResult {
         hit: true,
         detail: serde_json::json!({
@@ -723,7 +723,7 @@ pub(crate) async fn decision_tier2_gemini(state: &AppState, question: &missiond_
                     info!(question_id = %question.id, "Tier 2: Gemini decided");
                     state.mission.db().answer_agent_question(&question.id, &answer)
                         .map_err(|e| anyhow!("Failed to answer: {}", e))?;
-                    state.submit_notify.notify_one();
+                    state.event_bus.publish(crate::event_bus::DaemonEvent::TaskCreated { task_id: String::new() });
                     return Ok(TierResult {
                         hit: true,
                         detail: serde_json::json!({"tier": "T2", "status": "decided", "action": "DECIDE", "reasoning": reasoning}),

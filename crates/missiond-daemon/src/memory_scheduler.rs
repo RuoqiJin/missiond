@@ -2,7 +2,7 @@
 use tracing::{debug, info, warn};
 
 use crate::state::AppState;
-use crate::autopilot::MEMORY_SLOT_ID;
+use crate::state::MEMORY_SLOT_ID;
 use crate::extraction::{check_realtime_extraction, check_deep_analysis, check_kb_consolidation};
 use missiond_core::SessionState;
 use crate::slot_env::build_slot_tracking_env;
@@ -180,7 +180,7 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
                     info!(slot_id = %slot_id, role = %role, "Autopilot: auto-spawning slot for queued tasks (Wake-on-Demand)");
                     tokio::spawn(async move {
                         if ensure_memory_slot_by_id(&state_clone, &slot_id_clone).await {
-                            state_clone.submit_notify.notify_one();
+                            state_clone.event_bus.publish(crate::event_bus::DaemonEvent::TaskCreated { task_id: String::new() });
                         }
                     });
                     break; // One spawn attempt per role

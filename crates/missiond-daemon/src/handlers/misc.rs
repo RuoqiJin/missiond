@@ -172,7 +172,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 match state.mission.db().create_agent_question(&q_input) {
                     Ok(q) => {
                         info!(task_id = %task.id, question_id = %q.id, "Hard intercept: Plan→Execute risk review created");
-                        state.decision_notify.notify_one();
+                        state.event_bus.publish(crate::event_bus::DaemonEvent::QuestionCreated { question_id: q.id.clone() });
                     }
                     Err(e) => warn!(error = %e, "Failed to create hard intercept question"),
                 }
@@ -193,7 +193,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 match state.mission.db().create_agent_question(&q_input) {
                     Ok(q) => {
                         info!(task_id = %task.id, question_id = %q.id, "Soft intercept: created master decision question");
-                        state.decision_notify.notify_one();
+                        state.event_bus.publish(crate::event_bus::DaemonEvent::QuestionCreated { question_id: q.id.clone() });
                     }
                     Err(e) => warn!(error = %e, "Failed to create soft intercept question"),
                 }

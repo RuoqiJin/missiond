@@ -169,7 +169,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 result["dispatched"] = serde_json::json!(false);
                 result["hint"] = serde_json::json!("No idle slot found, task queued for autopilot dispatch");
                 // Signal unified scheduler to dispatch immediately
-                state.submit_notify.notify_one();
+                state.event_bus.publish(crate::event_bus::DaemonEvent::TaskCreated { task_id: task_id.clone() });
             }
             Ok(ToolResult::json(&result))
         }

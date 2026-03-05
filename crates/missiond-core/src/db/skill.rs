@@ -1,4 +1,5 @@
-use rusqlite::{params, OptionalExtension, Result as SqliteResult};
+use rusqlite::{params, OptionalExtension};
+use super::error::DbResult;
 use crate::types::*;
 use super::MissionDB;
 
@@ -15,7 +16,7 @@ impl MissionDB {
         file_path: &str,
         requires_json: Option<&str>,
         actions_json: Option<&str>,
-    ) -> SqliteResult<()> {
+    ) -> DbResult<()> {
         self.skill_topic_upsert_full(topic, description, aka, allowed_tools, file_path, requires_json, actions_json, None)
     }
 
@@ -30,7 +31,7 @@ impl MissionDB {
         requires_json: Option<&str>,
         actions_json: Option<&str>,
         context_hooks_json: Option<&str>,
-    ) -> SqliteResult<()> {
+    ) -> DbResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
@@ -44,9 +45,9 @@ impl MissionDB {
     }
 
     /// Get a skill topic by name
-    pub fn skill_topic_get(&self, topic: &str) -> SqliteResult<Option<SkillTopic>> {
+    pub fn skill_topic_get(&self, topic: &str) -> DbResult<Option<SkillTopic>> {
         let conn = self.read_conn();
-        conn.query_row(
+        Ok(conn.query_row(
             "SELECT topic, description, aka, allowed_tools, file_path,
                     hit_count, last_hit_at, fragment_count, total_lines, checksum,
                     requires_json, actions_json, context_hooks_json, created_at, updated_at
@@ -72,11 +73,11 @@ impl MissionDB {
                 })
             },
         )
-        .optional()
+        .optional()?)
     }
 
     /// List all skill topics
-    pub fn skill_topic_list(&self) -> SqliteResult<Vec<SkillTopic>> {
+    pub fn skill_topic_list(&self) -> DbResult<Vec<SkillTopic>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT topic, description, aka, allowed_tools, file_path,
@@ -103,11 +104,11 @@ impl MissionDB {
                 updated_at: row.get(14)?,
             })
         })?;
-        rows.collect()
+        Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
     }
 
     /// Record a hit on a skill topic (for Hook injection tracking)
-    pub fn skill_topic_hit(&self, topic: &str) -> SqliteResult<()> {
+    pub fn skill_topic_hit(&self, topic: &str) -> DbResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
@@ -125,7 +126,7 @@ impl MissionDB {
         title: Option<&str>,
         content: &str,
         sort_order: i32,
-    ) -> SqliteResult<String> {
+    ) -> DbResult<String> {
         let conn = self.conn();
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
@@ -158,7 +159,7 @@ impl MissionDB {
     }
 
     /// Update a skill block's content
-    pub fn skill_block_update(&self, id: &str, content: &str) -> SqliteResult<bool> {
+    pub fn skill_block_update(&self, id: &str, content: &str) -> DbResult<bool> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         let updated = conn.execute(
@@ -186,7 +187,7 @@ impl MissionDB {
     }
 
     /// Get all active blocks for a topic, ordered by sort_order
-    pub fn skill_blocks_for_topic(&self, topic: &str) -> SqliteResult<Vec<SkillBlock>> {
+    pub fn skill_blocks_for_topic(&self, topic: &str) -> DbResult<Vec<SkillBlock>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, topic, block_type, title, content, sort_order, status, created_at, updated_at
@@ -207,11 +208,11 @@ impl MissionDB {
                 updated_at: row.get(8)?,
             })
         })?;
-        rows.collect()
+        Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
     }
 
     /// Search skill blocks using FTS5
-    pub fn skill_search_fts(&self, query: &str) -> SqliteResult<Vec<SkillSearchResult>> {
+    pub fn skill_search_fts(&self, query: &str) -> DbResult<Vec<SkillSearchResult>> {
         let conn = self.read_conn();
         let tokens: Vec<&str> = query.split_whitespace().collect();
         if tokens.is_empty() {
@@ -244,11 +245,11 @@ impl MissionDB {
                 description: row.get(4)?,
             })
         })?;
-        rows.collect()
+        Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
     }
 
     /// Search skill topics by name/aka (exact + fuzzy)
-    pub fn skill_search_topics(&self, query: &str) -> SqliteResult<Vec<SkillTopic>> {
+    pub fn skill_search_topics(&self, query: &str) -> DbResult<Vec<SkillTopic>> {
         let conn = self.read_conn();
         let query_lower = query.to_lowercase();
         let pattern = format!("%{}%", query_lower);
@@ -283,11 +284,11 @@ impl MissionDB {
                 updated_at: row.get(14)?,
             })
         })?;
-        rows.collect()
+        Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
     }
 
     /// Update skill_topics metadata after materialization
-    pub fn skill_topic_update_stats(&self, topic: &str, total_lines: i32, checksum: &str) -> SqliteResult<()> {
+    pub fn skill_topic_update_stats(&self, topic: &str, total_lines: i32, checksum: &str) -> DbResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
@@ -298,7 +299,7 @@ impl MissionDB {
     }
 
     /// Set block status (for lifecycle management: active → merged/archived)
-    pub fn skill_block_set_status(&self, id: &str, status: &str) -> SqliteResult<bool> {
+    pub fn skill_block_set_status(&self, id: &str, status: &str) -> DbResult<bool> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         let updated = conn.execute(
@@ -309,7 +310,7 @@ impl MissionDB {
     }
 
     /// Delete all blocks for a topic (used before re-ingest)
-    pub fn skill_blocks_delete_topic(&self, topic: &str) -> SqliteResult<usize> {
+    pub fn skill_blocks_delete_topic(&self, topic: &str) -> DbResult<usize> {
         let conn = self.conn();
         let deleted = conn.execute(
             "DELETE FROM skill_blocks WHERE topic = ?1",
@@ -319,7 +320,7 @@ impl MissionDB {
     }
 
     /// Rebuild skill FTS index from scratch
-    pub fn skill_rebuild_fts(&self) -> SqliteResult<()> {
+    pub fn skill_rebuild_fts(&self) -> DbResult<()> {
         let conn = self.conn();
         conn.execute_batch("INSERT INTO skill_fts(skill_fts) VALUES('rebuild')")?;
         Ok(())
@@ -328,7 +329,7 @@ impl MissionDB {
     // ── Skill Embedding functions ──────────────────────────────────
 
     /// Store embedding BLOB + provider tag for a skill topic
-    pub fn skill_set_topic_embedding(&self, topic: &str, embedding: &[f32], provider: &str) -> SqliteResult<()> {
+    pub fn skill_set_topic_embedding(&self, topic: &str, embedding: &[f32], provider: &str) -> DbResult<()> {
         let conn = self.conn();
         let bytes = crate::embedding::f32_vec_to_bytes(embedding);
         conn.execute(
@@ -339,7 +340,7 @@ impl MissionDB {
     }
 
     /// Load all topic embeddings (for cache warmup)
-    pub fn skill_load_topic_embeddings(&self) -> SqliteResult<Vec<(String, Vec<f32>)>> {
+    pub fn skill_load_topic_embeddings(&self) -> DbResult<Vec<(String, Vec<f32>)>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT topic, embedding FROM skill_topics WHERE embedding IS NOT NULL"
@@ -359,7 +360,7 @@ impl MissionDB {
 
     /// List skill topics missing embedding (for backfill).
     /// Returns (topic, embed_text) where embed_text = "技能主题：{topic}\n{description}\n{all active block content}"
-    pub fn skill_topics_missing_embedding(&self, limit: i64) -> SqliteResult<Vec<(String, String)>> {
+    pub fn skill_topics_missing_embedding(&self, limit: i64) -> DbResult<Vec<(String, String)>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT topic, COALESCE(description, '') FROM skill_topics WHERE embedding IS NULL LIMIT ?1"
@@ -402,7 +403,7 @@ impl MissionDB {
     }
 
     /// List skill topics with embedding from a different provider (stale after model switch)
-    pub fn skill_topics_stale_embedding(&self, current_provider: &str, limit: i64) -> SqliteResult<Vec<(String, String)>> {
+    pub fn skill_topics_stale_embedding(&self, current_provider: &str, limit: i64) -> DbResult<Vec<(String, String)>> {
         let conn = self.read_conn();
         // Get stale topics, then build embed_text same as missing
         let mut stmt = conn.prepare(
@@ -453,7 +454,7 @@ impl MissionDB {
         action_id: &str,
         steps_total: i32,
         triggered_by: &str,
-    ) -> SqliteResult<()> {
+    ) -> DbResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
@@ -472,7 +473,7 @@ impl MissionDB {
         steps_completed: i32,
         context_json: Option<&str>,
         error: Option<&str>,
-    ) -> SqliteResult<()> {
+    ) -> DbResult<()> {
         self.skill_execution_update_with_duration(id, status, steps_completed, context_json, error, None)
     }
 
@@ -485,7 +486,7 @@ impl MissionDB {
         context_json: Option<&str>,
         error: Option<&str>,
         duration_ms: Option<i64>,
-    ) -> SqliteResult<()> {
+    ) -> DbResult<()> {
         let conn = self.conn();
         let completed_at = if status == "success" || status == "failed" || status == "cancelled" {
             Some(chrono::Utc::now().to_rfc3339())
@@ -501,7 +502,7 @@ impl MissionDB {
     }
 
     /// Get aggregated execution statistics for a skill topic
-    pub fn skill_execution_stats(&self, topic: Option<&str>) -> SqliteResult<Vec<crate::types::SkillExecutionStat>> {
+    pub fn skill_execution_stats(&self, topic: Option<&str>) -> DbResult<Vec<crate::types::SkillExecutionStat>> {
         let conn = self.read_conn();
         let row_mapper = |row: &rusqlite::Row| {
             Ok(crate::types::SkillExecutionStat {
@@ -547,7 +548,7 @@ impl MissionDB {
     }
 
     /// Check if a skill action is currently running (for concurrency guard)
-    pub fn skill_execution_is_running(&self, skill_topic: &str, action_id: &str) -> SqliteResult<bool> {
+    pub fn skill_execution_is_running(&self, skill_topic: &str, action_id: &str) -> DbResult<bool> {
         let conn = self.read_conn();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM skill_executions WHERE skill_topic = ?1 AND action_id = ?2 AND status = 'running'",
@@ -561,7 +562,7 @@ impl MissionDB {
     // ============ Skill Version Rollback (Phase 4) ============
 
     /// Save a skill version snapshot before materialize
-    pub fn skill_version_save(&self, topic: &str, content: &str, checksum: &str) -> SqliteResult<()> {
+    pub fn skill_version_save(&self, topic: &str, content: &str, checksum: &str) -> DbResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
@@ -579,7 +580,7 @@ impl MissionDB {
     }
 
     /// List recent versions for a skill topic
-    pub fn skill_version_list(&self, topic: &str, limit: i64) -> SqliteResult<Vec<crate::types::SkillVersion>> {
+    pub fn skill_version_list(&self, topic: &str, limit: i64) -> DbResult<Vec<crate::types::SkillVersion>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, topic, content, checksum, created_at FROM skill_versions
@@ -600,9 +601,9 @@ impl MissionDB {
     }
 
     /// Get a specific skill version by ID
-    pub fn skill_version_get(&self, id: i64) -> SqliteResult<Option<crate::types::SkillVersion>> {
+    pub fn skill_version_get(&self, id: i64) -> DbResult<Option<crate::types::SkillVersion>> {
         let conn = self.read_conn();
-        conn.query_row(
+        Ok(conn.query_row(
             "SELECT id, topic, content, checksum, created_at FROM skill_versions WHERE id = ?1",
             params![id],
             |row| {
@@ -614,7 +615,7 @@ impl MissionDB {
                     created_at: row.get(4)?,
                 })
             },
-        ).optional()
+        ).optional()?)
     }
 
 

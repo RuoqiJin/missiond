@@ -567,10 +567,6 @@ async fn main() -> Result<()> {
         memory_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         slow_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         claude_md_hash: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        extraction_notify: Arc::new(tokio::sync::Notify::new()),
-        slow_extraction_notify: Arc::new(tokio::sync::Notify::new()),
-        submit_notify: Arc::new(tokio::sync::Notify::new()),
-        decision_notify: Arc::new(tokio::sync::Notify::new()),
         last_supervisor_patrol_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         memory_paused: Arc::new(std::sync::atomic::AtomicBool::new(
             home.join("memory_paused").exists()
@@ -643,6 +639,7 @@ async fn main() -> Result<()> {
         kb_search_cache: missiond_core::embedding::new_cache(),
         embedding_tx: embedding_tx,
         incident_tx: incident_tx.clone(),
+        event_bus: Arc::new(event_bus::EventBus::new(256)),
     };
 
     // Auto-spawn slots with auto_start: true
@@ -1104,61 +1101,81 @@ async fn main() -> Result<()> {
     }
     info!("Autopilot scheduler started (60s interval, isolated task)");
 
-    // --- P3: All event handlers in dedicated tasks ---
-    // No more select! loop — each concern runs independently.
+    // --- P3: Event-driven handlers via EventBus (Phase 2) ---
+    // Each concern subscribes to DaemonEvent and filters relevant events.
+    // Replaces the old Notify-based wake signals.
 
-    // Fast lane extraction notification
+    // Extraction lane handler: SlotBecameIdle → schedule_memory_tasks
     {
         let s = state.clone();
+        let mut rx = s.event_bus.subscribe();
         tokio::spawn(async move {
             loop {
-                s.extraction_notify.notified().await;
-                if !s.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    schedule_memory_tasks(&s).await;
+                match rx.recv().await {
+                    Ok(event_bus::DaemonEvent::SlotBecameIdle { ref slot_id })
+                        if slot_id == MEMORY_SLOT_ID || slot_id == MEMORY_SLOW_SLOT_ID =>
+                    {
+                        if !s.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            schedule_memory_tasks(&s).await;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "Extraction consumer lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    _ => {} // ignore irrelevant events
                 }
             }
         });
     }
 
-    // Slow lane extraction notification
+    // Submit task dispatch handler: TaskCreated/TaskCompleted → dispatch
     {
         let s = state.clone();
+        let mut rx = s.event_bus.subscribe();
         tokio::spawn(async move {
             loop {
-                s.slow_extraction_notify.notified().await;
-                if !s.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    schedule_memory_tasks(&s).await;
+                match rx.recv().await {
+                    Ok(event_bus::DaemonEvent::TaskCreated { .. })
+                    | Ok(event_bus::DaemonEvent::TaskCompleted { .. }) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        dispatch_queued_submit_tasks(&s).await;
+                        if !s.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
+                            schedule_memory_tasks(&s).await;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "Submit consumer lagged");
+                        // After lag, still dispatch to catch up
+                        dispatch_queued_submit_tasks(&s).await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    _ => {}
                 }
             }
         });
     }
 
-    // Submit task dispatch notification
+    // Decision Engine handler: QuestionCreated → process
     {
         let s = state.clone();
+        let mut rx = s.event_bus.subscribe();
         tokio::spawn(async move {
             loop {
-                s.submit_notify.notified().await;
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                dispatch_queued_submit_tasks(&s).await;
-                if !s.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
-                    schedule_memory_tasks(&s).await;
+                match rx.recv().await {
+                    Ok(event_bus::DaemonEvent::QuestionCreated { .. }) => {
+                        // Debounce: coalesce rapid signals
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        process_pending_master_questions(&s).await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "Decision consumer lagged");
+                        process_pending_master_questions(&s).await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    _ => {}
                 }
-            }
-        });
-    }
-
-    // Decision Engine notification channel
-    {
-        let s = state.clone();
-        tokio::spawn(async move {
-            loop {
-                s.decision_notify.notified().await;
-                // Debounce: coalesce rapid signals
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                process_pending_master_questions(&s).await;
             }
         });
     }
@@ -1367,13 +1384,13 @@ async fn main() -> Result<()> {
                     Ok(missiond_core::ManagerEvent::StateChange { ref slot_id, new_state, prev_state }) => {
                         // Route memory slot state changes to the correct lane
                         let lane = if slot_id == MEMORY_SLOT_ID {
-                            Some(("fast", &s.extraction_state, &s.memory_slot_busy_since, &s.extraction_notify))
+                            Some(("fast", &s.extraction_state, &s.memory_slot_busy_since))
                         } else if slot_id == MEMORY_SLOW_SLOT_ID {
-                            Some(("slow", &s.slow_extraction_state, &s.slow_slot_busy_since, &s.slow_extraction_notify))
+                            Some(("slow", &s.slow_extraction_state, &s.slow_slot_busy_since))
                         } else {
                             None
                         };
-                        if let Some((lane_name, es_lock, busy_since, notify)) = lane {
+                        if let Some((lane_name, es_lock, busy_since)) = lane {
                             if new_state == SessionState::Idle {
                                 busy_since.store(0, std::sync::atomic::Ordering::SeqCst);
                                 let mut es = es_lock.write().await;
@@ -1427,7 +1444,7 @@ async fn main() -> Result<()> {
                                         es.current_slot_task_id = None;
                                         es.is_checkpoint = false;
                                         es.checkpoint_message_id = None;
-                                        notify.notify_one();
+                                        s.event_bus.publish(event_bus::DaemonEvent::SlotBecameIdle { slot_id: slot_id.to_string() });
                                     }
                                 }
                             } else if prev_state == SessionState::Idle {
@@ -1514,12 +1531,12 @@ async fn main() -> Result<()> {
                                         info!(task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,
                                             jsonl_result = jsonl_resp.is_some(),
                                             "Submit task closed: slot returned to Idle");
-                                        s.submit_notify.notify_one();
+                                        s.event_bus.publish(event_bus::DaemonEvent::TaskCompleted { task_id: task.id.clone() });
                                     }
                                 }
                             }
                             // Always signal submit dispatcher when any slot becomes Idle
-                            s.submit_notify.notify_one();
+                            s.event_bus.publish(event_bus::DaemonEvent::TaskCompleted { task_id: String::new() });
                         }
                     }
                     Ok(missiond_core::ManagerEvent::ConfirmRequired { slot_id, prompt: _, tool_info }) => {

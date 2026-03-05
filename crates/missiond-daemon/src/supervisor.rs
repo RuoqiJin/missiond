@@ -2,7 +2,7 @@
 use tracing::{debug, info, warn};
 
 use crate::state::{AppState, ExtractionPhase, ExtractionState, MAX_WAIT_FOR_IDLE_SECS};
-use crate::autopilot::SUPERVISOR_SLOT_ID;
+use crate::state::SUPERVISOR_SLOT_ID;
 use missiond_core::SessionState;
 use crate::memory_scheduler::ensure_memory_slot_by_id;
 use missiond_core::PTYSpawnOptions;

@@ -1,11 +1,12 @@
-use rusqlite::{params, OptionalExtension, Result as SqliteResult};
+use rusqlite::{params, OptionalExtension};
+use super::error::DbResult;
 use super::MissionDB;
 
 impl MissionDB {
     // ============ Router Chat Sessions ============
 
     /// Find or create a router_chat conversation for a given task_id
-    pub fn router_chat_get_or_create(&self, task_id: &str, model: &str) -> SqliteResult<String> {
+    pub fn router_chat_get_or_create(&self, task_id: &str, model: &str) -> DbResult<String> {
         let conn = self.conn();
         // Find existing active router_chat conversation for this task
         let existing: Option<String> = conn.query_row(
@@ -30,7 +31,7 @@ impl MissionDB {
     }
 
     /// Load router_chat message history as OpenAI-format messages array
-    pub fn router_chat_load_history(&self, conv_id: &str) -> SqliteResult<Vec<serde_json::Value>> {
+    pub fn router_chat_load_history(&self, conv_id: &str) -> DbResult<Vec<serde_json::Value>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT role, content FROM conversation_messages WHERE session_id = ?1 ORDER BY id ASC"
@@ -48,7 +49,7 @@ impl MissionDB {
         &self,
         conv_id: &str,
         messages: &[(String, String)], // (role, content) pairs
-    ) -> SqliteResult<()> {
+    ) -> DbResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         for (role, content) in messages {
@@ -67,7 +68,7 @@ impl MissionDB {
     }
 
     /// List all router_chat conversations with message size stats
-    pub fn router_chat_list(&self, limit: i64) -> SqliteResult<Vec<serde_json::Value>> {
+    pub fn router_chat_list(&self, limit: i64) -> DbResult<Vec<serde_json::Value>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT c.id, c.task_id, c.model, c.message_count, c.started_at, c.status,
@@ -90,11 +91,11 @@ impl MissionDB {
                 "estimated_tokens": total_chars / 4,
             }))
         })?;
-        rows.collect::<Result<Vec<_>, _>>()
+        Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
     }
 
     /// Aggregate stats for all router_chat conversations
-    pub fn router_chat_stats(&self) -> SqliteResult<serde_json::Value> {
+    pub fn router_chat_stats(&self) -> DbResult<serde_json::Value> {
         let conn = self.read_conn();
 
         let (total_convs, total_msgs, total_chars): (i64, i64, i64) = conn.query_row(
@@ -156,7 +157,7 @@ impl MissionDB {
     }
 
     /// Clear all messages from a router_chat conversation (keep the conversation record)
-    pub fn router_chat_clear(&self, conversation_id: &str) -> SqliteResult<i64> {
+    pub fn router_chat_clear(&self, conversation_id: &str) -> DbResult<i64> {
         let conn = self.conn();
         let is_router: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM conversations WHERE id = ?1 AND chat_type = 'router_chat'",
@@ -178,7 +179,7 @@ impl MissionDB {
     }
 
     /// Clear all messages from router_chat conversations linked to a task
-    pub fn router_chat_clear_by_task(&self, task_id: &str) -> SqliteResult<i64> {
+    pub fn router_chat_clear_by_task(&self, task_id: &str) -> DbResult<i64> {
         let conn = self.conn();
         let deleted = conn.execute(
             "DELETE FROM conversation_messages WHERE session_id IN
@@ -194,7 +195,7 @@ impl MissionDB {
     }
 
     /// Delete a router_chat conversation and all its messages
-    pub fn router_chat_delete(&self, conversation_id: &str) -> SqliteResult<(i64, i64)> {
+    pub fn router_chat_delete(&self, conversation_id: &str) -> DbResult<(i64, i64)> {
         let conn = self.conn();
         let msg_deleted = conn.execute(
             "DELETE FROM conversation_messages WHERE session_id = ?1
@@ -209,7 +210,7 @@ impl MissionDB {
     }
 
     /// Delete all router_chat conversations linked to a task
-    pub fn router_chat_delete_by_task(&self, task_id: &str) -> SqliteResult<(i64, i64)> {
+    pub fn router_chat_delete_by_task(&self, task_id: &str) -> DbResult<(i64, i64)> {
         let conn = self.conn();
         let msg_deleted = conn.execute(
             "DELETE FROM conversation_messages WHERE session_id IN

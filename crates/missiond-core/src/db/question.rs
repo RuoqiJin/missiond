@@ -1,4 +1,5 @@
-use rusqlite::{params, Result as SqliteResult};
+use rusqlite::params;
+use super::error::DbResult;
 use crate::types::*;
 use super::MissionDB;
 
@@ -8,7 +9,7 @@ impl MissionDB {
     pub fn create_agent_question(
         &self,
         input: &CreateAgentQuestionInput,
-    ) -> SqliteResult<AgentQuestion> {
+    ) -> DbResult<AgentQuestion> {
         let now = chrono::Utc::now().to_rfc3339();
         let id = uuid::Uuid::new_v4().to_string();
         let q = AgentQuestion {
@@ -52,7 +53,7 @@ impl MissionDB {
         Ok(q)
     }
 
-    pub fn get_agent_question(&self, id: &str) -> SqliteResult<Option<AgentQuestion>> {
+    pub fn get_agent_question(&self, id: &str) -> DbResult<Option<AgentQuestion>> {
         let conn = self.read_conn();
         let mut stmt = conn
             .prepare("SELECT * FROM agent_questions WHERE id = ?1")?;
@@ -69,7 +70,7 @@ impl MissionDB {
         status: Option<&str>,
         target: Option<&str>,
         limit: Option<usize>,
-    ) -> SqliteResult<Vec<AgentQuestion>> {
+    ) -> DbResult<Vec<AgentQuestion>> {
         let conn = self.read_conn();
         let mut sql = "SELECT * FROM agent_questions WHERE 1=1".to_string();
         let mut param_values: Vec<String> = Vec::new();
@@ -98,18 +99,18 @@ impl MissionDB {
     }
 
     /// List answered questions linked to a specific board task
-    pub fn list_questions_for_task(&self, task_id: &str) -> SqliteResult<Vec<AgentQuestion>> {
+    pub fn list_questions_for_task(&self, task_id: &str) -> DbResult<Vec<AgentQuestion>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM agent_questions WHERE task_id = ?1 AND status = 'answered' ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![task_id], |row| Self::row_to_agent_question(row))?;
-        rows.collect()
+        Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
     }
 
     /// Increment retry_count and set status back to open for retry.
     /// Also clears claim fields so CAS re-claim can succeed.
-    pub fn increment_board_task_retry(&self, task_id: &str, new_retry: i64) -> SqliteResult<()> {
+    pub fn increment_board_task_retry(&self, task_id: &str, new_retry: i64) -> DbResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
@@ -121,7 +122,7 @@ impl MissionDB {
 
     /// Release CAS claim and revert task to open.
     /// Used when PTY spawn times out or other pre-send failures occur.
-    pub fn unclaim_board_task(&self, task_id: &str) -> SqliteResult<()> {
+    pub fn unclaim_board_task(&self, task_id: &str) -> DbResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
@@ -135,7 +136,7 @@ impl MissionDB {
         &self,
         id: &str,
         answer: &str,
-    ) -> SqliteResult<Option<AgentQuestion>> {
+    ) -> DbResult<Option<AgentQuestion>> {
         let now = chrono::Utc::now().to_rfc3339();
         {
             let conn = self.conn();
@@ -172,7 +173,7 @@ impl MissionDB {
         self.get_agent_question(id)
     }
 
-    pub fn dismiss_agent_question(&self, id: &str) -> SqliteResult<Option<AgentQuestion>> {
+    pub fn dismiss_agent_question(&self, id: &str) -> DbResult<Option<AgentQuestion>> {
         let now = chrono::Utc::now().to_rfc3339();
         {
             let conn = self.conn();
@@ -185,7 +186,7 @@ impl MissionDB {
     }
 
     /// Decision Engine: set routing trace JSON for a question
-    pub fn set_question_routing_trace(&self, id: &str, trace_json: &str) -> SqliteResult<()> {
+    pub fn set_question_routing_trace(&self, id: &str, trace_json: &str) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn();
         conn.execute(
@@ -196,7 +197,7 @@ impl MissionDB {
     }
 
     /// Decision Engine: downgrade question target from master to user
-    pub fn downgrade_question_to_user(&self, id: &str) -> SqliteResult<()> {
+    pub fn downgrade_question_to_user(&self, id: &str) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn();
         conn.execute(
@@ -207,7 +208,7 @@ impl MissionDB {
     }
 
     /// Decision Engine: increment retry_count for a question
-    pub fn increment_question_retry(&self, id: &str) -> SqliteResult<()> {
+    pub fn increment_question_retry(&self, id: &str) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn();
         conn.execute(
@@ -218,7 +219,7 @@ impl MissionDB {
     }
 
     /// Decision Engine: find pending master questions older than max_age_secs
-    pub fn find_stale_master_questions(&self, max_age_secs: i64) -> SqliteResult<Vec<AgentQuestion>> {
+    pub fn find_stale_master_questions(&self, max_age_secs: i64) -> DbResult<Vec<AgentQuestion>> {
         let conn = self.read_conn();
         let now = chrono::Utc::now().to_rfc3339();
         let mut stmt = conn.prepare(
@@ -229,11 +230,11 @@ impl MissionDB {
         let rows = stmt.query_map(params![now, max_age_secs as f64], |row| {
             Self::row_to_agent_question(row)
         })?;
-        rows.collect()
+        Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
     }
 
     /// Find board tasks with ≥ min_count answered master questions (for checkpoint harvesting)
-    pub fn find_tasks_with_unharvested_decisions(&self, min_count: usize) -> SqliteResult<Vec<(String, String, usize)>> {
+    pub fn find_tasks_with_unharvested_decisions(&self, min_count: usize) -> DbResult<Vec<(String, String, usize)>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT bt.id, bt.title, COUNT(aq.id) as q_count
@@ -251,11 +252,11 @@ impl MissionDB {
                 row.get::<_, i64>(2)? as usize,
             ))
         })?;
-        rows.collect()
+        Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
     }
 
     /// Decision Engine: aggregate statistics for monitoring dashboard
-    pub fn decision_stats(&self, hours: i64) -> SqliteResult<serde_json::Value> {
+    pub fn decision_stats(&self, hours: i64) -> DbResult<serde_json::Value> {
         let conn = self.read_conn();
         let cutoff = (chrono::Utc::now() - chrono::TimeDelta::hours(hours)).to_rfc3339();
 
@@ -321,7 +322,7 @@ impl MissionDB {
         }))
     }
 
-    fn row_to_agent_question(row: &rusqlite::Row) -> SqliteResult<AgentQuestion> {
+    fn row_to_agent_question(row: &rusqlite::Row) -> rusqlite::Result<AgentQuestion> {
         let status_str: String = row.get("status")?;
         let status =
             AgentQuestionStatus::from_str(&status_str).unwrap_or(AgentQuestionStatus::Pending);

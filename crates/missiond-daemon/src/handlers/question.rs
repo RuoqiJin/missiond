@@ -91,7 +91,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             // Signal Decision Engine if target=master
             if q.target == "master" {
-                state.decision_notify.notify_one();
+                state.event_bus.publish(crate::event_bus::DaemonEvent::QuestionCreated { question_id: q.id.clone() });
                 info!(question_id = %q.id, "Decision Engine notified: new master question");
             }
             Ok(ToolResult::json_pretty(&q))
@@ -128,7 +128,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             {
                 Some(q) => {
                     // Signal scheduler for instant slot recovery after question answered
-                    state.submit_notify.notify_one();
+                    state.event_bus.publish(crate::event_bus::DaemonEvent::TaskCompleted { task_id: String::new() });
                     Ok(ToolResult::json_pretty(&q))
                 }
                 None => Ok(ToolResult::error("Question not found")),

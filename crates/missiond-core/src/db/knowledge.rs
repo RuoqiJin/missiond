@@ -1,4 +1,5 @@
-use rusqlite::{params, Connection, OptionalExtension, Result as SqliteResult};
+use rusqlite::{params, Connection, OptionalExtension};
+use super::error::DbResult;
 use std::sync::atomic::Ordering;
 use crate::types::*;
 use super::{MissionDB, token_jaccard_similarity};
@@ -41,7 +42,7 @@ impl MissionDB {
     }
 
     /// Remember (upsert) a knowledge entry, with FTS similarity dedup
-    pub fn kb_remember(&self, input: &KBRememberInput) -> SqliteResult<KBRememberResult> {
+    pub fn kb_remember(&self, input: &KBRememberInput) -> DbResult<KBRememberResult> {
         let now = chrono::Utc::now().to_rfc3339();
         let source = input.source.as_deref().unwrap_or("conversation");
         let mut confidence = input.confidence.unwrap_or(1.0);
@@ -197,7 +198,7 @@ impl MissionDB {
         category: &str,
         new_text: &str,
         threshold: f64,
-    ) -> SqliteResult<Option<(f64, KnowledgeEntry)>> {
+    ) -> DbResult<Option<(f64, KnowledgeEntry)>> {
         let entries = Self::kb_list_with_conn(conn, Some(category))?;
 
         let mut best: Option<(f64, KnowledgeEntry)> = None;
@@ -217,7 +218,7 @@ impl MissionDB {
     }
 
     /// Set linked_task_id on a knowledge entry (for Board-aware consolidation)
-    pub fn kb_set_linked_task_id(&self, key: &str, task_id: Option<&str>) -> SqliteResult<bool> {
+    pub fn kb_set_linked_task_id(&self, key: &str, task_id: Option<&str>) -> DbResult<bool> {
         let conn = self.conn();
         let updated = conn.execute(
             "UPDATE knowledge SET linked_task_id = ?1 WHERE key = ?2",
@@ -227,7 +228,7 @@ impl MissionDB {
     }
 
     /// Get a knowledge entry by key
-    pub fn kb_get(&self, key: &str) -> SqliteResult<Option<KnowledgeEntry>> {
+    pub fn kb_get(&self, key: &str) -> DbResult<Option<KnowledgeEntry>> {
         let conn = self.conn(); // Need write conn for access_count update
         let mut stmt = conn.prepare(
             "SELECT * FROM knowledge WHERE key = ?1"
@@ -250,7 +251,7 @@ impl MissionDB {
     }
 
     /// Get by category + key (internal, no access bump, uses existing connection)
-    fn kb_get_by_category_key_with_conn(conn: &Connection, category: &str, key: &str) -> SqliteResult<Option<KnowledgeEntry>> {
+    fn kb_get_by_category_key_with_conn(conn: &Connection, category: &str, key: &str) -> DbResult<Option<KnowledgeEntry>> {
         let mut stmt = conn.prepare(
             "SELECT * FROM knowledge WHERE category = ?1 AND key = ?2"
         )?;
@@ -265,7 +266,7 @@ impl MissionDB {
     // ── Embedding storage methods ──────────────────────────────────
 
     /// Store embedding BLOB + provider tag for a knowledge entry (f32 little-endian bytes)
-    pub fn kb_set_embedding(&self, id: &str, embedding: &[f32], provider: &str) -> SqliteResult<()> {
+    pub fn kb_set_embedding(&self, id: &str, embedding: &[f32], provider: &str) -> DbResult<()> {
         let conn = self.conn();
         let bytes = crate::embedding::f32_vec_to_bytes(embedding);
         conn.execute(
@@ -276,7 +277,7 @@ impl MissionDB {
     }
 
     /// List KB entries with embedding from a different provider (stale after model switch).
-    pub fn kb_entries_stale_embedding(&self, current_provider: &str, limit: i64) -> SqliteResult<Vec<(String, String, String)>> {
+    pub fn kb_entries_stale_embedding(&self, current_provider: &str, limit: i64) -> DbResult<Vec<(String, String, String)>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, summary, COALESCE(detail, '') FROM knowledge
@@ -287,12 +288,12 @@ impl MissionDB {
         let rows = stmt.query_map(params![current_provider, limit], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?;
-        rows.collect()
+        Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
     }
 
     /// Load all embeddings for a given category (e.g. "policy:decision").
     /// Returns Vec<(id, embedding)> for entries with non-NULL embeddings.
-    pub fn kb_load_embeddings(&self, category: &str) -> SqliteResult<Vec<(String, Vec<f32>)>> {
+    pub fn kb_load_embeddings(&self, category: &str) -> DbResult<Vec<(String, Vec<f32>)>> {
         let conn = self.read_conn();
         let like_pattern = format!("{}:%", category);
         let mut stmt = conn.prepare(
@@ -313,7 +314,7 @@ impl MissionDB {
     }
 
     /// Load ALL KB embeddings regardless of category (for hybrid search cache).
-    pub fn kb_load_all_embeddings(&self) -> SqliteResult<Vec<(String, Vec<f32>)>> {
+    pub fn kb_load_all_embeddings(&self) -> DbResult<Vec<(String, Vec<f32>)>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL"
@@ -332,7 +333,7 @@ impl MissionDB {
     }
 
     /// FTS5-based search returning ranked (id, rank) pairs for RRF merge.
-    pub fn kb_search_fts_ranked(&self, query: &str, category: Option<&str>) -> SqliteResult<Vec<(String, usize)>> {
+    pub fn kb_search_fts_ranked(&self, query: &str, category: Option<&str>) -> DbResult<Vec<(String, usize)>> {
         let fts_query = query.split_whitespace()
             .map(|w| format!("\"{}\"", w.replace('"', "")))
             .collect::<Vec<_>>()
@@ -374,7 +375,7 @@ impl MissionDB {
     }
 
     /// LIKE-based search returning ranked (id, rank) pairs for RRF merge.
-    pub fn kb_search_like_ranked(&self, query: &str, category: Option<&str>) -> SqliteResult<Vec<(String, usize)>> {
+    pub fn kb_search_like_ranked(&self, query: &str, category: Option<&str>) -> DbResult<Vec<(String, usize)>> {
         let keywords: Vec<String> = {
             let mut kw: Vec<String> = query.split_whitespace()
                 .map(|w| w.to_string())
@@ -430,7 +431,7 @@ impl MissionDB {
 
     /// List knowledge entries where embedding IS NULL (for backfill).
     /// Returns (id, summary, detail_text).
-    pub fn kb_entries_missing_embedding(&self, category: Option<&str>) -> SqliteResult<Vec<(String, String, String)>> {
+    pub fn kb_entries_missing_embedding(&self, category: Option<&str>) -> DbResult<Vec<(String, String, String)>> {
         let conn = self.read_conn();
         let mut entries = Vec::new();
         if let Some(cat) = category {
@@ -460,7 +461,7 @@ impl MissionDB {
     }
 
     /// Get a knowledge entry by its ID (for hybrid search result lookup)
-    pub fn kb_get_by_id(&self, id: &str) -> SqliteResult<Option<KnowledgeEntry>> {
+    pub fn kb_get_by_id(&self, id: &str) -> DbResult<Option<KnowledgeEntry>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare("SELECT * FROM knowledge WHERE id = ?1")?;
         let mut rows = stmt.query(params![id])?;
@@ -472,13 +473,13 @@ impl MissionDB {
     }
 
     /// Get a knowledge entry ID by key (lightweight, no access bump)
-    pub fn kb_get_id_by_key(&self, key: &str) -> SqliteResult<Option<String>> {
+    pub fn kb_get_id_by_key(&self, key: &str) -> DbResult<Option<String>> {
         let conn = self.read_conn();
-        conn.query_row(
+        Ok(conn.query_row(
             "SELECT id FROM knowledge WHERE key = ?1",
             params![key],
             |row| row.get(0),
-        ).optional()
+        ).optional()?)
     }
 
     /// Search knowledge with ranked results (for hybrid search RRF fusion).
@@ -488,7 +489,7 @@ impl MissionDB {
         query: &str,
         category: Option<&str>,
         limit: usize,
-    ) -> SqliteResult<Vec<(KnowledgeEntry, usize)>> {
+    ) -> DbResult<Vec<(KnowledgeEntry, usize)>> {
         let results = self.kb_search(query, category)?;
         Ok(results
             .into_iter()
@@ -501,7 +502,7 @@ impl MissionDB {
     /// Search knowledge via FTS, with LIKE fallback for Chinese text.
     /// NOTE: Does NOT bump access_count. Callers that represent user-initiated searches
     /// should explicitly call `kb_update_access_stats()` on the results.
-    pub fn kb_search(&self, query: &str, category: Option<&str>) -> SqliteResult<Vec<KnowledgeEntry>> {
+    pub fn kb_search(&self, query: &str, category: Option<&str>) -> DbResult<Vec<KnowledgeEntry>> {
         // Phase 1: FTS5 search (works well for English / space-separated tokens)
         let results = self.kb_search_fts(query, category)?;
         let results = if results.is_empty() {
@@ -515,7 +516,7 @@ impl MissionDB {
     }
 
     /// Batch update access_count and last_accessed_at for search hits
-    pub fn kb_update_access_stats(&self, entries: &[KnowledgeEntry]) -> SqliteResult<()> {
+    pub fn kb_update_access_stats(&self, entries: &[KnowledgeEntry]) -> DbResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         let mut stmt = conn.prepare(
@@ -528,7 +529,7 @@ impl MissionDB {
     }
 
     /// FTS5-based search
-    fn kb_search_fts(&self, query: &str, category: Option<&str>) -> SqliteResult<Vec<KnowledgeEntry>> {
+    fn kb_search_fts(&self, query: &str, category: Option<&str>) -> DbResult<Vec<KnowledgeEntry>> {
         let fts_query = query.split_whitespace()
             .map(|w| format!("\"{}\"", w.replace('"', "")))
             .collect::<Vec<_>>()
@@ -570,7 +571,7 @@ impl MissionDB {
     }
 
     /// LIKE-based fallback search for Chinese and partial matches
-    fn kb_search_like(&self, query: &str, category: Option<&str>) -> SqliteResult<Vec<KnowledgeEntry>> {
+    fn kb_search_like(&self, query: &str, category: Option<&str>) -> DbResult<Vec<KnowledgeEntry>> {
         let keywords: Vec<String> = {
             let mut kw: Vec<String> = query.split_whitespace()
                 .map(|w| w.to_string())
@@ -636,13 +637,13 @@ impl MissionDB {
 
     /// List knowledge entries, optionally filtered by category.
     /// Supports composite categories: querying "memory" also returns "memory:architecture" etc.
-    pub fn kb_list(&self, category: Option<&str>) -> SqliteResult<Vec<KnowledgeEntry>> {
+    pub fn kb_list(&self, category: Option<&str>) -> DbResult<Vec<KnowledgeEntry>> {
         let conn = self.read_conn();
         Self::kb_list_with_conn(&conn, category)
     }
 
     /// List knowledge entries using an existing connection (no lock)
-    fn kb_list_with_conn(conn: &Connection, category: Option<&str>) -> SqliteResult<Vec<KnowledgeEntry>> {
+    fn kb_list_with_conn(conn: &Connection, category: Option<&str>) -> DbResult<Vec<KnowledgeEntry>> {
         let mut entries = Vec::new();
         if let Some(cat) = category {
             let like_pattern = format!("{}:%", cat);
@@ -667,7 +668,7 @@ impl MissionDB {
 
     /// List knowledge entries with pagination support.
     /// Used by kb_analyze v2 for chunked analysis.
-    pub fn kb_list_paginated(&self, category: Option<&str>, limit: u32, offset: u32) -> SqliteResult<Vec<KnowledgeEntry>> {
+    pub fn kb_list_paginated(&self, category: Option<&str>, limit: u32, offset: u32) -> DbResult<Vec<KnowledgeEntry>> {
         let conn = self.read_conn();
         let mut entries = Vec::new();
         if let Some(cat) = category {
@@ -692,7 +693,7 @@ impl MissionDB {
     }
 
     /// Forget (delete) a knowledge entry by key
-    pub fn kb_forget(&self, key: &str) -> SqliteResult<bool> {
+    pub fn kb_forget(&self, key: &str) -> DbResult<bool> {
         let conn = self.conn();
         let deleted = conn.execute(
             "DELETE FROM knowledge WHERE key = ?1",
@@ -705,7 +706,7 @@ impl MissionDB {
     }
 
     /// Batch delete multiple knowledge entries by keys. Returns count of deleted entries.
-    pub fn kb_batch_forget(&self, keys: &[String]) -> SqliteResult<usize> {
+    pub fn kb_batch_forget(&self, keys: &[String]) -> DbResult<usize> {
         let conn = self.conn();
         let mut deleted = 0;
         for key in keys {
@@ -727,7 +728,7 @@ impl MissionDB {
     }
 
     /// Sync FTS index for a knowledge entry (uses existing connection)
-    fn kb_sync_fts_with_conn(conn: &Connection, entry: &KnowledgeEntry) -> SqliteResult<()> {
+    fn kb_sync_fts_with_conn(conn: &Connection, entry: &KnowledgeEntry) -> DbResult<()> {
         let rowid: i64 = conn.query_row(
             "SELECT rowid FROM knowledge WHERE id = ?1",
             params![entry.id],
@@ -758,7 +759,7 @@ impl MissionDB {
     }
 
     /// Get KB category counts for summary string
-    pub fn kb_summary(&self) -> SqliteResult<Vec<(String, i64)>> {
+    pub fn kb_summary(&self) -> DbResult<Vec<(String, i64)>> {
         tokio::task::block_in_place(|| {
             let conn = self.read_conn();
             let mut stmt = conn.prepare(
@@ -767,22 +768,22 @@ impl MissionDB {
             let rows = stmt.query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })?;
-            rows.collect()
+            Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
         })
     }
 
     /// Get top N hot keys by access_count (for instructions injection)
-    pub fn kb_hot_keys(&self, limit: i64) -> SqliteResult<Vec<String>> {
+    pub fn kb_hot_keys(&self, limit: i64) -> DbResult<Vec<String>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT key FROM knowledge ORDER BY access_count DESC, updated_at DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit], |row| row.get::<_, String>(0))?;
-        rows.collect()
+        Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
     }
 
     /// Find stale entries: never accessed and older than N days
-    pub fn kb_find_stale(&self, days: i64) -> SqliteResult<Vec<KnowledgeEntry>> {
+    pub fn kb_find_stale(&self, days: i64) -> DbResult<Vec<KnowledgeEntry>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM knowledge WHERE access_count = 0 \
@@ -791,12 +792,12 @@ impl MissionDB {
              ORDER BY updated_at ASC",
         )?;
         let rows = stmt.query_map(params![days], |row| Self::row_to_knowledge_entry(row))?;
-        rows.collect()
+        Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
     }
 
     /// Find potential duplicates using Jaccard similarity on key+summary text.
     /// Returns pairs with similarity score (threshold: 0.6).
-    pub fn kb_find_duplicates(&self) -> SqliteResult<Vec<(KnowledgeEntry, KnowledgeEntry, f64)>> {
+    pub fn kb_find_duplicates(&self) -> DbResult<Vec<(KnowledgeEntry, KnowledgeEntry, f64)>> {
         const DUP_THRESHOLD: f64 = 0.6;
         let entries = self.kb_list(None)?;
         let mut duplicates = Vec::new();
@@ -826,7 +827,7 @@ impl MissionDB {
     }
 
     /// Get embedding coverage stats across all three systems (KB, Skill, Conversation).
-    pub fn embedding_stats(&self) -> SqliteResult<serde_json::Value> {
+    pub fn embedding_stats(&self) -> DbResult<serde_json::Value> {
         let conn = self.read_conn();
 
         // KB stats
@@ -893,7 +894,7 @@ impl MissionDB {
     }
 
     /// Get KB statistics for governance
-    pub fn kb_stats(&self) -> SqliteResult<serde_json::Value> {
+    pub fn kb_stats(&self) -> DbResult<serde_json::Value> {
         let conn = self.read_conn();
         let total: i64 = conn.query_row(
             "SELECT COUNT(*) FROM knowledge", [], |row| row.get(0)
@@ -944,7 +945,7 @@ impl MissionDB {
 
     /// Auto-GC: delete infra (duplicates servers.yaml), expired bugfix (>30d),
     /// and stale zero-access entries (>14d, non-protected categories).
-    pub fn kb_auto_gc(&self) -> SqliteResult<usize> {
+    pub fn kb_auto_gc(&self) -> DbResult<usize> {
         let conn = self.conn();
         let mut deleted = 0;
 
@@ -985,7 +986,7 @@ impl MissionDB {
         plan_id: &str,
         task_id: Option<&str>,
         operations: &[KBOperation],
-    ) -> SqliteResult<usize> {
+    ) -> DbResult<usize> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         let mut saved = 0;
@@ -1016,7 +1017,7 @@ impl MissionDB {
         &self,
         plan_id: Option<&str>,
         status: Option<&str>,
-    ) -> SqliteResult<Vec<KBOperationRow>> {
+    ) -> DbResult<Vec<KBOperationRow>> {
         let conn = self.conn();
         let (sql, params_vec): (String, Vec<Box<dyn rusqlite::ToSql>>) = match (plan_id, status) {
             (Some(pid), Some(s)) => (
@@ -1058,7 +1059,7 @@ impl MissionDB {
                 error: row.get(11)?,
             })
         })?;
-        rows.collect()
+        Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
     }
 
     /// Update operation status
@@ -1068,7 +1069,7 @@ impl MissionDB {
         status: &str,
         result: Option<&str>,
         error: Option<&str>,
-    ) -> SqliteResult<bool> {
+    ) -> DbResult<bool> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         let executed_at = if status == "done" || status == "failed" { Some(now.as_str()) } else { None };
@@ -1086,7 +1087,7 @@ impl MissionDB {
         task_id: &str,
         new_status: &str,
         result: Option<&str>,
-    ) -> SqliteResult<bool> {
+    ) -> DbResult<bool> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         let pattern = format!("%task_id={}%", task_id);
@@ -1100,7 +1101,7 @@ impl MissionDB {
 
     /// Expire stale pending kb_operations older than `ttl_secs` seconds.
     /// Returns the number of expired operations.
-    pub fn kb_ops_expire_stale(&self, ttl_secs: i64) -> SqliteResult<usize> {
+    pub fn kb_ops_expire_stale(&self, ttl_secs: i64) -> DbResult<usize> {
         let conn = self.conn();
         let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(ttl_secs)).to_rfc3339();
         let updated = conn.execute(
@@ -1112,7 +1113,7 @@ impl MissionDB {
     }
 
     /// Get queue status summary for a plan
-    pub fn kb_ops_plan_summary(&self, plan_id: &str) -> SqliteResult<serde_json::Value> {
+    pub fn kb_ops_plan_summary(&self, plan_id: &str) -> DbResult<serde_json::Value> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT status, COUNT(*) FROM kb_operation_queue WHERE plan_id = ?1 GROUP BY status"
@@ -1133,7 +1134,7 @@ impl MissionDB {
         Ok(serde_json::Value::Object(summary))
     }
 
-    pub(crate) fn row_to_knowledge_entry(row: &rusqlite::Row) -> SqliteResult<KnowledgeEntry> {
+    pub(crate) fn row_to_knowledge_entry(row: &rusqlite::Row) -> rusqlite::Result<KnowledgeEntry> {
         let detail_str: Option<String> = row.get("detail")?;
         let detail = detail_str.and_then(|s| serde_json::from_str(&s).ok());
 

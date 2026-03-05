@@ -6,7 +6,7 @@ use missiond_mcp::tools::ToolResult;
 
 use crate::state::AppState;
 use crate::lenient;
-use crate::autopilot::{MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
+use crate::state::{MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 use crate::state::{CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES};
 use crate::events_sync;
 use crate::helpers::default_mission_home;
