@@ -82,7 +82,8 @@ pub(crate) async fn schedule_memory_tasks(state: &AppState) {
 /// Returns true if at least one task was dispatched.
 /// Part of the unified priority scheduler — called before extraction checks.
 pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
-    let queued = match state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Queued) {
+    // spawn_blocking: batch table scan
+    let queued = match state.db_exec.run(|db| db.get_tasks_by_status(missiond_core::types::TaskStatus::Queued)).await {
         Ok(tasks) => tasks,
         Err(e) => {
             warn!(error = %e, "Failed to query queued submit tasks");
@@ -157,7 +158,7 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
 
     // Phase 2: Wake-on-Demand — auto-spawn stopped slots for roles that still have queued tasks
     {
-        let remaining = match state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Queued) {
+        let remaining = match state.db_exec.run(|db| db.get_tasks_by_status(missiond_core::types::TaskStatus::Queued)).await {
             Ok(t) => t,
             Err(_) => vec![],
         };
@@ -195,7 +196,8 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
 /// Reap submit tasks stuck in Running state for too long (15 min).
 /// If the slot is Idle, mark Done; otherwise mark Failed after timeout.
 pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
-    let running = match state.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Running) {
+    // spawn_blocking: batch table scan
+    let running = match state.db_exec.run(|db| db.get_tasks_by_status(missiond_core::types::TaskStatus::Running)).await {
         Ok(t) => t,
         Err(_) => return,
     };

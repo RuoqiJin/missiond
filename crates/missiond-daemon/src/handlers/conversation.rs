@@ -133,9 +133,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let top_k = limit.unwrap_or(10) as usize;
             let db = state.mission.db();
 
-            // ── Path A: single-session message search (legacy behavior) ──
+            // ── Path A: single-session message search (spawn_blocking: FTS5) ──
             if let Some(ref sid) = session_id {
-                let mut msgs = db.search_conversation_messages(&query, (top_k * 3) as i64)
+                let q = query.clone();
+                let limit = (top_k * 3) as i64;
+                let mut msgs = state.db_exec.run(move |db| db.search_conversation_messages(&q, limit)).await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 msgs.retain(|m| m.session_id == *sid);
                 msgs.truncate(top_k);
@@ -153,8 +155,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
             // ── Path B: hybrid session-level search (FTS5 + embedding RRF) ──
 
-            // 1. FTS5: AND-first BM25 search → session ranking
-            let fts_sessions = db.search_conversation_sessions_fts(&query, (top_k * 3) as i64)
+            // 1. FTS5: AND-first BM25 search → session ranking (spawn_blocking)
+            let q = query.clone();
+            let limit = (top_k * 3) as i64;
+            let fts_sessions = state.db_exec.run(move |db| db.search_conversation_sessions_fts(&q, limit)).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             let fts_ranked: Vec<(String, usize)> = fts_sessions.into_iter()
                 .enumerate()

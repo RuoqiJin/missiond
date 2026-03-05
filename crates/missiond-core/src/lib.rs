@@ -37,6 +37,7 @@ pub use types::{
 
 // Re-export database
 pub use db::MissionDB;
+pub use db::executor::DbExecutor;
 
 // Re-export semantic parser types
 pub use semantic::{

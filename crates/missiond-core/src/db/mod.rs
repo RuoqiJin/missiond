@@ -3,6 +3,7 @@
 //! Mirrors the TypeScript implementation in packages/missiond/src/db/index.ts
 
 pub mod error;
+pub mod executor;
 mod task;
 mod slot;
 mod board;

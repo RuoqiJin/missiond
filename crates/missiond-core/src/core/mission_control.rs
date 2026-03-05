@@ -194,6 +194,11 @@ impl MissionControl {
         &self.db
     }
 
+    /// Get a shared Arc to the database (for DbExecutor construction).
+    pub fn db_arc(&self) -> Arc<MissionDB> {
+        Arc::clone(&self.db)
+    }
+
     // ============ Task Operations ============
 
     /// Submit a task (async, returns immediately)

@@ -144,16 +144,20 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 return Ok(ToolResult::json_pretty(&entries));
             }
 
-            let db = state.mission.db();
             let top_k = 20usize;
 
-            // 1. FTS5 ranked IDs (fallback to LIKE for Chinese)
-            let mut fts_ranked = db.kb_search_fts_ranked(&query, category.as_deref())
-                .unwrap_or_default();
-            if fts_ranked.is_empty() {
-                fts_ranked = db.kb_search_like_ranked(&query, category.as_deref())
+            // 1. FTS5 ranked IDs (fallback to LIKE for Chinese) — spawn_blocking
+            let q = query.clone();
+            let cat = category.clone();
+            let fts_ranked = state.db_exec.run(move |db| {
+                let mut ranked = db.kb_search_fts_ranked(&q, cat.as_deref())
                     .unwrap_or_default();
-            }
+                if ranked.is_empty() {
+                    ranked = db.kb_search_like_ranked(&q, cat.as_deref())
+                        .unwrap_or_default();
+                }
+                Ok(ranked)
+            }).await.unwrap_or_default();
 
             // 2. Embedding cosine similarity against kb_search_cache
             let query_embedding = state.embedding_service.as_ref()
@@ -197,7 +201,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             ranked.truncate(top_k);
 
-            // 4. Fetch full KnowledgeEntry objects in RRF order
+            // 4. Fetch full KnowledgeEntry objects in RRF order (lightweight lookups)
+            let db = state.mission.db();
             let mut results = Vec::new();
             for (id, _rrf, _fts_r, _vec_r, _sim) in &ranked {
                 if let Ok(Some(entry)) = db.kb_get_by_id(id) {
