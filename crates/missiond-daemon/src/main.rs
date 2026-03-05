@@ -383,6 +383,8 @@ struct AppState {
     last_kb_consolidation_at: Arc<std::sync::atomic::AtomicI64>,
     /// Last decision harvest checkpoint timestamp (epoch secs). 0 = never run.
     last_decision_harvest_at: Arc<std::sync::atomic::AtomicI64>,
+    /// Last supervisor patrol timestamp (epoch secs). 0 = never run.
+    last_supervisor_patrol_at: Arc<std::sync::atomic::AtomicI64>,
     /// Pause switch for memory extraction tasks (realtime, deep_analysis, sync, GC).
     memory_paused: Arc<std::sync::atomic::AtomicBool>,
     /// Epoch secs when memory was paused. 0 = not paused. Used for TTL auto-resume.
@@ -7352,6 +7354,9 @@ async fn autopilot_tick(state: &AppState) -> Result<()> {
     // Reaper: timeout Running submit tasks after 15 minutes
     reap_stale_submit_tasks(state).await;
 
+    // Supervisor patrol: every 5 minutes, send patrol task to slot-supervisor
+    schedule_supervisor_patrol(state).await;
+
     // Extraction status summary (debug)
     {
         let now = chrono::Utc::now().timestamp();
@@ -8525,6 +8530,7 @@ content: "<commit hash 或提交摘要>"
 
 const MEMORY_SLOT_ID: &str = "slot-memory";           // Fast lane (realtime)
 const MEMORY_SLOW_SLOT_ID: &str = "slot-memory-slow";  // Slow lane (deep + consolidation)
+const SUPERVISOR_SLOT_ID: &str = "slot-supervisor";    // Supervisor (Opus patrol)
 
 /// Detect if a new unknown session is a compacted replacement for an active slot session.
 ///
@@ -9597,6 +9603,84 @@ fn get_task_jsonl_path(state: &AppState, task: &missiond_core::types::Task) -> O
     let session_uuid = state.mission.db().get_slot_session(slot_id).ok()??;
     let conv = state.mission.db().get_conversation(&session_uuid).ok()??;
     conv.jsonl_path
+}
+
+/// Supervisor patrol interval (5 minutes).
+const SUPERVISOR_PATROL_INTERVAL_SECS: i64 = 300;
+
+/// Schedule a periodic patrol task on the supervisor slot.
+/// The supervisor uses Opus model to inspect all slot PTY screens, detect anomalies,
+/// and take corrective action (kill misbehaving slots, report issues).
+async fn schedule_supervisor_patrol(state: &AppState) {
+    let now = chrono::Utc::now().timestamp();
+    let last = state.last_supervisor_patrol_at.load(std::sync::atomic::Ordering::Relaxed);
+    if now - last < SUPERVISOR_PATROL_INTERVAL_SECS {
+        return;
+    }
+
+    // Check if supervisor slot exists and is idle
+    let status = state.pty.get_status(SUPERVISOR_SLOT_ID).await;
+    match status {
+        Some(s) if s.state == SessionState::Idle => {}
+        Some(s) => {
+            debug!(state = ?s.state, "supervisor: not idle, skipping patrol");
+            return;
+        }
+        None => {
+            // Slot not spawned — try to ensure it's running
+            ensure_memory_slot_by_id(state, SUPERVISOR_SLOT_ID).await;
+            return;
+        }
+    }
+
+    state.last_supervisor_patrol_at.store(now, std::sync::atomic::Ordering::Relaxed);
+
+    // Collect slot status summary for the patrol prompt
+    let all_status = state.pty.get_all_status().await;
+    let mut status_lines = Vec::new();
+    for info in &all_status {
+        if info.slot_id == SUPERVISOR_SLOT_ID {
+            continue; // Don't inspect self
+        }
+        status_lines.push(format!("- {} [{}] state={:?}", info.slot_id, info.role, info.state));
+    }
+    let status_summary = status_lines.join("\n");
+
+    let prompt = format!(
+        "定期巡检。以下是当前所有工位的状态快照：\n\n\
+         {status_summary}\n\n\
+         ## 巡检任务\n\
+         1. 对状态为 Running 或 Thinking 的工位，用 mission_pty_screen 查看最近输出\n\
+         2. 检查是否存在以下异常：\n\
+            - 直接用 sqlite3/bash 操作 mission.db（严重！立即 mission_kill）\n\
+            - MCP 工具连续报错或不可用\n\
+            - 长时间无输出或陷入循环\n\
+            - 工位偏离任务目标\n\
+         3. 对 idle 工位无需检查，它们正常待命\n\
+         4. 如果所有工位正常，简短报告「巡检完成，无异常」即可\n\n\
+         ## 干预措施\n\
+         - 发现严重异常 → mission_kill(slotId) 立即终止 + mission_kb_remember 记录\n\
+         - 发现潜在问题 → mission_board_create 建任务跟进\n\
+         - 所有正常 → 不需要任何操作\n\n\
+         注意：保持巡检高效，不要花超过 2 分钟。只看 Running/Thinking 的工位。"
+    );
+
+    info!(slots = all_status.len(), "Dispatching supervisor patrol");
+
+    let pty = Arc::clone(&state.pty);
+    tokio::spawn(async move {
+        match pty.send(SUPERVISOR_SLOT_ID, &prompt, 180_000).await {
+            Ok(res) => {
+                info!(
+                    response_len = res.response.len(),
+                    "Supervisor patrol completed"
+                );
+            }
+            Err(e) => {
+                warn!(error = %e, "Supervisor patrol failed");
+            }
+        }
+    });
 }
 
 /// Threshold for considering the memory slot stuck (10 minutes).
@@ -11118,6 +11202,7 @@ async fn main() -> Result<()> {
         last_auto_gc_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         last_kb_consolidation_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         last_decision_harvest_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        last_supervisor_patrol_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         memory_paused: Arc::new(std::sync::atomic::AtomicBool::new(
             home.join("memory_paused").exists()
         )),
