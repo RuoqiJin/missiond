@@ -3,10 +3,12 @@
 //! All daemon components that call Gemini (or any model via the Router API)
 //! should go through `GeminiClient` to avoid 429 RESOURCE_EXHAUSTED errors.
 //!
-//! GCP Tier 1 quota for gemini-3.1-pro is only 25 RPM. This module provides:
-//! - RPM rate limiting via `governor` (20 RPM, leaving 5 headroom)
-//! - Concurrency limiting via `tokio::sync::Semaphore` (max 3 concurrent)
-//! - Automatic 429 retry with exponential backoff (up to 3 retries)
+//! Supports two modes (selected at init via `llm.yaml`):
+//! - **HTTP mode** (default): XJP Router / Vertex AI with 20 RPM rate limit + 429 retry
+//! - **CLI mode**: Gemini CLI subprocess via Google One AI Pro (no Vertex rate limits)
+//!
+//! Both modes share semaphore + rate_limiter and return OpenAI-compatible JSON,
+//! so all call sites work identically regardless of provider.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -17,6 +19,8 @@ use governor::{Quota, RateLimiter, clock::DefaultClock, state::{InMemoryState, N
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
+use crate::gemini_cli::GeminiCli;
+
 type GovernorLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
 /// Shared Gemini rate limiter + retry client.
@@ -25,27 +29,40 @@ type GovernorLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 pub(crate) struct GeminiClient {
     rate_limiter: Arc<GovernorLimiter>,
     semaphore: Arc<Semaphore>,
+    cli: Option<Arc<GeminiCli>>,
 }
 
 impl GeminiClient {
-    /// Create a new client with 20 RPM limit and 3 max concurrent requests.
+    /// Create a new HTTP-mode client with 20 RPM limit and 3 max concurrent requests.
     pub fn new() -> Self {
         let quota = Quota::per_minute(NonZeroU32::new(20).unwrap());
         Self {
             rate_limiter: Arc::new(RateLimiter::direct(quota)),
             semaphore: Arc::new(Semaphore::new(3)),
+            cli: None,
         }
     }
 
-    /// Send a request to the Router/Gemini API with rate limiting and 429 retry.
+    /// Create a CLI-mode client that routes through Gemini CLI subprocess.
+    pub fn with_cli(cli: GeminiCli) -> Self {
+        // CLI mode: relax rate limit (Google One AI Pro has generous limits)
+        let quota = Quota::per_minute(NonZeroU32::new(60).unwrap());
+        Self {
+            rate_limiter: Arc::new(RateLimiter::direct(quota)),
+            semaphore: Arc::new(Semaphore::new(3)),
+            cli: Some(Arc::new(cli)),
+        }
+    }
+
+    /// Returns true if this client uses Gemini CLI mode.
+    pub fn is_cli_mode(&self) -> bool {
+        self.cli.is_some()
+    }
+
+    /// Send a request with rate limiting.
     ///
-    /// Handles:
-    /// 1. Semaphore acquire (concurrency limit)
-    /// 2. Rate limiter wait (RPM limit)
-    /// 3. HTTP request
-    /// 4. 429 → drop permit, exponential backoff, retry up to 3 times
-    /// 5. Other errors → propagate
-    /// 6. Success → parse JSON response
+    /// In HTTP mode: POST to Router API with 429 retry.
+    /// In CLI mode: extract messages from body, call CLI, return OpenAI-compatible JSON.
     pub async fn send(
         &self,
         http_client: &reqwest::Client,
@@ -60,35 +77,52 @@ impl GeminiClient {
         // 2. Wait for RPM budget
         self.rate_limiter.until_ready().await;
 
-        // 3. Send request
-        let resp = http_client.post(url)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", jwt))
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| anyhow!("Gemini request failed: {}", e))?;
+        // 3. Dispatch based on mode
+        if let Some(cli) = &self.cli {
+            // CLI mode: extract messages from body, call CLI
+            // Ignore body's model — use CLI's configured default_model
+            // (call sites may pass model names incompatible with CLI, e.g. "gemini-3.1-pro" vs "gemini-3.1-pro-preview")
+            let messages = body.get("messages").and_then(|v| v.as_array())
+                .ok_or_else(|| anyhow!("CLI mode: missing 'messages' in body"))?;
+            let max_tokens = body.get("max_tokens").and_then(|v| v.as_u64()).map(|n| n as u32);
 
-        // 4. Handle 429 with retry
-        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let err_body = resp.text().await.unwrap_or_default();
-            drop(permit); // CRITICAL: release permit before sleeping
-            warn!(body = %err_body, "Gemini 429 RESOURCE_EXHAUSTED, starting retry");
-            return self.retry_with_backoff(http_client, url, jwt, body, 3).await;
+            let resp = cli.call(messages, None, max_tokens, None).await;
+            drop(permit);
+            let resp = resp?;
+
+            // Convert to OpenAI-compatible format (all call sites use /choices/0/message/content)
+            Ok(serde_json::json!({
+                "choices": [{"message": {"content": resp.content}, "finish_reason": "stop"}],
+                "model": resp.model,
+            }))
+        } else {
+            // HTTP mode: existing logic
+            let resp = http_client.post(url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {}", jwt))
+                .json(body)
+                .send()
+                .await
+                .map_err(|e| anyhow!("Gemini request failed: {}", e))?;
+
+            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let err_body = resp.text().await.unwrap_or_default();
+                drop(permit); // CRITICAL: release permit before sleeping
+                warn!(body = %err_body, "Gemini 429 RESOURCE_EXHAUSTED, starting retry");
+                return self.retry_with_backoff(http_client, url, jwt, body, 3).await;
+            }
+
+            drop(permit);
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let err_body = resp.text().await.unwrap_or_default();
+                return Err(anyhow!("Router returned {}: {}", status, err_body));
+            }
+
+            resp.json().await
+                .map_err(|e| anyhow!("Failed to parse Gemini response: {}", e))
         }
-
-        drop(permit);
-
-        // 5. Check other HTTP errors
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let err_body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Router returned {}: {}", status, err_body));
-        }
-
-        // 6. Parse JSON
-        resp.json().await
-            .map_err(|e| anyhow!("Failed to parse Gemini response: {}", e))
     }
 
     /// Send with a custom timeout. Returns `None` on any error (for best-effort calls).
