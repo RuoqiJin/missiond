@@ -444,11 +444,12 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
 /// KB consolidation on slow lane (slot-memory-slow).
 /// Periodic (every 24h) KB dedup, merge, and cleanup.
 pub(crate) async fn check_kb_consolidation(state: &AppState) {
-    // Only run once per 24 hours
+    // Only run once per 24 hours (persisted in DB to survive daemon restarts)
     let now = chrono::Utc::now().timestamp();
-    let last = state.last_kb_consolidation_at.load(std::sync::atomic::Ordering::Relaxed);
-    if last > 0 && now - last < 86400 {
-        return;
+    if let Ok(Some(last)) = state.mission.db().last_completed_slot_task_at("kb_consolidation") {
+        if now - last < 86400 {
+            return;
+        }
     }
 
     // Yield to deep analysis if there's pending work
@@ -529,9 +530,6 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
         es.current_slot_task_id = Some(slot_task_id.clone());
     }
 
-    // Update last consolidation timestamp
-    state.last_kb_consolidation_at.store(now, std::sync::atomic::Ordering::Relaxed);
-
     let pty = Arc::clone(&state.pty);
     let extraction_state = Arc::clone(&state.slow_extraction_state);
     let mission = Arc::clone(&state.mission);
@@ -581,9 +579,8 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
 
 /// KB auto-GC: delete infra, expired bugfix, stale zero-access entries. Runs hourly.
 pub(crate) fn check_kb_auto_gc(state: &AppState) {
-    use std::sync::atomic::Ordering;
     let now = chrono::Utc::now().timestamp();
-    let last = state.last_auto_gc_at.load(Ordering::Relaxed);
+    let last = state.mission.db().daemon_state_get("last_auto_gc_at").unwrap_or(None).unwrap_or(0);
     if now - last < 3600 {
         return;
     }
@@ -593,5 +590,5 @@ pub(crate) fn check_kb_auto_gc(state: &AppState) {
         Ok(_) => debug!("KB auto-GC: nothing to clean"),
         Err(e) => warn!(error = %e, "KB auto-GC failed"),
     }
-    state.last_auto_gc_at.store(now, Ordering::Relaxed);
+    let _ = state.mission.db().daemon_state_set("last_auto_gc_at", now);
 }

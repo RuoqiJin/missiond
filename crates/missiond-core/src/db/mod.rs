@@ -994,6 +994,15 @@ impl MissionDB {
             tracing::info!("Migration: added session_timeline + timeline_built_at to conversations");
         }
 
+        // Daemon state KV: persist timestamps/flags that must survive daemon restarts
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS daemon_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );"
+        )?;
+
         Ok(())
     }
 

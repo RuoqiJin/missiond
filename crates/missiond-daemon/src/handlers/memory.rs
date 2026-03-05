@@ -162,8 +162,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             ).unwrap_or(0);
 
             // Timestamps
-            let last_consolidation = state.last_kb_consolidation_at.load(std::sync::atomic::Ordering::Relaxed);
-            let last_gc = state.last_auto_gc_at.load(std::sync::atomic::Ordering::Relaxed);
+            let last_consolidation = db.last_completed_slot_task_at("kb_consolidation").unwrap_or(None).unwrap_or(0);
+            let last_gc = db.daemon_state_get("last_auto_gc_at").unwrap_or(None).unwrap_or(0);
 
             // KB stats (full — includes mostAccessed, oldest, subcategories)
             let kb_stats = db.kb_stats()
