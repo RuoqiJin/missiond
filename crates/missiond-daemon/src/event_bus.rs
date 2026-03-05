@@ -22,6 +22,8 @@ pub(crate) enum DaemonEvent {
     // ===== Task scheduling =====
     /// A new submit task was created and queued.
     TaskCreated { task_id: String },
+    /// Multiple submit tasks created in a batch (aggregated to avoid broadcast flooding).
+    TasksBatchCreated { count: usize },
     /// A submit task completed (slot returned to idle).
     TaskCompleted { task_id: String },
 
@@ -38,6 +40,23 @@ pub(crate) enum DaemonEvent {
     // ===== Health / AIOps =====
     /// An incident was detected by health scan or PTY error detection.
     IncidentDetected { incident_id: String },
+
+    // ===== LLM Gateway =====
+    /// A Gemini API request completed (success or failure).
+    GeminiRequestCompleted {
+        request_id: String,
+        caller: String,
+        session_id: Option<String>,
+        api_mode: String,
+        model: String,
+        prompt_chars: usize,
+        response_chars: usize,
+        queue_wait_ms: u64,
+        duration_ms: u64,
+        retry_count: u32,
+        status: String,
+        error_msg: Option<String>,
+    },
 }
 
 /// Broadcast-based event bus for daemon inter-module communication.
@@ -63,5 +82,10 @@ impl EventBus {
     /// Create a new subscriber. Each subscriber has an independent receive buffer.
     pub fn subscribe(&self) -> broadcast::Receiver<DaemonEvent> {
         self.tx.subscribe()
+    }
+
+    /// Get a clone of the sender (for passing to components that emit events).
+    pub fn sender(&self) -> broadcast::Sender<DaemonEvent> {
+        self.tx.clone()
     }
 }

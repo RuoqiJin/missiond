@@ -372,6 +372,30 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
         }
 
+        // ===== Gemini Request Log =====
+        "mission_gemini_trace" => {
+            let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
+            let caller = args_val.get("caller").and_then(|v| v.as_str());
+            let session_id = args_val.get("session_id").and_then(|v| v.as_str());
+            let status = args_val.get("status").and_then(|v| v.as_str());
+            let limit = args_val.get("limit").and_then(|v| v.as_i64()).unwrap_or(20);
+
+            let db = state.mission.db();
+            let rows = db.gemini_log_query(caller, session_id, status, limit)
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            Ok(ToolResult::json_pretty(&serde_json::json!({
+                "count": rows.len(),
+                "requests": rows,
+            })))
+        }
+
+        "mission_gemini_stats" => {
+            let db = state.mission.db();
+            let stats = db.gemini_log_stats()
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            Ok(ToolResult::json_pretty(&stats))
+        }
+
         _ => Err(anyhow!("Unknown misc tool: {name}")),
     }
 }

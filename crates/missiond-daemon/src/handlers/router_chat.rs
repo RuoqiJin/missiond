@@ -9,6 +9,7 @@ use crate::state::AppState;
 use crate::embedding_worker::resolve_llm_credentials;
 use crate::context_budget::apply_context_budget;
 use crate::context_budget::MAX_ROUTER_PAYLOAD_BYTES;
+use crate::gemini_client::REQUEST_CALLER;
 
 /// Allowed directory prefixes for file attachments (path jail).
 const FILE_ALLOWED_PREFIXES: &[&str] = &[
@@ -182,7 +183,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .sum();
             info!("Router chat: {} messages ({} chars) to {} via {}", messages.len(), total_chars, model, url);
 
-            let result = state.gemini.send(&state.http_client, &url, &jwt, &body).await?;
+            let result = REQUEST_CALLER.scope("router_chat".to_string(), async {
+                state.gemini.send(&state.http_client, &url, &jwt, &body).await
+            }).await?;
 
             let content = result
                 .pointer("/choices/0/message/content")

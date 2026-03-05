@@ -164,6 +164,43 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
+        // ── Gemini Request Log ──
+        ToolDefinition::new(
+            "mission_gemini_trace",
+            "查询 Gemini API 调用日志。支持按 caller/session_id/status 筛选。排查 LLM 调用链路问题。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "caller": {
+                        "type": "string",
+                        "description": "调用方: router_chat, flow_engine, kb_analyze, embedding",
+                        "enum": ["router_chat", "flow_engine", "kb_analyze", "embedding"]
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Claude Code session ID"
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "请求状态: ok, error, timeout",
+                        "enum": ["ok", "error", "timeout"]
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "返回条数(默认 20)",
+                        "default": 20
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_gemini_stats",
+            "Gemini API 调用统计（7天汇总：按 caller 分布、平均耗时、慢请求 Top 10）",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+        ),
         // ── AIOps Incidents ──
         ToolDefinition::new(
             "mission_incident_test",

@@ -1,11 +1,11 @@
 
 use anyhow::{anyhow, Result};
-use serde_json::json;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::state::AppState;
 use crate::llm_gateway::call_gemini_for_flow;
 use crate::memory_scheduler::ensure_memory_slot_by_id;
+use crate::prompts;
 
 pub(crate) struct TierResult {
     hit: bool,
@@ -20,273 +20,6 @@ pub(crate) fn save_routing_trace(state: &AppState, question_id: &str, resolved_t
         "latency_ms": latency_ms,
     });
     let _ = state.mission.db().set_question_routing_trace(question_id, &trace.to_string());
-}
-
-// ============ AIOps CronSensor ============
-
-/// Phase 2: Concurrent health scan of all servers with healthEndpoint configured.
-/// Uses JoinSet for parallel HTTP GET with 5s timeout per server.
-pub(crate) async fn health_scan(state: &AppState) {
-    let servers = &state.infra.servers;
-    let mut set = tokio::task::JoinSet::new();
-
-    for server in servers {
-        let endpoint = match &server.health_endpoint {
-            Some(e) => e.clone(),
-            None => continue,
-        };
-        let client = state.http_client.clone();
-        let server_id = server.id.clone();
-        let server_name = server.name.clone();
-
-        set.spawn(async move {
-            let healthy = match client
-                .get(&endpoint)
-                .timeout(std::time::Duration::from_secs(5))
-                .send()
-                .await
-            {
-                Ok(resp) => resp.status().is_success(),
-                Err(_) => false,
-            };
-            (server_id, server_name, endpoint, healthy)
-        });
-    }
-
-    while let Some(result) = set.join_next().await {
-        let (server_id, server_name, endpoint, healthy) = match result {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(error = %e, "Health check task panicked");
-                continue;
-            }
-        };
-
-        if !healthy {
-            let incident = missiond_core::types::MissionIncident {
-                id: format!("inc-{}", uuid::Uuid::new_v4()),
-                severity: missiond_core::types::IncidentSeverity::High,
-                source: missiond_core::types::IncidentSource::HealthCheck,
-                title: format!("{} 健康检查失败", server_name),
-                description: format!(
-                    "服务器 {} ({}) 的健康端点 {} 无响应或返回非 200。\n\n\
-                     建议操作：\n\
-                     1. mission_reachability(target=\"{}\") 确认网络连通性\n\
-                     2. mission_os_diagnose(target=\"{}\") 检查系统状态\n\
-                     3. 检查 Docker 容器状态",
-                    server_name, server_id, endpoint, server_id, server_id
-                ),
-                server_id: Some(server_id.clone()),
-                raw_payload: json!({
-                    "endpoint": endpoint,
-                    "server_id": server_id,
-                    "server_name": server_name,
-                }),
-                created_at: chrono::Utc::now().to_rfc3339(),
-            };
-
-            if let Err(e) = state.incident_tx.try_send(incident) {
-                warn!(server_id = %server_id, "Incident channel full, dropping health check: {}", e);
-            }
-        }
-    }
-}
-
-// ============ AIOps Reactor ============
-
-/// Process a single incident from the event bus:
-/// 1. Dedupe check (5-minute window on dedupe_key)
-/// 2. Insert into DB
-/// 3. Create a high-priority Board task for slot-ops
-pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::types::MissionIncident) {
-    let db = state.mission.db();
-    let dedupe_key = format!("{}:{}", incident.source, incident.title);
-
-    // PtySlot incidents: dispatch remediation to a Claude Code (Opus) slot
-    if matches!(incident.source, missiond_core::types::IncidentSource::PtySlot) {
-        if let Some(slot_id) = incident.raw_payload.get("slot_id").and_then(|v| v.as_str()) {
-            create_pty_remediation_task(state, slot_id, &incident.title, &incident.description);
-            // Still insert incident record below, but skip default Board task creation
-            if let Err(e) = db.insert_incident(
-                &incident.id,
-                &incident.severity.to_string(),
-                &incident.source.to_string(),
-                &incident.title,
-                &incident.description,
-                incident.server_id.as_deref(),
-                Some(&incident.raw_payload.to_string()),
-                None,
-                &dedupe_key,
-            ) {
-                warn!(error = %e, "AIOps: failed to insert incident record");
-            }
-            return;
-        }
-    }
-
-    // 5-minute dedupe window — drop duplicate incidents
-    match db.has_recent_incident(&dedupe_key, 300) {
-        Ok(true) => {
-            debug!(
-                dedupe_key = %dedupe_key,
-                "Incident dedupe: dropping duplicate within 5min window"
-            );
-            return;
-        }
-        Ok(false) => {}
-        Err(e) => {
-            warn!(error = %e, "Incident dedupe check failed, proceeding anyway");
-        }
-    }
-
-    // Truncate raw_payload for prompt safety (max 2000 chars)
-    let raw_str = incident.raw_payload.to_string();
-    let truncated_payload = if raw_str.len() > 2000 {
-        format!("{}... (truncated, {} total)", &raw_str[..2000], raw_str.len())
-    } else {
-        raw_str
-    };
-
-    // Build Board task description with structured context
-    let description = format!(
-        "## AIOps 自动检测到异常\n\n\
-         **严重等级**: {severity}\n\
-         **来源**: {source}\n\
-         **服务器**: {server}\n\
-         **时间**: {time}\n\n\
-         ### 描述\n{desc}\n\n\
-         ### 原始数据\n```json\n{payload}\n```",
-        severity = incident.severity,
-        source = incident.source,
-        server = incident.server_id.as_deref().unwrap_or("N/A"),
-        time = incident.created_at,
-        desc = incident.description,
-        payload = truncated_payload,
-    );
-
-    // Determine priority and auto-execute from severity
-    // Warning → Board backlog only (autoExecute=false), High/Critical → auto-dispatch to slot-ops
-    let (priority, auto_execute) = match incident.severity {
-        missiond_core::types::IncidentSeverity::Critical => ("urgent", true),
-        missiond_core::types::IncidentSeverity::High => ("high", true),
-        missiond_core::types::IncidentSeverity::Warning => ("medium", false),
-    };
-
-    // Create board task
-    let task_input = missiond_core::types::CreateBoardTaskInput {
-        title: format!("[AIOps] {}", incident.title),
-        description: Some(description),
-        priority: Some(priority.to_string()),
-        category: Some("ops".to_string()),
-        assignee: Some("slot-ops".to_string()),
-        auto_execute: Some(auto_execute),
-        server: incident.server_id.clone(),
-        project: None,
-        due_date: None,
-        parent_id: None,
-        prompt_template: None,
-        hidden: None,
-        flow_template: None,
-        depends_on: None,
-    };
-
-    let board_task_id = match db.create_board_task(&task_input) {
-        Ok(task) => {
-            info!(
-                incident_id = %incident.id,
-                board_task_id = %task.id,
-                severity = %incident.severity,
-                title = %incident.title,
-                "AIOps: incident → board task created"
-            );
-            Some(task.id)
-        }
-        Err(e) => {
-            error!(error = %e, "AIOps: failed to create board task for incident");
-            None
-        }
-    };
-
-    // Fire submit_notify so Autopilot picks up the new task
-    state.event_bus.publish(crate::event_bus::DaemonEvent::TaskCreated { task_id: String::new() });
-
-    // Insert incident record into DB
-    if let Err(e) = db.insert_incident(
-        &incident.id,
-        &incident.severity.to_string(),
-        &incident.source.to_string(),
-        &incident.title,
-        &incident.description,
-        incident.server_id.as_deref(),
-        Some(&incident.raw_payload.to_string()),
-        board_task_id.as_deref(),
-        &dedupe_key,
-    ) {
-        warn!(error = %e, "AIOps: failed to insert incident record");
-    }
-}
-
-// ============ PTY Auto-Remediation ============
-
-/// Dispatch a remediation Board task to a Claude Code (Opus) slot.
-/// The slot will use MCP tools (pty_screen, pty_send, pty_kill) to observe and fix.
-pub(crate) fn create_pty_remediation_task(
-    state: &AppState,
-    target_slot_id: &str,
-    incident_title: &str,
-    incident_description: &str,
-) {
-    let description = format!(
-        "## PTY 工位自愈任务\n\n\
-         **目标工位**: `{target_slot}`\n\
-         **问题**: {title}\n\n\
-         ### 问题详情\n{desc}\n\n\
-         ### 操作指南\n\
-         1. `mission_pty_screen(slotId=\"{target_slot}\")` 查看目标工位当前屏幕\n\
-         2. `mission_pty_status(slotId=\"{target_slot}\")` 检查工位状态\n\
-         3. 根据屏幕内容判断修复方式：\n\
-            - MCP 不可用 → `mission_pty_kill(slotId=\"{target_slot}\")` 重启（auto_restart 会自动恢复）\n\
-            - 卡在确认提示 → `mission_pty_send(slotId=\"{target_slot}\", message=\"...\")` 发送合适回复\n\
-            - 其他情况 → 先观察，再决定\n\
-         4. 操作后再次 `mission_pty_screen` 确认修复效果\n\
-         5. 重复 observe-act 直到目标工位恢复正常\n\n\
-         **注意**: 如果无法修复，在任务中说明原因即可。",
-        target_slot = target_slot_id,
-        title = incident_title,
-        desc = incident_description,
-    );
-
-    let task_input = missiond_core::types::CreateBoardTaskInput {
-        title: format!("[自愈] {}", incident_title),
-        description: Some(description),
-        priority: Some("high".to_string()),
-        category: Some("ops".to_string()),
-        assignee: Some("slot-coder-1".to_string()),
-        auto_execute: Some(true),
-        server: None,
-        project: None,
-        due_date: None,
-        parent_id: None,
-        prompt_template: None,
-        hidden: None,
-        flow_template: None,
-        depends_on: None,
-    };
-
-    match state.mission.db().create_board_task(&task_input) {
-        Ok(task) => {
-            info!(
-                task_id = %task.id,
-                target_slot = %target_slot_id,
-                "PTY remediation: Board task created for Opus slot"
-            );
-            // Notify autopilot to pick up immediately
-            state.event_bus.publish(crate::event_bus::DaemonEvent::TaskCreated { task_id: String::new() });
-        }
-        Err(e) => {
-            error!(error = %e, "PTY remediation: failed to create Board task");
-        }
-    }
 }
 
 /// Decision Engine: process pending questions targeted at master.
@@ -688,12 +421,7 @@ pub(crate) async fn decision_tier2_gemini(state: &AppState, question: &missiond_
     }
 
     let user_prompt = context_parts.join("\n\n");
-    let system_prompt = "你是一个高级架构决策大脑。请基于提供的上下文，对当前遭遇的困境做出决断。\
-        你必须且只能输出严格的 JSON 格式。\
-        如果你可以直接做出决定，请输出：{\"action\": \"DECIDE\", \"decision\": \"你的具体决策\", \"reasoning\": \"简要理由\"}。\
-        如果该问题需要动态运行代码、查看报错日志或全局搜索未知的代码库才能决定，你必须弃权并输出：{\"action\": \"ESCALATE_TIER_3\", \"decision\": \"\", \"reasoning\": \"需要阅读源码\"}。";
-
-    let full_prompt = format!("{}\n\n---\n\n{}", system_prompt, user_prompt);
+    let full_prompt = format!("{}\n\n---\n\n{}", prompts::decision::TIER2_SYSTEM, user_prompt);
 
     // Reuse call_gemini_for_flow with a decision-specific conversation key
     let conv_key = format!("decision-{}", question.id);
@@ -757,7 +485,7 @@ pub(crate) async fn decision_tier3_dispatch(state: &AppState, question: &mission
 
     // Build investigation prompt
     let mut prompt_parts = vec![
-        "【最高优先任务】主干线工位在执行任务时遇到了阻塞。".to_string(),
+        prompts::decision::TIER3_HEADER.to_string(),
         format!("阻塞问题：{}", question.question),
     ];
     if !question.context.is_empty() {
@@ -786,12 +514,7 @@ pub(crate) async fn decision_tier3_dispatch(state: &AppState, question: &mission
             }
         }
     }
-    prompt_parts.push(format!(
-        "\n你的唯一目标是：通过阅读代码、运行测试等方式，查明真相并给出明确的决策。\n\
-         **警告**：你是只读/诊断性质的工位，禁止进行任何实质性的业务代码修改。\n\
-         当你得出结论后，请立刻调用 `mission_question_answer(id=\"{}\", answer=\"你的结论\")` 提交结果。",
-        question.id
-    ));
+    prompt_parts.push(prompts::decision::TIER3_FOOTER.replace("{0}", &question.id));
 
     let prompt = prompt_parts.join("\n");
     let prompt_summary = if prompt.len() > 200 {
@@ -896,132 +619,5 @@ pub(crate) async fn reap_stale_decision_tasks(state: &AppState) {
                 },
             );
         }
-    }
-}
-
-/// Decision Engine Phase 4: Harvest successful decisions into policy:decision KB entries.
-/// Triggered when a Board task is marked done — scans answered master questions,
-/// calls Gemini to generalize into reusable rules, writes to KB.
-pub(crate) async fn harvest_decisions_for_task(state: &AppState, task_id: &str, task_title: &str) {
-    // 1. Scan answered master questions for this task
-    let questions = match state.mission.db().list_questions_for_task(task_id) {
-        Ok(qs) => qs,
-        Err(e) => {
-            warn!(task_id, error = %e, "Decision harvester: failed to query questions");
-            return;
-        }
-    };
-
-    // Filter to only master-targeted questions (decision engine handled)
-    let master_questions: Vec<_> = questions.iter()
-        .filter(|q| q.target == "master" && q.answer.is_some())
-        .collect();
-
-    if master_questions.is_empty() {
-        debug!(task_id, "Decision harvester: no master decisions to harvest");
-        return;
-    }
-
-    info!(task_id, count = master_questions.len(), "Decision harvester: harvesting decisions");
-
-    // 2. Build Q&A summary for Gemini
-    let qa_text: String = master_questions.iter()
-        .map(|q| {
-            let dt = &q.decision_type;
-            let answer = q.answer.as_deref().unwrap_or("");
-            format!("- [{}] Q: {}\n  A: {}", dt, q.question, answer)
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    // 3. Call Gemini to generalize (with Few-Shot examples for quality)
-    let prompt = format!(
-        "以下是刚成功完成的任务「{}」中的具体技术决策（均已通过代码落地验证）。\n\
-        请将每条决策提炼为一条普适的架构/决策规则。\n\n\
-        **要求：**\n\
-        1. 剥离具体变量名、版本号、文件路径，保留问题特征和决策原则\n\
-        2. 每条规则输出为 JSON 对象，包含 key、summary、detail\n\
-        3. key：动宾结构连字符短语（如 resolve-dependency-conflict-legacy）\n\
-        4. summary：`[触发条件词簇] → [核心原则] → [动作]`，必须包含触发该问题的所有可能同义词、报错关键字和核心名词\n\
-        5. detail：JSON 对象 {{\"scenario\": \"...\", \"decision\": \"...\", \"reasoning\": \"...\"}}\n\
-        6. 如果多条决策本质相同，合并为一条\n\
-        7. 只输出 JSON 数组，不要包含任何其他文本\n\n\
-        **Few-Shot 示例（必须严格遵循此格式）：**\n\
-        错误示范 summary：'遇到依赖冲突时选择兼容方案。'\n\
-        正确示范 summary：'遇到 第三方 API 接口 废弃 deprecated 过期 报错 不兼容 时，优先采用 降级 兼容 强行覆盖 旧版本 原则，切勿 大规模重构 业务逻辑'\n\
-        正确示范完整条目：\n\
-        {{\"key\":\"handle-third-party-api-deprecation\",\"summary\":\"遇到 第三方 API 接口 废弃 deprecated 过期 报错 不兼容 时，优先采用 降级 兼容 强行覆盖 旧版本 原则，切勿 大规模重构 业务逻辑\",\"detail\":{{\"scenario\":\"调用外部依赖或第三方 SDK 时发现其 API 已废弃导致编译或运行报错\",\"decision\":\"寻找最小侵入性的兼容方案（如编写 adapter、忽略警告或锁死旧版本）\",\"reasoning\":\"保持主线业务稳定性，避免因外部环境变化引发不可控的级联重构\"}}}}\n\n\
-        决策记录：\n{}", task_title, qa_text
-    );
-
-    let gemini_response = match call_gemini_for_flow(state, task_id, &prompt).await {
-        Ok(r) => r,
-        Err(e) => {
-            warn!(task_id, error = %e, "Decision harvester: Gemini call failed");
-            return;
-        }
-    };
-
-    // 4. Parse Gemini response — extract JSON array robustly
-    // Gemini may wrap JSON in markdown fences or natural language text
-    let json_text = if let Some(start) = gemini_response.find('[') {
-        if let Some(end) = gemini_response.rfind(']') {
-            &gemini_response[start..=end]
-        } else {
-            gemini_response.trim()
-        }
-    } else {
-        gemini_response.trim()
-    };
-
-    let rules: Vec<serde_json::Value> = match serde_json::from_str(json_text) {
-        Ok(r) => r,
-        Err(e) => {
-            warn!(task_id, error = %e, resp = %json_text, "Decision harvester: failed to parse Gemini JSON");
-            return;
-        }
-    };
-
-    let mut written = 0;
-    for rule in &rules {
-        let key = rule.get("key").and_then(|v| v.as_str()).unwrap_or_default();
-        let summary = rule.get("summary").and_then(|v| v.as_str()).unwrap_or_default();
-        let detail = rule.get("detail");
-
-        if key.is_empty() || summary.is_empty() {
-            continue;
-        }
-
-        let input = missiond_core::types::KBRememberInput {
-            category: "policy:decision".to_string(),
-            key: key.to_string(),
-            summary: summary.to_string(),
-            detail: detail.cloned(),
-            source: Some("decision-harvester".to_string()),
-            confidence: Some(0.8),
-        };
-
-        match state.mission.db().kb_remember(&input) {
-            Ok(result) => {
-                info!(key, action = %result.action, "Decision harvester: wrote policy:decision");
-                written += 1;
-            }
-            Err(e) => {
-                warn!(key, error = %e, "Decision harvester: kb_remember failed");
-            }
-        }
-    }
-
-    if written > 0 {
-        // Write a board note about the harvest
-        let _ = state.mission.db().add_board_task_note(
-            &missiond_core::types::AddBoardTaskNoteInput {
-                task_id: task_id.to_string(),
-                content: format!("🧠 [决策引擎] 从 {} 条主控决策中提炼了 {} 条 policy:decision 规则，已写入肌肉记忆。",
-                    master_questions.len(), written),
-                note_type: Some("progress".to_string()),
-                author: Some("decision-harvester".to_string()),
-            },
-        );
     }
 }
