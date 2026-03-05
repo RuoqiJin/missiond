@@ -13,6 +13,8 @@ mod helpers;
 mod handlers;
 mod decision_engine;
 mod autopilot;
+mod llm_gateway;
+mod event_bus;
 mod extraction;
 mod supervisor;
 mod memory_scheduler;
@@ -21,6 +23,7 @@ mod slot_env;
 mod claude_md_sync;
 mod context_budget;
 mod gemini_client;
+mod gemini_cli;
 mod message_handler;
 mod ipc_handler;
 
@@ -47,7 +50,8 @@ use mcp_client::McpProcessClient;
 use helpers::*;
 use ipc_handler::{handle_ipc_connection, bind_ipc_listener};
 use embedding_worker::{init_embedding_provider, generate_and_store_conv_embedding};
-use autopilot::{autopilot_tick, detect_compaction, MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
+use autopilot::{autopilot_tick, detect_compaction};
+use state::{MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 use supervisor::get_task_jsonl_path;
 use memory_scheduler::{schedule_memory_tasks, dispatch_queued_submit_tasks};
 use decision_engine::{process_pending_master_questions, process_incident, health_scan};
@@ -592,7 +596,34 @@ async fn main() -> Result<()> {
             .timeout(std::time::Duration::from_secs(180))
             .build()
             .expect("Failed to build HTTP client"),
-        gemini: gemini_client::GeminiClient::new(),
+        gemini: {
+            // Check llm.yaml for provider config
+            let llm_yaml = default_mission_home().join("llm.yaml");
+            if llm_yaml.exists() {
+                if let Ok(content) = std::fs::read_to_string(&llm_yaml) {
+                    if let Ok(config) = serde_yaml::from_str::<embedding_worker::LlmConfig>(&content) {
+                        if config.provider == "gemini-cli" {
+                            let cli_cfg = config.gemini_cli.unwrap_or_default();
+                            info!(binary = %cli_cfg.binary, model = %cli_cfg.model, "LLM provider: gemini-cli");
+                            gemini_client::GeminiClient::with_cli(gemini_cli::GeminiCli::new(
+                                cli_cfg.binary,
+                                cli_cfg.model,
+                                std::time::Duration::from_secs(cli_cfg.timeout),
+                            ))
+                        } else {
+                            info!(provider = %config.provider, "LLM provider: HTTP router");
+                            gemini_client::GeminiClient::new()
+                        }
+                    } else {
+                        gemini_client::GeminiClient::new()
+                    }
+                } else {
+                    gemini_client::GeminiClient::new()
+                }
+            } else {
+                gemini_client::GeminiClient::new()
+            }
+        },
         xjp_mcp: Arc::new(McpProcessClient::new(
             default_mission_home().join("xjp-mcp-config.json"),
         )),

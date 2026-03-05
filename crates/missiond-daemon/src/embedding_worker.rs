@@ -10,11 +10,42 @@ use crate::helpers::default_mission_home;
 
 #[derive(serde::Deserialize)]
 pub(crate) struct LlmConfig {
+    #[serde(default = "LlmConfig::default_provider")]
+    pub(crate) provider: String,
+    #[serde(default)]
     base_url: String,
     #[serde(default)]
     auth: LlmAuth,
     #[serde(default = "LlmConfig::default_model")]
     default_model: String,
+    #[serde(default)]
+    pub(crate) gemini_cli: Option<GeminiCliConfig>,
+}
+
+#[derive(serde::Deserialize, Clone)]
+pub(crate) struct GeminiCliConfig {
+    #[serde(default = "GeminiCliConfig::default_binary")]
+    pub binary: String,
+    #[serde(default = "GeminiCliConfig::default_model")]
+    pub model: String,
+    #[serde(default = "GeminiCliConfig::default_timeout")]
+    pub timeout: u64,
+}
+
+impl Default for GeminiCliConfig {
+    fn default() -> Self {
+        Self {
+            binary: Self::default_binary(),
+            model: Self::default_model(),
+            timeout: Self::default_timeout(),
+        }
+    }
+}
+
+impl GeminiCliConfig {
+    fn default_binary() -> String { "gemini".to_string() }
+    fn default_model() -> String { "gemini-3.1-pro-preview".to_string() }
+    fn default_timeout() -> u64 { 120 }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -38,9 +69,8 @@ impl Default for LlmAuth {
 }
 
 impl LlmConfig {
-    fn default_model() -> String {
-        "gpt-4o".to_string()
-    }
+    fn default_provider() -> String { "xjp-router".to_string() }
+    fn default_model() -> String { "gpt-4o".to_string() }
 }
 
 
