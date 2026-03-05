@@ -23,9 +23,18 @@ use missiond_mcp::tools::ToolResult;
 
 static NEXT_ID: AtomicI64 = AtomicI64::new(1);
 
+/// Session ID for this MCP proxy process (one per Claude Code session).
+/// Sourced from CLAUDE_SESSION_ID env var, falling back to pid-based ID.
+fn get_session_id() -> String {
+    std::env::var("CLAUDE_SESSION_ID")
+        .or_else(|_| std::env::var("SESSION_ID"))
+        .unwrap_or_else(|_| format!("mcp-{}", std::process::id()))
+}
+
 #[derive(Clone)]
 struct IpcClient {
     endpoint: String,
+    session_id: String,
 }
 
 impl IpcClient {
@@ -74,6 +83,7 @@ impl IpcClient {
             params: Some(serde_json::json!({
                 "name": name,
                 "arguments": arguments,
+                "_meta": { "session_id": self.session_id },
             })),
             id: Some(RequestId::Number(id)),
         };
@@ -223,7 +233,8 @@ async fn main() -> Result<()> {
     let endpoint = ipc_endpoint_from_env();
     ensure_daemon(&endpoint).await?;
 
-    let client = IpcClient { endpoint };
+    let session_id = get_session_id();
+    let client = IpcClient { endpoint, session_id };
 
     // Fetch KB summary from daemon for instructions injection
     let instructions = match client.call_method("kb/summary", None).await {

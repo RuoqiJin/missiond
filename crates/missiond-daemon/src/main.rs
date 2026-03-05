@@ -11,8 +11,11 @@ mod state;
 mod mcp_client;
 mod helpers;
 mod handlers;
+mod aiops;
 mod decision_engine;
+mod decision_harvest;
 mod autopilot;
+mod flow_engine;
 mod llm_gateway;
 mod event_bus;
 mod event_router;
@@ -27,6 +30,8 @@ mod gemini_client;
 mod gemini_cli;
 mod message_handler;
 mod ipc_handler;
+mod prompts;
+mod session_util;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -42,7 +47,8 @@ use missiond_core::{CCTasksWatcher, CCTasksWatcherOptions, WatcherEvent};
 use missiond_mcp::tools::ToolResult;
 use serde_json::Value;
 use tokio::io::BufReader;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
+use crate::event_bus::DaemonEvent;
 use tracing::{debug, error, info, warn};
 
 // Re-imports from extracted modules
@@ -51,10 +57,11 @@ use mcp_client::McpProcessClient;
 use helpers::*;
 use ipc_handler::{handle_ipc_connection, bind_ipc_listener};
 use embedding_worker::{init_embedding_provider, generate_and_store_conv_embedding};
-use autopilot::{autopilot_tick, detect_compaction};
+use autopilot::autopilot_tick;
+use session_util::detect_compaction;
 use state::{MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 use supervisor::get_task_jsonl_path;
-use decision_engine::{process_incident, health_scan};
+use aiops::{process_incident, health_scan};
 use message_handler::{handle_new_messages, handle_pty_text_complete};
 
 impl AppState {
@@ -534,6 +541,8 @@ async fn main() -> Result<()> {
         info!(count = pty_uuids.len(), "Loaded PTY session UUIDs from DB");
     }
 
+    let event_bus_instance = Arc::new(event_bus::EventBus::new(512));
+
     let state = AppState {
         mission,
         permission,
@@ -595,6 +604,7 @@ async fn main() -> Result<()> {
         gemini: {
             // Check llm.yaml for provider config
             let llm_yaml = default_mission_home().join("llm.yaml");
+            let event_tx = event_bus_instance.sender();
             if llm_yaml.exists() {
                 if let Ok(content) = std::fs::read_to_string(&llm_yaml) {
                     if let Ok(config) = serde_yaml::from_str::<embedding_worker::LlmConfig>(&content) {
@@ -605,19 +615,19 @@ async fn main() -> Result<()> {
                                 cli_cfg.binary,
                                 cli_cfg.model,
                                 std::time::Duration::from_secs(cli_cfg.timeout),
-                            ))
+                            ), event_tx)
                         } else {
                             info!(provider = %config.provider, "LLM provider: HTTP router");
-                            gemini_client::GeminiClient::new()
+                            gemini_client::GeminiClient::new(event_tx)
                         }
                     } else {
-                        gemini_client::GeminiClient::new()
+                        gemini_client::GeminiClient::new(event_tx)
                     }
                 } else {
-                    gemini_client::GeminiClient::new()
+                    gemini_client::GeminiClient::new(event_tx)
                 }
             } else {
-                gemini_client::GeminiClient::new()
+                gemini_client::GeminiClient::new(event_tx)
             }
         },
         xjp_mcp: Arc::new(McpProcessClient::new(
@@ -639,7 +649,7 @@ async fn main() -> Result<()> {
         kb_search_cache: missiond_core::embedding::new_cache(),
         embedding_tx: embedding_tx,
         incident_tx: incident_tx.clone(),
-        event_bus: Arc::new(event_bus::EventBus::new(256)),
+        event_bus: Arc::clone(&event_bus_instance),
     };
 
     // Auto-spawn slots with auto_start: true
@@ -1050,6 +1060,47 @@ async fn main() -> Result<()> {
                 }
             }
             warn!("Embedding worker channel closed");
+        });
+    }
+
+    // --- Gemini request log subscriber (EventBus → DB persistence) ---
+    {
+        let mut rx = state.event_bus.subscribe();
+        let log_db = Arc::clone(&state.mission);
+        tokio::spawn(async move {
+            // Startup cleanup: remove logs older than 7 days
+            if let Ok(deleted) = log_db.db().gemini_log_cleanup(7) {
+                if deleted > 0 {
+                    info!(deleted, "Gemini log: cleaned up old entries");
+                }
+            }
+            loop {
+                match rx.recv().await {
+                    Ok(DaemonEvent::GeminiRequestCompleted {
+                        request_id, caller, session_id, api_mode, model,
+                        prompt_chars, response_chars, queue_wait_ms, duration_ms,
+                        retry_count, status, error_msg,
+                    }) => {
+                        if let Err(e) = log_db.db().gemini_log_insert(
+                            &request_id, &caller, session_id.as_deref(),
+                            &api_mode, &model,
+                            prompt_chars as i64, response_chars as i64,
+                            queue_wait_ms as i64, duration_ms as i64,
+                            retry_count as i64, &status, error_msg.as_deref(),
+                        ) {
+                            warn!(error = %e, "Gemini log: failed to persist request");
+                        }
+                    }
+                    Ok(_) => {} // ignore other events
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(skipped = n, "Gemini log subscriber lagged, some requests not logged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        info!("Gemini log subscriber: event bus closed");
+                        break;
+                    }
+                }
+            }
         });
     }
 

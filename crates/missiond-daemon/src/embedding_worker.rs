@@ -2,6 +2,7 @@
 use anyhow::{anyhow, Result};
 use tracing::{debug, info, warn};
 
+use crate::gemini_client::REQUEST_CALLER;
 use crate::state::AppState;
 use std::sync::Arc;
 use std::path::PathBuf;
@@ -433,10 +434,12 @@ pub(crate) async fn generate_conv_summary_llm(state: &AppState, conv_text: &str,
         "max_tokens": 512,
     });
 
-    let result = state.gemini.send_best_effort(
-        &state.http_client, &url, &jwt, &body,
-        std::time::Duration::from_secs(60),
-    ).await?;
+    let result = REQUEST_CALLER.scope("embedding".to_string(), async {
+        state.gemini.send_best_effort(
+            &state.http_client, &url, &jwt, &body,
+            std::time::Duration::from_secs(60),
+        ).await
+    }).await?;
     let content = result
         .pointer("/choices/0/message/content")
         .and_then(|v| v.as_str())

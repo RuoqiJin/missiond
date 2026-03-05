@@ -10,6 +10,7 @@ use anyhow::{anyhow, Result};
 use tracing::{info, warn};
 
 use crate::embedding_worker::resolve_llm_credentials;
+use crate::gemini_client::REQUEST_CALLER;
 use crate::state::AppState;
 
 /// Call Gemini via the router API for flow daemon phases.
@@ -39,7 +40,9 @@ pub(crate) async fn call_gemini_for_flow(state: &AppState, task_id: &str, prompt
 
     info!(task_id, conv_id = %conv_id, msg_count = messages.len(), "Flow engine: calling Gemini");
 
-    let result = state.gemini.send(&state.http_client, &url, &jwt, &body).await?;
+    let result = REQUEST_CALLER.scope("flow_engine".to_string(), async {
+        state.gemini.send(&state.http_client, &url, &jwt, &body).await
+    }).await?;
 
     let content = result
         .pointer("/choices/0/message/content")

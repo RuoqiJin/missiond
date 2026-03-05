@@ -7,6 +7,7 @@ use missiond_mcp::tools::ToolResult;
 use crate::state::AppState;
 use crate::embedding_worker::resolve_llm_credentials;
 use crate::context_budget::apply_context_budget;
+use crate::gemini_client::REQUEST_CALLER;
 use crate::state::EmbeddingTask;
 use crate::lenient;
 use crate::context_budget::MAX_ROUTER_PAYLOAD_BYTES;
@@ -705,7 +706,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 mode, entries.len(), kb_jsonl.len(), model, url);
 
             // 7. Call router API (rate-limited with 429 retry)
-            let result = state.gemini.send(&state.http_client, &url, &jwt, &body).await?;
+            let result = REQUEST_CALLER.scope("kb_analyze".to_string(), async {
+                state.gemini.send(&state.http_client, &url, &jwt, &body).await
+            }).await?;
 
             let content = result
                 .pointer("/choices/0/message/content")

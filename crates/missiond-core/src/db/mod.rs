@@ -13,6 +13,7 @@ mod conversation;
 mod audit;
 mod router_chat;
 mod incident;
+mod gemini_log;
 
 use rusqlite::Connection;
 use error::{DbError, DbResult};
@@ -1019,6 +1020,28 @@ impl MissionDB {
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );"
+        )?;
+
+        // Gemini request log: persistent instrumentation for all LLM calls
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS gemini_requests (
+                id TEXT PRIMARY KEY,
+                caller TEXT NOT NULL,
+                session_id TEXT,
+                api_mode TEXT NOT NULL,
+                model TEXT NOT NULL,
+                prompt_chars INTEGER,
+                response_chars INTEGER,
+                queue_wait_ms INTEGER,
+                duration_ms INTEGER,
+                retry_count INTEGER DEFAULT 0,
+                status TEXT NOT NULL,
+                error_msg TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_gemini_req_created ON gemini_requests(created_at);
+            CREATE INDEX IF NOT EXISTS idx_gemini_req_caller ON gemini_requests(caller);
+            CREATE INDEX IF NOT EXISTS idx_gemini_req_session ON gemini_requests(session_id);"
         )?;
 
         Ok(())

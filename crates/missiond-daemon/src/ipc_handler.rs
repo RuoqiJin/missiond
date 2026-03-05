@@ -3,6 +3,7 @@ use missiond_core::ipc::{IpcListener, IpcStream};
 use missiond_mcp::protocol::{self, Request, RequestId, Response, RpcError};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+use crate::gemini_client::REQUEST_SESSION_ID;
 use crate::state::AppState;
 use serde_json::Value;
 
@@ -26,7 +27,19 @@ pub(crate) async fn handle_ipc_connection(state: AppState, mut reader: BufReader
         }
     };
 
-    let resp = handle_ipc_request(state, request).await;
+    // Extract session_id from request params meta (if provided by MCP proxy)
+    let session_id = request.params.as_ref()
+        .and_then(|p| p.get("_meta"))
+        .and_then(|m| m.get("session_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    // Wrap handler in task_local scope so all downstream code can read session_id
+    let resp = REQUEST_SESSION_ID.scope(session_id, async {
+        handle_ipc_request(state, request).await
+    }).await;
+
     let json = protocol::serialize_response_string(&resp)?;
     reader.get_mut().write_all(json.as_bytes()).await?;
     reader.get_mut().write_all(b"\n").await?;
@@ -52,8 +65,6 @@ pub(crate) async fn handle_ipc_request(state: AppState, request: Request) -> Res
                             .iter()
                             .map(|(cat, n)| format!("{} {}", n, cat))
                             .collect();
-                        // Preferences + hot topics are synced to CLAUDE.md (always visible).
-                        // Instructions only carry KB stats + behavioral nudges.
                         format!(
                             "[MissionD] KB: {}. Use mission_kb_search before guessing. Use mission_kb_remember when learning.",
                             parts.join(", ")
