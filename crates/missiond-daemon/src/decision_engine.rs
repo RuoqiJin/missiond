@@ -1,19 +1,29 @@
 
+use std::sync::atomic::Ordering;
+
 use anyhow::{anyhow, Result};
 use tracing::{debug, info, warn};
 
 use crate::state::AppState;
 use crate::llm_gateway::call_gemini_for_flow;
 use crate::memory_scheduler::ensure_memory_slot_by_id;
-use crate::prompts;
 
 pub(crate) struct TierResult {
     hit: bool,
     detail: serde_json::Value,
 }
 
-/// Save routing trace JSON to the question record
+/// Save routing trace JSON to the question record.
+/// Also increments DaemonStats tier counters based on resolved_tier.
 pub(crate) fn save_routing_trace(state: &AppState, question_id: &str, resolved_tier: &str, path: &[serde_json::Value], latency_ms: u128) {
+    // Increment tier-specific DaemonStats counters
+    match resolved_tier {
+        "T1" => { state.stats.decisions_tier1_hit.fetch_add(1, Ordering::Relaxed); }
+        "T2" => { state.stats.decisions_tier2_hit.fetch_add(1, Ordering::Relaxed); }
+        "T3" => { state.stats.decisions_tier3_dispatched.fetch_add(1, Ordering::Relaxed); }
+        _ => {} // "downgraded", "error", "T2-escalated" — no dedicated counter
+    }
+
     let trace = serde_json::json!({
         "resolved_tier": resolved_tier,
         "path": path,
@@ -422,7 +432,7 @@ pub(crate) async fn decision_tier2_gemini(state: &AppState, question: &missiond_
     }
 
     let user_prompt = context_parts.join("\n\n");
-    let full_prompt = format!("{}\n\n---\n\n{}", prompts::decision::TIER2_SYSTEM, user_prompt);
+    let full_prompt = format!("{}\n\n---\n\n{}", state.prompts.tier2_system(), user_prompt);
 
     // Reuse call_gemini_for_flow with a decision-specific conversation key
     let conv_key = format!("decision-{}", question.id);
@@ -486,7 +496,7 @@ pub(crate) async fn decision_tier3_dispatch(state: &AppState, question: &mission
 
     // Build investigation prompt
     let mut prompt_parts = vec![
-        prompts::decision::TIER3_HEADER.to_string(),
+        state.prompts.tier3_header(),
         format!("阻塞问题：{}", question.question),
     ];
     if !question.context.is_empty() {
@@ -515,7 +525,7 @@ pub(crate) async fn decision_tier3_dispatch(state: &AppState, question: &mission
             }
         }
     }
-    prompt_parts.push(prompts::decision::TIER3_FOOTER.replace("{0}", &question.id));
+    prompt_parts.push(state.prompts.tier3_footer().replace("{0}", &question.id));
 
     let prompt = prompt_parts.join("\n");
     let prompt_summary = if prompt.len() > 200 {

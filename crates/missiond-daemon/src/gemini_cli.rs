@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Gemini CLI subprocess wrapper.
 #[derive(Clone, Debug)]
@@ -75,6 +75,7 @@ impl GeminiCli {
     }
 
     /// Convenience: single prompt string.
+    #[allow(dead_code)]
     pub async fn prompt(&self, text: &str, model: Option<&str>) -> Result<String> {
         let messages = vec![serde_json::json!({"role": "user", "content": text})];
         let resp = self.call(&messages, model, None, None).await?;

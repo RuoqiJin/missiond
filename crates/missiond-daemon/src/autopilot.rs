@@ -18,6 +18,8 @@ use crate::supervisor::schedule_supervisor_patrol;
 use crate::flow_engine::{execute_flow_task, ensure_autopilot_pty};
 
 pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
+    let tick_start = std::time::Instant::now();
+
     // Check PTY slots for low context — restart if < 10%
     check_slot_context_levels(state).await;
 
@@ -72,6 +74,11 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
 
     // KB auto-GC: every hour
     check_kb_auto_gc(state);
+
+    // Hot-reload LLM prompts from ~/.xjp-mission/prompts/ (every 10 ticks ≈ 10 min)
+    if state.stats.autopilot_ticks.load(std::sync::atomic::Ordering::Relaxed) % 10 == 0 {
+        state.prompts.reload();
+    }
 
     // Reaper: force-fail stale slot tasks (pending/running > 30 min)
     match state.mission.db().reap_stale_slot_tasks(1800) {
@@ -552,6 +559,12 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
             }
         }
     }
+
+    // Record tick timing to DaemonStats
+    let tick_ms = tick_start.elapsed().as_millis() as u64;
+    state.stats.autopilot_ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state.stats.autopilot_total_ms.fetch_add(tick_ms, std::sync::atomic::Ordering::Relaxed);
+    state.stats.autopilot_latency.record(tick_ms * 1000); // histogram expects microseconds
 
     Ok(())
 }

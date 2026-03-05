@@ -30,6 +30,7 @@ mod gemini_client;
 mod gemini_cli;
 mod message_handler;
 mod ipc_handler;
+mod daemon_stats;
 mod prompts;
 mod session_util;
 
@@ -542,7 +543,16 @@ async fn main() -> Result<()> {
     }
 
     let event_bus_instance = Arc::new(event_bus::EventBus::new(512));
-    let db_exec = missiond_core::DbExecutor::new(mission.db_arc());
+    let daemon_stats = Arc::new(daemon_stats::DaemonStats::new());
+    let mut db_exec = missiond_core::DbExecutor::new(mission.db_arc());
+    {
+        let stats = Arc::clone(&daemon_stats);
+        db_exec.set_on_run(std::sync::Arc::new(move |elapsed_us| {
+            stats.db_exec_runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            stats.db_exec_total_us.fetch_add(elapsed_us, std::sync::atomic::Ordering::Relaxed);
+            stats.db_exec_latency.record(elapsed_us);
+        }));
+    }
 
     let state = AppState {
         mission,
@@ -652,6 +662,8 @@ async fn main() -> Result<()> {
         incident_tx: incident_tx.clone(),
         event_bus: Arc::clone(&event_bus_instance),
         db_exec,
+        stats: Arc::clone(&daemon_stats),
+        prompts: Arc::new(prompts::PromptStore::load()),
     };
 
     // Auto-spawn slots with auto_start: true

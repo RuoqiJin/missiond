@@ -18,6 +18,7 @@ pub(crate) struct LlmConfig {
     #[serde(default)]
     auth: LlmAuth,
     #[serde(default = "LlmConfig::default_model")]
+    #[allow(dead_code)]
     default_model: String,
     #[serde(default)]
     pub(crate) gemini_cli: Option<GeminiCliConfig>,

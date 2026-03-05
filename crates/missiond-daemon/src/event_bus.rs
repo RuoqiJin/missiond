@@ -3,43 +3,27 @@
 //! Replaces scattered `tokio::sync::Notify` signals with a typed event system.
 //! All inter-module communication goes through DaemonEvent publish/subscribe.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 use tracing::debug;
 
 /// Domain events that flow between daemon modules.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields used in Debug output via publish() tracing
 pub(crate) enum DaemonEvent {
     // ===== Slot lifecycle =====
     /// A slot transitioned to Idle (extraction/submit can trigger).
     SlotBecameIdle { slot_id: String },
-    /// A slot transitioned away from Idle.
-    SlotBecameBusy { slot_id: String },
-
-    // ===== Extraction pipeline =====
-    /// Extraction completed successfully on a lane.
-    ExtractionCompleted { lane: &'static str },
 
     // ===== Task scheduling =====
     /// A new submit task was created and queued.
     TaskCreated { task_id: String },
-    /// Multiple submit tasks created in a batch (aggregated to avoid broadcast flooding).
-    TasksBatchCreated { count: usize },
     /// A submit task completed (slot returned to idle).
     TaskCompleted { task_id: String },
 
     // ===== Decision engine =====
     /// A new master-target question was created.
     QuestionCreated { question_id: String },
-
-    // ===== Memory system =====
-    /// Memory extraction paused.
-    MemoryPaused,
-    /// Memory extraction resumed.
-    MemoryResumed,
-
-    // ===== Health / AIOps =====
-    /// An incident was detected by health scan or PTY error detection.
-    IncidentDetected { incident_id: String },
 
     // ===== LLM Gateway =====
     /// A Gemini API request completed (success or failure).
@@ -65,16 +49,18 @@ pub(crate) enum DaemonEvent {
 /// it will receive `RecvError::Lagged` and skip missed events.
 pub(crate) struct EventBus {
     tx: broadcast::Sender<DaemonEvent>,
+    pub(crate) publish_count: AtomicU64,
 }
 
 impl EventBus {
     pub fn new(capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(capacity);
-        Self { tx }
+        Self { tx, publish_count: AtomicU64::new(0) }
     }
 
     /// Publish an event to all subscribers. Silently drops if no subscribers.
     pub fn publish(&self, event: DaemonEvent) {
+        self.publish_count.fetch_add(1, Ordering::Relaxed);
         debug!(event = ?event, "EventBus: publish");
         let _ = self.tx.send(event);
     }

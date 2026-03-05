@@ -48,15 +48,36 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 })
                 .collect();
 
+            // Memory extraction state
+            let memory_paused = state.memory_paused.load(std::sync::atomic::Ordering::Relaxed);
+            let fast_lane = {
+                let es = state.extraction_state.read().await;
+                json!({ "phase": format!("{:?}", es.phase), "type": es.active_type })
+            };
+            let slow_lane = {
+                let es = state.slow_extraction_state.read().await;
+                json!({ "phase": format!("{:?}", es.phase), "type": es.active_type })
+            };
+
             Ok(ToolResult::json(&serde_json::json!({
                 "status": "ok",
                 "ipc": "connected",
                 "wsPort": ws_port(),
                 "pty": pty_status,
-                "uptime": std::time::SystemTime::now()
+                "uptime_epoch": std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0),
+                "memory": {
+                    "paused": memory_paused,
+                    "fast_lane": fast_lane,
+                    "slow_lane": slow_lane,
+                },
+                "event_bus": {
+                    "publish_count": state.event_bus.publish_count.load(std::sync::atomic::Ordering::Relaxed),
+                },
+                "gemini_mode": if state.gemini.is_cli_mode() { "cli" } else { "http" },
+                "stats": state.stats.snapshot(),
             })))
         }
 
