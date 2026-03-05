@@ -1,4 +1,5 @@
-use rusqlite::{params, OptionalExtension, Result as SqliteResult};
+use rusqlite::{params, OptionalExtension};
+use super::error::DbResult;
 use crate::types::*;
 use super::MissionDB;
 
@@ -9,7 +10,7 @@ impl MissionDB {
 
     /// Get conversations pending deep analysis (conversation-level watermark).
     /// Returns completed user conversations that haven't been analyzed at the current version.
-    pub fn get_pending_deep_analysis(&self, current_version: i32, max_retries: i32) -> SqliteResult<Vec<Conversation>> {
+    pub fn get_pending_deep_analysis(&self, current_version: i32, max_retries: i32) -> DbResult<Vec<Conversation>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM conversations
@@ -39,9 +40,9 @@ impl MissionDB {
     }
 
     /// Lightweight check: are there any conversations pending deep analysis?
-    pub fn has_pending_deep_analysis(&self, current_version: i32, max_retries: i32) -> SqliteResult<bool> {
+    pub fn has_pending_deep_analysis(&self, current_version: i32, max_retries: i32) -> DbResult<bool> {
         let conn = self.read_conn();
-        conn.query_row(
+        Ok(conn.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM conversations
                 WHERE status = 'completed'
@@ -63,13 +64,13 @@ impl MissionDB {
             )",
             params![max_retries, current_version],
             |row| row.get(0),
-        )
+        )?)
     }
 
     /// Count conversations pending deep analysis.
-    pub fn count_pending_deep_analysis(&self, current_version: i32, max_retries: i32) -> SqliteResult<i64> {
+    pub fn count_pending_deep_analysis(&self, current_version: i32, max_retries: i32) -> DbResult<i64> {
         let conn = self.read_conn();
-        conn.query_row(
+        Ok(conn.query_row(
             "SELECT COUNT(*) FROM (
                 SELECT id FROM conversations
                 WHERE status = 'completed'
@@ -91,13 +92,13 @@ impl MissionDB {
             )",
             params![max_retries, current_version],
             |row| row.get(0),
-        )
+        )?)
     }
 
     /// Count distinct sessions with pending realtime messages.
-    pub fn count_pending_realtime(&self) -> SqliteResult<i64> {
+    pub fn count_pending_realtime(&self) -> DbResult<i64> {
         let conn = self.read_conn();
-        conn.query_row(
+        Ok(conn.query_row(
             "SELECT COUNT(DISTINCT c.id) FROM conversations c
              JOIN conversation_messages m ON c.id = m.session_id
              WHERE c.conversation_type = 'user'
@@ -105,11 +106,11 @@ impl MissionDB {
                AND m.role IN ('user', 'assistant')",
             [],
             |row| row.get(0),
-        )
+        )?)
     }
 
     /// Per-session pending realtime message summary (session_id, msg_count, oldest_timestamp).
-    pub fn pending_realtime_detail(&self) -> SqliteResult<Vec<(String, i64, String)>> {
+    pub fn pending_realtime_detail(&self) -> DbResult<Vec<(String, i64, String)>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT c.id, COUNT(*) as cnt, MIN(m.timestamp) as oldest
@@ -131,7 +132,7 @@ impl MissionDB {
     }
 
     /// Per-conversation pending deep analysis summary (id, ended_at, retries).
-    pub fn pending_deep_detail(&self, current_version: i32, max_retries: i32) -> SqliteResult<Vec<(String, String, i32)>> {
+    pub fn pending_deep_detail(&self, current_version: i32, max_retries: i32) -> DbResult<Vec<(String, String, i32)>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, COALESCE(ended_at, '[active]'), analysis_retries FROM conversations
@@ -164,7 +165,7 @@ impl MissionDB {
     }
 
     /// Mark a conversation's deep analysis as complete with the given version.
-    pub fn mark_analysis_complete(&self, id: &str, version: i32) -> SqliteResult<()> {
+    pub fn mark_analysis_complete(&self, id: &str, version: i32) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn();
         conn.execute(
@@ -175,7 +176,7 @@ impl MissionDB {
     }
 
     /// Advance the deep analysis checkpoint watermark for an active session.
-    pub fn update_deep_checkpoint(&self, id: &str, message_id: i64) -> SqliteResult<()> {
+    pub fn update_deep_checkpoint(&self, id: &str, message_id: i64) -> DbResult<()> {
         self.conn().execute(
             "UPDATE conversations SET deep_analyzed_message_id = ?1, analysis_retries = 0 WHERE id = ?2",
             params![message_id, id],
@@ -184,7 +185,7 @@ impl MissionDB {
     }
 
     /// Increment analysis retry count for a failed deep analysis attempt.
-    pub fn mark_analysis_failed(&self, id: &str) -> SqliteResult<()> {
+    pub fn mark_analysis_failed(&self, id: &str) -> DbResult<()> {
         let conn = self.conn();
         conn.execute(
             "UPDATE conversations SET analysis_retries = analysis_retries + 1 WHERE id = ?1",
@@ -197,7 +198,7 @@ impl MissionDB {
     // ============ Conversations ============
 
     /// Upsert a conversation session
-    pub fn upsert_conversation(&self, conv: &Conversation) -> SqliteResult<()> {
+    pub fn upsert_conversation(&self, conv: &Conversation) -> DbResult<()> {
         let conn = self.conn();
         conn.execute(
             "INSERT INTO conversations (id, project, slot_id, source, model, git_branch, jsonl_path, parent_session_id, task_id, message_count, started_at, ended_at, status, analyzed_at, conversation_type)
@@ -221,7 +222,7 @@ impl MissionDB {
     }
 
     /// Get child (subagent) conversations for a parent session.
-    pub fn get_child_conversations(&self, parent_session_id: &str) -> SqliteResult<Vec<Conversation>> {
+    pub fn get_child_conversations(&self, parent_session_id: &str) -> DbResult<Vec<Conversation>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM conversations WHERE parent_session_id = ?1 ORDER BY started_at ASC"
@@ -234,7 +235,7 @@ impl MissionDB {
 
     /// Insert a conversation message, returns the auto-increment ID.
     /// Dedup via UNIQUE index on message_uuid — duplicate inserts are silently ignored.
-    pub fn insert_conversation_message(&self, msg: &ConversationMessage) -> SqliteResult<i64> {
+    pub fn insert_conversation_message(&self, msg: &ConversationMessage) -> DbResult<i64> {
         let conn = self.conn();
         conn.execute(
             "INSERT OR IGNORE INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata)
@@ -249,7 +250,7 @@ impl MissionDB {
 
     /// Batch insert conversation messages within a transaction.
     /// Returns IDs of actually inserted rows (dedup via UNIQUE index).
-    pub fn insert_conversation_messages_batch(&self, messages: &[ConversationMessage]) -> SqliteResult<Vec<i64>> {
+    pub fn insert_conversation_messages_batch(&self, messages: &[ConversationMessage]) -> DbResult<Vec<i64>> {
         if messages.is_empty() {
             return Ok(Vec::new());
         }
@@ -275,7 +276,7 @@ impl MissionDB {
     }
 
     /// Get a conversation by ID
-    pub fn get_conversation(&self, id: &str) -> SqliteResult<Option<Conversation>> {
+    pub fn get_conversation(&self, id: &str) -> DbResult<Option<Conversation>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare("SELECT * FROM conversations WHERE id = ?1")?;
         let mut rows = stmt.query(params![id])?;
@@ -290,7 +291,7 @@ impl MissionDB {
     /// conv_type: None = user+worker (default), Some("meta") = system, Some("system") = meta+worker, Some("all") = everything.
     /// List conversations, optionally filtered by status, conversation_type, and task_id.
     /// conv_type: None = user+worker (default), Some("meta") = system, Some("system") = meta+worker, Some("all") = everything.
-    pub fn list_conversations(&self, status: Option<&str>, limit: i64, conv_type: Option<&str>, task_id: Option<&str>) -> SqliteResult<Vec<Conversation>> {
+    pub fn list_conversations(&self, status: Option<&str>, limit: i64, conv_type: Option<&str>, task_id: Option<&str>) -> DbResult<Vec<Conversation>> {
         let conn = self.read_conn();
         let mut convs = Vec::new();
         let type_clause = match conv_type {
@@ -360,7 +361,7 @@ impl MissionDB {
         session_id: &str,
         since_id: Option<i64>,
         limit: i64,
-    ) -> SqliteResult<Vec<ConversationMessage>> {
+    ) -> DbResult<Vec<ConversationMessage>> {
         let conn = self.read_conn();
         let mut msgs = Vec::new();
         if let Some(since) = since_id {
@@ -381,7 +382,7 @@ impl MissionDB {
     }
 
     /// Search conversation messages: AND-first FTS5, OR fallback, then LIKE.
-    pub fn search_conversation_messages(&self, query: &str, limit: i64) -> SqliteResult<Vec<ConversationMessage>> {
+    pub fn search_conversation_messages(&self, query: &str, limit: i64) -> DbResult<Vec<ConversationMessage>> {
         let conn = self.read_conn();
         let (and_query, or_query) = Self::build_conv_fts_queries(query);
 
@@ -432,7 +433,7 @@ impl MissionDB {
 
     /// FTS5 search grouped by session — returns (session_id, best_bm25_score) ranked by BM25.
     /// Uses AND-first strategy: try all terms AND, fall back to OR, then LIKE.
-    pub fn search_conversation_sessions_fts(&self, query: &str, limit: i64) -> SqliteResult<Vec<(String, f64)>> {
+    pub fn search_conversation_sessions_fts(&self, query: &str, limit: i64) -> DbResult<Vec<(String, f64)>> {
         let conn = self.read_conn();
         let (and_query, or_query) = Self::build_conv_fts_queries(query);
 
@@ -510,7 +511,7 @@ impl MissionDB {
     }
 
     /// Store LLM-generated summary for a conversation.
-    pub fn set_conversation_summary(&self, id: &str, summary: &str) -> SqliteResult<()> {
+    pub fn set_conversation_summary(&self, id: &str, summary: &str) -> DbResult<()> {
         let conn = self.conn();
         conn.execute(
             "UPDATE conversations SET llm_summary = ?1 WHERE id = ?2",
@@ -520,7 +521,7 @@ impl MissionDB {
     }
 
     /// Clear conversation summary + embedding so it can be regenerated (e.g., after timeline build).
-    pub fn clear_conversation_summary(&self, id: &str) -> SqliteResult<()> {
+    pub fn clear_conversation_summary(&self, id: &str) -> DbResult<()> {
         let conn = self.conn();
         conn.execute(
             "UPDATE conversations SET llm_summary = NULL, embedding = NULL, embedding_provider = NULL WHERE id = ?1",
@@ -530,7 +531,7 @@ impl MissionDB {
     }
 
     /// Store conversation embedding + provider identifier.
-    pub fn set_conversation_embedding(&self, id: &str, embedding: &[f32], provider: &str) -> SqliteResult<()> {
+    pub fn set_conversation_embedding(&self, id: &str, embedding: &[f32], provider: &str) -> DbResult<()> {
         let conn = self.conn();
         let bytes = crate::embedding::f32_vec_to_bytes(embedding);
         conn.execute(
@@ -541,7 +542,7 @@ impl MissionDB {
     }
 
     /// Load all conversation embeddings matching a specific provider. For cache warming.
-    pub fn load_conversation_embeddings(&self, provider: &str) -> SqliteResult<Vec<(String, Vec<f32>)>> {
+    pub fn load_conversation_embeddings(&self, provider: &str) -> DbResult<Vec<(String, Vec<f32>)>> {
         let conn = self.read_conn();
         // Exclude meta/compaction from search embedding cache — they pollute results
         let mut stmt = conn.prepare(
@@ -564,7 +565,7 @@ impl MissionDB {
 
     /// List conversation IDs that are completed but missing LLM summary (for backfill).
     /// Excludes meta/compaction/subagent — only user and worker conversations get independent summaries.
-    pub fn conversations_missing_summary(&self, limit: i64) -> SqliteResult<Vec<String>> {
+    pub fn conversations_missing_summary(&self, limit: i64) -> DbResult<Vec<String>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id FROM conversations
@@ -579,7 +580,7 @@ impl MissionDB {
     }
 
     /// List conversation IDs with embeddings from a different provider (for re-embedding on provider switch).
-    pub fn conversations_stale_embedding(&self, current_provider: &str, limit: i64) -> SqliteResult<Vec<String>> {
+    pub fn conversations_stale_embedding(&self, current_provider: &str, limit: i64) -> DbResult<Vec<String>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id FROM conversations
@@ -598,7 +599,7 @@ impl MissionDB {
     // ============ Session Timeline Reconstruction ============
 
     /// Find completed parent conversations that have compaction children but no timeline yet.
-    pub fn conversations_needing_timeline(&self, limit: i64) -> SqliteResult<Vec<String>> {
+    pub fn conversations_needing_timeline(&self, limit: i64) -> DbResult<Vec<String>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT DISTINCT c.parent_session_id
@@ -617,7 +618,7 @@ impl MissionDB {
 
     /// Get compaction fragments for a parent session, ordered by started_at.
     /// Returns (fragment_id, started_at, message_count).
-    pub fn get_compaction_fragments(&self, parent_id: &str) -> SqliteResult<Vec<(String, String, i64)>> {
+    pub fn get_compaction_fragments(&self, parent_id: &str) -> DbResult<Vec<(String, String, i64)>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, started_at, message_count FROM conversations
@@ -633,19 +634,19 @@ impl MissionDB {
     }
 
     /// Get the last assistant message content from a conversation (for compaction summary extraction).
-    pub fn get_last_assistant_content(&self, session_id: &str) -> SqliteResult<Option<String>> {
+    pub fn get_last_assistant_content(&self, session_id: &str) -> DbResult<Option<String>> {
         let conn = self.read_conn();
-        conn.query_row(
+        Ok(conn.query_row(
             "SELECT content FROM conversation_messages
              WHERE session_id = ?1 AND role = 'assistant'
              ORDER BY id DESC LIMIT 1",
             params![session_id],
             |row| row.get::<_, String>(0),
-        ).optional()
+        ).optional()?)
     }
 
     /// Write session_timeline JSON and set timeline_built_at (CAS: only if timeline_built_at IS NULL).
-    pub fn set_session_timeline(&self, parent_id: &str, timeline_json: &str) -> SqliteResult<bool> {
+    pub fn set_session_timeline(&self, parent_id: &str, timeline_json: &str) -> DbResult<bool> {
         let conn = self.conn();
         let updated = conn.execute(
             "UPDATE conversations SET session_timeline = ?1, timeline_built_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -655,7 +656,7 @@ impl MissionDB {
         Ok(updated > 0)
     }
 
-    pub(crate) fn row_to_conversation(row: &rusqlite::Row) -> SqliteResult<Conversation> {
+    pub(crate) fn row_to_conversation(row: &rusqlite::Row) -> rusqlite::Result<Conversation> {
         Ok(Conversation {
             id: row.get("id")?,
             project: row.get("project")?,
@@ -684,7 +685,7 @@ impl MissionDB {
         })
     }
 
-    pub(crate) fn row_to_conversation_message(row: &rusqlite::Row) -> SqliteResult<ConversationMessage> {
+    pub(crate) fn row_to_conversation_message(row: &rusqlite::Row) -> rusqlite::Result<ConversationMessage> {
         Ok(ConversationMessage {
             id: row.get("id")?,
             session_id: row.get("session_id")?,

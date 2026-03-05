@@ -1,4 +1,5 @@
-use rusqlite::{params, OptionalExtension, Result as SqliteResult};
+use rusqlite::{params, OptionalExtension};
+use super::error::DbResult;
 use crate::types::*;
 use super::MissionDB;
 
@@ -6,7 +7,7 @@ impl MissionDB {
     // ============ Slot Sessions ============
 
     /// Get session ID for a slot
-    pub fn get_slot_session(&self, slot_id: &str) -> SqliteResult<Option<String>> {
+    pub fn get_slot_session(&self, slot_id: &str) -> DbResult<Option<String>> {
         let conn = self.read_conn();
         let mut stmt = conn
             .prepare("SELECT session_id FROM slot_sessions WHERE slot_id = ?")?;
@@ -20,7 +21,7 @@ impl MissionDB {
     }
 
     /// Set session ID for a slot (upsert)
-    pub fn set_slot_session(&self, slot_id: &str, session_id: &str) -> SqliteResult<()> {
+    pub fn set_slot_session(&self, slot_id: &str, session_id: &str) -> DbResult<()> {
         let now = chrono::Utc::now().timestamp_millis();
         let conn = self.conn();
         conn.execute(
@@ -33,7 +34,7 @@ impl MissionDB {
     }
 
     /// Delete a slot session
-    pub fn delete_slot_session(&self, slot_id: &str) -> SqliteResult<()> {
+    pub fn delete_slot_session(&self, slot_id: &str) -> DbResult<()> {
         let conn = self.conn();
         conn.execute("DELETE FROM slot_sessions WHERE slot_id = ?", params![slot_id])?;
         Ok(())
@@ -45,7 +46,7 @@ impl MissionDB {
     }
 
     /// Get all slot sessions
-    pub fn get_all_slot_sessions(&self) -> SqliteResult<Vec<(String, String)>> {
+    pub fn get_all_slot_sessions(&self) -> DbResult<Vec<(String, String)>> {
         let conn = self.read_conn();
         let mut stmt = conn
             .prepare("SELECT slot_id, session_id FROM slot_sessions")?;
@@ -61,20 +62,20 @@ impl MissionDB {
     }
 
     /// Get slot_id for a given session_id (reverse lookup)
-    pub fn get_slot_for_session(&self, session_id: &str) -> SqliteResult<Option<String>> {
+    pub fn get_slot_for_session(&self, session_id: &str) -> DbResult<Option<String>> {
         let conn = self.read_conn();
-        conn.query_row(
+        Ok(conn.query_row(
             "SELECT slot_id FROM slot_sessions WHERE session_id = ?1",
             params![session_id],
             |row| row.get(0),
-        ).optional()
+        ).optional()?)
     }
 
 
     // ============ Slot Task History ============
 
     /// Insert a new slot task record (status=pending)
-    pub fn insert_slot_task(&self, task: &SlotTask) -> SqliteResult<()> {
+    pub fn insert_slot_task(&self, task: &SlotTask) -> DbResult<()> {
         let conn = self.conn();
         conn.execute(
             "INSERT INTO slot_tasks (id, slot_id, task_type, status, prompt_summary, source_sessions, output_count, created_at, started_at, completed_at, duration_ms, error, conversation_id)
@@ -90,7 +91,7 @@ impl MissionDB {
     }
 
     /// Update slot task status to running
-    pub fn slot_task_set_running(&self, id: &str) -> SqliteResult<()> {
+    pub fn slot_task_set_running(&self, id: &str) -> DbResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
@@ -101,7 +102,7 @@ impl MissionDB {
     }
 
     /// Mark slot task as completed
-    pub fn slot_task_set_completed(&self, id: &str, output_count: i64) -> SqliteResult<()> {
+    pub fn slot_task_set_completed(&self, id: &str, output_count: i64) -> DbResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
@@ -114,7 +115,7 @@ impl MissionDB {
     }
 
     /// Mark slot task as failed
-    pub fn slot_task_set_failed(&self, id: &str, error: &str) -> SqliteResult<()> {
+    pub fn slot_task_set_failed(&self, id: &str, error: &str) -> DbResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
@@ -133,7 +134,7 @@ impl MissionDB {
         task_type: Option<&str>,
         status: Option<&str>,
         limit: i64,
-    ) -> SqliteResult<Vec<SlotTask>> {
+    ) -> DbResult<Vec<SlotTask>> {
         let conn = self.read_conn();
         let mut sql = String::from(
             "SELECT id, slot_id, task_type, status, prompt_summary, source_sessions,
@@ -160,11 +161,11 @@ impl MissionDB {
         let params_ref: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_ref.as_slice(), Self::row_to_slot_task)?;
-        rows.collect()
+        Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
     }
 
     /// Get slot task stats summary
-    pub fn slot_task_stats(&self, slot_id: Option<&str>) -> SqliteResult<serde_json::Value> {
+    pub fn slot_task_stats(&self, slot_id: Option<&str>) -> DbResult<serde_json::Value> {
         let conn = self.read_conn();
         let (where_clause, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(s) = slot_id {
             ("WHERE slot_id = ?1", vec![Box::new(s.to_string())])
@@ -234,19 +235,19 @@ impl MissionDB {
 
     /// Reaper: force-fail stale pending/running tasks older than threshold.
     /// Returns the number of tasks reaped.
-    pub fn reap_stale_slot_tasks(&self, max_age_secs: i64) -> SqliteResult<usize> {
+    pub fn reap_stale_slot_tasks(&self, max_age_secs: i64) -> DbResult<usize> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
+        Ok(conn.execute(
             "UPDATE slot_tasks SET status = 'failed', error = 'reaper: stale task', completed_at = ?1
              WHERE status IN ('pending', 'running')
                AND julianday(?1) - julianday(created_at) > ?2 / 86400.0",
             params![now, max_age_secs as f64],
-        )
+        )?)
     }
 
     /// Find stale decision slot tasks (for Decision Engine timeout recovery)
-    pub fn find_stale_decision_tasks(&self, max_age_secs: i64) -> SqliteResult<Vec<SlotTask>> {
+    pub fn find_stale_decision_tasks(&self, max_age_secs: i64) -> DbResult<Vec<SlotTask>> {
         let conn = self.read_conn();
         let now = chrono::Utc::now().to_rfc3339();
         let mut stmt = conn.prepare(
@@ -271,24 +272,24 @@ impl MissionDB {
                 conversation_id: row.get("conversation_id")?,
             })
         })?;
-        rows.collect()
+        Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
     }
 
     /// Startup cleanup: force-fail all pending/running tasks (leftover from previous daemon).
-    pub fn cleanup_orphan_slot_tasks(&self) -> SqliteResult<usize> {
+    pub fn cleanup_orphan_slot_tasks(&self) -> DbResult<usize> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
+        Ok(conn.execute(
             "UPDATE slot_tasks SET status = 'failed', error = 'daemon restart: orphan cleanup', completed_at = ?1
              WHERE status IN ('pending', 'running')",
             params![now],
-        )
+        )?)
     }
 
     /// Get the ID of the currently running slot task (if any)
     /// Get the timestamp (unix epoch seconds) of the last completed task of a given type.
     /// Returns None if no completed task exists.
-    pub fn last_completed_slot_task_at(&self, task_type: &str) -> SqliteResult<Option<i64>> {
+    pub fn last_completed_slot_task_at(&self, task_type: &str) -> DbResult<Option<i64>> {
         let conn = self.read_conn();
         let completed_at: Option<String> = conn.query_row(
             "SELECT completed_at FROM slot_tasks WHERE task_type = ?1 AND status = 'completed' ORDER BY completed_at DESC LIMIT 1",
@@ -300,16 +301,16 @@ impl MissionDB {
         }))
     }
 
-    pub fn get_running_slot_task(&self, slot_id: &str) -> SqliteResult<Option<String>> {
+    pub fn get_running_slot_task(&self, slot_id: &str) -> DbResult<Option<String>> {
         let conn = self.read_conn();
-        conn.query_row(
+        Ok(conn.query_row(
             "SELECT id FROM slot_tasks WHERE slot_id = ?1 AND status = 'running' ORDER BY created_at DESC LIMIT 1",
             params![slot_id],
             |row| row.get(0),
-        ).optional()
+        ).optional()?)
     }
 
-    fn row_to_slot_task(row: &rusqlite::Row) -> SqliteResult<SlotTask> {
+    fn row_to_slot_task(row: &rusqlite::Row) -> rusqlite::Result<SlotTask> {
         Ok(SlotTask {
             id: row.get("id")?,
             slot_id: row.get("slot_id")?,
@@ -330,20 +331,20 @@ impl MissionDB {
     // ── daemon_state KV ──
 
     /// Get a persisted daemon state value (epoch seconds).
-    pub fn daemon_state_get(&self, key: &str) -> SqliteResult<Option<i64>> {
+    pub fn daemon_state_get(&self, key: &str) -> DbResult<Option<i64>> {
         let conn = self.read_conn();
-        conn.query_row(
+        Ok(conn.query_row(
             "SELECT value FROM daemon_state WHERE key = ?1",
             params![key],
             |row| {
                 let v: String = row.get(0)?;
                 Ok(v.parse::<i64>().unwrap_or(0))
             },
-        ).optional()
+        ).optional()?)
     }
 
     /// Set a persisted daemon state value (epoch seconds).
-    pub fn daemon_state_set(&self, key: &str, value: i64) -> SqliteResult<()> {
+    pub fn daemon_state_set(&self, key: &str, value: i64) -> DbResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(

@@ -1,4 +1,5 @@
-use rusqlite::{params, Result as SqliteResult};
+use rusqlite::params;
+use super::error::DbResult;
 use crate::types::*;
 use super::MissionDB;
 
@@ -17,7 +18,7 @@ impl MissionDB {
         raw_payload: Option<&str>,
         board_task_id: Option<&str>,
         dedupe_key: &str,
-    ) -> SqliteResult<()> {
+    ) -> DbResult<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
@@ -29,7 +30,7 @@ impl MissionDB {
     }
 
     /// Check if an incident with the same dedupe_key was recorded within the window.
-    pub fn has_recent_incident(&self, dedupe_key: &str, window_secs: i64) -> SqliteResult<bool> {
+    pub fn has_recent_incident(&self, dedupe_key: &str, window_secs: i64) -> DbResult<bool> {
         let conn = self.read_conn();
         let now = chrono::Utc::now().to_rfc3339();
         let count: i64 = conn.query_row(
@@ -43,7 +44,7 @@ impl MissionDB {
     }
 
     /// List recent incidents.
-    pub fn list_incidents(&self, limit: i64) -> SqliteResult<Vec<IncidentRow>> {
+    pub fn list_incidents(&self, limit: i64) -> DbResult<Vec<IncidentRow>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, severity, source, title, description, server_id, board_task_id, dedupe_key, created_at
@@ -62,7 +63,7 @@ impl MissionDB {
                 created_at: row.get("created_at")?,
             })
         })?;
-        rows.collect()
+        Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
     }
 
     // ── Token Usage Ledger ──────────────────────────────────────────
@@ -78,7 +79,7 @@ impl MissionDB {
         cache_creation_tokens: i64,
         cache_read_tokens: i64,
         output_tokens: i64,
-    ) -> SqliteResult<()> {
+    ) -> DbResult<()> {
         let conn = self.conn();
         conn.execute(
             "INSERT INTO token_usage_ledger
@@ -108,7 +109,7 @@ impl MissionDB {
         slot_id: Option<&str>,
         since: Option<&str>,
         group_by: Option<&str>,
-    ) -> SqliteResult<Vec<std::collections::HashMap<String, serde_json::Value>>> {
+    ) -> DbResult<Vec<std::collections::HashMap<String, serde_json::Value>>> {
         let conn = self.read_conn();
 
         let group_col = match group_by {

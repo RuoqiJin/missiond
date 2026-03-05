@@ -1,4 +1,5 @@
-use rusqlite::{params, Result as SqliteResult};
+use rusqlite::params;
+use super::error::DbResult;
 use crate::types::*;
 use super::MissionDB;
 
@@ -6,7 +7,7 @@ impl MissionDB {
     // ============ Tasks ============
 
     /// Insert a new task
-    pub fn insert_task(&self, task: &Task) -> SqliteResult<()> {
+    pub fn insert_task(&self, task: &Task) -> DbResult<()> {
         let conn = self.conn();
         conn.execute(
             "INSERT INTO tasks (id, role, prompt, status, slot_id, session_id, result, error, created_at, started_at, finished_at)
@@ -29,7 +30,7 @@ impl MissionDB {
     }
 
     /// Update a task by ID
-    pub fn update_task(&self, id: &str, update: &TaskUpdate) -> SqliteResult<()> {
+    pub fn update_task(&self, id: &str, update: &TaskUpdate) -> DbResult<()> {
         let mut fields = Vec::new();
         let mut values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
@@ -76,7 +77,7 @@ impl MissionDB {
     }
 
     /// Get a task by ID
-    pub fn get_task(&self, id: &str) -> SqliteResult<Option<Task>> {
+    pub fn get_task(&self, id: &str) -> DbResult<Option<Task>> {
         tokio::task::block_in_place(|| {
             let conn = self.read_conn();
             // Support short ID prefix matching (like git short hashes)
@@ -104,7 +105,7 @@ impl MissionDB {
     }
 
     /// Get all tasks by status
-    pub fn get_tasks_by_status(&self, status: TaskStatus) -> SqliteResult<Vec<Task>> {
+    pub fn get_tasks_by_status(&self, status: TaskStatus) -> DbResult<Vec<Task>> {
         tokio::task::block_in_place(|| {
             let conn = self.read_conn();
             let mut stmt = conn
@@ -120,7 +121,7 @@ impl MissionDB {
     }
 
     /// Get queued tasks by role
-    pub fn get_queued_tasks_by_role(&self, role: &str) -> SqliteResult<Vec<Task>> {
+    pub fn get_queued_tasks_by_role(&self, role: &str) -> DbResult<Vec<Task>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM tasks WHERE status = 'queued' AND role = ? ORDER BY created_at ASC",
@@ -136,7 +137,7 @@ impl MissionDB {
 
     /// Requeue running tasks assigned to a slot (e.g. after slot restart).
     /// Resets status to Queued and clears slot_id/started_at so they get re-dispatched.
-    pub fn requeue_running_tasks_for_slot(&self, slot_id: &str) -> SqliteResult<usize> {
+    pub fn requeue_running_tasks_for_slot(&self, slot_id: &str) -> DbResult<usize> {
         let conn = self.conn();
         let n = conn.execute(
             "UPDATE tasks SET status = 'queued', slot_id = NULL, started_at = NULL WHERE status = 'running' AND slot_id = ?",
@@ -146,7 +147,7 @@ impl MissionDB {
     }
 
     /// Get all tasks (for listing)
-    pub fn get_all_tasks(&self, limit: i64) -> SqliteResult<Vec<Task>> {
+    pub fn get_all_tasks(&self, limit: i64) -> DbResult<Vec<Task>> {
         tokio::task::block_in_place(|| {
             let conn = self.read_conn();
             let mut stmt = conn
@@ -163,7 +164,7 @@ impl MissionDB {
 
     /// Get completed/failed tasks since a given timestamp (per-session watermark model).
     /// Each caller tracks its own watermark — no global consume, no cross-session interference.
-    pub fn ack_completed_tasks(&self, since: Option<i64>) -> SqliteResult<Vec<Task>> {
+    pub fn ack_completed_tasks(&self, since: Option<i64>) -> DbResult<Vec<Task>> {
         let conn = self.read_conn();
         if let Some(since_ts) = since {
             let mut stmt = conn.prepare(
@@ -186,7 +187,7 @@ impl MissionDB {
         }
     }
 
-    fn row_to_task(row: &rusqlite::Row) -> SqliteResult<Task> {
+    fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         let status_str: String = row.get("status")?;
         let status = TaskStatus::from_str(&status_str).unwrap_or(TaskStatus::Queued);
 
@@ -209,7 +210,7 @@ impl MissionDB {
     // ============ Inbox ============
 
     /// Insert an inbox message
-    pub fn insert_inbox_message(&self, msg: &InboxMessage) -> SqliteResult<()> {
+    pub fn insert_inbox_message(&self, msg: &InboxMessage) -> DbResult<()> {
         let conn = self.conn();
         conn.execute(
             "INSERT INTO inbox (id, task_id, from_role, content, read, created_at)
@@ -227,7 +228,7 @@ impl MissionDB {
     }
 
     /// Get inbox messages
-    pub fn get_inbox_messages(&self, unread_only: bool, limit: i64) -> SqliteResult<Vec<InboxMessage>> {
+    pub fn get_inbox_messages(&self, unread_only: bool, limit: i64) -> DbResult<Vec<InboxMessage>> {
         let sql = if unread_only {
             "SELECT * FROM inbox WHERE read = 0 ORDER BY created_at DESC LIMIT ?"
         } else {
@@ -246,13 +247,13 @@ impl MissionDB {
     }
 
     /// Mark an inbox message as read
-    pub fn mark_inbox_read(&self, id: &str) -> SqliteResult<()> {
+    pub fn mark_inbox_read(&self, id: &str) -> DbResult<()> {
         let conn = self.conn();
         conn.execute("UPDATE inbox SET read = 1 WHERE id = ?", params![id])?;
         Ok(())
     }
 
-    fn row_to_inbox_message(row: &rusqlite::Row) -> SqliteResult<InboxMessage> {
+    fn row_to_inbox_message(row: &rusqlite::Row) -> rusqlite::Result<InboxMessage> {
         let read: i32 = row.get("read")?;
         Ok(InboxMessage {
             id: row.get("id")?,
@@ -274,7 +275,7 @@ impl MissionDB {
         event_type: EventType,
         data: Option<&serde_json::Value>,
         timestamp: i64,
-    ) -> SqliteResult<i64> {
+    ) -> DbResult<i64> {
         let data_str = data.map(|d| serde_json::to_string(d).unwrap_or_default());
 
         let conn = self.conn();
@@ -288,7 +289,7 @@ impl MissionDB {
     }
 
     /// Get events by task ID
-    pub fn get_events_by_task(&self, task_id: &str) -> SqliteResult<Vec<TaskEvent>> {
+    pub fn get_events_by_task(&self, task_id: &str) -> DbResult<Vec<TaskEvent>> {
         let conn = self.read_conn();
         let mut stmt = conn
             .prepare("SELECT * FROM events WHERE task_id = ? ORDER BY id ASC")?;
@@ -301,7 +302,7 @@ impl MissionDB {
         Ok(events)
     }
 
-    fn row_to_event(row: &rusqlite::Row) -> SqliteResult<TaskEvent> {
+    fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<TaskEvent> {
         let type_str: String = row.get("type")?;
         let event_type = EventType::from_str(&type_str).unwrap_or(EventType::TaskCreated);
         let data_str: Option<String> = row.get("data")?;

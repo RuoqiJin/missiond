@@ -2,7 +2,7 @@
 use tracing::{debug, info, warn};
 
 use crate::state::{AppState, ExtractionPhase};
-use crate::autopilot::{MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
+use crate::state::{MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 use crate::supervisor::is_auth_error;
 use crate::memory_scheduler::{ensure_memory_slot, ensure_memory_slot_by_id};
 use missiond_core::SessionState;

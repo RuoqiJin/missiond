@@ -2,6 +2,7 @@
 //!
 //! Mirrors the TypeScript implementation in packages/missiond/src/db/index.ts
 
+pub mod error;
 mod task;
 mod slot;
 mod board;
@@ -13,7 +14,8 @@ mod audit;
 mod router_chat;
 mod incident;
 
-use rusqlite::{Connection, Result as SqliteResult};
+use rusqlite::Connection;
+use error::{DbError, DbResult};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -246,7 +248,7 @@ pub struct MissionDB {
 
 impl MissionDB {
     /// Create a new database connection
-    pub fn new<P: AsRef<Path>>(db_path: P) -> SqliteResult<Self> {
+    pub fn new<P: AsRef<Path>>(db_path: P) -> DbResult<Self> {
         let conn = Connection::open(&db_path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -269,7 +271,7 @@ impl MissionDB {
     }
 
     /// Alias for new - opens a database file
-    pub fn open<P: AsRef<Path>>(db_path: P) -> SqliteResult<Self> {
+    pub fn open<P: AsRef<Path>>(db_path: P) -> DbResult<Self> {
         Self::new(db_path)
     }
 
@@ -280,7 +282,7 @@ impl MissionDB {
     }
 
     /// Create an in-memory database (for testing)
-    pub fn in_memory() -> SqliteResult<Self> {
+    pub fn in_memory() -> DbResult<Self> {
         let conn = Connection::open_in_memory()?;
         let read_conn = Connection::open_in_memory()?;
         let db = Self {
@@ -302,7 +304,23 @@ impl MissionDB {
         self.read_conn.lock().expect("MissionDB read_conn mutex poisoned")
     }
 
-    fn init(&self) -> SqliteResult<()> {
+    /// Execute a closure with the write connection locked.
+    /// WARNING: The closure MUST NOT contain any `.await` calls (rusqlite is synchronous).
+    #[allow(dead_code)]
+    pub(crate) fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> DbResult<T>) -> DbResult<T> {
+        let conn = self.conn.lock().map_err(|e| DbError::Other(format!("mutex poisoned: {}", e)))?;
+        f(&conn)
+    }
+
+    /// Execute a closure with the read connection locked.
+    /// WARNING: The closure MUST NOT contain any `.await` calls (rusqlite is synchronous).
+    #[allow(dead_code)]
+    pub(crate) fn with_read<T>(&self, f: impl FnOnce(&Connection) -> DbResult<T>) -> DbResult<T> {
+        let conn = self.read_conn.lock().map_err(|e| DbError::Other(format!("mutex poisoned: {}", e)))?;
+        f(&conn)
+    }
+
+    fn init(&self) -> DbResult<()> {
         {
             let conn = self.conn();
             conn.execute_batch(SCHEMA)?;
@@ -314,7 +332,7 @@ impl MissionDB {
 
     /// Rebuild FTS5 index on startup to ensure consistency.
     /// integrity-check only validates structure, not data consistency after concurrent writes.
-    fn check_fts_integrity(&self) -> SqliteResult<()> {
+    fn check_fts_integrity(&self) -> DbResult<()> {
         let conn = self.conn();
         let has_fts: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='knowledge_fts'",
@@ -334,7 +352,7 @@ impl MissionDB {
 
     /// Rebuild FTS5 index if dirty flag is set (called from autopilot_tick).
     /// Returns true if rebuild was performed.
-    pub fn kb_rebuild_fts_if_dirty(&self) -> SqliteResult<bool> {
+    pub fn kb_rebuild_fts_if_dirty(&self) -> DbResult<bool> {
         if !self.fts_dirty.swap(false, Ordering::Relaxed) {
             return Ok(false);
         }
@@ -345,7 +363,7 @@ impl MissionDB {
     }
 
     /// Run schema migrations for existing databases
-    fn migrate(&self) -> SqliteResult<()> {
+    fn migrate(&self) -> DbResult<()> {
         let conn = self.conn();
 
         // Phase D: Add autopilot columns to board_tasks
@@ -1050,7 +1068,7 @@ fn token_jaccard_similarity(a: &str, b: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::TaskStatus;
+    use crate::types::{Task, TaskStatus, TaskUpdate, InboxMessage, EventType};
 
     fn create_test_task(id: &str) -> Task {
         Task {

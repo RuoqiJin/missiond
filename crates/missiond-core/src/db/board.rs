@@ -1,4 +1,5 @@
-use rusqlite::{params, OptionalExtension, Result as SqliteResult};
+use rusqlite::{params, OptionalExtension};
+use super::error::DbResult;
 use crate::types::*;
 use super::MissionDB;
 
@@ -6,7 +7,7 @@ impl MissionDB {
     // ============ Board Tasks ============
 
     /// Insert a new board task
-    pub fn insert_board_task(&self, task: &BoardTask) -> SqliteResult<()> {
+    pub fn insert_board_task(&self, task: &BoardTask) -> DbResult<()> {
         let conn = self.conn();
         let depends_on_json = serde_json::to_string(&task.depends_on).unwrap_or_else(|_| "[]".to_string());
         conn.execute(
@@ -39,7 +40,7 @@ impl MissionDB {
     }
 
     /// Create a board task from input
-    pub fn create_board_task(&self, input: &CreateBoardTaskInput) -> SqliteResult<BoardTask> {
+    pub fn create_board_task(&self, input: &CreateBoardTaskInput) -> DbResult<BoardTask> {
         let now = chrono::Utc::now().to_rfc3339();
         let id = uuid::Uuid::new_v4().to_string();
 
@@ -99,7 +100,7 @@ impl MissionDB {
     /// Get a board task by ID
     /// Resolve a (possibly short) board task ID to a full UUID.
     /// Supports exact match and unique prefix match (>= 6 chars).
-    pub fn resolve_board_task_id(&self, id: &str) -> SqliteResult<Option<String>> {
+    pub fn resolve_board_task_id(&self, id: &str) -> DbResult<Option<String>> {
         let conn = self.read_conn();
         // Exact match
         let exact: Option<String> = conn.query_row(
@@ -125,7 +126,7 @@ impl MissionDB {
         Ok(None)
     }
 
-    pub fn get_board_task(&self, id: &str) -> SqliteResult<Option<BoardTask>> {
+    pub fn get_board_task(&self, id: &str) -> DbResult<Option<BoardTask>> {
         let full_id = match self.resolve_board_task_id(id)? {
             Some(fid) => fid,
             None => return Ok(None),
@@ -142,7 +143,7 @@ impl MissionDB {
     }
 
     /// List all board tasks (optionally filtered by status, hidden excluded by default)
-    pub fn list_board_tasks(&self, status: Option<&str>, include_hidden: bool) -> SqliteResult<Vec<BoardTask>> {
+    pub fn list_board_tasks(&self, status: Option<&str>, include_hidden: bool) -> DbResult<Vec<BoardTask>> {
         let conn = self.read_conn();
         let mut tasks = Vec::new();
         let hidden_clause = if include_hidden { "" } else { " AND hidden = 0" };
@@ -171,7 +172,7 @@ impl MissionDB {
     }
 
     /// Update a board task
-    pub fn update_board_task(&self, id: &str, update: &UpdateBoardTaskInput) -> SqliteResult<Option<BoardTask>> {
+    pub fn update_board_task(&self, id: &str, update: &UpdateBoardTaskInput) -> DbResult<Option<BoardTask>> {
         let id = match self.resolve_board_task_id(id)? {
             Some(fid) => fid,
             None => return Ok(None),
@@ -266,7 +267,7 @@ impl MissionDB {
     }
 
     /// Delete a board task and all descendants
-    pub fn delete_board_task(&self, id: &str) -> SqliteResult<i64> {
+    pub fn delete_board_task(&self, id: &str) -> DbResult<i64> {
         let id = match self.resolve_board_task_id(id)? {
             Some(fid) => fid,
             None => return Ok(0),
@@ -298,7 +299,7 @@ impl MissionDB {
     }
 
     /// Toggle a board task status (open <-> done)
-    pub fn toggle_board_task(&self, id: &str) -> SqliteResult<Option<BoardTask>> {
+    pub fn toggle_board_task(&self, id: &str) -> DbResult<Option<BoardTask>> {
         if let Some(task) = self.get_board_task(id)? {
             let new_status = match task.status {
                 BoardTaskStatus::Done => "open",
@@ -321,7 +322,7 @@ impl MissionDB {
         id: &str,
         executor_id: &str,
         executor_type: &str,
-    ) -> SqliteResult<Option<BoardTask>> {
+    ) -> DbResult<Option<BoardTask>> {
         let full_id = match self.resolve_board_task_id(id)? {
             Some(fid) => fid,
             None => return Ok(None),
@@ -344,7 +345,7 @@ impl MissionDB {
 
     /// Release all claims held by a specific executor (zombie cleanup on disconnect/exit).
     /// Resets claimed tasks back to 'open'.
-    pub fn release_board_claims_by_executor(&self, executor_id: &str) -> SqliteResult<usize> {
+    pub fn release_board_claims_by_executor(&self, executor_id: &str) -> DbResult<usize> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn();
         let count = conn.execute(
@@ -363,7 +364,7 @@ impl MissionDB {
     /// Recover stale running tasks using lease-based expiration.
     /// Tasks with an expired lease (lease_expires_at < now) are reset to 'open'.
     /// Tasks without a lease fall back to the old N-minute timeout based on updated_at.
-    pub fn recover_stale_running_tasks(&self, fallback_stale_minutes: i64) -> SqliteResult<usize> {
+    pub fn recover_stale_running_tasks(&self, fallback_stale_minutes: i64) -> DbResult<usize> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn();
         // Recover tasks with expired lease
@@ -392,7 +393,7 @@ impl MissionDB {
     }
 
     /// Set or renew the lease expiration for a running board task.
-    pub fn set_board_task_lease(&self, task_id: &str, lease_expires_at: &str) -> SqliteResult<usize> {
+    pub fn set_board_task_lease(&self, task_id: &str, lease_expires_at: &str) -> DbResult<usize> {
         let conn = self.conn();
         let count = conn.execute(
             "UPDATE board_tasks SET lease_expires_at = ?1, updated_at = ?2
@@ -404,7 +405,7 @@ impl MissionDB {
 
     /// List board tasks currently in 'running' state with auto_execute.
     /// Used by smart watchdog to detect orphaned tasks (slot idle but task still running).
-    pub fn list_running_autopilot_tasks(&self) -> SqliteResult<Vec<BoardTask>> {
+    pub fn list_running_autopilot_tasks(&self) -> DbResult<Vec<BoardTask>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM board_tasks
@@ -423,7 +424,7 @@ impl MissionDB {
 
     /// List board tasks eligible for autopilot execution
     /// (auto_execute=true, status=open, due_date <= now, has assignee)
-    pub fn list_autopilot_tasks(&self) -> SqliteResult<Vec<BoardTask>> {
+    pub fn list_autopilot_tasks(&self) -> DbResult<Vec<BoardTask>> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
@@ -443,7 +444,7 @@ impl MissionDB {
     }
 
     /// Board summary: status counts + pending questions + recent activity
-    pub fn board_summary(&self, since: Option<&str>) -> SqliteResult<serde_json::Value> {
+    pub fn board_summary(&self, since: Option<&str>) -> DbResult<serde_json::Value> {
         tokio::task::block_in_place(|| {
             let conn = self.read_conn();
             let since_clause = since.unwrap_or("2000-01-01T00:00:00Z");
@@ -485,7 +486,7 @@ impl MissionDB {
     }
 
     /// Clear all done board tasks
-    pub fn clear_done_board_tasks(&self) -> SqliteResult<i64> {
+    pub fn clear_done_board_tasks(&self) -> DbResult<i64> {
         let conn = self.conn();
         let result = conn
             .execute("DELETE FROM board_tasks WHERE status = 'done'", [])?;
@@ -493,7 +494,7 @@ impl MissionDB {
     }
 
     /// Check whether all DAG dependencies of a task are satisfied.
-    pub fn check_dependencies(&self, depends_on: &[String]) -> SqliteResult<crate::types::DependencyStatus> {
+    pub fn check_dependencies(&self, depends_on: &[String]) -> DbResult<crate::types::DependencyStatus> {
         use crate::types::DependencyStatus;
         if depends_on.is_empty() {
             return Ok(DependencyStatus::Ready);
@@ -525,7 +526,7 @@ impl MissionDB {
 
     /// Find all downstream tasks that depend on the given task (direct + transitive).
     /// Used by mission_board_retry to cascade-reset downstream tasks.
-    pub fn find_downstream_tasks(&self, task_id: &str) -> SqliteResult<Vec<String>> {
+    pub fn find_downstream_tasks(&self, task_id: &str) -> DbResult<Vec<String>> {
         let conn = self.read_conn();
         let mut all_tasks: Vec<BoardTask> = Vec::new();
         let mut stmt = conn.prepare("SELECT * FROM board_tasks WHERE depends_on != '[]'")?;
@@ -553,7 +554,7 @@ impl MissionDB {
     }
 
     /// Reset a task and optionally all downstream tasks to open status.
-    pub fn retry_board_task(&self, task_id: &str, reset_downstream: bool) -> SqliteResult<Vec<String>> {
+    pub fn retry_board_task(&self, task_id: &str, reset_downstream: bool) -> DbResult<Vec<String>> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn();
 
@@ -584,7 +585,7 @@ impl MissionDB {
         Ok(reset_ids)
     }
 
-    fn row_to_board_task(row: &rusqlite::Row) -> SqliteResult<BoardTask> {
+    fn row_to_board_task(row: &rusqlite::Row) -> rusqlite::Result<BoardTask> {
         let status_str: String = row.get("status")?;
         let status = BoardTaskStatus::from_str(&status_str).unwrap_or(BoardTaskStatus::Open);
         let auto_execute: i32 = row.get("auto_execute").unwrap_or(0);
@@ -631,7 +632,7 @@ impl MissionDB {
     pub fn add_board_task_note(
         &self,
         input: &AddBoardTaskNoteInput,
-    ) -> SqliteResult<BoardTaskNote> {
+    ) -> DbResult<BoardTaskNote> {
         let now = chrono::Utc::now().to_rfc3339();
         let id = uuid::Uuid::new_v4().to_string();
         let note_type_str = input.note_type.as_deref().unwrap_or("note");
@@ -645,7 +646,7 @@ impl MissionDB {
             |row| row.get(0),
         )?;
         if !task_exists {
-            return Err(rusqlite::Error::QueryReturnedNoRows);
+            return Err(rusqlite::Error::QueryReturnedNoRows.into());
         }
 
         let note_type = BoardNoteType::from_str(note_type_str).unwrap_or(BoardNoteType::Note);
@@ -667,7 +668,7 @@ impl MissionDB {
     }
 
     /// Get all notes for a board task (ordered by creation time ASC)
-    pub fn get_board_task_notes(&self, task_id: &str) -> SqliteResult<Vec<BoardTaskNote>> {
+    pub fn get_board_task_notes(&self, task_id: &str) -> DbResult<Vec<BoardTaskNote>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, task_id, content, note_type, author, created_at
@@ -685,7 +686,7 @@ impl MissionDB {
     pub fn get_board_task_with_notes(
         &self,
         id: &str,
-    ) -> SqliteResult<Option<BoardTaskWithNotes>> {
+    ) -> DbResult<Option<BoardTaskWithNotes>> {
         if let Some(task) = self.get_board_task(id)? {
             let notes = self.get_board_task_notes(&task.id)?;
             Ok(Some(BoardTaskWithNotes { task, notes }))
@@ -694,7 +695,7 @@ impl MissionDB {
         }
     }
 
-    fn row_to_board_task_note(row: &rusqlite::Row) -> SqliteResult<BoardTaskNote> {
+    fn row_to_board_task_note(row: &rusqlite::Row) -> rusqlite::Result<BoardTaskNote> {
         let note_type_str: String = row.get("note_type")?;
         let note_type = BoardNoteType::from_str(&note_type_str).unwrap_or(BoardNoteType::Note);
 

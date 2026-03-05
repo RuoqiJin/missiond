@@ -1,4 +1,5 @@
-use rusqlite::{params, Result as SqliteResult};
+use rusqlite::params;
+use super::error::DbResult;
 use crate::types::*;
 use super::MissionDB;
 
@@ -6,7 +7,7 @@ impl MissionDB {
     // ============ Conversation Tool Calls (Audit) ============
 
     /// Insert a tool call record (from tool_use block in assistant message)
-    pub fn insert_tool_call(&self, tc: &ToolCallRecord) -> SqliteResult<()> {
+    pub fn insert_tool_call(&self, tc: &ToolCallRecord) -> DbResult<()> {
         let conn = self.conn();
         conn.execute(
             "INSERT OR IGNORE INTO conversation_tool_calls (id, session_id, message_id, tool_name, input_summary, raw_input, output_summary, raw_output, status, duration_ms, timestamp)
@@ -21,7 +22,7 @@ impl MissionDB {
     }
 
     /// Batch insert tool call records
-    pub fn insert_tool_calls_batch(&self, calls: &[ToolCallRecord]) -> SqliteResult<usize> {
+    pub fn insert_tool_calls_batch(&self, calls: &[ToolCallRecord]) -> DbResult<usize> {
         if calls.is_empty() {
             return Ok(0);
         }
@@ -47,7 +48,7 @@ impl MissionDB {
     }
 
     /// Update tool call with output (from tool_result block in user message)
-    pub fn update_tool_call_output(&self, tool_use_id: &str, output_summary: &str, raw_output: &str, status: &str) -> SqliteResult<bool> {
+    pub fn update_tool_call_output(&self, tool_use_id: &str, output_summary: &str, raw_output: &str, status: &str) -> DbResult<bool> {
         let conn = self.conn();
         let changes = conn.execute(
             "UPDATE conversation_tool_calls SET output_summary = ?1, raw_output = ?2, status = ?3 WHERE id = ?4",
@@ -57,7 +58,7 @@ impl MissionDB {
     }
 
     /// Get tool calls for a session (for audit trace)
-    pub fn get_tool_calls_by_session(&self, session_id: &str, tool_filter: Option<&[String]>, limit: i64) -> SqliteResult<Vec<ToolCallRecord>> {
+    pub fn get_tool_calls_by_session(&self, session_id: &str, tool_filter: Option<&[String]>, limit: i64) -> DbResult<Vec<ToolCallRecord>> {
         let conn = self.read_conn();
         let mut calls = Vec::new();
         if let Some(filter) = tool_filter {
@@ -91,7 +92,7 @@ impl MissionDB {
     }
 
     /// Get a single tool call by ID (for audit detail drilldown)
-    pub fn get_tool_call_by_id(&self, tool_use_id: &str) -> SqliteResult<Option<ToolCallRecord>> {
+    pub fn get_tool_call_by_id(&self, tool_use_id: &str) -> DbResult<Option<ToolCallRecord>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare("SELECT * FROM conversation_tool_calls WHERE id = ?1")?;
         let mut rows = stmt.query(params![tool_use_id])?;
@@ -103,7 +104,7 @@ impl MissionDB {
     }
 
     /// Get tool call statistics for a session
-    pub fn get_tool_call_stats(&self, session_id: &str) -> SqliteResult<Vec<(String, i64, i64, i64)>> {
+    pub fn get_tool_call_stats(&self, session_id: &str) -> DbResult<Vec<(String, i64, i64, i64)>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT tool_name,
@@ -126,7 +127,7 @@ impl MissionDB {
         Ok(stats)
     }
 
-    fn row_to_tool_call(row: &rusqlite::Row) -> SqliteResult<ToolCallRecord> {
+    fn row_to_tool_call(row: &rusqlite::Row) -> rusqlite::Result<ToolCallRecord> {
         Ok(ToolCallRecord {
             id: row.get("id")?,
             session_id: row.get("session_id")?,
@@ -143,7 +144,7 @@ impl MissionDB {
     }
 
     /// Batch insert conversation events (system events from JSONL: turn_duration, etc.)
-    pub fn insert_conversation_events_batch(&self, events: &[crate::types::ConversationEvent]) -> SqliteResult<usize> {
+    pub fn insert_conversation_events_batch(&self, events: &[crate::types::ConversationEvent]) -> DbResult<usize> {
         if events.is_empty() {
             return Ok(0);
         }
@@ -168,7 +169,7 @@ impl MissionDB {
         session_id: &str,
         event_type: Option<&str>,
         limit: i64,
-    ) -> SqliteResult<Vec<crate::types::ConversationEvent>> {
+    ) -> DbResult<Vec<crate::types::ConversationEvent>> {
         let conn = self.read_conn();
         let mut events = Vec::new();
         if let Some(et) = event_type {
@@ -214,7 +215,7 @@ impl MissionDB {
         &self,
         tool_use_id: &str,
         limit: i64,
-    ) -> SqliteResult<Vec<ConversationMessage>> {
+    ) -> DbResult<Vec<ConversationMessage>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata
@@ -233,7 +234,7 @@ impl MissionDB {
     pub fn get_event_type_summary(
         &self,
         session_id: Option<&str>,
-    ) -> SqliteResult<Vec<(String, i64)>> {
+    ) -> DbResult<Vec<(String, i64)>> {
         let conn = self.read_conn();
         let mut summary = Vec::new();
         if let Some(sid) = session_id {
@@ -259,7 +260,7 @@ impl MissionDB {
     }
 
     /// Delete old progress/hook events older than cutoff timestamp
-    pub fn cleanup_old_events(&self, cutoff: &str) -> SqliteResult<usize> {
+    pub fn cleanup_old_events(&self, cutoff: &str) -> DbResult<usize> {
         let conn = self.conn();
         let deleted = conn.execute(
             "DELETE FROM conversation_events
@@ -271,7 +272,7 @@ impl MissionDB {
     }
 
     /// Get all session IDs that have at least one event in conversation_events
-    pub fn get_sessions_with_events(&self) -> SqliteResult<std::collections::HashSet<String>> {
+    pub fn get_sessions_with_events(&self) -> DbResult<std::collections::HashSet<String>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT DISTINCT session_id FROM conversation_events"
@@ -283,7 +284,7 @@ impl MissionDB {
     }
 
     /// Count tool calls still in 'pending' status (missing output)
-    pub fn count_pending_tool_calls(&self) -> SqliteResult<i64> {
+    pub fn count_pending_tool_calls(&self) -> DbResult<i64> {
         let conn = self.read_conn();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM conversation_tool_calls WHERE status = 'pending'",
@@ -294,7 +295,7 @@ impl MissionDB {
     }
 
     /// Get session IDs that have pending tool calls (for output patching)
-    pub fn get_sessions_with_pending_tool_calls(&self) -> SqliteResult<Vec<String>> {
+    pub fn get_sessions_with_pending_tool_calls(&self) -> DbResult<Vec<String>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT DISTINCT session_id FROM conversation_tool_calls WHERE status = 'pending'"
@@ -306,7 +307,7 @@ impl MissionDB {
     }
 
     /// Get all session IDs that have at least one tool call in conversation_tool_calls
-    pub fn get_sessions_with_tool_calls(&self) -> SqliteResult<std::collections::HashSet<String>> {
+    pub fn get_sessions_with_tool_calls(&self) -> DbResult<std::collections::HashSet<String>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT DISTINCT session_id FROM conversation_tool_calls"
@@ -318,7 +319,7 @@ impl MissionDB {
     }
 
     /// Get raw messages for tool call backfill (assistant+user roles with raw_content)
-    pub fn get_messages_for_tool_call_backfill(&self, session_id: &str) -> SqliteResult<Vec<(String, String, String)>> {
+    pub fn get_messages_for_tool_call_backfill(&self, session_id: &str) -> DbResult<Vec<(String, String, String)>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT role, raw_content, timestamp FROM conversation_messages
@@ -335,7 +336,7 @@ impl MissionDB {
     }
 
     /// Get all conversations with their JSONL paths (for backfill)
-    pub fn get_conversations_with_jsonl(&self) -> SqliteResult<Vec<(String, String)>> {
+    pub fn get_conversations_with_jsonl(&self) -> DbResult<Vec<(String, String)>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, jsonl_path FROM conversations WHERE jsonl_path IS NOT NULL AND jsonl_path != ''"
@@ -349,7 +350,7 @@ impl MissionDB {
     }
 
     /// Mark a conversation as analyzed
-    pub fn mark_conversation_analyzed(&self, id: &str) -> SqliteResult<()> {
+    pub fn mark_conversation_analyzed(&self, id: &str) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn();
         conn.execute(
@@ -360,7 +361,7 @@ impl MissionDB {
     }
 
     /// Get conversations that are completed but not yet analyzed
-    pub fn get_unanalyzed_conversations(&self) -> SqliteResult<Vec<Conversation>> {
+    pub fn get_unanalyzed_conversations(&self) -> DbResult<Vec<Conversation>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM conversations WHERE status = 'completed' AND analyzed_at IS NULL ORDER BY started_at DESC"
@@ -372,7 +373,7 @@ impl MissionDB {
     }
 
     /// Mark a conversation as completed
-    pub fn complete_conversation(&self, id: &str) -> SqliteResult<()> {
+    pub fn complete_conversation(&self, id: &str) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn();
         conn.execute(
@@ -384,7 +385,7 @@ impl MissionDB {
 
     /// Complete stale active conversations whose last message is older than the given cutoff.
     /// Returns the number of conversations marked completed.
-    pub fn complete_stale_conversations(&self, cutoff: &str) -> SqliteResult<usize> {
+    pub fn complete_stale_conversations(&self, cutoff: &str) -> DbResult<usize> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT c.id FROM conversations c
@@ -405,7 +406,7 @@ impl MissionDB {
     }
 
     /// Mark a conversation as compacted (replaced by context compaction).
-    pub fn mark_conversation_compacted(&self, id: &str) -> SqliteResult<()> {
+    pub fn mark_conversation_compacted(&self, id: &str) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn();
         conn.execute(
@@ -416,7 +417,7 @@ impl MissionDB {
     }
 
     /// Set the task_id on a conversation.
-    pub fn set_conversation_task_id(&self, id: &str, task_id: &str) -> SqliteResult<()> {
+    pub fn set_conversation_task_id(&self, id: &str, task_id: &str) -> DbResult<()> {
         let conn = self.conn();
         conn.execute(
             "UPDATE conversations SET task_id = ?1 WHERE id = ?2",
@@ -426,7 +427,7 @@ impl MissionDB {
     }
 
     /// Get all conversations sharing the same task_id.
-    pub fn get_conversations_by_task_id(&self, task_id: &str) -> SqliteResult<Vec<Conversation>> {
+    pub fn get_conversations_by_task_id(&self, task_id: &str) -> DbResult<Vec<Conversation>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM conversations WHERE task_id = ?1 ORDER BY started_at ASC"
@@ -438,17 +439,17 @@ impl MissionDB {
     }
 
     /// Re-activate a completed conversation when new messages arrive.
-    pub fn reactivate_conversation(&self, id: &str) -> SqliteResult<usize> {
+    pub fn reactivate_conversation(&self, id: &str) -> DbResult<usize> {
         let conn = self.conn();
-        conn.execute(
+        Ok(conn.execute(
             "UPDATE conversations SET status = 'active', ended_at = NULL WHERE id = ?1 AND status = 'completed'",
             params![id],
-        )
+        )?)
     }
 
     /// Get conversation messages not yet forwarded to memory analysis.
     /// Returns messages from today (UTC) for user CLI sessions only (no PTY, no subagents).
-    pub fn get_pending_memory_messages(&self, today: &str) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
+    pub fn get_pending_memory_messages(&self, today: &str) -> DbResult<Vec<(String, String, Vec<ConversationMessage>)>> {
         tokio::task::block_in_place(|| {
             // Single JOIN query: get all pending messages at once
             // Excludes: PTY sessions (slot_id IS NOT NULL), subagent sessions (id LIKE 'agent-%')
@@ -487,7 +488,7 @@ impl MissionDB {
     }
 
     /// Update memory_forwarded_at for a conversation
-    pub fn update_memory_forwarded_at(&self, session_id: &str, timestamp: &str) -> SqliteResult<()> {
+    pub fn update_memory_forwarded_at(&self, session_id: &str, timestamp: &str) -> DbResult<()> {
         let conn = self.conn();
         conn.execute(
             "UPDATE conversations SET memory_forwarded_at = ?1 WHERE id = ?2",
@@ -498,7 +499,7 @@ impl MissionDB {
 
     /// Get pending USER-ONLY messages for user-voice extraction.
     /// Same logic as get_pending_memory_messages but only returns role='user'.
-    pub fn get_pending_user_voice_messages(&self) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
+    pub fn get_pending_user_voice_messages(&self) -> DbResult<Vec<(String, String, Vec<ConversationMessage>)>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT m.*, COALESCE(c.project, '') as c_project, c.user_voice_forwarded_at
@@ -532,7 +533,7 @@ impl MissionDB {
     }
 
     /// Update user_voice_forwarded_at for a conversation
-    pub fn update_user_voice_forwarded_at(&self, session_id: &str, timestamp: &str) -> SqliteResult<()> {
+    pub fn update_user_voice_forwarded_at(&self, session_id: &str, timestamp: &str) -> DbResult<()> {
         let conn = self.conn();
         conn.execute(
             "UPDATE conversations SET user_voice_forwarded_at = ?1 WHERE id = ?2",
@@ -544,14 +545,14 @@ impl MissionDB {
     /// Get pending messages for unified realtime extraction (replaces separate user_voice + memory).
     /// Returns all user+assistant messages since realtime_forwarded_at watermark.
     /// Uses fair-queuing: per-session cap (10 msgs) + oldest-first ordering to prevent starvation.
-    pub fn get_pending_realtime_messages(&self) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
+    pub fn get_pending_realtime_messages(&self) -> DbResult<Vec<(String, String, Vec<ConversationMessage>)>> {
         self.get_pending_realtime_messages_with_limit(50)
     }
 
     /// Get pending realtime messages with a configurable limit.
     /// Fair-queuing: each session gets at most 15 messages per batch, ordered by oldest first.
     /// Includes tool_result messages (file contents, command outputs) for richer memory extraction.
-    pub fn get_pending_realtime_messages_with_limit(&self, limit: usize) -> SqliteResult<Vec<(String, String, Vec<ConversationMessage>)>> {
+    pub fn get_pending_realtime_messages_with_limit(&self, limit: usize) -> DbResult<Vec<(String, String, Vec<ConversationMessage>)>> {
         tokio::task::block_in_place(|| {
             let conn = self.read_conn();
             let mut stmt = conn.prepare(
@@ -593,7 +594,7 @@ impl MissionDB {
     }
 
     /// Update realtime_forwarded_at watermark for a conversation.
-    pub fn update_realtime_forwarded_at(&self, session_id: &str, timestamp: &str) -> SqliteResult<()> {
+    pub fn update_realtime_forwarded_at(&self, session_id: &str, timestamp: &str) -> DbResult<()> {
         let conn = self.conn();
         conn.execute(
             "UPDATE conversations SET realtime_forwarded_at = ?1 WHERE id = ?2",
