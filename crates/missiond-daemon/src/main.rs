@@ -15,6 +15,7 @@ mod decision_engine;
 mod autopilot;
 mod llm_gateway;
 mod event_bus;
+mod event_router;
 mod extraction;
 mod supervisor;
 mod memory_scheduler;
@@ -53,8 +54,7 @@ use embedding_worker::{init_embedding_provider, generate_and_store_conv_embeddin
 use autopilot::{autopilot_tick, detect_compaction};
 use state::{MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 use supervisor::get_task_jsonl_path;
-use memory_scheduler::{schedule_memory_tasks, dispatch_queued_submit_tasks};
-use decision_engine::{process_pending_master_questions, process_incident, health_scan};
+use decision_engine::{process_incident, health_scan};
 use message_handler::{handle_new_messages, handle_pty_text_complete};
 
 impl AppState {
@@ -1102,83 +1102,8 @@ async fn main() -> Result<()> {
     info!("Autopilot scheduler started (60s interval, isolated task)");
 
     // --- P3: Event-driven handlers via EventBus (Phase 2) ---
-    // Each concern subscribes to DaemonEvent and filters relevant events.
-    // Replaces the old Notify-based wake signals.
-
-    // Extraction lane handler: SlotBecameIdle → schedule_memory_tasks
-    {
-        let s = state.clone();
-        let mut rx = s.event_bus.subscribe();
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(event_bus::DaemonEvent::SlotBecameIdle { ref slot_id })
-                        if slot_id == MEMORY_SLOT_ID || slot_id == MEMORY_SLOW_SLOT_ID =>
-                    {
-                        if !s.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                            schedule_memory_tasks(&s).await;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "Extraction consumer lagged");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    _ => {} // ignore irrelevant events
-                }
-            }
-        });
-    }
-
-    // Submit task dispatch handler: TaskCreated/TaskCompleted → dispatch
-    {
-        let s = state.clone();
-        let mut rx = s.event_bus.subscribe();
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(event_bus::DaemonEvent::TaskCreated { .. })
-                    | Ok(event_bus::DaemonEvent::TaskCompleted { .. }) => {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        dispatch_queued_submit_tasks(&s).await;
-                        if !s.memory_paused.load(std::sync::atomic::Ordering::Relaxed) {
-                            schedule_memory_tasks(&s).await;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "Submit consumer lagged");
-                        // After lag, still dispatch to catch up
-                        dispatch_queued_submit_tasks(&s).await;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    _ => {}
-                }
-            }
-        });
-    }
-
-    // Decision Engine handler: QuestionCreated → process
-    {
-        let s = state.clone();
-        let mut rx = s.event_bus.subscribe();
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(event_bus::DaemonEvent::QuestionCreated { .. }) => {
-                        // Debounce: coalesce rapid signals
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        process_pending_master_questions(&s).await;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "Decision consumer lagged");
-                        process_pending_master_questions(&s).await;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    _ => {}
-                }
-            }
-        });
-    }
+    // Extracted to event_router.rs to prevent main.rs from becoming a God Module (R4).
+    event_router::start_event_consumers(&state);
 
     // AIOps Reactor: consume incident events, debounce, triage, create board tasks
     {
