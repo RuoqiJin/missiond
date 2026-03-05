@@ -42,9 +42,17 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "search": {
                         "type": "boolean",
                         "description": "启用 Google 搜索增强（仅 Gemini，默认 false）"
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "本地文件路径列表。文件内容自动读取并追加到最后一条 user 消息。限制: 项目目录内、单文件 ≤ 500KB、UTF-8"
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "单条 user 消息（便捷模式）。等价于 messages: [{role:'user', content:message}]。与 messages 二选一"
                     }
-                },
-                "required": ["messages"]
+                }
             }),
         ),
         ToolDefinition::new(

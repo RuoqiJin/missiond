@@ -7,6 +7,7 @@ use missiond_core::{
 };
 use tokio::sync::Mutex;
 
+use crate::gemini_client::GeminiClient;
 use crate::mcp_client::McpProcessClient;
 
 
@@ -126,6 +127,8 @@ pub(crate) struct AppState {
     pub(crate) slot_progress: Arc<tokio::sync::RwLock<HashMap<String, SlotProgress>>>,
     /// Shared HTTP client for Router API calls (connection pool reuse).
     pub(crate) http_client: reqwest::Client,
+    /// Rate-limited Gemini client (20 RPM, 3 concurrent, 429 auto-retry).
+    pub(crate) gemini: GeminiClient,
     /// Persistent xjp-mcp client (lazy-initialized, auto-reconnect on crash).
     pub(crate) xjp_mcp: Arc<McpProcessClient>,
     /// Flow engine reentry guard: task IDs currently being processed.

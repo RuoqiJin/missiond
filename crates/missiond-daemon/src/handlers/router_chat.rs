@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use tracing::{info, warn};
@@ -8,6 +10,15 @@ use crate::embedding_worker::resolve_llm_credentials;
 use crate::context_budget::apply_context_budget;
 use crate::context_budget::MAX_ROUTER_PAYLOAD_BYTES;
 
+/// Allowed directory prefixes for file attachments (path jail).
+const FILE_ALLOWED_PREFIXES: &[&str] = &[
+    "/Users/jinchen/Projects/",
+    "/Users/jinchen/.claude/",
+    "/Users/jinchen/.xjp-mission/",
+];
+/// Max file size for attachments (500 KB).
+const FILE_MAX_SIZE: u64 = 500 * 1024;
+
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== Router Chat =====
@@ -15,9 +26,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let params: serde_json::Value = serde_json::from_value(args)
                 .map_err(|e| anyhow!("Invalid params: {}", e))?;
 
-            let mut messages: Vec<serde_json::Value> = params.get("messages")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .ok_or_else(|| anyhow!("'messages' array is required"))?;
+            // Support `message` shorthand: single string → [{role: "user", content: message}]
+            let mut messages: Vec<serde_json::Value> = if let Some(msg) = params.get("message").and_then(|v| v.as_str()) {
+                vec![serde_json::json!({"role": "user", "content": msg})]
+            } else {
+                params.get("messages")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .ok_or_else(|| anyhow!("'messages' or 'message' is required"))?
+            };
 
             let context_mode = params.get("context")
                 .and_then(|v| v.as_str())
@@ -96,6 +112,50 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 }
             }
 
+            // Process file attachments: read files and append to last user message
+            if let Some(files) = params.get("files").and_then(|v| v.as_array()) {
+                let mut file_contents = Vec::new();
+                for file_val in files {
+                    let path_str = file_val.as_str()
+                        .ok_or_else(|| anyhow!("file path must be a string"))?;
+                    let path = Path::new(path_str).canonicalize()
+                        .map_err(|e| anyhow!("Cannot resolve path '{}': {}", path_str, e))?;
+
+                    // Security: path jail check
+                    if !FILE_ALLOWED_PREFIXES.iter().any(|p| path.starts_with(p)) {
+                        return Err(anyhow!("File path not in allowed directories: {}", path.display()));
+                    }
+
+                    // Security: file size check
+                    let metadata = tokio::fs::metadata(&path).await
+                        .map_err(|e| anyhow!("Cannot stat '{}': {}", path.display(), e))?;
+                    if metadata.len() > FILE_MAX_SIZE {
+                        return Err(anyhow!("File too large ({} bytes, max {}): {}",
+                            metadata.len(), FILE_MAX_SIZE, path.display()));
+                    }
+
+                    // Read (UTF-8 validated by read_to_string)
+                    let content = tokio::fs::read_to_string(&path).await
+                        .map_err(|e| anyhow!("Failed to read '{}' (must be UTF-8): {}", path.display(), e))?;
+
+                    let filename = path.file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path_str.to_string());
+                    file_contents.push(format!("\n\n<file path=\"{}\">\n{}\n</file>", filename, content));
+                }
+
+                if !file_contents.is_empty() {
+                    // Append to the last user message
+                    if let Some(last_user) = messages.iter_mut().rev()
+                        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                    {
+                        let original = last_user.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                        last_user["content"] = serde_json::json!(format!("{}{}", original, file_contents.join("")));
+                    }
+                    info!("Router chat: attached {} files", files.len());
+                }
+            }
+
             // Apply context budget before sending
             let budget_result = apply_context_budget(&mut messages, MAX_ROUTER_PAYLOAD_BYTES);
             if budget_result.trimmed {
@@ -122,22 +182,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .sum();
             info!("Router chat: {} messages ({} chars) to {} via {}", messages.len(), total_chars, model, url);
 
-            let resp = state.http_client.post(&url)
-                .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {}", jwt))
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| anyhow!("Router request failed: {}", e))?;
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let err_body = resp.text().await.unwrap_or_default();
-                return Ok(ToolResult::error(format!("Router returned {}: {}", status, err_body)));
-            }
-
-            let result: serde_json::Value = resp.json().await
-                .map_err(|e| anyhow!("Failed to parse router response: {}", e))?;
+            let result = state.gemini.send(&state.http_client, &url, &jwt, &body).await?;
 
             let content = result
                 .pointer("/choices/0/message/content")
