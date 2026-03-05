@@ -403,23 +403,10 @@ pub(crate) async fn generate_conv_summary_llm(state: &AppState, conv_text: &str,
         "max_tokens": 512,
     });
 
-    let resp = state.http_client.post(&url)
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", jwt))
-        .json(&body)
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-        .ok()?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        warn!(status = %status, body = %body, "LLM summary request failed");
-        return None;
-    }
-
-    let result: serde_json::Value = resp.json().await.ok()?;
+    let result = state.gemini.send_best_effort(
+        &state.http_client, &url, &jwt, &body,
+        std::time::Duration::from_secs(60),
+    ).await?;
     let content = result
         .pointer("/choices/0/message/content")
         .and_then(|v| v.as_str())

@@ -20,6 +20,7 @@ mod embedding_worker;
 mod slot_env;
 mod claude_md_sync;
 mod context_budget;
+mod gemini_client;
 mod message_handler;
 mod ipc_handler;
 
@@ -591,6 +592,7 @@ async fn main() -> Result<()> {
             .timeout(std::time::Duration::from_secs(180))
             .build()
             .expect("Failed to build HTTP client"),
+        gemini: gemini_client::GeminiClient::new(),
         xjp_mcp: Arc::new(McpProcessClient::new(
             default_mission_home().join("xjp-mcp-config.json"),
         )),

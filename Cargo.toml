@@ -76,6 +76,9 @@ crossterm = "0.28"
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
+# Rate limiting
+governor = "0.8"
+
 # Image rendering (PTY screenshot)
 image = "0.25"
 ab_glyph = "0.2"

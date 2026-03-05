@@ -894,22 +894,7 @@ pub(crate) async fn call_gemini_for_flow(state: &AppState, task_id: &str, prompt
 
     info!(task_id, conv_id = %conv_id, msg_count = messages.len(), "Flow engine: calling Gemini");
 
-    let resp = state.http_client.post(&url)
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", jwt))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| anyhow!("Gemini request failed: {}", e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let err_body = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("Gemini returned {}: {}", status, err_body));
-    }
-
-    let result: serde_json::Value = resp.json().await
-        .map_err(|e| anyhow!("Failed to parse Gemini response: {}", e))?;
+    let result = state.gemini.send(&state.http_client, &url, &jwt, &body).await?;
 
     let content = result
         .pointer("/choices/0/message/content")

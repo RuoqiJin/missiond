@@ -704,23 +704,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             info!("KB analyze [{}]: sending {} entries ({} chars) to {} via {}",
                 mode, entries.len(), kb_jsonl.len(), model, url);
 
-            // 7. Call router API (shared client for connection pool reuse)
-            let resp = state.http_client.post(&url)
-                .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {}", jwt))
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| anyhow!("Router request failed: {}", e))?;
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let err_body = resp.text().await.unwrap_or_default();
-                return Ok(ToolResult::error(format!("Router returned {}: {}", status, err_body)));
-            }
-
-            let result: serde_json::Value = resp.json().await
-                .map_err(|e| anyhow!("Failed to parse router response: {}", e))?;
+            // 7. Call router API (rate-limited with 429 retry)
+            let result = state.gemini.send(&state.http_client, &url, &jwt, &body).await?;
 
             let content = result
                 .pointer("/choices/0/message/content")
