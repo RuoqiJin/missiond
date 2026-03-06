@@ -106,13 +106,22 @@ impl DaemonEvent {
             Self::QuestionCreated { question_id } =>
                 json!({ "question_id": question_id }),
             Self::GeminiRequestCompleted {
-                caller, model, duration_ms, status, error_msg, ..
+                request_id, caller, session_id, api_mode, model,
+                prompt_chars, response_chars, queue_wait_ms,
+                duration_ms, retry_count, status, error_msg,
             } => json!({
                 "caller": caller,
                 "model": model,
                 "duration_ms": duration_ms,
                 "status": status,
                 "error": error_msg,
+                "request_id": request_id,
+                "session_id": session_id,
+                "api_mode": api_mode,
+                "prompt_chars": prompt_chars,
+                "response_chars": response_chars,
+                "queue_wait_ms": queue_wait_ms,
+                "retry_count": retry_count,
             }),
             Self::DecisionResolved { question_id, tier, duration_ms } =>
                 json!({ "question_id": question_id, "tier": tier, "duration_ms": duration_ms }),
