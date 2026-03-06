@@ -85,7 +85,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_router_chat_delete",
-            "删除 Gemini 对话（含所有消息）。支持按 conversation_id 或 task_id 定位。",
+            "删除 Gemini 对话（含所有消息）。消息会先归档到 router_chat_archive 表，可用 restore 恢复。",
             json!({
                 "type": "object",
                 "properties": {
@@ -102,7 +102,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_router_chat_clear",
-            "清空 Gemini 对话的消息历史（保留对话记录本身，重置消息数为 0）。下次 chat 时从空白开始。",
+            "清理 Gemini 对话消息。默认只清最后一轮（2条：1问1答），传 count:-1 清全部。消息归档到 router_chat_archive，可用 restore 恢复。",
             json!({
                 "type": "object",
                 "properties": {
@@ -112,9 +112,27 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "task_id": {
                         "type": "string",
-                        "description": "Board 任务 ID（清空该任务关联的所有 Gemini 对话消息）"
+                        "description": "Board 任务 ID（清理该任务关联的所有 Gemini 对话）"
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "清理最后 N 条消息（默认 2 = 最后一轮问答）。传 -1 清全部。"
                     }
                 }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_router_chat_restore",
+            "从归档恢复已清理/删除的 Gemini 对话消息。将 router_chat_archive 中的消息还原到 conversation_messages。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "conversation_id": {
+                        "type": "string",
+                        "description": "对话 ID（恢复该对话的所有归档消息）"
+                    }
+                },
+                "required": ["conversation_id"]
             }),
         ),
         ToolDefinition::new(
@@ -125,7 +143,5 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {}
             }),
         ),
-
-
     ]
 }
