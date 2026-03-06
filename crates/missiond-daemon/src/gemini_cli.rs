@@ -195,7 +195,7 @@ fn parse_stream_events(events: &[Value], requested_model: &str) -> Result<Gemini
             }
             "message" => {
                 let role = event.get("role").and_then(|v| v.as_str()).unwrap_or("");
-                if role == "assistant" {
+                if role == "assistant" || role == "model" {
                     if let Some(content) = event.get("content").and_then(|v| v.as_str()) {
                         content_parts.push(content.to_string());
                     }
@@ -213,7 +213,9 @@ fn parse_stream_events(events: &[Value], requested_model: &str) -> Result<Gemini
                     return Err(anyhow!("Gemini CLI result status: {}", status));
                 }
             }
-            _ => {} // ignore unknown event types
+            _ => {
+                info!(event_type, "Gemini CLI: unhandled event type");
+            }
         }
     }
 
