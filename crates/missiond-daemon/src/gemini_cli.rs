@@ -221,10 +221,8 @@ fn parse_stream_events(events: &[Value], requested_model: &str) -> Result<Gemini
         return Err(anyhow!("Gemini CLI: no assistant content in {} events", events.len()));
     }
 
-    // For stream-json, assistant messages with delta=true are incremental chunks.
-    // However, from testing, each chunk appears to contain the full response (not truly incremental).
-    // Use the last assistant message as the complete response.
-    let content = content_parts.last().unwrap().clone();
+    // stream-json emits incremental delta chunks — concatenate all to get full response.
+    let content = content_parts.join("");
 
     info!(content_len = content.len(), events = events.len(), "Gemini CLI: stream complete");
 
