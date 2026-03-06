@@ -49,7 +49,6 @@ use missiond_mcp::tools::ToolResult;
 use serde_json::Value;
 use tokio::io::BufReader;
 use tokio::sync::{Mutex, broadcast};
-use crate::event_bus::DaemonEvent;
 use tracing::{debug, error, info, warn};
 
 // Re-imports from extracted modules
@@ -379,6 +378,96 @@ impl AppState {
     }
 }
 
+/// Phase 6: Timeline Writer — single consumer for MPSC, batch-writes to SQLite,
+/// then broadcasts TimelineEvent to all consumers + serializes to WS String channel.
+async fn run_timeline_writer(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<event_bus::TimelineEntry>,
+    db: Arc<missiond_core::MissionDB>,
+    timeline_tx: broadcast::Sender<event_bus::TimelineEvent>,
+    ws_tx: broadcast::Sender<String>,
+) {
+    use event_bus::{TimelineEntry, TimelineEvent};
+
+    loop {
+        // Block until first event arrives
+        let first = match rx.recv().await {
+            Some(e) => e,
+            None => break, // Channel closed
+        };
+        let mut batch: Vec<TimelineEntry> = vec![first];
+
+        // Micro-batch: drain up to 100 ready events
+        while batch.len() < 100 {
+            match rx.try_recv() {
+                Ok(e) => batch.push(e),
+                Err(_) => break,
+            }
+        }
+
+        // Batch-write to SQLite in a single transaction (spawn_blocking for sync rusqlite)
+        let db_clone = Arc::clone(&db);
+        let db_entries: Vec<(Option<String>, String, Option<String>, String, Option<String>, String)> = batch
+            .iter()
+            .map(|entry| {
+                let payload_json = entry.event.to_frontend_payload().to_string();
+                (
+                    entry.trace_id.clone(),
+                    entry.span_id.clone(),
+                    entry.parent_span_id.clone(),
+                    entry.event.wire_type().to_string(),
+                    entry.summary.clone(),
+                    payload_json,
+                )
+            })
+            .collect();
+
+        let seqs = tokio::task::spawn_blocking(move || {
+            let params: Vec<(Option<&str>, &str, Option<&str>, &str, Option<&str>, &str)> = db_entries
+                .iter()
+                .map(|(t, s, p, e, sum, pay)| {
+                    (t.as_deref(), s.as_str(), p.as_deref(), e.as_str(), sum.as_deref(), pay.as_str())
+                })
+                .collect();
+            db_clone.insert_timeline_batch(&params)
+        }).await;
+
+        let seqs = match seqs {
+            Ok(Ok(seqs)) => seqs,
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "Timeline Writer: SQLite batch insert failed");
+                continue;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Timeline Writer: spawn_blocking panicked");
+                continue;
+            }
+        };
+
+        let ts = chrono::Utc::now().timestamp_millis();
+
+        // Broadcast each event with its persistent seq
+        for (entry, seq) in batch.into_iter().zip(seqs) {
+            let te = TimelineEvent {
+                seq,
+                trace_id: entry.trace_id,
+                span_id: entry.span_id,
+                parent_span_id: entry.parent_span_id,
+                event: entry.event,
+                summary: entry.summary,
+                ts,
+            };
+
+            // Forward to WS clients as JSON string
+            let json_str = te.to_frontend_json();
+            let _ = ws_tx.send(json_str);
+
+            // Broadcast to internal consumers (event_router, gemini log, etc.)
+            let _ = timeline_tx.send(te);
+        }
+    }
+    tracing::warn!("Timeline Writer: MPSC channel closed, shutting down");
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let home = default_mission_home();
@@ -496,7 +585,15 @@ async fn main() -> Result<()> {
         std::time::Duration::from_secs(5),
     );
 
-    // WebSocket server (PTY attach + Tasks events + AIOps webhooks)
+    // Phase 6: Timeline architecture
+    // MPSC for event ingestion, broadcast<TimelineEvent> for fan-out to consumers + WS
+    let (timeline_mpsc_tx, timeline_mpsc_rx) = tokio::sync::mpsc::unbounded_channel::<event_bus::TimelineEntry>();
+    let (timeline_broadcast_tx, _) = broadcast::channel::<event_bus::TimelineEvent>(512);
+
+    // Frontend event stream: TimelineEvent → JSON String → WS /events
+    let (frontend_events_tx, _) = broadcast::channel::<String>(256);
+
+    // WebSocket server (PTY attach + Tasks events + AIOps webhooks + EventBus stream)
     let ws_port = ws_port();
     let mut ws_server = PTYWebSocketServer::new(WSServerOptions {
         port: ws_port,
@@ -504,6 +601,8 @@ async fn main() -> Result<()> {
         cc_tasks_watcher: Some(Arc::clone(&cc_tasks)),
         screenshot_broker: Some(Arc::clone(&screenshot_broker)),
         incident_tx: Some(incident_tx.clone()),
+        frontend_events_tx: Some(frontend_events_tx.clone()),
+        db: Some(mission.db_arc()),
     });
     if let Err(e) = ws_server.start().await {
         // Match Node behavior: continue running even if WS is unavailable (e.g. port in use).
@@ -542,7 +641,7 @@ async fn main() -> Result<()> {
         info!(count = pty_uuids.len(), "Loaded PTY session UUIDs from DB");
     }
 
-    let event_bus_instance = Arc::new(event_bus::EventBus::new(512));
+    let event_bus_instance = Arc::new(event_bus::EventBus::new(timeline_mpsc_tx));
     let daemon_stats = Arc::new(daemon_stats::DaemonStats::new());
     let mut db_exec = missiond_core::DbExecutor::new(mission.db_arc());
     {
@@ -615,7 +714,7 @@ async fn main() -> Result<()> {
         gemini: {
             // Check llm.yaml for provider config
             let llm_yaml = default_mission_home().join("llm.yaml");
-            let event_tx = event_bus_instance.sender();
+            let event_tx = event_bus_instance.sender();  // mpsc::UnboundedSender<TimelineEntry>
             if llm_yaml.exists() {
                 if let Ok(content) = std::fs::read_to_string(&llm_yaml) {
                     if let Ok(config) = serde_yaml::from_str::<embedding_worker::LlmConfig>(&content) {
@@ -1077,9 +1176,9 @@ async fn main() -> Result<()> {
         });
     }
 
-    // --- Gemini request log subscriber (EventBus → DB persistence) ---
+    // --- Gemini request log subscriber (Timeline → DB persistence) ---
     {
-        let mut rx = state.event_bus.subscribe();
+        let mut rx = timeline_broadcast_tx.subscribe();
         let log_db = Arc::clone(&state.mission);
         tokio::spawn(async move {
             // Startup cleanup: remove logs older than 7 days
@@ -1090,22 +1189,23 @@ async fn main() -> Result<()> {
             }
             loop {
                 match rx.recv().await {
-                    Ok(DaemonEvent::GeminiRequestCompleted {
-                        request_id, caller, session_id, api_mode, model,
-                        prompt_chars, response_chars, queue_wait_ms, duration_ms,
-                        retry_count, status, error_msg,
-                    }) => {
-                        if let Err(e) = log_db.db().gemini_log_insert(
-                            &request_id, &caller, session_id.as_deref(),
-                            &api_mode, &model,
-                            prompt_chars as i64, response_chars as i64,
-                            queue_wait_ms as i64, duration_ms as i64,
-                            retry_count as i64, &status, error_msg.as_deref(),
-                        ) {
-                            warn!(error = %e, "Gemini log: failed to persist request");
+                    Ok(te) => {
+                        if let event_bus::DaemonEvent::GeminiRequestCompleted {
+                            ref request_id, ref caller, ref session_id, ref api_mode, ref model,
+                            prompt_chars, response_chars, queue_wait_ms, duration_ms,
+                            retry_count, ref status, ref error_msg,
+                        } = te.event {
+                            if let Err(e) = log_db.db().gemini_log_insert(
+                                request_id, caller, session_id.as_deref(),
+                                api_mode, model,
+                                prompt_chars as i64, response_chars as i64,
+                                queue_wait_ms as i64, duration_ms as i64,
+                                retry_count as i64, status, error_msg.as_deref(),
+                            ) {
+                                warn!(error = %e, "Gemini log: failed to persist request");
+                            }
                         }
                     }
-                    Ok(_) => {} // ignore other events
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(skipped = n, "Gemini log subscriber lagged, some requests not logged");
                     }
@@ -1168,7 +1268,78 @@ async fn main() -> Result<()> {
 
     // --- P3: Event-driven handlers via EventBus (Phase 2) ---
     // Extracted to event_router.rs to prevent main.rs from becoming a God Module (R4).
-    event_router::start_event_consumers(&state);
+    event_router::start_event_consumers(&state, &timeline_broadcast_tx);
+
+    // --- Phase 6: Timeline Writer Task ---
+    // MPSC → SQLite batch INSERT (get seq) → broadcast<TimelineEvent> + broadcast<String> (WS)
+    {
+        let rx = timeline_mpsc_rx;
+        let timeline_tx = timeline_broadcast_tx.clone();
+        let ws_tx = frontend_events_tx.clone();
+        let db = state.mission.db_arc();
+        tokio::spawn(async move {
+            run_timeline_writer(rx, db, timeline_tx, ws_tx).await;
+        });
+    }
+
+    // Health snapshot injector (synthetic, not persisted to timeline)
+    {
+        let ws_tx = frontend_events_tx.clone();
+        let stats = Arc::clone(&state.stats);
+        let s = state.clone();
+        tokio::spawn(async move {
+            let mut snapshot_interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            snapshot_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                snapshot_interval.tick().await;
+                if ws_tx.receiver_count() == 0 {
+                    continue;
+                }
+                let snap = stats.snapshot();
+                let publish_count = s.event_bus.publish_count.load(
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                let memory_paused = s.memory_paused.load(
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                let fast_lane = {
+                    let es = s.extraction_state.read().await;
+                    serde_json::json!({ "phase": format!("{:?}", es.phase), "type": es.active_type })
+                };
+                let slow_lane = {
+                    let es = s.slow_extraction_state.read().await;
+                    serde_json::json!({ "phase": format!("{:?}", es.phase), "type": es.active_type })
+                };
+                let payload = serde_json::json!({
+                    "type": "health_snapshot",
+                    "ts": chrono::Utc::now().timestamp_millis(),
+                    "seq": -1,
+                    "payload": {
+                        "stats": snap,
+                        "event_bus": { "publish_count": publish_count },
+                        "memory": {
+                            "paused": memory_paused,
+                            "fast_lane": fast_lane,
+                            "slow_lane": slow_lane,
+                        },
+                    }
+                });
+                let _ = ws_tx.send(payload.to_string());
+            }
+        });
+    }
+    info!("Timeline Writer + Health snapshot started (ws://*:{}/events)", ws_port);
+
+    // Timeline TTL cleanup on startup
+    {
+        let db = state.mission.db_arc();
+        tokio::task::spawn_blocking(move || {
+            match db.cleanup_timeline_ttl(7) {
+                Ok(deleted) if deleted > 0 => info!(deleted, "Timeline: cleaned up old entries (>7 days)"),
+                _ => {}
+            }
+        });
+    }
 
     // AIOps Reactor: consume incident events, debounce, triage, create board tasks
     {
@@ -1372,6 +1543,12 @@ async fn main() -> Result<()> {
                         s.mission.db().clear_slot_session(&slot_id);
                     }
                     Ok(missiond_core::ManagerEvent::StateChange { ref slot_id, new_state, prev_state }) => {
+                        // Publish slot state change for all slots (Phase 6c)
+                        s.event_bus.publish(event_bus::DaemonEvent::SlotStateChanged {
+                            slot_id: slot_id.to_string(),
+                            new_state: format!("{:?}", new_state),
+                            prev_state: format!("{:?}", prev_state),
+                        });
                         // Route memory slot state changes to the correct lane
                         let lane = if slot_id == MEMORY_SLOT_ID {
                             Some(("fast", &s.extraction_state, &s.memory_slot_busy_since))
@@ -1428,6 +1605,11 @@ async fn main() -> Result<()> {
                                         if let Some(ref st_id) = es.current_slot_task_id {
                                             let _ = s.mission.db().slot_task_set_completed(st_id, 0);
                                         }
+                                        s.event_bus.publish(event_bus::DaemonEvent::MemoryPhaseChanged {
+                                            slot_id: slot_id.to_string(),
+                                            phase: "Idle".to_string(),
+                                            active_type: es.active_type.map(|s| s.to_string()),
+                                        });
                                         es.phase = ExtractionPhase::Idle;
                                         es.active_type = None;
                                         es.current_task_id = None;
@@ -1521,7 +1703,14 @@ async fn main() -> Result<()> {
                                         info!(task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,
                                             jsonl_result = jsonl_resp.is_some(),
                                             "Submit task closed: slot returned to Idle");
-                                        s.event_bus.publish(event_bus::DaemonEvent::TaskCompleted { task_id: task.id.clone() });
+                                        s.event_bus.publish_traced(
+                                            event_bus::DaemonEvent::TaskCompleted { task_id: task.id.clone() },
+                                            event_bus::TraceContext {
+                                                trace_id: Some(task.id.clone()),
+                                                summary: Some(format!("Task completed on {}", slot_id)),
+                                                ..Default::default()
+                                            },
+                                        );
                                     }
                                 }
                             }

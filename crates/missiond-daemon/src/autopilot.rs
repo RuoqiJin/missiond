@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use tracing::{debug, info, warn};
 
 use crate::state::{AppState, MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
+use crate::event_bus::DaemonEvent;
 use crate::supervisor::{check_slot_context_levels, check_slot_stuck};
 use crate::memory_scheduler::ensure_memory_slot_by_id;
 use crate::decision_harvest::harvest_decisions_for_task;
@@ -230,6 +231,9 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                             ..Default::default()
                         },
                     );
+                    state.event_bus.publish(DaemonEvent::BoardTaskUpdated {
+                        task_id: task.id.clone(), status: "blocked".to_string(), category: task.category.clone(),
+                    });
                     let _ = state.mission.db().add_board_task_note(
                         &missiond_core::types::AddBoardTaskNoteInput {
                             task_id: task.id.clone(),
@@ -431,6 +435,9 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                                 ..Default::default()
                             },
                         );
+                        state.event_bus.publish(DaemonEvent::BoardTaskUpdated {
+                            task_id: task.id.clone(), status: "failed".to_string(), category: task.category.clone(),
+                        });
                     } else {
                         let _ = state.mission.db().increment_board_task_retry(&task.id, new_retry);
                     }
@@ -478,6 +485,9 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                                 ..Default::default()
                             },
                         );
+                        state.event_bus.publish(DaemonEvent::BoardTaskUpdated {
+                            task_id: task.id.clone(), status: "done".to_string(), category: task.category.clone(),
+                        });
                         info!(task_id = %task.id, duration_ms = res.duration_ms, "Autopilot: task completed");
                     }
                 }
@@ -550,6 +560,9 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                             ..Default::default()
                         },
                     );
+                    state.event_bus.publish(DaemonEvent::BoardTaskUpdated {
+                        task_id: task.id.clone(), status: "failed".to_string(), category: task.category.clone(),
+                    });
                     warn!(task_id = %task.id, retries = new_retry, "Autopilot: task failed after max retries");
                 } else {
                     // Back to open for retry, increment retry_count

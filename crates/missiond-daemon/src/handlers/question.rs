@@ -5,6 +5,8 @@ use tracing::info;
 use missiond_mcp::tools::ToolResult;
 
 use crate::state::AppState;
+use crate::event_bus::{DaemonEvent, TraceContext};
+use crate::gemini_client::REQUEST_SESSION_ID;
 
 #[derive(Deserialize)]
 struct QuestionCreateArgs {
@@ -91,7 +93,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             // Signal Decision Engine if target=master
             if q.target == "master" {
-                state.event_bus.publish(crate::event_bus::DaemonEvent::QuestionCreated { question_id: q.id.clone() });
+                state.event_bus.publish_traced(
+                    DaemonEvent::QuestionCreated { question_id: q.id.clone() },
+                    TraceContext {
+                        trace_id: q.task_id.clone(),
+                        summary: Some(format!("Question: {}", q.question.chars().take(80).collect::<String>())),
+                        ..Default::default()
+                    },
+                );
                 info!(question_id = %q.id, "Decision Engine notified: new master question");
             }
             Ok(ToolResult::json_pretty(&q))
@@ -128,7 +137,18 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             {
                 Some(q) => {
                     // Signal scheduler for instant slot recovery after question answered
-                    state.event_bus.publish(crate::event_bus::DaemonEvent::TaskCompleted { task_id: String::new() });
+                    state.event_bus.publish(DaemonEvent::TaskCompleted { task_id: String::new() });
+                    state.event_bus.publish_traced(
+                        DaemonEvent::QuestionResolved {
+                            question_id: id.clone(),
+                            resolution: "answered".to_string(),
+                        },
+                        TraceContext {
+                            trace_id: REQUEST_SESSION_ID.try_with(|s| s.clone()).ok(),
+                            summary: Some("Question answered by human".to_string()),
+                            ..Default::default()
+                        },
+                    );
                     Ok(ToolResult::json_pretty(&q))
                 }
                 None => Ok(ToolResult::error("Question not found")),
@@ -142,7 +162,20 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .dismiss_agent_question(&id)
                 .map_err(|e| anyhow!("DB error: {}", e))?
             {
-                Some(q) => Ok(ToolResult::json_pretty(&q)),
+                Some(q) => {
+                    state.event_bus.publish_traced(
+                        DaemonEvent::QuestionResolved {
+                            question_id: id.clone(),
+                            resolution: "dismissed".to_string(),
+                        },
+                        TraceContext {
+                            trace_id: REQUEST_SESSION_ID.try_with(|s| s.clone()).ok(),
+                            summary: Some("Question dismissed by human".to_string()),
+                            ..Default::default()
+                        },
+                    );
+                    Ok(ToolResult::json_pretty(&q))
+                }
                 None => Ok(ToolResult::error("Question not found")),
             }
         }

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Activity, Crosshair, FlaskConical, Rocket } from 'lucide-react';
+import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Activity, Crosshair, FlaskConical, Rocket, Gauge } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
@@ -18,12 +18,16 @@ import { MemoryDashboard } from './components/MemoryDashboard';
 import { DecisionDashboard } from './components/DecisionDashboard';
 import { ResearchBoard } from './components/ResearchBoard';
 import { DeployDashboard } from './components/DeployDashboard';
+import { EngineDashboard } from './components/EngineDashboard';
+import { useEventStream, useConnectionState } from './hooks/useEventStream';
 
-type Tab = 'board' | 'terminal' | 'knowledge' | 'conversations' | 'memory' | 'decisions' | 'research' | 'deploy';
+type Tab = 'board' | 'terminal' | 'knowledge' | 'conversations' | 'memory' | 'decisions' | 'research' | 'deploy' | 'engine';
 
 interface SlotDef { id: string; label: string; role: string; running?: boolean }
 
 export default function App() {
+  useEventStream(); // Global EventBus WS connection
+  const wsState = useConnectionState();
   const openAddDialog = useTaskCenterStore((s) => s.openAddDialog);
   const fetchTasks = useTaskCenterStore((s) => s.fetchTasks);
   const isLoading = useTaskCenterStore((s) => s.isLoading);
@@ -185,10 +189,28 @@ export default function App() {
               <FlaskConical className="w-3 h-3" />
               Research
             </button>
+            <button
+              onClick={() => setTab('engine')}
+              className={cn(
+                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
+                tab === 'engine' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
+              )}
+            >
+              <Gauge className="w-3 h-3" />
+              Engine
+            </button>
           </div>
         </div>
 
         <div className="flex items-center gap-2">
+          {/* WS connection indicator */}
+          <div
+            className={cn(
+              'w-1.5 h-1.5 rounded-full transition-colors',
+              wsState === 'connected' ? 'bg-emerald-500' : wsState === 'connecting' ? 'bg-amber-500 animate-pulse' : 'bg-neutral-600',
+            )}
+            title={`EventBus: ${wsState}`}
+          />
           {tab === 'terminal' && slots.filter((s) => s.running).length > 0 && (
             <div className="flex items-center gap-1 mr-2">
               {slots.filter((s) => s.running).map((slot) => (
@@ -245,6 +267,8 @@ export default function App() {
         <DeployDashboard />
       ) : tab === 'research' ? (
         <ResearchBoard />
+      ) : tab === 'engine' ? (
+        <EngineDashboard />
       ) : (
         <MemoryDashboard />
       )}

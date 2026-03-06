@@ -1023,6 +1023,24 @@ impl MissionDB {
             );"
         )?;
 
+        // Phase 6: System Timeline — persistent event log with global monotonic seq
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS system_timeline (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                trace_id TEXT,
+                span_id TEXT,
+                parent_span_id TEXT,
+                event_type TEXT NOT NULL,
+                summary TEXT,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_tl_created ON system_timeline(created_at);
+            CREATE INDEX IF NOT EXISTS idx_tl_type ON system_timeline(event_type);
+            CREATE INDEX IF NOT EXISTS idx_tl_trace ON system_timeline(trace_id);
+            CREATE INDEX IF NOT EXISTS idx_tl_parent ON system_timeline(parent_span_id);"
+        )?;
+
         // Gemini request log: persistent instrumentation for all LLM calls
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS gemini_requests (
@@ -1048,7 +1066,84 @@ impl MissionDB {
         Ok(())
     }
 
+    // ── System Timeline (Phase 6) ──
 
+    /// Batch-insert timeline entries in a single transaction.
+    /// Returns the seq (AUTOINCREMENT rowid) for each entry.
+    pub fn insert_timeline_batch(
+        &self,
+        entries: &[(Option<&str>, &str, Option<&str>, &str, Option<&str>, &str)],
+    ) -> DbResult<Vec<i64>> {
+        let conn = self.conn();
+        conn.execute_batch("BEGIN")?;
+        let mut seqs = Vec::with_capacity(entries.len());
+        for (trace_id, span_id, parent_span_id, event_type, summary, payload) in entries {
+            conn.execute(
+                "INSERT INTO system_timeline (trace_id, span_id, parent_span_id, event_type, summary, payload)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![trace_id, span_id, parent_span_id, event_type, summary, payload],
+            )?;
+            seqs.push(conn.last_insert_rowid());
+        }
+        conn.execute_batch("COMMIT")?;
+        Ok(seqs)
+    }
+
+    /// Query timeline events after a given seq (for WS catch-up).
+    pub fn query_timeline_since(&self, since_seq: i64, limit: usize) -> DbResult<Vec<TimelineRow>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT seq, trace_id, span_id, parent_span_id, event_type, summary, payload, created_at
+             FROM system_timeline WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![since_seq, limit as i64], |row| {
+            Ok(TimelineRow {
+                seq: row.get(0)?,
+                trace_id: row.get(1)?,
+                span_id: row.get(2)?,
+                parent_span_id: row.get(3)?,
+                event_type: row.get(4)?,
+                summary: row.get(5)?,
+                payload: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Get the latest seq in the timeline (for connected message).
+    pub fn timeline_latest_seq(&self) -> DbResult<i64> {
+        let conn = self.read_conn();
+        let seq: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM system_timeline",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(seq)
+    }
+
+    /// Delete timeline events older than N days. Returns count deleted.
+    pub fn cleanup_timeline_ttl(&self, days: i64) -> DbResult<usize> {
+        let conn = self.conn();
+        let deleted = conn.execute(
+            "DELETE FROM system_timeline WHERE created_at < datetime('now', ?1)",
+            rusqlite::params![format!("-{} days", days)],
+        )?;
+        Ok(deleted)
+    }
+}
+
+/// A row from the system_timeline table.
+#[derive(Debug, Clone)]
+pub struct TimelineRow {
+    pub seq: i64,
+    pub trace_id: Option<String>,
+    pub span_id: Option<String>,
+    pub parent_span_id: Option<String>,
+    pub event_type: String,
+    pub summary: Option<String>,
+    pub payload: String,
+    pub created_at: String,
 }
 
 /// Tokenize text for similarity comparison.
