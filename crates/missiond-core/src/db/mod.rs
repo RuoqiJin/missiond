@@ -731,6 +731,22 @@ impl MissionDB {
             tracing::info!("Migration: created conversation_msg_fts with existing data backfill");
         }
 
+        // Router chat archive — soft-delete target for cleared/deleted messages
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS router_chat_archive (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_id INTEGER NOT NULL,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                archived_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                archive_reason TEXT NOT NULL DEFAULT 'clear'
+            );
+            CREATE INDEX IF NOT EXISTS idx_rca_session ON router_chat_archive(session_id);
+            CREATE INDEX IF NOT EXISTS idx_rca_archived ON router_chat_archive(archived_at);"
+        )?;
+
         // Token usage ledger — append-only event stream for cost analysis
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS token_usage_ledger (

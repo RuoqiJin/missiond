@@ -309,21 +309,27 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
             let conv_id = args_val.get("conversation_id").and_then(|v| v.as_str());
             let task_id = args_val.get("task_id").and_then(|v| v.as_str());
+            // count: default 2 (last round = 1 user + 1 assistant), -1 for all
+            let count_raw = args_val.get("count").and_then(|v| v.as_i64()).unwrap_or(2);
+            let count = if count_raw < 0 { None } else { Some(count_raw) };
             match (conv_id, task_id) {
                 (Some(cid), _) => {
-                    let cleared = state.mission.db().router_chat_clear(cid)
+                    let (archived, remaining) = state.mission.db().router_chat_clear(cid, count)
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json(&serde_json::json!({
                         "conversation_id": cid,
-                        "cleared_messages": cleared,
+                        "archived_messages": archived,
+                        "remaining_messages": remaining,
+                        "note": "已归档到 router_chat_archive 表，可用 mission_router_chat_restore 恢复",
                     })))
                 }
                 (None, Some(tid)) => {
-                    let cleared = state.mission.db().router_chat_clear_by_task(tid)
+                    let archived = state.mission.db().router_chat_clear_by_task(tid, count)
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json(&serde_json::json!({
                         "task_id": tid,
-                        "cleared_messages": cleared,
+                        "archived_messages": archived,
+                        "note": "已归档到 router_chat_archive 表，可用 mission_router_chat_restore 恢复",
                     })))
                 }
                 _ => Ok(ToolResult::error("需要提供 conversation_id 或 task_id")),
@@ -356,6 +362,18 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
         }
 
+
+        "mission_router_chat_restore" => {
+            let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
+            let conv_id = args_val.get("conversation_id").and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("需要提供 conversation_id"))?;
+            let restored = state.mission.db().router_chat_restore(conv_id)
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            Ok(ToolResult::json(&serde_json::json!({
+                "conversation_id": conv_id,
+                "restored_messages": restored,
+            })))
+        }
 
         _ => Err(anyhow!("Unknown router_chat tool: {name}")),
     }

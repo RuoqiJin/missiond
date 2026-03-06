@@ -156,8 +156,10 @@ impl MissionDB {
         }))
     }
 
-    /// Clear all messages from a router_chat conversation (keep the conversation record)
-    pub fn router_chat_clear(&self, conversation_id: &str) -> DbResult<i64> {
+    /// Archive + delete messages from a router_chat conversation.
+    /// count: None = all messages, Some(n) = last n messages only.
+    /// Returns (archived_count, remaining_count).
+    pub fn router_chat_clear(&self, conversation_id: &str, count: Option<i64>) -> DbResult<(i64, i64)> {
         let conn = self.conn();
         let is_router: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM conversations WHERE id = ?1 AND chat_type = 'router_chat'",
@@ -165,63 +167,143 @@ impl MissionDB {
             |row| row.get(0),
         )?;
         if !is_router {
-            return Ok(0);
+            return Ok((0, 0));
         }
-        let deleted = conn.execute(
-            "DELETE FROM conversation_messages WHERE session_id = ?1",
-            params![conversation_id],
-        )? as i64;
-        conn.execute(
-            "UPDATE conversations SET message_count = 0 WHERE id = ?1",
+        let tx = conn.unchecked_transaction()?;
+        // Determine which messages to archive
+        let id_clause = if let Some(n) = count {
+            // Last N messages by id DESC
+            format!(
+                "id IN (SELECT id FROM conversation_messages WHERE session_id = ?1 ORDER BY id DESC LIMIT {})",
+                n
+            )
+        } else {
+            "session_id = ?1".to_string()
+        };
+        // 1. Archive
+        tx.execute(
+            &format!(
+                "INSERT INTO router_chat_archive (original_id, session_id, role, content, timestamp, archive_reason)
+                 SELECT id, session_id, role, content, timestamp, 'clear'
+                 FROM conversation_messages WHERE {}", id_clause
+            ),
             params![conversation_id],
         )?;
-        Ok(deleted)
+        // 2. Delete
+        let deleted = tx.execute(
+            &format!("DELETE FROM conversation_messages WHERE {}", id_clause),
+            params![conversation_id],
+        )? as i64;
+        // 3. Update message_count
+        let remaining: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM conversation_messages WHERE session_id = ?1",
+            params![conversation_id],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "UPDATE conversations SET message_count = ?1 WHERE id = ?2",
+            params![remaining, conversation_id],
+        )?;
+        tx.commit()?;
+        Ok((deleted, remaining))
     }
 
-    /// Clear all messages from router_chat conversations linked to a task
-    pub fn router_chat_clear_by_task(&self, task_id: &str) -> DbResult<i64> {
+    /// Archive + delete messages from all router_chat conversations linked to a task.
+    /// count: None = all messages, Some(n) = last n messages from each conversation.
+    /// Returns total archived count.
+    pub fn router_chat_clear_by_task(&self, task_id: &str, count: Option<i64>) -> DbResult<i64> {
         let conn = self.conn();
-        let deleted = conn.execute(
-            "DELETE FROM conversation_messages WHERE session_id IN
-             (SELECT id FROM conversations WHERE task_id = ?1 AND chat_type = 'router_chat')",
-            params![task_id],
-        )? as i64;
-        conn.execute(
-            "UPDATE conversations SET message_count = 0
-             WHERE task_id = ?1 AND chat_type = 'router_chat'",
-            params![task_id],
+        // Get all conversation IDs for this task
+        let mut stmt = conn.prepare(
+            "SELECT id FROM conversations WHERE task_id = ?1 AND chat_type = 'router_chat'"
         )?;
-        Ok(deleted)
+        let conv_ids: Vec<String> = stmt.query_map(params![task_id], |row| row.get(0))?
+            .filter_map(|r| r.ok()).collect();
+        drop(stmt);
+
+        let mut total = 0i64;
+        for cid in &conv_ids {
+            let (archived, _) = self.router_chat_clear(cid, count)?;
+            total += archived;
+        }
+        Ok(total)
     }
 
-    /// Delete a router_chat conversation and all its messages
+    /// Archive + delete a router_chat conversation and all its messages.
     pub fn router_chat_delete(&self, conversation_id: &str) -> DbResult<(i64, i64)> {
         let conn = self.conn();
-        let msg_deleted = conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        // Archive messages first
+        tx.execute(
+            "INSERT INTO router_chat_archive (original_id, session_id, role, content, timestamp, archive_reason)
+             SELECT id, session_id, role, content, timestamp, 'delete'
+             FROM conversation_messages WHERE session_id = ?1
+             AND EXISTS (SELECT 1 FROM conversations WHERE id = ?1 AND chat_type = 'router_chat')",
+            params![conversation_id],
+        )?;
+        let msg_deleted = tx.execute(
             "DELETE FROM conversation_messages WHERE session_id = ?1
              AND EXISTS (SELECT 1 FROM conversations WHERE id = ?1 AND chat_type = 'router_chat')",
             params![conversation_id],
         )? as i64;
-        let conv_deleted = conn.execute(
+        let conv_deleted = tx.execute(
             "DELETE FROM conversations WHERE id = ?1 AND chat_type = 'router_chat'",
             params![conversation_id],
         )? as i64;
+        tx.commit()?;
         Ok((conv_deleted, msg_deleted))
     }
 
-    /// Delete all router_chat conversations linked to a task
+    /// Archive + delete all router_chat conversations linked to a task.
     pub fn router_chat_delete_by_task(&self, task_id: &str) -> DbResult<(i64, i64)> {
         let conn = self.conn();
-        let msg_deleted = conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        // Archive all messages
+        tx.execute(
+            "INSERT INTO router_chat_archive (original_id, session_id, role, content, timestamp, archive_reason)
+             SELECT m.id, m.session_id, m.role, m.content, m.timestamp, 'delete'
+             FROM conversation_messages m
+             INNER JOIN conversations c ON c.id = m.session_id
+             WHERE c.task_id = ?1 AND c.chat_type = 'router_chat'",
+            params![task_id],
+        )?;
+        let msg_deleted = tx.execute(
             "DELETE FROM conversation_messages WHERE session_id IN
              (SELECT id FROM conversations WHERE task_id = ?1 AND chat_type = 'router_chat')",
             params![task_id],
         )? as i64;
-        let conv_deleted = conn.execute(
+        let conv_deleted = tx.execute(
             "DELETE FROM conversations WHERE task_id = ?1 AND chat_type = 'router_chat'",
             params![task_id],
         )? as i64;
+        tx.commit()?;
         Ok((conv_deleted, msg_deleted))
+    }
+
+    /// Restore archived messages back to conversation_messages.
+    /// Returns count of restored messages.
+    pub fn router_chat_restore(&self, conversation_id: &str) -> DbResult<i64> {
+        let conn = self.conn();
+        let tx = conn.unchecked_transaction()?;
+        let restored = tx.execute(
+            "INSERT INTO conversation_messages (session_id, role, content, timestamp)
+             SELECT session_id, role, content, timestamp
+             FROM router_chat_archive WHERE session_id = ?1
+             ORDER BY original_id ASC",
+            params![conversation_id],
+        )? as i64;
+        if restored > 0 {
+            tx.execute(
+                "DELETE FROM router_chat_archive WHERE session_id = ?1",
+                params![conversation_id],
+            )?;
+            tx.execute(
+                "UPDATE conversations SET message_count = (SELECT COUNT(*) FROM conversation_messages WHERE session_id = ?1) WHERE id = ?1",
+                params![conversation_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(restored)
     }
 
 
