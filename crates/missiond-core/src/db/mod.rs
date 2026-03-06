@@ -1147,6 +1147,244 @@ impl MissionDB {
         )?;
         Ok(deleted)
     }
+
+    // ── L3: Timeline Query Methods ──
+
+    /// Filtered timeline query with optional event_type, trace_id, time range, and pagination.
+    pub fn query_timeline_filtered(
+        &self,
+        event_type: Option<&str>,
+        trace_id: Option<&str>,
+        since: Option<&str>,
+        until: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> DbResult<Vec<TimelineRow>> {
+        let conn = self.read_conn();
+        let mut conditions = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(et) = event_type {
+            conditions.push(format!("event_type = ?{}", params.len() + 1));
+            params.push(Box::new(et.to_string()));
+        }
+        if let Some(tid) = trace_id {
+            conditions.push(format!("trace_id = ?{}", params.len() + 1));
+            params.push(Box::new(tid.to_string()));
+        }
+        if let Some(s) = since {
+            let ts = Self::parse_relative_time(s);
+            conditions.push(format!("created_at >= ?{}", params.len() + 1));
+            params.push(Box::new(ts));
+        }
+        if let Some(u) = until {
+            let ts = Self::parse_relative_time(u);
+            conditions.push(format!("created_at <= ?{}", params.len() + 1));
+            params.push(Box::new(ts));
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
+
+        let sql = format!(
+            "SELECT seq, trace_id, span_id, parent_span_id, event_type, summary, payload, created_at
+             FROM system_timeline {} ORDER BY seq DESC LIMIT ?{} OFFSET ?{}",
+            where_clause, params.len() + 1, params.len() + 2
+        );
+        params.push(Box::new(limit));
+        params.push(Box::new(offset));
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok(TimelineRow {
+                seq: row.get(0)?,
+                trace_id: row.get(1)?,
+                span_id: row.get(2)?,
+                parent_span_id: row.get(3)?,
+                event_type: row.get(4)?,
+                summary: row.get(5)?,
+                payload: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Query all events belonging to a single trace (causal chain).
+    pub fn query_timeline_by_trace(&self, trace_id: &str) -> DbResult<Vec<TimelineRow>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT seq, trace_id, span_id, parent_span_id, event_type, summary, payload, created_at
+             FROM system_timeline WHERE trace_id = ?1 ORDER BY seq ASC"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![trace_id], |row| {
+            Ok(TimelineRow {
+                seq: row.get(0)?,
+                trace_id: row.get(1)?,
+                span_id: row.get(2)?,
+                parent_span_id: row.get(3)?,
+                event_type: row.get(4)?,
+                summary: row.get(5)?,
+                payload: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Timeline statistics: event count by type, trace stats, Gemini latency distribution.
+    pub fn query_timeline_stats(&self, since: Option<&str>, until: Option<&str>) -> DbResult<TimelineStats> {
+        let conn = self.read_conn();
+
+        let mut conditions = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(s) = since {
+            let ts = Self::parse_relative_time(s);
+            conditions.push(format!("created_at >= ?{}", params.len() + 1));
+            params.push(Box::new(ts));
+        }
+        if let Some(u) = until {
+            let ts = Self::parse_relative_time(u);
+            conditions.push(format!("created_at <= ?{}", params.len() + 1));
+            params.push(Box::new(ts));
+        }
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+        // Total events
+        let total_sql = format!("SELECT COUNT(*) FROM system_timeline {}", where_clause);
+        let total_events: i64 = conn.query_row(&total_sql, param_refs.as_slice(), |r| r.get(0))?;
+
+        // By type
+        let by_type_sql = format!(
+            "SELECT event_type, COUNT(*) FROM system_timeline {} GROUP BY event_type ORDER BY COUNT(*) DESC",
+            where_clause
+        );
+        let mut stmt = conn.prepare(&by_type_sql)?;
+        let by_type: Vec<(String, i64)> = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?.collect::<Result<Vec<_>, _>>()?;
+
+        // Traced events
+        let traced_where = if where_clause.is_empty() {
+            "WHERE trace_id IS NOT NULL AND trace_id != ''".to_string()
+        } else {
+            format!("{} AND trace_id IS NOT NULL AND trace_id != ''", where_clause)
+        };
+        let traced_sql = format!(
+            "SELECT COUNT(*), COUNT(DISTINCT trace_id) FROM system_timeline {}",
+            traced_where
+        );
+        let (traced_events, unique_traces): (i64, i64) = conn.query_row(
+            &traced_sql, param_refs.as_slice(), |r| Ok((r.get(0)?, r.get(1)?))
+        )?;
+
+        // Gemini latency from payload JSON
+        let gemini_sql = if where_clause.is_empty() {
+            "SELECT json_extract(payload, '$.duration_ms') FROM system_timeline WHERE event_type = 'gemini_request_completed' ORDER BY seq DESC LIMIT 100".to_string()
+        } else {
+            format!(
+                "SELECT json_extract(payload, '$.duration_ms') FROM system_timeline {} AND event_type = 'gemini_request_completed' ORDER BY seq DESC LIMIT 100",
+                where_clause
+            )
+        };
+        let mut stmt = conn.prepare(&gemini_sql)?;
+        let durations: Vec<i64> = stmt.query_map(param_refs.as_slice(), |row| {
+            row.get::<_, Option<i64>>(0)
+        })?.filter_map(|r| r.ok().flatten()).collect();
+
+        let gemini_latency = if durations.is_empty() {
+            None
+        } else {
+            let mut sorted = durations.clone();
+            sorted.sort();
+            let len = sorted.len();
+            let avg = sorted.iter().sum::<i64>() / len as i64;
+            Some(LatencyStats {
+                count: len as i64,
+                avg_ms: avg,
+                p50_ms: sorted[len / 2],
+                p90_ms: sorted[(len as f64 * 0.9) as usize],
+                p99_ms: sorted[(len as f64 * 0.99).min((len - 1) as f64) as usize],
+            })
+        };
+
+        Ok(TimelineStats { total_events, by_type, traced_events, unique_traces, gemini_latency })
+    }
+
+    /// Search timeline by keyword in summary and payload.
+    pub fn query_timeline_search(
+        &self,
+        keyword: &str,
+        since: Option<&str>,
+        until: Option<&str>,
+        limit: i64,
+    ) -> DbResult<Vec<TimelineRow>> {
+        let conn = self.read_conn();
+        let like_pattern = format!("%{}%", keyword);
+        let mut conditions = vec![
+            format!("(summary LIKE ?{} OR payload LIKE ?{})", 1, 2),
+        ];
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+            Box::new(like_pattern.clone()),
+            Box::new(like_pattern),
+        ];
+
+        if let Some(s) = since {
+            let ts = Self::parse_relative_time(s);
+            conditions.push(format!("created_at >= ?{}", params.len() + 1));
+            params.push(Box::new(ts));
+        }
+        if let Some(u) = until {
+            let ts = Self::parse_relative_time(u);
+            conditions.push(format!("created_at <= ?{}", params.len() + 1));
+            params.push(Box::new(ts));
+        }
+
+        let sql = format!(
+            "SELECT seq, trace_id, span_id, parent_span_id, event_type, summary, payload, created_at
+             FROM system_timeline WHERE {} ORDER BY seq DESC LIMIT ?{}",
+            conditions.join(" AND "), params.len() + 1
+        );
+        params.push(Box::new(limit));
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok(TimelineRow {
+                seq: row.get(0)?,
+                trace_id: row.get(1)?,
+                span_id: row.get(2)?,
+                parent_span_id: row.get(3)?,
+                event_type: row.get(4)?,
+                summary: row.get(5)?,
+                payload: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Parse relative time strings like "1h", "24h", "7d" into SQLite datetime expressions.
+    fn parse_relative_time(s: &str) -> String {
+        let s = s.trim();
+        if let Some(hours) = s.strip_suffix('h').and_then(|v| v.parse::<i64>().ok()) {
+            return format!("{}", (chrono::Utc::now() - chrono::Duration::hours(hours)).format("%Y-%m-%d %H:%M:%S"));
+        }
+        if let Some(days) = s.strip_suffix('d').and_then(|v| v.parse::<i64>().ok()) {
+            return format!("{}", (chrono::Utc::now() - chrono::Duration::days(days)).format("%Y-%m-%d %H:%M:%S"));
+        }
+        // Assume ISO datetime, pass through
+        s.to_string()
+    }
 }
 
 /// A row from the system_timeline table.
@@ -1160,6 +1398,26 @@ pub struct TimelineRow {
     pub summary: Option<String>,
     pub payload: String,
     pub created_at: String,
+}
+
+/// Timeline statistics returned by query_timeline_stats.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TimelineStats {
+    pub total_events: i64,
+    pub by_type: Vec<(String, i64)>,
+    pub traced_events: i64,
+    pub unique_traces: i64,
+    pub gemini_latency: Option<LatencyStats>,
+}
+
+/// Latency percentile statistics.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LatencyStats {
+    pub count: i64,
+    pub avg_ms: i64,
+    pub p50_ms: i64,
+    pub p90_ms: i64,
+    pub p99_ms: i64,
 }
 
 /// Tokenize text for similarity comparison.

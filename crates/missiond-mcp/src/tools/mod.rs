@@ -109,6 +109,7 @@ mod board;
 mod slot;
 mod question;
 mod power;
+mod timeline;
 
 /// Generate all tool definitions
 pub fn all_tools() -> Vec<ToolDefinition> {
@@ -129,6 +130,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
     tools.extend(slot::definitions());
     tools.extend(question::definitions());
     tools.extend(power::definitions());
+    tools.extend(timeline::definitions());
     tools
 }
 
