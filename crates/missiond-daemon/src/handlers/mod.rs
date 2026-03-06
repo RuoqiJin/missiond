@@ -17,6 +17,7 @@ mod infra;
 mod question;
 mod misc;
 mod health;
+mod timeline;
 
 use anyhow::Result;
 use serde_json::Value;
@@ -40,6 +41,7 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         n if n.starts_with("mission_conversation_") || n == "mission_agent_trajectory"
             || n == "mission_trigger_backfill" || n == "mission_embedding_stats"
             || n == "mission_token_stats" => conversation::handle(state, n, args).await,
+        n if n.starts_with("mission_timeline_") => timeline::handle(state, n, args).await,
         n if n.starts_with("mission_audit_") => audit::handle(state, n, args).await,
         n if n.starts_with("mission_infra_") || n == "mission_reachability"
             || n == "mission_os_diagnose" => infra::handle(state, n, args).await,
