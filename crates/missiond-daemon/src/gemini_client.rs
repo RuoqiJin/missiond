@@ -20,10 +20,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use governor::{Quota, RateLimiter, clock::DefaultClock, state::{InMemoryState, NotKeyed}};
-use tokio::sync::{broadcast, Semaphore};
+use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
-use crate::event_bus::DaemonEvent;
+use crate::event_bus::{DaemonEvent, TimelineEntry};
 use crate::gemini_cli::GeminiCli;
 
 type GovernorLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
@@ -54,7 +54,7 @@ pub(crate) struct GeminiClient {
     rate_limiter: Arc<GovernorLimiter>,
     semaphore: Arc<Semaphore>,
     cli: Option<Arc<GeminiCli>>,
-    event_tx: broadcast::Sender<DaemonEvent>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>,
     /// Atomic counters for DaemonStats aggregation.
     pub(crate) request_count: Arc<AtomicU64>,
     pub(crate) error_count: Arc<AtomicU64>,
@@ -63,7 +63,7 @@ pub(crate) struct GeminiClient {
 
 impl GeminiClient {
     /// Create a new HTTP-mode client with 20 RPM limit and 3 max concurrent requests.
-    pub fn new(event_tx: broadcast::Sender<DaemonEvent>) -> Self {
+    pub fn new(event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>) -> Self {
         let quota = Quota::per_minute(NonZeroU32::new(20).unwrap());
         Self {
             rate_limiter: Arc::new(RateLimiter::direct(quota)),
@@ -77,7 +77,7 @@ impl GeminiClient {
     }
 
     /// Create a CLI-mode client that routes through Gemini CLI subprocess.
-    pub fn with_cli(cli: GeminiCli, event_tx: broadcast::Sender<DaemonEvent>) -> Self {
+    pub fn with_cli(cli: GeminiCli, event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>) -> Self {
         // CLI mode: relax rate limit (Google One AI Pro has generous limits)
         let quota = Quota::per_minute(NonZeroU32::new(60).unwrap());
         Self {
@@ -138,7 +138,14 @@ impl GeminiClient {
                 .ok_or_else(|| anyhow!("CLI mode: missing 'messages' in body"))?;
             let max_tokens = body.get("max_tokens").and_then(|v| v.as_u64()).map(|n| n as u32);
 
-            let resp = cli.call(messages, None, max_tokens, None).await;
+            // Whitelist: only these models are allowed via CLI. Others fall back to default.
+            let cli_model = body.get("model").and_then(|v| v.as_str())
+                .and_then(|m| match m {
+                    "gemini-3.1-flash-lite" | "gemini-3.1-pro-preview" => Some(m),
+                    _ => None,
+                });
+
+            let resp = cli.call(messages, cli_model, max_tokens, None).await;
             drop(permit);
             let resp = resp?;
 
@@ -255,7 +262,8 @@ impl GeminiClient {
             "gemini_request"
         );
 
-        let _ = self.event_tx.send(DaemonEvent::GeminiRequestCompleted {
+        let trace_id = session_id.clone();
+        let event = DaemonEvent::GeminiRequestCompleted {
             request_id: request_id.to_string(),
             caller: caller.to_string(),
             session_id,
@@ -268,7 +276,15 @@ impl GeminiClient {
             retry_count,
             status,
             error_msg,
-        });
+        };
+        let entry = TimelineEntry {
+            event,
+            trace_id: trace_id,
+            span_id: uuid::Uuid::new_v4().to_string(),
+            parent_span_id: None,
+            summary: Some(format!("{} → {} ({}ms)", caller, model, api_duration.as_millis())),
+        };
+        let _ = self.event_tx.send(entry);
     }
 
     async fn retry_with_backoff(

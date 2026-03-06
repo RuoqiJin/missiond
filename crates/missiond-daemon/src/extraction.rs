@@ -1,14 +1,31 @@
 
 use tracing::{debug, info, warn};
 
-use crate::state::{AppState, ExtractionPhase};
+use crate::state::{AppState, ExtractionPhase, ExtractionState};
 use crate::state::{MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
+use crate::event_bus::{DaemonEvent, EventBus};
 use crate::supervisor::is_auth_error;
 use crate::memory_scheduler::{ensure_memory_slot, ensure_memory_slot_by_id};
 use missiond_core::SessionState;
 use std::sync::Arc;
 use crate::state::{CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES};
 use crate::supervisor::check_extraction_gate;
+
+/// Helper: update extraction phase and publish MemoryPhaseChanged event.
+fn set_extraction_phase(
+    es: &mut ExtractionState,
+    phase: ExtractionPhase,
+    active_type: Option<&str>,
+    event_bus: &EventBus,
+    slot_id: &str,
+) {
+    es.phase = phase;
+    event_bus.publish(DaemonEvent::MemoryPhaseChanged {
+        slot_id: slot_id.to_string(),
+        phase: format!("{:?}", phase),
+        active_type: active_type.map(|s| s.to_string()),
+    });
+}
 
 pub(crate) async fn check_realtime_extraction(state: &AppState) {
     if !check_extraction_gate(&state.extraction_state, &state.mission, "realtime").await {
@@ -112,8 +129,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
     {
         let now = chrono::Utc::now().timestamp();
         let mut es = state.extraction_state.write().await;
-        es.phase = ExtractionPhase::Sending;
-        es.active_type = Some("realtime");
+        set_extraction_phase(&mut es, ExtractionPhase::Sending, Some("realtime"), &state.event_bus, MEMORY_SLOT_ID);
         es.phase_started_at = now;
         es.watermark_targets = watermark_targets;
         es.current_task_id = Some(task_id);
@@ -363,8 +379,7 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
         {
             let now = chrono::Utc::now().timestamp();
             let mut es = state.slow_extraction_state.write().await;
-            es.phase = ExtractionPhase::Sending;
-            es.active_type = Some("deep_analysis");
+            set_extraction_phase(&mut es, ExtractionPhase::Sending, Some("deep_analysis"), &state.event_bus, MEMORY_SLOW_SLOT_ID);
             es.phase_started_at = now;
             es.current_deep_conv_id = Some(conv.id.clone());
             es.current_task_id = Some(task_id);
@@ -524,8 +539,7 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
     // Set slow extraction state
     {
         let mut es = state.slow_extraction_state.write().await;
-        es.phase = ExtractionPhase::Sending;
-        es.active_type = Some("kb_consolidation");
+        set_extraction_phase(&mut es, ExtractionPhase::Sending, Some("kb_consolidation"), &state.event_bus, MEMORY_SLOW_SLOT_ID);
         es.phase_started_at = now;
         es.current_task_id = Some(task_id);
         es.current_slot_task_id = Some(slot_task_id.clone());

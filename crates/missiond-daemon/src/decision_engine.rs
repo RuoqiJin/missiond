@@ -5,6 +5,7 @@ use anyhow::{anyhow, Result};
 use tracing::{debug, info, warn};
 
 use crate::state::AppState;
+use crate::event_bus::{DaemonEvent, TraceContext};
 use crate::llm_gateway::call_gemini_for_flow;
 use crate::memory_scheduler::ensure_memory_slot_by_id;
 
@@ -65,6 +66,10 @@ pub(crate) async fn process_pending_master_questions(state: &AppState) {
                 "Decision Engine: retry limit reached, downgrading to user");
             path.push(serde_json::json!({"tier": "anti-loop", "status": "downgraded", "reason": format!("retry_count={}", question.retry_count)}));
             let _ = state.mission.db().downgrade_question_to_user(&question.id);
+            state.event_bus.publish_traced(
+                DaemonEvent::QuestionResolved { question_id: question.id.clone(), resolution: "downgraded".to_string() },
+                TraceContext { trace_id: question.task_id.clone(), summary: Some("Anti-loop: retry limit reached".to_string()), ..Default::default() },
+            );
             save_routing_trace(state, &question.id, "downgraded", &path, start.elapsed().as_millis());
             continue;
         }
@@ -112,12 +117,20 @@ pub(crate) async fn process_pending_master_questions(state: &AppState) {
                             info!(question_id = %question.id, "Tier 1 miss for preference → downgrade to user");
                             path.push(serde_json::json!({"tier": "preference", "status": "downgraded", "reason": "t1_miss_preference_exclusive"}));
                             let _ = state.mission.db().downgrade_question_to_user(&question.id);
+                            state.event_bus.publish_traced(
+                                DaemonEvent::QuestionResolved { question_id: question.id.clone(), resolution: "downgraded".to_string() },
+                                TraceContext { trace_id: question.task_id.clone(), summary: Some("Preference miss → downgrade".to_string()), ..Default::default() },
+                            );
                             save_routing_trace(state, &question.id, "downgraded", &path, start.elapsed().as_millis());
                         }
                     }
                     Err(_) => {
                         path.push(serde_json::json!({"tier": "T1", "status": "error"}));
                         let _ = state.mission.db().downgrade_question_to_user(&question.id);
+                        state.event_bus.publish_traced(
+                            DaemonEvent::QuestionResolved { question_id: question.id.clone(), resolution: "downgraded".to_string() },
+                            TraceContext { trace_id: question.task_id.clone(), summary: Some("T1 error → downgrade".to_string()), ..Default::default() },
+                        );
                         save_routing_trace(state, &question.id, "downgraded", &path, start.elapsed().as_millis());
                     }
                 }
@@ -218,6 +231,7 @@ pub(crate) async fn process_pending_master_questions(state: &AppState) {
 ///
 /// Fallback (embedding unavailable): FTS5 + keyword overlap ≥ 30%
 pub(crate) async fn decision_tier1_kb(state: &AppState, question: &missiond_core::types::AgentQuestion) -> Result<TierResult> {
+    let tier_start = std::time::Instant::now();
     // Path A: FTS5 search with ranked results (spawn_blocking: FTS5 heavy)
     let q_text = question.question.clone();
     let fts_results = state.db_exec.run(move |db| {
@@ -318,7 +332,21 @@ pub(crate) async fn decision_tier1_kb(state: &AppState, question: &missiond_core
 
             state.mission.db().answer_agent_question(&question.id, &answer)
                 .map_err(|e| anyhow!("Failed to answer: {}", e))?;
-            state.event_bus.publish(crate::event_bus::DaemonEvent::TaskCreated { task_id: String::new() });
+            // Scheduling signal (wake submit consumer)
+            state.event_bus.publish(DaemonEvent::TaskCreated { task_id: String::new() });
+            // Semantic trace: decision resolved
+            state.event_bus.publish_traced(
+                DaemonEvent::DecisionResolved {
+                    question_id: question.id.clone(),
+                    tier: "T1".to_string(),
+                    duration_ms: tier_start.elapsed().as_millis() as u64,
+                },
+                TraceContext {
+                    trace_id: question.task_id.clone(),
+                    summary: Some(format!("T1 hybrid hit: {}", entry.key)),
+                    ..Default::default()
+                },
+            );
 
             return Ok(TierResult {
                 hit: true,
@@ -386,7 +414,19 @@ pub(crate) async fn decision_tier1_kb(state: &AppState, question: &missiond_core
 
     state.mission.db().answer_agent_question(&question.id, &answer)
         .map_err(|e| anyhow!("Failed to answer: {}", e))?;
-    state.event_bus.publish(crate::event_bus::DaemonEvent::TaskCreated { task_id: String::new() });
+    state.event_bus.publish(DaemonEvent::TaskCreated { task_id: String::new() });
+    state.event_bus.publish_traced(
+        DaemonEvent::DecisionResolved {
+            question_id: question.id.clone(),
+            tier: "T1".to_string(),
+            duration_ms: tier_start.elapsed().as_millis() as u64,
+        },
+        TraceContext {
+            trace_id: question.task_id.clone(),
+            summary: Some(format!("T1 FTS hit: {}", top.key)),
+            ..Default::default()
+        },
+    );
     Ok(TierResult {
         hit: true,
         detail: serde_json::json!({
@@ -398,6 +438,7 @@ pub(crate) async fn decision_tier1_kb(state: &AppState, question: &missiond_core
 
 /// Tier 2: Call Gemini with structured JSON contract
 pub(crate) async fn decision_tier2_gemini(state: &AppState, question: &missiond_core::types::AgentQuestion) -> Result<TierResult> {
+    let tier_start = std::time::Instant::now();
     // Build context: task description + question + phase + recent notes
     let mut context_parts = Vec::new();
 
@@ -462,7 +503,19 @@ pub(crate) async fn decision_tier2_gemini(state: &AppState, question: &missiond_
                     info!(question_id = %question.id, "Tier 2: Gemini decided");
                     state.mission.db().answer_agent_question(&question.id, &answer)
                         .map_err(|e| anyhow!("Failed to answer: {}", e))?;
-                    state.event_bus.publish(crate::event_bus::DaemonEvent::TaskCreated { task_id: String::new() });
+                    state.event_bus.publish(DaemonEvent::TaskCreated { task_id: String::new() });
+                    state.event_bus.publish_traced(
+                        DaemonEvent::DecisionResolved {
+                            question_id: question.id.clone(),
+                            tier: "T2".to_string(),
+                            duration_ms: tier_start.elapsed().as_millis() as u64,
+                        },
+                        TraceContext {
+                            trace_id: question.task_id.clone(),
+                            summary: Some(format!("T2 Gemini: {}", decision.chars().take(60).collect::<String>())),
+                            ..Default::default()
+                        },
+                    );
                     return Ok(TierResult {
                         hit: true,
                         detail: serde_json::json!({"tier": "T2", "status": "decided", "action": "DECIDE", "reasoning": reasoning}),
@@ -565,6 +618,18 @@ pub(crate) async fn decision_tier3_dispatch(state: &AppState, question: &mission
         Ok(_) => {
             info!(question_id = %question.id, slot_task_id = %slot_task.id,
                 "Tier 3: dispatched to slot-decision");
+            state.event_bus.publish_traced(
+                DaemonEvent::DecisionResolved {
+                    question_id: question.id.clone(),
+                    tier: "T3".to_string(),
+                    duration_ms: 0, // dispatch is async, real duration unknown
+                },
+                TraceContext {
+                    trace_id: question.task_id.clone(),
+                    summary: Some("T3 dispatched to slot-decision".to_string()),
+                    ..Default::default()
+                },
+            );
             Ok(TierResult {
                 hit: true,
                 detail: serde_json::json!({"tier": "T3", "status": "dispatched", "slot_task_id": slot_task.id}),
@@ -619,6 +684,10 @@ pub(crate) async fn reap_stale_decision_tasks(state: &AppState) {
         if let Err(e) = state.mission.db().downgrade_question_to_user(&question.id) {
             warn!(question_id = %question.id, error = %e, "Decision reaper: downgrade failed");
         }
+        state.event_bus.publish_traced(
+            DaemonEvent::QuestionResolved { question_id: question.id.clone(), resolution: "downgraded".to_string() },
+            TraceContext { trace_id: question.task_id.clone(), summary: Some("Stale decision: 15min timeout → downgrade".to_string()), ..Default::default() },
+        );
 
         // 2. Write warning note to associated board task
         if let Some(ref task_id) = question.task_id {

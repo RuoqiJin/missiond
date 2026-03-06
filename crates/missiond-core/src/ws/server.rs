@@ -42,6 +42,10 @@ pub struct WSServerOptions {
     pub screenshot_broker: Option<Arc<super::ScreenshotBroker>>,
     /// AIOps incident event bus sender (optional, for webhook endpoints)
     pub incident_tx: Option<tokio::sync::mpsc::Sender<crate::types::MissionIncident>>,
+    /// Frontend event stream (pre-serialized JSON from daemon EventBus)
+    pub frontend_events_tx: Option<broadcast::Sender<String>>,
+    /// Database for timeline catch-up queries (Phase 6)
+    pub db: Option<Arc<crate::db::MissionDB>>,
 }
 
 /// PTY WebSocket Server
@@ -53,6 +57,8 @@ pub struct PTYWebSocketServer {
     shutdown_tx: Option<broadcast::Sender<()>>,
     jarvis_trace: JarvisTraceStore,
     incident_tx: Option<tokio::sync::mpsc::Sender<crate::types::MissionIncident>>,
+    frontend_events_tx: Option<broadcast::Sender<String>>,
+    db: Option<Arc<crate::db::MissionDB>>,
 }
 
 // ── AIOps Webhook Parsers ──
@@ -113,12 +119,16 @@ fn parse_test_webhook(body: &str) -> Option<crate::types::MissionIncident> {
 enum Route<'a> {
     Pty { slot_id: &'a str },
     Tasks,
+    Events,
     Invalid,
 }
 
 fn parse_route(path: &str) -> Route<'_> {
     if path == "/tasks" {
         return Route::Tasks;
+    }
+    if path == "/events" {
+        return Route::Events;
     }
     if let Some(slot_id) = path.strip_prefix("/pty/") {
         if !slot_id.is_empty() && !slot_id.contains('/') {
@@ -232,6 +242,8 @@ impl PTYWebSocketServer {
             shutdown_tx: None,
             jarvis_trace: JarvisTraceStore::new(),
             incident_tx: options.incident_tx,
+            frontend_events_tx: options.frontend_events_tx,
+            db: options.db,
         }
     }
 
@@ -255,6 +267,8 @@ impl PTYWebSocketServer {
         let screenshot_broker = self.screenshot_broker.clone();
         let jarvis_trace = self.jarvis_trace.clone();
         let incident_tx = self.incident_tx.clone();
+        let frontend_events_tx = self.frontend_events_tx.clone();
+        let db = self.db.clone();
 
         tokio::spawn(async move {
             let mut shutdown_rx = shutdown_tx.subscribe();
@@ -268,8 +282,10 @@ impl PTYWebSocketServer {
                                 let screenshot_broker = screenshot_broker.clone();
                                 let jarvis_trace = jarvis_trace.clone();
                                 let incident_tx = incident_tx.clone();
+                                let frontend_events_tx = frontend_events_tx.clone();
+                                let db = db.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx).await {
+                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, frontend_events_tx, db).await {
                                         error!(?e, ?addr, "WebSocket connection error");
                                     }
                                 });
@@ -652,6 +668,8 @@ impl PTYWebSocketServer {
         screenshot_broker: Option<Arc<super::ScreenshotBroker>>,
         jarvis_trace: JarvisTraceStore,
         incident_tx: Option<tokio::sync::mpsc::Sender<crate::types::MissionIncident>>,
+        frontend_events_tx: Option<broadcast::Sender<String>>,
+        db: Option<Arc<crate::db::MissionDB>>,
     ) -> anyhow::Result<()> {
         // Peek at first bytes to detect non-WebSocket HTTP requests
         let mut peek_buf = [0u8; 512];
@@ -713,6 +731,7 @@ impl PTYWebSocketServer {
 
         match parse_route(&path) {
             Route::Tasks => Self::handle_tasks_subscription(addr, ws_stream, cc_tasks_watcher).await,
+            Route::Events => Self::handle_events_subscription(addr, ws_stream, frontend_events_tx, db).await,
             Route::Pty { slot_id } => {
                 Self::handle_pty_subscription(addr, ws_stream, pty_manager, screenshot_broker, slot_id).await
             }
@@ -721,7 +740,7 @@ impl PTYWebSocketServer {
                 let _ = ws_tx
                     .send(Message::Close(Some(close_frame(
                         4000,
-                        "Invalid URL. Use /pty/<slotId> or /tasks",
+                        "Invalid URL. Use /pty/<slotId>, /tasks, or /events",
                     ))))
                     .await;
                 warn!(?addr, %path, "Invalid WebSocket URL");
@@ -954,6 +973,196 @@ impl PTYWebSocketServer {
 
         info!(?addr, slot_id, "Client disconnected from PTY");
         Ok(())
+    }
+
+    /// Handle /events WebSocket subscription — frontend EventBus bridge.
+    ///
+    /// Receives pre-serialized JSON strings from the daemon's frontend_event_consumer
+    /// and forwards them to the connected browser client.
+    async fn handle_events_subscription(
+        addr: SocketAddr,
+        ws_stream: tokio_tungstenite::WebSocketStream<TcpStream>,
+        frontend_events_tx: Option<broadcast::Sender<String>>,
+        db: Option<Arc<crate::db::MissionDB>>,
+    ) -> anyhow::Result<()> {
+        let tx = match frontend_events_tx {
+            Some(tx) => tx,
+            None => {
+                let (mut ws_tx, _ws_rx) = ws_stream.split();
+                let _ = ws_tx
+                    .send(Message::Close(Some(close_frame(
+                        4000,
+                        "Frontend event stream not configured",
+                    ))))
+                    .await;
+                warn!(?addr, "Frontend events not available");
+                return Ok(());
+            }
+        };
+
+        let mut rx = tx.subscribe();
+        let (mut ws_tx, mut ws_rx) = ws_stream.split();
+
+        info!(?addr, "Client subscribing to EventBus stream");
+
+        // Send connected message with latest seq from DB (for catch-up protocol)
+        let latest_seq = db.as_ref()
+            .and_then(|d| d.timeline_latest_seq().ok())
+            .unwrap_or(0);
+        let connected = serde_json::json!({
+            "type": "connected",
+            "ts": chrono::Utc::now().timestamp_millis(),
+            "seq": latest_seq,
+        });
+        let _ = send_json(&mut ws_tx, &connected).await;
+
+        // Ping keepalive every 15 seconds
+        let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut consecutive_lags: u32 = 0;
+
+        loop {
+            tokio::select! {
+                event = rx.recv() => {
+                    match event {
+                        Ok(json_str) => {
+                            consecutive_lags = 0;
+                            if ws_tx.send(Message::Text(json_str)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            consecutive_lags += 1;
+                            let resync = serde_json::json!({
+                                "type": "resync",
+                                "ts": chrono::Utc::now().timestamp_millis(),
+                                "missed": n,
+                            });
+                            let _ = send_json(&mut ws_tx, &resync).await;
+                            if consecutive_lags >= 3 {
+                                warn!(?addr, "Events client too slow, disconnecting");
+                                let _ = ws_tx
+                                    .send(Message::Close(Some(close_frame(4008, "Too slow"))))
+                                    .await;
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+
+                _ = ping_interval.tick() => {
+                    if ws_tx.send(Message::Ping(vec![])).await.is_err() {
+                        break;
+                    }
+                }
+
+                msg = ws_rx.next() => {
+                    match msg {
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Ok(Message::Pong(_))) => {} // keepalive ack
+                        Some(Ok(Message::Text(text))) => {
+                            // Handle client sync request: { "action": "sync", "since_seq": N }
+                            if let Ok(req) = serde_json::from_str::<serde_json::Value>(&text) {
+                                if req.get("action").and_then(|v| v.as_str()) == Some("sync") {
+                                    let since_seq = req.get("since_seq").and_then(|v| v.as_i64()).unwrap_or(0);
+                                    if let Some(ref db) = db {
+                                        Self::handle_catch_up(&mut ws_tx, db, since_seq).await;
+                                    }
+                                }
+                            }
+                        }
+                        Some(Err(e)) => {
+                            warn!(?addr, error = %e, "Events WS error");
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        info!(?addr, "Client unsubscribed from EventBus stream");
+        Ok(())
+    }
+
+    /// Handle catch-up: replay historical events from DB since a given seq.
+    async fn handle_catch_up(
+        ws_tx: &mut futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, Message>,
+        db: &Arc<crate::db::MissionDB>,
+        since_seq: i64,
+    ) {
+        let latest = db.timeline_latest_seq().unwrap_or(0);
+        let gap = latest - since_seq;
+
+        if gap > 1000 {
+            // Too far behind — client should do full HTTP refresh
+            let msg = serde_json::json!({
+                "type": "too_far_behind",
+                "ts": chrono::Utc::now().timestamp_millis(),
+                "gap": gap,
+                "latest_seq": latest,
+            });
+            let _ = send_json(ws_tx, &msg).await;
+            return;
+        }
+
+        if gap <= 0 {
+            let msg = serde_json::json!({
+                "type": "caught_up",
+                "ts": chrono::Utc::now().timestamp_millis(),
+                "seq": latest,
+            });
+            let _ = send_json(ws_tx, &msg).await;
+            return;
+        }
+
+        // Replay historical events from SQLite
+        let db_clone = Arc::clone(db);
+        let rows = tokio::task::spawn_blocking(move || {
+            db_clone.query_timeline_since(since_seq, 1000)
+        }).await;
+
+        match rows {
+            Ok(Ok(rows)) => {
+                for row in &rows {
+                    // Reconstruct the wire-format JSON from TimelineRow
+                    let payload: serde_json::Value = serde_json::from_str(&row.payload)
+                        .unwrap_or(serde_json::json!({}));
+                    // Parse SQLite datetime "YYYY-MM-DD HH:MM:SS" as UTC millis
+                    let ts = chrono::NaiveDateTime::parse_from_str(&row.created_at, "%Y-%m-%d %H:%M:%S")
+                        .map(|dt| dt.and_utc().timestamp_millis())
+                        .unwrap_or(0);
+                    let event = serde_json::json!({
+                        "type": row.event_type,
+                        "ts": ts,
+                        "seq": row.seq,
+                        "trace_id": row.trace_id,
+                        "span_id": row.span_id,
+                        "parent_span_id": row.parent_span_id,
+                        "payload": payload,
+                    });
+                    if ws_tx.send(Message::Text(event.to_string())).await.is_err() {
+                        return;
+                    }
+                }
+                let caught_up = serde_json::json!({
+                    "type": "caught_up",
+                    "ts": chrono::Utc::now().timestamp_millis(),
+                    "seq": rows.last().map(|r| r.seq).unwrap_or(latest),
+                });
+                let _ = send_json(ws_tx, &caught_up).await;
+            }
+            _ => {
+                warn!("Timeline catch-up query failed");
+                let msg = serde_json::json!({
+                    "type": "caught_up",
+                    "ts": chrono::Utc::now().timestamp_millis(),
+                    "seq": latest,
+                });
+                let _ = send_json(ws_tx, &msg).await;
+            }
+        }
     }
 
     async fn handle_tasks_subscription(

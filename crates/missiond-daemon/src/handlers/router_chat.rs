@@ -43,10 +43,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .and_then(|v| v.as_str())
                 .unwrap_or("gemini-3.1-pro")
                 .to_string();
+            let has_files = params.get("files")
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
             let max_tokens: u32 = params.get("max_tokens")
                 .and_then(|v| v.as_u64())
                 .map(|n| n as u32)
-                .unwrap_or(16384);
+                .unwrap_or(if has_files { 65536 } else { 16384 });
             let search_enabled = params.get("search")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
@@ -158,10 +162,27 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
 
             // Apply context budget before sending
-            let budget_result = apply_context_budget(&mut messages, MAX_ROUTER_PAYLOAD_BYTES);
-            if budget_result.trimmed {
-                info!("Router chat: context budget applied — {}", budget_result.note.as_deref().unwrap_or("trimmed"));
-            }
+            // When files are attached, refuse to truncate — error out instead of silent data loss
+            let budget_result = if has_files {
+                let total_bytes: usize = messages.iter()
+                    .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+                    .map(|s| s.len())
+                    .sum();
+                if total_bytes > MAX_ROUTER_PAYLOAD_BYTES {
+                    return Err(anyhow!(
+                        "附件消息总大小 ({:.1}MB) 超出上游限制 ({:.1}MB)，拒绝截断。请减少文件大小或拆分请求。",
+                        total_bytes as f64 / 1_048_576.0,
+                        MAX_ROUTER_PAYLOAD_BYTES as f64 / 1_048_576.0
+                    ));
+                }
+                crate::context_budget::ContextBudgetResult { trimmed: false, note: None }
+            } else {
+                let r = apply_context_budget(&mut messages, MAX_ROUTER_PAYLOAD_BYTES);
+                if r.trimmed {
+                    info!("Router chat: context budget applied — {}", r.note.as_deref().unwrap_or("trimmed"));
+                }
+                r
+            };
 
             // Resolve LLM credentials
             let (base_url, jwt) = resolve_llm_credentials().await?;
@@ -197,6 +218,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .unwrap_or("unknown");
             let usage = result.get("usage");
             let resp_model = result.get("model").and_then(|v| v.as_str()).unwrap_or(&model);
+
+            // When files are attached, output truncation is unacceptable — return error with partial content
+            if has_files && (finish_reason == "length" || finish_reason == "max_tokens") {
+                return Err(anyhow!(
+                    "输出被截断（finish_reason={}，max_tokens={}）。附件模式下不允许截断。\n请增大 max_tokens 或简化 prompt 后重试。\n\n--- 部分响应 ---\n{}",
+                    finish_reason, max_tokens, &content[..content.len().min(500)]
+                ));
+            }
 
             let mut resp = serde_json::json!({
                 "model": resp_model,

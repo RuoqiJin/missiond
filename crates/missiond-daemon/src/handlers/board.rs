@@ -4,8 +4,18 @@ use serde_json::Value;
 use missiond_mcp::tools::ToolResult;
 
 use crate::state::AppState;
+use crate::event_bus::DaemonEvent;
 use crate::lenient;
 use crate::decision_harvest::harvest_decisions_for_task;
+
+/// Publish BoardTaskUpdated event.
+fn publish_board_update(state: &AppState, task: &missiond_core::types::BoardTask) {
+    state.event_bus.publish(DaemonEvent::BoardTaskUpdated {
+        task_id: task.id.clone(),
+        status: format!("{:?}", task.status),
+        category: task.category.clone(),
+    });
+}
 
 #[derive(Deserialize)]
 struct BoardListArgs {
@@ -72,6 +82,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 }
             }
 
+            publish_board_update(state, &task);
             Ok(ToolResult::json_pretty(&task))
         }
         "mission_board_update" => {
@@ -94,6 +105,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             match task {
                 Some(t) => {
+                    publish_board_update(state, &t);
                     // Decision Engine: harvest decisions when task marked done
                     if is_marking_done {
                         let state = state.clone();
@@ -141,6 +153,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             match task {
                 Some(t) => {
+                    publish_board_update(state, &t);
                     // Decision Engine: harvest decisions when toggled to done
                     if t.status == missiond_core::types::BoardTaskStatus::Done {
                         let state = state.clone();
