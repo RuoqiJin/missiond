@@ -433,6 +433,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let message_id = args_val.get("message_id").and_then(|v| v.as_i64())
                 .ok_or_else(|| anyhow!("missing message_id"))?;
             let db = state.mission.db();
+            // Include translation if available
+            let translation = db.get_translation(message_id)
+                .ok()
+                .flatten()
+                .map(|(t, _)| t);
             match db.get_conversation_message_by_id(message_id).map_err(|e| anyhow!("DB error: {}", e))? {
                 Some(msg) => Ok(ToolResult::json_pretty(&serde_json::json!({
                     "id": msg.id,
@@ -442,6 +447,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     "raw_content": msg.raw_content,
                     "model": msg.model,
                     "timestamp": msg.timestamp,
+                    "translation": translation,
                 }))),
                 None => Ok(ToolResult::error("Message not found")),
             }
