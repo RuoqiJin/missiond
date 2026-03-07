@@ -439,6 +439,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     "session_id": msg.session_id,
                     "role": msg.role,
                     "content": msg.content,
+                    "raw_content": msg.raw_content,
                     "model": msg.model,
                     "timestamp": msg.timestamp,
                 }))),
