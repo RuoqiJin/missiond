@@ -5,7 +5,7 @@ import {
   Search, RefreshCw, Sparkles, AlertTriangle,
   Zap, Brain, Wrench, ArrowRight, ChevronRight, ChevronDown,
   MessageSquare, GitBranch, GitCommit, Activity, Cpu, Settings2, User, Clock,
-  FileCode, Terminal, Eye, File, ArrowUp, ArrowDown, BookOpen, Loader2,
+  FileCode, Terminal, Eye, File, ArrowUp, ArrowDown, BookOpen, Loader2, Languages, CheckCheck,
 } from 'lucide-react';
 import { diffLines } from 'diff';
 import ReactMarkdown from 'react-markdown';
@@ -74,6 +74,10 @@ const EVENT_COLORS: Record<string, { dot: string; bg: string; text: string; labe
   briefing_summary_generated: { dot: 'bg-rose-400',  bg: 'bg-rose-400/10',    text: 'text-rose-400',    label: 'Summary',    icon: <Sparkles className="w-3 h-3" /> },
   system_message:           { dot: 'bg-slate-400',   bg: 'bg-slate-400/10',   text: 'text-slate-400',   label: 'Daemon',     icon: <Terminal className="w-3 h-3" /> },
   slot_task_dispatched:     { dot: 'bg-amber-400',   bg: 'bg-amber-400/10',   text: 'text-amber-400',   label: 'Dispatch',   icon: <ArrowRight className="w-3 h-3" /> },
+  // ── Translation Worker (indigo) ──
+  translation_started:      { dot: 'bg-indigo-400',  bg: 'bg-indigo-400/10',  text: 'text-indigo-400',  label: 'Translating', icon: <Languages className="w-3 h-3" /> },
+  translation_completed:    { dot: 'bg-indigo-500',  bg: 'bg-indigo-500/10',  text: 'text-indigo-400',  label: 'Translated',  icon: <CheckCheck className="w-3 h-3" /> },
+  translation_failed:       { dot: 'bg-red-400',     bg: 'bg-red-400/10',     text: 'text-red-400',     label: 'Trans Err',   icon: <AlertTriangle className="w-3 h-3" /> },
 };
 
 // Slot color coding — fixed colors per slot for visual consistency
@@ -206,6 +210,9 @@ function eventSummary(ev: TimelineEvent): string {
     case 'briefing_summary_generated': return `seq=${p.target_seq}: ${p.summary || ''}`;
     case 'system_message': return `[Daemon] ${p.preview || ''}`;
     case 'slot_task_dispatched': return `→ ${p.slot_id || ''} [${p.purpose || ''}] ${p.preview || ''}`;
+    case 'translation_started': return `Translating msg#${p.message_id} (${p.content_chars || 0}ch)`;
+    case 'translation_completed': return `Translated msg#${p.message_id} (${p.duration_ms || 0}ms): ${p.preview || ''}`;
+    case 'translation_failed': return `Translation failed msg#${p.message_id}: ${p.error || ''}`;
     default: return ev.event_type;
   }
 }
@@ -219,6 +226,8 @@ interface FullMessage {
   content: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   contentBlocks: any[] | null;
+  imageCount: number;
+  translation?: string | null;
 }
 
 /** Fetch full message content + raw_content blocks. Auto-fetches when `enabled` is true. */
@@ -232,10 +241,22 @@ function useFullMessage(messageId: number | undefined, enabled: boolean): FullMe
       .then(data => {
         if (cancelled || !data?.content) return;
         let blocks: FullMessage['contentBlocks'] = null;
+        let imageCount = 0;
         if (data.raw_content) {
-          try { blocks = JSON.parse(data.raw_content); } catch { /* ignore */ }
+          try {
+            blocks = JSON.parse(data.raw_content);
+            if (Array.isArray(blocks)) {
+              // Count images and strip base64 data to avoid bloating React state
+              for (const block of blocks) {
+                if (block?.type === 'image') {
+                  imageCount++;
+                  if (block.source?.data) block.source.data = '[stripped]';
+                }
+              }
+            }
+          } catch { /* ignore */ }
         }
-        setMsg({ content: data.content, contentBlocks: blocks });
+        setMsg({ content: data.content, contentBlocks: blocks, imageCount, translation: data.translation || null });
       })
       .catch(() => {});
     return () => { cancelled = true; };
@@ -249,13 +270,15 @@ export function CognitiveTimeline() {
   const timelineVersion = useEventInvalidation('timeline');
 
   const [events, setEvents] = useState<TimelineEvent[]>([]);
+  const [sessionsMeta, setSessionsMeta] = useState<Record<string, { startedAt: string }>>({});
   const [stats, setStats] = useState<TimelineStats | null>(null);
   const [hourlyStats, setHourlyStats] = useState<TimelineStats | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<TimelineEvent | null>(null);
   const [traceEvents, setTraceEvents] = useState<TimelineEvent[]>([]);
   const [quickFilter, setQuickFilter] = useState('all');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [window, setWindow] = useState('24h');
+  const [searchInput, setSearchInput] = useState('');
+  const [searchQuery, setSearchQuery] = useState(''); // Only updated on Enter — drives data fetching
+  const [activeWindow, setActiveWindow] = useState('24h');
   const [loading, setLoading] = useState(false);
   const [selectionSource, setSelectionSource] = useState<'timeline' | 'list' | null>(null);
 
@@ -269,34 +292,91 @@ export function CognitiveTimeline() {
     initialRange: { min: now - windowToMs('24h'), max: now },
   });
 
-  // Fetch data
-  const fetchData = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams({ window });
-      if (searchQuery) params.set('query', searchQuery);
+  // Track the time range we already have data for — avoid redundant fetches
+  const loadedRangeRef = useRef<{ min: number; max: number } | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
-      const [evRes, stRes, hrRes] = await Promise.allSettled([
-        fetch(`/api/timeline/events?${params}`).then(r => r.json()),
-        fetch(`/api/timeline/stats?window=${window}`).then(r => r.json()),
-        fetch(`/api/timeline/stats?window=1h`).then(r => r.json()),
-      ]);
+  // Fetch events and merge with existing (deduplicate by seq, no pop-in)
+  const fetchForRange = useCallback(async (
+    rangeMin: number, rangeMax: number,
+    opts?: { signal?: AbortSignal; silent?: boolean; replace?: boolean },
+  ) => {
+    const duration = rangeMax - rangeMin;
+    // Fetch 2× buffer on each side so preloaded events are ready before visible
+    const bufMin = rangeMin - duration;
+    const bufMax = rangeMax + duration;
+    const since = new Date(bufMin).toISOString().replace('T', ' ').slice(0, 19);
+    const until = new Date(bufMax).toISOString().replace('T', ' ').slice(0, 19);
 
-      if (evRes.status === 'fulfilled') {
-        const raw = evRes.value.events;
-        setEvents(Array.isArray(raw) ? raw : (raw?.events || []));
-      }
-      if (stRes.status === 'fulfilled' && !stRes.value.error) {
-        setStats(stRes.value);
-      }
-      if (hrRes.status === 'fulfilled' && !hrRes.value.error) {
-        setHourlyStats(hrRes.value);
-      }
-    } catch { /* ignore */ }
-    setLoading(false);
-  }, [window, searchQuery]);
+    const params = new URLSearchParams({ since, until });
+    if (searchQuery) params.set('query', searchQuery);
 
-  useEffect(() => { fetchData(); }, [fetchData, timelineVersion]);
+    const [evRes, stRes, hrRes] = await Promise.allSettled([
+      fetch(`/api/timeline/events?${params}`, { signal: opts?.signal }).then(r => r.json()),
+      fetch(`/api/timeline/stats?since=${since}&until=${until}`, { signal: opts?.signal }).then(r => r.json()),
+      fetch(`/api/timeline/stats?window=1h`, { signal: opts?.signal }).then(r => r.json()),
+    ]);
+
+    if (evRes.status === 'fulfilled') {
+      const raw = evRes.value.events;
+      const incoming: TimelineEvent[] = Array.isArray(raw) ? raw : (raw?.events || []);
+      if (opts?.replace) {
+        setEvents(incoming);
+      } else {
+        // Merge: deduplicate by seq, keep newest data for each event
+        setEvents(prev => {
+          const map = new Map<number, TimelineEvent>();
+          for (const ev of prev) map.set(ev.seq, ev);
+          for (const ev of incoming) map.set(ev.seq, ev);
+          return Array.from(map.values()).sort((a, b) => (b.seq ?? 0) - (a.seq ?? 0));
+        });
+      }
+      if (evRes.value.sessions) {
+        setSessionsMeta(prev => ({ ...prev, ...evRes.value.sessions }));
+      }
+    }
+    if (stRes.status === 'fulfilled' && !stRes.value.error) setStats(stRes.value);
+    if (hrRes.status === 'fulfilled' && !hrRes.value.error) setHourlyStats(hrRes.value);
+
+    // Extend the loaded range (union of old + new)
+    const prevLoaded = loadedRangeRef.current;
+    loadedRangeRef.current = prevLoaded
+      ? { min: Math.min(prevLoaded.min, bufMin), max: Math.max(prevLoaded.max, bufMax) }
+      : { min: bufMin, max: bufMax };
+  }, [searchQuery]);
+
+  // Preload when visible range consumes >50% of loaded buffer on either side
+  useEffect(() => {
+    const { min, max } = timeRange;
+    const loaded = loadedRangeRef.current;
+
+    if (!loaded) {
+      // Initial load — full fetch with loading indicator
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      setLoading(true);
+      fetchForRange(min, max, { signal: controller.signal, replace: true })
+        .catch(() => {})
+        .finally(() => setLoading(false));
+      return () => controller.abort();
+    }
+
+    // Check if visible range is approaching the edges of loaded buffer
+    const bufferLeft = min - loaded.min;
+    const bufferRight = loaded.max - max;
+    const visibleDuration = max - min;
+    const threshold = visibleDuration * 0.5;
+
+    if (bufferLeft > threshold && bufferRight > threshold) return; // Plenty of buffer
+
+    // Silent preload — no loading spinner, merge results
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    fetchForRange(min, max, { signal: controller.signal, silent: true }).catch(() => {});
+    return () => controller.abort();
+  }, [timeRange, fetchForRange, timelineVersion]);
 
   // In-place summary update: briefing worker sends target_seq + new summary via CustomEvent
   useEffect(() => {
@@ -375,18 +455,24 @@ export function CognitiveTimeline() {
     }
 
     // Build session intervals sorted by start time
-    const sessions: { id: string; parentId?: string; start: number; end: number; events: TimelineEvent[] }[] = [];
+    // Use actual session startedAt from metadata so capsules span the full session lifetime
+    const sessions: { id: string; parentId?: string; start: number; end: number; startedBefore: boolean; events: TimelineEvent[] }[] = [];
     for (const [sid, evts] of bySession) {
       const times = evts.map(e => utcMs(e.created_at));
+      const evtMin = Math.min(...times);
       // Extract parent_session_id from payload — sub-agent sessions inherit parent color
       const parentId = evts.find(e => e.payload?.parent_session_id)?.payload?.parent_session_id;
-      sessions.push({ id: sid, parentId, start: Math.min(...times), end: Math.max(...times), events: evts });
+      // Use session metadata startedAt if available (preserves capsule across time windows)
+      const meta = sessionsMeta[sid];
+      const actualStart = meta?.startedAt ? Math.min(utcMs(meta.startedAt), evtMin) : evtMin;
+      const startedBefore = actualStart < evtMin;
+      sessions.push({ id: sid, parentId, start: actualStart, end: Math.max(...times), startedBefore, events: evts });
     }
     sessions.sort((a, b) => a.start - b.start);
 
     // Greedy row assignment — pack sessions into fewest non-overlapping rows
     const rowEnds: number[] = []; // tracks end-time of last session in each row
-    const layout = new Map<string, { colorIdx: number; row: number; events: TimelineEvent[] }>();
+    const layout = new Map<string, { colorIdx: number; row: number; startedBefore: boolean; events: TimelineEvent[] }>();
     for (const s of sessions) {
       let assigned = -1;
       for (let r = 0; r < rowEnds.length; r++) {
@@ -394,11 +480,11 @@ export function CognitiveTimeline() {
       }
       if (assigned === -1) { assigned = rowEnds.length; rowEnds.push(0); }
       rowEnds[assigned] = s.end;
-      layout.set(s.id, { colorIdx: hashSessionColor(s.parentId || s.id), row: assigned, events: s.events });
+      layout.set(s.id, { colorIdx: hashSessionColor(s.parentId || s.id), row: assigned, startedBefore: s.startedBefore, events: s.events });
     }
 
     return { map: layout, rowCount: Math.max(rowEnds.length, 1) };
-  }, [filtered]);
+  }, [filtered, sessionsMeta]);
 
   // Build slot layout: group events by slot_id, assign fixed sub-row per slot
   const slotLayout = useMemo(() => {
@@ -476,12 +562,13 @@ export function CognitiveTimeline() {
 
   // Sync window preset buttons with gesture-controlled timeRange
   const handleWindowChange = useCallback((w: string) => {
-    setWindow(w);
+    setActiveWindow(w);
     const n = Date.now();
+    loadedRangeRef.current = null; // Force refetch for new window
     setGestureRange({ min: n - windowToMs(w), max: n });
   }, [setGestureRange]);
 
-  // Position calculation for horizontal timeline
+  // Position calculation — only used for debounced/non-critical paths (span lines, trace lines)
   const getX = useCallback((dateStr: string) => {
     const t = utcMs(dateStr);
     const { min, max } = timeRange;
@@ -489,6 +576,10 @@ export function CognitiveTimeline() {
     if (range <= 0) return 50;
     return ((t - min) / range) * 100;
   }, [timeRange]);
+
+  // CSS calc()-driven position: elements set --t-event inline, container provides --t-min/--t-range.
+  // The browser repositions all elements via CSS without React re-render during gestures.
+  const cssLeft = 'calc((var(--t-event) - var(--t-min)) / var(--t-range) * 100%)';
 
   // Time axis ticks
   const timeTicks = useMemo(() => {
@@ -560,9 +651,9 @@ export function CognitiveTimeline() {
             <input
               type="text"
               placeholder="Search..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && fetchData()}
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { setSearchQuery(searchInput); loadedRangeRef.current = null; } }}
               className="pl-7 pr-3 py-1.5 text-xs bg-neutral-900 border border-neutral-800 rounded-md text-neutral-300 placeholder-neutral-600 w-44 focus:outline-none focus:border-neutral-600"
             />
           </div>
@@ -591,7 +682,7 @@ export function CognitiveTimeline() {
                 onClick={() => handleWindowChange(w.value)}
                 className={cn(
                   'px-2 py-1 text-[10px] font-medium rounded transition-colors',
-                  window === w.value ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
+                  activeWindow === w.value ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
                 )}
               >
                 {w.label}
@@ -613,7 +704,7 @@ export function CognitiveTimeline() {
             );
           })()}
 
-          <button onClick={fetchData} className="p-1.5 rounded hover:bg-neutral-800 text-neutral-500 hover:text-neutral-300 transition-colors">
+          <button onClick={() => { loadedRangeRef.current = null; setLoading(true); fetchForRange(timeRange.min, timeRange.max, { replace: true }).catch(() => {}).finally(() => setLoading(false)); }} className="p-1.5 rounded hover:bg-neutral-800 text-neutral-500 hover:text-neutral-300 transition-colors">
             <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} />
           </button>
         </div>
@@ -655,45 +746,44 @@ export function CognitiveTimeline() {
               );
             })}
 
-            {/* Session capsules for Chat lane */}
-            {(() => {
-              return Array.from(sessionLayout.map.entries()).map(([sid, info]) => {
-                const sc = SESSION_COLORS[info.colorIdx];
-                const times = info.events.map(e => utcMs(e.created_at));
-                const xStart = getX(new Date(Math.min(...times)).toISOString());
-                const xEnd = getX(new Date(Math.max(...times)).toISOString());
-                const chatTop = laneGeometry.lanes[0].top;
-                const subH = laneGeometry.chatSubRowHeight;
-                const yCenter = chatTop + subH * (info.row + 0.5);
-                // Capsule: pad 0.8% horizontally, 40% of sub-row height vertically
-                const padX = 0.6;
-                const capsuleH = subH * 0.7;
-                return (
-                  <svg key={`capsule-${sid}`} className="absolute inset-0 w-full h-full pointer-events-none z-[1]" preserveAspectRatio="none">
-                    <rect
-                      x={`${xStart - padX}%`}
-                      y={`${yCenter - capsuleH / 2}%`}
-                      width={`${Math.max(xEnd - xStart + padX * 2, 1.2)}%`}
-                      height={`${capsuleH}%`}
-                      rx="10" ry="10"
-                      fill={sc.line}
-                      stroke={sc.line.replace('0.25)', '0.45)')}
-                      strokeWidth="1"
-                    />
-                  </svg>
-                );
-              });
-            })()}
+            {/* Session capsules for Chat lane — positioned via CSS calc() */}
+            {Array.from(sessionLayout.map.entries()).map(([sid, info]) => {
+              const sc = SESSION_COLORS[info.colorIdx];
+              const times = info.events.map(e => utcMs(e.created_at));
+              const evtMin = Math.min(...times);
+              const evtMax = Math.max(...times);
+              const meta = sessionsMeta[sid];
+              const actualStart = meta?.startedAt ? Math.min(utcMs(meta.startedAt), evtMin) : evtMin;
+              const chatTop = laneGeometry.lanes[0].top;
+              const subH = laneGeometry.chatSubRowHeight;
+              const yCenter = chatTop + subH * (info.row + 0.5);
+              const capsuleH = subH * 0.7;
+              return (
+                <div
+                  key={`capsule-${sid}`}
+                  className="absolute pointer-events-none z-[1]"
+                  style={{
+                    '--t-start': actualStart,
+                    '--t-end': evtMax,
+                    left: 'calc((var(--t-start) - var(--t-min)) / var(--t-range) * 100%)',
+                    width: 'calc(max((var(--t-end) - var(--t-start)) / var(--t-range) * 100%, 1.2%))',
+                    top: `${yCenter - capsuleH / 2}%`,
+                    height: `${capsuleH}%`,
+                    backgroundColor: sc.line,
+                    border: `1px solid ${sc.line.replace('0.25)', '0.45)')}`,
+                    borderRadius: '10px',
+                  } as React.CSSProperties}
+                />
+              );
+            })}
 
-            {/* Event dots */}
+            {/* Event dots — positioned via CSS calc() driven by --t-min/--t-range on container */}
             {filtered.map((ev) => {
-              const x = getX(ev.created_at);
               const y = getY(ev);
               const ec = getEventColor(ev.event_type);
               const isSelected = selectedEvent?.seq === ev.seq;
               const isInsight = ev.event_type === 'insight_generated';
               const isError = hasError(ev);
-              // Chat lane: override dot color with session color
               const isChat = isChatEvent(ev.event_type);
               const sessionInfo = isChat && ev.payload?.session_id ? sessionLayout.map.get(ev.payload.session_id) : undefined;
               const sessionColor = sessionInfo ? SESSION_COLORS[sessionInfo.colorIdx] : null;
@@ -704,14 +794,14 @@ export function CognitiveTimeline() {
                   ref={(el) => { if (el) timelineDotRefs.current.set(ev.seq, el); else timelineDotRefs.current.delete(ev.seq); }}
                   onClick={() => selectEvent(ev, 'timeline')}
                   className={cn(
-                    'absolute -translate-x-1/2 -translate-y-1/2 rounded-full z-10 transition-all duration-300 ease-out',
+                    'absolute -translate-x-1/2 -translate-y-1/2 rounded-full z-10 transition-[transform,box-shadow,background-color] duration-200 ease-out',
                     isInsight ? 'w-4 h-4 ring-2 ring-emerald-400/40' :
                     isError ? 'w-3 h-3 ring-2 ring-red-500/40' :
                     'w-2.5 h-2.5 hover:w-3.5 hover:h-3.5',
                     sessionColor ? sessionColor.dot : ec.dot,
                     isSelected && 'ring-2 ring-white/60 w-4 h-4',
                   )}
-                  style={{ left: `${x}%`, top: `${y}%` }}
+                  style={{ '--t-event': utcMs(ev.created_at), left: cssLeft, top: `${y}%` } as React.CSSProperties}
                   title={`${ec.label}: ${eventSummary(ev)}${isChat && ev.payload?.session_id ? `\nSession: ${ev.payload.session_id.slice(0, 8)}` : ''}\n${formatBeijingTime(ev.created_at)}`}
                 />
               );
@@ -1136,6 +1226,36 @@ function ChatSummary({ event }: { event: TimelineEvent }) {
     );
   }
 
+  // User message with images: render text + inline images
+  if (isUser && fullMsg && fullMsg.imageCount > 0) {
+    // Extract text parts from contentBlocks (images are stripped to placeholders)
+    const textParts = fullMsg.contentBlocks
+      ?.filter((b: { type: string }) => b.type === 'text')
+      .map((b: { text: string }) => b.text)
+      .join('\n') || fullMsg.content;
+    // Strip image placeholder text like [图片: image/png]
+    const cleanText = textParts.replace(/\[图片: [\w/]+\]\n?/g, '').trim();
+
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] uppercase tracking-wider text-neutral-500 font-medium">User Message</span>
+          <span className="text-[10px] text-neutral-600 bg-neutral-900 px-1.5 py-0.5 rounded font-mono">{content_chars} chars</span>
+        </div>
+        {cleanText && (
+          <div className="p-3 rounded-lg text-sm leading-relaxed bg-blue-500/10 border border-blue-500/20 text-blue-100 whitespace-pre-wrap break-words">
+            {cleanText}
+          </div>
+        )}
+        <div className="flex flex-wrap gap-2">
+          {Array.from({ length: fullMsg.imageCount }, (_, i) => (
+            <MessageImage key={i} messageId={message_id} index={i} />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   const displayText = fullMsg?.content ?? preview;
 
   return (
@@ -1168,6 +1288,27 @@ function ChatSummary({ event }: { event: TimelineEvent }) {
   );
 }
 
+/** Lazy-loaded image from a conversation message */
+function MessageImage({ messageId, index }: { messageId: number; index: number }) {
+  const [expanded, setExpanded] = useState(false);
+  const src = `/api/system/message-image?message_id=${messageId}&index=${index}`;
+  return (
+    <div className="my-1">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={src}
+        alt={`Attachment ${index + 1}`}
+        className={cn(
+          'rounded-lg border border-neutral-700 cursor-pointer transition-all hover:border-neutral-500',
+          expanded ? 'max-w-full' : 'max-w-sm max-h-64 object-cover',
+        )}
+        onClick={() => setExpanded(!expanded)}
+        loading="lazy"
+      />
+    </div>
+  );
+}
+
 function ThinkingSummary({ event }: { event: TimelineEvent }) {
   const preview = event.payload?.preview || '';
   const messageId = event.payload?.message_id;
@@ -1175,6 +1316,8 @@ function ThinkingSummary({ event }: { event: TimelineEvent }) {
 
   const fullMsg = useFullMessage(messageId, true);
   const displayText = fullMsg?.content ?? preview;
+  const translation = fullMsg?.translation;
+  const [showOriginal, setShowOriginal] = useState(false);
 
   return (
     <div className="border border-violet-500/20 rounded-lg bg-violet-500/5 overflow-hidden">
@@ -1182,11 +1325,29 @@ function ThinkingSummary({ event }: { event: TimelineEvent }) {
         <Brain className="w-4 h-4 text-violet-400 shrink-0" />
         <span className="text-xs text-violet-300 font-medium">Thinking</span>
         <span className="text-[10px] text-neutral-600 font-mono">{contentChars} chars</span>
+        <div className="flex-1" />
+        {translation && (
+          <button
+            onClick={() => setShowOriginal(!showOriginal)}
+            className={cn(
+              'text-[10px] px-1.5 py-0.5 rounded font-medium transition-colors',
+              showOriginal ? 'bg-violet-500/20 text-violet-300' : 'bg-indigo-500/20 text-indigo-300',
+            )}
+          >
+            {showOriginal ? 'EN' : '中'}
+          </button>
+        )}
       </div>
       <div className="px-3 pb-3 border-t border-violet-500/10">
-        <pre className="text-[11px] text-violet-200/80 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-96 overflow-auto mt-2">
-          {displayText}
-        </pre>
+        {translation && !showOriginal ? (
+          <pre className="text-[12px] text-indigo-100/90 whitespace-pre-wrap break-words leading-relaxed max-h-96 overflow-auto mt-2">
+            {translation}
+          </pre>
+        ) : (
+          <pre className="text-[11px] text-violet-200/80 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-96 overflow-auto mt-2">
+            {displayText}
+          </pre>
+        )}
       </div>
     </div>
   );
@@ -1619,9 +1780,9 @@ function ToolResultViewer({ input, block }: { input: any; block?: any }) {
   const toolId: string | undefined = block?.id;
   const [detail, setDetail] = useState<{ input?: unknown; output?: unknown } | null>(null);
   const [loading, setLoading] = useState(false);
-  const [showResult, setShowResult] = useState(false);
 
-  const load = useCallback(() => {
+  // Auto-load tool result on mount (user preference: show full content directly)
+  useEffect(() => {
     if (!toolId || detail) return;
     setLoading(true);
     fetch(`/api/system/tool-call?id=${encodeURIComponent(toolId)}`)
@@ -1687,25 +1848,15 @@ function ToolResultViewer({ input, block }: { input: any; block?: any }) {
         </div>
       )}
 
-      {/* Load result button / result content */}
-      {toolId && !showResult && (
-        <button
-          onClick={() => { setShowResult(true); load(); }}
-          className="text-[10px] text-teal-500 hover:text-teal-300 transition-colors flex items-center gap-1"
-        >
-          <Eye className="w-3 h-3" />
-          Show {isRead ? 'file content' : `${toolName} result`}
-        </button>
-      )}
-
-      {showResult && loading && (
+      {/* Tool result — auto-loaded */}
+      {loading && (
         <div className="flex items-center gap-1.5 text-[11px] text-neutral-500">
           <Loader2 className="w-3 h-3 animate-spin" />
           Loading...
         </div>
       )}
 
-      {showResult && resultText && (
+      {resultText && (
         <div className="border border-neutral-800 rounded overflow-hidden">
           <div className="bg-neutral-900/60 px-2 py-1 flex items-center gap-1.5 text-[10px] text-neutral-400 border-b border-neutral-800">
             {isRead ? <Eye className="w-3 h-3" /> : <BookOpen className="w-3 h-3" />}
@@ -1718,7 +1869,7 @@ function ToolResultViewer({ input, block }: { input: any; block?: any }) {
         </div>
       )}
 
-      {showResult && !loading && !resultText && detail && (
+      {!loading && !resultText && detail && (
         <span className="text-[10px] text-neutral-500 italic">No result data</span>
       )}
     </div>

@@ -19,6 +19,7 @@ const ALL_EVENT_TYPES = [
   'board_task_note_added', 'board_task_claimed',
   'board_task_deleted', 'board_task_updated',
   'slot_state_changed', 'memory_phase_changed',                      // System
+  'translation_started', 'translation_completed', 'translation_failed', // Translation Worker
 ];
 
 /** Convert window string to absolute ISO datetimes — avoids relative time parsing issues in backend */
@@ -45,7 +46,12 @@ export async function GET(req: NextRequest) {
     const windowStr = req.nextUrl.searchParams.get('window') || '24h';
     const query = req.nextUrl.searchParams.get('query') || undefined;
     const limitStr = req.nextUrl.searchParams.get('limit');
-    const { since, until } = windowToAbsoluteRange(windowStr);
+    // Support direct absolute time params (from gesture-driven range)
+    const directSince = req.nextUrl.searchParams.get('since');
+    const directUntil = req.nextUrl.searchParams.get('until');
+    const { since, until } = directSince && directUntil
+      ? { since: directSince, until: directUntil }
+      : windowToAbsoluteRange(windowStr);
 
     // Use search if query provided
     if (query) {
@@ -79,8 +85,33 @@ export async function GET(req: NextRequest) {
     // Sort by seq descending (newest first) — consistent with non-stratified mode
     allEvents.sort((a, b) => (b.seq ?? 0) - (a.seq ?? 0));
 
+    // Fetch session metadata (startedAt) for capsule continuity across time windows
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const sessionIds = new Set<string>();
+    for (const ev of allEvents) {
+      if (ev.payload?.session_id && !ev.payload?.slot_id) {
+        sessionIds.add(ev.payload.session_id);
+      }
+    }
+    let sessions: Record<string, { startedAt: string }> = {};
+    if (sessionIds.size > 0) {
+      try {
+        const convList = await callTool('mission_conversation_list', {
+          conversationType: 'all', limit: 50,
+        }) as Array<{ id: string; startedAt: string }>;
+        if (Array.isArray(convList)) {
+          for (const conv of convList) {
+            if (sessionIds.has(conv.id)) {
+              sessions[conv.id] = { startedAt: conv.startedAt };
+            }
+          }
+        }
+      } catch { /* session metadata is optional — capsules still work without it */ }
+    }
+
     return NextResponse.json({
       events: { count: allEvents.length, offset: 0, events: allEvents },
+      sessions,
       _range: { since, until },
     });
   } catch (err) {

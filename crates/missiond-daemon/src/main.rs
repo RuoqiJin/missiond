@@ -39,6 +39,7 @@ mod timeline_analyst;
 mod git_watcher;
 mod minimax_client;
 mod briefing_worker;
+mod translation_worker;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1293,6 +1294,12 @@ async fn main() -> Result<()> {
 
     // --- Briefing Worker: async semantic summarization via MiniMax M2.5 ---
     briefing_worker::spawn_briefing_worker(Arc::new(state.clone()));
+
+    // --- Translation Worker: async thinking→Chinese translation via MiniMax ---
+    translation_worker::spawn_translation_worker(
+        Arc::new(state.clone()),
+        timeline_broadcast_tx.subscribe(),
+    );
 
     // --- P0: IPC listener in dedicated task (never starved by other work) ---
     // Previously inside the main select! loop — a single slow branch (e.g. 120s PTY spawn)

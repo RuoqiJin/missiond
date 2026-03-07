@@ -213,6 +213,29 @@ pub(crate) enum DaemonEvent {
         /// How the summary was produced: "minimax", "static_rule", "tool_skip"
         method: String,
     },
+
+    // ===== Translation Worker =====
+    /// Translation worker picked up a thinking message for translation.
+    TranslationStarted {
+        message_id: i64,
+        /// Virtual slot_id for Slot swimlane routing (e.g. "translation-worker").
+        slot_id: String,
+        content_chars: usize,
+    },
+    /// Translation completed successfully.
+    TranslationCompleted {
+        message_id: i64,
+        slot_id: String,
+        /// First ~80 chars of the translated text for timeline preview.
+        preview: String,
+        duration_ms: u64,
+    },
+    /// Translation failed.
+    TranslationFailed {
+        message_id: i64,
+        slot_id: String,
+        error: String,
+    },
 }
 
 impl DaemonEvent {
@@ -251,6 +274,9 @@ impl DaemonEvent {
             Self::ImageMessageInserted { .. } => "image_message_inserted",
             Self::BriefingBatchStarted { .. } => "briefing_batch_started",
             Self::BriefingSummaryGenerated { .. } => "briefing_summary_generated",
+            Self::TranslationStarted { .. } => "translation_started",
+            Self::TranslationCompleted { .. } => "translation_completed",
+            Self::TranslationFailed { .. } => "translation_failed",
         }
     }
 
@@ -353,6 +379,12 @@ impl DaemonEvent {
                 json!({ "pending_count": pending_count }),
             Self::BriefingSummaryGenerated { target_seq, summary, method } =>
                 json!({ "target_seq": target_seq, "summary": summary, "method": method }),
+            Self::TranslationStarted { message_id, slot_id, content_chars } =>
+                json!({ "message_id": message_id, "slot_id": slot_id, "content_chars": content_chars }),
+            Self::TranslationCompleted { message_id, slot_id, preview, duration_ms } =>
+                json!({ "message_id": message_id, "slot_id": slot_id, "preview": preview, "duration_ms": duration_ms }),
+            Self::TranslationFailed { message_id, slot_id, error } =>
+                json!({ "message_id": message_id, "slot_id": slot_id, "error": error }),
         }
     }
 }
