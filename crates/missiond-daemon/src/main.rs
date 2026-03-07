@@ -758,7 +758,7 @@ async fn main() -> Result<()> {
             init_embedding_provider(&temp_client).await
         },
         embedding_cache: missiond_core::embedding::new_cache(),
-        conversation_embedding_cache: missiond_core::embedding::new_cache(),
+        conversation_topic_cache: missiond_core::embedding::new_topic_cache(),
         skill_embedding_cache: missiond_core::embedding::new_cache(),
         kb_search_cache: missiond_core::embedding::new_cache(),
         embedding_tx: embedding_tx,
@@ -861,13 +861,43 @@ async fn main() -> Result<()> {
                 .map(|svc| svc.provider_id().to_string())
                 .unwrap_or_else(|| missiond_core::embedding::FASTEMBED_PROVIDER_ID.to_string());
 
+            // Load multi-topic vectors first, then backfill from old single-vec embeddings
+            let mut topic_map: std::collections::HashMap<String, Vec<Vec<f32>>> =
+                std::collections::HashMap::new();
+
+            // Phase 1: Load from conversation_topic_vectors table
+            match db.load_conversation_topic_vectors(&provider_id) {
+                Ok(all) => {
+                    for (sid, vecs) in all {
+                        topic_map.insert(sid, vecs);
+                    }
+                    info!(count = topic_map.len(), "Topic vectors loaded");
+                }
+                Err(e) => warn!(error = %e, "Failed to load topic vectors"),
+            }
+
+            // Phase 2: Backfill from old single-embedding (wrap as 1-topic)
             match db.load_conversation_embeddings(&provider_id) {
                 Ok(all) => {
-                    let mut guard = conv_state.conversation_embedding_cache.write().await;
-                    *guard = all;
-                    info!(count = guard.len(), "Conversation embedding cache warmed");
+                    let mut backfilled = 0;
+                    for (sid, vec) in all {
+                        if !topic_map.contains_key(&sid) {
+                            topic_map.insert(sid, vec![vec]);
+                            backfilled += 1;
+                        }
+                    }
+                    if backfilled > 0 {
+                        info!(backfilled, "Old single-vec embeddings loaded as fallback");
+                    }
                 }
-                Err(e) => warn!(error = %e, "Failed to warm conversation embedding cache"),
+                Err(e) => warn!(error = %e, "Failed to load old conversation embeddings"),
+            }
+
+            // Populate cache
+            {
+                let mut guard = conv_state.conversation_topic_cache.write().await;
+                *guard = topic_map.into_iter().collect();
+                info!(count = guard.len(), "Conversation topic cache warmed");
             }
 
             // Skill topic embedding cache
@@ -1062,30 +1092,20 @@ async fn main() -> Result<()> {
                                 info!(count = guard.len(), "Skill embedding cache refreshed after backfill");
                             }
 
-                            // ── Phase 4: Conversation stale re-embed ──
+                            // ── Phase 4: Conversation topic vector backfill ──
+                            // Re-process sessions that have summaries but no topic vectors yet.
                             loop {
-                                let stale = db.conversations_stale_embedding(&provider_id, 20).unwrap_or_default();
-                                if stale.is_empty() { break; }
-                                info!(count = stale.len(), provider = %provider_id, "Conv stale re-embedding");
-                                for session_id in &stale {
-                                    if let Ok(Some(conv)) = db.get_conversation(session_id) {
-                                        if let Some(ref summary) = conv.llm_summary {
-                                            let svc = Arc::clone(emb_svc);
-                                            let summary_clone = summary.clone();
-                                            let embed_result = tokio::time::timeout(
-                                                std::time::Duration::from_secs(30),
-                                                tokio::task::spawn_blocking(move || svc.embed(&summary_clone)),
-                                            ).await;
-                                            if let Ok(Ok(Some(vec))) = embed_result {
-                                                let _ = db.set_conversation_embedding(session_id, &vec, &provider_id);
-                                                let mut cache = worker_state.conversation_embedding_cache.write().await;
-                                                cache.retain(|(id, _)| id != session_id);
-                                                cache.push((session_id.clone(), vec));
-                                            } else {
-                                                warn!(session = %session_id, "Conv stale re-embedding failed/timed out");
-                                            }
-                                        }
+                                let needing = db.conversations_needing_topic_vectors(&provider_id, 20).unwrap_or_default();
+                                if needing.is_empty() { break; }
+                                info!(count = needing.len(), "Conv topic vector backfill");
+                                for session_id in &needing {
+                                    if tokio::time::timeout(
+                                        std::time::Duration::from_secs(90),
+                                        generate_and_store_conv_embedding(&worker_state, session_id),
+                                    ).await.is_err() {
+                                        warn!(session = %session_id, "Topic vector backfill timed out");
                                     }
+                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                                 }
                                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                             }

@@ -15,8 +15,18 @@ use tokio::sync::RwLock;
 /// A single cached embedding: (id, vector)
 pub type EmbeddingCache = Arc<RwLock<Vec<(String, Vec<f32>)>>>;
 
+/// Multi-topic embedding cache: (session_id, [topic_vectors]).
+/// Each session has N topic vectors (1 per extracted topic from LLM summary).
+/// MaxSim: search score = max(cosine(query, topic_i)) per session.
+pub type TopicCache = Arc<RwLock<Vec<(String, Vec<Vec<f32>>)>>>;
+
 /// Create a new empty embedding cache
 pub fn new_cache() -> EmbeddingCache {
+    Arc::new(RwLock::new(Vec::new()))
+}
+
+/// Create a new empty topic cache
+pub fn new_topic_cache() -> TopicCache {
     Arc::new(RwLock::new(Vec::new()))
 }
 
@@ -142,6 +152,34 @@ pub fn hybrid_search(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     results
+}
+
+/// MaxSim search over topic cache: for each session, score = max(cosine(query, topic_i)).
+/// Returns (session_id, rank, max_similarity) sorted by similarity descending.
+pub fn maxsim_search(
+    query_embedding: &[f32],
+    cache: &[(String, Vec<Vec<f32>>)],
+    top_k: usize,
+) -> Vec<(String, usize, f32)> {
+    let mut scores: Vec<(usize, f32)> = cache
+        .iter()
+        .enumerate()
+        .map(|(i, (_, topics))| {
+            let max_sim = topics
+                .iter()
+                .map(|tv| cosine_similarity(query_embedding, tv))
+                .fold(0.0f32, f32::max);
+            (i, max_sim)
+        })
+        .collect();
+    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    scores
+        .iter()
+        .take(top_k)
+        .enumerate()
+        .map(|(rank, (idx, sim))| (cache[*idx].0.clone(), rank, *sim))
+        .collect()
 }
 
 // ── Temporal Decay ───────────────────────────────────────────────

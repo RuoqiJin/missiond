@@ -1080,6 +1080,20 @@ impl MissionDB {
             CREATE INDEX IF NOT EXISTS idx_gemini_req_session ON gemini_requests(session_id);"
         )?;
 
+        // ── Conversation Topic Vectors (multi-topic MaxSim search) ──
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS conversation_topic_vectors (
+                session_id TEXT NOT NULL,
+                chunk_idx INTEGER NOT NULL,
+                topic TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                embedding_provider TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (session_id, chunk_idx)
+            );
+            CREATE INDEX IF NOT EXISTS idx_ctv_provider ON conversation_topic_vectors(embedding_provider);"
+        )?;
+
         // ── Image Descriptions (Vision Worker cache) ──
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS image_descriptions (

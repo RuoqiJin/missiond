@@ -197,22 +197,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 Vec::new()
             };
 
-            // 2. Vector path (for hybrid + semantic modes)
+            // 2. Vector path: MaxSim over multi-topic cache (for hybrid + semantic modes)
             let vec_ranked: Vec<(String, usize, f32)> = if mode != "fts" {
                 let query_embedding = state.embedding_service.as_ref()
                     .and_then(|svc| svc.embed(&query));
-                let cache = state.conversation_embedding_cache.read().await;
+                let cache = state.conversation_topic_cache.read().await;
                 let result = if let Some(ref qe) = query_embedding {
-                    let mut scores: Vec<(usize, f32)> = cache.iter()
-                        .enumerate()
-                        .map(|(i, (_, vec))| (i, missiond_core::embedding::cosine_similarity(qe, vec)))
-                        .collect();
-                    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                    scores.iter()
-                        .take((top_k + skip) * 3)
-                        .enumerate()
-                        .map(|(rank, (idx, sim))| (cache[*idx].0.clone(), rank, *sim))
-                        .collect()
+                    missiond_core::embedding::maxsim_search(qe, &cache, (top_k + skip) * 3)
                 } else {
                     Vec::new()
                 };
@@ -355,7 +346,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let kb_cache_size = state.kb_search_cache.read().await.len();
             let policy_cache_size = state.embedding_cache.read().await.len();
             let skill_cache_size = state.skill_embedding_cache.read().await.len();
-            let conv_cache_size = state.conversation_embedding_cache.read().await.len();
+            let conv_cache_size = state.conversation_topic_cache.read().await.len();
             let provider = state.embedding_service.as_ref()
                 .map(|svc| svc.provider_id())
                 .unwrap_or("none");

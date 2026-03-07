@@ -762,6 +762,99 @@ impl MissionDB {
     }
 
 
+    // ============ Multi-Topic Vectors (MaxSim Search) ============
+
+    /// Store topic vectors for a conversation session (replaces any existing).
+    /// topics: [(topic_summary, embedding_vector)]
+    pub fn set_conversation_topic_vectors(
+        &self,
+        session_id: &str,
+        topics: &[(String, Vec<f32>)],
+        provider: &str,
+    ) -> DbResult<()> {
+        let conn = self.conn();
+        // Delete old topic vectors for this session
+        conn.execute(
+            "DELETE FROM conversation_topic_vectors WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        let mut stmt = conn.prepare(
+            "INSERT INTO conversation_topic_vectors (session_id, chunk_idx, topic, embedding, embedding_provider)
+             VALUES (?1, ?2, ?3, ?4, ?5)"
+        )?;
+        for (idx, (topic, vec)) in topics.iter().enumerate() {
+            let bytes = crate::embedding::f32_vec_to_bytes(vec);
+            stmt.execute(params![session_id, idx as i64, topic, bytes, provider])?;
+        }
+        Ok(())
+    }
+
+    /// Load all topic vectors for cache warming. Returns (session_id, [vectors]).
+    /// Groups by session_id, ordered by chunk_idx.
+    pub fn load_conversation_topic_vectors(&self, provider: &str) -> DbResult<Vec<(String, Vec<Vec<f32>>)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT tv.session_id, tv.embedding
+             FROM conversation_topic_vectors tv
+             JOIN conversations c ON c.id = tv.session_id
+             WHERE tv.embedding_provider = ?1
+               AND c.conversation_type NOT IN ('meta', 'compaction')
+             ORDER BY tv.session_id, tv.chunk_idx"
+        )?;
+        let rows = stmt.query_map(params![provider], |row| {
+            let sid: String = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((sid, blob))
+        })?;
+
+        let mut result: Vec<(String, Vec<Vec<f32>>)> = Vec::new();
+        for row in rows {
+            let (sid, blob) = row?;
+            let vec = crate::embedding::bytes_to_f32_vec(&blob);
+            if let Some(last) = result.last_mut() {
+                if last.0 == sid {
+                    last.1.push(vec);
+                    continue;
+                }
+            }
+            result.push((sid, vec![vec]));
+        }
+        Ok(result)
+    }
+
+    /// Get topic summaries for a session (for display in search results).
+    pub fn get_conversation_topics(&self, session_id: &str) -> DbResult<Vec<String>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT topic FROM conversation_topic_vectors
+             WHERE session_id = ?1 ORDER BY chunk_idx"
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| row.get::<_, String>(0))?;
+        let mut topics = Vec::new();
+        for r in rows { topics.push(r?); }
+        Ok(topics)
+    }
+
+    /// List session IDs that have old single-vector embeddings but no topic vectors yet.
+    /// Used for gradual migration during backfill.
+    pub fn conversations_needing_topic_vectors(&self, provider: &str, limit: i64) -> DbResult<Vec<String>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT c.id FROM conversations c
+             WHERE c.llm_summary IS NOT NULL
+               AND c.conversation_type IN ('user', 'worker')
+               AND NOT EXISTS (
+                   SELECT 1 FROM conversation_topic_vectors tv
+                   WHERE tv.session_id = c.id AND tv.embedding_provider = ?1
+               )
+             ORDER BY c.started_at DESC LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(params![provider, limit], |row| row.get::<_, String>(0))?;
+        let mut ids = Vec::new();
+        for r in rows { ids.push(r?); }
+        Ok(ids)
+    }
+
     // ============ Session Timeline Reconstruction ============
 
     /// Find completed parent conversations that have compaction children but no timeline yet.
