@@ -75,7 +75,36 @@ pub(crate) enum DaemonEvent {
         phase: String,
         active_type: Option<String>,
     },
-    /// Board task created/updated/toggled.
+    // ===== Board Task lifecycle =====
+    /// A new board task was created.
+    BoardTaskCreated {
+        task_id: String,
+        title: String,
+        category: String,
+    },
+    /// Board task status changed (toggle, manual update).
+    BoardTaskStatusChanged {
+        task_id: String,
+        old_status: String,
+        new_status: String,
+    },
+    /// A note was added to a board task.
+    BoardTaskNoteAdded {
+        task_id: String,
+        note_id: String,
+        content_preview: String,
+    },
+    /// A board task was claimed by a slot/session.
+    BoardTaskClaimed {
+        task_id: String,
+        slot_id: String,
+    },
+    /// A board task was deleted.
+    BoardTaskDeleted {
+        task_id: String,
+        title: String,
+    },
+    /// Board task fields updated (title, category, priority, etc.).
     BoardTaskUpdated {
         task_id: String,
         status: String,
@@ -113,10 +142,38 @@ pub(crate) enum DaemonEvent {
     ConversationMessageLogged {
         message_id: i64,
         session_id: String,
+        parent_session_id: Option<String>,
         role: String,
         content_chars: usize,
         /// Truncated preview for timeline display.
         preview: String,
+    },
+
+    // ===== Codex CLI (GPT-5.4) =====
+    /// A Codex CLI request was sent (prompt dispatched to GPT).
+    CodexRequestStarted {
+        request_id: String,
+        caller: String,
+        model: String,
+        prompt_chars: usize,
+        has_image: bool,
+        prompt_text: Option<String>,
+        image_hash: Option<String>,
+    },
+    /// A Codex CLI request completed (success or failure).
+    CodexRequestCompleted {
+        request_id: String,
+        caller: String,
+        model: String,
+        prompt_chars: usize,
+        response_chars: usize,
+        duration_ms: u64,
+        status: String,
+        error_msg: Option<String>,
+        response_text: Option<String>,
+        input_tokens: u64,
+        output_tokens: u64,
+        image_hash: Option<String>,
     },
 
     // ===== Vision Worker =====
@@ -124,6 +181,22 @@ pub(crate) enum DaemonEvent {
     ImageMessageInserted {
         message_id: i64,
         session_id: String,
+    },
+
+    // ===== Briefing Worker =====
+    /// Briefing worker found pending entries and started processing.
+    BriefingBatchStarted {
+        pending_count: usize,
+    },
+    /// A timeline entry's summary was updated by the briefing worker.
+    /// Frontend uses target_seq + summary to do in-place cache update.
+    BriefingSummaryGenerated {
+        /// The seq of the timeline entry whose summary was updated.
+        target_seq: i64,
+        /// The new semantic summary.
+        summary: String,
+        /// How the summary was produced: "minimax", "static_rule", "tool_skip"
+        method: String,
     },
 }
 
@@ -140,14 +213,27 @@ impl DaemonEvent {
             Self::DecisionResolved { .. } => "decision_made",
             Self::QuestionResolved { .. } => "question_resolved",
             Self::MemoryPhaseChanged { .. } => "memory_phase_changed",
+            Self::BoardTaskCreated { .. } => "board_task_created",
+            Self::BoardTaskStatusChanged { .. } => "board_task_status_changed",
+            Self::BoardTaskNoteAdded { .. } => "board_task_note_added",
+            Self::BoardTaskClaimed { .. } => "board_task_claimed",
+            Self::BoardTaskDeleted { .. } => "board_task_deleted",
             Self::BoardTaskUpdated { .. } => "board_task_updated",
             Self::SlotStateChanged { .. } => "slot_state_changed",
             Self::InsightGenerated { .. } => "insight_generated",
             Self::GitCommitDetected { .. } => "git_commit",
             Self::ConversationMessageLogged { ref role, .. } => {
-                if role == "user" { "user_message" } else { "assistant_message" }
+                match role.as_str() {
+                    "user" => "user_message",
+                    "thinking" => "thinking_message",
+                    _ => "assistant_message",
+                }
             }
+            Self::CodexRequestStarted { .. } => "codex_request_started",
+            Self::CodexRequestCompleted { .. } => "codex_request_completed",
             Self::ImageMessageInserted { .. } => "image_message_inserted",
+            Self::BriefingBatchStarted { .. } => "briefing_batch_started",
+            Self::BriefingSummaryGenerated { .. } => "briefing_summary_generated",
         }
     }
 
@@ -196,18 +282,58 @@ impl DaemonEvent {
                 json!({ "question_id": question_id, "resolution": resolution }),
             Self::MemoryPhaseChanged { slot_id, phase, active_type } =>
                 json!({ "slot_id": slot_id, "phase": phase, "active_type": active_type }),
+            Self::BoardTaskCreated { task_id, title, category } =>
+                json!({ "task_id": task_id, "title": title, "category": category, "action": "created" }),
+            Self::BoardTaskStatusChanged { task_id, old_status, new_status } =>
+                json!({ "task_id": task_id, "old_status": old_status, "new_status": new_status, "action": "status_changed" }),
+            Self::BoardTaskNoteAdded { task_id, note_id, content_preview } =>
+                json!({ "task_id": task_id, "note_id": note_id, "content_preview": content_preview, "action": "note_added" }),
+            Self::BoardTaskClaimed { task_id, slot_id } =>
+                json!({ "task_id": task_id, "slot_id": slot_id, "action": "claimed" }),
+            Self::BoardTaskDeleted { task_id, title } =>
+                json!({ "task_id": task_id, "title": title, "action": "deleted" }),
             Self::BoardTaskUpdated { task_id, status, category } =>
-                json!({ "task_id": task_id, "status": status, "category": category }),
+                json!({ "task_id": task_id, "status": status, "category": category, "action": "updated" }),
             Self::SlotStateChanged { slot_id, new_state, prev_state } =>
                 json!({ "slot_id": slot_id, "new_state": new_state, "prev_state": prev_state }),
             Self::InsightGenerated { category, priority, title } =>
                 json!({ "category": category, "priority": priority, "title": title }),
             Self::GitCommitDetected { repo, hash, short_hash, author, message, committed_at } =>
                 json!({ "repo": repo, "hash": hash, "short_hash": short_hash, "author": author, "message": message, "committed_at": committed_at }),
-            Self::ConversationMessageLogged { message_id, session_id, role, content_chars, preview } =>
-                json!({ "message_id": message_id, "session_id": session_id, "role": role, "content_chars": content_chars, "preview": preview }),
+            Self::ConversationMessageLogged { message_id, session_id, parent_session_id, role, content_chars, preview } =>
+                json!({ "message_id": message_id, "session_id": session_id, "parent_session_id": parent_session_id, "role": role, "content_chars": content_chars, "preview": preview }),
+            Self::CodexRequestStarted {
+                request_id, caller, model, prompt_chars, has_image, image_hash, ..
+            } => json!({
+                "request_id": request_id,
+                "caller": caller,
+                "model": model,
+                "prompt_chars": prompt_chars,
+                "has_image": has_image,
+                "image_hash": image_hash,
+            }),
+            Self::CodexRequestCompleted {
+                request_id, caller, model, prompt_chars, response_chars,
+                duration_ms, status, error_msg, input_tokens, output_tokens, image_hash, ..
+            } => json!({
+                "request_id": request_id,
+                "caller": caller,
+                "model": model,
+                "prompt_chars": prompt_chars,
+                "response_chars": response_chars,
+                "duration_ms": duration_ms,
+                "status": status,
+                "error": error_msg,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "image_hash": image_hash,
+            }),
             Self::ImageMessageInserted { message_id, session_id } =>
                 json!({ "message_id": message_id, "session_id": session_id }),
+            Self::BriefingBatchStarted { pending_count } =>
+                json!({ "pending_count": pending_count }),
+            Self::BriefingSummaryGenerated { target_seq, summary, method } =>
+                json!({ "target_seq": target_seq, "summary": summary, "method": method }),
         }
     }
 }
