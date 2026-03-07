@@ -6,7 +6,7 @@ use missiond_mcp::tools::ToolResult;
 use crate::state::AppState;
 use crate::lenient;
 use crate::state::EmbeddingTask;
-use crate::helpers::char_boundary_at;
+
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
@@ -126,14 +126,37 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 query: String,
                 #[serde(default, deserialize_with = "lenient::option_i64")]
                 limit: Option<i64>,
+                #[serde(default, deserialize_with = "lenient::option_i64")]
+                offset: Option<i64>,
                 session_id: Option<String>,
                 exclude_session_id: Option<String>,
+                /// hybrid (default), fts, semantic
+                query_mode: Option<String>,
+                /// last_24h, last_7d, last_30d
+                time_range: Option<String>,
+                project: Option<String>,
             }
-            let Args { query, limit, session_id, exclude_session_id } = serde_json::from_value(args)?;
+            let Args { query, limit, offset, session_id, exclude_session_id,
+                        query_mode, time_range, project } = serde_json::from_value(args)?;
             let top_k = limit.unwrap_or(10) as usize;
+            let skip = offset.unwrap_or(0) as usize;
+            let mode = query_mode.as_deref().unwrap_or("hybrid");
             let db = state.mission.db();
 
-            // ── Path A: single-session message search (spawn_blocking: FTS5) ──
+            // Resolve timeRange to ISO timestamp
+            let time_after: Option<String> = time_range.as_deref().and_then(|tr| {
+                let hours = match tr {
+                    "last_24h" => 24,
+                    "last_7d" => 24 * 7,
+                    "last_30d" => 24 * 30,
+                    _ => return None,
+                };
+                Some(chrono::Utc::now()
+                    .checked_sub_signed(chrono::Duration::hours(hours))?
+                    .to_rfc3339())
+            });
+
+            // ── Path A: single-session message search (FTS5 snippet) ──
             if let Some(ref sid) = session_id {
                 let q = query.clone();
                 let limit = (top_k * 3) as i64;
@@ -153,39 +176,53 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 })));
             }
 
-            // ── Path B: hybrid session-level search (FTS5 + embedding RRF) ──
+            // ── Path B: session-level search ──
 
-            // 1. FTS5: AND-first BM25 search → session ranking (spawn_blocking)
-            let q = query.clone();
-            let limit = (top_k * 3) as i64;
-            let fts_sessions = state.db_exec.run(move |db| db.search_conversation_sessions_fts(&q, limit)).await
-                .map_err(|e| anyhow!("DB error: {}", e))?;
-            let fts_ranked: Vec<(String, usize)> = fts_sessions.into_iter()
-                .enumerate()
-                .map(|(rank, (sid, _score))| (sid, rank))
-                .collect();
-
-            // 2. Vector: embed query → cosine sim against conversation embedding cache
-            let query_embedding = state.embedding_service.as_ref()
-                .and_then(|svc| svc.embed(&query));
-            let cache = state.conversation_embedding_cache.read().await;
-            let vec_ranked: Vec<(String, usize, f32)> = if let Some(ref qe) = query_embedding {
-                let mut scores: Vec<(usize, f32)> = cache.iter()
+            // 1. FTS5 path (for hybrid + fts modes)
+            let fts_ranked: Vec<(String, usize)> = if mode != "semantic" {
+                let q = query.clone();
+                let pool_limit = ((top_k + skip) * 3) as i64;
+                let ta = time_after.clone();
+                let proj = project.clone();
+                let fts_sessions = state.db_exec.run(move |db| {
+                    db.search_conversation_sessions_fts_filtered(
+                        &q, pool_limit, ta.as_deref(), proj.as_deref(),
+                    )
+                }).await.map_err(|e| anyhow!("DB error: {}", e))?;
+                fts_sessions.into_iter()
                     .enumerate()
-                    .map(|(i, (_, vec))| (i, missiond_core::embedding::cosine_similarity(qe, vec)))
-                    .collect();
-                scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                scores.iter()
-                    .take(top_k * 3)
-                    .enumerate()
-                    .map(|(rank, (idx, sim))| (cache[*idx].0.clone(), rank, *sim))
+                    .map(|(rank, (sid, _score))| (sid, rank))
                     .collect()
             } else {
                 Vec::new()
             };
-            drop(cache);
 
-            // 3. RRF merge
+            // 2. Vector path (for hybrid + semantic modes)
+            let vec_ranked: Vec<(String, usize, f32)> = if mode != "fts" {
+                let query_embedding = state.embedding_service.as_ref()
+                    .and_then(|svc| svc.embed(&query));
+                let cache = state.conversation_embedding_cache.read().await;
+                let result = if let Some(ref qe) = query_embedding {
+                    let mut scores: Vec<(usize, f32)> = cache.iter()
+                        .enumerate()
+                        .map(|(i, (_, vec))| (i, missiond_core::embedding::cosine_similarity(qe, vec)))
+                        .collect();
+                    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    scores.iter()
+                        .take((top_k + skip) * 3)
+                        .enumerate()
+                        .map(|(rank, (idx, sim))| (cache[*idx].0.clone(), rank, *sim))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                drop(cache);
+                result
+            } else {
+                Vec::new()
+            };
+
+            // 3. Merge / rank
             let rrf_k = 60;
             let mut session_scores: std::collections::HashMap<String, (Option<usize>, Option<usize>, Option<f32>)> =
                 std::collections::HashMap::new();
@@ -201,56 +238,75 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let mut ranked: Vec<(String, f64, Option<usize>, Option<usize>, Option<f32>)> = session_scores
                 .into_iter()
                 .map(|(sid, (fts_r, vec_r, sim))| {
-                    let score = missiond_core::embedding::rrf_score(fts_r, vec_r, rrf_k);
+                    let score = match mode {
+                        "fts" => fts_r.map(|r| 1.0 / (rrf_k + r + 1) as f64).unwrap_or(0.0),
+                        "semantic" => vec_r.map(|r| 1.0 / (rrf_k + r + 1) as f64).unwrap_or(0.0),
+                        _ => missiond_core::embedding::rrf_score(fts_r, vec_r, rrf_k),
+                    };
                     (sid, score, fts_r, vec_r, sim)
                 })
                 .collect();
             ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-            // Exclude session if requested
             if let Some(ref ex_sid) = exclude_session_id {
                 ranked.retain(|(sid, _, _, _, _)| sid != ex_sid);
             }
+
+            // Apply offset + limit
+            let total_hits = ranked.len();
+            if skip > 0 {
+                ranked = ranked.into_iter().skip(skip).collect();
+            }
             ranked.truncate(top_k);
 
-            // 4. Enrich: fetch conversation metadata + sample messages
+            // 4. Enrich with snippets (FTS5 native) or llmSummary fallback
             let mut results = Vec::new();
-            for (sid, rrf, fts_r, vec_r, sim) in &ranked {
+            for (sid, _rrf, fts_r, _vec_r, sim) in &ranked {
                 let conv = db.get_conversation(sid).ok().flatten();
-                let sample_msgs = db.get_conversation_messages(sid, None, 5)
-                    .unwrap_or_default();
-                let sample: Vec<serde_json::Value> = sample_msgs.iter().map(|m| {
-                    serde_json::json!({
-                        "role": m.role,
-                        "content": if m.content.len() > 300 {
-                            format!("{}…", &m.content[..char_boundary_at(&m.content, 300)])
-                        } else {
-                            m.content.clone()
-                        },
-                    })
-                }).collect();
+
+                // Build matchReason: FTS snippet if keyword-matched, llmSummary if vector-only
+                let match_reason = if fts_r.is_some() {
+                    // FTS hit — get native snippet() from SQLite
+                    let snippets = db.get_session_fts_snippets(sid, &query, 3)
+                        .unwrap_or_default();
+                    if snippets.is_empty() {
+                        conv.as_ref()
+                            .and_then(|c| c.llm_summary.as_deref())
+                            .unwrap_or("(无摘要)")
+                            .to_string()
+                    } else {
+                        snippets.iter()
+                            .map(|(role, snip)| format!("[{}] {}", role, snip))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    }
+                } else {
+                    // Vector-only hit — use llmSummary as context
+                    format!("[语义匹配] {}",
+                        conv.as_ref()
+                            .and_then(|c| c.llm_summary.as_deref())
+                            .unwrap_or("(无摘要)"))
+                };
 
                 results.push(serde_json::json!({
                     "sessionId": sid,
-                    "rrfScore": rrf,
-                    "ftsRank": fts_r,
-                    "vecRank": vec_r,
-                    "cosineSim": sim,
                     "project": conv.as_ref().and_then(|c| c.project.as_deref()),
                     "status": conv.as_ref().map(|c| c.status.as_str()),
                     "slotId": conv.as_ref().and_then(|c| c.slot_id.as_deref()),
-                    "llmSummary": conv.as_ref().and_then(|c| c.llm_summary.as_deref()),
+                    "summary": conv.as_ref().and_then(|c| c.llm_summary.as_deref()),
                     "messageCount": conv.as_ref().map(|c| c.message_count),
                     "startedAt": conv.as_ref().map(|c| &c.started_at),
-                    "sampleMessages": sample,
+                    "matchReason": match_reason,
+                    "cosineSim": sim,
                 }));
             }
 
             Ok(ToolResult::json(&serde_json::json!({
                 "results": results,
                 "count": results.len(),
+                "totalHits": total_hits,
                 "query": query,
-                "mode": "hybrid_rrf",
+                "mode": mode,
                 "ftsHits": fts_ranked.len(),
                 "vecHits": vec_ranked.len(),
             })))

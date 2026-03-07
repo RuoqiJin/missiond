@@ -520,6 +520,148 @@ impl MissionDB {
         Ok(results)
     }
 
+    /// Get FTS5 snippet() matches for a specific session — returns top matching message snippets.
+    /// Uses FTS5 native snippet() for efficient, tokenizer-aligned context extraction.
+    pub fn get_session_fts_snippets(
+        &self,
+        session_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> DbResult<Vec<(String, String)>> {
+        let conn = self.read_conn();
+        let (and_query, or_query) = Self::build_conv_fts_queries(query);
+
+        let sql = "SELECT m.role, snippet(conversation_msg_fts, 0, '**', '**', '…', 48) as snip
+             FROM conversation_messages m
+             JOIN conversation_msg_fts f ON m.id = f.rowid
+             WHERE conversation_msg_fts MATCH ?1 AND m.session_id = ?2
+             ORDER BY f.rank
+             LIMIT ?3";
+
+        // Try AND first
+        let results = {
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map(params![and_query, session_id, limit as i64], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut r = Vec::new();
+            for row in rows { r.push(row?); }
+            r
+        };
+        if !results.is_empty() { return Ok(results); }
+
+        // Fallback to OR
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![or_query, session_id, limit as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut r = Vec::new();
+        for row in rows { r.push(row?); }
+        Ok(r)
+    }
+
+    /// FTS5 session search with time range filter.
+    pub fn search_conversation_sessions_fts_filtered(
+        &self,
+        query: &str,
+        limit: i64,
+        time_after: Option<&str>,
+        project: Option<&str>,
+    ) -> DbResult<Vec<(String, f64)>> {
+        let conn = self.read_conn();
+        let (and_query, or_query) = Self::build_conv_fts_queries(query);
+
+        let mut conditions = vec![
+            "conversation_msg_fts MATCH ?1".to_string(),
+            "c.conversation_type NOT IN ('meta', 'compaction')".to_string(),
+        ];
+        let mut param_idx = 2; // ?1 = query, ?2 = limit (at end)
+
+        if time_after.is_some() {
+            param_idx += 1;
+            conditions.push(format!("c.started_at >= ?{}", param_idx));
+        }
+        if project.is_some() {
+            param_idx += 1;
+            conditions.push(format!("c.project = ?{}", param_idx));
+        }
+
+        let where_clause = conditions.join(" AND ");
+        let sql = format!(
+            "SELECT m.session_id, MIN(f.rank) as best_score
+             FROM conversation_messages m
+             JOIN conversation_msg_fts f ON m.id = f.rowid
+             JOIN conversations c ON m.session_id = c.id
+             WHERE {}
+             GROUP BY m.session_id
+             ORDER BY best_score ASC
+             LIMIT ?2",
+            where_clause
+        );
+
+        // Try AND first, then OR
+        for q in [&and_query, &or_query] {
+            let mut stmt = conn.prepare(&sql)?;
+            let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+                Box::new(q.clone()),
+                Box::new(limit),
+            ];
+            if let Some(ta) = time_after {
+                params_vec.push(Box::new(ta.to_string()));
+            }
+            if let Some(p) = project {
+                params_vec.push(Box::new(p.to_string()));
+            }
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+            let rows = stmt.query_map(param_refs.as_slice(), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })?;
+            let mut r = Vec::new();
+            for row in rows { r.push(row?); }
+            if !r.is_empty() { return Ok(r); }
+        }
+
+        // Phase 3: LIKE fallback
+        let pattern = format!("%{}%", query);
+        let mut like_conditions = vec![
+            "m.content LIKE ?1".to_string(),
+            "c.conversation_type NOT IN ('meta', 'compaction')".to_string(),
+        ];
+        if time_after.is_some() {
+            like_conditions.push("c.started_at >= ?3".to_string());
+        }
+        if project.is_some() {
+            let idx = if time_after.is_some() { 4 } else { 3 };
+            like_conditions.push(format!("c.project = ?{}", idx));
+        }
+        let like_sql = format!(
+            "SELECT m.session_id, COUNT(*) as hits FROM conversation_messages m
+             JOIN conversations c ON m.session_id = c.id
+             WHERE {}
+             GROUP BY m.session_id
+             ORDER BY hits DESC LIMIT ?2",
+            like_conditions.join(" AND ")
+        );
+        let mut stmt = conn.prepare(&like_sql)?;
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+            Box::new(pattern),
+            Box::new(limit),
+        ];
+        if let Some(ta) = time_after {
+            params_vec.push(Box::new(ta.to_string()));
+        }
+        if let Some(p) = project {
+            params_vec.push(Box::new(p.to_string()));
+        }
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })?;
+        let mut r = Vec::new();
+        for row in rows { r.push(row?); }
+        Ok(r)
+    }
+
     /// Build FTS5 MATCH queries: AND (strict) + OR (loose) variants.
     /// Returns (and_query, or_query). Caller tries AND first, falls back to OR.
     fn build_conv_fts_queries(query: &str) -> (String, String) {

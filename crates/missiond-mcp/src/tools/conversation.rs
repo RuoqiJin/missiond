@@ -57,17 +57,35 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_conversation_search",
-            "混合语义搜索对话（FTS5 + Embedding RRF 双路融合）。返回会话级结果，含摘要、匹配分数和示例消息。传 sessionId 时退化为单会话消息搜索。",
+            "搜索对话。默认 hybrid 模式(FTS5+Embedding RRF)。返回会话级结果+匹配片段(FTS snippet)。找特定报错/代码名用 fts 模式；找解决思路用 semantic 模式。",
             json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "搜索关键词（支持中英混合，语义搜索自动启用）"
+                        "description": "搜索关键词（支持中英混合）"
+                    },
+                    "queryMode": {
+                        "type": "string",
+                        "enum": ["hybrid", "fts", "semantic"],
+                        "description": "搜索模式：hybrid(默认,FTS+Embedding), fts(精确关键词), semantic(语义相似度)"
                     },
                     "limit": {
                         "type": "integer",
                         "description": "最大返回会话数（默认 10）"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "跳过前 N 条结果（分页用）"
+                    },
+                    "timeRange": {
+                        "type": "string",
+                        "enum": ["last_24h", "last_7d", "last_30d"],
+                        "description": "时间范围过滤"
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "按项目过滤"
                     },
                     "sessionId": {
                         "type": "string",
