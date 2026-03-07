@@ -15,6 +15,7 @@ mod audit;
 mod router_chat;
 mod incident;
 mod gemini_log;
+mod vision;
 
 use rusqlite::Connection;
 use error::{DbError, DbResult};
@@ -1077,6 +1078,17 @@ impl MissionDB {
             CREATE INDEX IF NOT EXISTS idx_gemini_req_created ON gemini_requests(created_at);
             CREATE INDEX IF NOT EXISTS idx_gemini_req_caller ON gemini_requests(caller);
             CREATE INDEX IF NOT EXISTS idx_gemini_req_session ON gemini_requests(session_id);"
+        )?;
+
+        // ── Image Descriptions (Vision Worker cache) ──
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS image_descriptions (
+                image_hash TEXT PRIMARY KEY,
+                media_type TEXT NOT NULL,
+                description TEXT NOT NULL,
+                char_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );"
         )?;
 
         Ok(())

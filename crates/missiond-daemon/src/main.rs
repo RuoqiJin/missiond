@@ -23,6 +23,7 @@ mod extraction;
 mod supervisor;
 mod memory_scheduler;
 mod embedding_worker;
+mod vision_worker;
 mod slot_env;
 mod claude_md_sync;
 mod context_budget;
@@ -1220,6 +1221,9 @@ async fn main() -> Result<()> {
             }
         });
     }
+
+    // --- Vision Worker: async image understanding pipeline ---
+    vision_worker::spawn_vision_worker(Arc::new(state.clone()));
 
     // --- P0: IPC listener in dedicated task (never starved by other work) ---
     // Previously inside the main select! loop — a single slow branch (e.g. 120s PTY spawn)

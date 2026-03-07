@@ -83,6 +83,13 @@ pub(crate) enum DaemonEvent {
         priority: String,
         title: String,
     },
+
+    // ===== Vision Worker =====
+    /// A message with image content was inserted, needs async vision processing.
+    ImageMessageInserted {
+        message_id: i64,
+        session_id: String,
+    },
 }
 
 impl DaemonEvent {
@@ -100,6 +107,7 @@ impl DaemonEvent {
             Self::BoardTaskUpdated { .. } => "board_task_updated",
             Self::SlotStateChanged { .. } => "slot_state_changed",
             Self::InsightGenerated { .. } => "insight_generated",
+            Self::ImageMessageInserted { .. } => "image_message_inserted",
         }
     }
 
@@ -144,6 +152,8 @@ impl DaemonEvent {
                 json!({ "slot_id": slot_id, "new_state": new_state, "prev_state": prev_state }),
             Self::InsightGenerated { category, priority, title } =>
                 json!({ "category": category, "priority": priority, "title": title }),
+            Self::ImageMessageInserted { message_id, session_id } =>
+                json!({ "message_id": message_id, "session_id": session_id }),
         }
     }
 }
