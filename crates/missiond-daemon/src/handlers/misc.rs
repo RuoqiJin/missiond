@@ -417,6 +417,17 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             Ok(ToolResult::json_pretty(&stats))
         }
 
+        "mission_gemini_content" => {
+            let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
+            let request_id = args_val.get("request_id").and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("missing request_id"))?;
+            let db = state.mission.db();
+            match db.gemini_log_get_content(request_id).map_err(|e| anyhow!("DB error: {}", e))? {
+                Some(content) => Ok(ToolResult::json_pretty(&content)),
+                None => Ok(ToolResult::error("Request not found")),
+            }
+        }
+
         _ => Err(anyhow!("Unknown misc tool: {name}")),
     }
 }

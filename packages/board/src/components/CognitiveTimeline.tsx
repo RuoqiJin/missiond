@@ -7,6 +7,7 @@ import {
   MessageSquare, GitBranch, Activity, Cpu, Settings2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { utcMs, formatBeijing, formatBeijingTime } from '@/lib/time';
 import { useEventInvalidation } from '../hooks/useEventStream';
 
 // ── Types ──────────────────────────────────────────────────
@@ -37,22 +38,29 @@ const EVENT_COLORS: Record<string, { dot: string; bg: string; text: string; labe
   slot_state_changed:       { dot: 'bg-slate-400',   bg: 'bg-slate-400/10',   text: 'text-slate-400',   label: 'Slot',     icon: <Settings2 className="w-3 h-3" /> },
   task_lifecycle:           { dot: 'bg-blue-400',    bg: 'bg-blue-400/10',    text: 'text-blue-400',    label: 'Task',     icon: <Activity className="w-3 h-3" /> },
   question_created:         { dot: 'bg-amber-400',   bg: 'bg-amber-400/10',   text: 'text-amber-400',   label: 'Question', icon: <MessageSquare className="w-3 h-3" /> },
-  gemini_request_completed: { dot: 'bg-purple-400',  bg: 'bg-purple-400/10',  text: 'text-purple-400',  label: 'Gemini',   icon: <Cpu className="w-3 h-3" /> },
+  gemini_request_started:   { dot: 'bg-purple-300',  bg: 'bg-purple-300/10',  text: 'text-purple-300',  label: 'Prompt',   icon: <Cpu className="w-3 h-3" /> },
+  gemini_request_completed: { dot: 'bg-purple-500',  bg: 'bg-purple-500/10',  text: 'text-purple-400',  label: 'Response', icon: <Cpu className="w-3 h-3" /> },
   decision_made:            { dot: 'bg-orange-400',  bg: 'bg-orange-400/10',  text: 'text-orange-400',  label: 'Decision', icon: <GitBranch className="w-3 h-3" /> },
   question_resolved:        { dot: 'bg-amber-300',   bg: 'bg-amber-300/10',   text: 'text-amber-300',   label: 'Resolved', icon: <MessageSquare className="w-3 h-3" /> },
   memory_phase_changed:     { dot: 'bg-cyan-400',    bg: 'bg-cyan-400/10',    text: 'text-cyan-400',    label: 'Memory',   icon: <Brain className="w-3 h-3" /> },
   board_task_updated:       { dot: 'bg-blue-300',    bg: 'bg-blue-300/10',    text: 'text-blue-300',    label: 'Board',    icon: <Activity className="w-3 h-3" /> },
   insight_generated:        { dot: 'bg-emerald-400', bg: 'bg-emerald-400/10', text: 'text-emerald-400', label: 'Insight',  icon: <Sparkles className="w-3 h-3" /> },
+  git_commit:               { dot: 'bg-green-400',   bg: 'bg-green-400/10',   text: 'text-green-400',   label: 'Commit',   icon: <GitBranch className="w-3 h-3" /> },
+  user_message:             { dot: 'bg-blue-400',    bg: 'bg-blue-400/10',    text: 'text-blue-400',    label: 'User',     icon: <MessageSquare className="w-3 h-3" /> },
+  assistant_message:        { dot: 'bg-teal-400',    bg: 'bg-teal-400/10',    text: 'text-teal-400',    label: 'Assistant', icon: <Brain className="w-3 h-3" /> },
 };
 
 const SWIMLANES = [
-  { id: 'ai',   label: 'AI / LLM',  types: ['gemini_request_completed', 'decision_made', 'insight_generated'] },
+  { id: 'chat', label: 'Chat',       types: ['user_message', 'assistant_message'] },
+  { id: 'ai',   label: 'AI / LLM',  types: ['gemini_request_started', 'gemini_request_completed', 'decision_made', 'insight_generated'] },
+  { id: 'code', label: 'Code',       types: ['git_commit'] },
   { id: 'flow', label: 'Flow',       types: ['task_lifecycle', 'question_created', 'question_resolved', 'board_task_updated'] },
   { id: 'sys',  label: 'System',     types: ['slot_state_changed', 'memory_phase_changed'] },
 ];
 
 const QUICK_FILTERS = [
   { label: 'All', value: 'all' },
+  { label: 'Chat', value: 'chat' },
   { label: 'Errors', value: 'errors' },
   { label: 'Insights', value: 'insights' },
   { label: 'Gemini', value: 'gemini' },
@@ -67,9 +75,7 @@ const WINDOW_OPTIONS = [
 
 // ── Helpers ────────────────────────────────────────────────
 
-function formatTime(dateStr: string): string {
-  return new Date(dateStr).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-}
+// Time helpers delegated to @/lib/time (single source of truth)
 
 function shortTrace(id: string | null): string {
   if (!id) return '';
@@ -94,7 +100,11 @@ function eventSummary(ev: TimelineEvent): string {
   switch (ev.event_type) {
     case 'slot_state_changed': return `${p.slot_id || ''} → ${p.new_state || ''}`;
     case 'task_lifecycle': return `${p.action || ''}: ${p.task_title || p.task_id || ''}`;
+    case 'gemini_request_started': return `${p.caller || ''} → ${p.model || ''} (${p.prompt_chars || 0} chars)`;
     case 'gemini_request_completed': return `${p.caller || ''} ${p.duration_ms ? p.duration_ms + 'ms' : ''} ${p.error ? '❌' : ''}`;
+    case 'git_commit': return `${p.short_hash || ''} ${p.message || ''}`;
+    case 'user_message': return `${p.preview || ''}`;
+    case 'assistant_message': return `${p.preview || ''}`;
     case 'decision_made': return `${p.tier || ''}: ${p.question?.slice(0, 60) || ''}`;
     case 'insight_generated': return `${p.title || ''}`;
     case 'board_task_updated': return `${p.title || ''} → ${p.status || ''}`;
@@ -166,15 +176,16 @@ export function CognitiveTimeline() {
   const filtered = useMemo(() => {
     let result = events;
     if (quickFilter === 'errors') result = result.filter(hasError);
+    else if (quickFilter === 'chat') result = result.filter(e => e.event_type === 'user_message' || e.event_type === 'assistant_message');
     else if (quickFilter === 'insights') result = result.filter(e => e.event_type === 'insight_generated');
-    else if (quickFilter === 'gemini') result = result.filter(e => e.event_type === 'gemini_request_completed');
+    else if (quickFilter === 'gemini') result = result.filter(e => e.event_type === 'gemini_request_completed' || e.event_type === 'gemini_request_started');
     return result;
   }, [events, quickFilter]);
 
   // Compute time range for horizontal axis
   const timeRange = useMemo(() => {
     if (filtered.length === 0) return { min: Date.now() - 3600000, max: Date.now() };
-    const times = filtered.map(e => new Date(e.created_at).getTime());
+    const times = filtered.map(e => utcMs(e.created_at));
     const min = Math.min(...times);
     const max = Math.max(...times);
     const padding = Math.max((max - min) * 0.05, 60000); // 5% padding, min 1 min
@@ -197,7 +208,7 @@ export function CognitiveTimeline() {
     const count = 6;
     return Array.from({ length: count + 1 }, (_, i) => {
       const t = min + (range * i) / count;
-      return { pos: (i / count) * 100, label: formatTime(new Date(t).toISOString()) };
+      return { pos: (i / count) * 100, label: formatBeijingTime(new Date(t).toISOString()) };
     });
   }, [timeRange]);
 
@@ -210,7 +221,7 @@ export function CognitiveTimeline() {
     const counts = new Array(buckets).fill(0);
     const errorCounts = new Array(buckets).fill(0);
     for (const ev of events) {
-      const t = new Date(ev.created_at).getTime();
+      const t = utcMs(ev.created_at);
       const idx = Math.min(Math.floor(((t - min) / range) * buckets), buckets - 1);
       if (idx >= 0) {
         counts[idx]++;
@@ -347,14 +358,46 @@ export function CognitiveTimeline() {
                     isSelected && 'ring-2 ring-white/60 w-4 h-4',
                   )}
                   style={{ left: `${x}%`, top: `${laneY}%` }}
-                  title={`${ec.label}: ${eventSummary(ev)}\n${formatTime(ev.created_at)}`}
+                  title={`${ec.label}: ${eventSummary(ev)}\n${formatBeijingTime(ev.created_at)}`}
                 />
               );
             })}
 
+            {/* Span pair lines — connect started↔completed sharing same span_id */}
+            {(() => {
+              const spanPairs = new Map<string, TimelineEvent[]>();
+              for (const ev of filtered) {
+                if (ev.span_id && (ev.event_type === 'gemini_request_started' || ev.event_type === 'gemini_request_completed')) {
+                  const arr = spanPairs.get(ev.span_id) || [];
+                  arr.push(ev);
+                  spanPairs.set(ev.span_id, arr);
+                }
+              }
+              return Array.from(spanPairs.values())
+                .filter(pair => pair.length === 2)
+                .map(pair => {
+                  const [a, b] = pair.sort((x, y) => utcMs(x.created_at) - utcMs(y.created_at));
+                  const x1 = getX(a.created_at);
+                  const x2 = getX(b.created_at);
+                  const y = ((getSwimlane(a.event_type) + 0.5) / SWIMLANES.length) * 100;
+                  const isActive = selectedEvent && (selectedEvent.span_id === a.span_id);
+                  return (
+                    <svg key={`span-${a.span_id}`} className="absolute inset-0 w-full h-full pointer-events-none z-0" preserveAspectRatio="none">
+                      <line
+                        x1={`${x1}%`} y1={`${y}%`}
+                        x2={`${x2}%`} y2={`${y}%`}
+                        stroke={isActive ? 'rgba(168,85,247,0.5)' : 'rgba(168,85,247,0.15)'}
+                        strokeWidth={isActive ? '2' : '1'}
+                        strokeDasharray="3 2"
+                      />
+                    </svg>
+                  );
+                });
+            })()}
+
             {/* Trace connecting lines — show when event selected */}
             {selectedEvent?.trace_id && traceEvents.length > 1 && (() => {
-              const sorted = [...traceEvents].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+              const sorted = [...traceEvents].sort((a, b) => utcMs(a.created_at) - utcMs(b.created_at));
               return sorted.slice(0, -1).map((ev, i) => {
                 const next = sorted[i + 1];
                 const x1 = getX(ev.created_at);
@@ -418,7 +461,7 @@ export function CognitiveTimeline() {
                   <h4 className="text-[10px] text-neutral-500 uppercase tracking-wider mb-2">Trace Chain</h4>
                   <div className="space-y-1">
                     {[...traceEvents]
-                      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+                      .sort((a, b) => utcMs(a.created_at) - utcMs(b.created_at))
                       .map(tev => {
                         const ec = getEventColor(tev.event_type);
                         const isActive = tev.seq === selectedEvent.seq;
@@ -433,7 +476,7 @@ export function CognitiveTimeline() {
                           >
                             <div className={cn('w-2 h-2 rounded-full shrink-0', ec.dot)} />
                             <span className={cn('truncate', ec.text)}>{ec.label}</span>
-                            <span className="text-neutral-600 text-[10px] ml-auto">{formatTime(tev.created_at)}</span>
+                            <span className="text-neutral-600 text-[10px] ml-auto">{formatBeijingTime(tev.created_at)}</span>
                           </button>
                         );
                       })}
@@ -494,7 +537,7 @@ function EventMeta({ event }: { event: TimelineEvent }) {
 
       {/* Meta fields */}
       <div className="space-y-1.5 text-[11px]">
-        <MetaRow label="Time" value={new Date(event.created_at).toLocaleString()} />
+        <MetaRow label="Time" value={formatBeijing(event.created_at)} />
         <MetaRow label="Seq" value={`#${event.seq}`} />
         {event.trace_id && <MetaRow label="Trace" value={shortTrace(event.trace_id)} mono />}
         {event.span_id && <MetaRow label="Span" value={shortTrace(event.span_id)} mono />}
@@ -509,6 +552,99 @@ function MetaRow({ label, value, mono }: { label: string; value: string; mono?: 
     <div className="flex justify-between">
       <span className="text-neutral-500">{label}</span>
       <span className={cn('text-neutral-300', mono && 'font-mono')}>{value}</span>
+    </div>
+  );
+}
+
+function ChatMessagePanel({ messageId }: { messageId: number }) {
+  const [content, setContent] = useState<{ role?: string; content?: string } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
+
+  const load = useCallback(() => {
+    setExpanded(true);
+    setLoading(true);
+    setError(null);
+    fetch(`/api/system/conversation-message?message_id=${messageId}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) setError(data.error);
+        else setContent(data);
+      })
+      .catch(e => setError(String(e)))
+      .finally(() => setLoading(false));
+  }, [messageId]);
+
+  if (!expanded) {
+    return (
+      <button onClick={load} className="text-[10px] text-neutral-500 hover:text-neutral-300 transition-colors">
+        Show full content...
+      </button>
+    );
+  }
+  if (loading) return <div className="text-[11px] text-neutral-500 animate-pulse">Loading...</div>;
+  if (error) return <div className="text-[11px] text-red-400">Failed: {error}</div>;
+  if (!content?.content) return null;
+
+  const isUser = content.role === 'user';
+  return (
+    <div>
+      <div className="text-[9px] text-neutral-500 uppercase tracking-wider mb-1">Full Content (incl. tool calls)</div>
+      <pre className={cn(
+        'text-[11px] font-mono bg-neutral-900 rounded p-3 overflow-auto max-h-80 whitespace-pre-wrap break-words leading-relaxed',
+        isUser ? 'text-blue-300/80' : 'text-teal-300/80',
+      )}>
+        {content.content}
+      </pre>
+    </div>
+  );
+}
+
+function GeminiContentPanel({ requestId }: { requestId: string }) {
+  const [content, setContent] = useState<{ prompt_text?: string; response_text?: string } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetch(`/api/system/gemini-content?request_id=${encodeURIComponent(requestId)}`)
+      .then(r => r.json())
+      .then(data => {
+        if (!cancelled) {
+          if (data.error) setError(data.error);
+          else setContent(data);
+        }
+      })
+      .catch(e => { if (!cancelled) setError(String(e)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [requestId]);
+
+  if (loading) return <div className="text-[11px] text-neutral-500 animate-pulse">Loading content...</div>;
+  if (error) return <div className="text-[11px] text-red-400">Failed: {error}</div>;
+  if (!content) return null;
+
+  return (
+    <div className="space-y-3">
+      {content.prompt_text && (
+        <div>
+          <div className="text-[9px] text-neutral-500 uppercase tracking-wider mb-1">Prompt</div>
+          <pre className="text-[11px] text-purple-300/80 font-mono bg-neutral-900 rounded p-3 overflow-auto max-h-60 whitespace-pre-wrap break-words leading-relaxed">
+            {content.prompt_text}
+          </pre>
+        </div>
+      )}
+      {content.response_text && (
+        <div>
+          <div className="text-[9px] text-neutral-500 uppercase tracking-wider mb-1">Response</div>
+          <pre className="text-[11px] text-emerald-300/80 font-mono bg-neutral-900 rounded p-3 overflow-auto max-h-60 whitespace-pre-wrap break-words leading-relaxed">
+            {content.response_text}
+          </pre>
+        </div>
+      )}
     </div>
   );
 }
@@ -543,15 +679,76 @@ function EventPayload({ event }: { event: TimelineEvent }) {
       {tab === 'summary' ? (
         <div className="space-y-2">
           <p className="text-xs text-neutral-300 leading-relaxed">{eventSummary(event)}</p>
-          {/* Quick payload fields for common event types */}
+          {/* Gemini started: show stats + fetch prompt content on demand */}
+          {event.event_type === 'gemini_request_started' && event.payload && (
+            <div className="space-y-3 mt-3">
+              <div className="grid grid-cols-2 gap-2">
+                <MiniStat label="Model" value={event.payload.model || '-'} />
+                <MiniStat label="Prompt" value={`${event.payload.prompt_chars || 0} chars`} />
+                <MiniStat label="Caller" value={event.payload.caller || '-'} />
+              </div>
+              {event.payload.request_id && (
+                <GeminiContentPanel requestId={event.payload.request_id} />
+              )}
+            </div>
+          )}
+          {/* Gemini completed: show stats + fetch response content on demand */}
           {event.event_type === 'gemini_request_completed' && event.payload && (
-            <div className="grid grid-cols-2 gap-2 mt-3">
-              <MiniStat label="Duration" value={`${event.payload.duration_ms || 0}ms`} />
-              <MiniStat label="Model" value={event.payload.model || '-'} />
-              <MiniStat label="Prompt" value={`${event.payload.prompt_chars || 0} chars`} />
-              <MiniStat label="Response" value={`${event.payload.response_chars || 0} chars`} />
-              <MiniStat label="Caller" value={event.payload.caller || '-'} />
-              <MiniStat label="Status" value={event.payload.status || event.payload.error ? 'error' : 'ok'} />
+            <div className="space-y-3 mt-3">
+              <div className="grid grid-cols-2 gap-2">
+                <MiniStat label="Duration" value={`${event.payload.duration_ms || 0}ms`} />
+                <MiniStat label="Model" value={event.payload.model || '-'} />
+                <MiniStat label="Prompt" value={`${event.payload.prompt_chars || 0} chars`} />
+                <MiniStat label="Response" value={`${event.payload.response_chars || 0} chars`} />
+                <MiniStat label="Caller" value={event.payload.caller || '-'} />
+                <MiniStat label="Status" value={event.payload.status || event.payload.error ? 'error' : 'ok'} />
+              </div>
+              {event.payload.request_id && (
+                <GeminiContentPanel requestId={event.payload.request_id} />
+              )}
+            </div>
+          )}
+          {/* Chat message details */}
+          {(event.event_type === 'user_message' || event.event_type === 'assistant_message') && event.payload && (
+            <div className="space-y-3 mt-3">
+              <div className="grid grid-cols-2 gap-2">
+                <MiniStat label="Role" value={event.payload.role || '-'} />
+                <MiniStat label="Length" value={`${event.payload.content_chars || 0} chars`} />
+              </div>
+              {/* Preview: visible text only (what user sees) */}
+              {event.payload.preview && (
+                <div>
+                  <div className="text-[9px] text-neutral-500 uppercase tracking-wider mb-1">
+                    {event.payload.role === 'user' ? 'Message' : 'Response'}
+                  </div>
+                  <pre className={cn(
+                    'text-[11px] font-mono bg-neutral-900 rounded p-3 overflow-auto max-h-40 whitespace-pre-wrap break-words leading-relaxed',
+                    event.payload.role === 'user' ? 'text-blue-300/80' : 'text-teal-300/80',
+                  )}>
+                    {event.payload.preview}
+                  </pre>
+                </div>
+              )}
+              {/* Load full content on demand */}
+              {event.payload.message_id && event.payload.content_chars > 200 && (
+                <ChatMessagePanel messageId={event.payload.message_id} />
+              )}
+            </div>
+          )}
+          {/* Git commit details */}
+          {event.event_type === 'git_commit' && event.payload && (
+            <div className="space-y-3 mt-3">
+              <div className="grid grid-cols-2 gap-2">
+                <MiniStat label="Hash" value={event.payload.short_hash || '-'} />
+                <MiniStat label="Repo" value={event.payload.repo || '-'} />
+                <MiniStat label="Author" value={event.payload.author || '-'} />
+                <MiniStat label="Time" value={event.payload.committed_at ? formatBeijing(event.payload.committed_at) : '-'} />
+              </div>
+              <div>
+                <div className="text-[9px] text-neutral-500 uppercase tracking-wider mb-1">Commit Message</div>
+                <p className="text-sm text-green-300 font-mono leading-relaxed">{event.payload.message}</p>
+              </div>
+              <div className="text-[10px] text-neutral-500 font-mono select-all">{event.payload.hash}</div>
             </div>
           )}
         </div>

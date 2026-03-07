@@ -56,7 +56,7 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
             => process::handle(state, name, args).await,
         "mission_slots" | "mission_inbox" | "mission_submit_phase_result"
             | "mission_slot_history" | "mission_jarvis_logs" | "mission_jarvis_trace"
-            | "mission_gemini_trace" | "mission_gemini_stats"
+            | "mission_gemini_trace" | "mission_gemini_stats" | "mission_gemini_content"
             => misc::handle(state, name, args).await,
 
         // ===== xjp proxy =====

@@ -380,6 +380,21 @@ impl MissionDB {
     }
 
     /// Get conversation messages, optionally since a given ID
+    /// Get a single conversation message by ID.
+    pub fn get_conversation_message_by_id(&self, id: i64) -> DbResult<Option<ConversationMessage>> {
+        let conn = self.read_conn();
+        let result = conn.query_row(
+            "SELECT * FROM conversation_messages WHERE id = ?1",
+            params![id],
+            |row| Self::row_to_conversation_message(row),
+        );
+        match result {
+            Ok(msg) => Ok(Some(msg)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub fn get_conversation_messages(
         &self,
         session_id: &str,
