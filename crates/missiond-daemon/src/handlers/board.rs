@@ -8,13 +8,45 @@ use crate::event_bus::{DaemonEvent, TraceContext};
 use crate::lenient;
 use crate::decision_harvest::harvest_decisions_for_task;
 
-/// Publish BoardTaskUpdated event with trace context (trace_id = task_id).
+/// Publish BoardTaskCreated event.
+fn publish_board_created(state: &AppState, task: &missiond_core::types::BoardTask) {
+    state.event_bus.publish_traced(
+        DaemonEvent::BoardTaskCreated {
+            task_id: task.id.clone(),
+            title: task.title.clone(),
+            category: task.category.clone(),
+        },
+        TraceContext {
+            trace_id: Some(task.id.clone()),
+            summary: Some(format!("board: created {}", task.title)),
+            ..Default::default()
+        },
+    );
+}
+
+/// Publish BoardTaskUpdated event (generic field update).
 fn publish_board_update(state: &AppState, task: &missiond_core::types::BoardTask) {
     state.event_bus.publish_traced(
         DaemonEvent::BoardTaskUpdated {
             task_id: task.id.clone(),
             status: format!("{:?}", task.status),
             category: task.category.clone(),
+        },
+        TraceContext {
+            trace_id: Some(task.id.clone()),
+            summary: Some(format!("board: {} → {:?}", task.title, task.status)),
+            ..Default::default()
+        },
+    );
+}
+
+/// Publish BoardTaskStatusChanged event.
+fn publish_board_status_changed(state: &AppState, task: &missiond_core::types::BoardTask, old_status: &str) {
+    state.event_bus.publish_traced(
+        DaemonEvent::BoardTaskStatusChanged {
+            task_id: task.id.clone(),
+            old_status: old_status.to_string(),
+            new_status: format!("{:?}", task.status),
         },
         TraceContext {
             trace_id: Some(task.id.clone()),
@@ -89,7 +121,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 }
             }
 
-            publish_board_update(state, &task);
+            publish_board_created(state, &task);
             Ok(ToolResult::json_pretty(&task))
         }
         "mission_board_update" => {
@@ -99,10 +131,16 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("Missing 'id' field"))?
                 .to_string();
+            let is_status_change = args_val.get("status").and_then(|v| v.as_str()).is_some();
             let is_marking_done = args_val.get("status")
                 .and_then(|v| v.as_str())
                 .map(|s| s == "done")
                 .unwrap_or(false);
+            // Fetch old status before update for status change tracking
+            let old_status = if is_status_change {
+                state.mission.db().get_board_task(&id).ok().flatten()
+                    .map(|t| format!("{:?}", t.status))
+            } else { None };
             let update: missiond_core::types::UpdateBoardTaskInput =
                 serde_json::from_value(args_val)?;
             let task = state
@@ -112,7 +150,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             match task {
                 Some(t) => {
-                    publish_board_update(state, &t);
+                    if let Some(old) = old_status {
+                        publish_board_status_changed(state, &t, &old);
+                    } else {
+                        publish_board_update(state, &t);
+                    }
                     // Decision Engine: harvest decisions when task marked done
                     if is_marking_done {
                         let state = state.clone();
@@ -141,11 +183,27 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         }
         "mission_board_delete" => {
             let BoardIdArgs { id } = serde_json::from_value(args)?;
+            // Fetch task info before deletion for event
+            let task_title = state.mission.db().get_board_task(&id).ok().flatten()
+                .map(|t| t.title.clone()).unwrap_or_default();
             let deleted = state
                 .mission
                 .db()
                 .delete_board_task(&id)
                 .map_err(|e| anyhow!("DB error: {}", e))?;
+            if deleted > 0 {
+                state.event_bus.publish_traced(
+                    DaemonEvent::BoardTaskDeleted {
+                        task_id: id.clone(),
+                        title: task_title.clone(),
+                    },
+                    TraceContext {
+                        trace_id: Some(id.clone()),
+                        summary: Some(format!("board: deleted {}", task_title)),
+                        ..Default::default()
+                    },
+                );
+            }
             Ok(ToolResult::json(&serde_json::json!({
                 "deleted": deleted,
                 "id": id,
@@ -153,6 +211,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         }
         "mission_board_toggle" => {
             let BoardIdArgs { id } = serde_json::from_value(args)?;
+            // Fetch old status before toggle
+            let old_status = state.mission.db().get_board_task(&id).ok().flatten()
+                .map(|t| format!("{:?}", t.status)).unwrap_or_else(|| "unknown".to_string());
             let task = state
                 .mission
                 .db()
@@ -160,7 +221,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             match task {
                 Some(t) => {
-                    publish_board_update(state, &t);
+                    publish_board_status_changed(state, &t, &old_status);
                     // Decision Engine: harvest decisions when toggled to done
                     if t.status == missiond_core::types::BoardTaskStatus::Done {
                         let state = state.clone();
@@ -184,7 +245,20 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let executor_id = args.get("executorId").and_then(|v| v.as_str())
                 .unwrap_or("claude-code-session");
             match state.mission.db().claim_board_task(task_id, executor_id, executor_type) {
-                Ok(Some(task)) => Ok(ToolResult::json_pretty(&task)),
+                Ok(Some(task)) => {
+                    state.event_bus.publish_traced(
+                        DaemonEvent::BoardTaskClaimed {
+                            task_id: task.id.clone(),
+                            slot_id: executor_id.to_string(),
+                        },
+                        TraceContext {
+                            trace_id: Some(task.id.clone()),
+                            summary: Some(format!("board: {} claimed by {}", task.title, executor_id)),
+                            ..Default::default()
+                        },
+                    );
+                    Ok(ToolResult::json_pretty(&task))
+                }
                 Ok(None) => {
                     // Check why it failed: task not found vs already claimed
                     match state.mission.db().get_board_task(task_id) {
@@ -206,6 +280,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         }
         "mission_board_note_add" => {
             let args: BoardNoteAddArgs = serde_json::from_value(args)?;
+            let task_id = args.task_id.clone();
+            let content_preview: String = args.content.chars().take(80).collect();
             let input = missiond_core::types::AddBoardTaskNoteInput {
                 task_id: args.task_id,
                 content: args.content,
@@ -217,6 +293,18 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .db()
                 .add_board_task_note(&input)
                 .map_err(|e| anyhow!("DB error: {}", e))?;
+            state.event_bus.publish_traced(
+                DaemonEvent::BoardTaskNoteAdded {
+                    task_id: task_id.clone(),
+                    note_id: note.id.clone(),
+                    content_preview: content_preview.clone(),
+                },
+                TraceContext {
+                    trace_id: Some(task_id),
+                    summary: Some(format!("board note: {}", content_preview)),
+                    ..Default::default()
+                },
+            );
             Ok(ToolResult::json_pretty(&note))
         }
 

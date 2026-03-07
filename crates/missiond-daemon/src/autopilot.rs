@@ -235,10 +235,10 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                         },
                     );
                     state.event_bus.publish_traced(
-                        DaemonEvent::BoardTaskUpdated {
-                            task_id: task.id.clone(), status: "blocked".to_string(), category: task.category.clone(),
+                        DaemonEvent::BoardTaskStatusChanged {
+                            task_id: task.id.clone(), old_status: format!("{:?}", task.status), new_status: "blocked".to_string(),
                         },
-                        TraceContext { trace_id: Some(task.id.clone()), ..Default::default() },
+                        TraceContext { trace_id: Some(task.id.clone()), summary: Some(format!("board: {} → blocked", task.title)), ..Default::default() },
                     );
                     let _ = state.mission.db().add_board_task_note(
                         &missiond_core::types::AddBoardTaskNoteInput {
@@ -442,10 +442,10 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                             },
                         );
                         state.event_bus.publish_traced(
-                            DaemonEvent::BoardTaskUpdated {
-                                task_id: task.id.clone(), status: "failed".to_string(), category: task.category.clone(),
+                            DaemonEvent::BoardTaskStatusChanged {
+                                task_id: task.id.clone(), old_status: format!("{:?}", task.status), new_status: "failed".to_string(),
                             },
-                            TraceContext { trace_id: Some(task.id.clone()), ..Default::default() },
+                            TraceContext { trace_id: Some(task.id.clone()), summary: Some(format!("board: {} → failed", task.title)), ..Default::default() },
                         );
                     } else {
                         let _ = state.mission.db().increment_board_task_retry(&task.id, new_retry);
@@ -495,10 +495,10 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                             },
                         );
                         state.event_bus.publish_traced(
-                            DaemonEvent::BoardTaskUpdated {
-                                task_id: task.id.clone(), status: "done".to_string(), category: task.category.clone(),
+                            DaemonEvent::BoardTaskStatusChanged {
+                                task_id: task.id.clone(), old_status: format!("{:?}", task.status), new_status: "done".to_string(),
                             },
-                            TraceContext { trace_id: Some(task.id.clone()), ..Default::default() },
+                            TraceContext { trace_id: Some(task.id.clone()), summary: Some(format!("board: {} → done", task.title)), ..Default::default() },
                         );
                         info!(task_id = %task.id, duration_ms = res.duration_ms, "Autopilot: task completed");
                     }
@@ -573,10 +573,10 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                         },
                     );
                     state.event_bus.publish_traced(
-                        DaemonEvent::BoardTaskUpdated {
-                            task_id: task.id.clone(), status: "failed".to_string(), category: task.category.clone(),
+                        DaemonEvent::BoardTaskStatusChanged {
+                            task_id: task.id.clone(), old_status: format!("{:?}", task.status), new_status: "failed".to_string(),
                         },
-                        TraceContext { trace_id: Some(task.id.clone()), ..Default::default() },
+                        TraceContext { trace_id: Some(task.id.clone()), summary: Some(format!("board: {} → failed", task.title)), ..Default::default() },
                     );
                     warn!(task_id = %task.id, retries = new_retry, "Autopilot: task failed after max retries");
                 } else {

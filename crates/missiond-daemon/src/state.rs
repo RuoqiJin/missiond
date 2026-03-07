@@ -159,6 +159,8 @@ pub(crate) struct AppState {
     pub(crate) stats: Arc<DaemonStats>,
     /// Centralized LLM prompts with file-based hot-reload.
     pub(crate) prompts: Arc<PromptStore>,
+    /// Wakeup signal for briefing worker when a long conversation message is logged.
+    pub(crate) briefing_notify: Arc<tokio::sync::Notify>,
 }
 
 /// Event-driven embedding tasks — the Worker sleeps until triggered.
