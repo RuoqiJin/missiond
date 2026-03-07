@@ -137,12 +137,27 @@ pub(crate) enum DaemonEvent {
         committed_at: String,
     },
 
+    // ===== Slot Command Dispatch =====
+    /// A task/prompt was dispatched to a slot for execution.
+    SlotTaskDispatched {
+        slot_id: String,
+        /// Associated task_id if dispatched from mission_submit queue.
+        task_id: Option<String>,
+        /// Purpose: "submit", "extraction", "deep_analysis", "user_voice", "consolidation"
+        purpose: String,
+        prompt_chars: usize,
+        /// Truncated preview of the dispatched prompt.
+        preview: String,
+    },
+
     // ===== Conversation Activity =====
     /// A new conversation message was logged (user or assistant).
     ConversationMessageLogged {
         message_id: i64,
         session_id: String,
         parent_session_id: Option<String>,
+        /// Slot ID if this is a PTY slot session (None = master CLI session).
+        slot_id: Option<String>,
         role: String,
         content_chars: usize,
         /// Truncated preview for timeline display.
@@ -222,9 +237,11 @@ impl DaemonEvent {
             Self::SlotStateChanged { .. } => "slot_state_changed",
             Self::InsightGenerated { .. } => "insight_generated",
             Self::GitCommitDetected { .. } => "git_commit",
+            Self::SlotTaskDispatched { .. } => "slot_task_dispatched",
             Self::ConversationMessageLogged { ref role, .. } => {
                 match role.as_str() {
                     "user" => "user_message",
+                    "system" => "system_message",
                     "thinking" => "thinking_message",
                     _ => "assistant_message",
                 }
@@ -300,8 +317,10 @@ impl DaemonEvent {
                 json!({ "category": category, "priority": priority, "title": title }),
             Self::GitCommitDetected { repo, hash, short_hash, author, message, committed_at } =>
                 json!({ "repo": repo, "hash": hash, "short_hash": short_hash, "author": author, "message": message, "committed_at": committed_at }),
-            Self::ConversationMessageLogged { message_id, session_id, parent_session_id, role, content_chars, preview } =>
-                json!({ "message_id": message_id, "session_id": session_id, "parent_session_id": parent_session_id, "role": role, "content_chars": content_chars, "preview": preview }),
+            Self::SlotTaskDispatched { slot_id, task_id, purpose, prompt_chars, preview } =>
+                json!({ "slot_id": slot_id, "task_id": task_id, "purpose": purpose, "prompt_chars": prompt_chars, "preview": preview }),
+            Self::ConversationMessageLogged { message_id, session_id, parent_session_id, slot_id, role, content_chars, preview } =>
+                json!({ "message_id": message_id, "session_id": session_id, "parent_session_id": parent_session_id, "slot_id": slot_id, "role": role, "content_chars": content_chars, "preview": preview }),
             Self::CodexRequestStarted {
                 request_id, caller, model, prompt_chars, has_image, image_hash, ..
             } => json!({

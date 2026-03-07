@@ -139,6 +139,21 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
                             ..Default::default()
                         },
                     );
+                    // Emit dispatch event for timeline visibility
+                    let preview = if task.prompt.len() > 200 {
+                        let mut end = 200;
+                        while end > 0 && !task.prompt.is_char_boundary(end) { end -= 1; }
+                        format!("{}...", &task.prompt[..end])
+                    } else { task.prompt.clone() };
+                    state.event_bus.publish(
+                        crate::event_bus::DaemonEvent::SlotTaskDispatched {
+                            slot_id: slot_id.clone(),
+                            task_id: Some(task.id.clone()),
+                            purpose: "submit".to_string(),
+                            prompt_chars: task.prompt.len(),
+                            preview,
+                        },
+                    );
                     info!(task_id = %task.id, slot_id = %slot_id, role = %task.role, "Autopilot: dispatched queued submit task");
                     state.stats.tasks_dispatched.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     used_slots.insert(slot_id.clone());

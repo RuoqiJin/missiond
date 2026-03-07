@@ -132,66 +132,73 @@ pub(crate) fn handle_new_messages(
 
             // Emit timeline events for conversation messages.
             // Match inserted DB IDs back to original JSONL messages for preview.
-            if !is_pty {
-                for &msg_id in &inserted_ids {
-                    if let Ok(Some(db_msg)) = db.get_conversation_message_by_id(msg_id) {
-                        if !matches!(db_msg.role.as_str(), "user" | "assistant" | "thinking") { continue; }
+            // Includes both master CLI and PTY slot sessions for full visibility.
+            for &msg_id in &inserted_ids {
+                if let Ok(Some(db_msg)) = db.get_conversation_message_by_id(msg_id) {
+                    // For PTY slots: include "system" (daemon-sent prompts) + assistant + thinking
+                    // For master CLI: include user + assistant + thinking
+                    let emit_role = if is_pty {
+                        matches!(db_msg.role.as_str(), "system" | "assistant" | "thinking")
+                    } else {
+                        matches!(db_msg.role.as_str(), "user" | "assistant" | "thinking")
+                    };
+                    if !emit_role { continue; }
 
-                        // Find original JSONL message
-                        let orig_msg = messages.iter()
-                            .find(|m| db_msg.message_uuid.as_deref() == Some(&m.uuid));
+                    // Find original JSONL message
+                    let orig_msg = messages.iter()
+                        .find(|m| db_msg.message_uuid.as_deref() == Some(&m.uuid));
 
-                        // Build preview based on role
-                        let preview = if db_msg.role == "thinking" {
-                            // Thinking: use first 200 chars of content
-                            let text = &db_msg.content;
-                            if text.len() > 200 {
-                                let mut end = 200;
-                                while end > 0 && !text.is_char_boundary(end) { end -= 1; }
-                                format!("{}...", &text[..end])
-                            } else {
-                                text.clone()
-                            }
+                    // Build preview based on role
+                    let preview = if db_msg.role == "thinking" {
+                        // Thinking: use first 200 chars of content
+                        let text = &db_msg.content;
+                        if text.len() > 200 {
+                            let mut end = 200;
+                            while end > 0 && !text.is_char_boundary(end) { end -= 1; }
+                            format!("{}...", &text[..end])
                         } else {
-                            // User/Assistant: prefer visible text, fallback to tool names
-                            let visible_text = orig_msg
-                                .map(|m| events_sync::extract_visible_text(&m.message.content))
-                                .unwrap_or_default();
-                            if visible_text.is_empty() {
-                                // Try tool names for assistant tool_use or user tool_result
-                                let tool_names = orig_msg
-                                    .map(|m| events_sync::extract_tool_names(&m.message.content))
-                                    .unwrap_or_default();
-                                if tool_names.is_empty() { continue; }
-                                format!("[{}]", tool_names.join(", "))
-                            } else if visible_text.len() > 200 {
-                                let mut end = 200;
-                                while end > 0 && !visible_text.is_char_boundary(end) { end -= 1; }
-                                format!("{}...", &visible_text[..end])
-                            } else {
-                                visible_text
-                            }
-                        };
-
-                        let content_chars = db_msg.content.len();
-                        state.event_bus.publish_traced(
-                            DaemonEvent::ConversationMessageLogged {
-                                message_id: msg_id,
-                                session_id: session_id.clone(),
-                                parent_session_id: parent_session_id.clone(),
-                                role: db_msg.role.clone(),
-                                content_chars,
-                                preview,
-                            },
-                            TraceContext {
-                                trace_id: Some(session_id.clone()),
-                                ..Default::default()
-                            },
-                        );
-                        // Wake briefing worker for long messages
-                        if content_chars > 300 {
-                            state.briefing_notify.notify_one();
+                            text.clone()
                         }
+                    } else {
+                        // User/Assistant/System: prefer visible text, fallback to tool names
+                        let visible_text = orig_msg
+                            .map(|m| events_sync::extract_visible_text(&m.message.content))
+                            .unwrap_or_default();
+                        if visible_text.is_empty() {
+                            // Try tool names for assistant tool_use or user tool_result
+                            let tool_names = orig_msg
+                                .map(|m| events_sync::extract_tool_names(&m.message.content))
+                                .unwrap_or_default();
+                            if tool_names.is_empty() { continue; }
+                            format!("[{}]", tool_names.join(", "))
+                        } else if visible_text.len() > 200 {
+                            let mut end = 200;
+                            while end > 0 && !visible_text.is_char_boundary(end) { end -= 1; }
+                            format!("{}...", &visible_text[..end])
+                        } else {
+                            visible_text
+                        }
+                    };
+
+                    let content_chars = db_msg.content.len();
+                    state.event_bus.publish_traced(
+                        DaemonEvent::ConversationMessageLogged {
+                            message_id: msg_id,
+                            session_id: session_id.clone(),
+                            parent_session_id: parent_session_id.clone(),
+                            slot_id: slot_id.clone(),
+                            role: db_msg.role.clone(),
+                            content_chars,
+                            preview,
+                        },
+                        TraceContext {
+                            trace_id: Some(session_id.clone()),
+                            ..Default::default()
+                        },
+                    );
+                    // Wake briefing worker for long messages
+                    if content_chars > 300 {
+                        state.briefing_notify.notify_one();
                     }
                 }
             }

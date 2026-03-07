@@ -35,6 +35,24 @@ fn set_extraction_phase(
     );
 }
 
+/// Helper: emit SlotTaskDispatched event for timeline visibility.
+fn emit_dispatch_event(event_bus: &EventBus, slot_id: &str, purpose: &str, prompt: &str) {
+    let preview = if prompt.len() > 200 {
+        let mut end = 200;
+        while end > 0 && !prompt.is_char_boundary(end) { end -= 1; }
+        format!("{}...", &prompt[..end])
+    } else {
+        prompt.to_string()
+    };
+    event_bus.publish(DaemonEvent::SlotTaskDispatched {
+        slot_id: slot_id.to_string(),
+        task_id: None,
+        purpose: purpose.to_string(),
+        prompt_chars: prompt.len(),
+        preview,
+    });
+}
+
 pub(crate) async fn check_realtime_extraction(state: &AppState) {
     if !check_extraction_gate(&state.extraction_state, &state.mission, "realtime").await {
         return;
@@ -147,6 +165,9 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
     let prompt = state.prompts.extraction_realtime();
 
     info!("Triggering realtime extraction via MCP pull");
+
+    // Emit dispatch event for timeline visibility
+    emit_dispatch_event(&state.event_bus, MEMORY_SLOT_ID, "extraction", &prompt);
 
     let pty = Arc::clone(&state.pty);
     let extraction_state = Arc::clone(&state.extraction_state);
@@ -358,6 +379,9 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
             es.checkpoint_message_id = max_message_id;
         }
 
+        // Emit dispatch event for timeline visibility
+        emit_dispatch_event(&state.event_bus, MEMORY_SLOW_SLOT_ID, "deep_analysis", &prompt);
+
         let conv_id = conv.id.clone();
         let pty = Arc::clone(&state.pty);
         let extraction_state = Arc::clone(&state.slow_extraction_state);
@@ -518,6 +542,9 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
         es.current_task_id = Some(task_id);
         es.current_slot_task_id = Some(slot_task_id.clone());
     }
+
+    // Emit dispatch event for timeline visibility
+    emit_dispatch_event(&state.event_bus, MEMORY_SLOW_SLOT_ID, "consolidation", prompt);
 
     let pty = Arc::clone(&state.pty);
     let extraction_state = Arc::clone(&state.slow_extraction_state);
