@@ -23,6 +23,14 @@ impl MissionDB {
              UNION ALL
 
              SELECT * FROM conversations
+             WHERE status = 'compacted'
+               AND conversation_type = 'user'
+               AND analysis_retries < ?1
+               AND (analyzed_at IS NULL OR analysis_version < ?2)
+
+             UNION ALL
+
+             SELECT * FROM conversations
              WHERE status = 'active'
                AND conversation_type = 'user'
                AND analysis_retries < ?1
@@ -54,6 +62,14 @@ impl MissionDB {
                 UNION ALL
 
                 SELECT 1 FROM conversations
+                WHERE status = 'compacted'
+                  AND conversation_type = 'user'
+                  AND analysis_retries < ?1
+                  AND (analyzed_at IS NULL OR analysis_version < ?2)
+
+                UNION ALL
+
+                SELECT 1 FROM conversations
                 WHERE status = 'active'
                   AND conversation_type = 'user'
                   AND analysis_retries < ?1
@@ -76,6 +92,14 @@ impl MissionDB {
                 WHERE status = 'completed'
                   AND conversation_type = 'user'
                   AND ended_at < datetime('now', '-5 minutes')
+                  AND analysis_retries < ?1
+                  AND (analyzed_at IS NULL OR analysis_version < ?2)
+
+                UNION ALL
+
+                SELECT id FROM conversations
+                WHERE status = 'compacted'
+                  AND conversation_type = 'user'
                   AND analysis_retries < ?1
                   AND (analyzed_at IS NULL OR analysis_version < ?2)
 

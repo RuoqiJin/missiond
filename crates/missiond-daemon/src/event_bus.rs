@@ -75,6 +75,14 @@ pub(crate) enum DaemonEvent {
         new_state: String,
         prev_state: String,
     },
+
+    // ===== Phase 6 L4: Proactive Agency =====
+    /// Timeline Analyst generated an insight from periodic analysis.
+    InsightGenerated {
+        category: String,
+        priority: String,
+        title: String,
+    },
 }
 
 impl DaemonEvent {
@@ -91,6 +99,7 @@ impl DaemonEvent {
             Self::MemoryPhaseChanged { .. } => "memory_phase_changed",
             Self::BoardTaskUpdated { .. } => "board_task_updated",
             Self::SlotStateChanged { .. } => "slot_state_changed",
+            Self::InsightGenerated { .. } => "insight_generated",
         }
     }
 
@@ -133,6 +142,8 @@ impl DaemonEvent {
                 json!({ "task_id": task_id, "status": status, "category": category }),
             Self::SlotStateChanged { slot_id, new_state, prev_state } =>
                 json!({ "slot_id": slot_id, "new_state": new_state, "prev_state": prev_state }),
+            Self::InsightGenerated { category, priority, title } =>
+                json!({ "category": category, "priority": priority, "title": title }),
         }
     }
 }
@@ -142,7 +153,6 @@ impl DaemonEvent {
 /// Trace context for causal chain tracking (Phase 6 L2).
 /// Will be used in Step 6c when trace/span chains are activated.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub(crate) struct TraceContext {
     /// Root ID spanning an entire causal chain (e.g. conversation session ID).
     pub trace_id: Option<String>,
@@ -241,8 +251,6 @@ impl EventBus {
     }
 
     /// Publish an event with trace context for causal chain tracking (Phase 6 L2).
-    /// Will be used in Step 6c when trace/span chains are activated.
-    #[allow(dead_code)]
     pub fn publish_traced(&self, event: DaemonEvent, ctx: TraceContext) {
         self.publish_count.fetch_add(1, Ordering::Relaxed);
         debug!(event = ?event, trace_id = ?ctx.trace_id, "EventBus: publish_traced");

@@ -959,6 +959,14 @@ impl MissionDB {
             [],
         )?;
 
+        // Rule 2b: memory:debug older than 14 days (debug process logs lose value once resolved;
+        // valuable insights should be distilled into memory:bugfix or architecture by then)
+        deleted += conn.execute(
+            "DELETE FROM knowledge WHERE category = 'memory:debug' \
+             AND julianday('now') - julianday(updated_at) > 14",
+            [],
+        )?;
+
         // Rule 3: zero access + 14 days stale + not in protected categories
         deleted += conn.execute(
             "DELETE FROM knowledge WHERE access_count = 0 \

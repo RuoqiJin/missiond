@@ -57,6 +57,84 @@ mod defaults {
 5. `debug`：同一致命报错尝试修复 2 次仍失败（附带报错和尝试记录）
 
 **参数要求：** 必须在 `options` 中提供分析或候选项（如 "A: 修改基类, B: 新增 wrapper"），不能只抛出问题。"#;
+
+    pub const EXTRACTION_REALTIME: &str = "\
+有新的对话内容待分析。
+
+📋 工作流程:
+1. 调用 mission_memory_pending 获取待分析内容
+2. 用 mission_kb_search 去重检查
+3. 用 mission_kb_remember 存入新知识
+4. 发现 bug → mission_board_create 上报
+
+⚠️ 异常处理（重要）:
+如果 MCP 工具调用失败、超时或不可用:
+- 不要尝试用 Bash/sqlite3 等替代方案访问数据库
+- 不要自行查找或修改文件系统中的 .db 文件
+- 直接输出: <slot_anomaly type=\"mcp_unavailable\" tool=\"工具名\" error=\"错误描述\"/>
+- 然后停止工作，等待 orchestrator 恢复
+orchestrator 会自动检测并处理 MCP 连接问题，你只需上报即可。
+
+📝 本工位职责:
+- 数据来源: 仅 mission_memory_pending（跨会话分析归 deep-analysis 工位负责）
+- 所有数据读写通过 MCP 工具完成，不直接访问文件系统中的数据库
+
+🎯 提取目标（按优先级）:
+- 用户偏好/原则/纠正 → category: preference
+- 架构决策/技术事实 → category: memory 或 memory:architecture/memory:decision
+- 已修 bug 根因（仅最终结论） → category: memory:bugfix
+- 运维痛点信号 → category: memory:ops
+- 调试弯路经验（仅泛化路径） → category: memory:debug
+
+🚫 严禁提取（违规内容会被系统拦截拒写）:
+- 具体代码排查过程、报错堆栈、单次 debug 流水账
+- 基础设施信息/API 细节/版本号/通用技术知识/当天工作日志
+- 对话仍在排查/试错/阅读日志中（未确认解决）→ 禁止写 memory:bugfix 和 memory:debug，留给 deep-analysis
+去重: 提取前 mission_kb_search 检查。
+
+📐 写入格式强制要求:
+summary ≤ 120 字，必须是结论性陈述，禁止叙事体
+detail 必须遵循三段式: {\"trigger\": \"触发条件\", \"conclusion\": \"最终结论\", \"action\": \"应采取的动作\"}
+
+❌ Bad Case（系统会拒绝的写法）:
+summary: '先查看了 xxx.rs 的第 30 行，发现 parse 报错 InvalidToken，然后尝试改用 serde_json，但还是失败，最后发现是 UTF-8 BOM 导致...'
+❌ 这是流水账，不是知识。
+
+✅ Good Case（正确写法）:
+summary: 'JSON 解析 InvalidToken 报错时，优先检查文件头 UTF-8 BOM 而非换解析库'
+detail: {\"trigger\": \"serde_json parse 报 InvalidToken，换库无效\", \"conclusion\": \"根因是文件头 3 字节 UTF-8 BOM\", \"action\": \"用 BufReader skip_bom 或 strip_prefix\"}";
+
+    pub const EXTRACTION_DEEP: &str = "\
+⚠️ 重要: 消息级知识（偏好/决策/事实）已由 realtime 管道提取，不要重复提取。
+你的任务仅限于:
+1. 跨会话模式 — 用 mission_conversation_search 搜索相关会话，发现反复出现的主题
+2. 工作流抽象 — 可以固化为工具/服务的重复操作
+3. 知识关联 — 不同会话之间的隐含联系
+4. 趋势发现 — 用户行为/需求的演变方向
+5. 问题上报 — 发现 bug/资源浪费/反复出错 → mission_board_create 创建任务
+6. 运维链路审计 — 重复的多步手动操作（SSH→查日志→重启→再查）→ 封装为 MCP 工具建议，存 category: memory:ops
+7. 调试经验提炼 — 只提炼「正确排查路径」（3 步以内），禁止记录试错过程。存 category: memory:debug
+8. 架构决策模式 (policy:decision) — 用户面对技术选项时的规律性偏好。\
+   必须提炼为泛化规则（剥离具体变量名/版本号），而非单次操作记录。\
+   summary 格式：[触发条件词簇] → [核心原则] → [动作]，富含可能出现在提问中的名词。存 category: policy:decision
+
+🚫 严禁提取（违规内容会被系统拦截拒写）:
+- 单条消息的偏好/决策/事实（realtime 已处理）
+- 当天工作日志、版本细节
+- 调试过程流水账（每一步尝试了什么、报了什么错）
+- 绝对禁止写入 category: infra（基础设施由 servers.yaml 管理）
+
+📐 写入格式强制要求:
+summary ≤ 120 字，必须是泛化结论，禁止叙事体
+detail 采用三段式: {\"trigger\": \"...\", \"conclusion\": \"...\", \"action\": \"...\"}
+
+❌ Bad Case:
+'在排查 deploy-agent 更新失败时，先 SSH 到服务器查看 systemctl status，发现 OOM，然后查看 journalctl -u deploy-agent --since today 发现内存从 200MB 涨到 2GB...'
+❌ 这是调试日记，不是知识。
+
+✅ Good Case:
+summary: 'deploy-agent OOM 排查：优先看 journalctl 内存趋势而非 systemctl 状态码'
+detail: {\"trigger\": \"deploy-agent 更新后服务异常\", \"conclusion\": \"根因是请求体未限流导致内存泄漏\", \"action\": \"加 body size limit + 内存监控告警\"}";
 }
 
 /// Runtime prompt data — loaded from files with const fallbacks.
@@ -66,6 +144,8 @@ struct PromptData {
     tier3_footer: String,
     harvest_template: String,
     help_protocol: String,
+    extraction_realtime: String,
+    extraction_deep: String,
 }
 
 impl PromptData {
@@ -77,6 +157,8 @@ impl PromptData {
             tier3_footer: load_or_default(&dir, "tier3_footer", defaults::TIER3_FOOTER),
             harvest_template: load_or_default(&dir, "harvest_template", defaults::HARVEST_TEMPLATE),
             help_protocol: load_or_default(&dir, "help_protocol", defaults::HELP_PROTOCOL),
+            extraction_realtime: load_or_default(&dir, "extraction_realtime", defaults::EXTRACTION_REALTIME),
+            extraction_deep: load_or_default(&dir, "extraction_deep", defaults::EXTRACTION_DEEP),
         }
     }
 }
@@ -129,5 +211,11 @@ impl PromptStore {
     }
     pub fn help_protocol(&self) -> String {
         self.data.read().map(|d| d.help_protocol.clone()).unwrap_or_else(|_| defaults::HELP_PROTOCOL.to_string())
+    }
+    pub fn extraction_realtime(&self) -> String {
+        self.data.read().map(|d| d.extraction_realtime.clone()).unwrap_or_else(|_| defaults::EXTRACTION_REALTIME.to_string())
+    }
+    pub fn extraction_deep(&self) -> String {
+        self.data.read().map(|d| d.extraction_deep.clone()).unwrap_or_else(|_| defaults::EXTRACTION_DEEP.to_string())
     }
 }

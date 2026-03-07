@@ -321,7 +321,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
 
             // Look up server from infra registry
-            let server = state.infra.get(target);
+            let server = state.infra.read().unwrap().get(target).cloned();
             let server_info = server.as_ref().map(|s| {
                 json!({ "id": s.id, "host": s.host, "roles": s.roles })
             });

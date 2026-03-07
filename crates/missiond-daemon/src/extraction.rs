@@ -3,7 +3,7 @@ use tracing::{debug, info, warn};
 
 use crate::state::{AppState, ExtractionPhase, ExtractionState};
 use crate::state::{MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
-use crate::event_bus::{DaemonEvent, EventBus};
+use crate::event_bus::{DaemonEvent, EventBus, TraceContext};
 use crate::supervisor::is_auth_error;
 use crate::memory_scheduler::{ensure_memory_slot, ensure_memory_slot_by_id};
 use missiond_core::SessionState;
@@ -11,20 +11,28 @@ use std::sync::Arc;
 use crate::state::{CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES};
 use crate::supervisor::check_extraction_gate;
 
-/// Helper: update extraction phase and publish MemoryPhaseChanged event.
+/// Helper: update extraction phase and publish MemoryPhaseChanged event with trace context.
 fn set_extraction_phase(
     es: &mut ExtractionState,
     phase: ExtractionPhase,
     active_type: Option<&str>,
     event_bus: &EventBus,
     slot_id: &str,
+    trace_id: Option<&str>,
 ) {
     es.phase = phase;
-    event_bus.publish(DaemonEvent::MemoryPhaseChanged {
-        slot_id: slot_id.to_string(),
-        phase: format!("{:?}", phase),
-        active_type: active_type.map(|s| s.to_string()),
-    });
+    event_bus.publish_traced(
+        DaemonEvent::MemoryPhaseChanged {
+            slot_id: slot_id.to_string(),
+            phase: format!("{:?}", phase),
+            active_type: active_type.map(|s| s.to_string()),
+        },
+        TraceContext {
+            trace_id: trace_id.map(|s| s.to_string()),
+            summary: Some(format!("{} → {:?}", slot_id, phase)),
+            ..Default::default()
+        },
+    );
 }
 
 pub(crate) async fn check_realtime_extraction(state: &AppState) {
@@ -129,37 +137,14 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
     {
         let now = chrono::Utc::now().timestamp();
         let mut es = state.extraction_state.write().await;
-        set_extraction_phase(&mut es, ExtractionPhase::Sending, Some("realtime"), &state.event_bus, MEMORY_SLOT_ID);
+        set_extraction_phase(&mut es, ExtractionPhase::Sending, Some("realtime"), &state.event_bus, MEMORY_SLOT_ID, Some(&task_id));
         es.phase_started_at = now;
         es.watermark_targets = watermark_targets;
         es.current_task_id = Some(task_id);
         es.current_slot_task_id = Some(slot_task_id.clone());
     }
 
-    let prompt = "有新的对话内容待分析。\n\n\
-         📋 工作流程:\n\
-         1. 调用 mission_memory_pending 获取待分析内容\n\
-         2. 用 mission_kb_search 去重检查\n\
-         3. 用 mission_kb_remember 存入新知识\n\
-         4. 发现 bug → mission_board_create 上报\n\n\
-         ⚠️ 异常处理（重要）:\n\
-         如果 MCP 工具调用失败、超时或不可用:\n\
-         - 不要尝试用 Bash/sqlite3 等替代方案访问数据库\n\
-         - 不要自行查找或修改文件系统中的 .db 文件\n\
-         - 直接输出: <slot_anomaly type=\"mcp_unavailable\" tool=\"工具名\" error=\"错误描述\"/>\n\
-         - 然后停止工作，等待 orchestrator 恢复\n\
-         orchestrator 会自动检测并处理 MCP 连接问题，你只需上报即可。\n\n\
-         📝 本工位职责:\n\
-         - 数据来源: 仅 mission_memory_pending（跨会话分析归 deep-analysis 工位负责）\n\
-         - 所有数据读写通过 MCP 工具完成，不直接访问文件系统中的数据库\n\n\
-         提取目标（按优先级）:\n\
-         - 用户偏好/原则/纠正 → category: preference\n\
-         - 架构决策/技术事实 → category: memory 或 memory:architecture/memory:decision\n\
-         - 已修 bug 根因 → category: memory:bugfix\n\
-         - 运维痛点信号 → category: memory:ops\n\
-         - 调试弯路经验 → category: memory:debug\n\
-         不提取: 基础设施信息/API细节/版本号/通用技术知识/当天日志\n\
-         去重: 提取前 mission_kb_search 检查。";
+    let prompt = state.prompts.extraction_realtime();
 
     info!("Triggering realtime extraction via MCP pull");
 
@@ -168,7 +153,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
     let mission = Arc::clone(&state.mission);
     let slot_task_id_clone = slot_task_id;
     tokio::spawn(async move {
-        match pty.send(MEMORY_SLOT_ID, prompt, 300_000).await {
+        match pty.send(MEMORY_SLOT_ID, &prompt, 300_000).await {
             Ok(res) => {
                 if is_auth_error(&res.response) {
                     warn!("Realtime extraction: auth error on {}, aborting", MEMORY_SLOT_ID);
@@ -323,27 +308,12 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
              消息数: {msg_count}\n\
              模式: {mode}\n\
              {checkpoint_hint}\n\
-             ⚠️ 重要: 消息级知识（偏好/决策/事实）已由 realtime 管道提取，不要重复提取。\n\
-             你的任务仅限于:\n\
-             1. 跨会话模式 — 用 mission_conversation_search 搜索相关会话，发现反复出现的主题\n\
-             2. 工作流抽象 — 可以固化为工具/服务的重复操作\n\
-             3. 知识关联 — 不同会话之间的隐含联系\n\
-             4. 趋势发现 — 用户行为/需求的演变方向\n\
-             5. 问题上报 — 发现 bug/资源浪费/反复出错等需要代码修复的问题时，调用 mission_board_create 创建任务\n\
-             6. 运维链路审计 — 会话中是否有重复的多步手动操作（SSH→查日志→重启→再查）？\
-             这些操作链可以封装为 MCP 工具一步完成。记录具体步骤序列和建议的工具名，存 category: memory:ops\n\
-             7. 调试经验提炼 — 调试过程中走了哪些弯路（错误假设→验证失败→换方向）？\
-             根因最终是什么？总结「正确排查路径」供下次遇到类似问题时参考，存 category: memory:debug\n\
-             8. 架构决策模式 (policy:decision) — 用户在面对技术选项、报错排查或架构设计时的规律性偏好。\
-             必须提炼为泛化规则（剥离具体变量名/版本号），而非单次操作记录。\
-             summary 格式：[触发条件词簇] → [核心原则] → [动作]，富含可能出现在提问中的名词。\
-             存 category: policy:decision\n\n\
-             不要提取: 单条消息的偏好/决策/事实（realtime 已处理）、当天工作日志、版本细节。\n\
-             绝对禁止写入 category: infra（基础设施由 servers.yaml 管理）。",
+             {deep_rules}",
             session_id = conv.id,
             project = conv.project.as_deref().unwrap_or("unknown"),
             msg_count = msg_count,
             mode = if is_checkpoint { "checkpoint (活跃会话增量)" } else { "full (已完成会话)" },
+            deep_rules = state.prompts.extraction_deep(),
             checkpoint_hint = checkpoint_hint,
         );
 
@@ -379,7 +349,7 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
         {
             let now = chrono::Utc::now().timestamp();
             let mut es = state.slow_extraction_state.write().await;
-            set_extraction_phase(&mut es, ExtractionPhase::Sending, Some("deep_analysis"), &state.event_bus, MEMORY_SLOW_SLOT_ID);
+            set_extraction_phase(&mut es, ExtractionPhase::Sending, Some("deep_analysis"), &state.event_bus, MEMORY_SLOW_SLOT_ID, Some(&conv.id));
             es.phase_started_at = now;
             es.current_deep_conv_id = Some(conv.id.clone());
             es.current_task_id = Some(task_id);
@@ -502,9 +472,13 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
            - update: 如有 linked_task_id，记录关联（暂存到 reason 中即可）\n\
            - delete: 直接 mission_kb_batch_forget(keys: target_keys) 批量删除\n\
         4. 再对 preference 分类执行同样流程（include_board_context=true）\n\
-        5. 完成后回复 '[DONE] 整理了 N 个分类，合并 M 条，蒸馏 K 条，删除 J 条'\n\n\
+        5. Policy 提炼：用 mission_kb_search(category=\"memory:decision\") 和 mission_kb_search(category=\"memory:architecture\") 扫描最近条目，\n\
+           判断是否有可泛化为 policy:decision 的复用规则（如：'X 场景永远用 Y 方案'、'遇到 A 问题先查 B'）。\n\
+           条件：跨 2+ 会话反复出现的模式 OR 用户明确要求的偏好。\n\
+           命中则 mission_kb_remember(category=\"policy:decision\") 写入，summary 用祈使句/箭头格式。\n\
+        6. 完成后回复 '[DONE] 整理了 N 个分类，合并 M 条，蒸馏 K 条，删除 J 条，提炼 P 条 policy'\n\n\
         规则:\n\
-        - 不操作 memory:bugfix（有 30 天 Auto-GC）\n\
+        - 不操作 memory:bugfix（有 30 天 Auto-GC）、memory:debug（有 14 天 Auto-GC）\n\
         - 坚决执行 mission_kb_analyze 返回的 actions，无需二次判断\n\
         - distill = 从已完成项目的多条流水账提取精华，升维到 architecture/feature\n\
         - 如果 plan.actions 为空数组，说明该分类不需要整理，跳过\n\
@@ -539,7 +513,7 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
     // Set slow extraction state
     {
         let mut es = state.slow_extraction_state.write().await;
-        set_extraction_phase(&mut es, ExtractionPhase::Sending, Some("kb_consolidation"), &state.event_bus, MEMORY_SLOW_SLOT_ID);
+        set_extraction_phase(&mut es, ExtractionPhase::Sending, Some("kb_consolidation"), &state.event_bus, MEMORY_SLOW_SLOT_ID, Some(&task_id));
         es.phase_started_at = now;
         es.current_task_id = Some(task_id);
         es.current_slot_task_id = Some(slot_task_id.clone());

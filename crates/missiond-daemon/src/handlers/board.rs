@@ -4,17 +4,24 @@ use serde_json::Value;
 use missiond_mcp::tools::ToolResult;
 
 use crate::state::AppState;
-use crate::event_bus::DaemonEvent;
+use crate::event_bus::{DaemonEvent, TraceContext};
 use crate::lenient;
 use crate::decision_harvest::harvest_decisions_for_task;
 
-/// Publish BoardTaskUpdated event.
+/// Publish BoardTaskUpdated event with trace context (trace_id = task_id).
 fn publish_board_update(state: &AppState, task: &missiond_core::types::BoardTask) {
-    state.event_bus.publish(DaemonEvent::BoardTaskUpdated {
-        task_id: task.id.clone(),
-        status: format!("{:?}", task.status),
-        category: task.category.clone(),
-    });
+    state.event_bus.publish_traced(
+        DaemonEvent::BoardTaskUpdated {
+            task_id: task.id.clone(),
+            status: format!("{:?}", task.status),
+            category: task.category.clone(),
+        },
+        TraceContext {
+            trace_id: Some(task.id.clone()),
+            summary: Some(format!("board: {} → {:?}", task.title, task.status)),
+            ..Default::default()
+        },
+    );
 }
 
 #[derive(Deserialize)]

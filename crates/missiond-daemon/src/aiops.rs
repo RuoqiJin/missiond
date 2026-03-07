@@ -13,10 +13,10 @@ use crate::state::AppState;
 /// Phase 2: Concurrent health scan of all servers with healthEndpoint configured.
 /// Uses JoinSet for parallel HTTP GET with 5s timeout per server.
 pub(crate) async fn health_scan(state: &AppState) {
-    let servers = &state.infra.servers;
+    let servers: Vec<_> = state.infra.read().unwrap().servers.iter().cloned().collect();
     let mut set = tokio::task::JoinSet::new();
 
-    for server in servers {
+    for server in &servers {
         let endpoint = match &server.health_endpoint {
             Some(e) => e.clone(),
             None => continue,
@@ -128,7 +128,8 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
     // Truncate raw_payload for prompt safety (max 2000 chars)
     let raw_str = incident.raw_payload.to_string();
     let truncated_payload = if raw_str.len() > 2000 {
-        format!("{}... (truncated, {} total)", &raw_str[..2000], raw_str.len())
+        let end = crate::helpers::char_boundary_at(&raw_str, 2000);
+        format!("{}... (truncated, {} total)", &raw_str[..end], raw_str.len())
     } else {
         raw_str
     };
