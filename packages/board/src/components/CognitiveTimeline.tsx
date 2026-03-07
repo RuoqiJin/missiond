@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Search, RefreshCw, Sparkles, AlertTriangle,
   Zap, Brain, Wrench, ArrowRight, ChevronRight, ChevronDown,
@@ -179,19 +179,32 @@ function hasError(ev: TimelineEvent): boolean {
   return !!ev.payload.error || !!ev.payload.error_msg || ev.payload.status === 'error';
 }
 
-/** Fetch full message content from conversation_messages table. Auto-fetches when `enabled` is true. */
-function useFullMessage(messageId: number | undefined, enabled: boolean): string | null {
-  const [content, setContent] = useState<string | null>(null);
+interface FullMessage {
+  content: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  contentBlocks: any[] | null;
+}
+
+/** Fetch full message content + raw_content blocks. Auto-fetches when `enabled` is true. */
+function useFullMessage(messageId: number | undefined, enabled: boolean): FullMessage | null {
+  const [msg, setMsg] = useState<FullMessage | null>(null);
   useEffect(() => {
     if (!messageId || !enabled) return;
     let cancelled = false;
     fetch(`/api/system/conversation-message?message_id=${messageId}`)
       .then(r => r.json())
-      .then(data => { if (!cancelled && data?.content) setContent(data.content); })
+      .then(data => {
+        if (cancelled || !data?.content) return;
+        let blocks: FullMessage['contentBlocks'] = null;
+        if (data.raw_content) {
+          try { blocks = JSON.parse(data.raw_content); } catch { /* ignore */ }
+        }
+        setMsg({ content: data.content, contentBlocks: blocks });
+      })
       .catch(() => {});
     return () => { cancelled = true; };
   }, [messageId, enabled]);
-  return content;
+  return msg;
 }
 
 // ── Main Component ─────────────────────────────────────────
@@ -610,7 +623,8 @@ export function CognitiveTimeline() {
               return (
                 <button
                   key={ev.seq}
-                  onClick={() => selectEvent(ev)}
+                  ref={(el) => { if (el) timelineDotRefs.current.set(ev.seq, el); else timelineDotRefs.current.delete(ev.seq); }}
+                  onClick={() => selectEvent(ev, 'timeline')}
                   className={cn(
                     'absolute -translate-x-1/2 -translate-y-1/2 rounded-full z-10 transition-all duration-300 ease-out',
                     isInsight ? 'w-4 h-4 ring-2 ring-emerald-400/40' :
@@ -663,7 +677,7 @@ export function CognitiveTimeline() {
 
             {/* Trace connecting lines — show when event selected */}
             {selectedEvent?.trace_id && traceEvents.length > 1 && (() => {
-              const sorted = [...traceEvents].sort((a, b) => utcMs(a.created_at) - utcMs(b.created_at));
+              const sorted = [...traceEvents].sort((a, b) => (utcMs(a.created_at) - utcMs(b.created_at)) || (a.seq - b.seq));
               return sorted.slice(0, -1).map((ev, i) => {
                 const next = sorted[i + 1];
                 const x1 = getX(ev.created_at);
@@ -727,14 +741,15 @@ export function CognitiveTimeline() {
                   <h4 className="text-[10px] text-neutral-500 uppercase tracking-wider mb-2">Trace Chain</h4>
                   <div className="space-y-1">
                     {[...traceEvents]
-                      .sort((a, b) => utcMs(a.created_at) - utcMs(b.created_at))
+                      .sort((a, b) => (utcMs(a.created_at) - utcMs(b.created_at)) || (a.seq - b.seq))
                       .map(tev => {
                         const ec = getEventColor(tev.event_type);
                         const isActive = tev.seq === selectedEvent.seq;
                         return (
                           <button
                             key={tev.seq}
-                            onClick={() => selectEvent(tev)}
+                            ref={(el) => { if (el) traceItemRefs.current.set(tev.seq, el); else traceItemRefs.current.delete(tev.seq); }}
+                            onClick={() => selectEvent(tev, 'list')}
                             className={cn(
                               'w-full text-left px-2 py-1.5 rounded text-xs flex items-center gap-2 transition-colors',
                               isActive ? 'bg-neutral-800 text-white' : 'text-neutral-400 hover:bg-neutral-800/50',
