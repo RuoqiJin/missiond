@@ -232,6 +232,22 @@ pub(crate) async fn execute_flow_task(state: &AppState, task: &missiond_core::ty
             let timeout_ms = p.timeout_secs() * 1000;
             info!(task_id = %task.id, phase = %phase_str, timeout_ms, "Flow engine: sending phase prompt to PTY");
 
+            // Emit dispatch event for timeline visibility
+            {
+                let preview = if prompt.len() > 200 {
+                    let mut end = 200;
+                    while end > 0 && !prompt.is_char_boundary(end) { end -= 1; }
+                    format!("{}...", &prompt[..end])
+                } else { prompt.clone() };
+                state.event_bus.publish(crate::event_bus::DaemonEvent::SlotTaskDispatched {
+                    slot_id: slot_id.to_string(),
+                    task_id: Some(task.id.clone()),
+                    purpose: format!("flow_{}", phase_str),
+                    prompt_chars: prompt.len(),
+                    preview,
+                });
+            }
+
             match state.pty.send(slot_id, &prompt, timeout_ms).await {
                 Ok(res) => {
                     // Check for auth errors

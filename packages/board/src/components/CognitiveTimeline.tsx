@@ -72,6 +72,7 @@ const EVENT_COLORS: Record<string, { dot: string; bg: string; text: string; labe
   memory_phase_changed:     { dot: 'bg-cyan-400',    bg: 'bg-cyan-400/10',    text: 'text-cyan-400',    label: 'Memory',     icon: <Brain className="w-3 h-3" /> },
   briefing_batch_started:   { dot: 'bg-rose-300',    bg: 'bg-rose-300/10',    text: 'text-rose-300',    label: 'Briefing',   icon: <Sparkles className="w-3 h-3" /> },
   briefing_summary_generated: { dot: 'bg-rose-400',  bg: 'bg-rose-400/10',    text: 'text-rose-400',    label: 'Summary',    icon: <Sparkles className="w-3 h-3" /> },
+  system_message:           { dot: 'bg-slate-400',   bg: 'bg-slate-400/10',   text: 'text-slate-400',   label: 'Daemon',     icon: <Terminal className="w-3 h-3" /> },
   slot_task_dispatched:     { dot: 'bg-amber-400',   bg: 'bg-amber-400/10',   text: 'text-amber-400',   label: 'Dispatch',   icon: <ArrowRight className="w-3 h-3" /> },
 };
 
@@ -90,14 +91,14 @@ function getSlotColor(slotId: string | null) {
 }
 
 const SWIMLANES = [
-  { id: 'chat',  label: 'Chat',      types: ['user_message', 'assistant_message', 'thinking_message'] },
-  { id: 'slot',  label: 'Slot',      types: ['slot_task_dispatched'] },
-  { id: 'ai',    label: 'AI / LLM',  types: ['gemini_request_started', 'gemini_request_completed', 'decision_made', 'insight_generated'] },
-  { id: 'gpt',   label: 'GPT',       types: ['codex_request_started', 'codex_request_completed'] },
-  { id: 'code',  label: 'Code',      types: ['git_commit'] },
-  { id: 'flow',  label: 'Flow',      types: ['task_lifecycle', 'question_created', 'question_resolved'] },
-  { id: 'board', label: 'Board',     types: ['board_task_created', 'board_task_status_changed', 'board_task_note_added', 'board_task_claimed', 'board_task_deleted', 'board_task_updated'] },
-  { id: 'sys',   label: 'System',    types: ['slot_state_changed', 'memory_phase_changed', 'briefing_batch_started', 'briefing_summary_generated'] },
+  { id: 'chat',    label: 'Chat',      types: ['user_message', 'assistant_message', 'thinking_message'] },
+  { id: 'slot',    label: 'Slot',      types: ['slot_task_dispatched', 'system_message'] },
+  { id: 'ai',      label: 'AI / LLM',  types: ['gemini_request_started', 'gemini_request_completed', 'decision_made', 'insight_generated'] },
+  { id: 'gpt',     label: 'GPT',       types: ['codex_request_started', 'codex_request_completed'] },
+  { id: 'code',    label: 'Code',      types: ['git_commit'] },
+  { id: 'flow',    label: 'Flow',      types: ['task_lifecycle', 'question_created', 'question_resolved'] },
+  { id: 'board',   label: 'Board',     types: ['board_task_created', 'board_task_status_changed', 'board_task_note_added', 'board_task_claimed', 'board_task_deleted', 'board_task_updated'] },
+  { id: 'sys',     label: 'System',    types: ['slot_state_changed', 'memory_phase_changed', 'briefing_batch_started', 'briefing_summary_generated'] },
 ];
 
 const QUICK_FILTERS = [
@@ -132,11 +133,16 @@ function getEventColor(type: string) {
   return EVENT_COLORS[type] || { dot: 'bg-neutral-500', bg: 'bg-neutral-500/10', text: 'text-neutral-400', label: type, icon: <Zap className="w-3 h-3" /> };
 }
 
-function getSwimlane(type: string): number {
+const SLOT_LANE_IDX = SWIMLANES.findIndex(s => s.id === 'slot');
+
+function getSwimlane(ev: TimelineEvent): number {
+  // Any event with slot_id → Slot lane (sub-rowed by slot_id)
+  if (ev.payload?.slot_id) return SLOT_LANE_IDX;
+
   for (let i = 0; i < SWIMLANES.length; i++) {
-    if (SWIMLANES[i].types.includes(type)) return i;
+    if (SWIMLANES[i].types.includes(ev.event_type)) return i;
   }
-  return 2; // default to system
+  return SWIMLANES.length - 1; // default to system
 }
 
 /** Convert window string like "10min", "1h", "24h" to milliseconds */
@@ -198,6 +204,7 @@ function eventSummary(ev: TimelineEvent): string {
     case 'board_task_updated': return `${p.title || ''} → ${p.status || ''}`;
     case 'briefing_batch_started': return `Briefing: ${p.pending_count || 0} pending`;
     case 'briefing_summary_generated': return `seq=${p.target_seq}: ${p.summary || ''}`;
+    case 'system_message': return `[Daemon] ${p.preview || ''}`;
     case 'slot_task_dispatched': return `→ ${p.slot_id || ''} [${p.purpose || ''}] ${p.preview || ''}`;
     default: return ev.event_type;
   }
@@ -359,7 +366,7 @@ export function CognitiveTimeline() {
     // Group chat events by session_id
     const bySession = new Map<string, TimelineEvent[]>();
     for (const ev of filtered) {
-      if (isChatEvent(ev.event_type) && ev.payload?.session_id) {
+      if (isChatEvent(ev.event_type) && ev.payload?.session_id && !ev.payload?.slot_id) {
         const sid = ev.payload.session_id;
         const arr = bySession.get(sid) || [];
         arr.push(ev);
@@ -393,38 +400,79 @@ export function CognitiveTimeline() {
     return { map: layout, rowCount: Math.max(rowEnds.length, 1) };
   }, [filtered]);
 
-  // Compute lane geometry — Chat lane expands when multiple concurrent sessions
+  // Build slot layout: group events by slot_id, assign fixed sub-row per slot
+  const slotLayout = useMemo(() => {
+    const bySlot = new Map<string, TimelineEvent[]>();
+    for (const ev of filtered) {
+      const sid = ev.payload?.slot_id;
+      if (!sid) continue;
+      const arr = bySlot.get(sid) || [];
+      arr.push(ev);
+      bySlot.set(sid, arr);
+    }
+    // Fixed row assignment by sorted slot_id for visual stability
+    const slotIds = Array.from(bySlot.keys()).sort();
+    const layout = new Map<string, { row: number; events: TimelineEvent[] }>();
+    slotIds.forEach((sid, index) => {
+      layout.set(sid, { row: index, events: bySlot.get(sid)! });
+    });
+    return { map: layout, rowCount: Math.max(slotIds.length, 1) };
+  }, [filtered]);
+
+  // Compute lane geometry — Chat + Slot lanes expand with concurrent sessions/slots
   const laneGeometry = useMemo(() => {
     const chatWeight = sessionLayout.rowCount;
-    const totalWeight = chatWeight + (SWIMLANES.length - 1); // chat=N, others=1 each
+    const slotWeight = slotLayout.rowCount;
+    // Chat and Slot are dynamic, others are weight=1
+    const totalWeight = chatWeight + slotWeight + (SWIMLANES.length - 2);
     const lanes: { top: number; height: number }[] = [];
     let offset = 0;
-    for (let i = 0; i < SWIMLANES.length; i++) {
-      const w = i === 0 ? chatWeight : 1;
+    for (const lane of SWIMLANES) {
+      const w = lane.id === 'chat' ? chatWeight : lane.id === 'slot' ? slotWeight : 1;
       const h = (w / totalWeight) * 100;
       lanes.push({ top: offset, height: h });
       offset += h;
     }
-    return { lanes, chatSubRowHeight: lanes[0].height / sessionLayout.rowCount };
-  }, [sessionLayout]);
+    const chatLane = lanes[SWIMLANES.findIndex(s => s.id === 'chat')];
+    const slotLane = lanes[SLOT_LANE_IDX];
+    return {
+      lanes,
+      chatSubRowHeight: chatLane.height / sessionLayout.rowCount,
+      slotSubRowHeight: slotLane.height / slotLayout.rowCount,
+    };
+  }, [sessionLayout, slotLayout]);
 
   // Get Y position for a chat event accounting for session sub-row
   const getChatY = useCallback((ev: TimelineEvent): number => {
     const sid = ev.payload?.session_id;
     const info = sid ? sessionLayout.map.get(sid) : undefined;
     const row = info?.row ?? 0;
-    const { top } = laneGeometry.lanes[0];
+    const chatLane = laneGeometry.lanes[SWIMLANES.findIndex(s => s.id === 'chat')];
     const subH = laneGeometry.chatSubRowHeight;
-    return top + subH * (row + 0.5);
+    return chatLane.top + subH * (row + 0.5);
   }, [sessionLayout, laneGeometry]);
 
-  // Get Y position for any event (delegates to getChatY for chat events)
+  // Get Y position for a slot event accounting for slot_id sub-row
+  const getSlotY = useCallback((ev: TimelineEvent): number => {
+    const sid = ev.payload?.slot_id;
+    const info = sid ? slotLayout.map.get(sid) : undefined;
+    const row = info?.row ?? 0;
+    const slotLane = laneGeometry.lanes[SLOT_LANE_IDX];
+    const subH = laneGeometry.slotSubRowHeight;
+    return slotLane.top + subH * (row + 0.5);
+  }, [slotLayout, laneGeometry]);
+
+  // Get Y position for any event
   const getY = useCallback((ev: TimelineEvent): number => {
+    // Slot events (with slot_id) → slot sub-row layout
+    if (ev.payload?.slot_id) return getSlotY(ev);
+    // Master chat events → chat sub-row layout
     if (isChatEvent(ev.event_type)) return getChatY(ev);
-    const laneIdx = getSwimlane(ev.event_type);
+    // Everything else → center of its lane
+    const laneIdx = getSwimlane(ev);
     const lane = laneGeometry.lanes[laneIdx];
     return lane.top + lane.height * 0.5;
-  }, [getChatY, laneGeometry]);
+  }, [getChatY, getSlotY, laneGeometry]);
 
   // Sync window preset buttons with gesture-controlled timeRange
   const handleWindowChange = useCallback((w: string) => {
@@ -1372,7 +1420,10 @@ const MarkdownContent = memo(function MarkdownContent({ content }: { content: st
       prose-pre:bg-neutral-900 prose-pre:border prose-pre:border-neutral-800 prose-pre:rounded-md prose-pre:my-2
       prose-blockquote:border-teal-500/30 prose-blockquote:text-teal-200/70
       prose-hr:border-neutral-700
-      prose-table:text-xs prose-th:text-teal-300 prose-td:text-teal-100/80
+      prose-table:text-xs prose-table:w-full prose-table:border-collapse prose-table:my-2
+      prose-thead:border-b prose-thead:border-neutral-700
+      prose-th:text-teal-300 prose-th:text-left prose-th:px-3 prose-th:py-1.5 prose-th:bg-neutral-800/50 prose-th:border prose-th:border-neutral-700/60 prose-th:font-medium
+      prose-td:text-teal-100/80 prose-td:px-3 prose-td:py-1.5 prose-td:border prose-td:border-neutral-700/40
     ">
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
     </div>

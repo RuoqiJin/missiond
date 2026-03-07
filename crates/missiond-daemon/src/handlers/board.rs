@@ -455,6 +455,19 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                                 ..Default::default()
                             },
                         );
+                        // Emit dispatch event for timeline visibility
+                        let preview = if decompose_prompt.len() > 200 {
+                            let mut end = 200;
+                            while end > 0 && !decompose_prompt.is_char_boundary(end) { end -= 1; }
+                            format!("{}...", &decompose_prompt[..end])
+                        } else { decompose_prompt.clone() };
+                        state.event_bus.publish(crate::event_bus::DaemonEvent::SlotTaskDispatched {
+                            slot_id: slot_id.clone(),
+                            task_id: Some(submit_task_id.clone()),
+                            purpose: "decompose".to_string(),
+                            prompt_chars: decompose_prompt.len(),
+                            preview,
+                        });
                     }
                 }
             }

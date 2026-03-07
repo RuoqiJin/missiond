@@ -103,6 +103,11 @@ function handleEvent(
       debouncedBump(set, 'timelineVersion');
       break;
 
+    case 'slot_task_dispatched':
+      debouncedBump(set, 'slotVersion');
+      debouncedBump(set, 'timelineVersion');
+      break;
+
     case 'briefing_batch_started':
       debouncedBump(set, 'timelineVersion');
       break;

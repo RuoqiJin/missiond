@@ -406,6 +406,22 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
             full_prompt, task.id, task.id, task.id
         );
 
+        // Emit dispatch event for timeline visibility
+        {
+            let preview = if full_prompt.len() > 200 {
+                let mut end = 200;
+                while end > 0 && !full_prompt.is_char_boundary(end) { end -= 1; }
+                format!("{}...", &full_prompt[..end])
+            } else { full_prompt.clone() };
+            state.event_bus.publish(crate::event_bus::DaemonEvent::SlotTaskDispatched {
+                slot_id: slot_id.clone(),
+                task_id: Some(task.id.clone()),
+                purpose: "board_auto_execute".to_string(),
+                prompt_chars: full_prompt.len(),
+                preview,
+            });
+        }
+
         // Send prompt and wait for response
         let timeout_ms = 600_000; // 10 minutes
         match state.pty.send(&slot_id, &full_prompt, timeout_ms).await {

@@ -87,6 +87,21 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                                         ..Default::default()
                                     },
                                 );
+                                // Emit dispatch event for timeline visibility
+                                let preview = if prompt.len() > 200 {
+                                    let mut end = 200;
+                                    while end > 0 && !prompt.is_char_boundary(end) { end -= 1; }
+                                    format!("{}...", &prompt[..end])
+                                } else { prompt.clone() };
+                                state.event_bus.publish(
+                                    crate::event_bus::DaemonEvent::SlotTaskDispatched {
+                                        slot_id: candidate_id.to_string(),
+                                        task_id: Some(task_id.clone()),
+                                        purpose: "submit".to_string(),
+                                        prompt_chars: prompt.len(),
+                                        preview,
+                                    },
+                                );
                                 dispatched_to = Some(candidate_id.to_string());
                                 info!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: dispatched to idle slot");
                                 break;
@@ -147,6 +162,21 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                                             session_id: slot_session,
                                             started_at: Some(now),
                                             ..Default::default()
+                                        },
+                                    );
+                                    // Emit dispatch event for timeline visibility
+                                    let preview = if prompt.len() > 200 {
+                                        let mut end = 200;
+                                        while end > 0 && !prompt.is_char_boundary(end) { end -= 1; }
+                                        format!("{}...", &prompt[..end])
+                                    } else { prompt.clone() };
+                                    state.event_bus.publish(
+                                        crate::event_bus::DaemonEvent::SlotTaskDispatched {
+                                            slot_id: candidate_id.to_string(),
+                                            task_id: Some(task_id.clone()),
+                                            purpose: "submit".to_string(),
+                                            prompt_chars: prompt.len(),
+                                            preview,
                                         },
                                     );
                                     dispatched_to = Some(candidate_id.to_string());
