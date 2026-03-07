@@ -1,5 +1,6 @@
 use tracing::{error, info, warn};
 
+use crate::event_bus::{DaemonEvent, TraceContext};
 use crate::state::AppState;
 use crate::events_sync;
 
@@ -124,8 +125,42 @@ pub(crate) fn handle_new_messages(
     match db.insert_conversation_messages_batch(&batch) {
         Ok(inserted_ids) if !inserted_ids.is_empty() => {
             info!(session = %session_id, count = inserted_ids.len(), "Logged conversation messages");
-            // Deep analysis uses conversation-level analyzed_at watermark (no per-message enqueue needed).
-            // Realtime extraction uses realtime_forwarded_at watermark.
+
+            // Emit timeline events for user/assistant messages with visible text.
+            // Match inserted DB IDs back to original JSONL messages for text-only preview.
+            if !is_pty {
+                for &msg_id in &inserted_ids {
+                    if let Ok(Some(db_msg)) = db.get_conversation_message_by_id(msg_id) {
+                        if db_msg.role != "user" && db_msg.role != "assistant" { continue; }
+                        // Find original JSONL message to extract visible-only text
+                        let visible_text = messages.iter()
+                            .find(|m| db_msg.message_uuid.as_deref() == Some(&m.uuid))
+                            .map(|m| events_sync::extract_visible_text(&m.message.content))
+                            .unwrap_or_default();
+                        if visible_text.is_empty() { continue; } // skip pure tool_use messages
+                        let preview = if visible_text.len() > 200 {
+                            let mut end = 200;
+                            while end > 0 && !visible_text.is_char_boundary(end) { end -= 1; }
+                            format!("{}...", &visible_text[..end])
+                        } else {
+                            visible_text
+                        };
+                        state.event_bus.publish_traced(
+                            DaemonEvent::ConversationMessageLogged {
+                                message_id: msg_id,
+                                session_id: session_id.clone(),
+                                role: db_msg.role.clone(),
+                                content_chars: db_msg.content.len(),
+                                preview,
+                            },
+                            TraceContext {
+                                trace_id: Some(session_id.clone()),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
+            }
         }
         Err(e) => {
             error!(session = %session_id, error = %e, "Failed to insert conversation messages");

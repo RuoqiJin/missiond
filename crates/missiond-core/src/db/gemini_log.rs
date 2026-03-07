@@ -5,29 +5,72 @@ use super::MissionDB;
 impl MissionDB {
     // ============ Gemini Request Log ============
 
-    /// Insert a Gemini request log entry.
-    pub fn gemini_log_insert(
+    /// Insert a Gemini request log entry (called when request starts).
+    pub fn gemini_log_insert_started(
         &self,
         id: &str,
         caller: &str,
         session_id: Option<&str>,
-        api_mode: &str,
         model: &str,
         prompt_chars: i64,
+        prompt_text: Option<&str>,
+    ) -> DbResult<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO gemini_requests (id, caller, session_id, api_mode, model, prompt_chars, response_chars, queue_wait_ms, duration_ms, retry_count, status, prompt_text)
+             VALUES (?1, ?2, ?3, 'pending', ?4, ?5, 0, 0, 0, 0, 'pending', ?6)",
+            params![id, caller, session_id, model, prompt_chars, prompt_text],
+        )?;
+        Ok(())
+    }
+
+    /// Update a Gemini request log entry when request completes.
+    pub fn gemini_log_update_completed(
+        &self,
+        id: &str,
+        api_mode: &str,
         response_chars: i64,
         queue_wait_ms: i64,
         duration_ms: i64,
         retry_count: i64,
         status: &str,
         error_msg: Option<&str>,
+        response_text: Option<&str>,
     ) -> DbResult<()> {
         let conn = self.conn();
         conn.execute(
-            "INSERT INTO gemini_requests (id, caller, session_id, api_mode, model, prompt_chars, response_chars, queue_wait_ms, duration_ms, retry_count, status, error_msg)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![id, caller, session_id, api_mode, model, prompt_chars, response_chars, queue_wait_ms, duration_ms, retry_count, status, error_msg],
+            "UPDATE gemini_requests SET api_mode = ?2, response_chars = ?3, queue_wait_ms = ?4, duration_ms = ?5, retry_count = ?6, status = ?7, error_msg = ?8, response_text = ?9 WHERE id = ?1",
+            params![id, api_mode, response_chars, queue_wait_ms, duration_ms, retry_count, status, error_msg, response_text],
         )?;
         Ok(())
+    }
+
+    /// Fetch full prompt/response content by request ID.
+    pub fn gemini_log_get_content(&self, request_id: &str) -> DbResult<Option<serde_json::Value>> {
+        let conn = self.read_conn();
+        let result = conn.query_row(
+            "SELECT id, caller, model, prompt_chars, response_chars, duration_ms, status, error_msg, prompt_text, response_text, created_at
+             FROM gemini_requests WHERE id = ?1",
+            params![request_id],
+            |row| Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "caller": row.get::<_, String>(1)?,
+                "model": row.get::<_, String>(2)?,
+                "prompt_chars": row.get::<_, i64>(3)?,
+                "response_chars": row.get::<_, i64>(4)?,
+                "duration_ms": row.get::<_, Option<i64>>(5)?,
+                "status": row.get::<_, String>(6)?,
+                "error_msg": row.get::<_, Option<String>>(7)?,
+                "prompt_text": row.get::<_, Option<String>>(8)?,
+                "response_text": row.get::<_, Option<String>>(9)?,
+                "created_at": row.get::<_, String>(10)?,
+            })),
+        );
+        match result {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Query recent Gemini requests with optional filters.

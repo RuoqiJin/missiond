@@ -35,6 +35,7 @@ mod daemon_stats;
 mod prompts;
 mod session_util;
 mod timeline_analyst;
+mod git_watcher;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1201,6 +1202,8 @@ async fn main() -> Result<()> {
     }
 
     // --- Gemini request log subscriber (Timeline → DB persistence) ---
+    // Two-step: insert on started (with prompt_text), update on completed (with response_text).
+    // Full content lives in gemini_requests table; timeline only stores request_id references.
     {
         let mut rx = timeline_broadcast_tx.subscribe();
         let log_db = Arc::clone(&state.mission);
@@ -1213,23 +1216,36 @@ async fn main() -> Result<()> {
             }
             loop {
                 match rx.recv().await {
-                    Ok(te) => {
-                        if let event_bus::DaemonEvent::GeminiRequestCompleted {
-                            ref request_id, ref caller, ref session_id, ref api_mode, ref model,
-                            prompt_chars, response_chars, queue_wait_ms, duration_ms,
-                            retry_count, ref status, ref error_msg,
-                        } = te.event {
-                            if let Err(e) = log_db.db().gemini_log_insert(
+                    Ok(te) => match &te.event {
+                        event_bus::DaemonEvent::GeminiRequestStarted {
+                            request_id, caller, session_id, model,
+                            prompt_chars, prompt_text,
+                        } => {
+                            if let Err(e) = log_db.db().gemini_log_insert_started(
                                 request_id, caller, session_id.as_deref(),
-                                api_mode, model,
-                                prompt_chars as i64, response_chars as i64,
-                                queue_wait_ms as i64, duration_ms as i64,
-                                retry_count as i64, status, error_msg.as_deref(),
+                                model, *prompt_chars as i64,
+                                prompt_text.as_deref(),
                             ) {
-                                warn!(error = %e, "Gemini log: failed to persist request");
+                                warn!(error = %e, "Gemini log: failed to insert started");
                             }
                         }
-                    }
+                        event_bus::DaemonEvent::GeminiRequestCompleted {
+                            request_id, api_mode,
+                            response_chars, queue_wait_ms, duration_ms,
+                            retry_count, status, error_msg, response_text, ..
+                        } => {
+                            if let Err(e) = log_db.db().gemini_log_update_completed(
+                                request_id, api_mode,
+                                *response_chars as i64, *queue_wait_ms as i64,
+                                *duration_ms as i64, *retry_count as i64,
+                                status, error_msg.as_deref(),
+                                response_text.as_deref(),
+                            ) {
+                                warn!(error = %e, "Gemini log: failed to update completed");
+                            }
+                        }
+                        _ => {}
+                    },
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(skipped = n, "Gemini log subscriber lagged, some requests not logged");
                     }
@@ -1307,6 +1323,22 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             run_timeline_writer(rx, db, timeline_tx, ws_tx).await;
         });
+    }
+
+    // --- Git Commit Watcher ---
+    // Polls monitored repos (from slot cwds) for new commits → timeline events.
+    {
+        let slot_cwds: Vec<String> = state.mission.list_slots()
+            .into_iter()
+            .filter_map(|s| s.config.cwd)
+            .collect();
+        let repos = git_watcher::collect_repo_roots(&slot_cwds);
+        if !repos.is_empty() {
+            let event_tx = state.event_bus.sender();
+            tokio::spawn(async move {
+                git_watcher::run_git_watcher(repos, event_tx).await;
+            });
+        }
     }
 
     // Health snapshot injector (synthetic, not persisted to timeline)

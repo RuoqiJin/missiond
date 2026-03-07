@@ -1094,6 +1094,22 @@ impl MissionDB {
             CREATE INDEX IF NOT EXISTS idx_ctv_provider ON conversation_topic_vectors(embedding_provider);"
         )?;
 
+        // Gemini requests: add prompt_text/response_text for full content storage
+        {
+            let gr_columns: Vec<String> = conn
+                .prepare("PRAGMA table_info(gemini_requests)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !gr_columns.iter().any(|c| c == "prompt_text") {
+                conn.execute_batch(
+                    "ALTER TABLE gemini_requests ADD COLUMN prompt_text TEXT;
+                     ALTER TABLE gemini_requests ADD COLUMN response_text TEXT;"
+                )?;
+                tracing::info!("Migration: added prompt_text/response_text to gemini_requests");
+            }
+        }
+
         // ── Image Descriptions (Vision Worker cache) ──
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS image_descriptions (

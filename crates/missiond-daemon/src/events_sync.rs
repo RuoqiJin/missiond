@@ -11,6 +11,26 @@ use tracing::{info, warn};
 
 /// Extract readable text from Claude message content (string or content blocks).
 /// Full content — no truncation in storage layer.
+/// Extract only human-visible text blocks (no tool_use/tool_result/thinking).
+/// Used for timeline preview — shows what the user actually sees in conversation.
+pub fn extract_visible_text(content: &Value) -> String {
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(arr) => arr.iter()
+            .filter_map(|item| {
+                let block_type = item.get("type")?.as_str()?;
+                if block_type == "text" {
+                    item.get("text")?.as_str().map(String::from)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
 pub fn extract_text_content(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),

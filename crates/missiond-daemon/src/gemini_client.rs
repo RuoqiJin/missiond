@@ -47,6 +47,7 @@ fn current_caller() -> String {
     REQUEST_CALLER.try_with(|c| c.clone()).unwrap_or_else(|_| "unknown".to_string())
 }
 
+
 /// Shared Gemini rate limiter + retry client.
 /// Stored in `AppState` and used by all Gemini call sites.
 #[derive(Clone)]
@@ -129,6 +130,12 @@ impl GeminiClient {
         self.rate_limiter.until_ready().await;
         let queue_wait = queue_start.elapsed();
 
+        // 2b. Emit "request started" event with prompt preview
+        let span_id = uuid::Uuid::new_v4().to_string();
+        self.emit_started_event(
+            &request_id, &caller, session_id.clone(), &model, prompt_chars, body, &span_id,
+        );
+
         // 3. Dispatch based on mode (measure API duration)
         let api_start = Instant::now();
         let api_mode;
@@ -171,8 +178,8 @@ impl GeminiClient {
                 // Retry path — emit event after retry completes
                 let retry_result = self.retry_with_backoff(http_client, url, jwt, body, 3).await;
                 let api_duration = api_start.elapsed();
-                self.emit_event(&request_id, &caller, session_id, api_mode, &model, prompt_chars,
-                    &retry_result, queue_wait, api_duration, 1); // at least 1 retry
+                self.emit_completed_event(&request_id, &caller, session_id, api_mode, &model, prompt_chars,
+                    &retry_result, queue_wait, api_duration, 1, &span_id);
                 return retry_result;
             }
 
@@ -190,9 +197,9 @@ impl GeminiClient {
         };
         let api_duration = api_start.elapsed();
 
-        // 4. Emit instrumentation event
-        self.emit_event(&request_id, &caller, session_id, api_mode, &model, prompt_chars,
-            &result, queue_wait, api_duration, 0);
+        // 4. Emit "request completed" event with response preview
+        self.emit_completed_event(&request_id, &caller, session_id, api_mode, &model, prompt_chars,
+            &result, queue_wait, api_duration, 0, &span_id);
 
         result
     }
@@ -219,7 +226,45 @@ impl GeminiClient {
         }
     }
 
-    fn emit_event(
+    /// Emit "request started" event — fires when the prompt is dispatched to LLM.
+    fn emit_started_event(
+        &self,
+        request_id: &str,
+        caller: &str,
+        session_id: Option<String>,
+        model: &str,
+        prompt_chars: usize,
+        body: &serde_json::Value,
+        span_id: &str,
+    ) {
+        // Extract full last-user-message text for DB storage (no truncation)
+        let prompt_text = body.get("messages")
+            .and_then(|v| v.as_array())
+            .and_then(|msgs| msgs.iter().rfind(|m| m.get("role").and_then(|r| r.as_str()) == Some("user")))
+            .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+            .map(|s| s.to_string());
+
+        let trace_id = session_id.clone();
+        let event = DaemonEvent::GeminiRequestStarted {
+            request_id: request_id.to_string(),
+            caller: caller.to_string(),
+            session_id,
+            model: model.to_string(),
+            prompt_chars,
+            prompt_text,
+        };
+        let entry = TimelineEntry {
+            event,
+            trace_id,
+            span_id: span_id.to_string(),
+            parent_span_id: None,
+            summary: Some(format!("{} → {} (prompt {}ch)", caller, model, prompt_chars)),
+        };
+        let _ = self.event_tx.send(entry);
+    }
+
+    /// Emit "request completed" event — fires when the LLM response arrives.
+    fn emit_completed_event(
         &self,
         request_id: &str,
         caller: &str,
@@ -231,19 +276,19 @@ impl GeminiClient {
         queue_wait: Duration,
         api_duration: Duration,
         retry_count: u32,
+        span_id: &str,
     ) {
-        let (status, response_chars, error_msg) = match result {
+        let (status, response_chars, error_msg, response_text) = match result {
             Ok(v) => {
-                let chars = v.pointer("/choices/0/message/content")
+                let content = v.pointer("/choices/0/message/content")
                     .and_then(|c| c.as_str())
-                    .map(|s| s.len())
-                    .unwrap_or(0);
-                ("ok".to_string(), chars, None)
+                    .unwrap_or("");
+                ("ok".to_string(), content.len(), None, Some(content.to_string()))
             }
             Err(e) => {
                 let msg = e.to_string();
                 let status = if msg.contains("timed out") { "timeout" } else { "error" };
-                (status.to_string(), 0, Some(msg))
+                (status.to_string(), 0, Some(msg), None)
             }
         };
 
@@ -276,11 +321,13 @@ impl GeminiClient {
             retry_count,
             status,
             error_msg,
+            response_text,
         };
+        // Use same span_id as the started event so they are linked as a pair
         let entry = TimelineEntry {
             event,
-            trace_id: trace_id,
-            span_id: uuid::Uuid::new_v4().to_string(),
+            trace_id,
+            span_id: span_id.to_string(),
             parent_span_id: None,
             summary: Some(format!("{} → {} ({}ms)", caller, model, api_duration.as_millis())),
         };

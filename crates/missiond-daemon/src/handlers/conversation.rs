@@ -428,6 +428,24 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             })))
         }
 
+        "mission_conversation_message" => {
+            let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
+            let message_id = args_val.get("message_id").and_then(|v| v.as_i64())
+                .ok_or_else(|| anyhow!("missing message_id"))?;
+            let db = state.mission.db();
+            match db.get_conversation_message_by_id(message_id).map_err(|e| anyhow!("DB error: {}", e))? {
+                Some(msg) => Ok(ToolResult::json_pretty(&serde_json::json!({
+                    "id": msg.id,
+                    "session_id": msg.session_id,
+                    "role": msg.role,
+                    "content": msg.content,
+                    "model": msg.model,
+                    "timestamp": msg.timestamp,
+                }))),
+                None => Ok(ToolResult::error("Message not found")),
+            }
+        }
+
         _ => Err(anyhow!("Unknown conversation tool: {name}")),
     }
 }

@@ -29,6 +29,16 @@ pub(crate) enum DaemonEvent {
     QuestionCreated { question_id: String },
 
     // ===== LLM Gateway =====
+    /// A Gemini API request was sent (prompt dispatched to LLM).
+    GeminiRequestStarted {
+        request_id: String,
+        caller: String,
+        session_id: Option<String>,
+        model: String,
+        prompt_chars: usize,
+        /// Full prompt text — stored in gemini_requests table, NOT sent to frontend.
+        prompt_text: Option<String>,
+    },
     /// A Gemini API request completed (success or failure).
     GeminiRequestCompleted {
         request_id: String,
@@ -43,6 +53,8 @@ pub(crate) enum DaemonEvent {
         retry_count: u32,
         status: String,
         error_msg: Option<String>,
+        /// Full response text — stored in gemini_requests table, NOT sent to frontend.
+        response_text: Option<String>,
     },
 
     // ===== Phase 5: Frontend push events =====
@@ -84,6 +96,29 @@ pub(crate) enum DaemonEvent {
         title: String,
     },
 
+    // ===== Git Activity =====
+    /// A new git commit was detected in a monitored repository.
+    GitCommitDetected {
+        repo: String,
+        hash: String,
+        short_hash: String,
+        author: String,
+        message: String,
+        /// Commit timestamp as ISO-8601 string.
+        committed_at: String,
+    },
+
+    // ===== Conversation Activity =====
+    /// A new conversation message was logged (user or assistant).
+    ConversationMessageLogged {
+        message_id: i64,
+        session_id: String,
+        role: String,
+        content_chars: usize,
+        /// Truncated preview for timeline display.
+        preview: String,
+    },
+
     // ===== Vision Worker =====
     /// A message with image content was inserted, needs async vision processing.
     ImageMessageInserted {
@@ -100,6 +135,7 @@ impl DaemonEvent {
             Self::TaskCreated { .. } => "task_lifecycle",
             Self::TaskCompleted { .. } => "task_lifecycle",
             Self::QuestionCreated { .. } => "question_created",
+            Self::GeminiRequestStarted { .. } => "gemini_request_started",
             Self::GeminiRequestCompleted { .. } => "gemini_request_completed",
             Self::DecisionResolved { .. } => "decision_made",
             Self::QuestionResolved { .. } => "question_resolved",
@@ -107,6 +143,10 @@ impl DaemonEvent {
             Self::BoardTaskUpdated { .. } => "board_task_updated",
             Self::SlotStateChanged { .. } => "slot_state_changed",
             Self::InsightGenerated { .. } => "insight_generated",
+            Self::GitCommitDetected { .. } => "git_commit",
+            Self::ConversationMessageLogged { ref role, .. } => {
+                if role == "user" { "user_message" } else { "assistant_message" }
+            }
             Self::ImageMessageInserted { .. } => "image_message_inserted",
         }
     }
@@ -122,10 +162,20 @@ impl DaemonEvent {
                 json!({ "task_id": task_id, "action": "completed" }),
             Self::QuestionCreated { question_id } =>
                 json!({ "question_id": question_id }),
+            Self::GeminiRequestStarted {
+                request_id, caller, session_id, model,
+                prompt_chars, ..
+            } => json!({
+                "request_id": request_id,
+                "caller": caller,
+                "session_id": session_id,
+                "model": model,
+                "prompt_chars": prompt_chars,
+            }),
             Self::GeminiRequestCompleted {
                 request_id, caller, session_id, api_mode, model,
                 prompt_chars, response_chars, queue_wait_ms,
-                duration_ms, retry_count, status, error_msg,
+                duration_ms, retry_count, status, error_msg, ..
             } => json!({
                 "caller": caller,
                 "model": model,
@@ -152,6 +202,10 @@ impl DaemonEvent {
                 json!({ "slot_id": slot_id, "new_state": new_state, "prev_state": prev_state }),
             Self::InsightGenerated { category, priority, title } =>
                 json!({ "category": category, "priority": priority, "title": title }),
+            Self::GitCommitDetected { repo, hash, short_hash, author, message, committed_at } =>
+                json!({ "repo": repo, "hash": hash, "short_hash": short_hash, "author": author, "message": message, "committed_at": committed_at }),
+            Self::ConversationMessageLogged { message_id, session_id, role, content_chars, preview } =>
+                json!({ "message_id": message_id, "session_id": session_id, "role": role, "content_chars": content_chars, "preview": preview }),
             Self::ImageMessageInserted { message_id, session_id } =>
                 json!({ "message_id": message_id, "session_id": session_id }),
         }
