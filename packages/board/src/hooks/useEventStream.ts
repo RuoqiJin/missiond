@@ -20,7 +20,7 @@ export function useEventStream() {
  * and can refetch data.
  */
 export function useEventInvalidation(
-  domain: 'slot' | 'task' | 'question' | 'decision' | 'memory' | 'deploy' | 'engine',
+  domain: 'slot' | 'task' | 'question' | 'decision' | 'memory' | 'deploy' | 'engine' | 'timeline',
 ): number {
   const key = `${domain}Version` as const;
   return useEventStreamStore((s) => s[key]);

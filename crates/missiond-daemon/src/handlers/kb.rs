@@ -13,6 +13,54 @@ use crate::lenient;
 use crate::context_budget::MAX_ROUTER_PAYLOAD_BYTES;
 use crate::helpers::default_mission_home;
 
+/// Content guard: reject verbose debug logs, stack traces, and narrative-style entries.
+/// Returns Some(rejection_message) if content should be rejected, None if OK.
+fn check_content_quality(summary: &str, detail: &Option<Value>) -> Option<String> {
+    // Rule 1: summary too long (> 200 chars = likely narrative)
+    if summary.chars().count() > 200 {
+        return Some(format!(
+            "REJECTED: summary 过长（{}字）。summary 必须 ≤ 120 字，是结论性陈述而非叙事。请提炼后重试。",
+            summary.chars().count()
+        ));
+    }
+
+    // Rule 2: summary contains stack trace / log indicators
+    let stack_patterns = ["at node_modules/", "Caused by:", "stack trace", "panic at", "RUST_BACKTRACE",
+                          "Error:", "    at ", "线程", "thread '"];
+    for pattern in &stack_patterns {
+        if summary.contains(pattern) {
+            return Some(format!(
+                "REJECTED: summary 包含堆栈/日志片段（'{}'）。summary 应是泛化结论，不要包含原始报错。请提炼后重试。",
+                pattern
+            ));
+        }
+    }
+
+    // Rule 3: narrative indicators — "先...然后...最后..." pattern in summary
+    let narrative_words = ["先查看", "先检查", "然后尝试", "然后发现", "最后发现", "接着",
+                           "第一步", "第二步", "第三步", "首先我", "我尝试"];
+    let narrative_count = narrative_words.iter().filter(|w| summary.contains(*w)).count();
+    if narrative_count >= 2 {
+        return Some(
+            "REJECTED: summary 是叙事体（含「先...然后...」等流水账结构）。请改写为结论性陈述：\
+             【现象关键字】→【根因】→【解决方案】。".to_string()
+        );
+    }
+
+    // Rule 4: detail too large (> 2000 chars of serialized JSON = likely pasting raw logs)
+    if let Some(d) = detail {
+        let detail_str = serde_json::to_string(d).unwrap_or_default();
+        if detail_str.len() > 2000 {
+            return Some(format!(
+                "REJECTED: detail 过长（{}字节）。detail 应是结构化三段式 {{trigger, conclusion, action}}，不要粘贴原始日志。请精简后重试。",
+                detail_str.len()
+            ));
+        }
+    }
+
+    None
+}
+
 #[derive(Deserialize)]
 struct KBRememberArgs {
     category: String,
@@ -73,6 +121,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         // ===== Knowledge Base (Jarvis Memory) =====
         "mission_kb_remember" => {
             let args: KBRememberArgs = serde_json::from_value(args)?;
+            // Content guard: reject verbose debug logs / stack traces
+            if let Some(rejection) = check_content_quality(&args.summary, &args.detail) {
+                return Ok(ToolResult::error(&rejection));
+            }
             let input = missiond_core::types::KBRememberInput {
                 category: args.category,
                 key: args.key,
@@ -199,16 +251,52 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 })
                 .collect();
             ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            ranked.truncate(top_k);
+            // Keep enlarged candidate pool (top_k * 3) so temporal decay can resurface evergreen docs
+            ranked.truncate(top_k * 3);
 
-            // 4. Fetch full KnowledgeEntry objects in RRF order (lightweight lookups)
+            // 4. Fetch full entries + apply temporal decay on enlarged pool
             let db = state.mission.db();
-            let mut results = Vec::new();
-            for (id, _rrf, _fts_r, _vec_r, _sim) in &ranked {
+            let now = chrono::Utc::now();
+            let mut scored_entries: Vec<(missiond_core::types::KnowledgeEntry, f64)> = Vec::new();
+            for (id, rrf, _fts_r, _vec_r, _sim) in &ranked {
                 if let Ok(Some(entry)) = db.kb_get_by_id(id) {
-                    results.push(entry);
+                    let age_days = chrono::DateTime::parse_from_rfc3339(&entry.updated_at)
+                        .map(|t| (now - t.with_timezone(&chrono::Utc)).num_hours() as f64 / 24.0)
+                        .unwrap_or(0.0);
+                    let decay = missiond_core::embedding::temporal_decay(&entry.category, age_days);
+                    scored_entries.push((entry, rrf * decay));
                 }
             }
+            // Re-sort by decayed score
+            scored_entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            // Trim to top_k * 2 before MMR (MMR needs a reasonable pool, not all 60)
+            scored_entries.truncate(top_k * 2);
+
+            // 5. MMR diversity re-ranking with min-max normalized scores + embedding cosine
+            let (min_s, max_s) = scored_entries.iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), (_, s)| (mn.min(*s), mx.max(*s)));
+            let score_range = max_s - min_s;
+
+            // Build embedding lookup from cache for MMR cosine similarity
+            let cache = state.kb_search_cache.read().await;
+            let emb_map: std::collections::HashMap<String, &Vec<f32>> = cache.iter()
+                .map(|(id, vec)| (id.clone(), vec))
+                .collect();
+
+            let candidates: Vec<(usize, f64, Vec<f32>)> = scored_entries.iter()
+                .enumerate()
+                .map(|(i, (e, score))| {
+                    let norm_score = if score_range > 0.0 { (score - min_s) / score_range } else { 1.0 };
+                    let emb = emb_map.get(&e.id).map(|v| (*v).clone()).unwrap_or_default();
+                    (i, norm_score, emb)
+                })
+                .collect();
+            drop(cache);
+
+            let mmr_indices = missiond_core::embedding::mmr_rerank_cosine(&candidates, top_k, 0.7);
+            let results: Vec<missiond_core::types::KnowledgeEntry> = mmr_indices.iter()
+                .filter_map(|&i| scored_entries.get(i).map(|(e, _)| e.clone()))
+                .collect();
 
             // Update access stats
             if !results.is_empty() {
@@ -280,8 +368,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             // Resolve host: if it looks like an infra key (no @ or .), try infra registry
             let (ssh_user, ssh_host, ssh_port, ssh_pass) = if !host.contains('@') && !host.contains('.') {
                 // Try infra registry lookup
-                let server = state.infra.get(&host);
-                let ip = server.and_then(|s| s.host.as_deref()).unwrap_or(&host);
+                let server = state.infra.read().unwrap().get(&host).cloned();
+                let ip_owned = server.and_then(|s| s.host.clone()).unwrap_or_else(|| host.clone());
+                let ip = ip_owned.as_str();
                 // Look up credentials from KB
                 let db = state.mission.db();
                 let cred_pass = db.kb_search(&format!("{} password", host), Some("credential"))

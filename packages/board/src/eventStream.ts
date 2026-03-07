@@ -33,6 +33,7 @@ interface EventStreamState {
   memoryVersion: number;
   deployVersion: number;
   engineVersion: number;
+  timelineVersion: number;
 
   // Actions
   connect: () => void;
@@ -44,7 +45,7 @@ const bumpTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
 function debouncedBump(
   set: (fn: (s: EventStreamState) => Partial<EventStreamState>) => void,
-  key: keyof Pick<EventStreamState, 'slotVersion' | 'taskVersion' | 'questionVersion' | 'decisionVersion' | 'memoryVersion' | 'deployVersion' | 'engineVersion'>,
+  key: keyof Pick<EventStreamState, 'slotVersion' | 'taskVersion' | 'questionVersion' | 'decisionVersion' | 'memoryVersion' | 'deployVersion' | 'engineVersion' | 'timelineVersion'>,
   delayMs = 80,
 ) {
   if (bumpTimers[key]) clearTimeout(bumpTimers[key]);
@@ -98,6 +99,10 @@ function handleEvent(
       break;
     }
 
+    case 'insight_generated':
+      debouncedBump(set, 'timelineVersion');
+      break;
+
     case 'resync':
       // Server says we missed events — bump all versions to force refetch
       debouncedBump(set, 'slotVersion', 0);
@@ -107,6 +112,7 @@ function handleEvent(
       debouncedBump(set, 'memoryVersion', 0);
       debouncedBump(set, 'deployVersion', 0);
       debouncedBump(set, 'engineVersion', 0);
+      debouncedBump(set, 'timelineVersion', 0);
       break;
 
     default:
@@ -129,6 +135,7 @@ export const useEventStreamStore = create<EventStreamState>()((set, get) => ({
   memoryVersion: 0,
   deployVersion: 0,
   engineVersion: 0,
+  timelineVersion: 0,
 
   connect: () => {
     const state = get();

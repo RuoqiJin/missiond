@@ -246,7 +246,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             // Step 3: Aggregate Infra
             let mut infra_results: Vec<Value> = Vec::new();
             for id in &infra_ids {
-                if let Some(server) = state.infra.get(id) {
+                if let Some(server) = state.infra.read().unwrap().get(id).cloned() {
                     infra_results.push(json!({
                         "id": server.id,
                         "name": server.name,

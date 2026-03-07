@@ -33,6 +33,7 @@ mod ipc_handler;
 mod daemon_stats;
 mod prompts;
 mod session_util;
+mod timeline_analyst;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -616,8 +617,9 @@ async fn main() -> Result<()> {
 
     // Infrastructure registry
     let servers_path = home.join("servers.yaml");
-    let infra = Arc::new(InfraConfig::load(&servers_path));
-    info!(count = infra.servers.len(), path = %servers_path.display(), "Infra registry loaded");
+    let infra_loaded = InfraConfig::load(&servers_path);
+    info!(count = infra_loaded.servers.len(), path = %servers_path.display(), "Infra registry loaded");
+    let infra = Arc::new(std::sync::RwLock::new(infra_loaded));
 
     // Skill index (scan ~/.claude/skills/)
     let skills_dir = dirs::home_dir()
@@ -660,6 +662,7 @@ async fn main() -> Result<()> {
         cc_tasks,
         skills,
         infra,
+        infra_path: servers_path.clone(),
         pty_session_uuids: Arc::new(tokio::sync::RwLock::new(pty_uuids)),
         extraction_state: Arc::new(tokio::sync::RwLock::new(ExtractionState {
             phase: ExtractionPhase::Idle,
@@ -1543,12 +1546,20 @@ async fn main() -> Result<()> {
                         s.mission.db().clear_slot_session(&slot_id);
                     }
                     Ok(missiond_core::ManagerEvent::StateChange { ref slot_id, new_state, prev_state }) => {
-                        // Publish slot state change for all slots (Phase 6c)
-                        s.event_bus.publish(event_bus::DaemonEvent::SlotStateChanged {
-                            slot_id: slot_id.to_string(),
-                            new_state: format!("{:?}", new_state),
-                            prev_state: format!("{:?}", prev_state),
-                        });
+                        // Publish slot state change with trace context (Phase 6c)
+                        let trace_id = s.mission.db().get_slot_session(slot_id).ok().flatten();
+                        s.event_bus.publish_traced(
+                            event_bus::DaemonEvent::SlotStateChanged {
+                                slot_id: slot_id.to_string(),
+                                new_state: format!("{:?}", new_state),
+                                prev_state: format!("{:?}", prev_state),
+                            },
+                            event_bus::TraceContext {
+                                trace_id,
+                                summary: Some(format!("{}: {:?} → {:?}", slot_id, prev_state, new_state)),
+                                ..Default::default()
+                            },
+                        );
                         // Route memory slot state changes to the correct lane
                         let lane = if slot_id == MEMORY_SLOT_ID {
                             Some(("fast", &s.extraction_state, &s.memory_slot_busy_since))
@@ -1605,11 +1616,20 @@ async fn main() -> Result<()> {
                                         if let Some(ref st_id) = es.current_slot_task_id {
                                             let _ = s.mission.db().slot_task_set_completed(st_id, 0);
                                         }
-                                        s.event_bus.publish(event_bus::DaemonEvent::MemoryPhaseChanged {
-                                            slot_id: slot_id.to_string(),
-                                            phase: "Idle".to_string(),
-                                            active_type: es.active_type.map(|s| s.to_string()),
-                                        });
+                                        let mem_trace_id = es.current_deep_conv_id.clone()
+                                            .or_else(|| es.current_task_id.clone());
+                                        s.event_bus.publish_traced(
+                                            event_bus::DaemonEvent::MemoryPhaseChanged {
+                                                slot_id: slot_id.to_string(),
+                                                phase: "Idle".to_string(),
+                                                active_type: es.active_type.map(|s| s.to_string()),
+                                            },
+                                            event_bus::TraceContext {
+                                                trace_id: mem_trace_id,
+                                                summary: Some(format!("{}: {:?} → Idle", slot_id, es.active_type)),
+                                                ..Default::default()
+                                            },
+                                        );
                                         es.phase = ExtractionPhase::Idle;
                                         es.active_type = None;
                                         es.current_task_id = None;
@@ -1852,8 +1872,12 @@ async fn main() -> Result<()> {
             let mut sighup = signal(SignalKind::hangup()).expect("Failed to register SIGHUP handler");
             loop {
                 sighup.recv().await;
-                info!("SIGHUP received, reloading slots.yaml");
+                info!("SIGHUP received, reloading slots.yaml and servers.yaml");
                 handle_slots_reload(&sig_state).await;
+                // Also reload infra config
+                let new_infra = InfraConfig::load(&sig_state.infra_path);
+                info!(count = new_infra.servers.len(), "Infra registry reloaded");
+                *sig_state.infra.write().unwrap() = new_infra;
             }
         });
     }

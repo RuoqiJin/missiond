@@ -38,18 +38,21 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_infra_list" => {
             let InfraListArgs { role, provider } =
                 serde_json::from_value(args).unwrap_or(InfraListArgs { role: None, provider: None });
-            let servers: Vec<&missiond_core::InfraServer> = if let Some(role) = role {
-                state.infra.by_role(&role)
+            let infra = state.infra.read().unwrap();
+            let servers: Vec<missiond_core::InfraServer> = if let Some(role) = role {
+                infra.by_role(&role).into_iter().cloned().collect()
             } else if let Some(provider) = provider {
-                state.infra.by_provider(&provider)
+                infra.by_provider(&provider).into_iter().cloned().collect()
             } else {
-                state.infra.servers.iter().collect()
+                infra.servers.clone()
             };
+            drop(infra);
             Ok(ToolResult::json_pretty(&servers))
         }
         "mission_infra_get" => {
             let InfraGetArgs { id } = serde_json::from_value(args)?;
-            match state.infra.get(&id) {
+            let server = state.infra.read().unwrap().get(&id).cloned();
+            match server {
                 Some(server) => Ok(ToolResult::json_pretty(&server)),
                 None => Ok(ToolResult::error(format!("Server not found: {}", id))),
             }
@@ -58,13 +61,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_reachability" => {
             let ReachabilityArgs { target, channels } = serde_json::from_value(args)?;
 
-            let server = state.infra.get(&target);
-            let public_ip = server.and_then(|s| s.host.as_deref());
-            let lan_ip = server.and_then(|s| s.lan.as_deref());
-            let server_name = server.map(|s| s.name.as_str()).unwrap_or(&target);
+            let server: Option<missiond_core::InfraServer> = state.infra.read().unwrap().get(&target).cloned();
+            let public_ip = server.as_ref().and_then(|s| s.host.clone());
+            let lan_ip = server.as_ref().and_then(|s| s.lan.clone());
+            let server_name = server.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| target.clone());
 
             // Parse Tailscale IP from description (e.g. "ssh user@100.x.x.x")
-            let ts_ip = server.and_then(|s| {
+            let ts_ip = server.as_ref().and_then(|s| {
                 let targets = s.parse_ssh_targets();
                 targets.iter().find(|t| t.via == "tailscale").map(|t| t.host.clone())
             });
@@ -161,7 +164,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             };
 
             // Probe 4: SSH TCP port
-            let ssh_targets_owned: Vec<(String, u16, String)> = server
+            let ssh_targets_owned: Vec<(String, u16, String)> = server.as_ref()
                 .map(|s| s.parse_ssh_targets().into_iter().map(|t| (t.host, t.port, t.via)).collect())
                 .unwrap_or_default();
             let do_ssh = should_probe("ssh") && !ssh_targets_owned.is_empty();
@@ -187,7 +190,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             };
 
             // Probe 5: Deploy agent HTTP (reads health_endpoint from servers.yaml)
-            let health_url = server.and_then(|s| s.health_endpoint.clone());
+            let health_url = server.as_ref().and_then(|s| s.health_endpoint.clone());
             let do_agent = should_probe("deploy_agent") && health_url.is_some();
             let agent_fut = async {
                 if !do_agent { return None; }
@@ -245,7 +248,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_os_diagnose" => {
             let OsDiagnoseArgs { target, checks } = serde_json::from_value(args)?;
 
-            let server = state.infra.get(&target);
+            let server: Option<missiond_core::InfraServer> = state.infra.read().unwrap().get(&target).cloned();
             if server.is_none() && !target.contains('@') && !target.contains('.') {
                 return Ok(ToolResult::error(format!("Server not found in infra registry: {}", target)));
             }

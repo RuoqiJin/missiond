@@ -93,7 +93,8 @@ pub(crate) struct AppState {
     pub(crate) pty: Arc<PTYManager>,
     pub(crate) cc_tasks: Arc<Mutex<CCTasksWatcher>>,
     pub(crate) skills: Arc<SkillIndex>,
-    pub(crate) infra: Arc<InfraConfig>,
+    pub(crate) infra: Arc<std::sync::RwLock<InfraConfig>>,
+    pub(crate) infra_path: std::path::PathBuf,
     /// JSONL session UUIDs belonging to PTY-managed slots.
     /// White-list: any session_id NOT in this set is a user CLI session.
     pub(crate) pty_session_uuids: Arc<tokio::sync::RwLock<HashSet<String>>>,

@@ -144,6 +144,151 @@ pub fn hybrid_search(
     results
 }
 
+// ── Temporal Decay ───────────────────────────────────────────────
+
+/// Half-life (in days) for temporal decay by KB category.
+/// Shorter = decays faster. 0 = no decay (evergreen).
+pub fn category_half_life(category: &str) -> f64 {
+    match category {
+        "memory:debug" => 14.0,
+        "memory:bugfix" => 30.0,
+        "memory:ops" => 21.0,
+        "memory:feature" => 90.0,
+        "memory:decision" => 180.0,
+        "memory" => 60.0,
+        // Evergreen categories: very long half-life (effectively no decay)
+        "preference" | "policy:decision" | "architecture" | "memory:architecture" => 0.0,
+        "project" => 90.0,
+        _ => 60.0,
+    }
+}
+
+/// Temporal decay factor: exp(-ln2 / half_life * age_days).
+/// Returns 1.0 for evergreen categories (half_life == 0).
+pub fn temporal_decay(category: &str, age_days: f64) -> f64 {
+    let half_life = category_half_life(category);
+    if half_life <= 0.0 || age_days <= 0.0 {
+        return 1.0;
+    }
+    (-std::f64::consts::LN_2 / half_life * age_days).exp()
+}
+
+// ── MMR (Maximal Marginal Relevance) ────────────────────────────
+
+/// Token Jaccard similarity between two strings (split on whitespace + CJK chars).
+fn token_jaccard(a: &str, b: &str) -> f64 {
+    use std::collections::HashSet;
+    let tokenize = |s: &str| -> HashSet<String> {
+        let mut tokens = HashSet::new();
+        for word in s.split(|c: char| c.is_whitespace() || c == '→' || c == '|' || c == ':') {
+            let w = word.trim();
+            if !w.is_empty() {
+                tokens.insert(w.to_lowercase());
+            }
+        }
+        tokens
+    };
+    let a_tokens = tokenize(a);
+    let b_tokens = tokenize(b);
+    if a_tokens.is_empty() || b_tokens.is_empty() {
+        return 0.0;
+    }
+    let intersection = a_tokens.intersection(&b_tokens).count() as f64;
+    let union = a_tokens.union(&b_tokens).count() as f64;
+    intersection / union
+}
+
+/// MMR greedy selection: balance relevance (score) vs diversity (dissimilarity to selected).
+/// lambda=1.0 → pure relevance, lambda=0.0 → pure diversity.
+pub fn mmr_rerank(
+    candidates: &[(usize, f64, String)], // (original_index, score, summary_text)
+    top_k: usize,
+    lambda: f64,
+) -> Vec<usize> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let mut selected: Vec<usize> = Vec::new(); // indices into candidates
+    let mut remaining: Vec<usize> = (0..candidates.len()).collect();
+
+    // Always pick the highest-scored first
+    selected.push(0);
+    remaining.retain(|&i| i != 0);
+
+    while selected.len() < top_k && !remaining.is_empty() {
+        let mut best_idx = 0;
+        let mut best_mmr = f64::NEG_INFINITY;
+
+        for &ri in &remaining {
+            let relevance = candidates[ri].1;
+            // Max similarity to any already-selected entry
+            let max_sim = selected.iter()
+                .map(|&si| token_jaccard(&candidates[ri].2, &candidates[si].2))
+                .fold(0.0_f64, f64::max);
+            let mmr = lambda * relevance - (1.0 - lambda) * max_sim;
+            if mmr > best_mmr {
+                best_mmr = mmr;
+                best_idx = ri;
+            }
+        }
+
+        selected.push(best_idx);
+        remaining.retain(|&i| i != best_idx);
+    }
+
+    // Return original indices
+    selected.iter().map(|&i| candidates[i].0).collect()
+}
+
+/// MMR greedy selection using embedding cosine similarity for true semantic diversity.
+/// candidates: (original_index, normalized_score [0..1], embedding_vector)
+pub fn mmr_rerank_cosine(
+    candidates: &[(usize, f64, Vec<f32>)],
+    top_k: usize,
+    lambda: f64,
+) -> Vec<usize> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let mut selected: Vec<usize> = Vec::new(); // indices into candidates
+    let mut remaining: Vec<usize> = (0..candidates.len()).collect();
+
+    // Always pick the highest-scored first
+    selected.push(0);
+    remaining.retain(|&i| i != 0);
+
+    while selected.len() < top_k && !remaining.is_empty() {
+        let mut best_idx = 0;
+        let mut best_mmr = f64::NEG_INFINITY;
+
+        for &ri in &remaining {
+            let relevance = candidates[ri].1;
+            let ri_emb = &candidates[ri].2;
+            // Max cosine similarity to any already-selected entry
+            let max_sim = if ri_emb.is_empty() {
+                0.0
+            } else {
+                selected.iter()
+                    .map(|&si| {
+                        let si_emb = &candidates[si].2;
+                        if si_emb.is_empty() { 0.0 } else { cosine_similarity(ri_emb, si_emb) as f64 }
+                    })
+                    .fold(0.0_f64, f64::max)
+            };
+            let mmr = lambda * relevance - (1.0 - lambda) * max_sim;
+            if mmr > best_mmr {
+                best_mmr = mmr;
+                best_idx = ri;
+            }
+        }
+
+        selected.push(best_idx);
+        remaining.retain(|&i| i != best_idx);
+    }
+
+    selected.iter().map(|&i| candidates[i].0).collect()
+}
+
 /// Convert raw bytes (little-endian) to Vec<f32>
 pub fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
     bytes
