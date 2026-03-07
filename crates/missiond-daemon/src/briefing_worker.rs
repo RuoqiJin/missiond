@@ -1,0 +1,295 @@
+//! Briefing Worker — async semantic summarization pipeline.
+//!
+//! Generates semantic summaries for timeline entries with long conversation messages,
+//! replacing the mechanical 200-char truncation preview.
+//!
+//! Architecture: hybrid event-driven + polling.
+//! - Event-driven: woken by `briefing_notify` when a long message is logged.
+//! - Polling: fallback 120s sweep for missed/backfill entries.
+//! - DB as reliable queue: entries with `summary == preview` are pending.
+//!
+//! Rate limiting: ~1 req/60s to stay within MiniMax Coding Plan (300 prompts/5h).
+//! Thinking messages use static rules (no LLM) to save ~1/3 quota.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Result;
+use tracing::{debug, info, warn};
+
+use crate::event_bus::DaemonEvent;
+use crate::minimax_client::MiniMaxClient;
+use crate::state::AppState;
+
+/// Minimum content length (chars) to trigger briefing.
+const MIN_CONTENT_CHARS: usize = 300;
+
+/// Batch size per poll cycle.
+const BATCH_SIZE: usize = 10;
+
+/// Poll interval when idle (no pending entries).
+const IDLE_INTERVAL_SECS: u64 = 120;
+
+/// Delay between MiniMax API calls.
+/// 300 prompts/5h = 1 per minute. Use 60s to stay safely within quota.
+const INTER_CALL_DELAY_SECS: u64 = 60;
+
+/// Result of processing a single entry.
+enum ProcessResult {
+    /// No processing done (content too short, not found, etc.)
+    Skipped,
+    /// Processed using a static rule or local logic (no API call).
+    Local,
+    /// Processed using MiniMax LLM API call.
+    Llm,
+}
+
+/// Process a single timeline entry: fetch full content, generate summary, update DB.
+async fn process_entry(
+    client: &MiniMaxClient,
+    state: &AppState,
+    seq: i64,
+    event_type: &str,
+    payload: &str,
+) -> Result<ProcessResult> {
+    let db = state.mission.db();
+
+    // Thinking messages: static rule, no LLM call needed
+    if event_type == "thinking_message" {
+        let preview = serde_json::from_str::<serde_json::Value>(payload)
+            .ok()
+            .and_then(|v| v.get("preview").and_then(|p| p.as_str()).map(String::from));
+        let summary = match preview {
+            Some(p) if !p.is_empty() => {
+                // Take first sentence or first 80 chars
+                let first_sentence_end = p.find('。')
+                    .or_else(|| p.find('.'))
+                    .map(|i| i + 1)
+                    .unwrap_or(p.len().min(80));
+                let s: String = p.chars().take(first_sentence_end).collect();
+                format!("[思考] {}", s)
+            }
+            _ => "[思考] ...".to_string(),
+        };
+        db.update_timeline_summary(seq, &summary)?;
+        state.event_bus.publish(DaemonEvent::BriefingSummaryGenerated {
+            target_seq: seq, summary: summary.clone(), method: "static_rule".into(),
+        });
+        debug!(seq, "Briefing: thinking message — static rule");
+        return Ok(ProcessResult::Local);
+    }
+
+    // Skip tool-only messages (preview is "[ToolName]" pattern) — no useful text to summarize
+    let preview = serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| v.get("preview").and_then(|p| p.as_str()).map(String::from))
+        .unwrap_or_default();
+    if preview.starts_with('[') && preview.ends_with(']') && !preview.contains(' ') {
+        // Mark as summarized with the tool name to prevent infinite retry
+        db.update_timeline_summary(seq, &preview)?;
+        state.event_bus.publish(DaemonEvent::BriefingSummaryGenerated {
+            target_seq: seq, summary: preview.clone(), method: "tool_skip".into(),
+        });
+        debug!(seq, preview = %preview, "Briefing: tool-only message, keeping as-is");
+        return Ok(ProcessResult::Local);
+    }
+
+    // Extract message_id from payload to fetch full content
+    let payload_json: serde_json::Value = serde_json::from_str(payload)
+        .unwrap_or(serde_json::Value::Null);
+
+    let message_id = payload_json.get("message_id")
+        .and_then(|v| v.as_i64());
+
+    let full_content = if let Some(msg_id) = message_id {
+        db.get_conversation_message_by_id(msg_id)
+            .ok()
+            .flatten()
+            .map(|m| m.content)
+    } else {
+        None
+    };
+
+    let text = match full_content {
+        Some(ref c) if c.len() >= MIN_CONTENT_CHARS => c.as_str(),
+        _ => {
+            debug!(seq, "Briefing: content too short or not found, skipping");
+            return Ok(ProcessResult::Skipped);
+        }
+    };
+
+    // Truncate by lines (not chars) to avoid breaking code blocks
+    let input_text = truncate_by_lines(text, 2000, 1000);
+
+    // Role-specific prompt
+    let prompt = match event_type {
+        "user_message" => format!(
+            "请用一句话(50字以内)提取用户的核心诉求或问题。直接输出，不要前缀。\n\n{}",
+            input_text
+        ),
+        "assistant_message" => format!(
+            "请简要总结AI的核心结论或方案。提炼1-2个要点，不超过100字。直接输出，不要前缀。\n\n{}",
+            input_text
+        ),
+        _ => format!(
+            "请用不超过100字简洁总结以下内容的核心要点。直接输出，不要前缀。\n\n{}",
+            input_text
+        ),
+    };
+
+    let max_chars = match event_type {
+        "user_message" => 50,
+        _ => 100,
+    };
+
+    let messages = vec![crate::minimax_client::ChatMessage {
+        role: "user".to_string(),
+        content: prompt,
+    }];
+    let summary = client.chat(&messages, Some(300)).await?;
+
+    if summary.is_empty() {
+        warn!(seq, "Briefing: empty summary from MiniMax");
+        return Ok(ProcessResult::Skipped);
+    }
+
+    // Truncate to limit, preferring sentence boundaries
+    let summary = truncate_at_boundary(&summary, max_chars + 30);
+
+    db.update_timeline_summary(seq, &summary)?;
+    state.event_bus.publish(DaemonEvent::BriefingSummaryGenerated {
+        target_seq: seq, summary: summary.clone(), method: "minimax".into(),
+    });
+    info!(seq, chars = summary.len(), event_type, "Briefing: summary updated");
+
+    Ok(ProcessResult::Llm)
+}
+
+/// Truncate text by lines: take first N + last M chars worth of lines.
+fn truncate_by_lines(text: &str, head_chars: usize, tail_chars: usize) -> String {
+    if text.len() <= head_chars + tail_chars + 100 {
+        return text.to_string();
+    }
+    let lines: Vec<&str> = text.lines().collect();
+
+    // Head: accumulate lines until head_chars
+    let mut head = Vec::new();
+    let mut head_len = 0;
+    for line in &lines {
+        if head_len + line.len() > head_chars && !head.is_empty() {
+            break;
+        }
+        head.push(*line);
+        head_len += line.len() + 1;
+    }
+
+    // Tail: accumulate lines from end until tail_chars
+    let mut tail = Vec::new();
+    let mut tail_len = 0;
+    for line in lines.iter().rev() {
+        if tail_len + line.len() > tail_chars && !tail.is_empty() {
+            break;
+        }
+        tail.push(*line);
+        tail_len += line.len() + 1;
+    }
+    tail.reverse();
+
+    format!("{}\n...\n{}", head.join("\n"), tail.join("\n"))
+}
+
+/// Truncate at a natural boundary (sentence-ending punctuation).
+fn truncate_at_boundary(text: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+    // Look for last sentence boundary within limit
+    let window: String = chars[..max_chars].iter().collect();
+    for boundary in ['。', '.', '；', ';', '！', '!', '？', '?'] {
+        if let Some(pos) = window.rfind(boundary) {
+            if pos > max_chars / 2 {
+                return window[..=pos].to_string();
+            }
+        }
+    }
+    // No good boundary — hard truncate
+    format!("{}...", &window[..window.len().min(max_chars - 3)])
+}
+
+/// Spawn the briefing worker as a hybrid event-driven + polling background task.
+pub(crate) fn spawn_briefing_worker(state: Arc<AppState>) {
+    let api_key = match crate::minimax_client::load_api_key() {
+        Some(key) => key,
+        None => {
+            warn!("Briefing worker: MiniMax API key not found, worker disabled");
+            return;
+        }
+    };
+
+    let client = MiniMaxClient::new(api_key);
+    let notify = Arc::clone(&state.briefing_notify);
+
+    tokio::spawn(async move {
+        info!("Briefing worker started (hybrid event+poll, rate: 1/{INTER_CALL_DELAY_SECS}s)");
+
+        // Initial delay to let the daemon stabilize
+        tokio::time::sleep(Duration::from_secs(30)).await;
+
+        loop {
+            // Hybrid wait: wake on event OR timeout
+            tokio::select! {
+                _ = notify.notified() => {
+                    debug!("Briefing worker: woken by event");
+                }
+                _ = tokio::time::sleep(Duration::from_secs(IDLE_INTERVAL_SECS)) => {
+                    debug!("Briefing worker: poll sweep");
+                }
+            }
+
+            let pending = match state.mission.db().find_timeline_needing_briefing(MIN_CONTENT_CHARS, BATCH_SIZE) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(error = %e, "Briefing worker: DB query failed");
+                    tokio::time::sleep(Duration::from_secs(IDLE_INTERVAL_SECS)).await;
+                    continue;
+                }
+            };
+
+            if pending.is_empty() {
+                continue;
+            }
+
+            let batch_size = pending.len();
+            state.event_bus.publish(DaemonEvent::BriefingBatchStarted {
+                pending_count: batch_size,
+            });
+            let mut processed = 0;
+            let mut llm_calls = 0;
+
+            for (seq, event_type, payload, _summary) in &pending {
+                match process_entry(&client, &state, *seq, event_type, payload).await {
+                    Ok(ProcessResult::Llm) => {
+                        processed += 1;
+                        llm_calls += 1;
+                        // Rate limit only for actual LLM API calls
+                        tokio::time::sleep(Duration::from_secs(INTER_CALL_DELAY_SECS)).await;
+                    }
+                    Ok(ProcessResult::Local) => {
+                        processed += 1;
+                        // No delay for static rules / tool skips
+                    }
+                    Ok(ProcessResult::Skipped) => {}
+                    Err(e) => {
+                        warn!(seq, error = %e, "Briefing worker: processing failed");
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    }
+                }
+            }
+
+            if processed > 0 {
+                info!(processed, llm_calls, batch_size, "Briefing worker: batch completed");
+            }
+        }
+    });
+}

@@ -31,6 +31,22 @@ pub fn extract_visible_text(content: &Value) -> String {
     }
 }
 
+/// Extract tool names from content blocks (for tool_use preview on timeline).
+pub fn extract_tool_names(content: &Value) -> Vec<String> {
+    match content {
+        Value::Array(arr) => arr.iter()
+            .filter_map(|item| {
+                if item.get("type")?.as_str()? == "tool_use" {
+                    item.get("name")?.as_str().map(String::from)
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        _ => vec![],
+    }
+}
+
 pub fn extract_text_content(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),

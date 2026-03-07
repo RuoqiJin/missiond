@@ -1190,6 +1190,63 @@ impl MissionDB {
         Ok(deleted)
     }
 
+    /// Find timeline entries that need semantic summary generation.
+    /// Returns (seq, event_type, payload, summary) for entries where summary is
+    /// the mechanical preview (from message_handler) and content is long enough
+    /// to benefit from semantic summarization.
+    pub fn find_timeline_needing_briefing(&self, min_content_chars: usize, limit: usize) -> DbResult<Vec<(i64, String, String, Option<String>)>> {
+        let conn = self.read_conn();
+        // Target: conversation messages (user/assistant/thinking) with long content
+        // that still have the mechanical preview (or NULL summary).
+        // Use payload.content_chars to filter long messages.
+        let mut stmt = conn.prepare(
+            "SELECT seq, event_type, payload, summary FROM system_timeline
+             WHERE event_type IN ('user_message', 'assistant_message', 'thinking_message')
+               AND json_extract(payload, '$.content_chars') > ?1
+               AND (summary IS NULL OR summary = json_extract(payload, '$.preview'))
+             ORDER BY seq DESC LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![min_content_chars as i64, limit as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Update the summary column for a timeline entry (used by briefing worker).
+    pub fn update_timeline_summary(&self, seq: i64, summary: &str) -> DbResult<bool> {
+        let conn = self.conn();
+        let updated = conn.execute(
+            "UPDATE system_timeline SET summary = ?1 WHERE seq = ?2",
+            rusqlite::params![summary, seq],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// Fetch briefing summaries for a session's conversation messages.
+    /// Returns a map of message_id → summary from system_timeline where the
+    /// summary differs from the raw preview (i.e., a semantic summary exists).
+    pub fn get_briefing_summaries_for_session(&self, session_id: &str) -> DbResult<std::collections::HashMap<i64, String>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT json_extract(payload, '$.message_id'), summary
+             FROM system_timeline
+             WHERE event_type IN ('user_message', 'assistant_message', 'thinking_message')
+               AND json_extract(payload, '$.session_id') = ?1
+               AND summary IS NOT NULL
+               AND summary != json_extract(payload, '$.preview')"
+        )?;
+        let mut map = std::collections::HashMap::new();
+        let rows = stmt.query_map(rusqlite::params![session_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            if let Ok((msg_id, summary)) = row {
+                map.insert(msg_id, summary);
+            }
+        }
+        Ok(map)
+    }
+
     // ── L3: Timeline Query Methods ──
 
     /// Filtered timeline query with optional event_type, trace_id, time range, and pagination.
@@ -1415,9 +1472,12 @@ impl MissionDB {
         Ok(rows)
     }
 
-    /// Parse relative time strings like "1h", "24h", "7d" into SQLite datetime expressions.
+    /// Parse relative time strings like "10min", "1h", "24h", "7d" into SQLite datetime expressions.
     fn parse_relative_time(s: &str) -> String {
         let s = s.trim();
+        if let Some(mins) = s.strip_suffix("min").and_then(|v| v.parse::<i64>().ok()) {
+            return format!("{}", (chrono::Utc::now() - chrono::Duration::minutes(mins)).format("%Y-%m-%d %H:%M:%S"));
+        }
         if let Some(hours) = s.strip_suffix('h').and_then(|v| v.parse::<i64>().ok()) {
             return format!("{}", (chrono::Utc::now() - chrono::Duration::hours(hours)).format("%Y-%m-%d %H:%M:%S"));
         }

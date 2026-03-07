@@ -23,6 +23,13 @@ pub(crate) fn handle_new_messages(
     let is_slot_session = slot_id.is_some();
     let source = if is_pty { "pty_jsonl" } else { "claude_cli" };
 
+    // Extract parent session ID for subagent conversations (needed for role mapping + event payload)
+    let parent_session_id = if session_id.starts_with("agent-") {
+        missiond_core::db::extract_parent_session_id(&jsonl_path)
+    } else {
+        None
+    };
+
     // Ensure conversation exists; re-activate if completed
     let existing_conv = db.get_conversation(&session_id).unwrap_or(None);
     if let Some(ref conv) = existing_conv {
@@ -36,12 +43,6 @@ pub(crate) fn handle_new_messages(
     }
     if existing_conv.is_none() {
         let first = messages.first();
-        // Extract parent session ID for subagent conversations
-        let parent_session_id = if session_id.starts_with("agent-") {
-            missiond_core::db::extract_parent_session_id(&jsonl_path)
-        } else {
-            None
-        };
         let conv = missiond_core::types::Conversation {
             id: session_id.clone(),
             project: Some(first.map(|m| m.cwd.clone()).unwrap_or(project_path)),
@@ -50,7 +51,7 @@ pub(crate) fn handle_new_messages(
             model: first.and_then(|m| m.message.model.clone()),
             git_branch: first.and_then(|m| m.git_branch.clone()),
             jsonl_path: Some(jsonl_path),
-            parent_session_id,
+            parent_session_id: parent_session_id.clone(),
             task_id: None,
             message_count: 0,
             started_at: first
@@ -103,6 +104,9 @@ pub(crate) fn handle_new_messages(
             } else if msg.message.role == "user" && is_slot_session {
                 // Slot sessions: "user" messages are daemon-sent system prompts, not the human
                 "system".to_string()
+            } else if msg.message.role == "user" && parent_session_id.is_some() {
+                // Sub-agent sessions: "user" messages are parent agent prompts, not the human
+                "agent_user".to_string()
             } else {
                 msg.message.role.clone()
             };
@@ -126,31 +130,57 @@ pub(crate) fn handle_new_messages(
         Ok(inserted_ids) if !inserted_ids.is_empty() => {
             info!(session = %session_id, count = inserted_ids.len(), "Logged conversation messages");
 
-            // Emit timeline events for user/assistant messages with visible text.
-            // Match inserted DB IDs back to original JSONL messages for text-only preview.
+            // Emit timeline events for conversation messages.
+            // Match inserted DB IDs back to original JSONL messages for preview.
             if !is_pty {
                 for &msg_id in &inserted_ids {
                     if let Ok(Some(db_msg)) = db.get_conversation_message_by_id(msg_id) {
-                        if db_msg.role != "user" && db_msg.role != "assistant" { continue; }
-                        // Find original JSONL message to extract visible-only text
-                        let visible_text = messages.iter()
-                            .find(|m| db_msg.message_uuid.as_deref() == Some(&m.uuid))
-                            .map(|m| events_sync::extract_visible_text(&m.message.content))
-                            .unwrap_or_default();
-                        if visible_text.is_empty() { continue; } // skip pure tool_use messages
-                        let preview = if visible_text.len() > 200 {
-                            let mut end = 200;
-                            while end > 0 && !visible_text.is_char_boundary(end) { end -= 1; }
-                            format!("{}...", &visible_text[..end])
+                        if !matches!(db_msg.role.as_str(), "user" | "assistant" | "thinking") { continue; }
+
+                        // Find original JSONL message
+                        let orig_msg = messages.iter()
+                            .find(|m| db_msg.message_uuid.as_deref() == Some(&m.uuid));
+
+                        // Build preview based on role
+                        let preview = if db_msg.role == "thinking" {
+                            // Thinking: use first 200 chars of content
+                            let text = &db_msg.content;
+                            if text.len() > 200 {
+                                let mut end = 200;
+                                while end > 0 && !text.is_char_boundary(end) { end -= 1; }
+                                format!("{}...", &text[..end])
+                            } else {
+                                text.clone()
+                            }
                         } else {
-                            visible_text
+                            // User/Assistant: prefer visible text, fallback to tool names
+                            let visible_text = orig_msg
+                                .map(|m| events_sync::extract_visible_text(&m.message.content))
+                                .unwrap_or_default();
+                            if visible_text.is_empty() {
+                                // Try tool names for assistant tool_use or user tool_result
+                                let tool_names = orig_msg
+                                    .map(|m| events_sync::extract_tool_names(&m.message.content))
+                                    .unwrap_or_default();
+                                if tool_names.is_empty() { continue; }
+                                format!("[{}]", tool_names.join(", "))
+                            } else if visible_text.len() > 200 {
+                                let mut end = 200;
+                                while end > 0 && !visible_text.is_char_boundary(end) { end -= 1; }
+                                format!("{}...", &visible_text[..end])
+                            } else {
+                                visible_text
+                            }
                         };
+
+                        let content_chars = db_msg.content.len();
                         state.event_bus.publish_traced(
                             DaemonEvent::ConversationMessageLogged {
                                 message_id: msg_id,
                                 session_id: session_id.clone(),
+                                parent_session_id: parent_session_id.clone(),
                                 role: db_msg.role.clone(),
-                                content_chars: db_msg.content.len(),
+                                content_chars,
                                 preview,
                             },
                             TraceContext {
@@ -158,6 +188,10 @@ pub(crate) fn handle_new_messages(
                                 ..Default::default()
                             },
                         );
+                        // Wake briefing worker for long messages
+                        if content_chars > 300 {
+                            state.briefing_notify.notify_one();
+                        }
                     }
                 }
             }

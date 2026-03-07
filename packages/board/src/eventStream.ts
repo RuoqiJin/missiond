@@ -103,6 +103,19 @@ function handleEvent(
       debouncedBump(set, 'timelineVersion');
       break;
 
+    case 'briefing_batch_started':
+      debouncedBump(set, 'timelineVersion');
+      break;
+
+    case 'briefing_summary_generated':
+      // In-place cache update: dispatch CustomEvent so timeline can update without refetch
+      if (typeof window !== 'undefined' && event.payload) {
+        window.dispatchEvent(new CustomEvent('timeline-summary-update', {
+          detail: { target_seq: event.payload.target_seq, summary: event.payload.summary },
+        }));
+      }
+      break;
+
     case 'resync':
       // Server says we missed events — bump all versions to force refetch
       debouncedBump(set, 'slotVersion', 0);

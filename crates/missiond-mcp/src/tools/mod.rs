@@ -110,6 +110,7 @@ mod slot;
 mod question;
 mod power;
 mod timeline;
+mod minimax;
 
 /// Generate all tool definitions
 pub fn all_tools() -> Vec<ToolDefinition> {
@@ -131,6 +132,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
     tools.extend(question::definitions());
     tools.extend(power::definitions());
     tools.extend(timeline::definitions());
+    tools.extend(minimax::definitions());
     tools
 }
 

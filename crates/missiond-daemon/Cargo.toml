@@ -38,6 +38,7 @@ notify = { workspace = true }
 missiond-core = { workspace = true }
 missiond-mcp = { workspace = true }
 sha2 = "0.10.9"
+base64 = { workspace = true }
 
 [lints]
 workspace = true

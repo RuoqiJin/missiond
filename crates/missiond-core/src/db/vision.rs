@@ -70,6 +70,19 @@ impl MissionDB {
         Ok(results)
     }
 
+    /// Mark a message's images as permanently failed by replacing `[图片: ` with `[图片(解析失败): `.
+    /// Returns true if any replacement was made.
+    pub fn mark_vision_permanently_failed(&self, message_id: i64) -> DbResult<bool> {
+        let conn = self.conn();
+        let affected = conn.execute(
+            "UPDATE conversation_messages
+             SET content = REPLACE(content, '[图片: ', '[图片(解析失败): ')
+             WHERE id = ?1 AND content LIKE '%[图片: %'",
+            params![message_id],
+        )?;
+        Ok(affected > 0)
+    }
+
     /// Count of image_descriptions cache entries.
     pub fn image_description_count(&self) -> DbResult<i64> {
         let conn = self.read_conn();

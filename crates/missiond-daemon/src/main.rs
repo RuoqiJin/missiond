@@ -27,6 +27,7 @@ mod vision_worker;
 mod slot_env;
 mod claude_md_sync;
 mod context_budget;
+mod codex_cli;
 mod gemini_client;
 mod gemini_cli;
 mod message_handler;
@@ -36,6 +37,8 @@ mod prompts;
 mod session_util;
 mod timeline_analyst;
 mod git_watcher;
+mod minimax_client;
+mod briefing_worker;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -768,6 +771,7 @@ async fn main() -> Result<()> {
         db_exec,
         stats: Arc::clone(&daemon_stats),
         prompts: Arc::new(prompts::PromptStore::load()),
+        briefing_notify: Arc::new(tokio::sync::Notify::new()),
     };
 
     // Auto-spawn slots with auto_start: true
@@ -1244,6 +1248,32 @@ async fn main() -> Result<()> {
                                 warn!(error = %e, "Gemini log: failed to update completed");
                             }
                         }
+                        // Codex CLI events — reuse gemini_requests table
+                        event_bus::DaemonEvent::CodexRequestStarted {
+                            request_id, caller, model, prompt_chars, prompt_text, ..
+                        } => {
+                            if let Err(e) = log_db.db().gemini_log_insert_started(
+                                request_id, caller, None,
+                                model, *prompt_chars as i64,
+                                prompt_text.as_deref(),
+                            ) {
+                                warn!(error = %e, "Codex log: failed to insert started");
+                            }
+                        }
+                        event_bus::DaemonEvent::CodexRequestCompleted {
+                            request_id, response_chars, duration_ms,
+                            status, error_msg, response_text, ..
+                        } => {
+                            if let Err(e) = log_db.db().gemini_log_update_completed(
+                                request_id, "codex-cli",
+                                *response_chars as i64, 0,
+                                *duration_ms as i64, 0,
+                                status, error_msg.as_deref(),
+                                response_text.as_deref(),
+                            ) {
+                                warn!(error = %e, "Codex log: failed to update completed");
+                            }
+                        }
                         _ => {}
                     },
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -1260,6 +1290,9 @@ async fn main() -> Result<()> {
 
     // --- Vision Worker: async image understanding pipeline ---
     vision_worker::spawn_vision_worker(Arc::new(state.clone()));
+
+    // --- Briefing Worker: async semantic summarization via MiniMax M2.5 ---
+    briefing_worker::spawn_briefing_worker(Arc::new(state.clone()));
 
     // --- P0: IPC listener in dedicated task (never starved by other work) ---
     // Previously inside the main select! loop — a single slow branch (e.g. 120s PTY spawn)
