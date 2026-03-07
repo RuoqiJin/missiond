@@ -5,7 +5,7 @@ import {
   Search, RefreshCw, Sparkles, AlertTriangle,
   Zap, Brain, Wrench, ArrowRight, ChevronRight, ChevronDown,
   MessageSquare, GitBranch, GitCommit, Activity, Cpu, Settings2, User, Clock,
-  FileCode, Terminal, Eye, File, ArrowUp, ArrowDown,
+  FileCode, Terminal, Eye, File, ArrowUp, ArrowDown, BookOpen, Loader2,
 } from 'lucide-react';
 import { diffLines } from 'diff';
 import ReactMarkdown from 'react-markdown';
@@ -39,31 +39,40 @@ interface TimelineStats {
 
 // ── Constants ──────────────────────────────────────────────
 
+// Color scheme: each major category has a dedicated hue that never overlaps
+// Gemini = purple, GPT/Codex = lime, Commit = yellow, Chat = blue/teal, Board = indigo, System = slate
 const EVENT_COLORS: Record<string, { dot: string; bg: string; text: string; label: string; icon: React.ReactNode }> = {
-  slot_state_changed:       { dot: 'bg-slate-400',   bg: 'bg-slate-400/10',   text: 'text-slate-400',   label: 'Slot',     icon: <Settings2 className="w-3 h-3" /> },
-  task_lifecycle:           { dot: 'bg-blue-400',    bg: 'bg-blue-400/10',    text: 'text-blue-400',    label: 'Task',     icon: <Activity className="w-3 h-3" /> },
-  question_created:         { dot: 'bg-amber-400',   bg: 'bg-amber-400/10',   text: 'text-amber-400',   label: 'Question', icon: <MessageSquare className="w-3 h-3" /> },
-  gemini_request_started:   { dot: 'bg-purple-300',  bg: 'bg-purple-300/10',  text: 'text-purple-300',  label: 'Prompt',   icon: <Cpu className="w-3 h-3" /> },
-  gemini_request_completed: { dot: 'bg-purple-500',  bg: 'bg-purple-500/10',  text: 'text-purple-400',  label: 'Response', icon: <Cpu className="w-3 h-3" /> },
-  codex_request_started:    { dot: 'bg-sky-300',     bg: 'bg-sky-300/10',     text: 'text-sky-300',     label: 'GPT Req',  icon: <Zap className="w-3 h-3" /> },
-  codex_request_completed:  { dot: 'bg-sky-500',     bg: 'bg-sky-500/10',     text: 'text-sky-400',     label: 'GPT Resp', icon: <Zap className="w-3 h-3" /> },
-  decision_made:            { dot: 'bg-orange-400',  bg: 'bg-orange-400/10',  text: 'text-orange-400',  label: 'Decision', icon: <GitBranch className="w-3 h-3" /> },
-  question_resolved:        { dot: 'bg-amber-300',   bg: 'bg-amber-300/10',   text: 'text-amber-300',   label: 'Resolved', icon: <MessageSquare className="w-3 h-3" /> },
-  memory_phase_changed:     { dot: 'bg-cyan-400',    bg: 'bg-cyan-400/10',    text: 'text-cyan-400',    label: 'Memory',   icon: <Brain className="w-3 h-3" /> },
-  board_task_created:       { dot: 'bg-indigo-400',  bg: 'bg-indigo-400/10',  text: 'text-indigo-400',  label: 'Created',  icon: <Activity className="w-3 h-3" /> },
-  board_task_status_changed:{ dot: 'bg-blue-400',    bg: 'bg-blue-400/10',    text: 'text-blue-400',    label: 'Status',   icon: <Activity className="w-3 h-3" /> },
-  board_task_note_added:    { dot: 'bg-sky-300',     bg: 'bg-sky-300/10',     text: 'text-sky-300',     label: 'Note',     icon: <MessageSquare className="w-3 h-3" /> },
-  board_task_claimed:       { dot: 'bg-teal-300',    bg: 'bg-teal-300/10',    text: 'text-teal-300',    label: 'Claimed',  icon: <Wrench className="w-3 h-3" /> },
-  board_task_deleted:       { dot: 'bg-red-400',     bg: 'bg-red-400/10',     text: 'text-red-400',     label: 'Deleted',  icon: <AlertTriangle className="w-3 h-3" /> },
-  board_task_updated:       { dot: 'bg-blue-300',    bg: 'bg-blue-300/10',    text: 'text-blue-300',    label: 'Board',    icon: <Activity className="w-3 h-3" /> },
-  insight_generated:        { dot: 'bg-emerald-400', bg: 'bg-emerald-400/10', text: 'text-emerald-400', label: 'Insight',  icon: <Sparkles className="w-3 h-3" /> },
-  git_commit:               { dot: 'bg-green-400',   bg: 'bg-green-400/10',   text: 'text-green-400',   label: 'Commit',   icon: <GitBranch className="w-3 h-3" /> },
-  user_message:             { dot: 'bg-blue-400',    bg: 'bg-blue-400/10',    text: 'text-blue-400',    label: 'User',     icon: <MessageSquare className="w-3 h-3" /> },
-  assistant_message:        { dot: 'bg-teal-400',    bg: 'bg-teal-400/10',    text: 'text-teal-400',    label: 'Assistant', icon: <Brain className="w-3 h-3" /> },
-  thinking_message:         { dot: 'bg-violet-400',  bg: 'bg-violet-400/10',  text: 'text-violet-400',  label: 'Thinking', icon: <Brain className="w-3 h-3" /> },
-  briefing_batch_started:   { dot: 'bg-rose-300',    bg: 'bg-rose-300/10',    text: 'text-rose-300',    label: 'Briefing', icon: <Sparkles className="w-3 h-3" /> },
-  briefing_summary_generated: { dot: 'bg-rose-400',  bg: 'bg-rose-400/10',    text: 'text-rose-400',    label: 'Summary',  icon: <Sparkles className="w-3 h-3" /> },
-  slot_task_dispatched:     { dot: 'bg-amber-400',   bg: 'bg-amber-400/10',   text: 'text-amber-400',   label: 'Dispatch', icon: <ArrowRight className="w-3 h-3" /> },
+  // ── Chat ──
+  user_message:             { dot: 'bg-blue-400',    bg: 'bg-blue-400/10',    text: 'text-blue-400',    label: 'User',      icon: <MessageSquare className="w-3 h-3" /> },
+  assistant_message:        { dot: 'bg-teal-400',    bg: 'bg-teal-400/10',    text: 'text-teal-400',    label: 'Assistant',  icon: <Brain className="w-3 h-3" /> },
+  thinking_message:         { dot: 'bg-violet-400',  bg: 'bg-violet-400/10',  text: 'text-violet-400',  label: 'Thinking',   icon: <Brain className="w-3 h-3" /> },
+  // ── Gemini (purple) ──
+  gemini_request_started:   { dot: 'bg-fuchsia-400', bg: 'bg-fuchsia-400/10', text: 'text-fuchsia-400', label: 'Gemini ▸',   icon: <Cpu className="w-3 h-3" /> },
+  gemini_request_completed: { dot: 'bg-fuchsia-500', bg: 'bg-fuchsia-500/10', text: 'text-fuchsia-400', label: 'Gemini ◂',   icon: <Cpu className="w-3 h-3" /> },
+  // ── GPT / Codex (lime-green) ──
+  codex_request_started:    { dot: 'bg-lime-400',    bg: 'bg-lime-400/10',    text: 'text-lime-400',    label: 'GPT ▸',      icon: <Zap className="w-3 h-3" /> },
+  codex_request_completed:  { dot: 'bg-lime-500',    bg: 'bg-lime-500/10',    text: 'text-lime-400',    label: 'GPT ◂',      icon: <Zap className="w-3 h-3" /> },
+  // ── Code (yellow) ──
+  git_commit:               { dot: 'bg-yellow-400',  bg: 'bg-yellow-400/10',  text: 'text-yellow-400',  label: 'Commit',     icon: <GitCommit className="w-3 h-3" /> },
+  // ── Flow ──
+  task_lifecycle:           { dot: 'bg-sky-400',     bg: 'bg-sky-400/10',     text: 'text-sky-400',     label: 'Task',       icon: <Activity className="w-3 h-3" /> },
+  question_created:         { dot: 'bg-amber-400',   bg: 'bg-amber-400/10',   text: 'text-amber-400',   label: 'Question',   icon: <MessageSquare className="w-3 h-3" /> },
+  question_resolved:        { dot: 'bg-amber-300',   bg: 'bg-amber-300/10',   text: 'text-amber-300',   label: 'Resolved',   icon: <MessageSquare className="w-3 h-3" /> },
+  decision_made:            { dot: 'bg-orange-400',  bg: 'bg-orange-400/10',  text: 'text-orange-400',  label: 'Decision',   icon: <GitBranch className="w-3 h-3" /> },
+  insight_generated:        { dot: 'bg-emerald-400', bg: 'bg-emerald-400/10', text: 'text-emerald-400', label: 'Insight',    icon: <Sparkles className="w-3 h-3" /> },
+  // ── Board (indigo) ──
+  board_task_created:       { dot: 'bg-indigo-400',  bg: 'bg-indigo-400/10',  text: 'text-indigo-400',  label: 'Created',    icon: <Activity className="w-3 h-3" /> },
+  board_task_status_changed:{ dot: 'bg-indigo-300',  bg: 'bg-indigo-300/10',  text: 'text-indigo-300',  label: 'Status',     icon: <Activity className="w-3 h-3" /> },
+  board_task_note_added:    { dot: 'bg-indigo-200',  bg: 'bg-indigo-200/10',  text: 'text-indigo-200',  label: 'Note',       icon: <MessageSquare className="w-3 h-3" /> },
+  board_task_claimed:       { dot: 'bg-indigo-500',  bg: 'bg-indigo-500/10',  text: 'text-indigo-400',  label: 'Claimed',    icon: <Wrench className="w-3 h-3" /> },
+  board_task_deleted:       { dot: 'bg-red-400',     bg: 'bg-red-400/10',     text: 'text-red-400',     label: 'Deleted',    icon: <AlertTriangle className="w-3 h-3" /> },
+  board_task_updated:       { dot: 'bg-indigo-300',  bg: 'bg-indigo-300/10',  text: 'text-indigo-300',  label: 'Board',      icon: <Activity className="w-3 h-3" /> },
+  // ── System (slate/cyan/rose) ──
+  slot_state_changed:       { dot: 'bg-slate-400',   bg: 'bg-slate-400/10',   text: 'text-slate-400',   label: 'Slot',       icon: <Settings2 className="w-3 h-3" /> },
+  memory_phase_changed:     { dot: 'bg-cyan-400',    bg: 'bg-cyan-400/10',    text: 'text-cyan-400',    label: 'Memory',     icon: <Brain className="w-3 h-3" /> },
+  briefing_batch_started:   { dot: 'bg-rose-300',    bg: 'bg-rose-300/10',    text: 'text-rose-300',    label: 'Briefing',   icon: <Sparkles className="w-3 h-3" /> },
+  briefing_summary_generated: { dot: 'bg-rose-400',  bg: 'bg-rose-400/10',    text: 'text-rose-400',    label: 'Summary',    icon: <Sparkles className="w-3 h-3" /> },
+  slot_task_dispatched:     { dot: 'bg-amber-400',   bg: 'bg-amber-400/10',   text: 'text-amber-400',   label: 'Dispatch',   icon: <ArrowRight className="w-3 h-3" /> },
 };
 
 // Slot color coding — fixed colors per slot for visual consistency
@@ -863,51 +872,6 @@ function MetaRow({ label, value, mono }: { label: string; value: string; mono?: 
   );
 }
 
-function ChatMessagePanel({ messageId }: { messageId: number }) {
-  const [content, setContent] = useState<{ role?: string; content?: string } | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState(false);
-
-  const load = useCallback(() => {
-    setExpanded(true);
-    setLoading(true);
-    setError(null);
-    fetch(`/api/system/conversation-message?message_id=${messageId}`)
-      .then(r => r.json())
-      .then(data => {
-        if (data.error) setError(data.error);
-        else setContent(data);
-      })
-      .catch(e => setError(String(e)))
-      .finally(() => setLoading(false));
-  }, [messageId]);
-
-  if (!expanded) {
-    return (
-      <button onClick={load} className="text-[10px] text-neutral-500 hover:text-neutral-300 transition-colors">
-        Show full content...
-      </button>
-    );
-  }
-  if (loading) return <div className="text-[11px] text-neutral-500 animate-pulse">Loading...</div>;
-  if (error) return <div className="text-[11px] text-red-400">Failed: {error}</div>;
-  if (!content?.content) return null;
-
-  const isUser = content.role === 'user';
-  return (
-    <div>
-      <div className="text-[9px] text-neutral-500 uppercase tracking-wider mb-1">Full Content (incl. tool calls)</div>
-      <pre className={cn(
-        'text-[11px] font-mono bg-neutral-900 rounded p-3 overflow-auto max-h-80 whitespace-pre-wrap break-words leading-relaxed',
-        isUser ? 'text-blue-300/80' : 'text-teal-300/80',
-      )}>
-        {content.content}
-      </pre>
-    </div>
-  );
-}
-
 function GeminiContentPanel({ requestId, isResponse }: { requestId: string; isResponse?: boolean }) {
   const [content, setContent] = useState<{ prompt_text?: string; response_text?: string } | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1418,9 +1382,11 @@ const MarkdownContent = memo(function MarkdownContent({ content }: { content: st
 // ── Tool Call Viewers (pluggable registry) ──────────────────
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const ToolViewers: Record<string, React.FC<{ input: any }>> = {
+const ToolViewers: Record<string, React.FC<{ input: any; block?: any }>> = {
   Edit: EditDiffViewer,
   Write: WriteSummaryViewer,
+  Skill: ToolResultViewer,
+  Read: ToolResultViewer,
 };
 
 /** Render content blocks from raw_content (text + tool_use interleaved) */
@@ -1482,6 +1448,7 @@ function ToolCallCard({ block }: { block: any }) {
     Read: <Eye className="w-3 h-3" />,
     Bash: <Terminal className="w-3 h-3" />,
     Grep: <Search className="w-3 h-3" />,
+    Skill: <BookOpen className="w-3 h-3" />,
   };
 
   return (
@@ -1497,7 +1464,7 @@ function ToolCallCard({ block }: { block: any }) {
       </div>
       {expanded && (
         <div className="bg-neutral-950">
-          {Viewer ? <Viewer input={input} /> : <FallbackToolViewer name={name} input={input} />}
+          {Viewer ? <Viewer input={input} block={block} /> : <FallbackToolViewer name={name} input={input} />}
         </div>
       )}
     </div>
@@ -1591,6 +1558,118 @@ function WriteSummaryViewer({ input }: { input: any }) {
         {content && <span className="text-neutral-600 ml-auto">{content.length} chars</span>}
       </div>
       <pre className="p-3 text-green-300/80 whitespace-pre-wrap break-all max-h-64 overflow-auto">{preview}{content && content.length > 500 ? '\n...' : ''}</pre>
+    </div>
+  );
+}
+
+/** Lazy-load tool result from audit_detail API, shared by Skill/Read viewers */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function ToolResultViewer({ input, block }: { input: any; block?: any }) {
+  const toolId: string | undefined = block?.id;
+  const [detail, setDetail] = useState<{ input?: unknown; output?: unknown } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [showResult, setShowResult] = useState(false);
+
+  const load = useCallback(() => {
+    if (!toolId || detail) return;
+    setLoading(true);
+    fetch(`/api/system/tool-call?id=${encodeURIComponent(toolId)}`)
+      .then(r => r.json())
+      .then(data => { if (!data.error) setDetail(data); })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [toolId, detail]);
+
+  // Extract readable text from tool result
+  const resultText = useMemo(() => {
+    if (!detail?.output) return '';
+    const out = detail.output;
+    if (typeof out === 'string') return out;
+    // Handle array of content blocks [{type:'text', text:'...'}]
+    if (Array.isArray(out)) {
+      return out
+        .filter((b: Record<string, unknown>) => b.type === 'text')
+        .map((b: Record<string, unknown>) => b.text)
+        .join('\n');
+    }
+    // Handle object with text/content field
+    if (typeof out === 'object' && out !== null) {
+      const o = out as Record<string, unknown>;
+      if (typeof o.text === 'string') return o.text;
+      if (typeof o.content === 'string') return o.content;
+      return JSON.stringify(out, null, 2);
+    }
+    return String(out);
+  }, [detail]);
+
+  const toolName = block?.name || 'Tool';
+  const isSkill = toolName === 'Skill';
+  const isRead = toolName === 'Read';
+
+  // For Skill: derive file path from skill name; for Read: use input.file_path
+  const displayPath = isSkill
+    ? (input?.skill ? `~/.claude/skills/${input.skill}/SKILL.md` : null)
+    : (input?.file_path?.replace(/^.*\/Projects\//, '~/Projects/') || input?.path || null);
+
+  return (
+    <div className="p-3 space-y-2">
+      {/* Input params */}
+      <div className="space-y-1">
+        {Object.entries(input || {}).filter(([, v]) => v != null).map(([k, v]) => {
+          const val = typeof v === 'string' ? v : JSON.stringify(v);
+          // Truncate long values in input display (e.g., Read's file_path is shown above)
+          const display = val.length > 200 ? val.slice(0, 200) + '...' : val;
+          return (
+            <div key={k} className="flex gap-2 text-[11px] font-mono">
+              <span className="text-neutral-500 shrink-0">{k}:</span>
+              <span className="text-neutral-300 break-all">{display}</span>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Derived path for Skill */}
+      {isSkill && displayPath && (
+        <div className="flex items-center gap-1.5 text-[11px] font-mono text-amber-400/80">
+          <BookOpen className="w-3 h-3" />
+          <span>{displayPath}</span>
+        </div>
+      )}
+
+      {/* Load result button / result content */}
+      {toolId && !showResult && (
+        <button
+          onClick={() => { setShowResult(true); load(); }}
+          className="text-[10px] text-teal-500 hover:text-teal-300 transition-colors flex items-center gap-1"
+        >
+          <Eye className="w-3 h-3" />
+          Show {isRead ? 'file content' : `${toolName} result`}
+        </button>
+      )}
+
+      {showResult && loading && (
+        <div className="flex items-center gap-1.5 text-[11px] text-neutral-500">
+          <Loader2 className="w-3 h-3 animate-spin" />
+          Loading...
+        </div>
+      )}
+
+      {showResult && resultText && (
+        <div className="border border-neutral-800 rounded overflow-hidden">
+          <div className="bg-neutral-900/60 px-2 py-1 flex items-center gap-1.5 text-[10px] text-neutral-400 border-b border-neutral-800">
+            {isRead ? <Eye className="w-3 h-3" /> : <BookOpen className="w-3 h-3" />}
+            <span className="font-mono truncate">{displayPath || 'Result'}</span>
+            <span className="text-neutral-600 ml-auto">{resultText.length} chars</span>
+          </div>
+          <pre className="p-2 text-[11px] font-mono text-neutral-300/80 whitespace-pre-wrap break-words max-h-80 overflow-auto leading-relaxed">
+            {resultText}
+          </pre>
+        </div>
+      )}
+
+      {showResult && !loading && !resultText && detail && (
+        <span className="text-[10px] text-neutral-500 italic">No result data</span>
+      )}
     </div>
   );
 }
