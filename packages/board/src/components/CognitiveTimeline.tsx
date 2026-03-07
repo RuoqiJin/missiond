@@ -1,13 +1,15 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react';
 import {
   Search, RefreshCw, Sparkles, AlertTriangle,
   Zap, Brain, Wrench, ArrowRight, ChevronRight, ChevronDown,
   MessageSquare, GitBranch, GitCommit, Activity, Cpu, Settings2, User, Clock,
-  FileCode, Terminal, Eye, File,
+  FileCode, Terminal, Eye, File, ArrowUp, ArrowDown,
 } from 'lucide-react';
 import { diffLines } from 'diff';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { cn } from '@/lib/utils';
 import { utcMs, formatBeijing, formatBeijingTime } from '@/lib/time';
 import { useEventInvalidation } from '../hooks/useEventStream';
@@ -61,10 +63,26 @@ const EVENT_COLORS: Record<string, { dot: string; bg: string; text: string; labe
   thinking_message:         { dot: 'bg-violet-400',  bg: 'bg-violet-400/10',  text: 'text-violet-400',  label: 'Thinking', icon: <Brain className="w-3 h-3" /> },
   briefing_batch_started:   { dot: 'bg-rose-300',    bg: 'bg-rose-300/10',    text: 'text-rose-300',    label: 'Briefing', icon: <Sparkles className="w-3 h-3" /> },
   briefing_summary_generated: { dot: 'bg-rose-400',  bg: 'bg-rose-400/10',    text: 'text-rose-400',    label: 'Summary',  icon: <Sparkles className="w-3 h-3" /> },
+  slot_task_dispatched:     { dot: 'bg-amber-400',   bg: 'bg-amber-400/10',   text: 'text-amber-400',   label: 'Dispatch', icon: <ArrowRight className="w-3 h-3" /> },
 };
+
+// Slot color coding — fixed colors per slot for visual consistency
+const SLOT_COLORS: Record<string, { badge: string; border: string }> = {
+  'slot-coder-1':      { badge: 'bg-blue-500/20 text-blue-300',    border: 'border-l-blue-400' },
+  'slot-coder-bypass': { badge: 'bg-indigo-500/20 text-indigo-300', border: 'border-l-indigo-400' },
+  'slot-deploy-1':     { badge: 'bg-orange-500/20 text-orange-300', border: 'border-l-orange-400' },
+  'slot-memory':       { badge: 'bg-cyan-500/20 text-cyan-300',    border: 'border-l-cyan-400' },
+  'slot-memory-slow':  { badge: 'bg-teal-500/20 text-teal-300',    border: 'border-l-teal-400' },
+};
+
+function getSlotColor(slotId: string | null) {
+  if (!slotId) return null;
+  return SLOT_COLORS[slotId] || { badge: 'bg-neutral-500/20 text-neutral-300', border: 'border-l-neutral-400' };
+}
 
 const SWIMLANES = [
   { id: 'chat',  label: 'Chat',      types: ['user_message', 'assistant_message', 'thinking_message'] },
+  { id: 'slot',  label: 'Slot',      types: ['slot_task_dispatched'] },
   { id: 'ai',    label: 'AI / LLM',  types: ['gemini_request_started', 'gemini_request_completed', 'decision_made', 'insight_generated'] },
   { id: 'gpt',   label: 'GPT',       types: ['codex_request_started', 'codex_request_completed'] },
   { id: 'code',  label: 'Code',      types: ['git_commit'] },
@@ -76,6 +94,7 @@ const SWIMLANES = [
 const QUICK_FILTERS = [
   { label: 'All', value: 'all' },
   { label: 'Chat', value: 'chat' },
+  { label: 'Slot', value: 'slot' },
   { label: 'Errors', value: 'errors' },
   { label: 'Insights', value: 'insights' },
   { label: 'Gemini', value: 'gemini' },
@@ -170,6 +189,7 @@ function eventSummary(ev: TimelineEvent): string {
     case 'board_task_updated': return `${p.title || ''} → ${p.status || ''}`;
     case 'briefing_batch_started': return `Briefing: ${p.pending_count || 0} pending`;
     case 'briefing_summary_generated': return `seq=${p.target_seq}: ${p.summary || ''}`;
+    case 'slot_task_dispatched': return `→ ${p.slot_id || ''} [${p.purpose || ''}] ${p.preview || ''}`;
     default: return ev.event_type;
   }
 }
@@ -321,6 +341,7 @@ export function CognitiveTimeline() {
     else if (quickFilter === 'insights') result = result.filter(e => e.event_type === 'insight_generated');
     else if (quickFilter === 'gemini') result = result.filter(e => e.event_type === 'gemini_request_completed' || e.event_type === 'gemini_request_started');
     else if (quickFilter === 'gpt') result = result.filter(e => e.event_type === 'codex_request_started' || e.event_type === 'codex_request_completed');
+    else if (quickFilter === 'slot') result = result.filter(e => e.event_type === 'slot_task_dispatched' || !!e.payload?.slot_id);
     return result;
   }, [events, quickFilter]);
 
@@ -768,7 +789,7 @@ export function CognitiveTimeline() {
 
             {/* Right: payload */}
             <div className="flex-1 p-3 overflow-y-auto min-w-0">
-              <EventPayload event={selectedEvent} />
+              <EventPayload event={selectedEvent} filteredEvents={filtered} onNavigate={(ev: TimelineEvent) => selectEvent(ev, 'list')} />
             </div>
           </div>
         ) : (
@@ -800,6 +821,10 @@ function EventMeta({ event }: { event: TimelineEvent }) {
       <div className="flex items-center gap-2">
         <div className={cn('w-3 h-3 rounded-full', ec.dot)} />
         <span className={cn('text-sm font-medium', ec.text)}>{ec.label}</span>
+        {event.payload?.slot_id && (() => {
+          const sc = getSlotColor(event.payload.slot_id);
+          return sc ? <span className={cn('text-[10px] px-1.5 py-0.5 rounded', sc.badge)}>{event.payload.slot_id}</span> : null;
+        })()}
         {hasError(event) && <AlertTriangle className="w-3 h-3 text-red-400" />}
       </div>
 
@@ -949,12 +974,38 @@ function GeminiContentPanel({ requestId, isResponse }: { requestId: string; isRe
   );
 }
 
-function EventPayload({ event }: { event: TimelineEvent }) {
+function EventPayload({ event, filteredEvents, onNavigate }: {
+  event: TimelineEvent;
+  filteredEvents: TimelineEvent[];
+  onNavigate: (ev: TimelineEvent) => void;
+}) {
   const [tab, setTab] = useState<'summary' | 'payload'>('summary');
+
+  const currentIndex = useMemo(
+    () => filteredEvents.findIndex(e => e.seq === event.seq),
+    [filteredEvents, event.seq],
+  );
+  const total = filteredEvents.length;
+  const hasPrev = currentIndex > 0;
+  const hasNext = currentIndex >= 0 && currentIndex < total - 1;
+
+  const goPrev = useCallback(() => { if (hasPrev) onNavigate(filteredEvents[currentIndex - 1]); }, [hasPrev, filteredEvents, currentIndex, onNavigate]);
+  const goNext = useCallback(() => { if (hasNext) onNavigate(filteredEvents[currentIndex + 1]); }, [hasNext, filteredEvents, currentIndex, onNavigate]);
+
+  // J/K and arrow key navigation
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement).tagName)) return;
+      if (e.key === 'j' || e.key === 'ArrowDown') { e.preventDefault(); goNext(); }
+      if (e.key === 'k' || e.key === 'ArrowUp') { e.preventDefault(); goPrev(); }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [goNext, goPrev]);
 
   return (
     <div className="flex flex-col h-full">
-      {/* Tabs */}
+      {/* Tabs + Navigation */}
       <div className="flex items-center gap-1 mb-3 border-b border-neutral-800 pb-2">
         <button
           onClick={() => setTab('summary')}
@@ -974,6 +1025,29 @@ function EventPayload({ event }: { event: TimelineEvent }) {
         >
           Payload
         </button>
+
+        {/* Navigation: prev / index / next */}
+        <div className="ml-auto flex items-center gap-1.5 text-[10px]">
+          <button
+            onClick={goPrev}
+            disabled={!hasPrev}
+            className="p-1 rounded hover:bg-neutral-800 disabled:opacity-30 text-neutral-400 hover:text-white transition-colors"
+            title="Previous (K / ↑)"
+          >
+            <ArrowUp className="w-3.5 h-3.5" />
+          </button>
+          <span className="text-neutral-500 font-mono tabular-nums min-w-[4ch] text-center">
+            {currentIndex >= 0 ? `${currentIndex + 1}/${total}` : '—'}
+          </span>
+          <button
+            onClick={goNext}
+            disabled={!hasNext}
+            className="p-1 rounded hover:bg-neutral-800 disabled:opacity-30 text-neutral-400 hover:text-white transition-colors"
+            title="Next (J / ↓)"
+          >
+            <ArrowDown className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto">
@@ -1070,12 +1144,12 @@ function ChatSummary({ event }: { event: TimelineEvent }) {
         </div>
       ) : displayText ? (
         <div className={cn(
-          'p-3 rounded-lg text-sm leading-relaxed whitespace-pre-wrap break-words max-h-96 overflow-auto',
+          'p-3 rounded-lg text-sm leading-relaxed max-h-[600px] overflow-auto',
           isUser
-            ? 'bg-blue-500/10 border border-blue-500/20 text-blue-100'
-            : 'bg-teal-500/10 border border-teal-500/20 text-teal-100',
+            ? 'bg-blue-500/10 border border-blue-500/20 text-blue-100 whitespace-pre-wrap break-words'
+            : 'bg-teal-500/10 border border-teal-500/20',
         )}>
-          {displayText}
+          {isUser ? displayText : <MarkdownContent content={displayText} />}
         </div>
       ) : null}
     </div>
@@ -1319,6 +1393,28 @@ function QuestionSummary({ event }: { event: TimelineEvent }) {
   );
 }
 
+// ── Markdown Renderer ───────────────────────────────────────
+
+const MarkdownContent = memo(function MarkdownContent({ content }: { content: string }) {
+  return (
+    <div className="prose prose-sm prose-invert max-w-none
+      prose-headings:text-teal-200 prose-headings:font-semibold prose-headings:mt-3 prose-headings:mb-1
+      prose-p:text-teal-100/90 prose-p:my-1.5 prose-p:leading-relaxed
+      prose-strong:text-teal-200 prose-em:text-teal-200/80
+      prose-li:text-teal-100/90 prose-li:my-0.5
+      prose-ul:my-1.5 prose-ol:my-1.5
+      prose-a:text-cyan-400 prose-a:no-underline hover:prose-a:underline
+      prose-code:text-amber-300 prose-code:bg-neutral-800 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-xs prose-code:before:content-none prose-code:after:content-none
+      prose-pre:bg-neutral-900 prose-pre:border prose-pre:border-neutral-800 prose-pre:rounded-md prose-pre:my-2
+      prose-blockquote:border-teal-500/30 prose-blockquote:text-teal-200/70
+      prose-hr:border-neutral-700
+      prose-table:text-xs prose-th:text-teal-300 prose-td:text-teal-100/80
+    ">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+    </div>
+  );
+});
+
 // ── Tool Call Viewers (pluggable registry) ──────────────────
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1354,8 +1450,8 @@ function ContentBlocksRenderer({ blocks }: { blocks: any[] }) {
         if (item.type === 'text') {
           const t = item as { type: 'text'; text: string };
           return (
-            <div key={i} className="p-3 rounded-lg text-sm leading-relaxed whitespace-pre-wrap break-words max-h-96 overflow-auto bg-teal-500/10 border border-teal-500/20 text-teal-100">
-              {t.text}
+            <div key={i} className="p-3 rounded-lg text-sm leading-relaxed max-h-[600px] overflow-auto bg-teal-500/10 border border-teal-500/20">
+              <MarkdownContent content={t.text} />
             </div>
           );
         }
