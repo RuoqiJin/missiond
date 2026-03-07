@@ -1,14 +1,17 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Search, RefreshCw, Sparkles, AlertTriangle,
-  Zap, Brain,
-  MessageSquare, GitBranch, Activity, Cpu, Settings2,
+  Zap, Brain, Wrench, ArrowRight, ChevronRight, ChevronDown,
+  MessageSquare, GitBranch, GitCommit, Activity, Cpu, Settings2, User, Clock,
+  FileCode, Terminal, Eye, File,
 } from 'lucide-react';
+import { diffLines } from 'diff';
 import { cn } from '@/lib/utils';
 import { utcMs, formatBeijing, formatBeijingTime } from '@/lib/time';
 import { useEventInvalidation } from '../hooks/useEventStream';
+import { useTimelineGestures } from '../hooks/useTimelineGestures';
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -40,22 +43,34 @@ const EVENT_COLORS: Record<string, { dot: string; bg: string; text: string; labe
   question_created:         { dot: 'bg-amber-400',   bg: 'bg-amber-400/10',   text: 'text-amber-400',   label: 'Question', icon: <MessageSquare className="w-3 h-3" /> },
   gemini_request_started:   { dot: 'bg-purple-300',  bg: 'bg-purple-300/10',  text: 'text-purple-300',  label: 'Prompt',   icon: <Cpu className="w-3 h-3" /> },
   gemini_request_completed: { dot: 'bg-purple-500',  bg: 'bg-purple-500/10',  text: 'text-purple-400',  label: 'Response', icon: <Cpu className="w-3 h-3" /> },
+  codex_request_started:    { dot: 'bg-sky-300',     bg: 'bg-sky-300/10',     text: 'text-sky-300',     label: 'GPT Req',  icon: <Zap className="w-3 h-3" /> },
+  codex_request_completed:  { dot: 'bg-sky-500',     bg: 'bg-sky-500/10',     text: 'text-sky-400',     label: 'GPT Resp', icon: <Zap className="w-3 h-3" /> },
   decision_made:            { dot: 'bg-orange-400',  bg: 'bg-orange-400/10',  text: 'text-orange-400',  label: 'Decision', icon: <GitBranch className="w-3 h-3" /> },
   question_resolved:        { dot: 'bg-amber-300',   bg: 'bg-amber-300/10',   text: 'text-amber-300',   label: 'Resolved', icon: <MessageSquare className="w-3 h-3" /> },
   memory_phase_changed:     { dot: 'bg-cyan-400',    bg: 'bg-cyan-400/10',    text: 'text-cyan-400',    label: 'Memory',   icon: <Brain className="w-3 h-3" /> },
+  board_task_created:       { dot: 'bg-indigo-400',  bg: 'bg-indigo-400/10',  text: 'text-indigo-400',  label: 'Created',  icon: <Activity className="w-3 h-3" /> },
+  board_task_status_changed:{ dot: 'bg-blue-400',    bg: 'bg-blue-400/10',    text: 'text-blue-400',    label: 'Status',   icon: <Activity className="w-3 h-3" /> },
+  board_task_note_added:    { dot: 'bg-sky-300',     bg: 'bg-sky-300/10',     text: 'text-sky-300',     label: 'Note',     icon: <MessageSquare className="w-3 h-3" /> },
+  board_task_claimed:       { dot: 'bg-teal-300',    bg: 'bg-teal-300/10',    text: 'text-teal-300',    label: 'Claimed',  icon: <Wrench className="w-3 h-3" /> },
+  board_task_deleted:       { dot: 'bg-red-400',     bg: 'bg-red-400/10',     text: 'text-red-400',     label: 'Deleted',  icon: <AlertTriangle className="w-3 h-3" /> },
   board_task_updated:       { dot: 'bg-blue-300',    bg: 'bg-blue-300/10',    text: 'text-blue-300',    label: 'Board',    icon: <Activity className="w-3 h-3" /> },
   insight_generated:        { dot: 'bg-emerald-400', bg: 'bg-emerald-400/10', text: 'text-emerald-400', label: 'Insight',  icon: <Sparkles className="w-3 h-3" /> },
   git_commit:               { dot: 'bg-green-400',   bg: 'bg-green-400/10',   text: 'text-green-400',   label: 'Commit',   icon: <GitBranch className="w-3 h-3" /> },
   user_message:             { dot: 'bg-blue-400',    bg: 'bg-blue-400/10',    text: 'text-blue-400',    label: 'User',     icon: <MessageSquare className="w-3 h-3" /> },
   assistant_message:        { dot: 'bg-teal-400',    bg: 'bg-teal-400/10',    text: 'text-teal-400',    label: 'Assistant', icon: <Brain className="w-3 h-3" /> },
+  thinking_message:         { dot: 'bg-violet-400',  bg: 'bg-violet-400/10',  text: 'text-violet-400',  label: 'Thinking', icon: <Brain className="w-3 h-3" /> },
+  briefing_batch_started:   { dot: 'bg-rose-300',    bg: 'bg-rose-300/10',    text: 'text-rose-300',    label: 'Briefing', icon: <Sparkles className="w-3 h-3" /> },
+  briefing_summary_generated: { dot: 'bg-rose-400',  bg: 'bg-rose-400/10',    text: 'text-rose-400',    label: 'Summary',  icon: <Sparkles className="w-3 h-3" /> },
 };
 
 const SWIMLANES = [
-  { id: 'chat', label: 'Chat',       types: ['user_message', 'assistant_message'] },
-  { id: 'ai',   label: 'AI / LLM',  types: ['gemini_request_started', 'gemini_request_completed', 'decision_made', 'insight_generated'] },
-  { id: 'code', label: 'Code',       types: ['git_commit'] },
-  { id: 'flow', label: 'Flow',       types: ['task_lifecycle', 'question_created', 'question_resolved', 'board_task_updated'] },
-  { id: 'sys',  label: 'System',     types: ['slot_state_changed', 'memory_phase_changed'] },
+  { id: 'chat',  label: 'Chat',      types: ['user_message', 'assistant_message', 'thinking_message'] },
+  { id: 'ai',    label: 'AI / LLM',  types: ['gemini_request_started', 'gemini_request_completed', 'decision_made', 'insight_generated'] },
+  { id: 'gpt',   label: 'GPT',       types: ['codex_request_started', 'codex_request_completed'] },
+  { id: 'code',  label: 'Code',      types: ['git_commit'] },
+  { id: 'flow',  label: 'Flow',      types: ['task_lifecycle', 'question_created', 'question_resolved'] },
+  { id: 'board', label: 'Board',     types: ['board_task_created', 'board_task_status_changed', 'board_task_note_added', 'board_task_claimed', 'board_task_deleted', 'board_task_updated'] },
+  { id: 'sys',   label: 'System',    types: ['slot_state_changed', 'memory_phase_changed', 'briefing_batch_started', 'briefing_summary_generated'] },
 ];
 
 const QUICK_FILTERS = [
@@ -64,13 +79,16 @@ const QUICK_FILTERS = [
   { label: 'Errors', value: 'errors' },
   { label: 'Insights', value: 'insights' },
   { label: 'Gemini', value: 'gemini' },
+  { label: 'GPT', value: 'gpt' },
 ];
 
 const WINDOW_OPTIONS = [
+  { label: '5m', value: '5min' },
+  { label: '10m', value: '10min' },
+  { label: '30m', value: '30min' },
   { label: '1h', value: '1h' },
   { label: '6h', value: '6h' },
   { label: '24h', value: '24h' },
-  { label: '7d', value: '7d' },
 ];
 
 // ── Helpers ────────────────────────────────────────────────
@@ -93,6 +111,41 @@ function getSwimlane(type: string): number {
   return 2; // default to system
 }
 
+/** Convert window string like "10min", "1h", "24h" to milliseconds */
+function windowToMs(w: string): number {
+  const minMatch = w.match(/^(\d+)min$/);
+  if (minMatch) return parseInt(minMatch[1], 10) * 60 * 1000;
+  const hMatch = w.match(/^(\d+)h$/);
+  if (hMatch) return parseInt(hMatch[1], 10) * 3600 * 1000;
+  const dMatch = w.match(/^(\d+)d$/);
+  if (dMatch) return parseInt(dMatch[1], 10) * 86400 * 1000;
+  return 3600 * 1000; // fallback 1h
+}
+
+// Session color palette for Chat lane — visually distinct, dark-theme friendly
+const SESSION_COLORS = [
+  { dot: 'bg-cyan-400',    line: 'rgba(34,211,238,0.25)',  ring: 'ring-cyan-400/40' },
+  { dot: 'bg-green-400',   line: 'rgba(74,222,128,0.25)',  ring: 'ring-green-400/40' },
+  { dot: 'bg-amber-400',   line: 'rgba(251,191,36,0.25)',  ring: 'ring-amber-400/40' },
+  { dot: 'bg-pink-400',    line: 'rgba(244,114,182,0.25)', ring: 'ring-pink-400/40' },
+  { dot: 'bg-violet-400',  line: 'rgba(167,139,250,0.25)', ring: 'ring-violet-400/40' },
+  { dot: 'bg-orange-400',  line: 'rgba(251,146,60,0.25)',  ring: 'ring-orange-400/40' },
+  { dot: 'bg-teal-300',    line: 'rgba(94,234,212,0.25)',  ring: 'ring-teal-300/40' },
+  { dot: 'bg-rose-400',    line: 'rgba(251,113,133,0.25)', ring: 'ring-rose-400/40' },
+];
+
+function hashSessionColor(sessionId: string): number {
+  let h = 0;
+  for (let i = 0; i < sessionId.length; i++) {
+    h = ((h << 5) - h + sessionId.charCodeAt(i)) | 0;
+  }
+  return ((h % SESSION_COLORS.length) + SESSION_COLORS.length) % SESSION_COLORS.length;
+}
+
+function isChatEvent(type: string): boolean {
+  return type === 'user_message' || type === 'assistant_message' || type === 'thinking_message';
+}
+
 function eventSummary(ev: TimelineEvent): string {
   if (ev.summary) return ev.summary;
   const p = ev.payload;
@@ -102,12 +155,21 @@ function eventSummary(ev: TimelineEvent): string {
     case 'task_lifecycle': return `${p.action || ''}: ${p.task_title || p.task_id || ''}`;
     case 'gemini_request_started': return `${p.caller || ''} → ${p.model || ''} (${p.prompt_chars || 0} chars)`;
     case 'gemini_request_completed': return `${p.caller || ''} ${p.duration_ms ? p.duration_ms + 'ms' : ''} ${p.error ? '❌' : ''}`;
+    case 'codex_request_started': return `${p.caller || ''} → ${p.model || ''} (${p.prompt_chars || 0}ch${p.has_image ? ' +img' : ''})`;
+    case 'codex_request_completed': return `${p.caller || ''} ${p.duration_ms ? p.duration_ms + 'ms' : ''} ${p.error ? '❌' : '✓'} ${p.output_tokens ? p.output_tokens + 'tok' : ''}`;
     case 'git_commit': return `${p.short_hash || ''} ${p.message || ''}`;
     case 'user_message': return `${p.preview || ''}`;
     case 'assistant_message': return `${p.preview || ''}`;
     case 'decision_made': return `${p.tier || ''}: ${p.question?.slice(0, 60) || ''}`;
     case 'insight_generated': return `${p.title || ''}`;
+    case 'board_task_created': return `Created: ${p.title || ''}`;
+    case 'board_task_status_changed': return `${p.old_status || ''} → ${p.new_status || ''}`;
+    case 'board_task_note_added': return `Note: ${p.content_preview || ''}`;
+    case 'board_task_claimed': return `Claimed by ${p.slot_id || ''}`;
+    case 'board_task_deleted': return `Deleted: ${p.title || ''}`;
     case 'board_task_updated': return `${p.title || ''} → ${p.status || ''}`;
+    case 'briefing_batch_started': return `Briefing: ${p.pending_count || 0} pending`;
+    case 'briefing_summary_generated': return `seq=${p.target_seq}: ${p.summary || ''}`;
     default: return ev.event_type;
   }
 }
@@ -117,6 +179,21 @@ function hasError(ev: TimelineEvent): boolean {
   return !!ev.payload.error || !!ev.payload.error_msg || ev.payload.status === 'error';
 }
 
+/** Fetch full message content from conversation_messages table. Auto-fetches when `enabled` is true. */
+function useFullMessage(messageId: number | undefined, enabled: boolean): string | null {
+  const [content, setContent] = useState<string | null>(null);
+  useEffect(() => {
+    if (!messageId || !enabled) return;
+    let cancelled = false;
+    fetch(`/api/system/conversation-message?message_id=${messageId}`)
+      .then(r => r.json())
+      .then(data => { if (!cancelled && data?.content) setContent(data.content); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [messageId, enabled]);
+  return content;
+}
+
 // ── Main Component ─────────────────────────────────────────
 
 export function CognitiveTimeline() {
@@ -124,24 +201,36 @@ export function CognitiveTimeline() {
 
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [stats, setStats] = useState<TimelineStats | null>(null);
+  const [hourlyStats, setHourlyStats] = useState<TimelineStats | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<TimelineEvent | null>(null);
   const [traceEvents, setTraceEvents] = useState<TimelineEvent[]>([]);
   const [quickFilter, setQuickFilter] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [window, setWindow] = useState('24h');
   const [loading, setLoading] = useState(false);
-  const timelineRef = useRef<HTMLDivElement>(null);
+  const [selectionSource, setSelectionSource] = useState<'timeline' | 'list' | null>(null);
+
+  // Ref maps for bidirectional scroll sync
+  const timelineDotRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
+  const traceItemRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
+
+  // Gesture-controlled timeline: pan (two-finger scroll) + zoom (pinch)
+  const now = Date.now();
+  const { containerRef: timelineRef, timeRange, setTimeRange: setGestureRange } = useTimelineGestures({
+    initialRange: { min: now - windowToMs('24h'), max: now },
+  });
 
   // Fetch data
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ window, limit: '500' });
+      const params = new URLSearchParams({ window });
       if (searchQuery) params.set('query', searchQuery);
 
-      const [evRes, stRes] = await Promise.allSettled([
+      const [evRes, stRes, hrRes] = await Promise.allSettled([
         fetch(`/api/timeline/events?${params}`).then(r => r.json()),
-        fetch(`/api/timeline/stats?${params.get('window') ? `window=${window}` : ''}`).then(r => r.json()),
+        fetch(`/api/timeline/stats?window=${window}`).then(r => r.json()),
+        fetch(`/api/timeline/stats?window=1h`).then(r => r.json()),
       ]);
 
       if (evRes.status === 'fulfilled') {
@@ -151,14 +240,32 @@ export function CognitiveTimeline() {
       if (stRes.status === 'fulfilled' && !stRes.value.error) {
         setStats(stRes.value);
       }
+      if (hrRes.status === 'fulfilled' && !hrRes.value.error) {
+        setHourlyStats(hrRes.value);
+      }
     } catch { /* ignore */ }
     setLoading(false);
   }, [window, searchQuery]);
 
   useEffect(() => { fetchData(); }, [fetchData, timelineVersion]);
 
+  // In-place summary update: briefing worker sends target_seq + new summary via CustomEvent
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { target_seq, summary } = (e as CustomEvent).detail;
+      if (target_seq && summary) {
+        setEvents(prev => prev.map(ev =>
+          ev.seq === target_seq ? { ...ev, summary } : ev
+        ));
+      }
+    };
+    globalThis.addEventListener('timeline-summary-update', handler);
+    return () => globalThis.removeEventListener('timeline-summary-update', handler);
+  }, []);
+
   // Load trace events when clicking an event with trace_id
-  const selectEvent = useCallback(async (ev: TimelineEvent) => {
+  const selectEvent = useCallback(async (ev: TimelineEvent, source: 'timeline' | 'list') => {
+    setSelectionSource(source);
     setSelectedEvent(ev);
     if (ev.trace_id) {
       try {
@@ -172,29 +279,120 @@ export function CognitiveTimeline() {
     }
   }, []);
 
+  // Bidirectional scroll sync: scroll the OTHER view when selection changes
+  useEffect(() => {
+    if (!selectedEvent || !selectionSource) return;
+    const seq = selectedEvent.seq;
+
+    if (selectionSource === 'timeline') {
+      // Clicked timeline dot → scroll trace chain list to the active item
+      const item = traceItemRefs.current.get(seq);
+      if (item) item.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } else if (selectionSource === 'list') {
+      // Clicked list item → blink the timeline dot
+      const dot = timelineDotRefs.current.get(seq);
+      if (dot) {
+        dot.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+        dot.classList.remove('animate-ping-radar');
+        void dot.offsetWidth; // force reflow to re-trigger animation
+        dot.classList.add('animate-ping-radar');
+      }
+    }
+  }, [selectedEvent, selectionSource]);
+
   // Filtered events
   const filtered = useMemo(() => {
     let result = events;
     if (quickFilter === 'errors') result = result.filter(hasError);
-    else if (quickFilter === 'chat') result = result.filter(e => e.event_type === 'user_message' || e.event_type === 'assistant_message');
+    else if (quickFilter === 'chat') result = result.filter(e => e.event_type === 'user_message' || e.event_type === 'assistant_message' || e.event_type === 'thinking_message');
     else if (quickFilter === 'insights') result = result.filter(e => e.event_type === 'insight_generated');
     else if (quickFilter === 'gemini') result = result.filter(e => e.event_type === 'gemini_request_completed' || e.event_type === 'gemini_request_started');
+    else if (quickFilter === 'gpt') result = result.filter(e => e.event_type === 'codex_request_started' || e.event_type === 'codex_request_completed');
     return result;
   }, [events, quickFilter]);
 
-  // Compute time range for horizontal axis
-  const timeRange = useMemo(() => {
-    if (filtered.length === 0) return { min: Date.now() - 3600000, max: Date.now() };
-    const times = filtered.map(e => utcMs(e.created_at));
-    const min = Math.min(...times);
-    const max = Math.max(...times);
-    const padding = Math.max((max - min) * 0.05, 60000); // 5% padding, min 1 min
-    return { min: min - padding, max: max + padding };
+  // Build session layout: sub-row assignment + capsule bounds for Chat lane
+  const sessionLayout = useMemo(() => {
+    // Group chat events by session_id
+    const bySession = new Map<string, TimelineEvent[]>();
+    for (const ev of filtered) {
+      if (isChatEvent(ev.event_type) && ev.payload?.session_id) {
+        const sid = ev.payload.session_id;
+        const arr = bySession.get(sid) || [];
+        arr.push(ev);
+        bySession.set(sid, arr);
+      }
+    }
+
+    // Build session intervals sorted by start time
+    const sessions: { id: string; parentId?: string; start: number; end: number; events: TimelineEvent[] }[] = [];
+    for (const [sid, evts] of bySession) {
+      const times = evts.map(e => utcMs(e.created_at));
+      // Extract parent_session_id from payload — sub-agent sessions inherit parent color
+      const parentId = evts.find(e => e.payload?.parent_session_id)?.payload?.parent_session_id;
+      sessions.push({ id: sid, parentId, start: Math.min(...times), end: Math.max(...times), events: evts });
+    }
+    sessions.sort((a, b) => a.start - b.start);
+
+    // Greedy row assignment — pack sessions into fewest non-overlapping rows
+    const rowEnds: number[] = []; // tracks end-time of last session in each row
+    const layout = new Map<string, { colorIdx: number; row: number; events: TimelineEvent[] }>();
+    for (const s of sessions) {
+      let assigned = -1;
+      for (let r = 0; r < rowEnds.length; r++) {
+        if (s.start > rowEnds[r]) { assigned = r; break; }
+      }
+      if (assigned === -1) { assigned = rowEnds.length; rowEnds.push(0); }
+      rowEnds[assigned] = s.end;
+      layout.set(s.id, { colorIdx: hashSessionColor(s.parentId || s.id), row: assigned, events: s.events });
+    }
+
+    return { map: layout, rowCount: Math.max(rowEnds.length, 1) };
   }, [filtered]);
+
+  // Compute lane geometry — Chat lane expands when multiple concurrent sessions
+  const laneGeometry = useMemo(() => {
+    const chatWeight = sessionLayout.rowCount;
+    const totalWeight = chatWeight + (SWIMLANES.length - 1); // chat=N, others=1 each
+    const lanes: { top: number; height: number }[] = [];
+    let offset = 0;
+    for (let i = 0; i < SWIMLANES.length; i++) {
+      const w = i === 0 ? chatWeight : 1;
+      const h = (w / totalWeight) * 100;
+      lanes.push({ top: offset, height: h });
+      offset += h;
+    }
+    return { lanes, chatSubRowHeight: lanes[0].height / sessionLayout.rowCount };
+  }, [sessionLayout]);
+
+  // Get Y position for a chat event accounting for session sub-row
+  const getChatY = useCallback((ev: TimelineEvent): number => {
+    const sid = ev.payload?.session_id;
+    const info = sid ? sessionLayout.map.get(sid) : undefined;
+    const row = info?.row ?? 0;
+    const { top } = laneGeometry.lanes[0];
+    const subH = laneGeometry.chatSubRowHeight;
+    return top + subH * (row + 0.5);
+  }, [sessionLayout, laneGeometry]);
+
+  // Get Y position for any event (delegates to getChatY for chat events)
+  const getY = useCallback((ev: TimelineEvent): number => {
+    if (isChatEvent(ev.event_type)) return getChatY(ev);
+    const laneIdx = getSwimlane(ev.event_type);
+    const lane = laneGeometry.lanes[laneIdx];
+    return lane.top + lane.height * 0.5;
+  }, [getChatY, laneGeometry]);
+
+  // Sync window preset buttons with gesture-controlled timeRange
+  const handleWindowChange = useCallback((w: string) => {
+    setWindow(w);
+    const n = Date.now();
+    setGestureRange({ min: n - windowToMs(w), max: n });
+  }, [setGestureRange]);
 
   // Position calculation for horizontal timeline
   const getX = useCallback((dateStr: string) => {
-    const t = new Date(dateStr).getTime();
+    const t = utcMs(dateStr);
     const { min, max } = timeRange;
     const range = max - min;
     if (range <= 0) return 50;
@@ -250,6 +448,17 @@ export function CognitiveTimeline() {
             value={stats?.by_type?.find(t => t[0] === 'insight_generated')?.[1] ?? 0}
             color="text-emerald-400"
           />
+          <div className="w-px h-6 bg-neutral-800" />
+          <StatCard
+            label="Gemini/h"
+            value={hourlyStats?.by_type?.find(t => t[0] === 'gemini_request_completed')?.[1] ?? 0}
+            color="text-purple-400"
+          />
+          <StatCard
+            label="GPT/h"
+            value={hourlyStats?.by_type?.find(t => t[0] === 'codex_request_completed')?.[1] ?? 0}
+            color="text-sky-400"
+          />
         </div>
 
         {/* Controls */}
@@ -288,7 +497,7 @@ export function CognitiveTimeline() {
             {WINDOW_OPTIONS.map(w => (
               <button
                 key={w.value}
-                onClick={() => setWindow(w.value)}
+                onClick={() => handleWindowChange(w.value)}
                 className={cn(
                   'px-2 py-1 text-[10px] font-medium rounded transition-colors',
                   window === w.value ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
@@ -298,6 +507,20 @@ export function CognitiveTimeline() {
               </button>
             ))}
           </div>
+
+          {/* Zoom level indicator — shows effective visible window */}
+          {(() => {
+            const visibleMs = timeRange.max - timeRange.min;
+            const label = visibleMs < 60_000 ? `${Math.round(visibleMs / 1000)}s`
+              : visibleMs < 3600_000 ? `${Math.round(visibleMs / 60_000)}m`
+              : visibleMs < 86400_000 ? `${(visibleMs / 3600_000).toFixed(1)}h`
+              : `${(visibleMs / 86400_000).toFixed(1)}d`;
+            return (
+              <span className="text-[10px] text-neutral-600 tabular-nums" title="Visible time window (pinch to zoom)">
+                {label}
+              </span>
+            );
+          })()}
 
           <button onClick={fetchData} className="p-1.5 rounded hover:bg-neutral-800 text-neutral-500 hover:text-neutral-300 transition-colors">
             <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} />
@@ -311,54 +534,93 @@ export function CognitiveTimeline() {
         <div className="flex flex-1 min-h-0">
           {/* Swimlane labels */}
           <div className="w-16 shrink-0 border-r border-neutral-800 flex flex-col">
-            {SWIMLANES.map((lane, i) => (
-              <div key={lane.id} className={cn(
-                'flex-1 flex items-center justify-center text-[10px] text-neutral-500 font-medium',
-                i < SWIMLANES.length - 1 && 'border-b border-neutral-800/50',
-              )}>
-                {lane.label}
-              </div>
-            ))}
+            {SWIMLANES.map((lane, i) => {
+              const geo = laneGeometry.lanes[i];
+              return (
+                <div key={lane.id} className={cn(
+                  'flex items-center justify-center text-[10px] text-neutral-500 font-medium',
+                  i < SWIMLANES.length - 1 && 'border-b border-neutral-800/50',
+                )} style={{ height: `${geo.height}%` }}>
+                  {lane.label}
+                </div>
+              );
+            })}
           </div>
 
-          {/* Timeline canvas */}
-          <div ref={timelineRef} className="flex-1 relative overflow-x-auto" style={{ minHeight: 140 }}>
+          {/* Timeline canvas — gesture-controlled: scroll to pan, pinch to zoom */}
+          <div ref={timelineRef} className="flex-1 relative overflow-hidden touch-none cursor-grab active:cursor-grabbing" style={{ minHeight: 100 + sessionLayout.rowCount * 28 }}>
             {/* Swimlane backgrounds */}
-            {SWIMLANES.map((lane, i) => (
-              <div
-                key={lane.id}
-                className={cn(
-                  'absolute left-0 right-0',
-                  i < SWIMLANES.length - 1 && 'border-b border-neutral-800/30',
-                )}
-                style={{ top: `${(i / SWIMLANES.length) * 100}%`, height: `${100 / SWIMLANES.length}%` }}
-              />
-            ))}
+            {SWIMLANES.map((lane, i) => {
+              const geo = laneGeometry.lanes[i];
+              return (
+                <div
+                  key={lane.id}
+                  className={cn(
+                    'absolute left-0 right-0',
+                    i < SWIMLANES.length - 1 && 'border-b border-neutral-800/30',
+                  )}
+                  style={{ top: `${geo.top}%`, height: `${geo.height}%` }}
+                />
+              );
+            })}
+
+            {/* Session capsules for Chat lane */}
+            {(() => {
+              return Array.from(sessionLayout.map.entries()).map(([sid, info]) => {
+                const sc = SESSION_COLORS[info.colorIdx];
+                const times = info.events.map(e => utcMs(e.created_at));
+                const xStart = getX(new Date(Math.min(...times)).toISOString());
+                const xEnd = getX(new Date(Math.max(...times)).toISOString());
+                const chatTop = laneGeometry.lanes[0].top;
+                const subH = laneGeometry.chatSubRowHeight;
+                const yCenter = chatTop + subH * (info.row + 0.5);
+                // Capsule: pad 0.8% horizontally, 40% of sub-row height vertically
+                const padX = 0.6;
+                const capsuleH = subH * 0.7;
+                return (
+                  <svg key={`capsule-${sid}`} className="absolute inset-0 w-full h-full pointer-events-none z-[1]" preserveAspectRatio="none">
+                    <rect
+                      x={`${xStart - padX}%`}
+                      y={`${yCenter - capsuleH / 2}%`}
+                      width={`${Math.max(xEnd - xStart + padX * 2, 1.2)}%`}
+                      height={`${capsuleH}%`}
+                      rx="10" ry="10"
+                      fill={sc.line}
+                      stroke={sc.line.replace('0.25)', '0.45)')}
+                      strokeWidth="1"
+                    />
+                  </svg>
+                );
+              });
+            })()}
 
             {/* Event dots */}
             {filtered.map((ev) => {
               const x = getX(ev.created_at);
-              const laneIdx = getSwimlane(ev.event_type);
-              const laneY = ((laneIdx + 0.5) / SWIMLANES.length) * 100;
+              const y = getY(ev);
               const ec = getEventColor(ev.event_type);
               const isSelected = selectedEvent?.seq === ev.seq;
               const isInsight = ev.event_type === 'insight_generated';
               const isError = hasError(ev);
+              // Chat lane: override dot color with session color
+              const isChat = isChatEvent(ev.event_type);
+              const sessionInfo = isChat && ev.payload?.session_id ? sessionLayout.map.get(ev.payload.session_id) : undefined;
+              const sessionColor = sessionInfo ? SESSION_COLORS[sessionInfo.colorIdx] : null;
 
               return (
                 <button
                   key={ev.seq}
                   onClick={() => selectEvent(ev)}
                   className={cn(
-                    'absolute -translate-x-1/2 -translate-y-1/2 rounded-full transition-all z-10',
+                    'absolute -translate-x-1/2 -translate-y-1/2 rounded-full z-10 transition-all duration-300 ease-out',
                     isInsight ? 'w-4 h-4 ring-2 ring-emerald-400/40' :
                     isError ? 'w-3 h-3 ring-2 ring-red-500/40' :
                     'w-2.5 h-2.5 hover:w-3.5 hover:h-3.5',
-                    ec.dot,
+                    sessionColor ? sessionColor.dot : ec.dot,
                     isSelected && 'ring-2 ring-white/60 w-4 h-4',
                   )}
-                  style={{ left: `${x}%`, top: `${laneY}%` }}
-                  title={`${ec.label}: ${eventSummary(ev)}\n${formatBeijingTime(ev.created_at)}`}
+                  style={{ left: `${x}%`, top: `${y}%` }}
+                  title={`${ec.label}: ${eventSummary(ev)}${isChat && ev.payload?.session_id ? `\nSession: ${ev.payload.session_id.slice(0, 8)}` : ''}\n${formatBeijingTime(ev.created_at)}`}
                 />
               );
             })}
@@ -367,7 +629,7 @@ export function CognitiveTimeline() {
             {(() => {
               const spanPairs = new Map<string, TimelineEvent[]>();
               for (const ev of filtered) {
-                if (ev.span_id && (ev.event_type === 'gemini_request_started' || ev.event_type === 'gemini_request_completed')) {
+                if (ev.span_id && (ev.event_type === 'gemini_request_started' || ev.event_type === 'gemini_request_completed' || ev.event_type === 'codex_request_started' || ev.event_type === 'codex_request_completed')) {
                   const arr = spanPairs.get(ev.span_id) || [];
                   arr.push(ev);
                   spanPairs.set(ev.span_id, arr);
@@ -379,14 +641,18 @@ export function CognitiveTimeline() {
                   const [a, b] = pair.sort((x, y) => utcMs(x.created_at) - utcMs(y.created_at));
                   const x1 = getX(a.created_at);
                   const x2 = getX(b.created_at);
-                  const y = ((getSwimlane(a.event_type) + 0.5) / SWIMLANES.length) * 100;
+                  const y = getY(a);
                   const isActive = selectedEvent && (selectedEvent.span_id === a.span_id);
+                  const isCodex = a.event_type.startsWith('codex_');
+                  const color = isCodex
+                    ? (isActive ? 'rgba(56,189,248,0.5)' : 'rgba(56,189,248,0.15)')
+                    : (isActive ? 'rgba(168,85,247,0.5)' : 'rgba(168,85,247,0.15)');
                   return (
                     <svg key={`span-${a.span_id}`} className="absolute inset-0 w-full h-full pointer-events-none z-0" preserveAspectRatio="none">
                       <line
                         x1={`${x1}%`} y1={`${y}%`}
                         x2={`${x2}%`} y2={`${y}%`}
-                        stroke={isActive ? 'rgba(168,85,247,0.5)' : 'rgba(168,85,247,0.15)'}
+                        stroke={color}
                         strokeWidth={isActive ? '2' : '1'}
                         strokeDasharray="3 2"
                       />
@@ -402,8 +668,8 @@ export function CognitiveTimeline() {
                 const next = sorted[i + 1];
                 const x1 = getX(ev.created_at);
                 const x2 = getX(next.created_at);
-                const y1 = ((getSwimlane(ev.event_type) + 0.5) / SWIMLANES.length) * 100;
-                const y2 = ((getSwimlane(next.event_type) + 0.5) / SWIMLANES.length) * 100;
+                const y1 = getY(ev);
+                const y2 = getY(next);
                 return (
                   <svg key={`line-${i}`} className="absolute inset-0 w-full h-full pointer-events-none z-0" preserveAspectRatio="none">
                     <line
@@ -539,6 +805,7 @@ function EventMeta({ event }: { event: TimelineEvent }) {
       <div className="space-y-1.5 text-[11px]">
         <MetaRow label="Time" value={formatBeijing(event.created_at)} />
         <MetaRow label="Seq" value={`#${event.seq}`} />
+        {event.payload?.session_id && <MetaRow label="Session" value={shortTrace(event.payload.session_id)} mono />}
         {event.trace_id && <MetaRow label="Trace" value={shortTrace(event.trace_id)} mono />}
         {event.span_id && <MetaRow label="Span" value={shortTrace(event.span_id)} mono />}
         {event.parent_span_id && <MetaRow label="Parent" value={shortTrace(event.parent_span_id)} mono />}
@@ -601,10 +868,12 @@ function ChatMessagePanel({ messageId }: { messageId: number }) {
   );
 }
 
-function GeminiContentPanel({ requestId }: { requestId: string }) {
+function GeminiContentPanel({ requestId, isResponse }: { requestId: string; isResponse?: boolean }) {
   const [content, setContent] = useState<{ prompt_text?: string; response_text?: string } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [promptOpen, setPromptOpen] = useState(!isResponse);
+  const [responseOpen, setResponseOpen] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -631,18 +900,34 @@ function GeminiContentPanel({ requestId }: { requestId: string }) {
     <div className="space-y-3">
       {content.prompt_text && (
         <div>
-          <div className="text-[9px] text-neutral-500 uppercase tracking-wider mb-1">Prompt</div>
-          <pre className="text-[11px] text-purple-300/80 font-mono bg-neutral-900 rounded p-3 overflow-auto max-h-60 whitespace-pre-wrap break-words leading-relaxed">
-            {content.prompt_text}
-          </pre>
+          <button
+            onClick={() => setPromptOpen(v => !v)}
+            className="flex items-center gap-1 text-[9px] text-neutral-500 uppercase tracking-wider mb-1 hover:text-neutral-300 transition-colors"
+          >
+            {promptOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+            Prompt
+          </button>
+          {promptOpen && (
+            <pre className="text-[11px] text-purple-300/80 font-mono bg-neutral-900 rounded p-3 overflow-auto max-h-60 whitespace-pre-wrap break-words leading-relaxed">
+              {content.prompt_text}
+            </pre>
+          )}
         </div>
       )}
       {content.response_text && (
         <div>
-          <div className="text-[9px] text-neutral-500 uppercase tracking-wider mb-1">Response</div>
-          <pre className="text-[11px] text-emerald-300/80 font-mono bg-neutral-900 rounded p-3 overflow-auto max-h-60 whitespace-pre-wrap break-words leading-relaxed">
-            {content.response_text}
-          </pre>
+          <button
+            onClick={() => setResponseOpen(v => !v)}
+            className="flex items-center gap-1 text-[9px] text-neutral-500 uppercase tracking-wider mb-1 hover:text-neutral-300 transition-colors"
+          >
+            {responseOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+            Response
+          </button>
+          {responseOpen && (
+            <pre className="text-[11px] text-emerald-300/80 font-mono bg-neutral-900 rounded p-3 overflow-auto max-h-60 whitespace-pre-wrap break-words leading-relaxed">
+              {content.response_text}
+            </pre>
+          )}
         </div>
       )}
     </div>
@@ -653,14 +938,14 @@ function EventPayload({ event }: { event: TimelineEvent }) {
   const [tab, setTab] = useState<'summary' | 'payload'>('summary');
 
   return (
-    <div>
+    <div className="flex flex-col h-full">
       {/* Tabs */}
-      <div className="flex items-center gap-1 mb-3">
+      <div className="flex items-center gap-1 mb-3 border-b border-neutral-800 pb-2">
         <button
           onClick={() => setTab('summary')}
           className={cn(
-            'px-2.5 py-1 text-[10px] font-medium rounded transition-colors',
-            tab === 'summary' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
+            'px-3 py-1.5 text-xs font-medium rounded-md transition-colors',
+            tab === 'summary' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300 hover:bg-neutral-800/50',
           )}
         >
           Summary
@@ -668,94 +953,412 @@ function EventPayload({ event }: { event: TimelineEvent }) {
         <button
           onClick={() => setTab('payload')}
           className={cn(
-            'px-2.5 py-1 text-[10px] font-medium rounded transition-colors',
-            tab === 'payload' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
+            'px-3 py-1.5 text-xs font-medium rounded-md transition-colors',
+            tab === 'payload' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300 hover:bg-neutral-800/50',
           )}
         >
           Payload
         </button>
       </div>
 
-      {tab === 'summary' ? (
-        <div className="space-y-2">
-          <p className="text-xs text-neutral-300 leading-relaxed">{eventSummary(event)}</p>
-          {/* Gemini started: show stats + fetch prompt content on demand */}
-          {event.event_type === 'gemini_request_started' && event.payload && (
-            <div className="space-y-3 mt-3">
-              <div className="grid grid-cols-2 gap-2">
-                <MiniStat label="Model" value={event.payload.model || '-'} />
-                <MiniStat label="Prompt" value={`${event.payload.prompt_chars || 0} chars`} />
-                <MiniStat label="Caller" value={event.payload.caller || '-'} />
-              </div>
-              {event.payload.request_id && (
-                <GeminiContentPanel requestId={event.payload.request_id} />
-              )}
-            </div>
-          )}
-          {/* Gemini completed: show stats + fetch response content on demand */}
-          {event.event_type === 'gemini_request_completed' && event.payload && (
-            <div className="space-y-3 mt-3">
-              <div className="grid grid-cols-2 gap-2">
-                <MiniStat label="Duration" value={`${event.payload.duration_ms || 0}ms`} />
-                <MiniStat label="Model" value={event.payload.model || '-'} />
-                <MiniStat label="Prompt" value={`${event.payload.prompt_chars || 0} chars`} />
-                <MiniStat label="Response" value={`${event.payload.response_chars || 0} chars`} />
-                <MiniStat label="Caller" value={event.payload.caller || '-'} />
-                <MiniStat label="Status" value={event.payload.status || event.payload.error ? 'error' : 'ok'} />
-              </div>
-              {event.payload.request_id && (
-                <GeminiContentPanel requestId={event.payload.request_id} />
-              )}
-            </div>
-          )}
-          {/* Chat message details */}
-          {(event.event_type === 'user_message' || event.event_type === 'assistant_message') && event.payload && (
-            <div className="space-y-3 mt-3">
-              <div className="grid grid-cols-2 gap-2">
-                <MiniStat label="Role" value={event.payload.role || '-'} />
-                <MiniStat label="Length" value={`${event.payload.content_chars || 0} chars`} />
-              </div>
-              {/* Preview: visible text only (what user sees) */}
-              {event.payload.preview && (
-                <div>
-                  <div className="text-[9px] text-neutral-500 uppercase tracking-wider mb-1">
-                    {event.payload.role === 'user' ? 'Message' : 'Response'}
-                  </div>
-                  <pre className={cn(
-                    'text-[11px] font-mono bg-neutral-900 rounded p-3 overflow-auto max-h-40 whitespace-pre-wrap break-words leading-relaxed',
-                    event.payload.role === 'user' ? 'text-blue-300/80' : 'text-teal-300/80',
-                  )}>
-                    {event.payload.preview}
-                  </pre>
-                </div>
-              )}
-              {/* Load full content on demand */}
-              {event.payload.message_id && event.payload.content_chars > 200 && (
-                <ChatMessagePanel messageId={event.payload.message_id} />
-              )}
-            </div>
-          )}
-          {/* Git commit details */}
-          {event.event_type === 'git_commit' && event.payload && (
-            <div className="space-y-3 mt-3">
-              <div className="grid grid-cols-2 gap-2">
-                <MiniStat label="Hash" value={event.payload.short_hash || '-'} />
-                <MiniStat label="Repo" value={event.payload.repo || '-'} />
-                <MiniStat label="Author" value={event.payload.author || '-'} />
-                <MiniStat label="Time" value={event.payload.committed_at ? formatBeijing(event.payload.committed_at) : '-'} />
-              </div>
-              <div>
-                <div className="text-[9px] text-neutral-500 uppercase tracking-wider mb-1">Commit Message</div>
-                <p className="text-sm text-green-300 font-mono leading-relaxed">{event.payload.message}</p>
-              </div>
-              <div className="text-[10px] text-neutral-500 font-mono select-all">{event.payload.hash}</div>
-            </div>
-          )}
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        {tab === 'summary' ? (
+          <EventSummaryView event={event} />
+        ) : (
+          <JsonTreeViewer data={event.payload} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Summary Views (per event type) ───────────────────────────
+
+function EventSummaryView({ event }: { event: TimelineEvent }) {
+  const p = event.payload;
+  if (!p) return <p className="text-xs text-neutral-500 italic">No payload</p>;
+
+  switch (event.event_type) {
+    case 'user_message':
+    case 'assistant_message':
+      return <ChatSummary event={event} />;
+    case 'thinking_message':
+      return <ThinkingSummary event={event} />;
+    case 'slot_state_changed':
+      return <SlotStateSummary event={event} />;
+    case 'task_lifecycle':
+    case 'board_task_created':
+    case 'board_task_status_changed':
+    case 'board_task_note_added':
+    case 'board_task_claimed':
+    case 'board_task_deleted':
+    case 'board_task_updated':
+      return <TaskSummary event={event} />;
+    case 'gemini_request_started':
+    case 'gemini_request_completed':
+    case 'codex_request_started':
+    case 'codex_request_completed':
+      return <LlmRequestSummary event={event} />;
+    case 'git_commit':
+      return <GitCommitSummary event={event} />;
+    case 'memory_phase_changed':
+      return <MemoryPhaseSummary event={event} />;
+    case 'decision_made':
+      return <DecisionSummary event={event} />;
+    case 'insight_generated':
+      return <InsightSummary event={event} />;
+    case 'question_created':
+    case 'question_resolved':
+      return <QuestionSummary event={event} />;
+    default:
+      return <DefaultSummary event={event} />;
+  }
+}
+
+function ChatSummary({ event }: { event: TimelineEvent }) {
+  const { role, preview, content_chars, message_id } = event.payload || {};
+  const isUser = role === 'user';
+  const toolMatch = preview?.match(/^\[([\w_]+)\]$/);
+
+  // Always auto-load full content
+  const fullContent = useFullMessage(message_id, true);
+
+  const displayText = fullContent ?? preview;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] uppercase tracking-wider text-neutral-500 font-medium">
+          {isUser ? 'User Message' : 'Assistant Response'}
+        </span>
+        <span className="text-[10px] text-neutral-600 bg-neutral-900 px-1.5 py-0.5 rounded font-mono">
+          {content_chars} chars
+        </span>
+      </div>
+
+      {toolMatch && !isUser && !fullContent ? (
+        <div className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-teal-500/10 border border-teal-500/20 text-teal-400 text-xs font-mono">
+          <Wrench className="w-3 h-3" />
+          <span>{toolMatch[1]}</span>
         </div>
-      ) : (
-        <pre className="text-[11px] text-neutral-400 font-mono bg-neutral-900 rounded p-3 overflow-auto max-h-80 whitespace-pre-wrap break-all">
-          {JSON.stringify(event.payload, null, 2)}
+      ) : displayText ? (
+        <div className={cn(
+          'p-3 rounded-lg text-sm leading-relaxed whitespace-pre-wrap break-words max-h-96 overflow-auto',
+          isUser
+            ? 'bg-blue-500/10 border border-blue-500/20 text-blue-100'
+            : 'bg-teal-500/10 border border-teal-500/20 text-teal-100',
+        )}>
+          {displayText}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ThinkingSummary({ event }: { event: TimelineEvent }) {
+  const preview = event.payload?.preview || '';
+  const messageId = event.payload?.message_id;
+  const contentChars = event.payload?.content_chars || 0;
+
+  const fullContent = useFullMessage(messageId, true);
+  const displayText = fullContent ?? preview;
+
+  return (
+    <div className="border border-violet-500/20 rounded-lg bg-violet-500/5 overflow-hidden">
+      <div className="flex items-center gap-2 p-2.5">
+        <Brain className="w-4 h-4 text-violet-400 shrink-0" />
+        <span className="text-xs text-violet-300 font-medium">Thinking</span>
+        <span className="text-[10px] text-neutral-600 font-mono">{contentChars} chars</span>
+      </div>
+      <div className="px-3 pb-3 border-t border-violet-500/10">
+        <pre className="text-[11px] text-violet-200/80 font-mono whitespace-pre-wrap break-words leading-relaxed max-h-96 overflow-auto mt-2">
+          {displayText}
         </pre>
+      </div>
+    </div>
+  );
+}
+
+function SlotStateSummary({ event }: { event: TimelineEvent }) {
+  const { slot_id, prev_state, new_state } = event.payload || {};
+  return (
+    <div className="flex flex-col items-center justify-center py-6 bg-neutral-900/50 rounded-lg border border-neutral-800">
+      <div className="flex items-center gap-1.5 text-neutral-400 mb-4 bg-neutral-800 px-2 py-1 rounded text-xs font-mono">
+        <Settings2 className="w-3 h-3" /> {slot_id}
+      </div>
+      <div className="flex items-center gap-4">
+        <SlotBadge state={prev_state || '?'} />
+        <div className="flex flex-col items-center text-neutral-500">
+          <ArrowRight className="w-5 h-5" />
+        </div>
+        <SlotBadge state={new_state || '?'} />
+      </div>
+    </div>
+  );
+}
+
+function SlotBadge({ state }: { state: string }) {
+  const isActive = state === 'Thinking' || state === 'Working' || state === 'Running';
+  return (
+    <div className={cn(
+      'px-4 py-2 rounded-full text-xs font-medium border',
+      isActive ? 'bg-amber-500/20 border-amber-500/30 text-amber-300' : 'bg-slate-500/20 border-slate-500/30 text-slate-300',
+    )}>
+      {state}
+    </div>
+  );
+}
+
+function TaskSummary({ event }: { event: TimelineEvent }) {
+  const p = event.payload || {};
+  const isUpdate = event.event_type === 'board_task_updated';
+  return (
+    <div className="border border-blue-500/20 bg-blue-950/10 rounded-lg p-4 space-y-2">
+      <div className="flex items-center gap-2">
+        <Activity className="w-4 h-4 text-blue-400" />
+        <span className="text-xs font-medium text-blue-300">{isUpdate ? 'Board Task Updated' : 'Task Lifecycle'}</span>
+        {p.action && (
+          <span className={cn(
+            'text-[10px] px-1.5 py-0.5 rounded font-medium',
+            p.action === 'completed' ? 'bg-green-500/20 text-green-400' :
+            p.action === 'created' ? 'bg-blue-500/20 text-blue-400' : 'bg-neutral-800 text-neutral-400',
+          )}>
+            {p.action}
+          </span>
+        )}
+        {p.status && (
+          <span className={cn(
+            'text-[10px] px-1.5 py-0.5 rounded font-medium',
+            p.status === 'done' ? 'bg-green-500/20 text-green-400' : 'bg-neutral-800 text-neutral-400',
+          )}>
+            {p.status}
+          </span>
+        )}
+      </div>
+      {p.title && <p className="text-sm text-neutral-200">{p.title}</p>}
+      {p.task_id && <p className="text-[10px] text-neutral-500 font-mono">{p.task_id}</p>}
+    </div>
+  );
+}
+
+function LlmRequestSummary({ event }: { event: TimelineEvent }) {
+  const p = event.payload || {};
+  const isStarted = event.event_type.endsWith('_started');
+  const isCodex = event.event_type.startsWith('codex_');
+  const accent = isCodex ? 'sky' : 'purple';
+  const [imageExpanded, setImageExpanded] = useState(false);
+
+  return (
+    <div className={cn(
+      'border rounded-lg overflow-hidden',
+      `border-${accent}-500/20 bg-${accent}-950/10`,
+    )} style={{
+      borderColor: isCodex ? 'rgba(56,189,248,0.2)' : 'rgba(168,85,247,0.2)',
+      backgroundColor: isCodex ? 'rgba(8,47,73,0.1)' : 'rgba(59,7,100,0.1)',
+    }}>
+      <div className="flex items-center gap-2 p-3 pb-0">
+        <Cpu className={cn('w-4 h-4', isCodex ? 'text-sky-400' : 'text-purple-400')} />
+        <span className={cn('text-xs font-medium', isCodex ? 'text-sky-300' : 'text-purple-300')}>
+          {isCodex ? 'GPT' : 'Gemini'} — {isStarted ? 'Request Sent' : 'Response Received'}
+        </span>
+        {p.error && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/20 text-red-400">Error</span>}
+      </div>
+
+      <div className="flex gap-3 p-3">
+        {/* Left: content (prompt/response + image) */}
+        <div className="flex-1 min-w-0 space-y-3">
+          {p.image_hash && (
+            <div>
+              <button
+                onClick={() => setImageExpanded(v => !v)}
+                className="flex items-center gap-1 text-[9px] text-neutral-500 uppercase tracking-wider mb-1 hover:text-neutral-300 transition-colors"
+              >
+                {imageExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                Source Image
+              </button>
+              {imageExpanded ? (
+                <img
+                  src={`/api/images?hash=${p.image_hash}`}
+                  alt="Vision source"
+                  className="max-w-full max-h-[500px] rounded-lg border border-neutral-700 object-contain"
+                />
+              ) : (
+                <img
+                  src={`/api/images?hash=${p.image_hash}`}
+                  alt="Vision source"
+                  className="w-24 h-16 rounded border border-neutral-700 object-cover cursor-pointer hover:opacity-80 transition-opacity"
+                  onClick={() => setImageExpanded(true)}
+                />
+              )}
+            </div>
+          )}
+          {p.request_id && <GeminiContentPanel requestId={p.request_id} isResponse={!isStarted} />}
+        </div>
+
+        {/* Right: stat cards */}
+        <div className="w-40 shrink-0 space-y-1.5">
+          <MiniStat label="Model" value={p.model || '-'} />
+          <MiniStat label="Caller" value={p.caller || '-'} />
+          {!isStarted && <MiniStat label="Duration" value={p.duration_ms ? `${(p.duration_ms / 1000).toFixed(1)}s` : '-'} />}
+          <MiniStat label="Prompt" value={`${p.prompt_chars || 0} chars`} />
+          {!isStarted && <MiniStat label="Response" value={`${p.response_chars || 0} chars`} />}
+          {!isStarted && p.status && <MiniStat label="Status" value={p.status} />}
+          {p.has_image && !p.image_hash && <MiniStat label="Image" value="Yes" />}
+          {p.output_tokens != null && <MiniStat label="Out Tokens" value={`${p.output_tokens}`} />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GitCommitSummary({ event }: { event: TimelineEvent }) {
+  const { short_hash, hash, message, author, repo, committed_at } = event.payload || {};
+  return (
+    <div className="border border-green-500/20 bg-green-950/10 rounded-lg p-4">
+      <div className="flex items-start justify-between mb-3">
+        <div className="flex items-center gap-2 text-green-400 font-mono text-sm bg-green-500/10 px-2 py-1 rounded">
+          <GitCommit className="w-4 h-4" />
+          {short_hash}
+        </div>
+        {repo && <span className="text-[10px] text-neutral-500 uppercase bg-neutral-900 px-2 py-1 rounded">{repo}</span>}
+      </div>
+      <p className="text-sm text-neutral-200 font-medium mb-4 leading-relaxed">{message}</p>
+      <div className="flex items-center gap-4 text-xs text-neutral-400">
+        {author && <div className="flex items-center gap-1.5"><User className="w-3.5 h-3.5" />{author}</div>}
+        {committed_at && <div className="flex items-center gap-1.5"><Clock className="w-3.5 h-3.5" />{formatBeijing(committed_at)}</div>}
+      </div>
+      {hash && <p className="text-[10px] text-neutral-600 font-mono mt-2 select-all">{hash}</p>}
+    </div>
+  );
+}
+
+function MemoryPhaseSummary({ event }: { event: TimelineEvent }) {
+  const p = event.payload || {};
+  return (
+    <div className="flex flex-col items-center justify-center py-6 bg-neutral-900/50 rounded-lg border border-neutral-800">
+      <Brain className="w-5 h-5 text-indigo-400 mb-2" />
+      <span className="text-[10px] text-neutral-500 uppercase tracking-wider mb-3">Memory Phase</span>
+      <div className="flex items-center gap-4">
+        <SlotBadge state={p.prev_phase || p.from || '?'} />
+        <ArrowRight className="w-5 h-5 text-neutral-500" />
+        <SlotBadge state={p.new_phase || p.to || '?'} />
+      </div>
+    </div>
+  );
+}
+
+function DecisionSummary({ event }: { event: TimelineEvent }) {
+  const p = event.payload || {};
+  return (
+    <div className="border border-amber-500/20 bg-amber-950/10 rounded-lg p-4 space-y-2">
+      <div className="flex items-center gap-2">
+        <Zap className="w-4 h-4 text-amber-400" />
+        <span className="text-xs font-medium text-amber-300">Decision Made</span>
+        {p.tier && <span className="text-[10px] bg-amber-500/20 text-amber-400 px-1.5 py-0.5 rounded">{p.tier}</span>}
+      </div>
+      {p.question && <p className="text-sm text-neutral-200 leading-relaxed">{p.question}</p>}
+      {p.answer && <p className="text-xs text-neutral-400 leading-relaxed">{p.answer}</p>}
+    </div>
+  );
+}
+
+function InsightSummary({ event }: { event: TimelineEvent }) {
+  const p = event.payload || {};
+  return (
+    <div className="border border-emerald-500/30 bg-emerald-950/20 rounded-lg p-4 space-y-2">
+      <div className="flex items-center gap-1.5">
+        <Sparkles className="w-4 h-4 text-emerald-400" />
+        <span className="text-xs font-medium text-emerald-300">Insight</span>
+      </div>
+      <p className="text-sm text-emerald-100 leading-relaxed">{p.title || eventSummary(event)}</p>
+      {p.body && <p className="text-xs text-emerald-300/70 leading-relaxed">{p.body}</p>}
+    </div>
+  );
+}
+
+function QuestionSummary({ event }: { event: TimelineEvent }) {
+  const p = event.payload || {};
+  const isResolved = event.event_type === 'question_resolved';
+  return (
+    <div className="border border-amber-500/20 bg-amber-950/10 rounded-lg p-4 space-y-2">
+      <div className="flex items-center gap-2">
+        <MessageSquare className="w-4 h-4 text-amber-400" />
+        <span className="text-xs font-medium text-amber-300">{isResolved ? 'Question Resolved' : 'Question Created'}</span>
+      </div>
+      {p.question && <p className="text-sm text-neutral-200 leading-relaxed">{p.question}</p>}
+      {isResolved && p.answer && <p className="text-xs text-green-400 leading-relaxed mt-1">{p.answer}</p>}
+      {p.question_id && <p className="text-[10px] text-neutral-500 font-mono">{p.question_id}</p>}
+    </div>
+  );
+}
+
+function DefaultSummary({ event }: { event: TimelineEvent }) {
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-neutral-300">{eventSummary(event)}</p>
+      {event.summary && <p className="text-xs text-neutral-500 italic">{event.summary}</p>}
+    </div>
+  );
+}
+
+// ── Collapsible JSON Tree Viewer ────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function JsonTreeViewer({ data }: { data: any }) {
+  return (
+    <div className="bg-[#0d1117] text-[#c9d1d9] font-mono text-[11px] p-3 rounded-lg overflow-auto border border-neutral-800">
+      <JsonNode value={data} isRoot />
+    </div>
+  );
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function JsonNode({ value, name, isRoot = false }: { value: any; name?: string; isRoot?: boolean }) {
+  const [expanded, setExpanded] = useState(true);
+  const isObject = value !== null && typeof value === 'object';
+  const isArray = Array.isArray(value);
+
+  if (!isObject) {
+    let color = 'text-[#a5d6ff]';
+    if (typeof value === 'number') color = 'text-[#79c0ff]';
+    if (typeof value === 'boolean') color = 'text-[#ff7b72]';
+    if (value === null) color = 'text-[#8b949e]';
+
+    return (
+      <div className="flex leading-relaxed" style={{ marginLeft: isRoot ? 0 : 16 }}>
+        {name != null && <span className="text-[#7ee787] mr-1">&quot;{name}&quot;:</span>}
+        <span className={color}>
+          {typeof value === 'string' ? `"${value}"` : String(value)}
+        </span>
+      </div>
+    );
+  }
+
+  const keys = Object.keys(value);
+  const isEmpty = keys.length === 0;
+  const bracket = isArray ? ['[', ']'] : ['{', '}'];
+
+  return (
+    <div style={{ marginLeft: isRoot ? 0 : 16 }} className="leading-relaxed">
+      <div
+        className={cn('flex items-center w-fit pr-2 rounded', !isEmpty && 'cursor-pointer hover:bg-white/5')}
+        onClick={() => !isEmpty && setExpanded(!expanded)}
+      >
+        {!isEmpty ? (
+          expanded ? <ChevronDown className="w-3 h-3 text-neutral-500 mr-1 shrink-0" /> : <ChevronRight className="w-3 h-3 text-neutral-500 mr-1 shrink-0" />
+        ) : <span className="w-4 shrink-0" />}
+        {name != null && <span className="text-[#7ee787] mr-1">&quot;{name}&quot;:</span>}
+        <span className="text-neutral-400">{bracket[0]}</span>
+        {!expanded && !isEmpty && <span className="text-neutral-500 px-1">…{keys.length}</span>}
+        {(!expanded || isEmpty) && <span className="text-neutral-400">{bracket[1]}</span>}
+      </div>
+      {expanded && !isEmpty && (
+        <>
+          {keys.map((key) => (
+            <JsonNode key={key} name={isArray ? undefined : key} value={value[key as keyof typeof value]} />
+          ))}
+          <div style={{ marginLeft: 16 }} className="text-neutral-400">{bracket[1]}</div>
+        </>
       )}
     </div>
   );
