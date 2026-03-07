@@ -140,8 +140,9 @@ pub(crate) struct AppState {
     pub(crate) embedding_service: Option<Arc<dyn missiond_core::embedding::EmbeddingProvider>>,
     /// In-memory embedding cache for policy:decision entries (id, vector).
     pub(crate) embedding_cache: missiond_core::embedding::EmbeddingCache,
-    /// In-memory embedding cache for conversation summaries (session_id, vector).
-    pub(crate) conversation_embedding_cache: missiond_core::embedding::EmbeddingCache,
+    /// In-memory multi-topic embedding cache for conversation search (session_id, [topic_vectors]).
+    /// MaxSim: search score = max(cosine(query, topic_i)) per session.
+    pub(crate) conversation_topic_cache: missiond_core::embedding::TopicCache,
     /// In-memory embedding cache for skill topics (topic_name, vector).
     pub(crate) skill_embedding_cache: missiond_core::embedding::EmbeddingCache,
     /// In-memory embedding cache for ALL KB entries (for hybrid search).

@@ -245,43 +245,40 @@ pub(crate) async fn init_embedding_provider(
         .map(|svc| Arc::new(svc) as Arc<dyn missiond_core::embedding::EmbeddingProvider>)
 }
 
-/// Generate LLM summary + embedding for a completed conversation, store to DB and update cache.
+/// Generate LLM summary + multi-topic embeddings for a conversation.
 ///
 /// Pipeline:
 /// 1. Fetch last N messages from DB
-/// 2. Call Router LLM for structured summary (fallback: first+last concatenation)
-/// 3. Generate embedding via EmbeddingService
-/// 4. Store summary + embedding to DB
-/// 5. Update in-memory cache
+/// 2. Build conversation text
+/// 3. Call Router LLM for structured topic list (JSON array of topic summaries)
+/// 4. Store combined summary to DB (for display)
+/// 5. Generate embedding for EACH topic independently
+/// 6. Store topic vectors to DB + update TopicCache
 pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_id: &str) {
     let db = state.mission.db();
 
-    // 1. Fetch messages (last 200 to stay within LLM context budget)
-    debug!(session = %session_id, "Step 1: fetching messages");
+    // 1. Fetch messages
+    debug!(session = %session_id, "Topic pipeline: fetching messages");
     let messages = match db.get_conversation_messages(session_id, None, 200) {
         Ok(msgs) if !msgs.is_empty() => msgs,
         Ok(_) => {
-            debug!(session = %session_id, "No messages for summary generation");
+            debug!(session = %session_id, "No messages for topic extraction");
             return;
         }
         Err(e) => {
-            warn!(session = %session_id, error = %e, "Failed to fetch messages for summary");
+            warn!(session = %session_id, error = %e, "Failed to fetch messages");
             return;
         }
     };
 
-    // 2. Build conversation text for LLM (budget: ~8K chars)
-    debug!(session = %session_id, msg_count = messages.len(), "Step 2: building conv_text");
+    // 2. Build conversation text for LLM
     let mut conv_text = String::with_capacity(8192);
-
-    // 2a. If parent has session_timeline, prepend compaction fragment summaries
     let has_timeline = if let Ok(Some(conv)) = db.get_conversation(session_id) {
         if let Some(ref tl_json) = conv.session_timeline {
             if let Ok(timeline) = serde_json::from_str::<Vec<serde_json::Value>>(tl_json) {
                 if !timeline.is_empty() {
-                    conv_text.push_str("=== 会话历史阶段摘要 (compaction fragments) ===\n");
+                    conv_text.push_str("=== 会话历史阶段摘要 ===\n");
                     let fragments: Vec<&serde_json::Value> = if timeline.len() > 10 {
-                        // Degradation: first 3 + last 3 + 2 middle samples
                         let mut selected: Vec<&serde_json::Value> = timeline.iter().take(3).collect();
                         let mid = timeline.len() / 2;
                         if mid > 3 && mid < timeline.len() - 3 {
@@ -296,7 +293,6 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
                     for entry in &fragments {
                         let idx = entry.get("shard_index").and_then(|v| v.as_u64()).unwrap_or(0);
                         if let Some(summary) = entry.get("summary").and_then(|v| v.as_str()) {
-                            // Truncate each fragment summary to ~300 tokens (~1200 chars)
                             let truncated = if summary.len() > 1200 {
                                 &summary[..char_boundary_at(summary, 1200)]
                             } else {
@@ -312,7 +308,6 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
         } else { false }
     } else { false };
 
-    // 2b. Append recent messages (reduce budget if timeline was prepended)
     let msg_budget = if has_timeline { 4000 } else { 8000 };
     for msg in &messages {
         let prefix = match msg.role.as_str() {
@@ -333,80 +328,180 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
         }
     }
 
-    // 3. Call Router LLM for summary (with fallback)
-    debug!(session = %session_id, text_len = conv_text.len(), has_timeline, "Step 3: calling LLM for summary");
-    let summary = match generate_conv_summary_llm(state, &conv_text, has_timeline).await {
-        Some(s) => {
-            debug!(session = %session_id, summary_len = s.len(), "LLM summary OK");
-            s
+    // 3. Extract structured topics via LLM
+    debug!(session = %session_id, text_len = conv_text.len(), "Topic pipeline: extracting topics");
+    let topics = match extract_conv_topics_llm(state, &conv_text, has_timeline).await {
+        Some(t) if !t.is_empty() => {
+            debug!(session = %session_id, count = t.len(), "Topics extracted: {:?}", &t);
+            t
         }
-        None => {
-            debug!(session = %session_id, "LLM summary failed, using fallback");
-            // Fallback: concatenate first 3 + last 3 messages
-            let first3: Vec<&str> = messages.iter().take(3).map(|m| m.content.as_str()).collect();
-            let last3: Vec<&str> = messages.iter().rev().take(3).rev().map(|m| m.content.as_str()).collect();
-            let mut fallback = first3.join("\n");
-            fallback.push_str("\n...\n");
-            fallback.push_str(&last3.join("\n"));
-            if fallback.len() > 2000 {
-                fallback.truncate(char_boundary_at(&fallback, 2000));
-            }
-            fallback
+        _ => {
+            debug!(session = %session_id, "Topic extraction failed, using single-summary fallback");
+            // Fallback: try old-style summary as single topic
+            let fallback = generate_conv_summary_llm_legacy(state, &conv_text, has_timeline).await
+                .unwrap_or_else(|| {
+                    let first3: Vec<&str> = messages.iter().take(3).map(|m| m.content.as_str()).collect();
+                    let last3: Vec<&str> = messages.iter().rev().take(3).rev().map(|m| m.content.as_str()).collect();
+                    let mut fb = first3.join("\n");
+                    fb.push_str("\n...\n");
+                    fb.push_str(&last3.join("\n"));
+                    if fb.len() > 2000 {
+                        fb.truncate(char_boundary_at(&fb, 2000));
+                    }
+                    fb
+                });
+            vec![fallback]
         }
     };
 
-    // 4. Store summary to DB
-    debug!(session = %session_id, "Step 4: storing summary");
-    if let Err(e) = db.set_conversation_summary(session_id, &summary) {
-        warn!(session = %session_id, error = %e, "Failed to store conversation summary");
+    // 4. Store combined summary for display (llm_summary column)
+    let combined_summary = if topics.len() == 1 {
+        topics[0].clone()
+    } else {
+        topics.iter()
+            .enumerate()
+            .map(|(i, t)| format!("{}. {}", i + 1, t))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    if let Err(e) = db.set_conversation_summary(session_id, &combined_summary) {
+        warn!(session = %session_id, error = %e, "Failed to store summary");
         return;
     }
 
-    // 5. Generate embedding from summary (via spawn_blocking to avoid block_in_place deadlock)
+    // 5. Generate embedding for EACH topic
     let embedding_service = match &state.embedding_service {
         Some(svc) => svc,
         None => {
-            debug!(session = %session_id, "No embedding service, skipping vector generation");
+            debug!(session = %session_id, "No embedding service, skipping");
             return;
         }
     };
     let provider_id = embedding_service.provider_id().to_string();
-    debug!(session = %session_id, provider = %provider_id, "Step 5: generating embedding");
-    let svc = Arc::clone(embedding_service);
-    let summary_for_embed = summary.clone();
-    let embedding = match tokio::task::spawn_blocking(move || svc.embed(&summary_for_embed)).await {
-        Ok(Some(vec)) => vec,
-        Ok(None) => {
-            warn!(session = %session_id, "Embedding generation returned None");
-            return;
-        }
-        Err(e) => {
-            warn!(session = %session_id, error = %e, "Embedding spawn_blocking panicked");
-            return;
-        }
-    };
-    debug!(session = %session_id, dim = embedding.len(), "Step 5: embedding OK");
 
-    // 6. Store embedding to DB
-    debug!(session = %session_id, "Step 6: storing embedding");
-    if let Err(e) = db.set_conversation_embedding(session_id, &embedding, &provider_id) {
-        warn!(session = %session_id, error = %e, "Failed to store conversation embedding");
+    let mut topic_vectors: Vec<(String, Vec<f32>)> = Vec::new();
+    for topic in &topics {
+        let svc = Arc::clone(embedding_service);
+        let text = topic.clone();
+        match tokio::task::spawn_blocking(move || svc.embed(&text)).await {
+            Ok(Some(vec)) => {
+                topic_vectors.push((topic.clone(), vec));
+            }
+            Ok(None) => {
+                warn!(session = %session_id, topic = %topic, "Embedding returned None");
+            }
+            Err(e) => {
+                warn!(session = %session_id, error = %e, "Embedding spawn_blocking panicked");
+            }
+        }
+    }
+
+    if topic_vectors.is_empty() {
+        warn!(session = %session_id, "All topic embeddings failed");
         return;
     }
 
-    // 7. Update in-memory cache
-    debug!(session = %session_id, "Step 7: updating cache");
-    let mut cache = state.conversation_embedding_cache.write().await;
-    // Remove old entry if exists, then push new
-    cache.retain(|(id, _)| id != session_id);
-    cache.push((session_id.to_string(), embedding));
+    // 6. Store topic vectors to DB
+    if let Err(e) = db.set_conversation_topic_vectors(session_id, &topic_vectors, &provider_id) {
+        warn!(session = %session_id, error = %e, "Failed to store topic vectors");
+        return;
+    }
+    // Also update old single-vec for backwards compat (first topic as representative)
+    let _ = db.set_conversation_embedding(session_id, &topic_vectors[0].1, &provider_id);
 
-    info!(session = %session_id, "Conversation summary + embedding generated");
+    // 7. Update TopicCache
+    let vecs_only: Vec<Vec<f32>> = topic_vectors.into_iter().map(|(_, v)| v).collect();
+    let mut cache = state.conversation_topic_cache.write().await;
+    cache.retain(|(id, _)| id != session_id);
+    cache.push((session_id.to_string(), vecs_only));
+
+    info!(session = %session_id, topics = topics.len(), "Multi-topic embeddings generated");
 }
 
-/// Call Router LLM to generate a structured conversation summary.
-/// Returns None if Router is unreachable or response is invalid.
-pub(crate) async fn generate_conv_summary_llm(state: &AppState, conv_text: &str, has_timeline: bool) -> Option<String> {
+/// Extract structured topics from conversation via LLM.
+/// Returns a Vec of topic summary strings (each 30-80 chars, optimized for embedding).
+async fn extract_conv_topics_llm(
+    state: &AppState,
+    conv_text: &str,
+    has_timeline: bool,
+) -> Option<Vec<String>> {
+    let (base_url, jwt) = resolve_llm_credentials().await.ok()?;
+    let url = format!("{}/v1/chat/completions", base_url);
+
+    let max_topics = if has_timeline { 8 } else { 5 };
+
+    let system_prompt = format!(
+        "你是一个技术文档分析专家。请从以下对话中提取所有独立讨论的核心主题。\n\n\
+        规则：\n\
+        1. 每个主题用一句话总结（30-80字），包含关键技术术语、工具名、文件路径\n\
+        2. 最少1个，最多{}个主题\n\
+        3. 主题之间应该是不同的技术方向，不要重复\n\
+        4. 必须输出合法 JSON 数组，不要其他内容\n\n\
+        示例输出：\n\
+        [\"排查 Router 自动 Fallback 到 Gemini 的超时机制\", \"配置 RustDesk 自建 hbbs/hbbr 服务器与 Tailscale 组网\", \"修复 GA 构建流水线 Docker 镜像标签问题\"]",
+        max_topics
+    );
+
+    let body = serde_json::json!({
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": conv_text}
+        ],
+        "max_tokens": 1024,
+    });
+
+    let result = REQUEST_CALLER.scope("embedding".to_string(), async {
+        state.gemini.send_best_effort(
+            &state.http_client, &url, &jwt, &body,
+            std::time::Duration::from_secs(60),
+        ).await
+    }).await?;
+
+    let content = result
+        .pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())?;
+
+    // Parse JSON array from response (handle markdown code fences)
+    let json_str = content.trim();
+    let json_str = if json_str.starts_with("```") {
+        // Strip markdown code fence
+        json_str
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim()
+    } else {
+        json_str
+    };
+
+    match serde_json::from_str::<Vec<String>>(json_str) {
+        Ok(topics) if !topics.is_empty() => {
+            // Limit and filter
+            let topics: Vec<String> = topics.into_iter()
+                .filter(|t| !t.trim().is_empty())
+                .take(max_topics)
+                .collect();
+            debug!(count = topics.len(), "Topic extraction OK");
+            Some(topics)
+        }
+        Ok(_) => {
+            debug!("Topic extraction returned empty array");
+            None
+        }
+        Err(e) => {
+            debug!(error = %e, raw = %json_str, "Topic extraction JSON parse failed");
+            None
+        }
+    }
+}
+
+/// Legacy single-summary LLM call (fallback when topic extraction fails).
+async fn generate_conv_summary_llm_legacy(
+    state: &AppState,
+    conv_text: &str,
+    has_timeline: bool,
+) -> Option<String> {
     let (base_url, jwt) = resolve_llm_credentials().await.ok()?;
     let url = format!("{}/v1/chat/completions", base_url);
 
@@ -447,7 +542,7 @@ pub(crate) async fn generate_conv_summary_llm(state: &AppState, conv_text: &str,
         .map(|s| s.trim().to_string());
 
     if let Some(ref s) = content {
-        debug!(len = s.len(), "LLM summary generated");
+        debug!(len = s.len(), "Legacy LLM summary generated");
     }
     content
 }
