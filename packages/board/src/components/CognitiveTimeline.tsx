@@ -264,6 +264,30 @@ function useFullMessage(messageId: number | undefined, enabled: boolean): FullMe
   return msg;
 }
 
+// ── View Persistence ────────────────────────────────────────
+
+const STORAGE_KEY = 'timeline-view-state';
+
+function loadViewState(): { quickFilter: string; activeWindow: string } {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        quickFilter: parsed.quickFilter || 'all',
+        activeWindow: parsed.activeWindow || '24h',
+      };
+    }
+  } catch { /* ignore */ }
+  return { quickFilter: 'all', activeWindow: '24h' };
+}
+
+function saveViewState(state: { quickFilter: string; activeWindow: string }) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch { /* ignore */ }
+}
+
 // ── Main Component ─────────────────────────────────────────
 
 export function CognitiveTimeline() {
@@ -275,12 +299,18 @@ export function CognitiveTimeline() {
   const [hourlyStats, setHourlyStats] = useState<TimelineStats | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<TimelineEvent | null>(null);
   const [traceEvents, setTraceEvents] = useState<TimelineEvent[]>([]);
-  const [quickFilter, setQuickFilter] = useState('all');
+  const savedView = useMemo(() => loadViewState(), []);
+  const [quickFilter, setQuickFilter] = useState(savedView.quickFilter);
   const [searchInput, setSearchInput] = useState('');
   const [searchQuery, setSearchQuery] = useState(''); // Only updated on Enter — drives data fetching
-  const [activeWindow, setActiveWindow] = useState('24h');
+  const [activeWindow, setActiveWindow] = useState(savedView.activeWindow);
   const [loading, setLoading] = useState(false);
   const [selectionSource, setSelectionSource] = useState<'timeline' | 'list' | null>(null);
+
+  // Persist view state on change
+  useEffect(() => {
+    saveViewState({ quickFilter, activeWindow });
+  }, [quickFilter, activeWindow]);
 
   // Ref maps for bidirectional scroll sync
   const timelineDotRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
@@ -289,7 +319,7 @@ export function CognitiveTimeline() {
   // Gesture-controlled timeline: pan (two-finger scroll) + zoom (pinch)
   const now = Date.now();
   const { containerRef: timelineRef, timeRange, setTimeRange: setGestureRange } = useTimelineGestures({
-    initialRange: { min: now - windowToMs('24h'), max: now },
+    initialRange: { min: now - windowToMs(savedView.activeWindow), max: now },
   });
 
   // Track the time range we already have data for — avoid redundant fetches
