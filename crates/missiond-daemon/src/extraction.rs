@@ -53,6 +53,7 @@ fn emit_dispatch_event(event_bus: &EventBus, slot_id: &str, purpose: &str, promp
     });
 }
 
+// @beacon: memory
 pub(crate) async fn check_realtime_extraction(state: &AppState) {
     if !check_extraction_gate(&state.extraction_state, &state.mission, "realtime").await {
         return;

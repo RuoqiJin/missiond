@@ -99,6 +99,7 @@ fn extract_function(node: Node, src: &[u8]) -> Option<CodeNode> {
     }
     stub.push_str("    /* ...implementation elided... */\n}");
 
+    let beacons = collect_beacon_tags(node, src);
     Some(CodeNode {
         name: name_str,
         node_type: "function".to_string(),
@@ -109,6 +110,7 @@ fn extract_function(node: Node, src: &[u8]) -> Option<CodeNode> {
         docstring,
         stub_content: stub,
         calls,
+        beacons,
     })
 }
 
@@ -129,6 +131,7 @@ fn extract_struct(node: Node, src: &[u8]) -> Option<CodeNode> {
     }
     stub.push_str(&full_text);
 
+    let beacons = collect_beacon_tags(node, src);
     Some(CodeNode {
         name: name_str,
         node_type: "struct".to_string(),
@@ -139,6 +142,7 @@ fn extract_struct(node: Node, src: &[u8]) -> Option<CodeNode> {
         docstring,
         stub_content: stub,
         calls: Vec::new(),
+        beacons,
     })
 }
 
@@ -158,6 +162,7 @@ fn extract_enum(node: Node, src: &[u8]) -> Option<CodeNode> {
     }
     stub.push_str(&full_text);
 
+    let beacons = collect_beacon_tags(node, src);
     Some(CodeNode {
         name: name_str,
         node_type: "enum".to_string(),
@@ -168,6 +173,7 @@ fn extract_enum(node: Node, src: &[u8]) -> Option<CodeNode> {
         docstring,
         stub_content: stub,
         calls: Vec::new(),
+        beacons,
     })
 }
 
@@ -238,6 +244,7 @@ fn extract_trait(node: Node, src: &[u8]) -> Option<CodeNode> {
     }
     stub.push('}');
 
+    let beacons = collect_beacon_tags(node, src);
     Some(CodeNode {
         name: name_str,
         node_type: "trait".to_string(),
@@ -248,6 +255,7 @@ fn extract_trait(node: Node, src: &[u8]) -> Option<CodeNode> {
         docstring,
         stub_content: stub,
         calls: Vec::new(),
+        beacons,
     })
 }
 
@@ -264,6 +272,7 @@ fn extract_simple_item(node: Node, src: &[u8]) -> Option<CodeNode> {
     let docstring = collect_doc_comments(node, src);
     let full_text = text(node, src);
 
+    let beacons = collect_beacon_tags(node, src);
     Some(CodeNode {
         name: name_str,
         node_type: node_type.to_string(),
@@ -274,6 +283,7 @@ fn extract_simple_item(node: Node, src: &[u8]) -> Option<CodeNode> {
         docstring,
         stub_content: full_text,
         calls: Vec::new(),
+        beacons,
     })
 }
 
@@ -319,6 +329,30 @@ fn collect_doc_comments(node: Node, src: &[u8]) -> Option<String> {
         docs.reverse();
         Some(docs.join("\n"))
     }
+}
+
+/// Collect `// @beacon: tag1, tag2` from regular comments above a node.
+fn collect_beacon_tags(node: Node, src: &[u8]) -> Vec<String> {
+    let mut comments = Vec::new();
+    let mut sibling = node.prev_sibling();
+    while let Some(s) = sibling {
+        if s.kind() == "line_comment" {
+            comments.push(text(s, src));
+            sibling = s.prev_sibling();
+            continue;
+        }
+        if s.kind() == "attribute_item" {
+            sibling = s.prev_sibling();
+            continue;
+        }
+        break;
+    }
+    if comments.is_empty() {
+        return Vec::new();
+    }
+    comments.reverse();
+    let joined = comments.join("\n");
+    super::extract_beacon_tags(&joined)
 }
 
 /// Build function signature (everything before the body block).
@@ -463,6 +497,7 @@ fn process() {
             docstring: Some("/// Check if x is valid".to_string()),
             stub_content: String::new(),
             calls: vec!["validate".to_string(), "check".to_string()],
+            beacons: Vec::new(),
         };
         let text = node.embedding_text("src/lib.rs");
         assert!(text.contains("Name: foo"));

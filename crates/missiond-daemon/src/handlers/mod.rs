@@ -26,6 +26,7 @@ use missiond_mcp::tools::ToolResult;
 
 use crate::state::AppState;
 
+// @beacon: mcp
 /// Dispatch a tool call to the appropriate handler module.
 pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
@@ -34,6 +35,8 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         n if n.starts_with("mission_permission_") => permission::handle(state, n, args).await,
         n if n.starts_with("mission_cc_") => cc_tasks::handle(state, n, args).await,
         n if n.starts_with("mission_kb_") => kb::handle(state, n, args).await,
+        "mission_code_search" => kb::handle(state, name, args).await,
+        n if n.starts_with("mission_beacon_") => kb::handle(state, n, args).await,
         n if n.starts_with("mission_router_chat") => router_chat::handle(state, n, args).await,
         n if n.starts_with("mission_memory_") => memory::handle(state, n, args).await,
         n if n.starts_with("mission_board_") => board::handle(state, n, args).await,

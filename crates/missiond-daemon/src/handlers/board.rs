@@ -80,6 +80,7 @@ struct BoardNoteAddArgs {
     author: Option<String>,
 }
 
+// @beacon: board
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== Board Tasks (Personal Task Board) =====

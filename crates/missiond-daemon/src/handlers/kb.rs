@@ -15,12 +15,16 @@ use crate::helpers::default_mission_home;
 
 /// Content guard: reject verbose debug logs, stack traces, and narrative-style entries.
 /// Returns Some(rejection_message) if content should be rejected, None if OK.
-fn check_content_quality(summary: &str, detail: &Option<Value>) -> Option<String> {
-    // Rule 1: summary too long (> 400 chars = likely narrative)
-    if summary.chars().count() > 400 {
+fn check_content_quality(summary: &str, detail: &Option<Value>, category: Option<&str>) -> Option<String> {
+    // Rule 1: summary too long — architecture:summary gets 800 chars, others 400
+    let max_chars = match category {
+        Some(c) if c == "architecture:summary" => 800,
+        _ => 400,
+    };
+    if summary.chars().count() > max_chars {
         return Some(format!(
-            "REJECTED: summary 过长（{}字）。summary 必须 ≤ 400 字，是结论性一句话摘要。高密度技术细节（配置/命令/代码）请存入 detail 字段（JSON）。",
-            summary.chars().count()
+            "REJECTED: summary 过长（{}字）。summary 必须 ≤ {} 字，是结论性摘要。高密度技术细节（配置/命令/代码）请存入 detail 字段（JSON）。",
+            summary.chars().count(), max_chars
         ));
     }
 
@@ -116,13 +120,14 @@ struct KBGCArgs {
     days: Option<i64>,
 }
 
+// @beacon: knowledge
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== Knowledge Base (Jarvis Memory) =====
         "mission_kb_remember" => {
             let args: KBRememberArgs = serde_json::from_value(args)?;
             // Content guard: reject verbose debug logs / stack traces
-            if let Some(rejection) = check_content_quality(&args.summary, &args.detail) {
+            if let Some(rejection) = check_content_quality(&args.summary, &args.detail, Some(&args.category)) {
                 return Ok(ToolResult::error(&rejection));
             }
             let input = missiond_core::types::KBRememberInput {
@@ -1080,6 +1085,239 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "results": results,
                 "remaining": remaining,
             })))
+        }
+
+        // ===== Holographic Beacon (P4) =====
+        "mission_beacon_list" => {
+            let beacons = state.mission.db().beacon_list()
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            Ok(ToolResult::json_pretty(&beacons))
+        }
+        "mission_beacon_map" => {
+            #[derive(Deserialize)]
+            struct BeaconMapArgs { name: String }
+            let BeaconMapArgs { name } = serde_json::from_value(args)?;
+            let nodes = state.mission.db().beacon_map(&name)
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            if nodes.is_empty() {
+                return Ok(ToolResult::text(format!("Beacon '{}' not found or has no nodes.", name)));
+            }
+            Ok(ToolResult::json_pretty(&serde_json::json!({
+                "beacon": name,
+                "node_count": nodes.len(),
+                "files": nodes.iter().map(|n| &n.file_path).collect::<std::collections::HashSet<_>>().len(),
+                "nodes": nodes,
+            })))
+        }
+        "mission_beacon_tag" => {
+            #[derive(Deserialize)]
+            struct BeaconTagArgs {
+                file_path: String,
+                symbol: String,
+                feature: String,
+                #[serde(default)]
+                annotation: Option<String>,
+            }
+            let BeaconTagArgs { file_path, symbol, feature, annotation } =
+                serde_json::from_value(args)?;
+
+            // Read the file and insert `// @beacon: feature` above the symbol
+            let source = std::fs::read_to_string(&file_path)
+                .map_err(|e| anyhow!("Cannot read file {}: {}", file_path, e))?;
+
+            // Find the line containing the symbol declaration
+            let mut target_line = None;
+            for (idx, line) in source.lines().enumerate() {
+                let trimmed = line.trim();
+                // Match: fn symbol, struct symbol, enum symbol, impl symbol, trait symbol, pub ... fn symbol, etc.
+                if trimmed.contains(&format!("fn {}", symbol))
+                    || trimmed.contains(&format!("struct {}", symbol))
+                    || trimmed.contains(&format!("enum {}", symbol))
+                    || trimmed.contains(&format!("trait {}", symbol))
+                    || trimmed.contains(&format!("impl {}", symbol))
+                {
+                    target_line = Some(idx);
+                    break;
+                }
+            }
+
+            let target_line = target_line
+                .ok_or_else(|| anyhow!("Symbol '{}' not found in {}", symbol, file_path))?;
+
+            // Check if @beacon: feature already exists on preceding lines
+            let lines: Vec<&str> = source.lines().collect();
+            let already_tagged = if target_line > 0 {
+                (0..target_line).rev().take(5).any(|i| {
+                    let l = lines[i].trim();
+                    l.starts_with("//") && l.contains("@beacon:") && l.contains(&feature)
+                })
+            } else {
+                false
+            };
+
+            if already_tagged {
+                return Ok(ToolResult::text(format!(
+                    "Symbol '{}' already tagged with beacon '{}'.", symbol, feature
+                )));
+            }
+
+            // Determine indentation from the target line
+            let indent = lines[target_line].len() - lines[target_line].trim_start().len();
+            let indent_str: String = lines[target_line].chars().take(indent).collect();
+
+            // Insert the beacon comment
+            let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+            new_lines.insert(target_line, format!("{}// @beacon: {}", indent_str, feature));
+
+            std::fs::write(&file_path, new_lines.join("\n"))
+                .map_err(|e| anyhow!("Cannot write file {}: {}", file_path, e))?;
+
+            // Also immediately record in DB (sync pipeline will re-confirm on next commit)
+            let beacon_id = state.mission.db().beacon_ensure(&feature)
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+
+            // Determine repo from file_path (find repo root)
+            let repo_name = std::path::Path::new(&file_path)
+                .ancestors()
+                .find_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                .unwrap_or_else(|| "unknown".to_string());
+
+            let _ = state.mission.db().beacon_node_upsert(
+                &beacon_id, &repo_name, &file_path, &symbol,
+                annotation.as_deref(),
+            );
+
+            Ok(ToolResult::text(format!(
+                "Tagged '{}' with beacon '{}' in {}:{}",
+                symbol, feature, file_path, target_line + 1
+            )))
+        }
+        "mission_beacon_annotate" => {
+            #[derive(Deserialize)]
+            struct BeaconAnnotateArgs {
+                beacon_name: String,
+                file_path: String,
+                symbol: String,
+                annotation: String,
+            }
+            let BeaconAnnotateArgs { beacon_name, file_path, symbol, annotation } =
+                serde_json::from_value(args)?;
+
+            // Find repo name from file_path
+            let repo_name = std::path::Path::new(&file_path)
+                .ancestors()
+                .find_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                .unwrap_or_else(|| "unknown".to_string());
+
+            let updated = state.mission.db().beacon_node_annotate(
+                &beacon_name, &repo_name, &file_path, &symbol, &annotation,
+            ).map_err(|e| anyhow!("DB error: {}", e))?;
+
+            if updated {
+                Ok(ToolResult::text(format!("Annotation updated for {}::{} in beacon '{}'.", file_path, symbol, beacon_name)))
+            } else {
+                Ok(ToolResult::text(format!("No matching beacon node found for {}::{} in beacon '{}'.", file_path, symbol, beacon_name)))
+            }
+        }
+
+        // ===== Code Context (P3.5) =====
+        "mission_code_search" => {
+            #[derive(Deserialize)]
+            struct CodeSearchArgs {
+                query: String,
+                #[serde(default)]
+                repo: Option<String>,
+                #[serde(default)]
+                file_path: Option<String>,
+                #[serde(default)]
+                node_type: Option<String>,
+                #[serde(default)]
+                limit: Option<usize>,
+            }
+            let CodeSearchArgs { query, repo, file_path, node_type, limit } =
+                serde_json::from_value(args)?;
+            let limit = limit.unwrap_or(20).min(50);
+
+            // FTS search
+            let q = query.clone();
+            let hits = state.db_exec.run(move |db| {
+                db.ast_search(&q, limit * 2)
+            }).await.unwrap_or_default();
+
+            if hits.is_empty() {
+                return Ok(ToolResult::text("No code nodes found matching query."));
+            }
+
+            // Post-filter by repo, file_path prefix, node_type
+            let filtered: Vec<_> = hits.into_iter()
+                .filter(|h| {
+                    if let Some(ref r) = repo {
+                        if h.repo != *r { return false; }
+                    }
+                    if let Some(ref fp) = file_path {
+                        if !h.file_path.starts_with(fp.as_str()) { return false; }
+                    }
+                    if let Some(ref nt) = node_type {
+                        if h.node_type != *nt { return false; }
+                    }
+                    true
+                })
+                .take(limit)
+                .collect();
+
+            if filtered.is_empty() {
+                return Ok(ToolResult::text("No code nodes matched filters."));
+            }
+
+            // Render as structured JSON
+            let results: Vec<serde_json::Value> = filtered.iter().map(|h| {
+                serde_json::json!({
+                    "name": h.name,
+                    "node_type": h.node_type,
+                    "file_path": h.file_path,
+                    "repo": h.repo,
+                    "lines": format!("{}-{}", h.start_line, h.end_line),
+                    "exported": h.is_exported,
+                    "signature": h.signature,
+                    "calls": h.calls,
+                    "docstring": h.docstring,
+                    "stub": h.stub_content,
+                })
+            }).collect();
+
+            // Also do cross-file association for top results
+            let mut related_results: Vec<serde_json::Value> = Vec::new();
+            let db = state.mission.db();
+            for h in filtered.iter().take(5) {
+                if h.node_type == "impl" {
+                    if let Ok(related) = db.ast_find_related(&h.name, 3) {
+                        for r in related {
+                            if !filtered.iter().any(|f| f.id == r.id)
+                                && !related_results.iter().any(|rr| rr.get("name").and_then(|v| v.as_str()) == Some(&r.name) && rr.get("node_type").and_then(|v| v.as_str()) == Some(&r.node_type))
+                            {
+                                related_results.push(serde_json::json!({
+                                    "name": r.name,
+                                    "node_type": r.node_type,
+                                    "file_path": r.file_path,
+                                    "lines": format!("{}-{}", r.start_line, r.end_line),
+                                    "stub": r.stub_content,
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut output = serde_json::json!({
+                "query": query,
+                "count": results.len(),
+                "results": results,
+            });
+            if !related_results.is_empty() {
+                output["related"] = serde_json::json!(related_results);
+            }
+
+            Ok(ToolResult::json_pretty(&output))
         }
 
         _ => Err(anyhow!("Unknown kb tool: {name}")),

@@ -15,7 +15,7 @@ use serde::Deserialize;
 use tracing::{info, warn};
 
 use crate::codex_cli::CodexCli;
-use crate::event_bus::DaemonEvent;
+use crate::event_bus::{DaemonEvent, TraceContext};
 use crate::state::AppState;
 
 /// Minimum unnarrated messages before triggering analysis.
@@ -94,11 +94,32 @@ async fn process_pending(state: &AppState, codex: &CodexCli) -> anyhow::Result<(
         return Ok(());
     }
 
-    info!(sessions = pending.len(), "Step Narrator: found sessions needing narration");
+    let total_unnarrated: usize = pending.iter().map(|(_, c)| *c as usize).sum();
+    info!(sessions = pending.len(), total_unnarrated, "Step Narrator: found sessions needing narration");
+
+    // Batch-level event (no trace context — worker-level)
+    state.event_bus.publish(DaemonEvent::NarrationBatchStarted {
+        pending_sessions: pending.len(),
+        total_unnarrated,
+    });
 
     for (session_id, unnarrated_count) in pending {
         info!(session = %&session_id[..8.min(session_id.len())], unnarrated = unnarrated_count,
               "Step Narrator: processing session");
+
+        let trace_ctx = || TraceContext {
+            trace_id: Some(session_id.clone()),
+            ..Default::default()
+        };
+
+        // Session-level start event (traced by session_id)
+        state.event_bus.publish_traced(
+            DaemonEvent::NarrationSessionStarted {
+                session_id: session_id.clone(),
+                unnarrated_count: unnarrated_count as usize,
+            },
+            trace_ctx(),
+        );
 
         let start = Instant::now();
 
@@ -107,15 +128,25 @@ async fn process_pending(state: &AppState, codex: &CodexCli) -> anyhow::Result<(
                 let duration_ms = start.elapsed().as_millis() as u64;
                 info!(session = %&session_id[..8.min(session_id.len())], narrated = count, duration_ms,
                       "Step Narrator: completed");
-                state.event_bus.publish(DaemonEvent::NarrationCompleted {
-                    session_id: session_id.clone(),
-                    narrated_count: count,
-                    duration_ms,
-                });
+                state.event_bus.publish_traced(
+                    DaemonEvent::NarrationCompleted {
+                        session_id: session_id.clone(),
+                        narrated_count: count,
+                        duration_ms,
+                    },
+                    trace_ctx(),
+                );
             }
             Err(e) => {
                 warn!(session = %&session_id[..8.min(session_id.len())], error = %e,
                       "Step Narrator: failed");
+                state.event_bus.publish_traced(
+                    DaemonEvent::NarrationFailed {
+                        session_id: session_id.clone(),
+                        error: format!("{e:#}"),
+                    },
+                    trace_ctx(),
+                );
             }
         }
 

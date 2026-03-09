@@ -39,6 +39,7 @@ fn lagged_backoff(consecutive_lags: u32) -> Duration {
     Duration::from_millis(with_jitter)
 }
 
+// @beacon: eventbus
 /// Start all event-driven consumer tasks. Call once during daemon startup.
 pub(crate) fn start_event_consumers(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>) {
     spawn_extraction_consumer(state, timeline_tx);
