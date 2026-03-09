@@ -2,12 +2,12 @@
 use anyhow::{anyhow, Result};
 use tracing::{debug, info, warn};
 
-use crate::gemini_client::REQUEST_CALLER;
 use crate::state::AppState;
 use std::sync::Arc;
 use std::path::PathBuf;
 use crate::helpers::char_boundary_at;
 use crate::helpers::default_mission_home;
+use crate::minimax_client::ChatMessage;
 
 #[derive(serde::Deserialize)]
 pub(crate) struct LlmConfig {
@@ -426,15 +426,14 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
     info!(session = %session_id, topics = topics.len(), "Multi-topic embeddings generated");
 }
 
-/// Extract structured topics from conversation via LLM.
+/// Extract structured topics from conversation via MiniMax M2.5 (through Gateway).
 /// Returns a Vec of topic summary strings (each 30-80 chars, optimized for embedding).
 async fn extract_conv_topics_llm(
     state: &AppState,
     conv_text: &str,
     has_timeline: bool,
 ) -> Option<Vec<String>> {
-    let (base_url, jwt) = resolve_llm_credentials().await.ok()?;
-    let url = format!("{}/v1/chat/completions", base_url);
+    let handle = state.minimax.as_ref()?;
 
     let max_topics = if has_timeline { 8 } else { 5 };
 
@@ -450,30 +449,22 @@ async fn extract_conv_topics_llm(
         max_topics
     );
 
-    let body = serde_json::json!({
-        "model": "gemini-3.1-flash-lite",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": conv_text}
-        ],
-        "max_tokens": 1024,
-    });
+    let messages = vec![
+        ChatMessage { role: "system".into(), content: system_prompt },
+        ChatMessage { role: "user".into(), content: conv_text.to_string() },
+    ];
 
-    let result = REQUEST_CALLER.scope("embedding".to_string(), async {
-        state.gemini.send_best_effort(
-            &state.http_client, &url, &jwt, &body,
-            std::time::Duration::from_secs(60),
-        ).await
-    }).await?;
-
-    let content = result
-        .pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())?;
+    let content = match handle.call_embedding(messages, Some(1024), None).await {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(error = %e, "MiniMax topic extraction failed");
+            return None;
+        }
+    };
 
     // Parse JSON array from response (handle markdown code fences)
     let json_str = content.trim();
     let json_str = if json_str.starts_with("```") {
-        // Strip markdown code fence
         json_str
             .trim_start_matches("```json")
             .trim_start_matches("```")
@@ -485,12 +476,11 @@ async fn extract_conv_topics_llm(
 
     match serde_json::from_str::<Vec<String>>(json_str) {
         Ok(topics) if !topics.is_empty() => {
-            // Limit and filter
             let topics: Vec<String> = topics.into_iter()
                 .filter(|t| !t.trim().is_empty())
                 .take(max_topics)
                 .collect();
-            debug!(count = topics.len(), "Topic extraction OK");
+            debug!(count = topics.len(), "Topic extraction OK (MiniMax Gateway)");
             Some(topics)
         }
         Ok(_) => {
@@ -510,8 +500,7 @@ async fn generate_conv_summary_llm_legacy(
     conv_text: &str,
     has_timeline: bool,
 ) -> Option<String> {
-    let (base_url, jwt) = resolve_llm_credentials().await.ok()?;
-    let url = format!("{}/v1/chat/completions", base_url);
+    let handle = state.minimax.as_ref()?;
 
     let system_prompt = if has_timeline {
         "作为技术专家，请用 300 字以内总结以下长会话的完整生命周期。\n\
@@ -529,30 +518,22 @@ async fn generate_conv_summary_llm_legacy(
         输出纯文本，不要 Markdown 格式。"
     };
 
-    let body = serde_json::json!({
-        "model": "gemini-3.1-flash-lite",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": conv_text}
-        ],
-        "max_tokens": 512,
-    });
+    let messages = vec![
+        ChatMessage { role: "system".into(), content: system_prompt.to_string() },
+        ChatMessage { role: "user".into(), content: conv_text.to_string() },
+    ];
 
-    let result = REQUEST_CALLER.scope("embedding".to_string(), async {
-        state.gemini.send_best_effort(
-            &state.http_client, &url, &jwt, &body,
-            std::time::Duration::from_secs(60),
-        ).await
-    }).await?;
-    let content = result
-        .pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string());
-
-    if let Some(ref s) = content {
-        debug!(len = s.len(), "Legacy LLM summary generated");
+    match handle.call_embedding(messages, Some(512), None).await {
+        Ok(content) => {
+            let trimmed = content.trim().to_string();
+            debug!(len = trimmed.len(), "Legacy LLM summary generated (MiniMax)");
+            Some(trimmed)
+        }
+        Err(e) => {
+            warn!(error = %e, "MiniMax legacy summary failed");
+            None
+        }
     }
-    content
 }
 
 /// Resolve LLM credentials (base_url, bearer_token) for Router API calls.
