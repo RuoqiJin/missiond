@@ -13,10 +13,14 @@ export const EVENT_COLORS: Record<string, { dot: string; glow: string; bg: strin
   user_message:             { dot: 'bg-blue-400',    glow: 'shadow-blue-400/50',    bg: 'bg-blue-400/10',    text: 'text-blue-400',    label: 'User',      icon: <MessageSquare className="w-3 h-3" /> },
   assistant_message:        { dot: 'bg-teal-400',    glow: 'shadow-teal-400/50',    bg: 'bg-teal-400/10',    text: 'text-teal-400',    label: 'Assistant',  icon: <Brain className="w-3 h-3" /> },
   thinking_message:         { dot: 'bg-violet-400',  glow: 'shadow-violet-400/50',  bg: 'bg-violet-400/10',  text: 'text-violet-400',  label: 'Thinking',   icon: <Brain className="w-3 h-3" /> },
-  // ── Gemini (purple) ──
+  // ── Unified CLI Engine (cyan gradient) ──
+  cli_request_started:      { dot: 'bg-fuchsia-400', glow: 'shadow-fuchsia-400/50', bg: 'bg-fuchsia-400/10', text: 'text-fuchsia-400', label: 'CLI ▸',      icon: <Cpu className="w-3 h-3" /> },
+  cli_request_completed:    { dot: 'bg-fuchsia-500', glow: 'shadow-fuchsia-500/50', bg: 'bg-fuchsia-500/10', text: 'text-fuchsia-400', label: 'CLI ◂',      icon: <Cpu className="w-3 h-3" /> },
+  cli_tool_activity:        { dot: 'bg-fuchsia-300', glow: 'shadow-fuchsia-300/50', bg: 'bg-fuchsia-300/10', text: 'text-fuchsia-300', label: 'CLI Tool',   icon: <Wrench className="w-3 h-3" /> },
+  // ── Legacy: Gemini (purple) ──
   gemini_request_started:   { dot: 'bg-fuchsia-400', glow: 'shadow-fuchsia-400/50', bg: 'bg-fuchsia-400/10', text: 'text-fuchsia-400', label: 'Gemini ▸',   icon: <Cpu className="w-3 h-3" /> },
   gemini_request_completed: { dot: 'bg-fuchsia-500', glow: 'shadow-fuchsia-500/50', bg: 'bg-fuchsia-500/10', text: 'text-fuchsia-400', label: 'Gemini ◂',   icon: <Cpu className="w-3 h-3" /> },
-  // ── GPT / Codex (lime-green) ──
+  // ── Legacy: GPT / Codex (lime-green) ──
   codex_request_started:    { dot: 'bg-lime-400',    glow: 'shadow-lime-400/50',    bg: 'bg-lime-400/10',    text: 'text-lime-400',    label: 'GPT ▸',      icon: <Zap className="w-3 h-3" /> },
   codex_request_completed:  { dot: 'bg-lime-500',    glow: 'shadow-lime-500/50',    bg: 'bg-lime-500/10',    text: 'text-lime-400',    label: 'GPT ◂',      icon: <Zap className="w-3 h-3" /> },
   // ── Code (yellow) ──
@@ -67,7 +71,7 @@ export const SLOT_COLORS: Record<string, { badge: string; border: string }> = {
 export const SWIMLANES = [
   { id: 'chat',    label: 'Chat',      types: ['user_message', 'assistant_message', 'thinking_message'] },
   { id: 'slot',    label: 'Slot',      types: ['slot_task_dispatched', 'system_message'] },
-  { id: 'ai',      label: 'AI / LLM',  types: ['gemini_request_started', 'gemini_request_completed', 'decision_made', 'insight_generated'] },
+  { id: 'ai',      label: 'AI / LLM',  types: ['cli_request_started', 'cli_request_completed', 'cli_tool_activity', 'gemini_request_started', 'gemini_request_completed', 'decision_made', 'insight_generated'] },
   { id: 'gpt',     label: 'GPT',       types: ['codex_request_started', 'codex_request_completed'] },
   { id: 'code',    label: 'Code',      types: ['git_commit'] },
   { id: 'flow',    label: 'Flow',      types: ['task_lifecycle', 'question_created', 'question_resolved'] },
@@ -104,14 +108,14 @@ export const WINDOW_OPTIONS = [
 // ── Visual Status Styles ──
 
 export const DOT_STYLES: Record<DotVisualStatus, string> = {
-  focused:     'ring-[3px] ring-white/50 scale-[1.6] z-30 shadow-[0_0_10px_var(--tw-shadow-color)]',
-  highlighted: 'ring-2 ring-white/30 scale-125 z-25 shadow-[0_0_6px_var(--tw-shadow-color)]',
+  focused:     'ring-[3px] ring-white/50 scale-[1.6] z-[35] shadow-[0_0_10px_var(--tw-shadow-color)]',
+  highlighted: 'ring-2 ring-white/30 scale-125 z-30 shadow-[0_0_6px_var(--tw-shadow-color)]',
   dimmed:      'opacity-20 scale-90',
   normal:      '',
 };
 
 export const CAPSULE_STYLES: Record<CapsuleVisualStatus, string> = {
-  selected: 'z-[15] shadow-lg shadow-black/40',
+  selected: 'z-[5] shadow-lg shadow-black/40',
   dimmed:   'z-[1] opacity-25',
   normal:   'z-[1]',
 };

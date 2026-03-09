@@ -188,6 +188,8 @@ pub struct PTYSessionOptions {
     pub log_file: Option<PathBuf>,
     pub cols: u16,
     pub rows: u16,
+    /// CLI engine type (determines which binary to spawn and state parser to use)
+    pub engine: crate::types::CliEngine,
     /// Path to MCP config JSON file (passed as --mcp-config to claude)
     pub mcp_config: Option<PathBuf>,
     /// Skip all permission prompts and trust dialogs
@@ -203,6 +205,7 @@ impl Default for PTYSessionOptions {
             log_file: None,
             cols: 120,
             rows: 30,
+            engine: crate::types::CliEngine::default(),
             mcp_config: None,
             dangerously_skip_permissions: false,
         }
@@ -222,10 +225,10 @@ impl EventListener for SessionEventListener {
 
 // ========== PTYSession ==========
 
-/// Interactive PTY session for Claude Code
+/// Interactive PTY session for AI CLI agents.
 ///
-/// Manages a single Claude Code process with terminal emulation,
-/// state detection, and streaming text extraction.
+/// Manages a CLI process (Claude Code, Gemini CLI, or Codex CLI) with
+/// terminal emulation, state detection, and streaming text extraction.
 pub struct PTYSession {
     /// Unique session ID
     pub id: String,
@@ -236,6 +239,8 @@ pub struct PTYSession {
     /// Terminal dimensions
     pub cols: u16,
     pub rows: u16,
+    /// CLI engine type (determines spawn command and state parser)
+    pub engine: crate::types::CliEngine,
 
     // Internal state
     state: Arc<RwLock<SessionState>>,
@@ -313,6 +318,53 @@ pub enum SessionEvent {
     Exit(i32),
 }
 
+/// Build CLI launch command based on engine type.
+///
+/// Each engine has different binary, arguments, and flag support.
+/// The working directory is set via CommandBuilder::cwd(), not via CLI flags.
+fn build_cli_command(
+    engine: crate::types::CliEngine,
+    cwd: &std::path::Path,
+    mcp_config: Option<&std::path::Path>,
+    dangerously_skip_permissions: bool,
+) -> String {
+    use crate::types::CliEngine;
+
+    match engine {
+        CliEngine::ClaudeCode => {
+            let mut parts = format!("claude --add-dir \"{}\"", cwd.display());
+            if let Some(mcp) = mcp_config {
+                parts.push_str(&format!(" --mcp-config \"{}\"", mcp.display()));
+                info!(mcp_config = %mcp.display(), "MCP config will be injected");
+            }
+            if dangerously_skip_permissions {
+                parts.push_str(" --dangerously-skip-permissions");
+                info!("Dangerous mode: skipping all permission prompts");
+            }
+            parts
+        }
+        CliEngine::Gemini => {
+            // Gemini CLI: interactive mode, --yolo skips tool authorization
+            // Working directory is set via CommandBuilder::cwd(), not CLI flag
+            let mut parts = "gemini".to_string();
+            parts.push_str(" --yolo");
+            if let Some(mcp) = mcp_config {
+                info!(mcp_config = %mcp.display(), "MCP config ignored for Gemini CLI (not supported)");
+            }
+            parts
+        }
+        CliEngine::Codex => {
+            // Codex CLI: interactive mode
+            // Working directory is set via CommandBuilder::cwd(), not CLI flag
+            let parts = "codex".to_string();
+            if let Some(mcp) = mcp_config {
+                info!(mcp_config = %mcp.display(), "MCP config ignored for Codex CLI (not supported)");
+            }
+            parts
+        }
+    }
+}
+
 impl PTYSession {
     /// Create a new PTY session
     pub fn new(options: PTYSessionOptions) -> Result<Self> {
@@ -346,6 +398,7 @@ impl PTYSession {
             cwd: options.cwd,
             cols: options.cols,
             rows: options.rows,
+            engine: options.engine,
 
             state: Arc::new(RwLock::new(SessionState::Starting)),
             history: Arc::new(RwLock::new(Vec::new())),
@@ -507,32 +560,20 @@ impl PTYSession {
             pixel_height: 0,
         })?;
 
-        // Build command: claude --add-dir "cwd" [--mcp-config "path"]
-        // Use a login shell to ensure proper environment (nvm, homebrew, etc.)
-        let claude_cmd = {
-            let mut parts = format!("claude --add-dir \"{}\"", self.cwd.display());
-            if let Some(ref mcp_config) = self.mcp_config {
-                parts.push_str(&format!(" --mcp-config \"{}\"", mcp_config.display()));
-                info!(mcp_config = %mcp_config.display(), "MCP config will be injected");
-            }
-            if self.dangerously_skip_permissions {
-                parts.push_str(" --dangerously-skip-permissions");
-                info!("Dangerous mode: skipping all permission prompts");
-            }
-            parts
-        };
+        // Build CLI command based on engine type
+        let cli_cmd = build_cli_command(self.engine, &self.cwd, self.mcp_config.as_deref(), self.dangerously_skip_permissions);
 
         #[cfg(unix)]
         let mut cmd = {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-            info!(shell = %shell, cwd = %self.cwd.display(), "Spawning claude via login shell");
+            info!(shell = %shell, engine = %self.engine, cwd = %self.cwd.display(), "Spawning CLI via login shell");
 
             let mut c = CommandBuilder::new(&shell);
             c.args([
                 "-l",  // login shell (loads .zprofile, .zshrc)
                 "-i",  // interactive (needed for proper PTY behavior)
                 "-c",
-                &claude_cmd,
+                &cli_cmd,
             ]);
             c
         };
@@ -542,7 +583,7 @@ impl PTYSession {
             let mut c = CommandBuilder::new("cmd.exe");
             c.args([
                 "/C",
-                &claude_cmd,
+                &cli_cmd,
             ]);
             c
         };
@@ -621,9 +662,11 @@ impl PTYSession {
         let pty_writer = Arc::clone(&self.pty_writer);
 
         let slot_id_for_check = self.slot_id.clone();
+        let engine_for_check = self.engine;
         tokio::spawn(async move {
             Self::state_check_loop(
                 slot_id_for_check,
+                engine_for_check,
                 session_state,
                 term_for_check,
                 extractor,
@@ -735,6 +778,7 @@ impl PTYSession {
     #[allow(clippy::too_many_arguments)]
     async fn state_check_loop(
         slot_id: String,
+        engine: crate::types::CliEngine,
         state: Arc<RwLock<SessionState>>,
         term: Arc<Mutex<Term<SessionEventListener>>>,
         extractor: Arc<Mutex<IncrementalExtractor>>,
@@ -753,9 +797,22 @@ impl PTYSession {
     ) {
         let mut check_interval = interval(Duration::from_millis(100));
 
-        // Create parsers (stateless, can be reused)
-        let state_parser = ClaudeCodeStateParser::new();
-        let confirm_parser = ClaudeCodeConfirmParser::new();
+        // Create parsers based on engine type (stateless, can be reused)
+        use crate::types::CliEngine;
+        let state_parser: Box<dyn StateParser + Send + Sync> = match engine {
+            CliEngine::ClaudeCode => Box::new(ClaudeCodeStateParser::new()),
+            CliEngine::Gemini | CliEngine::Codex => {
+                // TODO(Step 2): implement GeminiCliStateParser / CodexCliStateParser
+                // For now, use Claude parser as fallback (it won't match non-Claude output,
+                // so detect_state will return None and state stays Starting/Idle)
+                Box::new(ClaudeCodeStateParser::new())
+            }
+        };
+        let confirm_parser: Option<Box<dyn ConfirmParser + Send + Sync>> = match engine {
+            CliEngine::ClaudeCode => Some(Box::new(ClaudeCodeConfirmParser::new())),
+            // Gemini --yolo / Codex: no confirmation dialogs
+            CliEngine::Gemini | CliEngine::Codex => None,
+        };
         let status_parser = ClaudeCodeStatusParser::new();
         let tool_parser = ClaudeCodeToolOutputParser::new();
         let fingerprint_registry = default_registry();
@@ -1055,7 +1112,7 @@ impl PTYSession {
 
                     // Handle confirming state using semantic ConfirmParser
                     if new_state == SessionState::Confirming {
-                        let semantic_confirm = confirm_parser.detect_confirm(&context);
+                        let semantic_confirm = confirm_parser.as_ref().and_then(|p| p.detect_confirm(&context));
                         let confirm_info = semantic_confirm.as_ref().map(convert_semantic_confirm_info);
                         *pending_tool_confirm.write().await = confirm_info.clone();
 

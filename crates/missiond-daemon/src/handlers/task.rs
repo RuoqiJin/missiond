@@ -135,6 +135,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                         id: slot.config.id.clone(),
                         role: slot.config.role.clone(),
                         cwd: slot.config.cwd.as_deref().map(std::path::PathBuf::from),
+                        engine: slot.config.engine,
                     };
                     let mcp_config = slot.config.mcp_config.clone().map(std::path::PathBuf::from);
                     let (extra_env, session_file) = build_slot_tracking_env(candidate_id, slot.config.env.as_ref()).await;

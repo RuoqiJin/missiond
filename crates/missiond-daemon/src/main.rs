@@ -571,6 +571,7 @@ async fn main() -> Result<()> {
             id: slot.config.id.clone(),
             role: slot.config.role.clone(),
             cwd: slot.config.cwd.as_deref().map(PathBuf::from),
+            engine: slot.config.engine,
         };
         pty.init_slot(&pty_slot).await;
     }
@@ -1306,6 +1307,44 @@ async fn main() -> Result<()> {
             loop {
                 match rx.recv().await {
                     Ok(te) => match &te.event {
+                        // Unified CLI engine events — log to gemini_requests table
+                        event_bus::DaemonEvent::CliRequestStarted {
+                            engine, request_id, caller, session_id, model,
+                            prompt_chars, prompt_text, ..
+                        } => {
+                            if let Err(e) = log_db.db().gemini_log_insert_started(
+                                request_id, caller, session_id.as_deref(),
+                                model, *prompt_chars as i64,
+                                prompt_text.as_deref(),
+                            ) {
+                                warn!(error = %e, engine = %engine, "CLI log: failed to insert started");
+                            }
+                        }
+                        event_bus::DaemonEvent::CliRequestCompleted {
+                            engine, request_id, response_chars, duration_ms,
+                            status, error_msg, response_text, extra, ..
+                        } => {
+                            let api_mode_default = format!("{}-cli", engine);
+                            let api_mode = extra.get("api_mode")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(&api_mode_default);
+                            let queue_wait_ms = extra.get("queue_wait_ms")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let retry_count = extra.get("retry_count")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            if let Err(e) = log_db.db().gemini_log_update_completed(
+                                request_id, api_mode,
+                                *response_chars as i64, queue_wait_ms as i64,
+                                *duration_ms as i64, retry_count as i64,
+                                status, error_msg.as_deref(),
+                                response_text.as_deref(),
+                            ) {
+                                warn!(error = %e, engine = %engine, "CLI log: failed to update completed");
+                            }
+                        }
+                        // Legacy engine-specific events (for backward compat with old timeline data)
                         event_bus::DaemonEvent::GeminiRequestStarted {
                             request_id, caller, session_id, model,
                             prompt_chars, prompt_text,
@@ -1333,7 +1372,6 @@ async fn main() -> Result<()> {
                                 warn!(error = %e, "Gemini log: failed to update completed");
                             }
                         }
-                        // Codex CLI events — reuse gemini_requests table
                         event_bus::DaemonEvent::CodexRequestStarted {
                             request_id, caller, model, prompt_chars, prompt_text, ..
                         } => {

@@ -10,7 +10,7 @@
 //! Both modes share semaphore + rate_limiter and return OpenAI-compatible JSON,
 //! so all call sites work identically regardless of provider.
 //!
-//! Instrumentation: every request emits a `DaemonEvent::GeminiRequestCompleted`
+//! Instrumentation: every request emits a `DaemonEvent::CliRequestCompleted`
 //! via EventBus for persistent logging. Caller identity flows through `task_local!`.
 
 use std::num::NonZeroU32;
@@ -63,7 +63,7 @@ pub(crate) struct GeminiClient {
 }
 
 /// Drop guard for `GeminiClient::send()`.
-/// Guarantees every `GeminiRequestStarted` gets a corresponding `GeminiRequestCompleted`,
+/// Guarantees every `CliRequestStarted` gets a corresponding `CliRequestCompleted`,
 /// even on early-return errors (`?`) or future cancellation (`send_best_effort` timeout).
 struct RequestGuard<'a> {
     client: &'a GeminiClient,
@@ -218,14 +218,15 @@ impl GeminiClient {
                 // Create progress channel to emit real-time tool activity events
                 let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<GeminiCliProgress>();
 
-                // Spawn forwarder: converts GeminiCliProgress → DaemonEvent::GeminiToolActivity
+                // Spawn forwarder: converts GeminiCliProgress → DaemonEvent::CliToolActivity
                 let fwd_request_id = request_id_clone;
                 let fwd_span_id = span_id_clone;
                 let fwd_session_id = session_id_clone;
                 let fwd_event_tx = event_tx_clone;
                 let forwarder = tokio::spawn(async move {
                     while let Some(prog) = progress_rx.recv().await {
-                        let event = DaemonEvent::GeminiToolActivity {
+                        let event = DaemonEvent::CliToolActivity {
+                            engine: missiond_core::CliEngine::Gemini,
                             request_id: fwd_request_id.clone(),
                             tool_seq: prog.tool_seq,
                             activity: prog.activity.clone(),
@@ -337,13 +338,15 @@ impl GeminiClient {
             .map(|s| s.to_string());
 
         let trace_id = session_id.clone();
-        let event = DaemonEvent::GeminiRequestStarted {
+        let event = DaemonEvent::CliRequestStarted {
+            engine: missiond_core::CliEngine::Gemini,
             request_id: request_id.to_string(),
             caller: caller.to_string(),
             session_id,
             model: model.to_string(),
             prompt_chars,
             prompt_text,
+            extra: serde_json::Value::Object(Default::default()),
         };
         let entry = TimelineEntry {
             event,
@@ -400,20 +403,23 @@ impl GeminiClient {
         );
 
         let trace_id = session_id.clone();
-        let event = DaemonEvent::GeminiRequestCompleted {
+        let event = DaemonEvent::CliRequestCompleted {
+            engine: missiond_core::CliEngine::Gemini,
             request_id: request_id.to_string(),
             caller: caller.to_string(),
             session_id,
-            api_mode: api_mode.to_string(),
             model: model.to_string(),
             prompt_chars,
             response_chars,
-            queue_wait_ms: queue_wait.as_millis() as u64,
             duration_ms: api_duration.as_millis() as u64,
-            retry_count,
             status,
             error_msg,
             response_text,
+            extra: serde_json::json!({
+                "api_mode": api_mode,
+                "queue_wait_ms": queue_wait.as_millis() as u64,
+                "retry_count": retry_count,
+            }),
         };
         // Use same span_id as the started event so they are linked as a pair
         let entry = TimelineEntry {

@@ -5,6 +5,32 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
+// ============ CLI Engine ============
+
+/// CLI engine type for slot workstations.
+/// Determines which binary to spawn and which state parser to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CliEngine {
+    /// Anthropic Claude Code (interactive PTY mode)
+    #[default]
+    ClaudeCode,
+    /// Google Gemini CLI (interactive PTY or subprocess stream-json)
+    Gemini,
+    /// OpenAI Codex CLI (subprocess JSON mode)
+    Codex,
+}
+
+impl std::fmt::Display for CliEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CliEngine::ClaudeCode => write!(f, "claude_code"),
+            CliEngine::Gemini => write!(f, "gemini"),
+            CliEngine::Codex => write!(f, "codex"),
+        }
+    }
+}
+
 // ============ Slot Config ============
 
 /// Slot traits: declarative capabilities that control pipeline routing.
@@ -17,6 +43,10 @@ pub enum SlotTrait {
     IsMetaAgent,
     /// Slot produces conversations that should be analyzed for knowledge extraction.
     GeneratesKnowledge,
+    /// Slot supports native image/vision input (e.g., Codex CLI `-i`).
+    SupportsVision,
+    /// Slot supports MCP tool server connections (e.g., Claude Code `--mcp-config`).
+    SupportsMcp,
 }
 
 /// Configuration for a slot (workstation)
@@ -26,6 +56,9 @@ pub struct SlotConfig {
     pub id: String,
     pub role: String,
     pub description: String,
+    /// CLI engine type. Defaults to ClaudeCode for backward compatibility.
+    #[serde(default)]
+    pub engine: CliEngine,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -52,14 +85,43 @@ impl SlotConfig {
         self.traits.contains(&SlotTrait::IsMetaAgent)
     }
 
-    /// Apply default traits based on role if none were explicitly configured.
+    /// Does this slot support native vision/image input?
+    pub fn supports_vision(&self) -> bool {
+        self.traits.contains(&SlotTrait::SupportsVision)
+    }
+
+    /// Does this slot support MCP tool server connections?
+    pub fn supports_mcp(&self) -> bool {
+        self.traits.contains(&SlotTrait::SupportsMcp)
+    }
+
+    /// Apply default traits based on role and engine.
+    /// Role-based defaults only apply when no traits are explicitly configured.
+    /// Engine-based capabilities are always injected (idempotent).
     pub fn apply_default_traits(&mut self) {
-        if !self.traits.is_empty() {
-            return;
+        // Role-based defaults (only if no explicit traits)
+        if self.traits.is_empty() {
+            match self.role.as_str() {
+                "memory" => self.traits.push(SlotTrait::IsMetaAgent),
+                _ => {}
+            }
         }
-        match self.role.as_str() {
-            "memory" => self.traits.push(SlotTrait::IsMetaAgent),
-            _ => {}
+
+        // Engine-based capability injection (always applied, idempotent)
+        match self.engine {
+            CliEngine::ClaudeCode => {
+                if !self.traits.contains(&SlotTrait::SupportsMcp) {
+                    self.traits.push(SlotTrait::SupportsMcp);
+                }
+            }
+            CliEngine::Codex => {
+                if !self.traits.contains(&SlotTrait::SupportsVision) {
+                    self.traits.push(SlotTrait::SupportsVision);
+                }
+            }
+            CliEngine::Gemini => {
+                // Gemini CLI: no special capabilities yet
+            }
         }
     }
 }
@@ -1379,6 +1441,7 @@ mod tests {
             id: "slot-1".to_string(),
             role: "worker".to_string(),
             description: "A worker slot".to_string(),
+            engine: CliEngine::default(),
             cwd: Some("/path/to/work".to_string()),
             mcp_config: None,
             auto_start: Some(true),
@@ -1390,6 +1453,68 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("\"id\":\"slot-1\""));
         assert!(json.contains("\"autoStart\":true"));
+        assert!(json.contains("\"engine\":\"claude_code\""));
+    }
+
+    #[test]
+    fn test_cli_engine_backward_compat() {
+        // JSON without engine field should default to ClaudeCode
+        let json = r#"{"id":"s1","role":"worker","description":"test"}"#;
+        let config: SlotConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.engine, CliEngine::ClaudeCode);
+
+        // JSON with engine: gemini
+        let json = r#"{"id":"s2","role":"researcher","description":"test","engine":"gemini"}"#;
+        let config: SlotConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.engine, CliEngine::Gemini);
+
+        // JSON with engine: codex
+        let json = r#"{"id":"s3","role":"vision","description":"test","engine":"codex"}"#;
+        let config: SlotConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.engine, CliEngine::Codex);
+    }
+
+    #[test]
+    fn test_cli_engine_display() {
+        assert_eq!(CliEngine::ClaudeCode.to_string(), "claude_code");
+        assert_eq!(CliEngine::Gemini.to_string(), "gemini");
+        assert_eq!(CliEngine::Codex.to_string(), "codex");
+    }
+
+    #[test]
+    fn test_engine_capability_inference() {
+        // Claude Code should get SupportsMcp
+        let mut config = SlotConfig {
+            id: "s1".into(), role: "worker".into(), description: "test".into(),
+            engine: CliEngine::ClaudeCode,
+            cwd: None, mcp_config: None, auto_start: None,
+            dangerously_skip_permissions: None, traits: vec![], env: None,
+        };
+        config.apply_default_traits();
+        assert!(config.supports_mcp());
+        assert!(!config.supports_vision());
+
+        // Codex should get SupportsVision
+        let mut config = SlotConfig {
+            id: "s2".into(), role: "vision".into(), description: "test".into(),
+            engine: CliEngine::Codex,
+            cwd: None, mcp_config: None, auto_start: None,
+            dangerously_skip_permissions: None, traits: vec![], env: None,
+        };
+        config.apply_default_traits();
+        assert!(config.supports_vision());
+        assert!(!config.supports_mcp());
+
+        // Memory role + Claude engine should get both IsMetaAgent and SupportsMcp
+        let mut config = SlotConfig {
+            id: "s3".into(), role: "memory".into(), description: "test".into(),
+            engine: CliEngine::ClaudeCode,
+            cwd: None, mcp_config: None, auto_start: None,
+            dangerously_skip_permissions: None, traits: vec![], env: None,
+        };
+        config.apply_default_traits();
+        assert!(config.is_meta_agent());
+        assert!(config.supports_mcp());
     }
 
     #[test]

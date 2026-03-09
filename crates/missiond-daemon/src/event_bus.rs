@@ -5,6 +5,7 @@
 //! This guarantees: persistent storage, global monotonic seq, causal ordering.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use missiond_core::CliEngine;
 use serde::{Serialize, Deserialize};
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -28,8 +29,8 @@ pub(crate) enum DaemonEvent {
     /// A new master-target question was created.
     QuestionCreated { question_id: String },
 
-    // ===== LLM Gateway =====
-    /// A Gemini API request was sent (prompt dispatched to LLM).
+    // ===== LLM Gateway (LEGACY — use CliRequestStarted/Completed/CliToolActivity) =====
+    /// DEPRECATED: Use CliRequestStarted instead. Kept for backward compat with stored timeline data.
     GeminiRequestStarted {
         request_id: String,
         caller: String,
@@ -39,7 +40,7 @@ pub(crate) enum DaemonEvent {
         /// Full prompt text — stored in gemini_requests table, NOT sent to frontend.
         prompt_text: Option<String>,
     },
-    /// A Gemini API request completed (success or failure).
+    /// DEPRECATED: Use CliRequestCompleted instead.
     GeminiRequestCompleted {
         request_id: String,
         caller: String,
@@ -57,8 +58,7 @@ pub(crate) enum DaemonEvent {
         response_text: Option<String>,
     },
 
-    /// Gemini CLI agentic tool activity — emitted in real-time as CLI calls tools.
-    /// parent_span_id links to the enclosing GeminiRequestStarted span.
+    /// DEPRECATED: Use CliToolActivity instead.
     GeminiToolActivity {
         request_id: String,
         /// Sequential index within this request (1, 2, 3...)
@@ -182,8 +182,8 @@ pub(crate) enum DaemonEvent {
         preview: String,
     },
 
-    // ===== Codex CLI (GPT-5.4) =====
-    /// A Codex CLI request was sent (prompt dispatched to GPT).
+    // ===== Codex CLI (LEGACY — use CliRequestStarted/Completed) =====
+    /// DEPRECATED: Use CliRequestStarted instead.
     CodexRequestStarted {
         request_id: String,
         caller: String,
@@ -193,7 +193,7 @@ pub(crate) enum DaemonEvent {
         prompt_text: Option<String>,
         image_hash: Option<String>,
     },
-    /// A Codex CLI request completed (success or failure).
+    /// DEPRECATED: Use CliRequestCompleted instead.
     CodexRequestCompleted {
         request_id: String,
         caller: String,
@@ -289,6 +289,51 @@ pub(crate) enum DaemonEvent {
         duration_ms: u64,
         queue_wait_ms: u64,
     },
+
+    // ===== Unified CLI Engine Events =====
+    /// Unified: an external CLI engine request was sent.
+    /// Replaces engine-specific GeminiRequestStarted / CodexRequestStarted.
+    CliRequestStarted {
+        engine: CliEngine,
+        request_id: String,
+        caller: String,
+        session_id: Option<String>,
+        model: String,
+        prompt_chars: usize,
+        prompt_text: Option<String>,
+        /// Engine-specific extra fields (e.g. has_image, image_hash for Codex).
+        extra: serde_json::Value,
+    },
+    /// Unified: an external CLI engine request completed.
+    /// Replaces engine-specific GeminiRequestCompleted / CodexRequestCompleted.
+    CliRequestCompleted {
+        engine: CliEngine,
+        request_id: String,
+        caller: String,
+        session_id: Option<String>,
+        model: String,
+        prompt_chars: usize,
+        response_chars: usize,
+        duration_ms: u64,
+        status: String,
+        error_msg: Option<String>,
+        response_text: Option<String>,
+        /// Engine-specific extra fields (e.g. queue_wait_ms, retry_count for Gemini;
+        /// input_tokens, output_tokens for Codex).
+        extra: serde_json::Value,
+    },
+    /// Unified: CLI engine tool activity (real-time tool use).
+    /// Replaces GeminiToolActivity.
+    CliToolActivity {
+        engine: CliEngine,
+        request_id: String,
+        tool_seq: u32,
+        activity: String,
+        tool_name: Option<String>,
+        input_preview: Option<String>,
+        result_preview: Option<String>,
+        is_error: bool,
+    },
 }
 
 impl DaemonEvent {
@@ -336,6 +381,9 @@ impl DaemonEvent {
             Self::NarrationCompleted { .. } => "narration_completed",
             Self::NarrationFailed { .. } => "narration_failed",
             Self::WorkerLlmCall { .. } => "worker_llm_call",
+            Self::CliRequestStarted { .. } => "cli_request_started",
+            Self::CliRequestCompleted { .. } => "cli_request_completed",
+            Self::CliToolActivity { .. } => "cli_tool_activity",
         }
     }
 
@@ -475,6 +523,62 @@ impl DaemonEvent {
                 "response_chars": response_chars,
                 "duration_ms": duration_ms,
                 "queue_wait_ms": queue_wait_ms,
+            }),
+            Self::CliRequestStarted {
+                engine, request_id, caller, session_id, model,
+                prompt_chars, extra, ..
+            } => {
+                let mut v = json!({
+                    "engine": engine.to_string(),
+                    "request_id": request_id,
+                    "caller": caller,
+                    "session_id": session_id,
+                    "model": model,
+                    "prompt_chars": prompt_chars,
+                });
+                if let serde_json::Value::Object(map) = extra {
+                    for (k, val) in map {
+                        v[k] = val.clone();
+                    }
+                }
+                v
+            }
+            Self::CliRequestCompleted {
+                engine, request_id, caller, session_id, model,
+                prompt_chars, response_chars, duration_ms,
+                status, error_msg, extra, ..
+            } => {
+                let mut v = json!({
+                    "engine": engine.to_string(),
+                    "request_id": request_id,
+                    "caller": caller,
+                    "session_id": session_id,
+                    "model": model,
+                    "prompt_chars": prompt_chars,
+                    "response_chars": response_chars,
+                    "duration_ms": duration_ms,
+                    "status": status,
+                    "error": error_msg,
+                });
+                if let serde_json::Value::Object(map) = extra {
+                    for (k, val) in map {
+                        v[k] = val.clone();
+                    }
+                }
+                v
+            }
+            Self::CliToolActivity {
+                engine, request_id, tool_seq, activity, tool_name,
+                input_preview, result_preview, is_error,
+            } => json!({
+                "engine": engine.to_string(),
+                "request_id": request_id,
+                "tool_seq": tool_seq,
+                "activity": activity,
+                "tool_name": tool_name,
+                "input_preview": input_preview,
+                "result_preview": result_preview,
+                "is_error": is_error,
             }),
         }
     }
