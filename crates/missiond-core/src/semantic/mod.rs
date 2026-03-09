@@ -5,6 +5,7 @@
 
 mod confirm;
 pub mod fingerprint;
+mod gemini_state;
 mod state;
 mod status;
 mod title;
@@ -17,6 +18,7 @@ pub use fingerprint::{
     FingerprintHints, FingerprintMatch, FingerprintPattern, FingerprintRegistry,
     FingerprintResult, FingerprintType, CLAUDE_CODE_FINGERPRINTS,
 };
+pub use gemini_state::GeminiCliStateParser;
 pub use state::ClaudeCodeStateParser;
 pub use status::{ClaudeCodeStatusParser, SPINNER_CHARS};
 pub use title::{ClaudeCodeTitleParser, ALL_SPINNERS, BRAILLE_SPINNERS, OTHER_SPINNERS};

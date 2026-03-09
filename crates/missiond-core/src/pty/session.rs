@@ -48,7 +48,7 @@ use uuid::Uuid;
 use super::extractor::{IncrementalExtractor, StableTextOp, TextAssembler};
 use crate::semantic::{
     ClaudeCodeConfirmParser, ClaudeCodeStateParser, ClaudeCodeStatusParser,
-    ClaudeCodeToolOutputParser,
+    ClaudeCodeToolOutputParser, GeminiCliStateParser,
     ConfirmParser, ParserContext, StateParser, StatusParser, ToolOutputParser,
     default_registry,
     ClaudeCodeStatus, ClaudeCodeToolOutput, ClaudeCodeTitle,
@@ -801,10 +801,10 @@ impl PTYSession {
         use crate::types::CliEngine;
         let state_parser: Box<dyn StateParser + Send + Sync> = match engine {
             CliEngine::ClaudeCode => Box::new(ClaudeCodeStateParser::new()),
-            CliEngine::Gemini | CliEngine::Codex => {
-                // TODO(Step 2): implement GeminiCliStateParser / CodexCliStateParser
-                // For now, use Claude parser as fallback (it won't match non-Claude output,
-                // so detect_state will return None and state stays Starting/Idle)
+            CliEngine::Gemini => Box::new(GeminiCliStateParser::new()),
+            CliEngine::Codex => {
+                // TODO: implement CodexCliStateParser
+                // For now, use Claude parser as fallback
                 Box::new(ClaudeCodeStateParser::new())
             }
         };
@@ -1252,13 +1252,22 @@ impl PTYSession {
         }
     }
 
-    /// Poll screen after paste to confirm Claude Code has received the pasted text.
-    /// Takes a pre-paste snapshot of the prompt line, then polls until the screen changes.
+    /// Poll screen after paste to confirm the CLI has received the pasted text.
     /// Claude Code shows "[Pasted text #N +M lines]" for multi-line pastes.
+    /// Gemini CLI (Ink TUI) handles bracketed paste natively — short settle only.
     /// Falls back after 10s timeout.
     async fn wait_for_paste_confirmation(&self, pre_paste_prompt: &str) {
         let slot_id = &self.slot_id;
-        // Initial settle time for TUI to begin processing the paste
+
+        // Gemini/Codex: Ink TUI handles bracketed paste natively, no polling needed.
+        // Just a brief settle for the TUI to process the input.
+        if self.engine != crate::types::CliEngine::ClaudeCode {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            tracing::debug!(slot = %slot_id, engine = %self.engine, "Paste settle (non-Claude CLI)");
+            return;
+        }
+
+        // Claude Code: poll for paste confirmation
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         for attempt in 0..38 {
