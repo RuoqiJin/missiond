@@ -6,8 +6,11 @@
 //! Architecture: Uses `-o stream-json` (NDJSON) instead of `-o json` to enable
 //! idle-timeout based liveness detection. As long as the CLI emits events
 //! (init, message, thinking deltas, result), the process is considered alive.
-//! Only when no output arrives for `idle_timeout` seconds do we kill the process.
-//! This elegantly handles both long prompts and long thinking times.
+//!
+//! Two-tier idle timeout: Gemini CLI is agentic and calls tools (file reads,
+//! code search) during reasoning. Tool execution can take much longer than text
+//! generation, so we use an extended timeout (5min) between tool_use → tool_result,
+//! and the normal idle timeout (120s) otherwise.
 //!
 //! Usage:
 //! ```ignore
@@ -20,10 +23,15 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 /// Absolute safety cap: kill process no matter what after this duration.
 const ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(900); // 15 minutes
+
+/// Extended idle timeout when Gemini CLI is executing tools (agentic mode).
+/// Tool execution (file reads, code search) can take much longer than text generation.
+const TOOL_EXEC_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
 
 /// Gemini CLI subprocess wrapper.
 #[derive(Clone, Debug)]
@@ -39,6 +47,23 @@ pub(crate) struct GeminiCliResponse {
     pub model: String,
 }
 
+/// Real-time progress event emitted during CLI execution.
+#[derive(Debug)]
+pub(crate) struct GeminiCliProgress {
+    /// Sequential index within this request (1, 2, 3...)
+    pub tool_seq: u32,
+    /// "tool_use" or "tool_result"
+    pub activity: String,
+    /// Tool name (e.g. "read_file", "grep", "bash")
+    pub tool_name: Option<String>,
+    /// Truncated input preview (≤200 chars)
+    pub input_preview: Option<String>,
+    /// Truncated result preview (≤500 chars)
+    pub result_preview: Option<String>,
+    /// Whether the tool result was an error
+    pub is_error: bool,
+}
+
 impl GeminiCli {
     pub fn new(binary: String, default_model: String, idle_timeout: Duration) -> Self {
         Self { binary, default_model, idle_timeout }
@@ -48,12 +73,15 @@ impl GeminiCli {
     ///
     /// Idle timeout: process is killed only if no stdout line arrives within `idle_timeout`.
     /// This means long thinking (with streaming deltas) or large responses never cause timeout.
+    ///
+    /// `progress_tx`: optional channel to emit real-time tool activity events.
     pub async fn call(
         &self,
         messages: &[Value],
         model: Option<&str>,
         _max_tokens: Option<u32>,
         idle_timeout_override: Option<Duration>,
+        progress_tx: Option<mpsc::UnboundedSender<GeminiCliProgress>>,
     ) -> Result<GeminiCliResponse> {
         let model = model.unwrap_or(&self.default_model);
         let idle_timeout = idle_timeout_override.unwrap_or(self.idle_timeout);
@@ -77,9 +105,14 @@ impl GeminiCli {
             .ok_or_else(|| anyhow!("Failed to capture stdout"))?;
         let mut lines = BufReader::new(stdout).lines();
 
-        // Collect NDJSON events with idle timeout
+        // Collect NDJSON events with idle timeout.
+        // Gemini CLI is agentic — it may call tools (file reads, code search) that take
+        // much longer than text generation. We use an extended timeout when waiting for
+        // tool_result after seeing a tool_use event.
         let mut events: Vec<Value> = Vec::new();
         let absolute_deadline = tokio::time::Instant::now() + ABSOLUTE_TIMEOUT;
+        let mut awaiting_tool_result = false;
+        let mut tool_seq: u32 = 0;
 
         let stream_result: Result<(), String> = async {
             loop {
@@ -87,7 +120,8 @@ impl GeminiCli {
                 if remaining.is_zero() {
                     return Err("absolute timeout (15min)".to_string());
                 }
-                let effective_timeout = idle_timeout.min(remaining);
+                let current_idle = if awaiting_tool_result { TOOL_EXEC_TIMEOUT } else { idle_timeout };
+                let effective_timeout = current_idle.min(remaining);
 
                 match tokio::time::timeout(effective_timeout, lines.next_line()).await {
                     Ok(Ok(Some(line))) => {
@@ -97,6 +131,26 @@ impl GeminiCli {
                                 let event_type = event.get("type")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("unknown");
+
+                                // Track agentic tool execution state + emit progress
+                                match event_type {
+                                    "tool_use" => {
+                                        awaiting_tool_result = true;
+                                        tool_seq += 1;
+                                        if let Some(ref tx) = progress_tx {
+                                            let _ = tx.send(extract_tool_use_progress(&event, tool_seq));
+                                        }
+                                    }
+                                    "tool_result" => {
+                                        awaiting_tool_result = false;
+                                        tool_seq += 1;
+                                        if let Some(ref tx) = progress_tx {
+                                            let _ = tx.send(extract_tool_result_progress(&event, tool_seq));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+
                                 if event_type == "result" || event_type == "error" {
                                     events.push(event);
                                     return Ok(()); // Terminal event
@@ -111,7 +165,10 @@ impl GeminiCli {
                     }
                     Ok(Ok(None)) => return Ok(()),  // EOF — process finished
                     Ok(Err(e)) => return Err(format!("IO error: {}", e)),
-                    Err(_) => return Err(format!("idle timeout ({}s no output)", idle_timeout.as_secs())),
+                    Err(_) => {
+                        let mode = if awaiting_tool_result { "tool_exec" } else { "idle" };
+                        return Err(format!("{} timeout ({}s no output)", mode, effective_timeout.as_secs()));
+                    }
                 }
             }
         }.await;
@@ -146,7 +203,7 @@ impl GeminiCli {
     #[allow(dead_code)]
     pub async fn prompt(&self, text: &str, model: Option<&str>) -> Result<String> {
         let messages = vec![serde_json::json!({"role": "user", "content": text})];
-        let resp = self.call(&messages, model, None, None).await?;
+        let resp = self.call(&messages, model, None, None, None).await?;
         Ok(resp.content)
     }
 }
@@ -229,4 +286,57 @@ fn parse_stream_events(events: &[Value], requested_model: &str) -> Result<Gemini
     info!(content_len = content.len(), events = events.len(), "Gemini CLI: stream complete");
 
     Ok(GeminiCliResponse { content, model })
+}
+
+/// Truncate a string to `max` chars, appending "…" if truncated.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let end: String = s.chars().take(max).collect();
+        format!("{}…", end)
+    }
+}
+
+/// Extract progress event from a tool_use NDJSON event.
+fn extract_tool_use_progress(event: &Value, tool_seq: u32) -> GeminiCliProgress {
+    let tool_name = event.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let input_preview = event.get("input")
+        .map(|v| {
+            if let Some(s) = v.as_str() {
+                truncate(s, 200)
+            } else {
+                truncate(&v.to_string(), 200)
+            }
+        });
+    GeminiCliProgress {
+        tool_seq,
+        activity: "tool_use".to_string(),
+        tool_name,
+        input_preview,
+        result_preview: None,
+        is_error: false,
+    }
+}
+
+/// Extract progress event from a tool_result NDJSON event.
+fn extract_tool_result_progress(event: &Value, tool_seq: u32) -> GeminiCliProgress {
+    let is_error = event.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
+    let result_preview = event.get("result")
+        .or_else(|| event.get("content"))
+        .map(|v| {
+            if let Some(s) = v.as_str() {
+                truncate(s, 500)
+            } else {
+                truncate(&v.to_string(), 500)
+            }
+        });
+    GeminiCliProgress {
+        tool_seq,
+        activity: "tool_result".to_string(),
+        tool_name: None,
+        input_preview: None,
+        result_preview,
+        is_error,
+    }
 }

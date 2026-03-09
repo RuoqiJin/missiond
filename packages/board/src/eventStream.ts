@@ -95,6 +95,7 @@ function handleEvent(
 
     case 'gemini_request_started':
     case 'gemini_request_completed':
+    case 'gemini_tool_activity':
     case 'codex_request_started':
     case 'codex_request_completed':
       debouncedBump(set, 'engineVersion');
