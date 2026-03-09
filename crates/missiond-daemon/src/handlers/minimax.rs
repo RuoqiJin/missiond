@@ -1,33 +1,25 @@
 //! Handler for mission_minimax_* MCP tools.
+//! Routes through MinimaxGateway (P0: interactive priority) for unified rate limiting.
 
 use anyhow::Result;
 use serde_json::Value;
 use missiond_mcp::tools::ToolResult;
 use tracing::info;
 
-use crate::minimax_client::{self, ChatMessage, MiniMaxClient};
+use crate::minimax_client::ChatMessage;
 use crate::state::AppState;
 
-/// Lazily initialize MiniMax client (cached in a static OnceLock).
-fn get_client() -> Option<&'static MiniMaxClient> {
-    use std::sync::OnceLock;
-    static CLIENT: OnceLock<Option<MiniMaxClient>> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        minimax_client::load_api_key().map(MiniMaxClient::new)
-    }).as_ref()
-}
-
-pub(crate) async fn handle(_state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
-        "mission_minimax_process" => handle_process(args).await,
+        "mission_minimax_process" => handle_process(state, args).await,
         _ => Ok(ToolResult::error(format!("Unknown minimax tool: {}", name))),
     }
 }
 
-async fn handle_process(args: Value) -> Result<ToolResult> {
-    let client = match get_client() {
-        Some(c) => c,
-        None => return Ok(ToolResult::error("MiniMax API key not configured (xjp secret get minimax/api-key-domestic)")),
+async fn handle_process(state: &AppState, args: Value) -> Result<ToolResult> {
+    let minimax = match state.minimax.as_ref() {
+        Some(m) => m,
+        None => return Ok(ToolResult::error("MiniMax gateway not available (API key not configured)")),
     };
 
     let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
@@ -40,7 +32,15 @@ async fn handle_process(args: Value) -> Result<ToolResult> {
     let result = match task {
         "summarize" => {
             let max_chars = args.get("maxChars").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
-            client.summarize(text, max_chars).await
+            let prompt = format!(
+                "请用不超过{}字简洁总结以下内容的核心要点。直接输出总结，不要前缀。\n\n{}",
+                max_chars, text
+            );
+            let messages = vec![ChatMessage {
+                role: "user".to_string(),
+                content: prompt,
+            }];
+            minimax.call_interactive(messages, Some(500), "minimax_process").await
         }
         "translate" => {
             let target_lang = args.get("targetLang").and_then(|v| v.as_str()).unwrap_or("en");
@@ -52,7 +52,7 @@ async fn handle_process(args: Value) -> Result<ToolResult> {
                 role: "user".to_string(),
                 content: prompt,
             }];
-            client.chat(&messages, None).await
+            minimax.call_interactive(messages, None, "minimax_process").await
         }
         "custom" => {
             let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
@@ -63,7 +63,7 @@ async fn handle_process(args: Value) -> Result<ToolResult> {
                 role: "user".to_string(),
                 content: format!("{}\n\n{}", prompt, text),
             }];
-            client.chat(&messages, None).await
+            minimax.call_interactive(messages, None, "minimax_process").await
         }
         _ => return Ok(ToolResult::error(format!("Unknown task type: {}", task))),
     };

@@ -38,13 +38,36 @@ const CHANNEL_CAPACITY: usize = 64;
 /// Minimum inter-request delay to avoid burst (shared across all callers).
 const MIN_INTER_REQUEST_MS: u64 = 500;
 
+/// Quota reservation: when remaining quota drops below this threshold,
+/// only P0 (interactive) and P1 (embedding) requests are allowed through.
+/// Prevents low-priority workers from starving interactive requests.
+const QUOTA_RESERVE_THRESHOLD: usize = 50;
+
 // ── Request / Response ─────────────────────────────────────────────
+
+/// Priority level for quota reservation.
+/// P0-P1 are protected (always allowed), P2-P3 are throttled when quota is low.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Priority {
+    Interactive = 0,
+    Embedding = 1,
+    Translation = 2,
+    Briefing = 3,
+}
+
+impl Priority {
+    /// Whether this priority is protected from quota reservation.
+    fn is_protected(self) -> bool {
+        matches!(self, Priority::Interactive | Priority::Embedding)
+    }
+}
 
 /// A request routed through the gateway.
 pub(crate) struct GatewayRequest {
     pub messages: Vec<ChatMessage>,
     pub max_tokens: Option<u32>,
     pub caller: &'static str,
+    pub priority: Priority,
     pub task_id: Option<String>,
     pub reply_tx: oneshot::Sender<Result<String>>,
 }
@@ -115,6 +138,7 @@ impl MinimaxHandle {
         messages: Vec<ChatMessage>,
         max_tokens: Option<u32>,
         caller: &'static str,
+        priority: Priority,
         task_id: Option<String>,
     ) -> Result<String> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -122,6 +146,7 @@ impl MinimaxHandle {
             messages,
             max_tokens,
             caller,
+            priority,
             task_id,
             reply_tx,
         };
@@ -136,7 +161,7 @@ impl MinimaxHandle {
         max_tokens: Option<u32>,
         caller: &'static str,
     ) -> Result<String> {
-        Self::send(&self.tx_interactive, messages, max_tokens, caller, None).await
+        Self::send(&self.tx_interactive, messages, max_tokens, caller, Priority::Interactive, None).await
     }
 
     /// P1: Embedding worker calls.
@@ -146,7 +171,7 @@ impl MinimaxHandle {
         max_tokens: Option<u32>,
         task_id: Option<String>,
     ) -> Result<String> {
-        Self::send(&self.tx_embedding, messages, max_tokens, "embedding", task_id).await
+        Self::send(&self.tx_embedding, messages, max_tokens, "embedding", Priority::Embedding, task_id).await
     }
 
     /// P2: Translation worker calls.
@@ -156,7 +181,7 @@ impl MinimaxHandle {
         max_tokens: Option<u32>,
         task_id: Option<String>,
     ) -> Result<String> {
-        Self::send(&self.tx_translation, messages, max_tokens, "translation", task_id).await
+        Self::send(&self.tx_translation, messages, max_tokens, "translation", Priority::Translation, task_id).await
     }
 
     /// P3: Briefing worker calls (lowest priority).
@@ -166,7 +191,7 @@ impl MinimaxHandle {
         max_tokens: Option<u32>,
         task_id: Option<String>,
     ) -> Result<String> {
-        Self::send(&self.tx_briefing, messages, max_tokens, "briefing", task_id).await
+        Self::send(&self.tx_briefing, messages, max_tokens, "briefing", Priority::Briefing, task_id).await
     }
 }
 
@@ -193,7 +218,18 @@ impl MinimaxGateway {
         let mut last_request_at = Instant::now() - Duration::from_secs(10);
 
         loop {
-            // 1. Biased priority select
+            // 1. Acquire concurrency permit FIRST (prevents priority inversion:
+            //    without this, a low-priority request could hold the loop while
+            //    high-priority requests queue up behind it during quota/delay waits)
+            let permit = match self.concurrency.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => {
+                    info!("MinimaxGateway: semaphore closed, shutting down");
+                    break;
+                }
+            };
+
+            // 2. Biased priority select (permit already held → no inversion)
             let req = tokio::select! {
                 biased;
                 Some(r) = self.rx_interactive.recv() => r,
@@ -208,36 +244,53 @@ impl MinimaxGateway {
 
             let queue_wait_start = Instant::now();
 
-            // 2. Quota check (spin-wait with backoff if exhausted)
+            // 3. Quota check with reservation protection
+            // Low-priority (P2+P3) requests are rejected when quota is low,
+            // preserving remaining quota for interactive/embedding use.
+            let mut quota_rejected = false;
             loop {
-                let can_proceed = {
-                    let mut q = self.quota.write().await;
-                    q.try_record()
-                };
-                if can_proceed {
+                let mut q = self.quota.write().await;
+                let remaining = q.remaining();
+
+                // Reservation gate: reject low-priority when quota is scarce
+                if !req.priority.is_protected() && remaining <= QUOTA_RESERVE_THRESHOLD {
+                    drop(q);
+                    warn!(
+                        caller = req.caller,
+                        remaining,
+                        "MinimaxGateway: quota reserved for high-priority, rejecting"
+                    );
+                    quota_rejected = true;
                     break;
                 }
+
+                if q.try_record() {
+                    drop(q);
+                    break;
+                }
+
+                drop(q);
+
+                // Protected requests wait; low-priority already rejected above
                 warn!(caller = req.caller, "MinimaxGateway: quota exhausted (300/5h), throttling 60s");
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
 
-            // 3. Min inter-request delay (prevent burst)
+            if quota_rejected {
+                let _ = req.reply_tx.send(Err(anyhow!(
+                    "Quota reserved for high-priority requests"
+                )));
+                drop(permit);
+                continue;
+            }
+
+            // 4. Min inter-request delay (prevent burst)
             let since_last = Instant::now().duration_since(last_request_at);
             let min_gap = Duration::from_millis(MIN_INTER_REQUEST_MS);
             if since_last < min_gap {
                 tokio::time::sleep(min_gap - since_last).await;
             }
             last_request_at = Instant::now();
-
-            // 4. Acquire concurrency permit
-            let permit = self.concurrency.clone().acquire_owned().await;
-            let permit = match permit {
-                Ok(p) => p,
-                Err(_) => {
-                    let _ = req.reply_tx.send(Err(anyhow!("Gateway semaphore closed")));
-                    continue;
-                }
-            };
 
             let queue_wait_ms = queue_wait_start.elapsed().as_millis() as u64;
 
