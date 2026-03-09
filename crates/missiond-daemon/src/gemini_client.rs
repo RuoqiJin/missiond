@@ -62,6 +62,47 @@ pub(crate) struct GeminiClient {
     pub(crate) retry_count: Arc<AtomicU64>,
 }
 
+/// Drop guard for `GeminiClient::send()`.
+/// Guarantees every `GeminiRequestStarted` gets a corresponding `GeminiRequestCompleted`,
+/// even on early-return errors (`?`) or future cancellation (`send_best_effort` timeout).
+struct RequestGuard<'a> {
+    client: &'a GeminiClient,
+    request_id: String,
+    caller: String,
+    session_id: Option<String>,
+    api_mode: String,
+    model: String,
+    prompt_chars: usize,
+    queue_wait: Duration,
+    span_id: String,
+    api_start: Instant,
+    completed: bool,
+}
+
+impl Drop for RequestGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            let err: Result<serde_json::Value> = Err(anyhow!("request cancelled (future dropped)"));
+            self.client.emit_completed_event(
+                &self.request_id, &self.caller, self.session_id.clone(),
+                &self.api_mode, &self.model, self.prompt_chars,
+                &err, self.queue_wait, self.api_start.elapsed(), 0, &self.span_id,
+            );
+        }
+    }
+}
+
+impl RequestGuard<'_> {
+    fn complete(mut self, result: &Result<serde_json::Value>, retry_count: u32) {
+        self.completed = true;
+        self.client.emit_completed_event(
+            &self.request_id, &self.caller, self.session_id.clone(),
+            &self.api_mode, &self.model, self.prompt_chars,
+            result, self.queue_wait, self.api_start.elapsed(), retry_count, &self.span_id,
+        );
+    }
+}
+
 impl GeminiClient {
     /// Create a new HTTP-mode client with 20 RPM limit and 3 max concurrent requests.
     pub fn new(event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>) -> Self {
@@ -123,7 +164,7 @@ impl GeminiClient {
 
         // 1. Acquire concurrency permit (measure queue wait)
         let queue_start = Instant::now();
-        let permit = self.semaphore.acquire().await
+        let permit = self.semaphore.clone().acquire_owned().await
             .map_err(|_| anyhow!("Gemini semaphore closed"))?;
 
         // 2. Wait for RPM budget
@@ -136,70 +177,79 @@ impl GeminiClient {
             &request_id, &caller, session_id.clone(), &model, prompt_chars, body, &span_id,
         );
 
-        // 3. Dispatch based on mode (measure API duration)
-        let api_start = Instant::now();
-        let api_mode;
-        let result = if let Some(cli) = &self.cli {
-            api_mode = "cli";
-            let messages = body.get("messages").and_then(|v| v.as_array())
-                .ok_or_else(|| anyhow!("CLI mode: missing 'messages' in body"))?;
-            let max_tokens = body.get("max_tokens").and_then(|v| v.as_u64()).map(|n| n as u32);
-
-            // Whitelist: only these models are allowed via CLI. Others fall back to default.
-            let cli_model = body.get("model").and_then(|v| v.as_str())
-                .and_then(|m| match m {
-                    "gemini-3.1-flash-lite" | "gemini-3.1-pro-preview" => Some(m),
-                    _ => None,
-                });
-
-            let resp = cli.call(messages, cli_model, max_tokens, None).await;
-            drop(permit);
-            let resp = resp?;
-
-            Ok(serde_json::json!({
-                "choices": [{"message": {"content": resp.content}, "finish_reason": "stop"}],
-                "model": resp.model,
-            }))
-        } else {
-            api_mode = "http";
-            let resp = http_client.post(url)
-                .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {}", jwt))
-                .json(body)
-                .send()
-                .await
-                .map_err(|e| anyhow!("Gemini request failed: {}", e))?;
-
-            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                let err_body = resp.text().await.unwrap_or_default();
-                drop(permit);
-                warn!(body = %err_body, "Gemini 429 RESOURCE_EXHAUSTED, starting retry");
-                self.retry_count.fetch_add(1, Ordering::Relaxed);
-                // Retry path — emit event after retry completes
-                let retry_result = self.retry_with_backoff(http_client, url, jwt, body, 3).await;
-                let api_duration = api_start.elapsed();
-                self.emit_completed_event(&request_id, &caller, session_id, api_mode, &model, prompt_chars,
-                    &retry_result, queue_wait, api_duration, 1, &span_id);
-                return retry_result;
-            }
-
-            drop(permit);
-
-            if !resp.status().is_success() {
-                self.error_count.fetch_add(1, Ordering::Relaxed);
-                let status = resp.status();
-                let err_body = resp.text().await.unwrap_or_default();
-                return Err(anyhow!("Router returned {}: {}", status, err_body));
-            }
-
-            resp.json().await
-                .map_err(|e| anyhow!("Failed to parse Gemini response: {}", e))
+        // 3. Drop guard — guarantees GeminiRequestCompleted on any exit path,
+        //    including early-return errors and future cancellation (send_best_effort timeout).
+        let api_mode = if self.cli.is_some() { "cli" } else { "http" };
+        let guard = RequestGuard {
+            client: self,
+            request_id,
+            caller,
+            session_id,
+            api_mode: api_mode.to_string(),
+            model,
+            prompt_chars,
+            queue_wait,
+            span_id,
+            api_start: Instant::now(),
+            completed: false,
         };
-        let api_duration = api_start.elapsed();
 
-        // 4. Emit "request completed" event with response preview
-        self.emit_completed_event(&request_id, &caller, session_id, api_mode, &model, prompt_chars,
-            &result, queue_wait, api_duration, 0, &span_id);
+        // 4. All work in async move block — ? returns are captured here,
+        //    never bypassing the guard in the outer scope.
+        let result: Result<serde_json::Value> = async move {
+            if let Some(cli) = &self.cli {
+                let messages = body.get("messages").and_then(|v| v.as_array())
+                    .ok_or_else(|| anyhow!("CLI mode: missing 'messages' in body"))?;
+                let max_tokens = body.get("max_tokens").and_then(|v| v.as_u64()).map(|n| n as u32);
+
+                // Whitelist: only these models are allowed via CLI. Others fall back to default.
+                let cli_model = body.get("model").and_then(|v| v.as_str())
+                    .and_then(|m| match m {
+                        "gemini-3.1-flash-lite" | "gemini-3.1-pro-preview" => Some(m),
+                        _ => None,
+                    });
+
+                let resp = cli.call(messages, cli_model, max_tokens, None).await;
+                drop(permit);
+                let resp = resp?;
+
+                Ok(serde_json::json!({
+                    "choices": [{"message": {"content": resp.content}, "finish_reason": "stop"}],
+                    "model": resp.model,
+                }))
+            } else {
+                let resp = http_client.post(url)
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", format!("Bearer {}", jwt))
+                    .json(body)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow!("Gemini request failed: {}", e))?;
+
+                if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    let err_body = resp.text().await.unwrap_or_default();
+                    drop(permit);
+                    warn!(body = %err_body, "Gemini 429 RESOURCE_EXHAUSTED, starting retry");
+                    self.retry_count.fetch_add(1, Ordering::Relaxed);
+                    return self.retry_with_backoff(http_client, url, jwt, body, 3).await;
+                }
+
+                drop(permit);
+
+                if !resp.status().is_success() {
+                    self.error_count.fetch_add(1, Ordering::Relaxed);
+                    let status = resp.status();
+                    let err_body = resp.text().await.unwrap_or_default();
+                    return Err(anyhow!("Router returned {}: {}", status, err_body));
+                }
+
+                resp.json().await
+                    .map_err(|e| anyhow!("Failed to parse Gemini response: {}", e))
+            }
+        }.await;
+
+        // 5. Normal completion — emit real result (disarms guard drop)
+        guard.complete(&result, 0);
 
         result
     }

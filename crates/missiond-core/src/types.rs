@@ -450,6 +450,62 @@ pub struct BoardTask {
 
 fn default_max_retries() -> i64 { 2 }
 
+/// Compact board task for search results (high density, low token cost)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactBoardTask {
+    pub id: String,
+    pub title: String,
+    pub status: BoardTaskStatus,
+    pub priority: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+}
+
+/// Board task with optional children tree (for includeChildren mode)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardTaskWithContext {
+    #[serde(flatten)]
+    pub task: BoardTask,
+    pub notes: Vec<BoardTaskNote>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub children: Option<Vec<BoardTaskWithContext>>,
+}
+
+/// Search results wrapper with meta info to prevent context overflow
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoardSearchResult {
+    pub meta: BoardSearchMeta,
+    pub data: Vec<CompactBoardTask>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoardSearchMeta {
+    pub total: usize,
+    pub returned: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Input for board search
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardSearchInput {
+    pub query: Option<String>,
+    pub project: Option<String>,
+    pub category: Option<String>,
+    pub status: Option<String>,
+    pub parent_id: Option<String>,
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub include_hidden: bool,
+}
+
 /// Result of checking whether a task's DAG dependencies are satisfied
 #[derive(Debug, Clone)]
 pub enum DependencyStatus {

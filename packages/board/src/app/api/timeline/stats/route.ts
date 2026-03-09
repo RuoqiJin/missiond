@@ -15,8 +15,9 @@ function windowToSince(w: string): string {
 
 export async function GET(req: NextRequest) {
   try {
+    const directSince = req.nextUrl.searchParams.get('since');
     const windowStr = req.nextUrl.searchParams.get('window') || '24h';
-    const since = windowToSince(windowStr);
+    const since = directSince || windowToSince(windowStr);
     const stats = await callTool('mission_timeline_stats', { since });
     return NextResponse.json(stats);
   } catch (err) {

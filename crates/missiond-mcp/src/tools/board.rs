@@ -169,16 +169,61 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_board_get",
-            "获取任务板上单个任务的详细信息",
+            "获取任务详情。支持批量 IDs 和内嵌子任务。单个 id 返回对象，多个 ids 返回数组。",
             json!({
                 "type": "object",
                 "properties": {
                     "id": {
                         "type": "string",
-                        "description": "任务 ID"
+                        "description": "单个任务 ID（与 ids 二选一）"
+                    },
+                    "ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "批量任务 ID 列表（与 id 二选一）"
+                    },
+                    "includeChildren": {
+                        "type": "boolean",
+                        "description": "是否内嵌子任务详情（含 notes）。默认 false"
                     }
-                },
-                "required": ["id"]
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_board_search",
+            "搜索任务板。返回精简格式（id+title+status+priority+parentId），适合快速定位。支持关键词、项目、分类等过滤。优先用此工具代替 board_list 以节省上下文。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "全文搜索 title+description（模糊匹配）"
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "按项目过滤（精确匹配）"
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "按分类过滤: deploy, dev, infra, test, other"
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "按状态过滤: open, done, running, failed, blocked"
+                    },
+                    "parentId": {
+                        "type": "string",
+                        "description": "按父任务 ID 过滤（获取某任务的所有子任务）"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "最大返回条数（默认 50）"
+                    },
+                    "includeHidden": {
+                        "type": "boolean",
+                        "description": "是否包含隐藏任务。默认 false"
+                    }
+                }
             }),
         ),
         ToolDefinition::new(

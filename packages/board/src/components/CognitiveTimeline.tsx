@@ -3,15 +3,15 @@
 import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react';
 import {
   Search, RefreshCw, Sparkles, AlertTriangle,
-  Zap, Brain, Wrench, ArrowRight, ChevronRight, ChevronDown,
+  Zap, Brain, Wrench, ArrowRight, ChevronLeft, ChevronRight, ChevronDown,
   MessageSquare, GitBranch, GitCommit, Activity, Cpu, Settings2, User, Clock,
-  FileCode, Terminal, Eye, File, ArrowUp, ArrowDown, BookOpen, Loader2, Languages, CheckCheck,
+  FileCode, Terminal, Eye, File, ArrowUp, ArrowDown, BookOpen, Loader2, Languages, CheckCheck, Calendar,
 } from 'lucide-react';
 import { diffLines } from 'diff';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { cn } from '@/lib/utils';
-import { utcMs, formatBeijing, formatBeijingTime } from '@/lib/time';
+import { utcMs, formatBeijing, formatBeijingTime, beijingDayRange, toBeijingDate, todayBeijing } from '@/lib/time';
 import { useEventInvalidation } from '../hooks/useEventStream';
 import { useTimelineGestures } from '../hooks/useTimelineGestures';
 
@@ -268,7 +268,9 @@ function useFullMessage(messageId: number | undefined, enabled: boolean): FullMe
 
 const STORAGE_KEY = 'timeline-view-state';
 
-function loadViewState(): { quickFilter: string; activeWindow: string } {
+type ViewMode = 'relative' | 'daily';
+
+function loadViewState(): { quickFilter: string; activeWindow: string; dailyDate: string | null } {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
@@ -276,16 +278,33 @@ function loadViewState(): { quickFilter: string; activeWindow: string } {
       return {
         quickFilter: parsed.quickFilter || 'all',
         activeWindow: parsed.activeWindow || '24h',
+        dailyDate: parsed.dailyDate || null,
       };
     }
   } catch { /* ignore */ }
-  return { quickFilter: 'all', activeWindow: '24h' };
+  return { quickFilter: 'all', activeWindow: '24h', dailyDate: null };
 }
 
-function saveViewState(state: { quickFilter: string; activeWindow: string }) {
+function saveViewState(state: { quickFilter: string; activeWindow: string; dailyDate: string | null }) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch { /* ignore */ }
+}
+
+/** Format date for daily navigator label: "3月9日周日" */
+function formatDailyLabel(dateStr: string): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const noon = Date.UTC(y, m - 1, d, 12) - 8 * 3600_000;
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: 'numeric', day: 'numeric', weekday: 'short',
+    timeZone: 'Asia/Shanghai',
+  }).format(new Date(noon));
+}
+
+/** Shift a Beijing date string by N days */
+function shiftDay(dateStr: string, delta: number): string {
+  const { start } = beijingDayRange(dateStr);
+  return toBeijingDate(start + delta * 86400_000);
 }
 
 // ── Main Component ─────────────────────────────────────────
@@ -307,10 +326,23 @@ export function CognitiveTimeline() {
   const [loading, setLoading] = useState(false);
   const [selectionSource, setSelectionSource] = useState<'timeline' | 'list' | null>(null);
 
+  // Daily view state
+  const [viewMode, setViewMode] = useState<ViewMode>(savedView.dailyDate ? 'daily' : 'relative');
+  const [dailyDate, setDailyDate] = useState<string | null>(savedView.dailyDate);
+
+  // In daily mode, allow panning to end of selected day (even if it's "future" for today)
+  const gestureMaxTime = useMemo(() => {
+    if (viewMode === 'daily' && dailyDate) {
+      const { end } = beijingDayRange(dailyDate);
+      return Math.max(end, Date.now() + 5 * 60_000);
+    }
+    return Date.now() + 5 * 60_000;
+  }, [viewMode, dailyDate]);
+
   // Persist view state on change
   useEffect(() => {
-    saveViewState({ quickFilter, activeWindow });
-  }, [quickFilter, activeWindow]);
+    saveViewState({ quickFilter, activeWindow, dailyDate });
+  }, [quickFilter, activeWindow, dailyDate]);
 
   // Ref maps for bidirectional scroll sync
   const timelineDotRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
@@ -318,8 +350,17 @@ export function CognitiveTimeline() {
 
   // Gesture-controlled timeline: pan (two-finger scroll) + zoom (pinch)
   const now = Date.now();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const initialRange = useMemo(() => {
+    if (savedView.dailyDate) {
+      const { start, end } = beijingDayRange(savedView.dailyDate);
+      return { min: start, max: end };
+    }
+    return { min: now - windowToMs(savedView.activeWindow), max: now };
+  }, []);
   const { containerRef: timelineRef, timeRange, setTimeRange: setGestureRange } = useTimelineGestures({
-    initialRange: { min: now - windowToMs(savedView.activeWindow), max: now },
+    initialRange,
+    maxAllowedTime: gestureMaxTime,
   });
 
   // Track the time range we already have data for — avoid redundant fetches
@@ -593,10 +634,36 @@ export function CognitiveTimeline() {
   // Sync window preset buttons with gesture-controlled timeRange
   const handleWindowChange = useCallback((w: string) => {
     setActiveWindow(w);
+    setViewMode('relative');
+    setDailyDate(null);
     const n = Date.now();
     loadedRangeRef.current = null; // Force refetch for new window
     setGestureRange({ min: n - windowToMs(w), max: n });
   }, [setGestureRange]);
+
+  // Daily view navigation
+  const earliestDate = useMemo(() => toBeijingDate(Date.now() - 7 * 86400_000), []);
+
+  const handleDailyNav = useCallback((dateStr: string) => {
+    setDailyDate(dateStr);
+    setViewMode('daily');
+    setActiveWindow('');
+    const { start, end } = beijingDayRange(dateStr);
+    loadedRangeRef.current = null;
+    setGestureRange({ min: start, max: end });
+  }, [setGestureRange]);
+
+  const handleDailyPrev = useCallback(() => {
+    const current = dailyDate || todayBeijing();
+    const prev = shiftDay(current, -1);
+    if (prev >= earliestDate) handleDailyNav(prev);
+  }, [dailyDate, earliestDate, handleDailyNav]);
+
+  const handleDailyNext = useCallback(() => {
+    const current = dailyDate || todayBeijing();
+    const next = shiftDay(current, 1);
+    if (next <= todayBeijing()) handleDailyNav(next);
+  }, [dailyDate, handleDailyNav]);
 
   // Position calculation — only used for debounced/non-critical paths (span lines, trace lines)
   const getX = useCallback((dateStr: string) => {

@@ -23,11 +23,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "summary": {
                         "type": "string",
-                        "description": "一行摘要"
+                        "description": "结论性摘要（≤400字）。用于语义搜索和上下文注入"
                     },
                     "detail": {
                         "type": "object",
-                        "description": "结构化详情 JSON（可选）"
+                        "description": "结构化详情 JSON（可选）。完整配置/命令/代码段/排查过程存此处，召回时随 summary 一起提供"
                     },
                     "source": {
                         "type": "string",
