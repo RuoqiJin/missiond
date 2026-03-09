@@ -47,3 +47,23 @@ export function formatBeijing(
 export function formatBeijingTime(dateStr: string | Date | undefined | null): string {
   return formatBeijing(dateStr, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 }
+
+// ── Daily View helpers ────────────────────────────────────
+
+/** Get UTC timestamp range for a Beijing timezone day (YYYY-MM-DD → 00:00~24:00 Asia/Shanghai) */
+export function beijingDayRange(dateStr: string): { start: number; end: number } {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  // Beijing 00:00:00 = UTC minus 8h
+  const start = Date.UTC(y, m - 1, d) - 8 * 3600_000;
+  return { start, end: start + 86400_000 };
+}
+
+/** UTC ms → YYYY-MM-DD in Beijing timezone */
+export function toBeijingDate(ms: number): string {
+  return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai' }).format(new Date(ms));
+}
+
+/** Today's YYYY-MM-DD in Beijing timezone */
+export function todayBeijing(): string {
+  return toBeijingDate(Date.now());
+}

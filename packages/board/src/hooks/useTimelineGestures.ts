@@ -15,20 +15,34 @@ interface UseTimelineGesturesOptions {
   maxAllowedTime?: number;
 }
 
+/**
+ * Write CSS custom properties on the timeline container for GPU-driven positioning.
+ * Elements use calc((var(--t-event) - var(--t-min)) / var(--t-range) * 100%) for left%.
+ * This bypasses React re-renders during gestures entirely.
+ */
+function writeCssVars(el: HTMLDivElement, min: number, range: number) {
+  el.style.setProperty('--t-min', String(min));
+  el.style.setProperty('--t-range', String(range));
+}
+
 export function useTimelineGestures({
   initialRange,
   minWindowMs = 30 * 1000,
   maxWindowMs = 7 * 24 * 3600 * 1000,
   maxAllowedTime = Date.now() + 5 * 60 * 1000,
 }: UseTimelineGesturesOptions) {
-  const [timeRange, setTimeRange] = useState<TimeRange>(initialRange);
+  // committedRange: debounced, drives React re-renders (histogram, ticks, etc.)
+  const [committedRange, setCommittedRange] = useState<TimeRange>(initialRange);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Use ref to avoid stale closures in high-frequency event handlers
-  const stateRef = useRef(timeRange);
-  stateRef.current = timeRange;
+  // Live range ref — updated on every gesture event, never triggers React render
+  const stateRef = useRef(initialRange);
 
-  // Unified range updater with boundary constraints
+  // RAF + debounce refs
+  const rafRef = useRef(0);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Clamp and apply range update
   const updateRange = useCallback((newMin: number, newMax: number) => {
     let min = newMin;
     let max = newMax;
@@ -53,21 +67,38 @@ export function useTimelineGestures({
       min = max - windowMs;
     }
 
-    // Only update if changed meaningfully (>1ms)
+    // Skip if unchanged
     const prev = stateRef.current;
-    if (Math.abs(prev.min - min) > 1 || Math.abs(prev.max - max) > 1) {
-      const next = { min, max };
-      stateRef.current = next;
-      setTimeRange(next);
-    }
+    if (Math.abs(prev.min - min) <= 1 && Math.abs(prev.max - max) <= 1) return;
+
+    stateRef.current = { min, max };
+
+    // 1. Immediate visual update — write CSS vars on next animation frame
+    cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(() => {
+      if (containerRef.current) writeCssVars(containerRef.current, min, max - min);
+    });
+
+    // 2. Debounced React state — triggers histogram, ticks, and other heavy computations
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      setCommittedRange({ min, max });
+    }, 150);
   }, [minWindowMs, maxWindowMs, maxAllowedTime]);
+
+  // Initialize CSS vars on mount
+  useEffect(() => {
+    if (containerRef.current) {
+      writeCssVars(containerRef.current, initialRange.min, initialRange.max - initialRange.min);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     const handleWheel = (e: WheelEvent) => {
-      // Prevent browser default scroll / back-forward navigation
       e.preventDefault();
 
       const { min, max } = stateRef.current;
@@ -77,26 +108,20 @@ export function useTimelineGestures({
       const anchorRatio = Math.max(0, Math.min(1, mouseX / rect.width));
 
       if (e.ctrlKey || e.metaKey) {
-        // ── Pinch-to-zoom (trackpad sends ctrlKey + deltaY) ──
+        // Pinch-to-zoom (trackpad sends ctrlKey + deltaY)
         const zoomSensitivity = 0.005;
         const zoomFactor = Math.exp(e.deltaY * zoomSensitivity);
         const newWindowMs = windowMs * zoomFactor;
-
-        // Zoom anchored at mouse position
         const anchorTime = min + windowMs * anchorRatio;
-        const newMin = anchorTime - newWindowMs * anchorRatio;
-        const newMax = anchorTime + newWindowMs * (1 - anchorRatio);
-
-        updateRange(newMin, newMax);
+        updateRange(
+          anchorTime - newWindowMs * anchorRatio,
+          anchorTime + newWindowMs * (1 - anchorRatio),
+        );
       } else {
-        // ── Two-finger scroll (horizontal pan) ──
-        // Prefer deltaX for horizontal scroll; fall back to deltaY for vertical-only mice
+        // Two-finger scroll (horizontal pan)
         const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-
-        // Convert pixel displacement to time displacement
         const panSensitivity = windowMs / rect.width;
         const timeShift = delta * panSensitivity;
-
         updateRange(min + timeShift, max + timeShift);
       }
     };
@@ -113,14 +138,13 @@ export function useTimelineGestures({
       e.preventDefault();
       if (!gestureStartRange) return;
       const ge = e as unknown as { scale: number; clientX: number };
-      const scale = ge.scale;
 
       const rect = container.getBoundingClientRect();
       const mouseX = ge.clientX - rect.left;
       const anchorRatio = Math.max(0, Math.min(1, mouseX / rect.width));
 
       const origWindow = gestureStartRange.max - gestureStartRange.min;
-      const newWindowMs = origWindow / scale;
+      const newWindowMs = origWindow / ge.scale;
       const anchorTime = gestureStartRange.min + origWindow * anchorRatio;
 
       updateRange(
@@ -134,7 +158,6 @@ export function useTimelineGestures({
       gestureStartRange = null;
     };
 
-    // Must be passive: false to call preventDefault
     container.addEventListener('wheel', handleWheel, { passive: false });
     container.addEventListener('gesturestart', handleGestureStart, { passive: false } as EventListenerOptions);
     container.addEventListener('gesturechange', handleGestureChange, { passive: false } as EventListenerOptions);
@@ -150,10 +173,13 @@ export function useTimelineGestures({
 
   return {
     containerRef,
-    timeRange,
+    /** Debounced range — use for React-rendered elements (histogram, ticks). */
+    timeRange: committedRange,
+    /** Force-set range (e.g. window button click) — updates both CSS and React immediately. */
     setTimeRange: (range: TimeRange) => {
       stateRef.current = range;
-      setTimeRange(range);
+      if (containerRef.current) writeCssVars(containerRef.current, range.min, range.max - range.min);
+      setCommittedRange(range);
     },
   };
 }

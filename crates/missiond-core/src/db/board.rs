@@ -626,6 +626,209 @@ impl MissionDB {
     }
 
 
+    // ============ Board Search ============
+
+    /// Search board tasks with filters, returning compact results
+    pub fn search_board_tasks(&self, input: &crate::types::BoardSearchInput) -> DbResult<crate::types::BoardSearchResult> {
+        let conn = self.read_conn();
+        let limit = input.limit.unwrap_or(50);
+
+        // Build dynamic WHERE clause
+        let mut conditions = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if !input.include_hidden {
+            conditions.push("hidden = 0".to_string());
+        }
+
+        if let Some(ref q) = input.query {
+            let param_idx = params.len() + 1;
+            conditions.push(format!("(title LIKE ?{} OR description LIKE ?{})", param_idx, param_idx));
+            params.push(Box::new(format!("%{}%", q)));
+        }
+        if let Some(ref project) = input.project {
+            let param_idx = params.len() + 1;
+            conditions.push(format!("project = ?{}", param_idx));
+            params.push(Box::new(project.clone()));
+        }
+        if let Some(ref category) = input.category {
+            let param_idx = params.len() + 1;
+            conditions.push(format!("category = ?{}", param_idx));
+            params.push(Box::new(category.clone()));
+        }
+        if let Some(ref status) = input.status {
+            let param_idx = params.len() + 1;
+            conditions.push(format!("status = ?{}", param_idx));
+            params.push(Box::new(status.clone()));
+        }
+        if let Some(ref parent_id) = input.parent_id {
+            let param_idx = params.len() + 1;
+            conditions.push(format!("parent_id = ?{}", param_idx));
+            params.push(Box::new(parent_id.clone()));
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+
+        // Count total matching
+        let count_sql = format!("SELECT COUNT(*) FROM board_tasks{}", where_clause);
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
+        let total: usize = conn.query_row(&count_sql, param_refs.as_slice(), |row| row.get(0))?;
+
+        // Fetch compact results with limit
+        let select_sql = format!(
+            "SELECT id, title, status, priority, parent_id, project, category FROM board_tasks{} ORDER BY order_idx ASC LIMIT {}",
+            where_clause, limit
+        );
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
+        let mut stmt = conn.prepare(&select_sql)?;
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            let status_str: String = row.get("status")?;
+            let status = crate::types::BoardTaskStatus::from_str(&status_str).unwrap_or(crate::types::BoardTaskStatus::Open);
+            Ok(crate::types::CompactBoardTask {
+                id: row.get("id")?,
+                title: row.get("title")?,
+                status,
+                priority: row.get("priority")?,
+                parent_id: row.get("parent_id")?,
+                project: row.get("project")?,
+                category: row.get("category")?,
+            })
+        })?;
+
+        let mut data = Vec::new();
+        for row in rows {
+            data.push(row?);
+        }
+        let returned = data.len();
+
+        let message = if returned < total {
+            Some(format!("Showing {} of {} results. Refine query for more.", returned, total))
+        } else {
+            None
+        };
+
+        Ok(crate::types::BoardSearchResult {
+            meta: crate::types::BoardSearchMeta { total, returned, message },
+            data,
+        })
+    }
+
+    /// Get multiple board tasks by IDs with optional children, using max 3 SQL queries
+    pub fn get_board_tasks_with_context(
+        &self,
+        ids: &[String],
+        include_children: bool,
+    ) -> DbResult<Vec<crate::types::BoardTaskWithContext>> {
+        use std::collections::HashMap;
+
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Resolve short IDs BEFORE acquiring conn (resolve_board_task_id also uses read_conn)
+        let mut full_ids = Vec::new();
+        for id in ids {
+            if let Some(fid) = self.resolve_board_task_id(id)? {
+                full_ids.push(fid);
+            }
+        }
+
+        if full_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.read_conn();
+
+        // Query 1: Fetch main tasks
+        let placeholders: Vec<String> = (1..=full_ids.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!("SELECT * FROM board_tasks WHERE id IN ({})", placeholders.join(","));
+        let params: Vec<&dyn rusqlite::ToSql> = full_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params.as_slice(), |row| Self::row_to_board_task(row))?;
+        let mut main_tasks: Vec<BoardTask> = Vec::new();
+        for row in rows {
+            main_tasks.push(row?);
+        }
+
+        // Query 2: Fetch children (if requested)
+        let mut children_by_parent: HashMap<String, Vec<BoardTask>> = HashMap::new();
+        if include_children && !main_tasks.is_empty() {
+            let parent_placeholders: Vec<String> = (1..=main_tasks.len()).map(|i| format!("?{}", i)).collect();
+            let child_sql = format!(
+                "SELECT * FROM board_tasks WHERE parent_id IN ({}) ORDER BY order_idx ASC",
+                parent_placeholders.join(",")
+            );
+            let parent_ids: Vec<String> = main_tasks.iter().map(|t| t.id.clone()).collect();
+            let params: Vec<&dyn rusqlite::ToSql> = parent_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            let mut stmt = conn.prepare(&child_sql)?;
+            let rows = stmt.query_map(params.as_slice(), |row| Self::row_to_board_task(row))?;
+            for row in rows {
+                let task = row?;
+                if let Some(ref pid) = task.parent_id {
+                    children_by_parent.entry(pid.clone()).or_default().push(task);
+                }
+            }
+        }
+
+        // Query 3: Fetch all notes in one batch
+        let mut all_task_ids: Vec<String> = main_tasks.iter().map(|t| t.id.clone()).collect();
+        for children in children_by_parent.values() {
+            for child in children {
+                all_task_ids.push(child.id.clone());
+            }
+        }
+
+        let mut notes_by_task: HashMap<String, Vec<BoardTaskNote>> = HashMap::new();
+        if !all_task_ids.is_empty() {
+            let note_placeholders: Vec<String> = (1..=all_task_ids.len()).map(|i| format!("?{}", i)).collect();
+            let note_sql = format!(
+                "SELECT id, task_id, content, note_type, author, created_at FROM board_task_notes WHERE task_id IN ({}) ORDER BY created_at ASC",
+                note_placeholders.join(",")
+            );
+            let params: Vec<&dyn rusqlite::ToSql> = all_task_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            let mut stmt = conn.prepare(&note_sql)?;
+            let rows = stmt.query_map(params.as_slice(), Self::row_to_board_task_note)?;
+            for row in rows {
+                let note = row?;
+                notes_by_task.entry(note.task_id.clone()).or_default().push(note);
+            }
+        }
+
+        // Assemble: build BoardTaskWithContext tree
+        let results: Vec<crate::types::BoardTaskWithContext> = main_tasks
+            .into_iter()
+            .map(|task| {
+                let task_id = task.id.clone();
+                let notes = notes_by_task.remove(&task_id).unwrap_or_default();
+                let children = if include_children {
+                    let child_tasks = children_by_parent.remove(&task_id).unwrap_or_default();
+                    Some(child_tasks.into_iter().map(|child| {
+                        let child_id = child.id.clone();
+                        let child_notes = notes_by_task.remove(&child_id).unwrap_or_default();
+                        crate::types::BoardTaskWithContext {
+                            task: child,
+                            notes: child_notes,
+                            children: None, // single level
+                        }
+                    }).collect())
+                } else {
+                    None
+                };
+                crate::types::BoardTaskWithContext {
+                    task,
+                    notes,
+                    children,
+                }
+            })
+            .collect();
+
+        Ok(results)
+    }
+
     // ============ Board Task Notes ============
 
     /// Add a note to a board task

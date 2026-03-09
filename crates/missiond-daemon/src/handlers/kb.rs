@@ -16,10 +16,10 @@ use crate::helpers::default_mission_home;
 /// Content guard: reject verbose debug logs, stack traces, and narrative-style entries.
 /// Returns Some(rejection_message) if content should be rejected, None if OK.
 fn check_content_quality(summary: &str, detail: &Option<Value>) -> Option<String> {
-    // Rule 1: summary too long (> 200 chars = likely narrative)
-    if summary.chars().count() > 200 {
+    // Rule 1: summary too long (> 400 chars = likely narrative)
+    if summary.chars().count() > 400 {
         return Some(format!(
-            "REJECTED: summary 过长（{}字）。summary 必须 ≤ 120 字，是结论性陈述而非叙事。请提炼后重试。",
+            "REJECTED: summary 过长（{}字）。summary 必须 ≤ 400 字，是结论性一句话摘要。高密度技术细节（配置/命令/代码）请存入 detail 字段（JSON）。",
             summary.chars().count()
         ));
     }

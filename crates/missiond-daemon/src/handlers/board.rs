@@ -170,16 +170,61 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
         }
         "mission_board_get" => {
-            let BoardIdArgs { id } = serde_json::from_value(args)?;
-            let task = state
+            // Support both single `id` and batch `ids`, with optional `includeChildren`
+            let include_children = args.get("includeChildren")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let ids: Vec<String> = if let Some(id_val) = args.get("ids").and_then(|v| v.as_array()) {
+                id_val.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+            } else if let Some(id) = args.get("id").and_then(|v| v.as_str()) {
+                vec![id.to_string()]
+            } else {
+                return Ok(ToolResult::error("Either 'id' or 'ids' is required"));
+            };
+
+            let single_mode = args.get("ids").is_none() && args.get("id").is_some();
+
+            if include_children || ids.len() > 1 {
+                // Use batch method (max 3 SQL queries)
+                let results = state
+                    .mission
+                    .db()
+                    .get_board_tasks_with_context(&ids, include_children)
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+
+                if results.is_empty() {
+                    return Ok(ToolResult::error("Task not found"));
+                }
+
+                if single_mode {
+                    // Single id mode: return object (backward compatible)
+                    Ok(ToolResult::json_pretty(&results[0]))
+                } else {
+                    Ok(ToolResult::json_pretty(&results))
+                }
+            } else {
+                // Single id, no children: use original method (backward compatible)
+                let task = state
+                    .mission
+                    .db()
+                    .get_board_task_with_notes(&ids[0])
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                match task {
+                    Some(t) => Ok(ToolResult::json_pretty(&t)),
+                    None => Ok(ToolResult::error("Task not found")),
+                }
+            }
+        }
+        "mission_board_search" => {
+            let input: missiond_core::types::BoardSearchInput =
+                serde_json::from_value(args).unwrap_or_default();
+            let result = state
                 .mission
                 .db()
-                .get_board_task_with_notes(&id)
+                .search_board_tasks(&input)
                 .map_err(|e| anyhow!("DB error: {}", e))?;
-            match task {
-                Some(t) => Ok(ToolResult::json_pretty(&t)),
-                None => Ok(ToolResult::error("Task not found")),
-            }
+            Ok(ToolResult::json_pretty(&result))
         }
         "mission_board_delete" => {
             let BoardIdArgs { id } = serde_json::from_value(args)?;
