@@ -8,8 +8,8 @@
 //! - Polling: fallback 120s sweep for missed/backfill entries.
 //! - DB as reliable queue: entries with `summary == preview` are pending.
 //!
-//! Rate limiting: ~1 req/60s to stay within MiniMax Coding Plan (300 prompts/5h).
-//! Thinking messages use static rules (no LLM) to save ~1/3 quota.
+//! Rate limiting delegated to MinimaxGateway (P3: briefing priority).
+//! Thinking messages use static rules (no LLM) to save quota.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,7 +18,7 @@ use anyhow::Result;
 use tracing::{debug, info, warn};
 
 use crate::event_bus::DaemonEvent;
-use crate::minimax_client::MiniMaxClient;
+use crate::minimax_client::ChatMessage;
 use crate::state::AppState;
 
 /// Minimum content length (chars) to trigger briefing.
@@ -29,10 +29,6 @@ const BATCH_SIZE: usize = 10;
 
 /// Poll interval when idle (no pending entries).
 const IDLE_INTERVAL_SECS: u64 = 120;
-
-/// Delay between MiniMax API calls.
-/// 300 prompts/5h = 1 per minute. Use 60s to stay safely within quota.
-const INTER_CALL_DELAY_SECS: u64 = 60;
 
 /// Result of processing a single entry.
 enum ProcessResult {
@@ -46,7 +42,6 @@ enum ProcessResult {
 
 /// Process a single timeline entry: fetch full content, generate summary, update DB.
 async fn process_entry(
-    client: &MiniMaxClient,
     state: &AppState,
     seq: i64,
     event_type: &str,
@@ -142,11 +137,14 @@ async fn process_entry(
         _ => 100,
     };
 
-    let messages = vec![crate::minimax_client::ChatMessage {
+    let minimax = state.minimax.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("MiniMax gateway not available"))?;
+
+    let messages = vec![ChatMessage {
         role: "user".to_string(),
         content: prompt,
     }];
-    let summary = client.chat(&messages, Some(300)).await?;
+    let summary = minimax.call_briefing(messages, Some(300), None).await?;
 
     if summary.is_empty() {
         warn!(seq, "Briefing: empty summary from MiniMax");
@@ -218,20 +216,17 @@ fn truncate_at_boundary(text: &str, max_chars: usize) -> String {
 }
 
 /// Spawn the briefing worker as a hybrid event-driven + polling background task.
+/// Requires MinimaxGateway to be initialized (state.minimax must be Some).
 pub(crate) fn spawn_briefing_worker(state: Arc<AppState>) {
-    let api_key = match crate::minimax_client::load_api_key() {
-        Some(key) => key,
-        None => {
-            warn!("Briefing worker: MiniMax API key not found, worker disabled");
-            return;
-        }
-    };
+    if state.minimax.is_none() {
+        warn!("Briefing worker: MinimaxGateway not available, worker disabled");
+        return;
+    }
 
-    let client = MiniMaxClient::new(api_key);
     let notify = Arc::clone(&state.briefing_notify);
 
     tokio::spawn(async move {
-        info!("Briefing worker started (hybrid event+poll, rate: 1/{INTER_CALL_DELAY_SECS}s)");
+        info!("Briefing worker started (hybrid event+poll, rate: gateway-managed)");
 
         // Initial delay to let the daemon stabilize
         tokio::time::sleep(Duration::from_secs(30)).await;
@@ -268,12 +263,11 @@ pub(crate) fn spawn_briefing_worker(state: Arc<AppState>) {
             let mut llm_calls = 0;
 
             for (seq, event_type, payload, _summary) in &pending {
-                match process_entry(&client, &state, *seq, event_type, payload).await {
+                match process_entry(&state, *seq, event_type, payload).await {
                     Ok(ProcessResult::Llm) => {
                         processed += 1;
                         llm_calls += 1;
-                        // Rate limit only for actual LLM API calls
-                        tokio::time::sleep(Duration::from_secs(INTER_CALL_DELAY_SECS)).await;
+                        // No local sleep — Gateway handles rate limiting
                     }
                     Ok(ProcessResult::Local) => {
                         processed += 1;
