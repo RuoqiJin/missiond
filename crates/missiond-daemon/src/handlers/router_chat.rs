@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
@@ -54,6 +55,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let search_enabled = params.get("search")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let idle_timeout = params.get("idle_timeout")
+                .and_then(|v| v.as_u64())
+                .map(|secs| Duration::from_secs(secs));
             let task_id = params.get("task_id").and_then(|v| v.as_str()).map(|s| s.to_string());
 
             // If task_id provided, load conversation history and prepend
@@ -205,7 +209,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             info!("Router chat: {} messages ({} chars) to {} via {}", messages.len(), total_chars, model, url);
 
             let result = REQUEST_CALLER.scope("router_chat".to_string(), async {
-                state.gemini.send(&state.http_client, &url, &jwt, &body).await
+                state.gemini.send_with_timeout(&state.http_client, &url, &jwt, &body, idle_timeout).await
             }).await?;
 
             let content = result
