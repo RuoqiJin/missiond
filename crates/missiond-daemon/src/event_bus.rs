@@ -57,6 +57,24 @@ pub(crate) enum DaemonEvent {
         response_text: Option<String>,
     },
 
+    /// Gemini CLI agentic tool activity — emitted in real-time as CLI calls tools.
+    /// parent_span_id links to the enclosing GeminiRequestStarted span.
+    GeminiToolActivity {
+        request_id: String,
+        /// Sequential index within this request (1, 2, 3...)
+        tool_seq: u32,
+        /// "tool_use" or "tool_result"
+        activity: String,
+        /// Tool name (e.g. "read_file", "grep", "bash")
+        tool_name: Option<String>,
+        /// Truncated input preview (≤200 chars)
+        input_preview: Option<String>,
+        /// Truncated result preview (≤500 chars)
+        result_preview: Option<String>,
+        /// Whether the tool result was an error
+        is_error: bool,
+    },
+
     // ===== Phase 5: Frontend push events =====
     /// A decision question was resolved by the decision engine.
     DecisionResolved {
@@ -283,6 +301,7 @@ impl DaemonEvent {
             Self::QuestionCreated { .. } => "question_created",
             Self::GeminiRequestStarted { .. } => "gemini_request_started",
             Self::GeminiRequestCompleted { .. } => "gemini_request_completed",
+            Self::GeminiToolActivity { .. } => "gemini_tool_activity",
             Self::DecisionResolved { .. } => "decision_made",
             Self::QuestionResolved { .. } => "question_resolved",
             Self::MemoryPhaseChanged { .. } => "memory_phase_changed",
@@ -358,6 +377,18 @@ impl DaemonEvent {
                 "response_chars": response_chars,
                 "queue_wait_ms": queue_wait_ms,
                 "retry_count": retry_count,
+            }),
+            Self::GeminiToolActivity {
+                request_id, tool_seq, activity, tool_name,
+                input_preview, result_preview, is_error,
+            } => json!({
+                "request_id": request_id,
+                "tool_seq": tool_seq,
+                "activity": activity,
+                "tool_name": tool_name,
+                "input_preview": input_preview,
+                "result_preview": result_preview,
+                "is_error": is_error,
             }),
             Self::DecisionResolved { question_id, tier, duration_ms } =>
                 json!({ "question_id": question_id, "tier": tier, "duration_ms": duration_ms }),

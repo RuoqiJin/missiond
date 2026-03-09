@@ -24,7 +24,7 @@ use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 use crate::event_bus::{DaemonEvent, TimelineEntry};
-use crate::gemini_cli::GeminiCli;
+use crate::gemini_cli::{GeminiCli, GeminiCliProgress};
 
 type GovernorLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
@@ -196,6 +196,11 @@ impl GeminiClient {
 
         // 4. All work in async move block — ? returns are captured here,
         //    never bypassing the guard in the outer scope.
+        let request_id_clone = guard.request_id.clone();
+        let span_id_clone = guard.span_id.clone();
+        let session_id_clone = guard.session_id.clone();
+        let event_tx_clone = self.event_tx.clone();
+
         let result: Result<serde_json::Value> = async move {
             if let Some(cli) = &self.cli {
                 let messages = body.get("messages").and_then(|v| v.as_array())
@@ -203,14 +208,51 @@ impl GeminiClient {
                 let max_tokens = body.get("max_tokens").and_then(|v| v.as_u64()).map(|n| n as u32);
 
                 // Whitelist: only these models are allowed via CLI. Others fall back to default.
+                // Note: flash-lite is NOT supported by Gemini CLI (ModelNotFoundError).
                 let cli_model = body.get("model").and_then(|v| v.as_str())
                     .and_then(|m| match m {
-                        "gemini-3.1-flash-lite" | "gemini-3.1-pro-preview" => Some(m),
+                        "gemini-3.1-pro-preview" => Some(m),
                         _ => None,
                     });
 
-                let resp = cli.call(messages, cli_model, max_tokens, None).await;
+                // Create progress channel to emit real-time tool activity events
+                let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<GeminiCliProgress>();
+
+                // Spawn forwarder: converts GeminiCliProgress → DaemonEvent::GeminiToolActivity
+                let fwd_request_id = request_id_clone;
+                let fwd_span_id = span_id_clone;
+                let fwd_session_id = session_id_clone;
+                let fwd_event_tx = event_tx_clone;
+                let forwarder = tokio::spawn(async move {
+                    while let Some(prog) = progress_rx.recv().await {
+                        let event = DaemonEvent::GeminiToolActivity {
+                            request_id: fwd_request_id.clone(),
+                            tool_seq: prog.tool_seq,
+                            activity: prog.activity.clone(),
+                            tool_name: prog.tool_name.clone(),
+                            input_preview: prog.input_preview.clone(),
+                            result_preview: prog.result_preview.clone(),
+                            is_error: prog.is_error,
+                        };
+                        let summary = match prog.activity.as_str() {
+                            "tool_use" => format!("#{} → {}", prog.tool_seq, prog.tool_name.as_deref().unwrap_or("?")),
+                            _ => format!("#{} ← {}", prog.tool_seq, if prog.is_error { "error" } else { "ok" }),
+                        };
+                        let entry = TimelineEntry {
+                            event,
+                            trace_id: fwd_session_id.clone(),
+                            span_id: uuid::Uuid::new_v4().to_string(),
+                            parent_span_id: Some(fwd_span_id.clone()),
+                            summary: Some(summary),
+                        };
+                        let _ = fwd_event_tx.send(entry);
+                    }
+                });
+
+                let resp = cli.call(messages, cli_model, max_tokens, None, Some(progress_tx)).await;
                 drop(permit);
+                // Drop the sender side is implicit (cli.call finished), wait for forwarder to drain
+                let _ = forwarder.await;
                 let resp = resp?;
 
                 Ok(serde_json::json!({
