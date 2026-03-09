@@ -41,6 +41,7 @@ export function useTimelineGestures({
   // RAF + debounce refs
   const rafRef = useRef(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const animRafRef = useRef(0); // For animated transitions
 
   // Clamp and apply range update
   const updateRange = useCallback((newMin: number, newMax: number) => {
@@ -171,15 +172,49 @@ export function useTimelineGestures({
     };
   }, [updateRange]);
 
+  /** Animate CSS variables from current to target over durationMs using RAF interpolation. */
+  const animateToRange = useCallback((target: TimeRange, durationMs = 300) => {
+    cancelAnimationFrame(animRafRef.current);
+    const from = { ...stateRef.current };
+    const startTime = performance.now();
+
+    const tick = (now: number) => {
+      const elapsed = now - startTime;
+      const t = Math.min(elapsed / durationMs, 1);
+      // ease-out cubic: 1 - (1-t)^3
+      const ease = 1 - Math.pow(1 - t, 3);
+
+      const min = from.min + (target.min - from.min) * ease;
+      const max = from.max + (target.max - from.max) * ease;
+
+      stateRef.current = { min, max };
+      if (containerRef.current) writeCssVars(containerRef.current, min, max - min);
+
+      if (t < 1) {
+        animRafRef.current = requestAnimationFrame(tick);
+      } else {
+        // Animation complete — commit final state to React
+        stateRef.current = target;
+        if (containerRef.current) writeCssVars(containerRef.current, target.min, target.max - target.min);
+        setCommittedRange(target);
+      }
+    };
+
+    animRafRef.current = requestAnimationFrame(tick);
+  }, []);
+
   return {
     containerRef,
     /** Debounced range — use for React-rendered elements (histogram, ticks). */
     timeRange: committedRange,
     /** Force-set range (e.g. window button click) — updates both CSS and React immediately. */
     setTimeRange: (range: TimeRange) => {
+      cancelAnimationFrame(animRafRef.current); // Cancel any running animation
       stateRef.current = range;
       if (containerRef.current) writeCssVars(containerRef.current, range.min, range.max - range.min);
       setCommittedRange(range);
     },
+    /** Animated range transition — smooth CSS variable interpolation via RAF. */
+    animateToRange,
   };
 }

@@ -88,8 +88,12 @@ function handleEvent(
       debouncedBump(set, 'memoryVersion');
       break;
 
+    case 'gemini_request_started':
     case 'gemini_request_completed':
+    case 'codex_request_started':
+    case 'codex_request_completed':
       debouncedBump(set, 'engineVersion');
+      debouncedBump(set, 'timelineVersion');
       break;
 
     case 'board_task_updated': {
