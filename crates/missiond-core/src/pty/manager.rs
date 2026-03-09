@@ -27,6 +27,8 @@ use super::session::{
 pub struct PTYAgentInfo {
     pub slot_id: String,
     pub role: String,
+    /// CLI engine running in this slot
+    pub engine: crate::types::CliEngine,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     pub state: SessionState,
@@ -71,6 +73,8 @@ pub struct Slot {
     pub id: String,
     pub role: String,
     pub cwd: Option<PathBuf>,
+    /// CLI engine type (ClaudeCode, Gemini, Codex)
+    pub engine: crate::types::CliEngine,
 }
 
 /// Permission policy trait
@@ -169,6 +173,7 @@ impl PTYManager {
         let info = PTYAgentInfo {
             slot_id: slot.id.clone(),
             role: slot.role.clone(),
+            engine: slot.engine,
             pid: None,
             state: SessionState::Exited,
             status_text: None,
@@ -288,6 +293,7 @@ impl PTYManager {
             log_file: Some(info.log_file.clone()),
             cols: 120,
             rows: 30,
+            engine: slot.engine,
             mcp_config: options.mcp_config.clone(),
             dangerously_skip_permissions: options.dangerously_skip_permissions,
         })?;
@@ -557,6 +563,7 @@ impl PTYManager {
                             log_file,
                             cols: 120,
                             rows: 30,
+                            engine: slot_for_restart.engine,
                             mcp_config: restart_options.mcp_config.clone(),
                             dangerously_skip_permissions: restart_options
                                 .dangerously_skip_permissions,

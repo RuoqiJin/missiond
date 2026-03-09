@@ -3,7 +3,8 @@ import { callTool } from '@/lib/missiond';
 
 // Per-type limits for stratified sampling — prevents high-volume types from starving others
 const TYPE_LIMITS: Record<string, number> = {
-  gemini_request_started: 30, // vision worker generates thousands; sample only
+  cli_request_started: 30,     // unified CLI engine events — sample only
+  gemini_request_started: 30,  // legacy: vision worker generates thousands
 };
 const DEFAULT_PER_TYPE_LIMIT = 80;
 

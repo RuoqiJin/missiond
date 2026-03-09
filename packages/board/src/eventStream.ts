@@ -93,6 +93,10 @@ function handleEvent(
       debouncedBump(set, 'timelineVersion');
       break;
 
+    case 'cli_request_started':
+    case 'cli_request_completed':
+    case 'cli_tool_activity':
+    // Legacy wire types (backward compat with stored timeline data)
     case 'gemini_request_started':
     case 'gemini_request_completed':
     case 'gemini_tool_activity':

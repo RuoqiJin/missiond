@@ -34,6 +34,9 @@ export function EventSummaryView({ event }: { event: TimelineEvent }) {
     case 'board_task_deleted':
     case 'board_task_updated':
       return <TaskSummary event={event} />;
+    case 'cli_request_started':
+    case 'cli_request_completed':
+    case 'cli_tool_activity':
     case 'gemini_request_started':
     case 'gemini_request_completed':
     case 'codex_request_started':

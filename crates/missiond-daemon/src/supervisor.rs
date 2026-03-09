@@ -61,6 +61,7 @@ pub(crate) async fn check_slot_context_levels(state: &AppState) {
                         id: slot.config.id.clone(),
                         role: slot.config.role.clone(),
                         cwd: slot.config.cwd.as_deref().map(PathBuf::from),
+                        engine: slot.config.engine,
                     };
                     let mcp_config = slot.config.mcp_config.clone().map(PathBuf::from);
                     let (extra_env, session_file) = build_slot_tracking_env(&slot.config.id, slot.config.env.as_ref()).await;

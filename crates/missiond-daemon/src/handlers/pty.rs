@@ -110,6 +110,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 id: slot.config.id.clone(),
                 role: slot.config.role.clone(),
                 cwd: slot.config.cwd.as_deref().map(PathBuf::from),
+                engine: slot.config.engine,
             };
 
             // Resolve MCP config: arg > slot config > None

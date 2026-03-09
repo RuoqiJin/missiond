@@ -32,6 +32,7 @@ pub(crate) async fn ensure_memory_slot_by_id(state: &AppState, slot_id: &str) ->
         id: slot.config.id.clone(),
         role: slot.config.role.clone(),
         cwd: slot.config.cwd.as_deref().map(PathBuf::from),
+        engine: slot.config.engine,
     };
     let slot_env = slot.config.env.as_ref();
     let mcp_config = slot.config.mcp_config.map(PathBuf::from);

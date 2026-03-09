@@ -560,14 +560,9 @@ export function CognitiveTimeline() {
           />
           <div className="w-px h-6 bg-neutral-800" />
           <StatCard
-            label="Gemini/h"
-            value={hourlyStats?.by_type?.find(t => t[0] === 'gemini_request_completed')?.[1] ?? 0}
+            label="CLI/h"
+            value={(hourlyStats?.by_type?.find(t => t[0] === 'cli_request_completed')?.[1] ?? 0) + (hourlyStats?.by_type?.find(t => t[0] === 'gemini_request_completed')?.[1] ?? 0) + (hourlyStats?.by_type?.find(t => t[0] === 'codex_request_completed')?.[1] ?? 0)}
             color="text-purple-400"
-          />
-          <StatCard
-            label="GPT/h"
-            value={hourlyStats?.by_type?.find(t => t[0] === 'codex_request_completed')?.[1] ?? 0}
-            color="text-sky-400"
           />
         </div>
 
@@ -814,7 +809,7 @@ export function CognitiveTimeline() {
                   ref={(el) => { if (el) timelineDotRefs.current.set(ev.seq, el); else timelineDotRefs.current.delete(ev.seq); }}
                   onClick={(e) => { e.stopPropagation(); selectEvent(ev, 'timeline'); }}
                   className={cn(
-                    'absolute -translate-x-1/2 -translate-y-1/2 rounded-full z-20',
+                    'absolute -translate-x-1/2 -translate-y-1/2 rounded-full z-[25]',
                     'transition-[transform,box-shadow,ring-color,opacity] duration-200 ease-out',
                     'animate-spring-pop',
                     // Size by type — use fixed size + scale for hover (GPU-only, no layout shift)
@@ -824,7 +819,7 @@ export function CognitiveTimeline() {
                     // Cutout ring — matches background for "floating" effect
                     dStatus === 'normal' && !sessionColor && 'ring-[2.5px] ring-neutral-950',
                     // Hover: scale up + glow (no width/height change = no reflow)
-                    dStatus === 'normal' && 'hover:scale-150 hover:shadow-[0_0_8px_var(--tw-shadow-color)] hover:z-30',
+                    dStatus === 'normal' && 'hover:scale-150 hover:shadow-[0_0_8px_var(--tw-shadow-color)] hover:z-[35]',
                     ec.dot,
                     // Shadow color matches dot color for coherent glow
                     ec.glow,
@@ -842,7 +837,7 @@ export function CognitiveTimeline() {
             {(() => {
               const spanPairs = new Map<string, TimelineEvent[]>();
               for (const ev of filtered) {
-                if (ev.span_id && (ev.event_type === 'gemini_request_started' || ev.event_type === 'gemini_request_completed' || ev.event_type === 'codex_request_started' || ev.event_type === 'codex_request_completed')) {
+                if (ev.span_id && (ev.event_type === 'cli_request_started' || ev.event_type === 'cli_request_completed' || ev.event_type === 'gemini_request_started' || ev.event_type === 'gemini_request_completed' || ev.event_type === 'codex_request_started' || ev.event_type === 'codex_request_completed')) {
                   const arr = spanPairs.get(ev.span_id) || [];
                   arr.push(ev);
                   spanPairs.set(ev.span_id, arr);

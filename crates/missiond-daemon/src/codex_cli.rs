@@ -12,7 +12,7 @@
 //! - `item.completed`: response text in `item.text`
 //! - `turn.completed`: inference done, contains `usage`
 //!
-//! Instrumentation: every request emits CodexRequestStarted/Completed
+//! Instrumentation: every request emits CliRequestStarted/Completed
 //! events via EventBus for timeline tracking.
 
 use std::path::Path;
@@ -61,7 +61,7 @@ impl CodexCli {
     ///
     /// Uses `codex exec --json --ephemeral --skip-git-repo-check` for headless operation.
     /// Image is passed via `-i <path>` flag (native vision support).
-    /// Emits CodexRequestStarted/Completed events for timeline tracking.
+    /// Emits CliRequestStarted/Completed events for timeline tracking.
     pub async fn call(
         &self,
         prompt: &str,
@@ -181,14 +181,18 @@ impl CodexCli {
     }
 
     fn emit_started(&self, request_id: &str, caller: &str, model: &str, prompt: &str, has_image: bool, image_hash: Option<&str>, span_id: &str) {
-        let event = DaemonEvent::CodexRequestStarted {
+        let event = DaemonEvent::CliRequestStarted {
+            engine: missiond_core::CliEngine::Codex,
             request_id: request_id.to_string(),
             caller: caller.to_string(),
+            session_id: None,
             model: model.to_string(),
             prompt_chars: prompt.len(),
-            has_image,
             prompt_text: Some(prompt.to_string()),
-            image_hash: image_hash.map(|s| s.to_string()),
+            extra: serde_json::json!({
+                "has_image": has_image,
+                "image_hash": image_hash,
+            }),
         };
         let entry = TimelineEntry {
             event,
@@ -230,9 +234,11 @@ impl CodexCli {
         info!(request_id, caller, model, prompt_chars, response_chars,
               duration_ms, status = %status, "codex_request");
 
-        let event = DaemonEvent::CodexRequestCompleted {
+        let event = DaemonEvent::CliRequestCompleted {
+            engine: missiond_core::CliEngine::Codex,
             request_id: request_id.to_string(),
             caller: caller.to_string(),
+            session_id: None,
             model: model.to_string(),
             prompt_chars,
             response_chars,
@@ -240,9 +246,11 @@ impl CodexCli {
             status,
             error_msg,
             response_text,
-            input_tokens,
-            output_tokens,
-            image_hash: image_hash.map(|s| s.to_string()),
+            extra: serde_json::json!({
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "image_hash": image_hash,
+            }),
         };
         let entry = TimelineEntry {
             event,

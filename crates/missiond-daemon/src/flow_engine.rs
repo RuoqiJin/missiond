@@ -407,6 +407,7 @@ pub(crate) async fn ensure_autopilot_pty(state: &AppState, task: &missiond_core:
         id: slot.config.id.clone(),
         role: slot.config.role.clone(),
         cwd: slot.config.cwd.as_deref().map(PathBuf::from),
+        engine: slot.config.engine,
     };
     let slot_env = slot.config.env.as_ref();
     let mcp_config = slot.config.mcp_config.clone().map(PathBuf::from);

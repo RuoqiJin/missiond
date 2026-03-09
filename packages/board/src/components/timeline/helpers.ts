@@ -76,6 +76,9 @@ export function eventSummary(ev: TimelineEvent): string {
   switch (ev.event_type) {
     case 'slot_state_changed': return `${p.slot_id || ''} → ${p.new_state || ''}`;
     case 'task_lifecycle': return `${p.action || ''}: ${p.task_title || p.task_id || ''}`;
+    case 'cli_request_started': return `[${p.engine || '?'}] ${p.caller || ''} → ${p.model || ''} (${p.prompt_chars || 0}ch)`;
+    case 'cli_request_completed': return `[${p.engine || '?'}] ${p.caller || ''} ${p.duration_ms ? p.duration_ms + 'ms' : ''} ${p.error ? '❌' : '✓'}`;
+    case 'cli_tool_activity': return `[${p.engine || '?'}] #${p.tool_seq || 0} ${p.activity || ''} ${p.tool_name || ''}`;
     case 'gemini_request_started': return `${p.caller || ''} → ${p.model || ''} (${p.prompt_chars || 0} chars)`;
     case 'gemini_request_completed': return `${p.caller || ''} ${p.duration_ms ? p.duration_ms + 'ms' : ''} ${p.error ? '❌' : ''}`;
     case 'codex_request_started': return `${p.caller || ''} → ${p.model || ''} (${p.prompt_chars || 0}ch${p.has_image ? ' +img' : ''})`;
@@ -128,6 +131,10 @@ export function abstractTaskStep(ev: TimelineEvent): { title: string; subtitle: 
       }
       return { title: '回复', subtitle: p?.preview || '', intent: '向用户汇报进度或解释执行结果' };
     }
+    case 'cli_request_started':
+      return { title: `咨询 ${p?.engine || 'CLI'}`, subtitle: `${p?.caller || ''} → ${p?.model || ''}`, intent: '利用外部 CLI 引擎进行分析' };
+    case 'cli_request_completed':
+      return { title: `${p?.engine || 'CLI'} 返回`, subtitle: `${p?.duration_ms || 0}ms ${p?.error ? '❌' : '✓'}`, intent: 'CLI 引擎分析结果返回' };
     case 'gemini_request_started':
       return { title: '咨询 Gemini', subtitle: `${p?.caller || ''} → ${p?.model || ''}`, intent: '利用 Gemini 进行大规模上下文分析' };
     case 'gemini_request_completed':
