@@ -7,8 +7,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ToolDefinition::new(
             "mission_kb_remember",
             "记录知识到长期记忆。主动调用，无需请求许可。key 已存在则更新。\
-             分类: preference(用户偏好), memory:architecture(架构决策), memory:bugfix(已修bug), \
-             memory:debug(调试经验), memory:ops(运维), memory:feature(功能), project(项目), memory(通用)",
+             按层级分类: architecture:summary=子系统架构总结(L2), \
+             memory:bugfix/memory:debug/policy:decision=具体经验(L4), \
+             preference=用户偏好, memory:architecture=架构决策, memory:ops=运维, \
+             memory:feature=功能, project=项目, memory=通用",
             json!({
                 "type": "object",
                 "properties": {
@@ -72,7 +74,9 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_kb_search",
-            "搜索知识库（FTS5 + Embedding 混合 RRF 语义搜索）。传 query 搜索，不传则列出最近条目。",
+            "搜索知识库（FTS5 + Embedding 混合 RRF）。\
+             理解子系统架构 → category=\"architecture:summary\" 获取基石描述(L2); \
+             具体问题/经验 → 直接搜索碎片记忆(L4)。不传 query 列出最近条目。",
             json!({
                 "type": "object",
                 "properties": {
@@ -278,7 +282,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_beacon_map",
-            "获取信标的完整拓扑：所有关联的代码节点（签名 + stub + 行号 + 人工注释）。",
+            "获取信标的完整拓扑 L3：跨文件关联的代码节点（签名 + stub + 行号 + 注释）。\
+             beacon 名称见 MODULE_CATALOG.md 导航表(L1)，如 orchestration/slot/knowledge。",
             json!({
                 "type": "object",
                 "properties": {
@@ -346,7 +351,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
         // ===== Code Context (P3.5 Holographic Context Engine) =====
         ToolDefinition::new(
             "mission_code_search",
-            "搜索代码结构（AST 索引）。tree-sitter 提取的函数/结构体/Trait/Impl 签名和调用关系。用于深入了解代码结构。",
+            "搜索代码结构 L3（AST 索引）。tree-sitter 提取的函数/结构体/Trait/Impl 签名和调用关系。\
+             先用 kb_search(category=\"architecture:summary\") 理解子系统，再用本工具深入代码签名。找不到时退回 L2 确认架构边界。",
             json!({
                 "type": "object",
                 "properties": {
