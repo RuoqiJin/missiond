@@ -19,7 +19,7 @@ import { DecisionDashboard } from './components/DecisionDashboard';
 import { ResearchBoard } from './components/ResearchBoard';
 import { DeployDashboard } from './components/DeployDashboard';
 import { EngineDashboard } from './components/EngineDashboard';
-import { CognitiveTimeline } from './components/CognitiveTimeline';
+import { CognitiveTimeline } from './components/timeline';
 import { useEventStream, useConnectionState } from './hooks/useEventStream';
 
 type Tab = 'board' | 'terminal' | 'knowledge' | 'conversations' | 'memory' | 'decisions' | 'research' | 'deploy' | 'engine' | 'timeline';
