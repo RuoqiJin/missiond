@@ -105,15 +105,23 @@ const SWIMLANES = [
   { id: 'sys',     label: 'System',    types: ['slot_state_changed', 'memory_phase_changed', 'briefing_batch_started', 'briefing_summary_generated'] },
 ];
 
-const QUICK_FILTERS = [
-  { label: 'All', value: 'all' },
-  { label: 'Chat', value: 'chat' },
-  { label: 'Slot', value: 'slot' },
-  { label: 'Errors', value: 'errors' },
-  { label: 'Insights', value: 'insights' },
-  { label: 'Gemini', value: 'gemini' },
-  { label: 'GPT', value: 'gpt' },
-];
+// ── Lane Visibility (Solo / Mute) ─────────────────────────
+
+/** Mute > Solo > default visible */
+function isLaneVisible(laneId: string, soloed: Set<string>, muted: Set<string>): boolean {
+  if (muted.has(laneId)) return false;
+  if (soloed.size > 0) return soloed.has(laneId);
+  return true;
+}
+
+/** Determine which lane an event belongs to (mirrors getSwimlane but returns lane id) */
+function getEventLaneId(ev: TimelineEvent): string {
+  if (ev.payload?.slot_id) return 'slot';
+  for (const lane of SWIMLANES) {
+    if (lane.types.includes(ev.event_type)) return lane.id;
+  }
+  return 'sys';
+}
 
 const WINDOW_OPTIONS = [
   { label: '5m', value: '5min' },
@@ -270,22 +278,23 @@ const STORAGE_KEY = 'timeline-view-state';
 
 type ViewMode = 'relative' | 'daily';
 
-function loadViewState(): { quickFilter: string; activeWindow: string; dailyDate: string | null } {
+function loadViewState(): { activeWindow: string; dailyDate: string | null; soloed: string[]; muted: string[] } {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
       return {
-        quickFilter: parsed.quickFilter || 'all',
         activeWindow: parsed.activeWindow || '24h',
         dailyDate: parsed.dailyDate || null,
+        soloed: parsed.soloed || [],
+        muted: parsed.muted || [],
       };
     }
   } catch { /* ignore */ }
-  return { quickFilter: 'all', activeWindow: '24h', dailyDate: null };
+  return { activeWindow: '24h', dailyDate: null, soloed: [], muted: [] };
 }
 
-function saveViewState(state: { quickFilter: string; activeWindow: string; dailyDate: string | null }) {
+function saveViewState(state: { activeWindow: string; dailyDate: string | null; soloed: string[]; muted: string[] }) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch { /* ignore */ }
@@ -319,12 +328,15 @@ export function CognitiveTimeline() {
   const [selectedEvent, setSelectedEvent] = useState<TimelineEvent | null>(null);
   const [traceEvents, setTraceEvents] = useState<TimelineEvent[]>([]);
   const savedView = useMemo(() => loadViewState(), []);
-  const [quickFilter, setQuickFilter] = useState(savedView.quickFilter);
   const [searchInput, setSearchInput] = useState('');
   const [searchQuery, setSearchQuery] = useState(''); // Only updated on Enter — drives data fetching
   const [activeWindow, setActiveWindow] = useState(savedView.activeWindow);
   const [loading, setLoading] = useState(false);
   const [selectionSource, setSelectionSource] = useState<'timeline' | 'list' | null>(null);
+
+  // Lane visibility (Solo / Mute)
+  const [soloed, setSoloed] = useState<Set<string>>(() => new Set(savedView.soloed));
+  const [muted, setMuted] = useState<Set<string>>(() => new Set(savedView.muted));
 
   // Daily view state
   const [viewMode, setViewMode] = useState<ViewMode>(savedView.dailyDate ? 'daily' : 'relative');
@@ -341,8 +353,8 @@ export function CognitiveTimeline() {
 
   // Persist view state on change
   useEffect(() => {
-    saveViewState({ quickFilter, activeWindow, dailyDate });
-  }, [quickFilter, activeWindow, dailyDate]);
+    saveViewState({ activeWindow, dailyDate, soloed: Array.from(soloed), muted: Array.from(muted) });
+  }, [activeWindow, dailyDate, soloed, muted]);
 
   // Ref maps for bidirectional scroll sync
   const timelineDotRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
@@ -472,7 +484,22 @@ export function CognitiveTimeline() {
         const res = await fetch(`/api/timeline/events?traceId=${ev.trace_id}&limit=50`);
         const data = await res.json();
         const raw = data.events;
-        setTraceEvents(Array.isArray(raw) ? raw : (raw?.events || []));
+        const incoming: TimelineEvent[] = Array.isArray(raw) ? raw : (raw?.events || []);
+        setTraceEvents(incoming);
+        // Feed trace data back into main events pool — fills gaps from stratified sampling limits
+        if (incoming.length > 0) {
+          setEvents(prev => {
+            const map = new Map<number, TimelineEvent>();
+            for (const e of prev) map.set(e.seq, e);
+            let added = 0;
+            for (const e of incoming) {
+              if (!map.has(e.seq)) added++;
+              map.set(e.seq, e);
+            }
+            if (added === 0) return prev; // No new events — avoid re-render
+            return Array.from(map.values()).sort((a, b) => (b.seq ?? 0) - (a.seq ?? 0));
+          });
+        }
       } catch { setTraceEvents([]); }
     } else {
       setTraceEvents([]);
@@ -500,23 +527,17 @@ export function CognitiveTimeline() {
     }
   }, [selectedEvent, selectionSource]);
 
-  // Filtered events
+  // Filtered events — lane visibility (Solo/Mute)
   const filtered = useMemo(() => {
-    let result = events;
-    if (quickFilter === 'errors') result = result.filter(hasError);
-    else if (quickFilter === 'chat') result = result.filter(e => e.event_type === 'user_message' || e.event_type === 'assistant_message' || e.event_type === 'thinking_message');
-    else if (quickFilter === 'insights') result = result.filter(e => e.event_type === 'insight_generated');
-    else if (quickFilter === 'gemini') result = result.filter(e => e.event_type === 'gemini_request_completed' || e.event_type === 'gemini_request_started');
-    else if (quickFilter === 'gpt') result = result.filter(e => e.event_type === 'codex_request_started' || e.event_type === 'codex_request_completed');
-    else if (quickFilter === 'slot') result = result.filter(e => e.event_type === 'slot_task_dispatched' || !!e.payload?.slot_id);
-    return result;
-  }, [events, quickFilter]);
+    return events.filter(e => isLaneVisible(getEventLaneId(e), soloed, muted));
+  }, [events, soloed, muted]);
 
   // Build session layout: sub-row assignment + capsule bounds for Chat lane
+  // Uses `events` (not `filtered`) so layout stays stable when toggling lane visibility
   const sessionLayout = useMemo(() => {
     // Group chat events by session_id
     const bySession = new Map<string, TimelineEvent[]>();
-    for (const ev of filtered) {
+    for (const ev of events) {
       if (isChatEvent(ev.event_type) && ev.payload?.session_id && !ev.payload?.slot_id) {
         const sid = ev.payload.session_id;
         const arr = bySession.get(sid) || [];
@@ -555,12 +576,13 @@ export function CognitiveTimeline() {
     }
 
     return { map: layout, rowCount: Math.max(rowEnds.length, 1) };
-  }, [filtered, sessionsMeta]);
+  }, [events, sessionsMeta]);
 
   // Build slot layout: group events by slot_id, assign fixed sub-row per slot
+  // Uses `events` (not `filtered`) so layout stays stable when toggling lane visibility
   const slotLayout = useMemo(() => {
     const bySlot = new Map<string, TimelineEvent[]>();
-    for (const ev of filtered) {
+    for (const ev of events) {
       const sid = ev.payload?.slot_id;
       if (!sid) continue;
       const arr = bySlot.get(sid) || [];
@@ -574,7 +596,7 @@ export function CognitiveTimeline() {
       layout.set(sid, { row: index, events: bySlot.get(sid)! });
     });
     return { map: layout, rowCount: Math.max(slotIds.length, 1) };
-  }, [filtered]);
+  }, [events]);
 
   // Compute lane geometry — Chat + Slot lanes expand with concurrent sessions/slots
   const laneGeometry = useMemo(() => {
@@ -664,6 +686,37 @@ export function CognitiveTimeline() {
     const next = shiftDay(current, 1);
     if (next <= todayBeijing()) handleDailyNav(next);
   }, [dailyDate, handleDailyNav]);
+
+  // Solo/Mute handlers
+  const handleSolo = useCallback((id: string, shift: boolean) => {
+    setSoloed(prev => {
+      const next = new Set(prev);
+      if (shift) {
+        // Shift: toggle this lane in the solo set
+        if (next.has(id)) next.delete(id); else next.add(id);
+      } else {
+        // Normal: exclusive solo (click again to clear)
+        if (next.has(id) && next.size === 1) next.clear();
+        else { next.clear(); next.add(id); }
+      }
+      // Unmute if soloing
+      setMuted(m => { const nm = new Set(m); nm.delete(id); return nm; });
+      return next;
+    });
+  }, []);
+
+  const handleMute = useCallback((id: string) => {
+    setMuted(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else {
+        next.add(id);
+        // Remove from solo if muting
+        setSoloed(s => { const ns = new Set(s); ns.delete(id); return ns; });
+      }
+      return next;
+    });
+  }, []);
 
   // Position calculation — only used for debounced/non-critical paths (span lines, trace lines)
   const getX = useCallback((dateStr: string) => {
@@ -755,21 +808,16 @@ export function CognitiveTimeline() {
             />
           </div>
 
-          {/* Quick filters */}
-          <div className="flex items-center gap-0.5 bg-neutral-900 rounded-md p-0.5">
-            {QUICK_FILTERS.map(f => (
-              <button
-                key={f.value}
-                onClick={() => setQuickFilter(f.value)}
-                className={cn(
-                  'px-2 py-1 text-[10px] font-medium rounded transition-colors',
-                  quickFilter === f.value ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
-                )}
-              >
-                {f.label}
-              </button>
-            ))}
-          </div>
+          {/* Reset lane visibility */}
+          {(soloed.size > 0 || muted.size > 0) && (
+            <button
+              onClick={() => { setSoloed(new Set()); setMuted(new Set()); }}
+              className="px-2 py-1 text-[10px] font-medium rounded bg-neutral-900 text-neutral-400 hover:text-white transition-colors"
+              title="Reset all Solo/Mute"
+            >
+              All
+            </button>
+          )}
 
           {/* Window */}
           <div className="flex items-center gap-0.5 bg-neutral-900 rounded-md p-0.5">
@@ -785,6 +833,46 @@ export function CognitiveTimeline() {
                 {w.label}
               </button>
             ))}
+          </div>
+
+          {/* Daily navigator */}
+          <div className="w-px h-5 bg-neutral-800" />
+          <div className="flex items-center gap-0.5">
+            <button
+              onClick={handleDailyPrev}
+              disabled={dailyDate ? dailyDate <= earliestDate : false}
+              className="p-1 rounded hover:bg-neutral-800 text-neutral-500 hover:text-neutral-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              title="前一天"
+            >
+              <ChevronLeft className="w-3.5 h-3.5" />
+            </button>
+
+            <div className="relative">
+              <span className={cn(
+                'px-2 py-1 text-[10px] font-medium rounded cursor-pointer transition-colors flex items-center gap-1',
+                viewMode === 'daily' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
+              )}>
+                <Calendar className="w-3 h-3" />
+                {dailyDate ? formatDailyLabel(dailyDate) : '日历'}
+              </span>
+              <input
+                type="date"
+                className="absolute inset-0 opacity-0 cursor-pointer"
+                value={dailyDate || todayBeijing()}
+                onChange={(e) => { if (e.target.value) handleDailyNav(e.target.value); }}
+                max={todayBeijing()}
+                min={earliestDate}
+              />
+            </div>
+
+            <button
+              onClick={handleDailyNext}
+              disabled={!dailyDate || dailyDate >= todayBeijing()}
+              className="p-1 rounded hover:bg-neutral-800 text-neutral-500 hover:text-neutral-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              title="后一天"
+            >
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
           </div>
 
           {/* Zoom level indicator — shows effective visible window */}
@@ -811,16 +899,46 @@ export function CognitiveTimeline() {
       <div className="border border-neutral-800 rounded-lg bg-neutral-950/50 flex flex-col" style={{ minHeight: 200 }}>
         {/* Swimlane labels + timeline area */}
         <div className="flex flex-1 min-h-0">
-          {/* Swimlane labels */}
-          <div className="w-16 shrink-0 border-r border-neutral-800 flex flex-col">
+          {/* Swimlane labels with Solo/Mute controls */}
+          <div className="w-20 shrink-0 border-r border-neutral-800 flex flex-col">
             {SWIMLANES.map((lane, i) => {
               const geo = laneGeometry.lanes[i];
+              const isSoloed = soloed.has(lane.id);
+              const isMuted = muted.has(lane.id);
+              const isVisible = isLaneVisible(lane.id, soloed, muted);
               return (
                 <div key={lane.id} className={cn(
-                  'flex items-center justify-center text-[10px] text-neutral-500 font-medium',
+                  'group flex items-center justify-between px-1 text-[10px] font-medium overflow-hidden',
                   i < SWIMLANES.length - 1 && 'border-b border-neutral-800/50',
+                  !isVisible && 'opacity-50',
                 )} style={{ height: `${geo.height}%` }}>
-                  {lane.label}
+                  {/* Solo */}
+                  <button
+                    onClick={(e) => handleSolo(lane.id, e.shiftKey)}
+                    className={cn(
+                      'w-3.5 h-3.5 flex items-center justify-center rounded text-[7px] font-bold shrink-0 transition-all',
+                      isSoloed
+                        ? 'bg-amber-500 text-black'
+                        : 'bg-neutral-800/0 text-neutral-600 opacity-0 group-hover:opacity-100 hover:bg-neutral-700 hover:text-neutral-300',
+                    )}
+                    title={`Solo ${lane.label} (Shift+click to add)`}
+                  >S</button>
+                  {/* Label */}
+                  <span className={cn(
+                    'truncate text-center flex-1 px-0.5',
+                    isSoloed ? 'text-amber-400' : isMuted ? 'text-neutral-600 line-through' : 'text-neutral-500',
+                  )} title={lane.label}>{lane.label}</span>
+                  {/* Mute */}
+                  <button
+                    onClick={() => handleMute(lane.id)}
+                    className={cn(
+                      'w-3.5 h-3.5 flex items-center justify-center rounded text-[7px] font-bold shrink-0 transition-all',
+                      isMuted
+                        ? 'bg-red-500/80 text-white'
+                        : 'bg-neutral-800/0 text-neutral-600 opacity-0 group-hover:opacity-100 hover:bg-neutral-700 hover:text-neutral-300',
+                    )}
+                    title={`Mute ${lane.label}`}
+                  >M</button>
                 </div>
               );
             })}
@@ -831,20 +949,30 @@ export function CognitiveTimeline() {
             {/* Swimlane backgrounds */}
             {SWIMLANES.map((lane, i) => {
               const geo = laneGeometry.lanes[i];
+              const laneHidden = !isLaneVisible(lane.id, soloed, muted);
               return (
                 <div
                   key={lane.id}
                   className={cn(
-                    'absolute left-0 right-0',
+                    'absolute left-0 right-0 transition-opacity',
                     i < SWIMLANES.length - 1 && 'border-b border-neutral-800/30',
+                    laneHidden && 'bg-neutral-900/40',
                   )}
-                  style={{ top: `${geo.top}%`, height: `${geo.height}%` }}
+                  style={{ top: `${geo.top}%`, height: `${geo.height}%`, opacity: laneHidden ? 0.3 : 1 }}
                 />
               );
             })}
 
+            {/* Current time marker — red line at "now" */}
+            {viewMode === 'daily' && (
+              <div
+                className="absolute top-0 bottom-0 w-px bg-red-500/60 z-20 pointer-events-none"
+                style={{ '--t-event': Date.now(), left: cssLeft } as React.CSSProperties}
+              />
+            )}
+
             {/* Session capsules for Chat lane — positioned via CSS calc() */}
-            {Array.from(sessionLayout.map.entries()).map(([sid, info]) => {
+            {isLaneVisible('chat', soloed, muted) && Array.from(sessionLayout.map.entries()).map(([sid, info]) => {
               const sc = SESSION_COLORS[info.colorIdx];
               const times = info.events.map(e => utcMs(e.created_at));
               const evtMin = Math.min(...times);
@@ -895,7 +1023,8 @@ export function CognitiveTimeline() {
                     isInsight ? 'w-4 h-4 ring-2 ring-emerald-400/40' :
                     isError ? 'w-3 h-3 ring-2 ring-red-500/40' :
                     'w-2.5 h-2.5 hover:w-3.5 hover:h-3.5',
-                    sessionColor ? sessionColor.dot : ec.dot,
+                    ec.dot, // Always use native event-type color (user=blue, assistant=teal, thinking=violet)
+                    sessionColor && !isSelected && `ring-1 ${sessionColor.ring}`, // Session affinity shown as ring
                     isSelected && 'ring-2 ring-white/60 w-4 h-4',
                   )}
                   style={{ '--t-event': utcMs(ev.created_at), left: cssLeft, top: `${y}%` } as React.CSSProperties}

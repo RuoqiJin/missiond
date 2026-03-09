@@ -1370,6 +1370,60 @@ impl MissionDB {
         Ok(rows)
     }
 
+    /// Stratified timeline query: returns up to `per_type_limit` events per event_type
+    /// within the time range, using a single SQL query with window functions.
+    /// Custom per-type limits can override the default (e.g., high-volume types get fewer).
+    pub fn query_timeline_stratified(
+        &self,
+        since: &str,
+        until: &str,
+        per_type_limit: i64,
+        type_limits: &std::collections::HashMap<String, i64>,
+    ) -> DbResult<Vec<TimelineRow>> {
+        let conn = self.read_conn();
+        let ts_since = Self::parse_relative_time(since);
+        let ts_until = Self::parse_relative_time(until);
+
+        // Build per-type CASE expression for custom limits
+        let limit_expr = if type_limits.is_empty() {
+            format!("{}", per_type_limit)
+        } else {
+            let mut cases = String::from("CASE event_type ");
+            for (et, lim) in type_limits {
+                cases.push_str(&format!("WHEN '{}' THEN {} ", et.replace('\'', "''"), lim));
+            }
+            cases.push_str(&format!("ELSE {} END", per_type_limit));
+            cases
+        };
+
+        let sql = format!(
+            "SELECT seq, trace_id, span_id, parent_span_id, event_type, summary, payload, created_at
+             FROM (
+               SELECT *, ROW_NUMBER() OVER (PARTITION BY event_type ORDER BY seq DESC) as rn
+               FROM system_timeline
+               WHERE created_at >= ?1 AND created_at <= ?2
+             )
+             WHERE rn <= ({})
+             ORDER BY seq DESC",
+            limit_expr
+        );
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![ts_since, ts_until], |row| {
+            Ok(TimelineRow {
+                seq: row.get(0)?,
+                trace_id: row.get(1)?,
+                span_id: row.get(2)?,
+                parent_span_id: row.get(3)?,
+                event_type: row.get(4)?,
+                summary: row.get(5)?,
+                payload: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Query all events belonging to a single trace (causal chain).
     pub fn query_timeline_by_trace(&self, trace_id: &str) -> DbResult<Vec<TimelineRow>> {
         let conn = self.read_conn();

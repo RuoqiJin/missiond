@@ -44,6 +44,35 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             })))
         }
 
+        "mission_timeline_stratified" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                since: String,
+                until: String,
+                #[serde(default, deserialize_with = "lenient::option_i64")]
+                per_type_limit: Option<i64>,
+                #[serde(default)]
+                type_limits: Option<std::collections::HashMap<String, i64>>,
+            }
+            let args: Args = serde_json::from_value(args)?;
+            let per_type_limit = args.per_type_limit.unwrap_or(80);
+            let type_limits = args.type_limits.unwrap_or_default();
+
+            let rows = state.mission.db().query_timeline_stratified(
+                &args.since,
+                &args.until,
+                per_type_limit,
+                &type_limits,
+            ).map_err(|e| anyhow!("DB error: {}", e))?;
+
+            let events: Vec<Value> = rows.iter().map(timeline_row_to_json).collect();
+            Ok(ToolResult::json(&json!({
+                "count": events.len(),
+                "events": events,
+            })))
+        }
+
         "mission_timeline_trace" => {
             #[derive(Deserialize)]
             #[serde(rename_all = "camelCase")]
