@@ -149,6 +149,18 @@ impl GeminiClient {
         jwt: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value> {
+        self.send_with_timeout(http_client, url, jwt, body, None).await
+    }
+
+    /// Send a request with optional idle timeout override (CLI mode only).
+    pub async fn send_with_timeout(
+        &self,
+        http_client: &reqwest::Client,
+        url: &str,
+        jwt: &str,
+        body: &serde_json::Value,
+        idle_timeout_override: Option<Duration>,
+    ) -> Result<serde_json::Value> {
         self.request_count.fetch_add(1, Ordering::Relaxed);
         let request_id = uuid::Uuid::new_v4().to_string();
         let caller = current_caller();
@@ -250,7 +262,7 @@ impl GeminiClient {
                     }
                 });
 
-                let resp = cli.call(messages, cli_model, max_tokens, None, Some(progress_tx)).await;
+                let resp = cli.call(messages, cli_model, max_tokens, idle_timeout_override, Some(progress_tx)).await;
                 drop(permit);
                 // Drop the sender side is implicit (cli.call finished), wait for forwarder to drain
                 let _ = forwarder.await;

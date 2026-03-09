@@ -51,6 +51,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "message": {
                         "type": "string",
                         "description": "单条 user 消息（便捷模式）。等价于 messages: [{role:'user', content:message}]。与 messages 二选一"
+                    },
+                    "idle_timeout": {
+                        "type": "integer",
+                        "description": "CLI 模式空闲超时秒数（默认 120）。长 prompt 或复杂推理时可设为 300-600"
                     }
                 }
             }),
