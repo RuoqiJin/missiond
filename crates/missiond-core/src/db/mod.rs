@@ -16,6 +16,7 @@ mod router_chat;
 mod incident;
 mod gemini_log;
 mod vision;
+mod ast;
 
 use rusqlite::Connection;
 use error::{DbError, DbResult};
@@ -1131,6 +1132,59 @@ impl MissionDB {
                 description TEXT NOT NULL,
                 char_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );"
+        )?;
+
+        // ── Holographic Context Engine: AST code structure nodes ──
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ast_nodes (
+                id TEXT PRIMARY KEY,
+                repo TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                node_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                is_exported INTEGER DEFAULT 0,
+                docstring TEXT,
+                stub_content TEXT NOT NULL,
+                calls TEXT,
+                embedding BLOB,
+                embedding_provider TEXT,
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_ast_repo_file ON ast_nodes(repo, file_path);
+            CREATE INDEX IF NOT EXISTS idx_ast_name ON ast_nodes(name);
+            CREATE INDEX IF NOT EXISTS idx_ast_node_type ON ast_nodes(node_type);
+            CREATE INDEX IF NOT EXISTS idx_ast_exported ON ast_nodes(is_exported);
+            CREATE INDEX IF NOT EXISTS idx_ast_provider ON ast_nodes(embedding_provider);"
+        )?;
+
+        // AST nodes FTS5 for full-text search
+        let has_ast_fts: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='ast_nodes_fts'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_ast_fts {
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE ast_nodes_fts USING fts5(
+                    name, signature, docstring, stub_content,
+                    content='ast_nodes', content_rowid='rowid'
+                );"
+            )?;
+        }
+
+        // AST file metadata — incremental sync cursor
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ast_file_meta (
+                repo TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                commit_hash TEXT NOT NULL,
+                node_count INTEGER DEFAULT 0,
+                updated_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (repo, file_path)
             );"
         )?;
 

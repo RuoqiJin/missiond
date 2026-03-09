@@ -86,6 +86,12 @@ ab_glyph = "0.2"
 # Embeddings (local inference via ONNX Runtime)
 fastembed = "5"
 
+# Code analysis (tree-sitter AST parsing)
+tree-sitter = "0.25"
+tree-sitter-rust = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.23"
+
 # Internal crates
 missiond-core = { version = "0.1.0", path = "crates/missiond-core" }
 missiond-runner = { version = "0.1.0", path = "crates/missiond-runner" }
