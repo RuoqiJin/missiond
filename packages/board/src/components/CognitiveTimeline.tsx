@@ -225,6 +225,61 @@ function eventSummary(ev: TimelineEvent): string {
   }
 }
 
+// ── Step Abstraction — convert TimelineEvent to human-readable step ──
+function abstractTaskStep(ev: TimelineEvent): { title: string; subtitle: string; intent: string } {
+  const p = ev.payload;
+  switch (ev.event_type) {
+    case 'user_message':
+      return { title: '接收用户指令', subtitle: p?.preview || ev.summary || '', intent: '接收并理解用户的原始需求' };
+    case 'thinking_message':
+      return { title: '思考执行策略', subtitle: p?.content_chars ? `${p.content_chars} chars` : '', intent: '规划下一步操作，评估上下文并决定调用哪些工具' };
+    case 'assistant_message': {
+      // Parse tool_use from preview pattern "[tool_name]"
+      const toolMatch = p?.preview?.match(/^\[([\w_]+)\]$/);
+      if (toolMatch) {
+        const toolName = toolMatch[1];
+        const toolMap: Record<string, { title: string; intent: string }> = {
+          Read: { title: '读取文件', intent: '获取文件内容以便分析或修改' },
+          Edit: { title: '修改文件', intent: '将代码修改应用到工作区文件' },
+          Write: { title: '创建/覆写文件', intent: '创建新文件或完整重写' },
+          Bash: { title: '执行终端命令', intent: '通过终端执行系统命令、构建或 Git 操作' },
+          Grep: { title: '搜索代码', intent: '在代码库中查找相关引用或定义' },
+          Glob: { title: '查找文件', intent: '按模式搜索文件路径' },
+          Agent: { title: '启动子 Agent', intent: '将子任务委派给专门的 Agent 并行处理' },
+          Skill: { title: '调用 Skill', intent: '执行预定义的技能模块' },
+        };
+        const info = toolMap[toolName] || { title: `调用 ${toolName}`, intent: '执行工具操作' };
+        return { title: info.title, subtitle: '', intent: info.intent };
+      }
+      return { title: '回复', subtitle: p?.preview || '', intent: '向用户汇报进度或解释执行结果' };
+    }
+    case 'gemini_request_started':
+      return { title: '咨询 Gemini', subtitle: `${p?.caller || ''} → ${p?.model || ''}`, intent: '利用 Gemini 进行大规模上下文分析' };
+    case 'gemini_request_completed':
+      return { title: 'Gemini 返回', subtitle: `${p?.duration_ms || 0}ms ${p?.error ? '❌' : '✓'}`, intent: 'Gemini 分析结果返回' };
+    case 'slot_state_changed':
+      return { title: '工位状态变更', subtitle: `${p?.prev_state || ''} → ${p?.new_state || ''}`, intent: '推进任务流生命周期' };
+    case 'slot_task_dispatched':
+      return { title: '派发任务', subtitle: `→ ${p?.slot_id || ''} [${p?.purpose || ''}]`, intent: '将子任务分配给工位执行' };
+    case 'git_commit':
+      return { title: 'Git 提交', subtitle: `${p?.short_hash || ''} ${p?.message || ''}`, intent: '将代码变更持久化到版本控制' };
+    case 'memory_phase_changed':
+      return { title: '记忆阶段变更', subtitle: ev.summary || '', intent: '记忆提取系统状态转换' };
+    case 'board_task_created':
+      return { title: '创建 Board 任务', subtitle: p?.title || '', intent: '将发现的问题或工作项记录到任务板' };
+    case 'board_task_status_changed':
+      return { title: '任务状态变更', subtitle: `${p?.old_status || ''} → ${p?.new_status || ''}`, intent: '更新任务完成状态' };
+    case 'board_task_claimed':
+      return { title: '认领任务', subtitle: `by ${p?.slot_id || ''}`, intent: '工位开始执行指定任务' };
+    case 'insight_generated':
+      return { title: '生成洞察', subtitle: p?.title || '', intent: 'Timeline 分析师生成了可执行的改进建议' };
+    case 'decision_made':
+      return { title: '做出决策', subtitle: p?.question?.slice(0, 60) || '', intent: '决策引擎对问题做出裁决' };
+    default:
+      return { title: EVENT_COLORS[ev.event_type]?.label || ev.event_type, subtitle: ev.summary || '', intent: '' };
+  }
+}
+
 function hasError(ev: TimelineEvent): boolean {
   if (!ev.payload) return false;
   return !!ev.payload.error || !!ev.payload.error_msg || ev.payload.status === 'error';
@@ -326,6 +381,7 @@ export function CognitiveTimeline() {
   const [stats, setStats] = useState<TimelineStats | null>(null);
   const [hourlyStats, setHourlyStats] = useState<TimelineStats | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<TimelineEvent | null>(null);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [traceEvents, setTraceEvents] = useState<TimelineEvent[]>([]);
   const savedView = useMemo(() => loadViewState(), []);
   const [searchInput, setSearchInput] = useState('');
@@ -476,9 +532,19 @@ export function CognitiveTimeline() {
   }, []);
 
   // Load trace events when clicking an event with trace_id
+  const toggleSession = useCallback((sid: string) => {
+    setSelectedSessionId(prev => {
+      if (prev === sid) return null; // toggle off
+      return sid;
+    });
+    setSelectedEvent(null);
+    setTraceEvents([]);
+  }, []);
+
   const selectEvent = useCallback(async (ev: TimelineEvent, source: 'timeline' | 'list') => {
     setSelectionSource(source);
     setSelectedEvent(ev);
+    setSelectedSessionId(null);
     if (ev.trace_id) {
       try {
         const res = await fetch(`/api/timeline/events?traceId=${ev.trace_id}&limit=50`);
@@ -983,10 +1049,19 @@ export function CognitiveTimeline() {
               const subH = laneGeometry.chatSubRowHeight;
               const yCenter = chatTop + subH * (info.row + 0.5);
               const capsuleH = subH * 0.7;
+              const isCapsuleSelected = selectedSessionId === sid;
+              const isOtherSelected = selectedSessionId != null && selectedSessionId !== sid;
               return (
                 <div
                   key={`capsule-${sid}`}
-                  className="absolute pointer-events-none z-[1]"
+                  className={cn(
+                    'absolute cursor-pointer transition-all duration-200',
+                    isCapsuleSelected
+                      ? 'z-20 brightness-125'
+                      : isOtherSelected
+                        ? 'z-[1] opacity-30'
+                        : 'z-[1] hover:brightness-110',
+                  )}
                   style={{
                     '--t-start': actualStart,
                     '--t-end': evtMax,
@@ -995,9 +1070,14 @@ export function CognitiveTimeline() {
                     top: `${yCenter - capsuleH / 2}%`,
                     height: `${capsuleH}%`,
                     backgroundColor: sc.line,
-                    border: `1px solid ${sc.line.replace('0.25)', '0.45)')}`,
+                    border: isCapsuleSelected
+                      ? `2px solid ${sc.line.replace('0.25)', '0.85)')}`
+                      : `1px solid ${sc.line.replace('0.25)', '0.45)')}`,
                     borderRadius: '10px',
+                    boxShadow: isCapsuleSelected ? `0 0 12px ${sc.line.replace('0.25)', '0.4)')}` : undefined,
                   } as React.CSSProperties}
+                  onClick={(e) => { e.stopPropagation(); toggleSession(sid); }}
+                  title={`Session: ${sid.slice(0, 8)} · ${info.events.length} events`}
                 />
               );
             })}
@@ -1012,6 +1092,8 @@ export function CognitiveTimeline() {
               const isChat = isChatEvent(ev.event_type);
               const sessionInfo = isChat && ev.payload?.session_id ? sessionLayout.map.get(ev.payload.session_id) : undefined;
               const sessionColor = sessionInfo ? SESSION_COLORS[sessionInfo.colorIdx] : null;
+              const isInSelectedSession = selectedSessionId != null && ev.payload?.session_id === selectedSessionId;
+              const isDimmedBySession = selectedSessionId != null && !isInSelectedSession;
 
               return (
                 <button
@@ -1019,13 +1101,15 @@ export function CognitiveTimeline() {
                   ref={(el) => { if (el) timelineDotRefs.current.set(ev.seq, el); else timelineDotRefs.current.delete(ev.seq); }}
                   onClick={() => selectEvent(ev, 'timeline')}
                   className={cn(
-                    'absolute -translate-x-1/2 -translate-y-1/2 rounded-full z-10 transition-[transform,box-shadow,background-color] duration-200 ease-out',
+                    'absolute -translate-x-1/2 -translate-y-1/2 rounded-full z-10 transition-[transform,box-shadow,background-color,opacity] duration-200 ease-out',
                     isInsight ? 'w-4 h-4 ring-2 ring-emerald-400/40' :
                     isError ? 'w-3 h-3 ring-2 ring-red-500/40' :
                     'w-2.5 h-2.5 hover:w-3.5 hover:h-3.5',
-                    ec.dot, // Always use native event-type color (user=blue, assistant=teal, thinking=violet)
-                    sessionColor && !isSelected && `ring-1 ${sessionColor.ring}`, // Session affinity shown as ring
+                    ec.dot,
+                    sessionColor && !isSelected && !isInSelectedSession && `ring-1 ${sessionColor.ring}`,
                     isSelected && 'ring-2 ring-white/60 w-4 h-4',
+                    isInSelectedSession && !isSelected && 'ring-2 ring-white/80 scale-125 z-20',
+                    isDimmedBySession && 'opacity-20',
                   )}
                   style={{ '--t-event': utcMs(ev.created_at), left: cssLeft, top: `${y}%` } as React.CSSProperties}
                   title={`${ec.label}: ${eventSummary(ev)}${isChat && ev.payload?.session_id ? `\nSession: ${ev.payload.session_id.slice(0, 8)}` : ''}\n${formatBeijingTime(ev.created_at)}`}
@@ -1165,9 +1249,16 @@ export function CognitiveTimeline() {
               <EventPayload event={selectedEvent} filteredEvents={filtered} onNavigate={(ev: TimelineEvent) => selectEvent(ev, 'list')} />
             </div>
           </div>
+        ) : selectedSessionId && sessionLayout.map.get(selectedSessionId) ? (
+          <SessionStepBrowser
+            events={sessionLayout.map.get(selectedSessionId)!.events}
+            sessionId={selectedSessionId}
+            sessionsMeta={sessionsMeta}
+            onDrillDown={(ev) => selectEvent(ev, 'list')}
+          />
         ) : (
           <div className="flex items-center justify-center h-full text-neutral-600 text-xs">
-            Click an event on the timeline to view details
+            Click an event or session capsule to view details
           </div>
         )}
       </div>
@@ -1176,6 +1267,138 @@ export function CognitiveTimeline() {
 }
 
 // ── Sub-components ─────────────────────────────────────────
+
+// ── Session Step Browser — iPhone-settings-style step navigator ──
+function SessionStepBrowser({ events, sessionId, sessionsMeta, onDrillDown }: {
+  events: TimelineEvent[];
+  sessionId: string;
+  sessionsMeta: Record<string, { startedAt: string }>;
+  onDrillDown: (ev: TimelineEvent) => void;
+}) {
+  const [activeIdx, setActiveIdx] = useState(0);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const sorted = useMemo(() =>
+    [...events].sort((a, b) => utcMs(a.created_at) - utcMs(b.created_at)),
+    [events],
+  );
+
+  const activeEvent = sorted[activeIdx];
+  const steps = useMemo(() => sorted.map(abstractTaskStep), [sorted]);
+
+  // Session meta
+  const times = useMemo(() => sorted.map(e => utcMs(e.created_at)), [sorted]);
+  const meta = sessionsMeta[sessionId];
+  const tStart = meta?.startedAt ? Math.min(utcMs(meta.startedAt), times[0]) : times[0];
+  const tEnd = times[times.length - 1];
+  const duration = tEnd - tStart;
+  const durationStr = duration < 60_000 ? `${(duration / 1000).toFixed(0)}s`
+    : duration < 3600_000 ? `${(duration / 60_000).toFixed(1)}m`
+    : `${(duration / 3600_000).toFixed(1)}h`;
+
+  // Keyboard navigation
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement).tagName)) return;
+      if (e.key === 'j' || e.key === 'ArrowDown') { e.preventDefault(); setActiveIdx(i => Math.min(i + 1, sorted.length - 1)); }
+      if (e.key === 'k' || e.key === 'ArrowUp') { e.preventDefault(); setActiveIdx(i => Math.max(i - 1, 0)); }
+      if (e.key === 'Enter') { e.preventDefault(); if (activeEvent) onDrillDown(activeEvent); }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [sorted.length, activeEvent, onDrillDown]);
+
+  // Auto-scroll active item into view
+  useEffect(() => {
+    const el = listRef.current?.querySelector('[data-active="true"]');
+    el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [activeIdx]);
+
+  if (!sorted.length) return null;
+
+  return (
+    <div className="flex h-full min-h-0">
+      {/* ── Left: Step Detail ── */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Header: step title + intent */}
+        <div className="p-4 border-b border-neutral-800/60 bg-neutral-900/30">
+          <div className="flex items-center gap-2 mb-1">
+            <div className={cn('w-3 h-3 rounded-full', getEventColor(activeEvent.event_type).dot)} />
+            <h2 className="text-sm font-medium text-neutral-100">{steps[activeIdx].title}</h2>
+            <span className="text-[10px] text-neutral-600 font-mono ml-auto">{formatBeijingTime(activeEvent.created_at)}</span>
+          </div>
+          {steps[activeIdx].subtitle && (
+            <p className="text-xs text-neutral-400 truncate mt-1 font-mono">{steps[activeIdx].subtitle}</p>
+          )}
+          {steps[activeIdx].intent && (
+            <div className="mt-2 text-xs text-neutral-500 border-l-2 border-neutral-700 pl-2.5">
+              {steps[activeIdx].intent}
+            </div>
+          )}
+        </div>
+
+        {/* Body: reuse EventSummaryView for detail */}
+        <div className="flex-1 overflow-y-auto p-4 min-h-0">
+          <EventSummaryView event={activeEvent} />
+        </div>
+
+        {/* Footer: session stats + drill-down button */}
+        <div className="flex items-center gap-3 px-4 py-2 border-t border-neutral-800/60 text-[10px] text-neutral-600">
+          <span className="font-mono">{sessionId.slice(0, 8)}</span>
+          <span>{sorted.length} steps</span>
+          <span>{durationStr}</span>
+          <button
+            onClick={() => onDrillDown(activeEvent)}
+            className="ml-auto text-neutral-500 hover:text-neutral-300 text-xs flex items-center gap-1 transition-colors"
+            title="View full event detail (Enter)"
+          >
+            Full Detail <ArrowRight className="w-3 h-3" />
+          </button>
+        </div>
+      </div>
+
+      {/* ── Right: Step Navigation Axis ── */}
+      <div ref={listRef} className="w-64 shrink-0 border-l border-neutral-800 bg-neutral-900/40 flex flex-col overflow-y-auto">
+        <div className="sticky top-0 bg-neutral-900/95 backdrop-blur-sm border-b border-neutral-800 z-10 px-3 py-2 flex items-center">
+          <span className="text-[10px] font-medium text-neutral-500 uppercase tracking-wider">Steps</span>
+          <span className="text-[10px] text-neutral-600 font-mono ml-auto">{activeIdx + 1}/{sorted.length}</span>
+        </div>
+
+        <div className="p-1.5 space-y-0.5">
+          {sorted.map((ev, idx) => {
+            const step = steps[idx];
+            const isActive = idx === activeIdx;
+            const ec = getEventColor(ev.event_type);
+            return (
+              <button
+                key={ev.seq}
+                data-active={isActive}
+                onClick={() => setActiveIdx(idx)}
+                className={cn(
+                  'w-full text-left px-2.5 py-2 rounded-md flex gap-2.5 items-start transition-all duration-150',
+                  isActive
+                    ? 'bg-blue-500/10 border border-blue-500/25'
+                    : 'border border-transparent opacity-60 hover:opacity-100 hover:bg-neutral-800/50',
+                )}
+              >
+                <div className={cn('w-2 h-2 rounded-full shrink-0 mt-1', ec.dot)} />
+                <div className="flex-1 min-w-0">
+                  <div className={cn('text-xs font-medium truncate', isActive ? 'text-blue-100' : 'text-neutral-300')}>
+                    {step.title}
+                  </div>
+                  {step.subtitle && (
+                    <div className="text-[10px] text-neutral-600 truncate mt-0.5">{step.subtitle}</div>
+                  )}
+                </div>
+                <span className="text-[9px] text-neutral-600 shrink-0 mt-0.5">{formatBeijingTime(ev.created_at)}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function StatCard({ label, value, color }: { label: string; value: string | number; color?: string }) {
   return (

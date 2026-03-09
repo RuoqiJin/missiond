@@ -13,6 +13,7 @@ readme = "../../README.md"
 [features]
 default = []
 embeddings = ["dep:fastembed"]
+code-context = ["dep:tree-sitter", "dep:tree-sitter-rust", "dep:tree-sitter-typescript", "dep:tree-sitter-python"]
 
 [dependencies]
 # Async runtime
@@ -66,6 +67,12 @@ rusqlite = { workspace = true }
 
 # Embeddings (feature-gated, requires glibc — not available on MUSL)
 fastembed = { workspace = true, optional = true }
+
+# Code analysis (feature-gated, tree-sitter AST parsing)
+tree-sitter = { workspace = true, optional = true }
+tree-sitter-rust = { workspace = true, optional = true }
+tree-sitter-typescript = { workspace = true, optional = true }
+tree-sitter-python = { workspace = true, optional = true }
 
 # WebSocket
 tokio-tungstenite = { workspace = true }

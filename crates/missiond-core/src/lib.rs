@@ -9,6 +9,7 @@
 //! - WebSocket communication
 //! - Claude Code Tasks monitoring
 
+pub mod ast;
 pub mod cc_tasks;
 pub mod core;
 pub mod db;

@@ -15,8 +15,9 @@ name = "missiond"
 path = "src/main.rs"
 
 [features]
-default = ["embeddings"]
+default = ["embeddings", "code-context"]
 embeddings = ["missiond-core/embeddings"]
+code-context = ["missiond-core/code-context"]
 
 [dependencies]
 tokio = { workspace = true }
