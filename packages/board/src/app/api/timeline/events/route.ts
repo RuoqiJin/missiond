@@ -7,21 +7,6 @@ const TYPE_LIMITS: Record<string, number> = {
 };
 const DEFAULT_PER_TYPE_LIMIT = 80;
 
-// All known timeline event types grouped by swimlane
-const ALL_EVENT_TYPES = [
-  'user_message', 'assistant_message', 'thinking_message',           // Chat
-  'gemini_request_started', 'gemini_request_completed',              // AI/LLM
-  'decision_made', 'insight_generated',
-  'codex_request_started', 'codex_request_completed',                // GPT
-  'git_commit',                                                      // Code
-  'task_lifecycle', 'question_created', 'question_resolved',         // Flow
-  'board_task_created', 'board_task_status_changed',                 // Board
-  'board_task_note_added', 'board_task_claimed',
-  'board_task_deleted', 'board_task_updated',
-  'slot_state_changed', 'memory_phase_changed',                      // System
-  'translation_started', 'translation_completed', 'translation_failed', // Translation Worker
-];
-
 /** Convert window string to absolute ISO datetimes — avoids relative time parsing issues in backend */
 function windowToAbsoluteRange(w: string): { since: string; until: string } {
   const until = new Date();
@@ -70,20 +55,16 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ events, _range: { since, until } });
     }
 
-    // Stratified fetch: parallel per-type calls to avoid high-volume types starving others
-    const calls = ALL_EVENT_TYPES.map(async (type) => {
-      const limit = TYPE_LIMITS[type] ?? DEFAULT_PER_TYPE_LIMIT;
-      const result = await callTool('mission_timeline_query', {
-        since, until, eventType: type, limit,
-      }) as { events?: unknown[] };
-      return result?.events ?? [];
-    });
+    // Stratified fetch: single SQL with ROW_NUMBER() OVER (PARTITION BY event_type)
+    // Replaces 23 parallel IPC calls with one unified query
+    const result = await callTool('mission_timeline_stratified', {
+      since, until,
+      perTypeLimit: DEFAULT_PER_TYPE_LIMIT,
+      typeLimits: TYPE_LIMITS,
+    }) as { events?: unknown[] };
 
-    const perTypeResults = await Promise.all(calls);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const allEvents = perTypeResults.flat() as any[];
-    // Sort by seq descending (newest first) — consistent with non-stratified mode
-    allEvents.sort((a, b) => (b.seq ?? 0) - (a.seq ?? 0));
+    const allEvents = (result?.events ?? []) as any[];
 
     // Fetch session metadata (startedAt) for capsule continuity across time windows
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
