@@ -66,7 +66,11 @@ pub(crate) async fn handle_ipc_request(state: AppState, request: Request) -> Res
                             .map(|(cat, n)| format!("{} {}", n, cat))
                             .collect();
                         format!(
-                            "[MissionD] KB: {}. Use mission_kb_search before guessing. Use mission_kb_remember when learning.",
+                            "[MissionD] KB: {}. \
+                            Search Path: 1. L2(Arch): kb_search(category=\"architecture:summary\") \
+                            2. L3(Code): code_search / beacon_map \
+                            3. L4(Details): kb_search for bugs/policies. \
+                            Use mission_kb_search before guessing. Use mission_kb_remember when learning.",
                             parts.join(", ")
                         )
                     }
