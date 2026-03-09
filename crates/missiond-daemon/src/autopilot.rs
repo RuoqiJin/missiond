@@ -18,6 +18,7 @@ use crate::decision_engine::reap_stale_decision_tasks;
 use crate::supervisor::schedule_supervisor_patrol;
 use crate::flow_engine::{execute_flow_task, ensure_autopilot_pty};
 
+// @beacon: orchestration
 pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     let tick_start = std::time::Instant::now();
 
@@ -285,6 +286,13 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
             prompt
         } else {
             format!("{}\n\n{}", context, prompt)
+        };
+
+        // P3: Inject code context from AST hybrid search (Holographic Context Engine)
+        let full_prompt = if let Some(code_ctx) = crate::code_prefetch::code_prefetch(state, &task).await {
+            format!("{}\n\n{}", full_prompt, code_ctx)
+        } else {
+            full_prompt
         };
 
         // Slot throttling: skip if slot has 3+ consecutive failures within 30 min

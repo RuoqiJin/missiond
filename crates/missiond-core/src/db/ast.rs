@@ -195,6 +195,7 @@ impl MissionDB {
                     docstring: row.get(9)?,
                     stub_content: row.get(10)?,
                     calls,
+                    beacons: Vec::new(),
                 },
                 embedding_provider: row.get(12)?,
             })
@@ -303,6 +304,88 @@ impl MissionDB {
         Ok(results)
     }
 
+    /// Load all embedded AST nodes for in-memory vector search cache.
+    pub fn ast_load_all_embeddings(&self) -> DbResult<Vec<(String, Vec<f32>)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, embedding FROM ast_nodes WHERE embedding IS NOT NULL"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((id, blob))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            let (id, blob) = row?;
+            result.push((id, crate::embedding::bytes_to_f32_vec(&blob)));
+        }
+        Ok(result)
+    }
+
+    /// Search AST nodes with FTS5, returning (id, rank_position) pairs for RRF merge.
+    pub fn ast_search_ranked(&self, query: &str, limit: usize) -> DbResult<Vec<(String, usize)>> {
+        let conn = self.read_conn();
+
+        // Build FTS query: quote each word for phrase matching, OR them together
+        let fts_query: String = query.split_whitespace()
+            .filter(|w| w.len() > 1)
+            .map(|w| format!("\"{}\"", w.replace('"', "")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT n.id
+             FROM ast_nodes_fts f
+             JOIN ast_nodes n ON n.rowid = f.rowid
+             WHERE ast_nodes_fts MATCH ?1
+             ORDER BY f.rank
+             LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(params![fts_query, limit as i64], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut result = Vec::new();
+        for (rank, row) in rows.enumerate() {
+            result.push((row?, rank));
+        }
+        Ok(result)
+    }
+
+    /// Get a full AstSearchHit by node ID (for rendering after RRF merge).
+    pub fn ast_get_search_hit(&self, node_id: &str) -> DbResult<Option<AstSearchHit>> {
+        let conn = self.read_conn();
+        conn.query_row(
+            "SELECT id, repo, file_path, name, node_type, signature,
+                    start_line, end_line, is_exported, docstring, stub_content, calls
+             FROM ast_nodes WHERE id = ?1",
+            params![node_id],
+            |row| {
+                let calls_json: String = row.get(11)?;
+                let calls: Vec<String> = serde_json::from_str(&calls_json).unwrap_or_default();
+                Ok(AstSearchHit {
+                    id: row.get(0)?,
+                    repo: row.get(1)?,
+                    file_path: row.get(2)?,
+                    name: row.get(3)?,
+                    node_type: row.get(4)?,
+                    signature: row.get(5)?,
+                    start_line: row.get::<_, usize>(6)?,
+                    end_line: row.get::<_, usize>(7)?,
+                    is_exported: row.get::<_, i32>(8)? != 0,
+                    docstring: row.get(9)?,
+                    stub_content: row.get(10)?,
+                    calls,
+                    rank: 0.0,
+                })
+            },
+        ).optional().map_err(Into::into)
+    }
+
     /// Get node by ID (for embedding text generation).
     pub fn ast_get_node(&self, node_id: &str) -> DbResult<Option<AstNodeRow>> {
         let conn = self.read_conn();
@@ -329,6 +412,7 @@ impl MissionDB {
                         docstring: row.get(9)?,
                         stub_content: row.get(10)?,
                         calls,
+                        beacons: Vec::new(),
                     },
                     embedding_provider: row.get(12)?,
                 })

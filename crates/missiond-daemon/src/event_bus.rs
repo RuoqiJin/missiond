@@ -671,6 +671,7 @@ impl EventBus {
         Self { tx, publish_count: AtomicU64::new(0) }
     }
 
+    // @beacon: eventbus
     /// Publish an event without trace context (backward-compatible).
     /// All 15 existing call sites use this — no changes needed.
     pub fn publish(&self, event: DaemonEvent) {

@@ -6,6 +6,7 @@ use tracing::{debug, info, warn};
 use crate::state::AppState;
 use std::path::Path;
 
+// @beacon: slot
 pub(crate) async fn build_slot_tracking_env(slot_id: &str, slot_env: Option<&HashMap<String, String>>) -> (HashMap<String, String>, PathBuf) {
     let session_file = std::env::temp_dir().join(format!("missiond-session-{}.txt", slot_id));
     // Remove stale file from previous spawn

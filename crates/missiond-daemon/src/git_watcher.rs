@@ -10,6 +10,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::ast_sync_worker::AstSyncTask;
 use crate::event_bus::{DaemonEvent, TimelineEntry};
 
 /// A single parsed git commit.
@@ -103,9 +104,11 @@ pub(crate) fn collect_repo_roots(slot_cwds: &[String]) -> Vec<PathBuf> {
 }
 
 /// Run the git commit poller loop. Call from a spawned task.
+/// Dual-channel: emits timeline events + AST sync commands.
 pub(crate) async fn run_git_watcher(
     repos: Vec<PathBuf>,
     event_tx: mpsc::UnboundedSender<TimelineEntry>,
+    ast_sync_tx: mpsc::Sender<AstSyncTask>,
 ) {
     if repos.is_empty() {
         info!("Git watcher: no repos to monitor");
@@ -131,7 +134,8 @@ pub(crate) async fn run_git_watcher(
         interval.tick().await;
 
         for repo in &repos {
-            let since = last_hash.get(repo).map(|s| s.as_str());
+            let old_hash = last_hash.get(repo).cloned();
+            let since = old_hash.as_deref();
             let commits = tokio::task::spawn_blocking({
                 let repo = repo.clone();
                 let since = since.map(|s| s.to_string());
@@ -144,14 +148,13 @@ pub(crate) async fn run_git_watcher(
                 continue;
             }
 
-            // Update last known hash to the newest commit
-            if let Some(newest) = commits.first() {
-                last_hash.insert(repo.clone(), newest.hash.clone());
-            }
+            // newest commit is first (git log order)
+            let newest_hash = commits.first().unwrap().hash.clone();
+            last_hash.insert(repo.clone(), newest_hash.clone());
 
             let name = repo_name(repo);
 
-            // Emit events oldest-first (commits are newest-first from git log)
+            // Emit timeline events oldest-first (commits are newest-first from git log)
             for commit in commits.into_iter().rev() {
                 info!(
                     repo = %name, hash = %commit.short_hash, msg = %commit.message,
@@ -175,6 +178,19 @@ pub(crate) async fn run_git_watcher(
                 if event_tx.send(entry).is_err() {
                     warn!("Git watcher: event channel closed");
                     return;
+                }
+            }
+
+            // AST sync: one CommitSync per polling cycle (old..newest range)
+            if let Some(ref old) = old_hash {
+                let task = AstSyncTask::CommitSync {
+                    repo_path: repo.clone(),
+                    repo_name: name.clone(),
+                    old_hash: old.clone(),
+                    new_hash: newest_hash,
+                };
+                if ast_sync_tx.try_send(task).is_err() {
+                    debug!(repo = %name, "AST sync channel full, skipping (backfill will catch up)");
                 }
             }
         }

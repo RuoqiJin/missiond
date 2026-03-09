@@ -14,7 +14,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "category": {
                         "type": "string",
-                        "enum": ["preference", "memory", "memory:architecture", "memory:bugfix", "memory:debug", "memory:ops", "memory:feature", "memory:decision", "memory:platform", "project", "architecture", "decision", "policy:decision", "feature", "infra", "procedure"],
+                        "enum": ["preference", "memory", "memory:architecture", "memory:bugfix", "memory:debug", "memory:ops", "memory:feature", "memory:decision", "memory:platform", "project", "architecture", "architecture:summary", "decision", "policy:decision", "feature", "infra", "procedure"],
                         "description": "分类"
                     },
                     "key": {
@@ -266,6 +266,115 @@ pub fn definitions() -> Vec<ToolDefinition> {
             }),
         ),
 
+
+        // ===== Holographic Beacon (P4) =====
+        ToolDefinition::new(
+            "mission_beacon_list",
+            "列出所有代码信标（feature beacon）。信标关联跨文件的代码节点，标注功能归属。",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_beacon_map",
+            "获取信标的完整拓扑：所有关联的代码节点（签名 + stub + 行号 + 人工注释）。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "信标名称（如 'memory-extraction'）"
+                    }
+                },
+                "required": ["name"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_beacon_tag",
+            "给代码符号打信标标签。底层修改源文件插入 `// @beacon: xxx`，由 P2 Pipeline 自动同步到 DB。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "文件的绝对路径"
+                    },
+                    "symbol": {
+                        "type": "string",
+                        "description": "目标函数/结构体名称"
+                    },
+                    "feature": {
+                        "type": "string",
+                        "description": "信标名称（如 'memory-extraction'）"
+                    },
+                    "annotation": {
+                        "type": "string",
+                        "description": "人工注释（可选，Why/注意事项）"
+                    }
+                },
+                "required": ["file_path", "symbol", "feature"]
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_beacon_annotate",
+            "更新信标节点的人工注释（Why/注意事项/历史背景）。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "beacon_name": {
+                        "type": "string",
+                        "description": "信标名称"
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "文件路径（相对于 repo root）"
+                    },
+                    "symbol": {
+                        "type": "string",
+                        "description": "符号名称"
+                    },
+                    "annotation": {
+                        "type": "string",
+                        "description": "注释文本"
+                    }
+                },
+                "required": ["beacon_name", "file_path", "symbol", "annotation"]
+            }),
+        ),
+
+        // ===== Code Context (P3.5 Holographic Context Engine) =====
+        ToolDefinition::new(
+            "mission_code_search",
+            "搜索代码结构（AST 索引）。tree-sitter 提取的函数/结构体/Trait/Impl 签名和调用关系。用于深入了解代码结构。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索查询（函数名、结构体名、或自然语言描述）"
+                    },
+                    "repo": {
+                        "type": "string",
+                        "description": "限定仓库名（可选）"
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "限定文件路径前缀（可选，如 'crates/missiond-daemon/src/'）"
+                    },
+                    "node_type": {
+                        "type": "string",
+                        "enum": ["function", "struct", "enum", "impl", "trait", "mod", "const", "type"],
+                        "description": "限定节点类型（可选）"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "返回数量上限（默认 20）"
+                    }
+                },
+                "required": ["query"]
+            }),
+        ),
 
     ]
 }

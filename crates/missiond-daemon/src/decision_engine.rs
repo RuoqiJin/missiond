@@ -34,6 +34,7 @@ pub(crate) fn save_routing_trace(state: &AppState, question_id: &str, resolved_t
 }
 
 /// Decision Engine: process pending questions targeted at master.
+// @beacon: decision
 /// Routes through Tier 1 (KB) → Tier 2 (Gemini) → Tier 3 (slot-decision) responsibility chain.
 /// Records routing_trace for each decision for observability.
 pub(crate) async fn process_pending_master_questions(state: &AppState) {

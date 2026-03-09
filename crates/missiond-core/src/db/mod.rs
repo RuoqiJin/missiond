@@ -16,7 +16,8 @@ mod router_chat;
 mod incident;
 mod gemini_log;
 mod vision;
-mod ast;
+pub mod ast;
+pub mod beacon;
 
 use rusqlite::Connection;
 use error::{DbError, DbResult};
@@ -1186,6 +1187,28 @@ impl MissionDB {
                 updated_at TEXT DEFAULT (datetime('now')),
                 PRIMARY KEY (repo, file_path)
             );"
+        )?;
+
+        // ── Holographic Beacon: feature-level code annotations (P4) ──
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS beacons (
+                id TEXT PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL,
+                description TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS beacon_nodes (
+                beacon_id TEXT NOT NULL,
+                repo TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                symbol_name TEXT NOT NULL,
+                annotation TEXT,
+                PRIMARY KEY (beacon_id, repo, file_path, symbol_name),
+                FOREIGN KEY (beacon_id) REFERENCES beacons(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_bn_symbol ON beacon_nodes(symbol_name);
+            CREATE INDEX IF NOT EXISTS idx_bn_beacon ON beacon_nodes(beacon_id);"
         )?;
 
         // Message narrations — GPT-5.4 generated step-by-step explanations

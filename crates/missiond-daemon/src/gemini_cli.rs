@@ -95,7 +95,7 @@ impl GeminiCli {
               "Gemini CLI: calling (stream-json mode)");
 
         let mut child = tokio::process::Command::new(&self.binary)
-            .args(["-p", &prompt, "-m", model, "-o", "stream-json"])
+            .args(["-p", &prompt, "-m", model, "-o", "stream-json", "--yolo"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -208,9 +208,12 @@ impl GeminiCli {
     }
 }
 
+/// Default system instruction prepended to all Gemini CLI prompts.
+const DEFAULT_SYSTEM_INSTRUCTION: &str = "System: 不要修改任何代码。只分析和回答问题。";
+
 /// Convert OpenAI-style messages array to a single prompt string.
 fn messages_to_prompt(messages: &[Value]) -> String {
-    let mut parts = Vec::new();
+    let mut parts = vec![DEFAULT_SYSTEM_INSTRUCTION.to_string()];
     for msg in messages {
         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
         let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");

@@ -18,6 +18,7 @@ use crate::supervisor::{strip_prompt_echo, truncate_safe, is_auth_error};
 use missiond_core::SessionState;
 use missiond_core::PTYSpawnOptions;
 
+// @beacon: orchestration
 /// Execute a flow-enabled Board task through the Engineering Flow Engine.
 /// Handles all phase types: slot phases (send to PTY), daemon phases (call Gemini), and Done.
 pub(crate) async fn execute_flow_task(state: &AppState, task: &missiond_core::types::BoardTask, slot_id: &str) -> Result<()> {

@@ -176,6 +176,7 @@ pub(crate) fn get_task_jsonl_path(state: &AppState, task: &missiond_core::types:
 const SUPERVISOR_PATROL_INTERVAL_SECS: i64 = 300;
 
 /// Schedule a periodic patrol task on the supervisor slot.
+// @beacon: slot
 /// The supervisor uses Opus model to inspect all slot PTY screens, detect anomalies,
 /// and take corrective action (kill misbehaving slots, report issues).
 pub(crate) async fn schedule_supervisor_patrol(state: &AppState) {

@@ -63,6 +63,7 @@ pub(crate) async fn ensure_memory_slot(state: &AppState) -> bool {
 }
 
 /// Unified priority scheduler for memory slots.
+// @beacon: memory
 /// Enforces strict priority: Submit Tasks > Realtime Extraction > Deep Analysis > KB Consolidation.
 /// Called from autopilot_tick (60s fallback) and event-driven paths (immediate).
 pub(crate) async fn schedule_memory_tasks(state: &AppState) {
