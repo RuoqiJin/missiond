@@ -69,23 +69,28 @@ function handleEvent(
 
     case 'slot_state_changed':
       debouncedBump(set, 'slotVersion');
+      debouncedBump(set, 'timelineVersion');
       break;
 
     case 'task_lifecycle':
       debouncedBump(set, 'taskVersion');
+      debouncedBump(set, 'timelineVersion');
       break;
 
     case 'question_created':
     case 'question_resolved':
       debouncedBump(set, 'questionVersion');
+      debouncedBump(set, 'timelineVersion');
       break;
 
     case 'decision_made':
       debouncedBump(set, 'decisionVersion');
+      debouncedBump(set, 'timelineVersion');
       break;
 
     case 'memory_phase_changed':
       debouncedBump(set, 'memoryVersion');
+      debouncedBump(set, 'timelineVersion');
       break;
 
     case 'gemini_request_started':
@@ -98,6 +103,7 @@ function handleEvent(
 
     case 'board_task_updated': {
       debouncedBump(set, 'taskVersion');
+      debouncedBump(set, 'timelineVersion');
       const cat = event.payload?.category;
       if (cat === 'deploy') debouncedBump(set, 'deployVersion');
       break;
@@ -125,6 +131,27 @@ function handleEvent(
       }
       break;
 
+    // ── Conversation messages — high-frequency, use longer debounce ──
+    case 'user_message':
+    case 'assistant_message':
+    case 'thinking_message':
+    case 'system_message':
+      debouncedBump(set, 'timelineVersion', 500);
+      break;
+
+    // ── Git / Board task lifecycle / Translation / Narration ──
+    case 'git_commit':
+    case 'board_task_created':
+    case 'board_task_status_changed':
+    case 'board_task_note_added':
+    case 'board_task_claimed':
+    case 'board_task_deleted':
+    case 'translation_started':
+    case 'translation_completed':
+    case 'translation_failed':
+      debouncedBump(set, 'timelineVersion');
+      break;
+
     case 'resync':
       // Server says we missed events — bump all versions to force refetch
       debouncedBump(set, 'slotVersion', 0);
@@ -138,6 +165,10 @@ function handleEvent(
       break;
 
     default:
+      // Catch narration_* and other future event types
+      if (event.type.startsWith('narration_')) {
+        debouncedBump(set, 'timelineVersion', 500);
+      }
       break;
   }
 }
