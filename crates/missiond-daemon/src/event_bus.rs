@@ -238,11 +238,38 @@ pub(crate) enum DaemonEvent {
     },
 
     // ===== Step Narrator Worker =====
+    /// Step Narrator found sessions needing narration and started a batch.
+    NarrationBatchStarted {
+        pending_sessions: usize,
+        total_unnarrated: usize,
+    },
+    /// Step Narrator started processing a specific session.
+    NarrationSessionStarted {
+        session_id: String,
+        unnarrated_count: usize,
+    },
     /// Step narration completed for a session.
     NarrationCompleted {
         session_id: String,
         narrated_count: usize,
         duration_ms: u64,
+    },
+    /// Step narration failed for a session.
+    NarrationFailed {
+        session_id: String,
+        error: String,
+    },
+
+    // ===== MiniMax Gateway =====
+    /// A MiniMax API call was completed through the gateway (unified for all workers).
+    WorkerLlmCall {
+        caller: String,
+        task_id: Option<String>,
+        status: String,
+        prompt_chars: usize,
+        response_chars: usize,
+        duration_ms: u64,
+        queue_wait_ms: u64,
     },
 }
 
@@ -285,7 +312,11 @@ impl DaemonEvent {
             Self::TranslationStarted { .. } => "translation_started",
             Self::TranslationCompleted { .. } => "translation_completed",
             Self::TranslationFailed { .. } => "translation_failed",
+            Self::NarrationBatchStarted { .. } => "narration_batch_started",
+            Self::NarrationSessionStarted { .. } => "narration_session_started",
             Self::NarrationCompleted { .. } => "narration_completed",
+            Self::NarrationFailed { .. } => "narration_failed",
+            Self::WorkerLlmCall { .. } => "worker_llm_call",
         }
     }
 
@@ -394,8 +425,26 @@ impl DaemonEvent {
                 json!({ "message_id": message_id, "slot_id": slot_id, "preview": preview, "duration_ms": duration_ms }),
             Self::TranslationFailed { message_id, slot_id, error } =>
                 json!({ "message_id": message_id, "slot_id": slot_id, "error": error }),
+            Self::NarrationBatchStarted { pending_sessions, total_unnarrated } =>
+                json!({ "pending_sessions": pending_sessions, "total_unnarrated": total_unnarrated }),
+            Self::NarrationSessionStarted { session_id, unnarrated_count } =>
+                json!({ "session_id": session_id, "unnarrated_count": unnarrated_count }),
             Self::NarrationCompleted { session_id, narrated_count, duration_ms } =>
                 json!({ "session_id": session_id, "narrated_count": narrated_count, "duration_ms": duration_ms }),
+            Self::NarrationFailed { session_id, error } =>
+                json!({ "session_id": session_id, "error": error }),
+            Self::WorkerLlmCall {
+                caller, task_id, status, prompt_chars,
+                response_chars, duration_ms, queue_wait_ms,
+            } => json!({
+                "caller": caller,
+                "task_id": task_id,
+                "status": status,
+                "prompt_chars": prompt_chars,
+                "response_chars": response_chars,
+                "duration_ms": duration_ms,
+                "queue_wait_ms": queue_wait_ms,
+            }),
         }
     }
 }

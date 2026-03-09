@@ -11,6 +11,7 @@ use crate::daemon_stats::DaemonStats;
 use crate::event_bus::EventBus;
 use crate::gemini_client::GeminiClient;
 use crate::mcp_client::McpProcessClient;
+use crate::minimax_gateway::MinimaxHandle;
 use crate::prompts::PromptStore;
 
 // --- Well-known slot IDs (shared across all daemon modules) ---
@@ -131,6 +132,8 @@ pub(crate) struct AppState {
     pub(crate) http_client: reqwest::Client,
     /// Rate-limited Gemini client (20 RPM, 3 concurrent, 429 auto-retry).
     pub(crate) gemini: GeminiClient,
+    /// MiniMax Gateway handle — unified rate-limited access for all workers.
+    pub(crate) minimax: Option<MinimaxHandle>,
     /// Persistent xjp-mcp client (lazy-initialized, auto-reconnect on crash).
     pub(crate) xjp_mcp: Arc<McpProcessClient>,
     /// Flow engine reentry guard: task IDs currently being processed.
@@ -163,6 +166,8 @@ pub(crate) struct AppState {
     pub(crate) briefing_notify: Arc<tokio::sync::Notify>,
     /// AST sync worker channel: code indexing pipeline (P2 Holographic Context Engine).
     pub(crate) ast_sync_tx: tokio::sync::mpsc::Sender<crate::ast_sync_worker::AstSyncTask>,
+    /// In-memory AST embedding cache for code prefetch hybrid search (P3).
+    pub(crate) ast_embedding_cache: missiond_core::embedding::EmbeddingCache,
 }
 
 /// Event-driven embedding tasks — the Worker sleeps until triggered.
@@ -174,8 +179,10 @@ pub(crate) enum EmbeddingTask {
     ProcessKBEntry(String),
     /// Incremental: embed a single Skill topic after upsert.
     ProcessSkillTopic(String),
-    /// Batch backfill all systems: KB → Skills → Conversations.
+    /// Batch backfill all systems: KB → Skills → Conversations → AST.
     BackfillAll,
+    /// Incremental: embed AST nodes after commit sync (P3 Holographic Context Engine).
+    ProcessAstBatch(Vec<String>),
 }
 
 

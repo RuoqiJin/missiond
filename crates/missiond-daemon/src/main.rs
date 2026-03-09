@@ -38,7 +38,9 @@ mod session_util;
 mod timeline_analyst;
 mod git_watcher;
 mod ast_sync_worker;
+mod code_prefetch;
 mod minimax_client;
+mod minimax_gateway;
 mod briefing_worker;
 mod translation_worker;
 mod step_narrator;
@@ -754,6 +756,17 @@ async fn main() -> Result<()> {
                 gemini_client::GeminiClient::new(event_tx)
             }
         },
+        minimax: {
+            let gw = minimax_gateway::create_minimax_gateway(event_bus_instance.sender());
+            if let Some((handle, gateway)) = gw {
+                info!("MinimaxGateway initialized");
+                tokio::spawn(gateway.run());
+                Some(handle)
+            } else {
+                warn!("MinimaxGateway: API key not found, gateway disabled");
+                None
+            }
+        },
         xjp_mcp: Arc::new(McpProcessClient::new(
             default_mission_home().join("xjp-mcp-config.json"),
         )),
@@ -779,6 +792,7 @@ async fn main() -> Result<()> {
         prompts: Arc::new(prompts::PromptStore::load()),
         briefing_notify: Arc::new(tokio::sync::Notify::new()),
         ast_sync_tx,
+        ast_embedding_cache: missiond_core::embedding::new_cache(),
     };
 
     // Auto-spawn slots with auto_start: true
@@ -860,6 +874,15 @@ async fn main() -> Result<()> {
                     info!(count = guard.len(), "KB search cache warmed (all categories)");
                 }
                 Err(e) => warn!(error = %e, "Failed to warm KB search cache"),
+            }
+            // Warm AST embedding cache (P3: code prefetch hybrid search)
+            match db.ast_load_all_embeddings() {
+                Ok(all) => {
+                    let mut guard = emb_state.ast_embedding_cache.write().await;
+                    *guard = all;
+                    info!(count = guard.len(), "AST embedding cache warmed");
+                }
+                Err(e) => warn!(error = %e, "Failed to warm AST embedding cache"),
             }
         });
     }
@@ -1008,6 +1031,32 @@ async fn main() -> Result<()> {
                                     cache.push((topic.clone(), vec));
                                     debug!(topic = %topic, "Skill topic embedding updated");
                                 }
+                            }
+                        }
+                    }
+                    EmbeddingTask::ProcessAstBatch(node_ids) => {
+                        if let Some(ref emb_svc) = worker_state.embedding_service {
+                            let mut embedded = 0usize;
+                            for node_id in &node_ids {
+                                if let Ok(Some(node_row)) = db.ast_get_node(node_id) {
+                                    let embed_text = node_row.node.embedding_text(&node_row.file_path);
+                                    let svc = Arc::clone(emb_svc);
+                                    if let Ok(Ok(Some(vec))) = tokio::time::timeout(
+                                        std::time::Duration::from_secs(30),
+                                        tokio::task::spawn_blocking(move || svc.embed(&embed_text)),
+                                    ).await {
+                                        let bytes = missiond_core::embedding::f32_vec_to_bytes(&vec);
+                                        let _ = db.ast_set_embedding(node_id, &bytes, &provider_id);
+                                        // Update in-memory cache
+                                        let mut guard = worker_state.ast_embedding_cache.write().await;
+                                        guard.retain(|(eid, _)| eid != node_id);
+                                        guard.push((node_id.clone(), vec));
+                                        embedded += 1;
+                                    }
+                                }
+                            }
+                            if embedded > 0 {
+                                debug!(count = embedded, total = node_ids.len(), "AST batch embedding completed");
                             }
                         }
                     }
@@ -1204,6 +1253,35 @@ async fn main() -> Result<()> {
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         }
 
+                        // ── Phase 6: AST node embedding backfill (P3 Holographic Context) ──
+                        if let Some(ref emb_svc) = worker_state.embedding_service {
+                            loop {
+                                let missing = db.ast_find_unembedded(20).unwrap_or_default();
+                                if missing.is_empty() { break; }
+                                info!(count = missing.len(), "AST embedding backfill batch");
+                                for (node_id, _repo, file_path) in &missing {
+                                    if let Ok(Some(node_row)) = db.ast_get_node(node_id) {
+                                        let embed_text = node_row.node.embedding_text(file_path);
+                                        let svc = Arc::clone(emb_svc);
+                                        if let Ok(Ok(Some(vec))) = tokio::time::timeout(
+                                            std::time::Duration::from_secs(30),
+                                            tokio::task::spawn_blocking(move || svc.embed(&embed_text)),
+                                        ).await {
+                                            let bytes = missiond_core::embedding::f32_vec_to_bytes(&vec);
+                                            let _ = db.ast_set_embedding(node_id, &bytes, &provider_id);
+                                        }
+                                    }
+                                }
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            }
+                            // Refresh AST embedding cache after backfill
+                            if let Ok(all) = db.ast_load_all_embeddings() {
+                                let mut guard = worker_state.ast_embedding_cache.write().await;
+                                *guard = all;
+                                info!(count = guard.len(), "AST embedding cache refreshed after backfill");
+                            }
+                        }
+
                         info!("Full embedding backfill complete");
                     }
                 }
@@ -1384,8 +1462,9 @@ async fn main() -> Result<()> {
         let repos = git_watcher::collect_repo_roots(&slot_cwds);
         if !repos.is_empty() {
             let event_tx = state.event_bus.sender();
+            let ast_tx = state.ast_sync_tx.clone();
             tokio::spawn(async move {
-                git_watcher::run_git_watcher(repos, event_tx).await;
+                git_watcher::run_git_watcher(repos, event_tx, ast_tx).await;
             });
         }
     }
