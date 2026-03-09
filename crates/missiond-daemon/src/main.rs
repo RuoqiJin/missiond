@@ -37,9 +37,11 @@ mod prompts;
 mod session_util;
 mod timeline_analyst;
 mod git_watcher;
+mod ast_sync_worker;
 mod minimax_client;
 mod briefing_worker;
 mod translation_worker;
+mod step_narrator;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -587,6 +589,9 @@ async fn main() -> Result<()> {
     // Embedding worker channel: event-driven, 0 CPU when idle
     let (embedding_tx, embedding_rx) = tokio::sync::mpsc::channel::<EmbeddingTask>(256);
 
+    // AST sync worker channel: code indexing pipeline (P2 HCE)
+    let (ast_sync_tx, ast_sync_rx) = tokio::sync::mpsc::channel::<ast_sync_worker::AstSyncTask>(64);
+
     // Screenshot broker (coordinates browser-based PTY screenshots)
     let screenshot_broker = missiond_core::ws::ScreenshotBroker::new(
         std::time::Duration::from_secs(5),
@@ -773,6 +778,7 @@ async fn main() -> Result<()> {
         stats: Arc::clone(&daemon_stats),
         prompts: Arc::new(prompts::PromptStore::load()),
         briefing_notify: Arc::new(tokio::sync::Notify::new()),
+        ast_sync_tx,
     };
 
     // Auto-spawn slots with auto_start: true
@@ -1295,6 +1301,9 @@ async fn main() -> Result<()> {
     // --- Briefing Worker: async semantic summarization via MiniMax M2.5 ---
     briefing_worker::spawn_briefing_worker(Arc::new(state.clone()));
 
+    // --- Step Narrator: async GPT-5.4 conversation step explanation ---
+    step_narrator::spawn_step_narrator(Arc::new(state.clone()));
+
     // --- Translation Worker: async thinking→Chinese translation via MiniMax ---
     translation_worker::spawn_translation_worker(
         Arc::new(state.clone()),
@@ -1379,6 +1388,38 @@ async fn main() -> Result<()> {
                 git_watcher::run_git_watcher(repos, event_tx).await;
             });
         }
+    }
+
+    // --- AST Sync Worker (P2 HCE) ---
+    // Worker loop + startup full sync for all repos
+    {
+        let mc = Arc::clone(&state.mission);
+        let etx = state.embedding_tx.clone();
+        tokio::spawn(async move {
+            ast_sync_worker::run_ast_sync_worker(ast_sync_rx, mc, etx).await;
+        });
+
+        // Full sync at startup: trigger for all repos after delay
+        let ast_tx2 = state.ast_sync_tx.clone();
+        let slot_cwds2: Vec<String> = state.mission.list_slots()
+            .into_iter()
+            .filter_map(|s| s.config.cwd)
+            .collect();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            let repos = git_watcher::collect_repo_roots(&slot_cwds2);
+            for repo in repos {
+                let name = repo.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if let Err(e) = ast_tx2.send(ast_sync_worker::AstSyncTask::FullSync {
+                    repo_path: repo,
+                    repo_name: name,
+                }).await {
+                    tracing::warn!(err = %e, "AST: failed to queue full sync");
+                }
+            }
+        });
     }
 
     // Health snapshot injector (synthetic, not persisted to timeline)

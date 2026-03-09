@@ -161,6 +161,8 @@ pub(crate) struct AppState {
     pub(crate) prompts: Arc<PromptStore>,
     /// Wakeup signal for briefing worker when a long conversation message is logged.
     pub(crate) briefing_notify: Arc<tokio::sync::Notify>,
+    /// AST sync worker channel: code indexing pipeline (P2 Holographic Context Engine).
+    pub(crate) ast_sync_tx: tokio::sync::mpsc::Sender<crate::ast_sync_worker::AstSyncTask>,
 }
 
 /// Event-driven embedding tasks — the Worker sleeps until triggered.

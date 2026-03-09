@@ -1268,6 +1268,9 @@ export function CognitiveTimeline() {
 
 // ── Sub-components ─────────────────────────────────────────
 
+// ── Narration type ──
+interface Narration { message_id: number; step_title: string; step_intent: string; step_result: string }
+
 // ── Session Step Browser — iPhone-settings-style step navigator ──
 function SessionStepBrowser({ events, sessionId, sessionsMeta, onDrillDown }: {
   events: TimelineEvent[];
@@ -1277,6 +1280,22 @@ function SessionStepBrowser({ events, sessionId, sessionsMeta, onDrillDown }: {
 }) {
   const [activeIdx, setActiveIdx] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
+  const [narrations, setNarrations] = useState<Map<number, Narration>>(new Map());
+
+  // Fetch GPT narrations for this session
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/system/narrations?session_id=${encodeURIComponent(sessionId)}`)
+      .then(r => r.json())
+      .then(data => {
+        if (cancelled || !data.narrations) return;
+        const map = new Map<number, Narration>();
+        for (const n of data.narrations) map.set(n.message_id, n);
+        setNarrations(map);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [sessionId]);
 
   const sorted = useMemo(() =>
     [...events].sort((a, b) => utcMs(a.created_at) - utcMs(b.created_at)),
@@ -1284,7 +1303,24 @@ function SessionStepBrowser({ events, sessionId, sessionsMeta, onDrillDown }: {
   );
 
   const activeEvent = sorted[activeIdx];
-  const steps = useMemo(() => sorted.map(abstractTaskStep), [sorted]);
+
+  // Merge: GPT narration (if available) → fallback to static abstractTaskStep
+  const steps = useMemo(() => sorted.map(ev => {
+    const n = narrations.get(ev.seq); // timeline events use seq, narrations use message_id
+    // Also try matching by payload.message_id if seq doesn't match
+    const msgId = ev.payload?.message_id;
+    const n2 = msgId ? narrations.get(msgId) : undefined;
+    const narration = n || n2;
+    if (narration) {
+      return {
+        title: narration.step_title,
+        subtitle: narration.step_result,
+        intent: narration.step_intent,
+        isAi: true,
+      };
+    }
+    return { ...abstractTaskStep(ev), isAi: false };
+  }), [sorted, narrations]);
 
   // Session meta
   const times = useMemo(() => sorted.map(e => utcMs(e.created_at)), [sorted]);
@@ -1325,6 +1361,7 @@ function SessionStepBrowser({ events, sessionId, sessionsMeta, onDrillDown }: {
           <div className="flex items-center gap-2 mb-1">
             <div className={cn('w-3 h-3 rounded-full', getEventColor(activeEvent.event_type).dot)} />
             <h2 className="text-sm font-medium text-neutral-100">{steps[activeIdx].title}</h2>
+            {steps[activeIdx].isAi && <span className="shrink-0" data-tooltip="AI 解说"><Sparkles className="w-3 h-3 text-purple-400" /></span>}
             <span className="text-[10px] text-neutral-600 font-mono ml-auto">{formatBeijingTime(activeEvent.created_at)}</span>
           </div>
           {steps[activeIdx].subtitle && (
