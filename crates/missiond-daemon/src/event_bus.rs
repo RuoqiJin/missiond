@@ -236,6 +236,14 @@ pub(crate) enum DaemonEvent {
         slot_id: String,
         error: String,
     },
+
+    // ===== Step Narrator Worker =====
+    /// Step narration completed for a session.
+    NarrationCompleted {
+        session_id: String,
+        narrated_count: usize,
+        duration_ms: u64,
+    },
 }
 
 impl DaemonEvent {
@@ -277,6 +285,7 @@ impl DaemonEvent {
             Self::TranslationStarted { .. } => "translation_started",
             Self::TranslationCompleted { .. } => "translation_completed",
             Self::TranslationFailed { .. } => "translation_failed",
+            Self::NarrationCompleted { .. } => "narration_completed",
         }
     }
 
@@ -385,6 +394,8 @@ impl DaemonEvent {
                 json!({ "message_id": message_id, "slot_id": slot_id, "preview": preview, "duration_ms": duration_ms }),
             Self::TranslationFailed { message_id, slot_id, error } =>
                 json!({ "message_id": message_id, "slot_id": slot_id, "error": error }),
+            Self::NarrationCompleted { session_id, narrated_count, duration_ms } =>
+                json!({ "session_id": session_id, "narrated_count": narrated_count, "duration_ms": duration_ms }),
         }
     }
 }

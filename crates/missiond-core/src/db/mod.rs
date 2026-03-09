@@ -1188,6 +1188,19 @@ impl MissionDB {
             );"
         )?;
 
+        // Message narrations — GPT-5.4 generated step-by-step explanations
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS message_narrations (
+                message_id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                step_title TEXT NOT NULL,
+                step_intent TEXT NOT NULL,
+                step_result TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_narrations_session ON message_narrations(session_id);"
+        )?;
+
         Ok(())
     }
 
@@ -1331,6 +1344,62 @@ impl MissionDB {
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    // ── Message Narrations (GPT-5.4 step explanations) ──
+
+    /// Batch-insert narrations for a session's messages.
+    pub fn insert_narrations(&self, narrations: &[(i64, &str, &str, &str, &str)]) -> DbResult<usize> {
+        let conn = self.conn();
+        let mut count = 0;
+        for (message_id, session_id, step_title, step_intent, step_result) in narrations {
+            conn.execute(
+                "INSERT OR REPLACE INTO message_narrations (message_id, session_id, step_title, step_intent, step_result)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![message_id, session_id, step_title, step_intent, step_result],
+            )?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Get all narrations for a session.
+    pub fn get_narrations_for_session(&self, session_id: &str) -> DbResult<Vec<(i64, String, String, String)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT message_id, step_title, step_intent, step_result FROM message_narrations WHERE session_id = ?1"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![session_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Get sessions that need narration (have unnarrated messages).
+    pub fn get_sessions_needing_narration(&self, min_unnarrated: i64) -> DbResult<Vec<(String, i64)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT cm.session_id, COUNT(*) as unnarrated
+             FROM conversation_messages cm
+             JOIN conversations c ON c.id = cm.session_id
+             LEFT JOIN message_narrations mn ON mn.message_id = cm.id
+             WHERE mn.message_id IS NULL
+               AND c.conversation_type = 'user'
+               AND cm.role IN ('user', 'assistant')
+             GROUP BY cm.session_id
+             HAVING unnarrated >= ?1
+             ORDER BY MAX(cm.timestamp) DESC
+             LIMIT 5"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![min_unnarrated], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
     /// Fetch briefing summaries for a session's conversation messages.

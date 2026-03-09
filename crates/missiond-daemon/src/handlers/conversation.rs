@@ -453,6 +453,27 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
         }
 
+        "mission_session_narrations" => {
+            let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
+            let session_id = args_val.get("session_id").and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("missing session_id"))?;
+            let db = state.mission.db();
+            let narrations = db.get_narrations_for_session(session_id)?;
+            let items: Vec<serde_json::Value> = narrations.iter()
+                .map(|(msg_id, title, intent, result)| serde_json::json!({
+                    "message_id": msg_id,
+                    "step_title": title,
+                    "step_intent": intent,
+                    "step_result": result,
+                }))
+                .collect();
+            Ok(ToolResult::json_pretty(&serde_json::json!({
+                "session_id": session_id,
+                "narrations": items,
+                "count": items.len(),
+            })))
+        }
+
         _ => Err(anyhow!("Unknown conversation tool: {name}")),
     }
 }
