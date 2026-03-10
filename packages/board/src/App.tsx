@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Activity, Crosshair, FlaskConical, Rocket, Gauge, Zap } from 'lucide-react';
+import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Activity, Crosshair, FlaskConical, Rocket, Gauge, Zap, GitFork } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
@@ -20,9 +20,10 @@ import { ResearchBoard } from './components/ResearchBoard';
 import { DeployDashboard } from './components/DeployDashboard';
 import { EngineDashboard } from './components/EngineDashboard';
 import { CognitiveTimeline } from './components/timeline';
+import { ArchitectureView } from './components/architecture';
 import { useEventStream, useConnectionState } from './hooks/useEventStream';
 
-type Tab = 'board' | 'terminal' | 'knowledge' | 'conversations' | 'memory' | 'decisions' | 'research' | 'deploy' | 'engine' | 'timeline';
+type Tab = 'board' | 'terminal' | 'knowledge' | 'conversations' | 'memory' | 'decisions' | 'research' | 'deploy' | 'engine' | 'timeline' | 'architecture';
 
 interface SlotDef { id: string; label: string; role: string; running?: boolean }
 
@@ -210,6 +211,16 @@ export default function App() {
               <Zap className="w-3 h-3" />
               Timeline
             </button>
+            <button
+              onClick={() => setTab('architecture')}
+              className={cn(
+                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
+                tab === 'architecture' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
+              )}
+            >
+              <GitFork className="w-3 h-3" />
+              Arch
+            </button>
           </div>
         </div>
 
@@ -282,6 +293,8 @@ export default function App() {
         <EngineDashboard />
       ) : tab === 'timeline' ? (
         <CognitiveTimeline />
+      ) : tab === 'architecture' ? (
+        <ArchitectureView />
       ) : (
         <MemoryDashboard />
       )}
