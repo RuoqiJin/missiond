@@ -12,7 +12,7 @@ export interface TimelineEvent {
   created_at: string;
 }
 
-export type SelectionScope = 'global' | 'session' | 'trace';
+export type SelectionScope = 'global' | 'session' | 'slot' | 'trace';
 
 export interface SelectionState {
   scope: SelectionScope;

@@ -3,6 +3,7 @@
 import { memo, useState } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { getBeaconColor, type ArchNodeData } from './types';
+import { useArchStore } from './useArchStore';
 
 const NODE_TYPE_SHAPES: Record<string, string> = {
   function: 'rounded-lg',
@@ -29,18 +30,23 @@ const NODE_TYPE_ICONS: Record<string, string> = {
 function CodeNode({ data }: NodeProps) {
   const [showStub, setShowStub] = useState(false);
   const d = data as unknown as ArchNodeData;
+  const changes = useArchStore(s => s.changes);
   const color = getBeaconColor(d.beacon);
   const shape = NODE_TYPE_SHAPES[d.node_type] || 'rounded-lg';
   const icon = NODE_TYPE_ICONS[d.node_type] || '?';
   const maxLines = 200; // For heat bar scaling
   const heatPct = Math.min(100, Math.round((d.lines / maxLines) * 100));
 
+  // Check if this node has been moved
+  const moveChange = changes.findLast(c => c.type === 'move' && c.nodeId === d.id);
+  const isMoved = !!moveChange;
+
   return (
     <div
       className={`relative group ${shape} ${d.is_exported ? 'border-2' : 'border border-dashed'}`}
       style={{
-        borderColor: color,
-        backgroundColor: `${color}10`,
+        borderColor: isMoved ? '#3b82f6' : color,
+        backgroundColor: isMoved ? 'rgba(59, 130, 246, 0.1)' : `${color}10`,
         minWidth: 180,
         maxWidth: 280,
       }}
@@ -48,6 +54,13 @@ function CodeNode({ data }: NodeProps) {
       onMouseLeave={() => setShowStub(false)}
     >
       <Handle type="target" position={Position.Top} className="!w-2 !h-2 !bg-neutral-500" />
+
+      {/* Moved indicator */}
+      {isMoved && (
+        <div className="absolute -top-2 left-1/2 -translate-x-1/2 px-1.5 py-0.5 bg-blue-500 text-[8px] text-white font-medium rounded-full whitespace-nowrap">
+          MOVED
+        </div>
+      )}
 
       {/* Header */}
       <div className="flex items-center gap-1.5 px-2 py-1.5">

@@ -15,7 +15,7 @@ import type { TimelineEvent, SelectionState, TimelineStats, ViewMode } from './t
 import { EMPTY_SELECTION } from './types';
 import {
   SESSION_COLORS, SWIMLANES, SLOT_LANE_IDX, WINDOW_OPTIONS,
-  DOT_STYLES, CAPSULE_STYLES,
+  DOT_STYLES, CAPSULE_STYLES, getSlotLine,
 } from './constants';
 import {
   getDotStatus, getCapsuleStatus, getEventColor,
@@ -96,9 +96,18 @@ export function CognitiveTimeline() {
     }
     return { min: now - windowToMs(savedView.activeWindow), max: now };
   }, []);
-  const { containerRef: timelineRef, timeRange, animateToRange } = useTimelineGestures({
+  const { containerRef: timelineRef, timeRange, animateToRange, isRefreshing } = useTimelineGestures({
     initialRange,
     maxAllowedTime: gestureMaxTime,
+    onRefresh: async () => {
+      loadedRangeRef.current = null;
+      const { min, max } = timeRange;
+      const windowMs = max - min;
+      const n = Date.now();
+      setLoading(true);
+      await fetchForRange(n - windowMs, n, { replace: true }).catch(() => {});
+      setLoading(false);
+    },
   });
 
   // Track the time range we already have data for — avoid redundant fetches
@@ -206,6 +215,7 @@ export function CognitiveTimeline() {
 
   // ── Unified selection handlers (defined as refs to avoid sessionLayout ordering) ──
   const sessionLayoutRef = useRef<typeof sessionLayout>(null!);
+  const slotLayoutRef = useRef<typeof slotLayout>(null!);
 
   const selectCapsule = useCallback((sid: string) => {
     setSelection(prev => {
@@ -214,6 +224,20 @@ export function CognitiveTimeline() {
       const sorted = [...sessionEvents].sort((a, b) => utcMs(a.created_at) - utcMs(b.created_at));
       return {
         scope: 'session', scopeId: sid,
+        focusedSeq: sorted[0]?.seq ?? null,
+        contextSeqs: sorted.map(e => e.seq),
+        source: 'timeline',
+      };
+    });
+  }, []);
+
+  const selectSlotCapsule = useCallback((slotId: string) => {
+    setSelection(prev => {
+      if (prev.scope === 'slot' && prev.scopeId === slotId) return EMPTY_SELECTION; // toggle off
+      const slotEvents = slotLayoutRef.current?.map.get(slotId)?.events || [];
+      const sorted = [...slotEvents].sort((a, b) => utcMs(a.created_at) - utcMs(b.created_at));
+      return {
+        scope: 'slot', scopeId: slotId,
         focusedSeq: sorted[0]?.seq ?? null,
         contextSeqs: sorted.map(e => e.seq),
         source: 'timeline',
@@ -396,8 +420,9 @@ export function CognitiveTimeline() {
     };
   }, [sessionLayout, slotLayout]);
 
-  // Keep ref in sync for selection handlers
+  // Keep refs in sync for selection handlers
   sessionLayoutRef.current = sessionLayout;
+  slotLayoutRef.current = slotLayout;
 
   // Get Y position for a chat event accounting for session sub-row
   const getChatY = useCallback((ev: TimelineEvent): number => {
@@ -673,7 +698,7 @@ export function CognitiveTimeline() {
         {/* Swimlane labels + timeline area */}
         <div className="flex flex-1 min-h-0">
           {/* Swimlane labels with Solo/Mute controls */}
-          <div className="w-20 shrink-0 border-r border-neutral-800 flex flex-col">
+          <div className="w-20 shrink-0 border-r border-neutral-800/80 bg-neutral-950 flex flex-col">
             {SWIMLANES.map((lane, i) => {
               const geo = laneGeometry.lanes[i];
               const isSoloed = soloed.has(lane.id);
@@ -681,37 +706,47 @@ export function CognitiveTimeline() {
               const isVisible = isLaneVisible(lane.id, soloed, muted);
               return (
                 <div key={lane.id} className={cn(
-                  'group flex items-center justify-between px-1 text-[10px] font-medium overflow-hidden',
+                  'group relative flex items-center gap-1 px-1.5 text-[10px] font-medium overflow-hidden',
+                  'hover:bg-white/[0.03] transition-colors',
                   i < SWIMLANES.length - 1 && 'border-b border-neutral-800/50',
-                  !isVisible && 'opacity-50',
+                  !isVisible && 'opacity-40',
                 )} style={{ height: `${geo.height}%` }}>
-                  {/* Solo */}
-                  <button
-                    onClick={(e) => handleSolo(lane.id, e.shiftKey)}
-                    className={cn(
-                      'w-3.5 h-3.5 flex items-center justify-center rounded text-[7px] font-bold shrink-0 transition-all',
-                      isSoloed
-                        ? 'bg-amber-500 text-black'
-                        : 'text-neutral-700 opacity-40 group-hover:opacity-100 hover:bg-neutral-700 hover:text-neutral-300',
-                    )}
-                    title={`Solo ${lane.label} (Shift+click to add)`}
-                  >S</button>
+                  {/* Accent dot — lane identity */}
+                  <div
+                    className={cn('w-1.5 h-1.5 rounded-full shrink-0', lane.accent.dot)}
+                    style={{ boxShadow: isVisible ? `0 0 6px ${lane.accent.css}` : 'none', opacity: isVisible ? 0.85 : 0.3 }}
+                  />
                   {/* Label */}
                   <span className={cn(
-                    'truncate text-center flex-1 px-0.5',
-                    isSoloed ? 'text-amber-400' : isMuted ? 'text-neutral-600 line-through' : 'text-neutral-500',
+                    'truncate flex-1',
+                    isSoloed ? 'text-amber-400' : isMuted ? 'text-neutral-600 line-through' : 'text-neutral-400',
                   )} title={lane.label}>{lane.label}</span>
-                  {/* Mute */}
-                  <button
-                    onClick={() => handleMute(lane.id)}
-                    className={cn(
-                      'w-3.5 h-3.5 flex items-center justify-center rounded text-[7px] font-bold shrink-0 transition-all',
-                      isMuted
-                        ? 'bg-red-500/80 text-white'
-                        : 'text-neutral-700 opacity-40 group-hover:opacity-100 hover:bg-neutral-700 hover:text-neutral-300',
-                    )}
-                    title={`Mute ${lane.label}`}
-                  >M</button>
+                  {/* Solo/Mute — right-aligned, appear on hover */}
+                  <div className={cn(
+                    'absolute right-0.5 top-1/2 -translate-y-1/2 items-center gap-0.5',
+                    (isSoloed || isMuted) ? 'flex' : 'hidden group-hover:flex',
+                  )}>
+                    <button
+                      onClick={(e) => handleSolo(lane.id, e.shiftKey)}
+                      className={cn(
+                        'w-3.5 h-3.5 flex items-center justify-center rounded text-[7px] font-bold transition-all',
+                        isSoloed
+                          ? 'bg-amber-500 text-black'
+                          : 'text-neutral-500 hover:bg-neutral-700 hover:text-neutral-300',
+                      )}
+                      title={`Solo ${lane.label} (Shift+click to add)`}
+                    >S</button>
+                    <button
+                      onClick={() => handleMute(lane.id)}
+                      className={cn(
+                        'w-3.5 h-3.5 flex items-center justify-center rounded text-[7px] font-bold transition-all',
+                        isMuted
+                          ? 'bg-red-500/80 text-white'
+                          : 'text-neutral-500 hover:bg-neutral-700 hover:text-neutral-300',
+                      )}
+                      title={`Mute ${lane.label}`}
+                    >M</button>
+                  </div>
                 </div>
               );
             })}
@@ -719,7 +754,7 @@ export function CognitiveTimeline() {
 
           {/* Timeline canvas — gesture-controlled: scroll to pan, pinch to zoom */}
           <div ref={timelineRef} className="flex-1 relative overflow-hidden touch-none cursor-grab active:cursor-grabbing" style={{ minHeight: 100 + sessionLayout.rowCount * 28 }} onClick={() => setSelection(EMPTY_SELECTION)}>
-            {/* Swimlane backgrounds */}
+            {/* Swimlane backgrounds — alternating tint + accent color */}
             {SWIMLANES.map((lane, i) => {
               const geo = laneGeometry.lanes[i];
               const laneHidden = !isLaneVisible(lane.id, soloed, muted);
@@ -728,10 +763,18 @@ export function CognitiveTimeline() {
                   key={lane.id}
                   className={cn(
                     'absolute left-0 right-0 transition-opacity',
-                    i < SWIMLANES.length - 1 && 'border-b border-neutral-800/30',
-                    laneHidden && 'bg-neutral-900/40',
+                    i < SWIMLANES.length - 1 && 'border-b border-neutral-800/40',
+                    laneHidden ? 'bg-neutral-900/40' : [
+                      i % 2 === 0 && 'bg-white/[0.012]',
+                      lane.accent.bg,
+                    ],
                   )}
-                  style={{ top: `${geo.top}%`, height: `${geo.height}%`, opacity: laneHidden ? 0.3 : 1 }}
+                  style={{
+                    top: `${geo.top}%`,
+                    height: `${geo.height}%`,
+                    opacity: laneHidden ? 0.3 : 1,
+                    borderLeft: laneHidden ? 'none' : `2px solid ${lane.accent.css}20`,
+                  }}
                 />
               );
             })}
@@ -792,7 +835,57 @@ export function CognitiveTimeline() {
               );
             })}
 
-            {/* Event dots — positioned via CSS calc() driven by --t-min/--t-range on container */}
+            {/* Slot capsules — grouped by slot_id, positioned in Slot lane sub-rows */}
+            {isLaneVisible('slot', soloed, muted) && Array.from(slotLayout.map.entries()).map(([slotId, info]) => {
+              const times = info.events.map(e => utcMs(e.created_at));
+              const evtMin = Math.min(...times);
+              const evtMax = Math.max(...times);
+              const slotLane = laneGeometry.lanes[SLOT_LANE_IDX];
+              const subH = laneGeometry.slotSubRowHeight;
+              const yCenter = slotLane.top + subH * (info.row + 0.5);
+              const capsuleH = subH * 0.7;
+              const lineColor = getSlotLine(slotId);
+              const cStatus = getCapsuleStatus(slotId, selection);
+              return (
+                <div
+                  key={`slot-capsule-${slotId}`}
+                  className={cn(
+                    'absolute cursor-pointer overflow-hidden',
+                    'transition-[opacity,box-shadow,border-color,transform] duration-200 ease-out',
+                    'animate-capsule-enter',
+                    cStatus === 'normal' && 'hover:brightness-110 hover:shadow-md hover:shadow-black/30',
+                    CAPSULE_STYLES[cStatus],
+                  )}
+                  style={{
+                    '--t-start': evtMin,
+                    '--t-end': evtMax,
+                    left: 'calc((var(--t-start) - var(--t-min)) / var(--t-range) * 100%)',
+                    width: 'calc(max((var(--t-end) - var(--t-start)) / var(--t-range) * 100%, 1.2%))',
+                    top: `${yCenter - capsuleH / 2}%`,
+                    height: `${capsuleH}%`,
+                    backgroundColor: lineColor,
+                    border: cStatus === 'selected'
+                      ? `2px solid ${lineColor.replace('0.25)', '0.85)')}`
+                      : `1px solid ${lineColor.replace('0.25)', '0.45)')}`,
+                    borderRadius: '10px',
+                    boxShadow: cStatus === 'selected'
+                      ? `0 0 14px ${lineColor.replace('0.25)', '0.35)')}, inset 0 1px 0 rgba(255,255,255,0.08)`
+                      : 'inset 0 1px 0 rgba(255,255,255,0.06)',
+                  } as React.CSSProperties}
+                  onClick={(e) => { e.stopPropagation(); selectSlotCapsule(slotId); }}
+                  title={`Slot: ${slotId} · ${info.events.length} events`}
+                >
+                  {/* Slot label inside capsule */}
+                  <div className="absolute inset-0 flex items-center px-1.5 pointer-events-none">
+                    <span className="text-[8px] font-medium text-white/40 truncate">{slotId.replace('slot-', '')}</span>
+                  </div>
+                  {/* Top highlight gradient */}
+                  <div className="absolute inset-0 bg-gradient-to-b from-white/[0.05] to-transparent pointer-events-none rounded-[10px]" />
+                </div>
+              );
+            })}
+
+            {/* Event dots — wrapper pattern: 24px hit area + 7px visual dot */}
             {filtered.map((ev) => {
               const y = getY(ev);
               const ec = getEventColor(ev.event_type);
@@ -804,32 +897,42 @@ export function CognitiveTimeline() {
               const sessionColor = sessionInfo ? SESSION_COLORS[sessionInfo.colorIdx] : null;
 
               return (
+                /* Outer wrapper: 24px invisible hit area, handles positioning + click */
                 <button
                   key={ev.seq}
                   ref={(el) => { if (el) timelineDotRefs.current.set(ev.seq, el); else timelineDotRefs.current.delete(ev.seq); }}
                   onClick={(e) => { e.stopPropagation(); selectEvent(ev, 'timeline'); }}
                   className={cn(
-                    'absolute -translate-x-1/2 -translate-y-1/2 rounded-full z-[25]',
-                    'transition-[transform,box-shadow,ring-color,opacity] duration-200 ease-out',
-                    'animate-spring-pop',
-                    // Size by type — use fixed size + scale for hover (GPU-only, no layout shift)
-                    isInsight ? 'w-3.5 h-3.5' :
-                    isError ? 'w-3 h-3' :
-                    'w-2.5 h-2.5',
-                    // Cutout ring — matches background for "floating" effect
-                    dStatus === 'normal' && !sessionColor && 'ring-[2.5px] ring-neutral-950',
-                    // Hover: scale up + glow (no width/height change = no reflow)
-                    dStatus === 'normal' && 'hover:scale-150 hover:shadow-[0_0_8px_var(--tw-shadow-color)] hover:z-[35]',
-                    ec.dot,
-                    // Shadow color matches dot color for coherent glow
-                    ec.glow,
-                    // Session ring (only in normal state, overrides cutout ring)
-                    sessionColor && dStatus === 'normal' && `ring-[2px] ${sessionColor.ring}`,
-                    DOT_STYLES[dStatus],
+                    'absolute -translate-x-1/2 -translate-y-1/2 w-6 h-6 flex items-center justify-center',
+                    'group/dot cursor-pointer z-[25]',
+                    dStatus === 'focused' && 'z-[35]',
+                    dStatus === 'highlighted' && 'z-30',
                   )}
                   style={{ '--t-event': utcMs(ev.created_at), left: cssLeft, top: `${y}%` } as React.CSSProperties}
                   title={`${ec.label}: ${eventSummary(ev)}${isChat && ev.payload?.session_id ? `\nSession: ${ev.payload.session_id.slice(0, 8)}` : ''}\n${formatBeijingTime(ev.created_at)}`}
-                />
+                >
+                  {/* Hover confirm halo — expands on mouse enter */}
+                  <div className={cn(
+                    'absolute inset-0 rounded-full pointer-events-none',
+                    'scale-50 opacity-0 transition-all duration-200 ease-out',
+                    dStatus === 'normal' && 'group-hover/dot:scale-100 group-hover/dot:opacity-100',
+                    ec.bg,
+                  )} />
+                  {/* Visual dot — stays 7px, animates independently */}
+                  <div className={cn(
+                    'rounded-full relative',
+                    'transition-[transform,box-shadow,ring-color,opacity] duration-200 ease-out',
+                    'animate-spring-pop',
+                    isInsight ? 'w-3.5 h-3.5' :
+                    isError ? 'w-3 h-3' :
+                    'w-[7px] h-[7px]',
+                    dStatus === 'normal' && !sessionColor && 'ring-2 ring-current/20',
+                    dStatus === 'normal' && 'group-hover/dot:scale-[1.8] group-hover/dot:shadow-[0_0_10px_var(--tw-shadow-color)]',
+                    ec.dot, ec.glow,
+                    sessionColor && dStatus === 'normal' && `ring-[2px] ${sessionColor.ring}`,
+                    DOT_STYLES[dStatus],
+                  )} />
+                </button>
               );
             })}
 
@@ -891,6 +994,32 @@ export function CognitiveTimeline() {
                 );
               });
             })()}
+
+            {/* Pull-to-refresh indicator — slides in from right via GPU-composited transform */}
+            <div
+              className="absolute top-0 bottom-0 z-50 pointer-events-none flex items-center justify-center"
+              style={{
+                right: '-56px',
+                width: '56px',
+                transform: 'translateX(var(--overscroll-x, 0px))',
+                willChange: 'transform',
+              }}
+            >
+              <div className="absolute inset-0 bg-gradient-to-l from-neutral-900/80 to-transparent" />
+              <div className={cn(
+                'relative rounded-full p-2 border',
+                isRefreshing
+                  ? 'bg-blue-500/20 border-blue-500/30'
+                  : 'bg-neutral-800/60 border-neutral-700/40',
+              )}>
+                <RefreshCw className={cn(
+                  'w-4 h-4',
+                  isRefreshing ? 'text-blue-400 animate-spin' : 'text-neutral-400',
+                )} style={!isRefreshing ? {
+                  transform: 'rotate(calc(var(--overscroll-progress, 0) * 360deg))',
+                } : undefined} />
+              </div>
+            </div>
           </div>
         </div>
 
