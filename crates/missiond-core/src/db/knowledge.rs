@@ -2,7 +2,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use super::error::DbResult;
 use std::sync::atomic::Ordering;
 use crate::types::*;
-use super::{MissionDB, token_jaccard_similarity};
+use super::MissionDB;
+use std::collections::HashSet;
 
 impl MissionDB {
     // ============ Knowledge Base ============
@@ -1236,4 +1237,42 @@ impl MissionDB {
             linked_task_id: row.get("linked_task_id").unwrap_or(None),
         })
     }
+}
+
+/// Tokenize text for similarity comparison.
+/// Chinese: character-level unigrams. English: lowercase words (len >= 2).
+fn tokenize_for_similarity(text: &str) -> HashSet<String> {
+    let mut tokens = HashSet::new();
+    let mut ascii_word = String::new();
+
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            ascii_word.push(ch.to_ascii_lowercase());
+        } else {
+            if ascii_word.len() >= 2 {
+                tokens.insert(ascii_word.clone());
+            }
+            ascii_word.clear();
+            // CJK character → insert as unigram
+            if ch as u32 > 0x2E80 {
+                tokens.insert(ch.to_string());
+            }
+        }
+    }
+    if ascii_word.len() >= 2 {
+        tokens.insert(ascii_word);
+    }
+    tokens
+}
+
+/// Token-level Jaccard similarity (supports Chinese + English mixed text)
+fn token_jaccard_similarity(a: &str, b: &str) -> f64 {
+    let ta = tokenize_for_similarity(a);
+    let tb = tokenize_for_similarity(b);
+    if ta.is_empty() && tb.is_empty() {
+        return 0.0;
+    }
+    let intersection = ta.intersection(&tb).count();
+    let union = ta.union(&tb).count();
+    if union == 0 { 0.0 } else { intersection as f64 / union as f64 }
 }
