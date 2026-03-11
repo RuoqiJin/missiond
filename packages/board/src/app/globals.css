@@ -34,34 +34,32 @@
   }
 }
 
-/* Timeline dot radar-ping animation for bidirectional sync */
-@keyframes ping-radar {
-  0% {
-    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.6);
+@layer components {
+  /* Timeline dot radar-ping animation for bidirectional sync */
+  @keyframes ping-radar {
+    0% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.6); }
+    100% { box-shadow: 0 0 0 12px rgba(255, 255, 255, 0); }
   }
-  100% {
-    box-shadow: 0 0 0 12px rgba(255, 255, 255, 0);
+  .animate-ping-radar {
+    animation: ping-radar 0.7s cubic-bezier(0, 0, 0.2, 1) forwards;
   }
-}
-.animate-ping-radar {
-  animation: ping-radar 0.7s cubic-bezier(0, 0, 0.2, 1) forwards;
-}
 
-/* Timeline dot spring-pop entrance animation */
-@keyframes spring-pop {
-  0% { opacity: 0; scale: 0.15; }
-  60% { opacity: 1; scale: 1.15; }
-  100% { opacity: 1; scale: 1; }
-}
-.animate-spring-pop {
-  animation: spring-pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
-}
+  /* Timeline dot spring-pop entrance animation */
+  @keyframes spring-pop {
+    0% { opacity: 0; scale: 0.15; }
+    60% { opacity: 1; scale: 1.15; }
+    100% { opacity: 1; scale: 1; }
+  }
+  .animate-spring-pop {
+    animation: spring-pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  }
 
-/* Timeline capsule fade-slide entrance animation */
-@keyframes capsule-enter {
-  0% { opacity: 0; translate: 0 3px; }
-  100% { opacity: 1; translate: 0 0; }
-}
-.animate-capsule-enter {
-  animation: capsule-enter 0.35s ease-out forwards;
+  /* Timeline capsule fade-slide entrance animation */
+  @keyframes capsule-enter {
+    0% { opacity: 0; translate: 0 3px; }
+    100% { opacity: 1; translate: 0 0; }
+  }
+  .animate-capsule-enter {
+    animation: capsule-enter 0.35s ease-out forwards;
+  }
 }

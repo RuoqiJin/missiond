@@ -136,6 +136,11 @@ export const CAPSULE_STYLES: Record<CapsuleVisualStatus, string> = {
   normal:   'z-[1]',
 };
 
+// ── CSS Helpers ──
+
+/** CSS calc expression for GPU-driven horizontal positioning via custom properties */
+export const CSS_LEFT = 'calc((var(--t-event) - var(--t-min)) / var(--t-range) * 100%)';
+
 // ── View Persistence ──
 
 export const STORAGE_KEY = 'timeline-view-state';
