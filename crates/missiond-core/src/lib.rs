@@ -65,7 +65,7 @@ pub use cc_tasks::{
 };
 
 // Re-export WebSocket types
-pub use ws::{PTYWebSocketServer, WSServerOptions};
+pub use ws::{PTYWebSocketServer, WSServerOptions, ContextEnricherFn, ContextEnricherSlot};
 
 // Re-export Sync types
 pub use sync::{SyncClient, SyncClientOptions, SyncEvent, SyncRelay, SyncRelayOptions};

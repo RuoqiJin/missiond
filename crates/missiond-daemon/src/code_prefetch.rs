@@ -11,15 +11,46 @@ use tracing::{debug, info};
 
 use missiond_core::db::ast::AstSearchHit;
 use missiond_core::embedding;
-use missiond_core::types::BoardTask;
-
 use crate::state::AppState;
+
+// --- Progressive Folding: Render Tier system (Gemini-reviewed) ---
+
+/// Render tier determines how much detail a node gets in the output.
+/// Higher tiers get more detail; lower tiers save token budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum RenderTier {
+    /// Stage 0 beacon hits — always full resolution.
+    Beacon = 2,
+    /// Stage 1-4 primary search hits — full if budget allows.
+    Primary = 1,
+    /// Stage 5 cross-file expansion — signature only.
+    Expansion = 0,
+}
+
+/// AST hit tagged with its render tier for progressive folding.
+#[derive(Clone)]
+struct RankedHit {
+    hit: AstSearchHit,
+    tier: RenderTier,
+}
 
 /// Max tokens for code context block (~40-60 nodes).
 const TOKEN_BUDGET: usize = 6000;
 
+/// Elevated budget when beacon hit confirms high signal-to-noise.
+const BEACON_ELEVATED_BUDGET: usize = 6000;
+
+/// Default interactive budget (Hook queries).
+const INTERACTIVE_BUDGET: usize = 2000;
+
 /// Estimated tokens per AST node in rendered output.
 const TOKENS_PER_NODE_ESTIMATE: usize = 120;
+
+/// Small nodes below this byte count are never folded (Gemini review: 4b).
+const MIN_FOLDABLE_BYTES: usize = 120;
+
+/// Max lines inside braces before struct/enum body gets folded.
+const STRUCT_FOLD_LINE_THRESHOLD: usize = 5;
 
 /// Max nodes from primary search (before cross-file expansion).
 const PRIMARY_TOP_K: usize = 40;
@@ -65,40 +96,28 @@ fn apply_file_cohesion(scored: &mut [(String, f64, AstSearchHit)]) {
     }
 }
 
-/// Build the search query from a Board task.
-fn build_query(task: &BoardTask) -> String {
-    let mut q = task.title.clone();
-    if !task.description.is_empty() {
-        q.push(' ');
-        q.push_str(&task.description);
-    }
-    // Truncate to avoid FTS query explosion on very long descriptions
-    if q.len() > 500 {
-        q.truncate(500);
-    }
-    q
-}
-
-// @beacon: holographic
-/// Main entry point: search + rank + render code context block.
-/// Returns None if no relevant code found or AST index is empty.
-pub(crate) async fn code_prefetch(state: &AppState, task: &BoardTask) -> Option<String> {
-    let query = build_query(task);
+/// Search by raw query string — unified entry point for Context Pipeline.
+pub(crate) async fn code_prefetch_query(state: &AppState, query: &str) -> Option<String> {
     if query.trim().is_empty() {
         return None;
     }
+    code_prefetch_inner(state, query).await
+}
+
+async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
 
     let mut budget_nodes = TOKEN_BUDGET / TOKENS_PER_NODE_ESTIMATE;
 
     // Stage 0: Beacon priority match (P4)
     // If task title/description contains a beacon name, inject full topology first
     let mut beacon_hits: Vec<AstSearchHit> = Vec::new();
-    let q = query.clone();
+    let q = query.to_string();
     let beacon_matches = state.db_exec.run(move |db| {
         db.beacon_search(&q)
     }).await.unwrap_or_default();
 
-    if !beacon_matches.is_empty() {
+    let has_beacon_hits = !beacon_matches.is_empty();
+    if has_beacon_hits {
         let db = state.mission.db();
         for beacon in &beacon_matches {
             if budget_nodes == 0 { break; }
@@ -131,14 +150,26 @@ pub(crate) async fn code_prefetch(state: &AppState, task: &BoardTask) -> Option<
     }
 
     // Stage 1: FTS5 ranked IDs
-    let q = query.clone();
+    let q = query.to_string();
     let fts_ranked = state.db_exec.run(move |db| {
         db.ast_search_ranked(&q, PRIMARY_TOP_K * 3)
     }).await.unwrap_or_default();
 
-    // Stage 2: Embedding vector search
-    let query_embedding = state.embedding_service.as_ref()
-        .and_then(|svc| svc.embed(&query));
+    // Stage 2: Embedding vector search (health-aware — Gemini reviewed)
+    // Check embedding health via relative coverage ratio, not absolute count
+    let ast_cache_len = state.ast_embedding_cache.read().await.len();
+    let fts_total = fts_ranked.len();
+    // Use FTS5 total as proxy for indexed nodes (avoids extra DB query in hot path).
+    // If cache has vectors for a decent fraction of what FTS5 knows about, vectors are useful.
+    let embedding_healthy = ast_cache_len > 0
+        && (fts_total == 0 || ast_cache_len as f64 / fts_total.max(1) as f64 > 0.5);
+
+    let query_embedding = if embedding_healthy {
+        state.embedding_service.as_ref().and_then(|svc| svc.embed(query))
+    } else {
+        debug!(cache_len = ast_cache_len, "AST embedding cache sparse, skipping vector search");
+        None
+    };
 
     let cache = state.ast_embedding_cache.read().await;
     let vec_ranked: Vec<(String, usize, f32)> = if let Some(ref qe) = query_embedding {
@@ -158,7 +189,7 @@ pub(crate) async fn code_prefetch(state: &AppState, task: &BoardTask) -> Option<
     drop(cache);
 
     if fts_ranked.is_empty() && vec_ranked.is_empty() {
-        debug!("Code prefetch: no FTS or vector results for task {}", task.id);
+        debug!("Code prefetch: no FTS or vector results for query {:?}", &query[..query.len().min(60)]);
         return None;
     }
 
@@ -184,7 +215,7 @@ pub(crate) async fn code_prefetch(state: &AppState, task: &BoardTask) -> Option<
     rrf_scored.truncate(PRIMARY_TOP_K * 2);
 
     if rrf_scored.is_empty() {
-        debug!("Code prefetch: all results below RRF threshold for task {}", task.id);
+        debug!("Code prefetch: all results below RRF threshold for query {:?}", &query[..query.len().min(60)]);
         return None;
     }
 
@@ -238,40 +269,58 @@ pub(crate) async fn code_prefetch(state: &AppState, task: &BoardTask) -> Option<
     });
 
     // Merge: beacon hits (priority) + hybrid search hits (deduped)
-    let beacon_ids: HashSet<String> = beacon_hits.iter()
+    // Tag each hit with its RenderTier (Gemini review: dedup + tier promotion)
+    let beacon_keys: HashSet<String> = beacon_hits.iter()
         .map(|h| format!("{}:{}", h.file_path, h.name))
         .collect();
-    primary_hits.retain(|h| !beacon_ids.contains(&format!("{}:{}", h.file_path, h.name)));
+    primary_hits.retain(|h| !beacon_keys.contains(&format!("{}:{}", h.file_path, h.name)));
 
-    let mut all_hits = beacon_hits;
-    all_hits.extend(primary_hits);
+    let mut ranked: Vec<RankedHit> = beacon_hits.into_iter()
+        .map(|hit| RankedHit { hit, tier: RenderTier::Beacon })
+        .collect();
+    ranked.extend(primary_hits.into_iter()
+        .map(|hit| RankedHit { hit, tier: RenderTier::Primary }));
 
-    if all_hits.is_empty() {
+    if ranked.is_empty() {
+        // Fallback: inject module-level topology map (Step 4, Gemini-reviewed)
+        // When no micro-level AST nodes match, provide architectural navigation
+        let summaries = state.db_exec.run(move |db| {
+            db.ast_module_summaries("missiond")
+        }).await.unwrap_or_default();
+
+        if !summaries.is_empty() {
+            info!(
+                query_prefix = &query[..query.len().min(60)],
+                modules = summaries.len(),
+                "Code prefetch: no AST match, injecting topology map fallback"
+            );
+            return crate::topology_map::render_module_navigation(&summaries, query);
+        }
         return None;
     }
 
     // Cross-file association: expand related types (post-search, Gemini-confirmed)
-    let remaining_budget = budget_nodes.saturating_sub(all_hits.len());
+    let remaining_budget = budget_nodes.saturating_sub(ranked.len());
     if remaining_budget > 0 {
-        let existing_names: HashSet<String> = all_hits.iter()
-            .map(|h| h.name.clone())
+        let existing_names: HashSet<String> = ranked.iter()
+            .map(|r| r.hit.name.clone())
             .collect();
-        let existing_ids: HashSet<String> = all_hits.iter()
-            .map(|h| h.id.clone())
+        let existing_ids: HashSet<String> = ranked.iter()
+            .map(|r| r.hit.id.clone())
             .collect();
 
         let mut expansion_hits: Vec<AstSearchHit> = Vec::new();
 
         // Expand: impl Foo → find struct/enum/trait Foo
-        for hit in &all_hits {
-            if hit.node_type == "impl" && expansion_hits.len() < remaining_budget {
-                if let Ok(related) = db.ast_find_related(&hit.name, 3) {
-                    for r in related {
-                        if !existing_ids.contains(&r.id)
-                            && !expansion_hits.iter().any(|e| e.id == r.id)
+        for r in &ranked {
+            if r.hit.node_type == "impl" && expansion_hits.len() < remaining_budget {
+                if let Ok(related) = db.ast_find_related(&r.hit.name, 3) {
+                    for rel in related {
+                        if !existing_ids.contains(&rel.id)
+                            && !expansion_hits.iter().any(|e| e.id == rel.id)
                             && expansion_hits.len() < remaining_budget
                         {
-                            expansion_hits.push(r);
+                            expansion_hits.push(rel);
                         }
                     }
                 }
@@ -279,17 +328,17 @@ pub(crate) async fn code_prefetch(state: &AppState, task: &BoardTask) -> Option<
         }
 
         // Expand: called functions not in results
-        for hit in all_hits.iter() {
-            for call_name in &hit.calls {
+        for r in ranked.iter() {
+            for call_name in &r.hit.calls {
                 if !existing_names.contains(call_name)
                     && expansion_hits.len() < remaining_budget
                 {
                     if let Ok(related) = db.ast_find_related(call_name, 1) {
-                        for r in related {
-                            if !existing_ids.contains(&r.id)
-                                && !expansion_hits.iter().any(|e| e.id == r.id)
+                        for rel in related {
+                            if !existing_ids.contains(&rel.id)
+                                && !expansion_hits.iter().any(|e| e.id == rel.id)
                             {
-                                expansion_hits.push(r);
+                                expansion_hits.push(rel);
                             }
                         }
                     }
@@ -297,66 +346,184 @@ pub(crate) async fn code_prefetch(state: &AppState, task: &BoardTask) -> Option<
             }
         }
 
-        all_hits.extend(expansion_hits);
+        ranked.extend(expansion_hits.into_iter()
+            .map(|hit| RankedHit { hit, tier: RenderTier::Expansion }));
     }
 
-    // Render XML output
-    let xml = render_code_context(&all_hits);
+    // Dynamic budget: beacon hit → elevate to full budget (Gemini review: 3)
+    let token_budget = if has_beacon_hits {
+        BEACON_ELEVATED_BUDGET
+    } else {
+        INTERACTIVE_BUDGET
+    };
+
+    // Render XML output with progressive folding
+    let xml = render_code_context_tiered(&ranked, token_budget);
 
     info!(
-        task_id = %task.id,
-        nodes = all_hits.len(),
-        files = all_hits.iter().map(|h| &h.file_path).collect::<HashSet<_>>().len(),
+        query_prefix = &query[..query.len().min(60)],
+        nodes = ranked.len(),
+        files = ranked.iter().map(|r| &r.hit.file_path).collect::<HashSet<_>>().len(),
         beacons = beacon_matches.len(),
-        "Code prefetch injected"
+        token_budget,
+        "Code prefetch injected (progressive folding)"
     );
 
     Some(xml)
 }
 
-/// Render AST search hits into XML `<code_context>` block, grouped by file.
-fn render_code_context(hits: &[AstSearchHit]) -> String {
-    if hits.is_empty() {
+// --- Progressive Folding: Token estimation & rendering ---
+
+/// Estimate token count from content bytes (~4 bytes per token for English/code).
+fn estimate_tokens(content: &str) -> usize {
+    content.len() / 4 + 1
+}
+
+/// Fold struct/enum body: if brace-enclosed content exceeds threshold, elide it.
+/// Returns the folded content or None if no folding needed.
+fn fold_structural_body(stub: &str, node_type: &str) -> Option<String> {
+    if node_type != "struct" && node_type != "enum" {
+        return None;
+    }
+    let open = stub.find('{')?;
+    let close = stub.rfind('}')?;
+    if close <= open + 1 {
+        return None;
+    }
+    let body = &stub[open + 1..close];
+    let body_lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+    if body_lines.len() <= STRUCT_FOLD_LINE_THRESHOLD {
+        return None; // Short enough — no folding needed
+    }
+    let mut folded = String::with_capacity(stub.len());
+    folded.push_str(&stub[..open + 1]);
+    folded.push_str(&format!("\n    // ... ({} fields/variants elided)\n", body_lines.len()));
+    folded.push_str(&stub[close..]);
+    Some(folded)
+}
+
+/// Render a single node at signature-only level (Tier 3 / budget-exhausted fallback).
+fn render_signature_only(hit: &AstSearchHit) -> String {
+    format!("// lines: {}-{}\n{}\n",
+        hit.start_line, hit.end_line, hit.signature)
+}
+
+/// Render a single node at full level (Tier 1).
+fn render_full(hit: &AstSearchHit) -> String {
+    let mut out = format!("// lines: {}-{}\n", hit.start_line, hit.end_line);
+    out.push_str(&hit.stub_content);
+    if !hit.stub_content.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push('\n');
+    out
+}
+
+/// Render a single node with struct/enum folding (Tier 2).
+fn render_folded(hit: &AstSearchHit) -> String {
+    if let Some(folded) = fold_structural_body(&hit.stub_content, &hit.node_type) {
+        let mut out = format!("// lines: {}-{}\n", hit.start_line, hit.end_line);
+        out.push_str(&folded);
+        if !folded.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+        out
+    } else {
+        render_full(hit)
+    }
+}
+
+/// Render AST search hits with progressive folding into XML `<code_context>`.
+///
+/// Tier system (Gemini-reviewed):
+/// - Beacon: always full resolution
+/// - Primary: full if budget allows, folded for large structs/enums, signature-only when exhausted
+/// - Expansion: always signature-only
+///
+/// High-tier nodes rendered first within each file (Gemini review: lost-in-middle).
+fn render_code_context_tiered(ranked: &[RankedHit], token_budget: usize) -> String {
+    if ranked.is_empty() {
         return String::new();
     }
 
-    // Group by file path, preserving order of first occurrence
+    // Group by file, preserving first-occurrence order.
+    // Within each file: sort by tier (desc) then start_line (asc) — high tier first.
     let mut file_order: Vec<String> = Vec::new();
-    let mut by_file: HashMap<String, Vec<&AstSearchHit>> = HashMap::new();
-    for hit in hits {
-        if !by_file.contains_key(&hit.file_path) {
-            file_order.push(hit.file_path.clone());
+    let mut by_file: HashMap<String, Vec<&RankedHit>> = HashMap::new();
+    for r in ranked {
+        if !by_file.contains_key(&r.hit.file_path) {
+            file_order.push(r.hit.file_path.clone());
         }
-        by_file.entry(hit.file_path.clone()).or_default().push(hit);
+        by_file.entry(r.hit.file_path.clone()).or_default().push(r);
     }
-
-    // Sort nodes within each file by start_line
     for nodes in by_file.values_mut() {
-        nodes.sort_by_key(|n| n.start_line);
+        nodes.sort_by(|a, b| {
+            b.tier.cmp(&a.tier)
+                .then_with(|| a.hit.start_line.cmp(&b.hit.start_line))
+        });
     }
 
+    let mut remaining = token_budget;
     let mut xml = String::with_capacity(4096);
     xml.push_str("<code_context>\n");
-    xml.push_str("<!-- tree-sitter 提取的代码结构概要。修改代码时请用 Read(file, offset, limit) 获取完整源码。-->\n");
+    xml.push_str("<!-- tree-sitter AST 概要 (progressive folding)。修改代码时请用 Read 获取完整源码。-->\n");
 
     for file_path in &file_order {
         let nodes = &by_file[file_path];
         xml.push_str(&format!("<file path=\"{}\">\n", file_path));
-        for node in nodes {
-            // Line range comment
-            xml.push_str(&format!("// lines: {}-{}\n", node.start_line, node.end_line));
-            // Stub content (already contains signature + doc + calls placeholder)
-            xml.push_str(&node.stub_content);
-            if !node.stub_content.ends_with('\n') {
-                xml.push('\n');
+        for r in nodes {
+            if remaining == 0 {
+                break;
             }
-            xml.push('\n');
+            let rendered = match r.tier {
+                RenderTier::Beacon => {
+                    // Always full
+                    render_full(&r.hit)
+                }
+                RenderTier::Primary => {
+                    let est = estimate_tokens(&r.hit.stub_content);
+                    // Small node exemption (Gemini review: 4b)
+                    if r.hit.stub_content.len() < MIN_FOLDABLE_BYTES || remaining >= est {
+                        // Try folding large structs/enums even at full budget
+                        if est > remaining && r.hit.stub_content.len() >= MIN_FOLDABLE_BYTES {
+                            render_folded(&r.hit)
+                        } else {
+                            render_full(&r.hit)
+                        }
+                    } else {
+                        // Budget tight: try folded first, fallback to signature
+                        let folded = render_folded(&r.hit);
+                        if estimate_tokens(&folded) <= remaining {
+                            folded
+                        } else {
+                            render_signature_only(&r.hit)
+                        }
+                    }
+                }
+                RenderTier::Expansion => {
+                    // Always signature-only
+                    render_signature_only(&r.hit)
+                }
+            };
+            let cost = estimate_tokens(&rendered);
+            remaining = remaining.saturating_sub(cost);
+            xml.push_str(&rendered);
         }
         xml.push_str("</file>\n");
     }
 
     xml.push_str("</code_context>");
     xml
+}
+
+/// Legacy render — kept for test compatibility.
+#[cfg(test)]
+fn render_code_context(hits: &[AstSearchHit]) -> String {
+    let ranked: Vec<RankedHit> = hits.iter()
+        .map(|h| RankedHit { hit: h.clone(), tier: RenderTier::Primary })
+        .collect();
+    render_code_context_tiered(&ranked, TOKEN_BUDGET)
 }
 
 #[cfg(test)]
@@ -439,5 +606,86 @@ mod tests {
         assert!((scored[0].1 - 1.2).abs() < 0.001);
         // b.rs has 1 hit → no boost
         assert!((scored[3].1 - 1.0).abs() < 0.001);
+    }
+
+    // --- Progressive Folding tests ---
+
+    fn make_hit(id: &str, file: &str, name: &str, node_type: &str, sig: &str, stub: &str) -> AstSearchHit {
+        AstSearchHit {
+            id: id.into(), repo: "test".into(), file_path: file.into(),
+            name: name.into(), node_type: node_type.into(), signature: sig.into(),
+            start_line: 1, end_line: 20, is_exported: true, docstring: None,
+            stub_content: stub.into(), calls: vec![], rank: 0.0,
+        }
+    }
+
+    #[test]
+    fn test_fold_structural_body_short_struct() {
+        let stub = "pub struct Point {\n    pub x: f64,\n    pub y: f64,\n}";
+        assert!(fold_structural_body(stub, "struct").is_none(), "Short struct should not be folded");
+    }
+
+    #[test]
+    fn test_fold_structural_body_large_struct() {
+        let stub = "pub struct Config {\n    pub a: u32,\n    pub b: u32,\n    pub c: u32,\n    pub d: u32,\n    pub e: u32,\n    pub f: u32,\n    pub g: u32,\n}";
+        let folded = fold_structural_body(stub, "struct");
+        assert!(folded.is_some(), "Large struct should be folded");
+        let text = folded.unwrap();
+        assert!(text.contains("elided"), "Folded text should contain 'elided'");
+        assert!(text.contains("pub struct Config {"), "Should preserve header");
+        assert!(text.ends_with('}'), "Should preserve closing brace");
+    }
+
+    #[test]
+    fn test_fold_not_applied_to_functions() {
+        let stub = "pub fn foo() {\n    line1;\n    line2;\n    line3;\n    line4;\n    line5;\n    line6;\n}";
+        assert!(fold_structural_body(stub, "function").is_none());
+    }
+
+    #[test]
+    fn test_tiered_rendering_beacon_always_full() {
+        let hit = make_hit("a", "a.rs", "Foo", "struct", "pub struct Foo",
+            "pub struct Foo {\n    pub x: u32,\n}");
+        let ranked = vec![RankedHit { hit, tier: RenderTier::Beacon }];
+        let xml = render_code_context_tiered(&ranked, 50); // tiny budget
+        assert!(xml.contains("pub x: u32"), "Beacon should always render full");
+    }
+
+    #[test]
+    fn test_tiered_rendering_expansion_signature_only() {
+        let hit = make_hit("b", "b.rs", "bar", "function",
+            "pub fn bar() -> i32",
+            "pub fn bar() -> i32 {\n    // Calls: baz\n    /* elided */\n}");
+        let ranked = vec![RankedHit { hit, tier: RenderTier::Expansion }];
+        let xml = render_code_context_tiered(&ranked, 10000);
+        assert!(xml.contains("pub fn bar() -> i32"), "Should contain signature");
+        assert!(!xml.contains("elided"), "Expansion should NOT contain body");
+    }
+
+    #[test]
+    fn test_tiered_rendering_budget_exhaustion() {
+        // First node is big (Beacon, always full), second is Primary
+        let big_stub = "pub fn big() {\n".to_string()
+            + &"    do_stuff();\n".repeat(100)
+            + "}";
+        let hit1 = make_hit("a", "a.rs", "big", "function", "pub fn big()", &big_stub);
+        let hit2 = make_hit("b", "b.rs", "small", "function",
+            "pub fn small()",
+            "pub fn small() {\n    // Calls: x\n    /* elided */\n}");
+        let ranked = vec![
+            RankedHit { hit: hit1, tier: RenderTier::Beacon },
+            RankedHit { hit: hit2, tier: RenderTier::Primary },
+        ];
+        // Budget barely covers the big node
+        let xml = render_code_context_tiered(&ranked, 500);
+        assert!(xml.contains("pub fn big()"), "Beacon always rendered");
+        // small should still appear (signature-only or full depending on remaining budget)
+        assert!(xml.contains("pub fn small()"), "Small node should still appear");
+    }
+
+    #[test]
+    fn test_dynamic_budget_beacon_elevates() {
+        // Verify BEACON_ELEVATED_BUDGET > INTERACTIVE_BUDGET
+        assert!(BEACON_ELEVATED_BUDGET > INTERACTIVE_BUDGET);
     }
 }

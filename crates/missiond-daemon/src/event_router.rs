@@ -16,6 +16,7 @@ use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::event_bus::{DaemonEvent, TimelineEvent};
+use crate::experience_harvester;
 use crate::state::{AppState, MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 use crate::memory_scheduler::{schedule_memory_tasks, dispatch_queued_submit_tasks};
 use crate::decision_engine::process_pending_master_questions;
@@ -45,6 +46,7 @@ pub(crate) fn start_event_consumers(state: &AppState, timeline_tx: &broadcast::S
     spawn_extraction_consumer(state, timeline_tx);
     spawn_submit_consumer(state, timeline_tx);
     spawn_decision_consumer(state, timeline_tx);
+    spawn_harvest_consumer(state, timeline_tx);
 }
 
 /// Extraction lane: SlotBecameIdle → schedule_memory_tasks.
@@ -213,6 +215,33 @@ fn spawn_decision_consumer(state: &AppState, timeline_tx: &broadcast::Sender<Tim
                     }
                     Err(RecvError::Closed) => break,
                 }
+            }
+        }
+    });
+}
+
+/// Experience Harvest: NarrationSessionCompleted → harvest_session.
+/// No debounce needed — fires once per session completion, already infrequent.
+fn spawn_harvest_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>) {
+    let s = state.clone();
+    let mut rx = timeline_tx.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(te) => {
+                    if let DaemonEvent::NarrationSessionCompleted { session_id, .. } = &te.event {
+                        let mc = std::sync::Arc::clone(&s.mission);
+                        let sid = session_id.clone();
+                        // Run in blocking context since it does DB queries
+                        let _ = tokio::task::spawn_blocking(move || {
+                            experience_harvester::harvest_session(mc.db(), &sid);
+                        }).await;
+                    }
+                }
+                Err(RecvError::Lagged(n)) => {
+                    tracing::debug!(skipped = n, "Harvest consumer lagged (non-critical)");
+                }
+                Err(RecvError::Closed) => break,
             }
         }
     });

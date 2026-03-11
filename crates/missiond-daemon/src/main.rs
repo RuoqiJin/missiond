@@ -45,6 +45,8 @@ mod briefing_worker;
 mod translation_worker;
 mod step_narrator;
 mod context_pipeline;
+mod experience_harvester;
+mod topology_map;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -611,6 +613,8 @@ async fn main() -> Result<()> {
 
     // WebSocket server (PTY attach + Tasks events + AIOps webhooks + EventBus stream)
     let ws_port = ws_port();
+    let context_enricher_slot: missiond_core::ContextEnricherSlot =
+        Arc::new(tokio::sync::RwLock::new(None));
     let mut ws_server = PTYWebSocketServer::new(WSServerOptions {
         port: ws_port,
         pty_manager: Some(Arc::clone(&pty)),
@@ -619,6 +623,7 @@ async fn main() -> Result<()> {
         incident_tx: Some(incident_tx.clone()),
         frontend_events_tx: Some(frontend_events_tx.clone()),
         db: Some(mission.db_arc()),
+        context_enricher: Arc::clone(&context_enricher_slot),
     });
     if let Err(e) = ws_server.start().await {
         // Match Node behavior: continue running even if WS is unavailable (e.g. port in use).
@@ -797,6 +802,25 @@ async fn main() -> Result<()> {
         ast_embedding_cache: missiond_core::embedding::new_cache(),
         last_msg_span: Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
+
+    // Late-bind context enricher for Jarvis chat completions
+    {
+        let state_for_enricher = state.clone();
+        let enricher: missiond_core::ContextEnricherFn = Arc::new(move |query: String| {
+            let s = state_for_enricher.clone();
+            Box::pin(async move {
+                let req = context_pipeline::PrefetchRequest {
+                    query,
+                    source: context_pipeline::PrefetchSource::Jarvis,
+                    token_budget: 4000,
+                };
+                let result = context_pipeline::execute(&s, &req).await;
+                result.assembled
+            })
+        });
+        *context_enricher_slot.write().await = Some(enricher);
+        info!("Jarvis context enricher activated");
+    }
 
     // Auto-spawn slots with auto_start: true
     {
@@ -1475,6 +1499,43 @@ async fn main() -> Result<()> {
         });
     }
     info!("Autopilot scheduler started (60s interval, isolated task)");
+
+    // --- AST Embedding Health Monitor (periodic self-healing, Gemini-reviewed) ---
+    // Every 15 min: check AST coverage, trigger BackfillAll if gaps detected.
+    {
+        let health_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let db = health_state.mission.db();
+                match db.ast_stats() {
+                    Ok(ast) if ast.total_nodes > 0 => {
+                        let coverage = ast.embedded_nodes as f64 / ast.total_nodes as f64;
+                        if ast.embedded_nodes < ast.total_nodes {
+                            let gap = ast.total_nodes - ast.embedded_nodes;
+                            info!(
+                                coverage = %format!("{:.1}%", coverage * 100.0),
+                                gap,
+                                total = ast.total_nodes,
+                                "AST embedding gap detected, triggering backfill"
+                            );
+                            let _ = health_state.embedding_tx.try_send(EmbeddingTask::BackfillAll);
+                        } else {
+                            debug!(
+                                coverage = "100.0%",
+                                total = ast.total_nodes,
+                                "AST embedding health OK"
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+    info!("AST embedding health monitor started (15min interval)");
 
     // --- P3: Event-driven handlers via EventBus (Phase 2) ---
     // Extracted to event_router.rs to prevent main.rs from becoming a God Module (R4).

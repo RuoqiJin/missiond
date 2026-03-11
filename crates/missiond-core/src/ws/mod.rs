@@ -10,4 +10,4 @@ mod server;
 
 pub use jarvis_trace::JarvisTraceStore;
 pub use screenshot_broker::{ScreenshotBroker, ScreenshotResult};
-pub use server::{PTYWebSocketServer, WSServerOptions};
+pub use server::{PTYWebSocketServer, WSServerOptions, ContextEnricherFn, ContextEnricherSlot};

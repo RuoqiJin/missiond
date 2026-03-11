@@ -419,6 +419,158 @@ impl MissionDB {
             },
         ).optional().map_err(Into::into)
     }
+
+    /// Aggregate AST nodes by module directory for topology map generation.
+    ///
+    /// Groups nodes by their directory prefix (crate-level or sub-directory),
+    /// collecting exported types and functions per module.
+    /// Gemini review: adaptive granularity — crates with >30 public nodes drill into subdirs.
+    pub fn ast_module_summaries(&self, repo: &str) -> DbResult<Vec<ModuleAstSummary>> {
+        use std::collections::HashMap;
+        let conn = self.read_conn();
+
+        let mut stmt = conn.prepare(
+            "SELECT file_path, node_type, name, is_exported, docstring
+             FROM ast_nodes WHERE repo = ?1
+             ORDER BY file_path, start_line"
+        )?;
+
+        // (file_path, node_type, name, is_exported, docstring)
+        let mut nodes: Vec<(String, String, String, bool, Option<String>)> = Vec::new();
+        let rows = stmt.query_map(params![repo], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i32>(3)? != 0,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })?;
+        for r in rows { nodes.push(r?); }
+
+        if nodes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Group by crate key
+        let mut crate_indices: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, (fp, ..)) in nodes.iter().enumerate() {
+            let key = extract_crate_key(fp);
+            crate_indices.entry(key).or_default().push(i);
+        }
+
+        let mut summaries = Vec::new();
+        const ADAPTIVE_THRESHOLD: usize = 30;
+
+        for (crate_key, indices) in &crate_indices {
+            let public_count = indices.iter()
+                .filter(|&&i| nodes[i].3)
+                .count();
+
+            if public_count > ADAPTIVE_THRESHOLD {
+                // Drill into subdirectories
+                let mut subdir_indices: HashMap<String, Vec<usize>> = HashMap::new();
+                for &i in indices {
+                    let subdir = extract_subdir_key(&nodes[i].0, crate_key);
+                    subdir_indices.entry(subdir).or_default().push(i);
+                }
+                for (subdir_key, sub_indices) in &subdir_indices {
+                    summaries.push(aggregate_summary(subdir_key, sub_indices, &nodes));
+                }
+            } else {
+                summaries.push(aggregate_summary(crate_key, indices, &nodes));
+            }
+        }
+
+        summaries.sort_by(|a, b| a.module_path.cmp(&b.module_path));
+        Ok(summaries)
+    }
+}
+
+/// Extract crate-level key from file path.
+fn extract_crate_key(file_path: &str) -> String {
+    let parts: Vec<&str> = file_path.split('/').collect();
+    if parts.len() >= 2 && (parts[0] == "crates" || parts[0] == "packages") {
+        format!("{}/{}", parts[0], parts[1])
+    } else if !parts.is_empty() {
+        parts[0].to_string()
+    } else {
+        "root".to_string()
+    }
+}
+
+/// Extract subdirectory key for drilling into large crates.
+fn extract_subdir_key(file_path: &str, crate_key: &str) -> String {
+    let after_crate = file_path.strip_prefix(crate_key)
+        .unwrap_or(file_path)
+        .trim_start_matches('/');
+    let parts: Vec<&str> = after_crate.split('/').collect();
+    let depth = if parts.len() > 2 { 2 } else { parts.len().saturating_sub(1) };
+    if depth == 0 {
+        crate_key.to_string()
+    } else {
+        format!("{}/{}", crate_key, parts[..depth].join("/"))
+    }
+}
+
+/// Build a ModuleAstSummary from indexed node tuples.
+fn aggregate_summary(
+    module_path: &str,
+    indices: &[usize],
+    nodes: &[(String, String, String, bool, Option<String>)],
+) -> ModuleAstSummary {
+    let mut public_types = Vec::new();
+    let mut public_functions = Vec::new();
+    let mut total_nodes = 0usize;
+    let mut files_set = std::collections::HashSet::new();
+    let mut file_docs: Vec<(String, String)> = Vec::new();
+    let mut seen_doc_files = std::collections::HashSet::new();
+
+    for &i in indices {
+        let (ref fp, ref ntype, ref name, is_exported, ref docstring) = nodes[i];
+        total_nodes += 1;
+        files_set.insert(fp.clone());
+
+        if let Some(ref doc) = docstring {
+            if !doc.is_empty() && seen_doc_files.insert(fp.clone()) {
+                let truncated = if doc.len() > 120 {
+                    let end = doc.char_indices()
+                        .take_while(|(i, _)| *i < 120)
+                        .last()
+                        .map(|(i, c)| i + c.len_utf8())
+                        .unwrap_or(120);
+                    format!("{}...", &doc[..end])
+                } else {
+                    doc.clone()
+                };
+                file_docs.push((fp.clone(), truncated));
+            }
+        }
+
+        if is_exported {
+            match ntype.as_str() {
+                "struct" | "enum" | "trait" | "type_alias" | "interface" => {
+                    public_types.push(name.clone());
+                }
+                "function" | "method" => {
+                    public_functions.push(name.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut files: Vec<String> = files_set.into_iter().collect();
+    files.sort();
+
+    ModuleAstSummary {
+        module_path: module_path.to_string(),
+        public_types,
+        public_functions,
+        total_nodes,
+        files,
+        file_docs,
+    }
 }
 
 /// Stats for AST index.
@@ -428,4 +580,64 @@ pub struct AstStats {
     pub total_files: usize,
     pub total_repos: usize,
     pub embedded_nodes: usize,
+}
+
+/// Aggregated module summary from AST nodes, grouped by directory prefix.
+/// Used by Dynamic Topology Map (Step 4) for module-level navigation fallback.
+#[derive(Debug, Clone)]
+pub struct ModuleAstSummary {
+    pub module_path: String,
+    pub public_types: Vec<String>,
+    pub public_functions: Vec<String>,
+    pub total_nodes: usize,
+    pub files: Vec<String>,
+    pub file_docs: Vec<(String, String)>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_crate_key() {
+        assert_eq!(extract_crate_key("crates/missiond-daemon/src/main.rs"), "crates/missiond-daemon");
+        assert_eq!(extract_crate_key("packages/board/src/app.tsx"), "packages/board");
+        assert_eq!(extract_crate_key("src/lib.rs"), "src");
+        assert_eq!(extract_crate_key("Cargo.toml"), "Cargo.toml");
+    }
+
+    #[test]
+    fn test_extract_subdir_key() {
+        assert_eq!(
+            extract_subdir_key("crates/missiond-daemon/src/handlers/mod.rs", "crates/missiond-daemon"),
+            "crates/missiond-daemon/src/handlers"
+        );
+        assert_eq!(
+            extract_subdir_key("crates/missiond-daemon/src/main.rs", "crates/missiond-daemon"),
+            "crates/missiond-daemon/src"
+        );
+        assert_eq!(
+            extract_subdir_key("crates/missiond-core/src/db/ast.rs", "crates/missiond-core"),
+            "crates/missiond-core/src/db"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_summary() {
+        let nodes = vec![
+            ("crates/foo/src/main.rs".into(), "struct".into(), "AppState".into(), true, Some("Main entry".into())),
+            ("crates/foo/src/main.rs".into(), "function".into(), "run".into(), true, None),
+            ("crates/foo/src/lib.rs".into(), "trait".into(), "Handler".into(), true, Some("Handler trait".into())),
+            ("crates/foo/src/lib.rs".into(), "function".into(), "internal".into(), false, None),
+        ];
+        let indices: Vec<usize> = (0..4).collect();
+        let summary = aggregate_summary("crates/foo", &indices, &nodes);
+
+        assert_eq!(summary.module_path, "crates/foo");
+        assert_eq!(summary.public_types, vec!["AppState", "Handler"]);
+        assert_eq!(summary.public_functions, vec!["run"]);
+        assert_eq!(summary.total_nodes, 4);
+        assert_eq!(summary.files.len(), 2);
+        assert_eq!(summary.file_docs.len(), 2); // One doc per file
+    }
 }

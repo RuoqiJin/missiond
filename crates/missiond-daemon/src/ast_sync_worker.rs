@@ -186,6 +186,9 @@ fn process_commit_sync(
     if !node_ids.is_empty() {
         trigger_embedding(embedding_tx, node_ids);
     }
+
+    // Update topology map (module-level summaries) after commit changes
+    crate::topology_map::update_module_summaries(db, repo_name);
 }
 
 /// Process full sync: scan repo for all code files, sync stale ones.
@@ -239,6 +242,9 @@ fn process_full_sync(
     if !node_ids.is_empty() {
         trigger_embedding(embedding_tx, node_ids);
     }
+
+    // Update topology map after full sync
+    crate::topology_map::update_module_summaries(db, repo_name);
 
     info!(
         repo = %repo_name,
