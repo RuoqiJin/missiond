@@ -12,7 +12,25 @@ use crate::state::AppState;
 
 /// Phase 2: Concurrent health scan of all servers with healthEndpoint configured.
 /// Uses JoinSet for parallel HTTP GET with 5s timeout per server.
+/// Pre-checks internet connectivity via Google to avoid false alarms when network is down.
 pub(crate) async fn health_scan(state: &AppState) {
+    // Pre-check: verify internet connectivity before scanning servers.
+    // If the local network is down, all health checks will fail — skip to avoid noise.
+    let inet_ok = match state
+        .http_client
+        .get("https://connectivitycheck.gstatic.com/generate_204")
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(resp) => resp.status().as_u16() == 204,
+        Err(_) => false,
+    };
+    if !inet_ok {
+        warn!("AIOps health_scan: internet connectivity check failed (Google unreachable), skipping all server checks");
+        return;
+    }
+
     let servers: Vec<_> = state.infra.read().unwrap().servers.iter().cloned().collect();
     let mut set = tokio::task::JoinSet::new();
 
@@ -39,6 +57,8 @@ pub(crate) async fn health_scan(state: &AppState) {
         });
     }
 
+    let db = state.mission.db();
+
     while let Some(result) = set.join_next().await {
         let (server_id, server_name, endpoint, healthy) = match result {
             Ok(v) => v,
@@ -48,7 +68,25 @@ pub(crate) async fn health_scan(state: &AppState) {
             }
         };
 
-        if !healthy {
+        let dedupe_key = format!("health_check:{} 健康检查失败", server_name);
+
+        if healthy {
+            // Recovery: auto-close the open alert task if one exists
+            match db.close_task_by_dedupe_key(&dedupe_key) {
+                Ok(Some(task)) => {
+                    // Add recovery note
+                    let _ = db.add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                        task_id: task.id.clone(),
+                        content: format!("✅ 已自动恢复 ({})", chrono::Utc::now().format("%H:%M UTC")),
+                        note_type: Some("progress".to_string()),
+                        author: Some("aiops".to_string()),
+                    });
+                    info!(server_id = %server_id, task_id = %task.id, "AIOps: server recovered, auto-closed alert task");
+                }
+                Ok(None) => {} // No open alert — server was already healthy
+                Err(e) => warn!(error = %e, "AIOps: failed to close recovery task"),
+            }
+        } else {
             let incident = missiond_core::types::MissionIncident {
                 id: format!("inc-{}", uuid::Uuid::new_v4()),
                 severity: missiond_core::types::IncidentSeverity::High,
@@ -80,10 +118,13 @@ pub(crate) async fn health_scan(state: &AppState) {
 
 // ============ AIOps Reactor ============
 
-/// Process a single incident from the event bus:
-/// 1. Dedupe check (5-minute window on dedupe_key)
-/// 2. Insert into DB
-/// 3. Create a high-priority Board task for slot-ops
+/// Process a single incident: state-based alert aggregation.
+///
+/// Instead of time-window dedup (which races with the 5min scan interval),
+/// we use the Board task lifecycle as the single source of truth:
+/// - If an open task with the same dedupe_key exists → append note (aggregate)
+/// - If no open task → create a new one
+/// - Incident records are always inserted for full audit trail
 pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::types::MissionIncident) {
     let db = state.mission.db();
     let dedupe_key = format!("{}:{}", incident.source, incident.title);
@@ -92,7 +133,6 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
     if matches!(incident.source, missiond_core::types::IncidentSource::PtySlot) {
         if let Some(slot_id) = incident.raw_payload.get("slot_id").and_then(|v| v.as_str()) {
             create_pty_remediation_task(state, slot_id, &incident.title, &incident.description);
-            // Still insert incident record below, but skip default Board task creation
             if let Err(e) = db.insert_incident(
                 &incident.id,
                 &incident.severity.to_string(),
@@ -110,94 +150,110 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
         }
     }
 
-    // 5-minute dedupe window — drop duplicate incidents
-    match db.has_recent_incident(&dedupe_key, 300) {
-        Ok(true) => {
-            debug!(
-                dedupe_key = %dedupe_key,
-                "Incident dedupe: dropping duplicate within 5min window"
-            );
-            return;
-        }
-        Ok(false) => {}
+    // State-based aggregation: check if an open Board task already tracks this alert
+    let existing_task = match db.find_open_task_by_dedupe_key(&dedupe_key) {
+        Ok(task) => task,
         Err(e) => {
-            warn!(error = %e, "Incident dedupe check failed, proceeding anyway");
-        }
-    }
-
-    // Truncate raw_payload for prompt safety (max 2000 chars)
-    let raw_str = incident.raw_payload.to_string();
-    let truncated_payload = if raw_str.len() > 2000 {
-        let end = crate::helpers::char_boundary_at(&raw_str, 2000);
-        format!("{}... (truncated, {} total)", &raw_str[..end], raw_str.len())
-    } else {
-        raw_str
-    };
-
-    // Build Board task description with structured context
-    let description = format!(
-        "## AIOps 自动检测到异常\n\n\
-         **严重等级**: {severity}\n\
-         **来源**: {source}\n\
-         **服务器**: {server}\n\
-         **时间**: {time}\n\n\
-         ### 描述\n{desc}\n\n\
-         ### 原始数据\n```json\n{payload}\n```",
-        severity = incident.severity,
-        source = incident.source,
-        server = incident.server_id.as_deref().unwrap_or("N/A"),
-        time = incident.created_at,
-        desc = incident.description,
-        payload = truncated_payload,
-    );
-
-    // Determine priority and auto-execute from severity
-    // Warning → Board backlog only (autoExecute=false), High/Critical → auto-dispatch to slot-ops
-    let (priority, auto_execute) = match incident.severity {
-        missiond_core::types::IncidentSeverity::Critical => ("urgent", true),
-        missiond_core::types::IncidentSeverity::High => ("high", true),
-        missiond_core::types::IncidentSeverity::Warning => ("medium", false),
-    };
-
-    // Create board task
-    let task_input = missiond_core::types::CreateBoardTaskInput {
-        title: format!("[AIOps] {}", incident.title),
-        description: Some(description),
-        priority: Some(priority.to_string()),
-        category: Some("ops".to_string()),
-        assignee: Some("slot-ops".to_string()),
-        auto_execute: Some(auto_execute),
-        server: incident.server_id.clone(),
-        project: None,
-        due_date: None,
-        parent_id: None,
-        prompt_template: None,
-        hidden: None,
-        flow_template: None,
-        depends_on: None,
-    };
-
-    let board_task_id = match db.create_board_task(&task_input) {
-        Ok(task) => {
-            info!(
-                incident_id = %incident.id,
-                board_task_id = %task.id,
-                severity = %incident.severity,
-                title = %incident.title,
-                "AIOps: incident → board task created"
-            );
-            Some(task.id)
-        }
-        Err(e) => {
-            error!(error = %e, "AIOps: failed to create board task for incident");
+            warn!(error = %e, "AIOps: failed to query open task by dedupe_key");
             None
         }
     };
 
-    // Fire submit_notify so Autopilot picks up the new task
-    state.event_bus.publish(crate::event_bus::DaemonEvent::TaskCreated { task_id: String::new() });
+    let board_task_id = if let Some(ref task) = existing_task {
+        // Aggregate: append note to existing open task instead of creating a new one
+        let note_content = format!(
+            "🔄 告警重复触发 ({})",
+            chrono::Utc::now().format("%m-%d %H:%M UTC"),
+        );
+        if let Err(e) = db.add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+            task_id: task.id.clone(),
+            content: note_content,
+            note_type: Some("progress".to_string()),
+            author: Some("aiops".to_string()),
+        }) {
+            warn!(error = %e, "AIOps: failed to append note to existing task");
+        }
+        // Touch updated_at so it floats to the top
+        let _ = db.update_board_task(&task.id, &missiond_core::types::UpdateBoardTaskInput {
+            ..Default::default()
+        });
+        debug!(
+            task_id = %task.id,
+            dedupe_key = %dedupe_key,
+            "AIOps: alert aggregated into existing task"
+        );
+        Some(task.id.clone())
+    } else {
+        // No open task — create a new one with dedupe_key for future aggregation
+        let raw_str = incident.raw_payload.to_string();
+        let truncated_payload = if raw_str.len() > 2000 {
+            let end = crate::helpers::char_boundary_at(&raw_str, 2000);
+            format!("{}... (truncated, {} total)", &raw_str[..end], raw_str.len())
+        } else {
+            raw_str
+        };
 
-    // Insert incident record into DB
+        let description = format!(
+            "## AIOps 自动检测到异常\n\n\
+             **严重等级**: {severity}\n\
+             **来源**: {source}\n\
+             **服务器**: {server}\n\
+             **时间**: {time}\n\n\
+             ### 描述\n{desc}\n\n\
+             ### 原始数据\n```json\n{payload}\n```",
+            severity = incident.severity,
+            source = incident.source,
+            server = incident.server_id.as_deref().unwrap_or("N/A"),
+            time = incident.created_at,
+            desc = incident.description,
+            payload = truncated_payload,
+        );
+
+        let (priority, auto_execute) = match incident.severity {
+            missiond_core::types::IncidentSeverity::Critical => ("urgent", true),
+            missiond_core::types::IncidentSeverity::High => ("high", true),
+            missiond_core::types::IncidentSeverity::Warning => ("medium", false),
+        };
+
+        let task_input = missiond_core::types::CreateBoardTaskInput {
+            title: format!("[AIOps] {}", incident.title),
+            description: Some(description),
+            priority: Some(priority.to_string()),
+            category: Some("ops".to_string()),
+            assignee: Some("slot-ops".to_string()),
+            auto_execute: Some(auto_execute),
+            server: incident.server_id.clone(),
+            project: None,
+            due_date: None,
+            parent_id: None,
+            prompt_template: None,
+            hidden: None,
+            flow_template: None,
+            depends_on: None,
+            dedupe_key: Some(dedupe_key.clone()),
+        };
+
+        match db.create_board_task(&task_input) {
+            Ok(task) => {
+                info!(
+                    incident_id = %incident.id,
+                    board_task_id = %task.id,
+                    severity = %incident.severity,
+                    title = %incident.title,
+                    "AIOps: incident → board task created"
+                );
+                // Notify autopilot
+                state.event_bus.publish(crate::event_bus::DaemonEvent::TaskCreated { task_id: String::new() });
+                Some(task.id)
+            }
+            Err(e) => {
+                error!(error = %e, "AIOps: failed to create board task for incident");
+                None
+            }
+        }
+    };
+
+    // Always insert incident record for full audit trail
     if let Err(e) = db.insert_incident(
         &incident.id,
         &incident.severity.to_string(),
@@ -258,6 +314,7 @@ pub(crate) fn create_pty_remediation_task(
         hidden: None,
         flow_template: None,
         depends_on: None,
+        dedupe_key: None,
     };
 
     match state.mission.db().create_board_task(&task_input) {
