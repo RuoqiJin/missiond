@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::event_bus::{DaemonEvent, TimelineEntry};
+use crate::gemini_client::current_parent_span_id;
 
 /// Absolute safety cap: kill process no matter what after this duration.
 const ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(300); // 5 min
@@ -181,6 +182,7 @@ impl CodexCli {
     }
 
     fn emit_started(&self, request_id: &str, caller: &str, model: &str, prompt: &str, has_image: bool, image_hash: Option<&str>, span_id: &str) {
+        let parent = current_parent_span_id();
         let event = DaemonEvent::CliRequestStarted {
             engine: missiond_core::CliEngine::Codex,
             request_id: request_id.to_string(),
@@ -198,7 +200,7 @@ impl CodexCli {
             event,
             trace_id: Some("codex".to_string()),
             span_id: span_id.to_string(),
-            parent_span_id: None,
+            parent_span_id: parent,
             summary: Some(format!("{} → {} ({}ch{})", caller, model, prompt.len(), if has_image { " +img" } else { "" })),
         };
         let _ = self.event_tx.send(entry);
@@ -252,11 +254,12 @@ impl CodexCli {
                 "image_hash": image_hash,
             }),
         };
+        let parent = current_parent_span_id();
         let entry = TimelineEntry {
             event,
             trace_id: Some("codex".to_string()),
             span_id: span_id.to_string(),
-            parent_span_id: None,
+            parent_span_id: parent,
             summary: Some(format!("{} → {} ({}ms)", caller, model, duration_ms)),
         };
         let _ = self.event_tx.send(entry);

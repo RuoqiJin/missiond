@@ -44,6 +44,7 @@ mod minimax_gateway;
 mod briefing_worker;
 mod translation_worker;
 mod step_narrator;
+mod context_pipeline;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -794,6 +795,7 @@ async fn main() -> Result<()> {
         briefing_notify: Arc::new(tokio::sync::Notify::new()),
         ast_sync_tx,
         ast_embedding_cache: missiond_core::embedding::new_cache(),
+        last_msg_span: Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
 
     // Auto-spawn slots with auto_start: true

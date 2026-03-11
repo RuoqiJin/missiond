@@ -181,6 +181,7 @@ pub(crate) fn handle_new_messages(
                     };
 
                     let content_chars = db_msg.content.len();
+                    let msg_span_id = uuid::Uuid::new_v4().to_string();
                     state.event_bus.publish_traced(
                         DaemonEvent::ConversationMessageLogged {
                             message_id: msg_id,
@@ -193,9 +194,16 @@ pub(crate) fn handle_new_messages(
                         },
                         TraceContext {
                             trace_id: Some(session_id.clone()),
+                            span_id: Some(msg_span_id.clone()),
                             ..Default::default()
                         },
                     );
+                    // Cache assistant_message span_id for cross-lane causal linking.
+                    // IPC handler reads this to set PARENT_SPAN_ID on downstream tool calls.
+                    if db_msg.role == "assistant" {
+                        state.last_msg_span.lock().unwrap()
+                            .insert(session_id.clone(), msg_span_id);
+                    }
                     // Wake briefing worker for long messages
                     if content_chars > 300 {
                         state.briefing_notify.notify_one();

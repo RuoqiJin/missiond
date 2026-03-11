@@ -26,6 +26,7 @@ import { SessionCapsule } from './ui/SessionCapsule';
 import { SlotCapsule } from './ui/SlotCapsule';
 import { SpanLines } from './ui/SpanLines';
 import { TraceLines } from './ui/TraceLines';
+import { CrossLaneLinks } from './ui/CrossLaneLinks';
 import { TimeAxis, Minimap } from './ui/TimeAxisBar';
 
 // ── Main Component ─────────────────────────────────────────
@@ -508,10 +509,18 @@ export function CognitiveTimeline() {
               getY={getY}
             />
 
-            {/* Pull-to-refresh indicator */}
+            {/* Cross-lane causal links (tool call → LLM request) */}
+            <CrossLaneLinks
+              filtered={filtered}
+              selection={selection}
+              getX={getX}
+              getY={getY}
+            />
+
+            {/* Pull-to-refresh indicator — hidden unless actively overscrolling */}
             <div
               className="absolute top-0 bottom-0 z-50 pointer-events-none flex items-center justify-center"
-              style={{ right: '-56px', width: '56px', transform: 'translateX(var(--overscroll-x, 0px))', willChange: 'transform' }}
+              style={{ right: '-56px', width: '56px', transform: 'translateX(var(--overscroll-x, 0px))', opacity: 'calc(clamp(0, var(--overscroll-progress, 0) * 10, 1))', willChange: 'transform, opacity' }}
             >
               <div className="absolute inset-0 bg-gradient-to-l from-neutral-900/80 to-transparent" />
               <div className={cn('relative rounded-full p-2 border', isRefreshing ? 'bg-blue-500/20 border-blue-500/30' : 'bg-neutral-800/60 border-neutral-700/40')}>
