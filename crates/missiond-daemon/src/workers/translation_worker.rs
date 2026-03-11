@@ -177,25 +177,21 @@ fn extract_thinking_ctx(event: &TimelineEvent) -> Option<ThinkingTraceCtx> {
     })
 }
 
-/// Spawn the translation worker.
-/// Requires MinimaxGateway to be initialized (state.minimax must be Some).
-pub(crate) fn spawn_translation_worker(
-    state: Arc<AppState>,
-    timeline_rx: broadcast::Receiver<TimelineEvent>,
-) {
-    if state.minimax.is_none() {
-        warn!("Translation worker: MinimaxGateway not available, worker disabled");
-        return;
-    }
+pub(crate) struct TranslationWorker {
+    pub timeline_rx: broadcast::Receiver<TimelineEvent>,
+}
 
-    tokio::spawn(async move {
+impl super::BackgroundWorker for TranslationWorker {
+    fn name(&self) -> &'static str { "translation_worker" }
+
+    async fn run(self, state: Arc<AppState>) {
         info!("Translation worker started (event-driven + {IDLE_POLL_SECS}s fallback poll, rate: gateway-managed)");
 
         // Initial delay to let daemon stabilize
         tokio::time::sleep(Duration::from_secs(15)).await;
 
-        run_loop(state, timeline_rx).await;
-    });
+        run_loop(state, self.timeline_rx).await;
+    }
 }
 
 async fn run_loop(

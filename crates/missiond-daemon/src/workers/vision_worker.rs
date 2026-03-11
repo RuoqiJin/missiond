@@ -207,16 +207,19 @@ fn mark_vision_permanently_failed(state: &AppState, message_id: i64) {
     }
 }
 
-/// Spawn the vision worker as a periodic background task.
-pub(crate) fn spawn_vision_worker(state: Arc<AppState>) {
-    let codex = CodexCli::new(
-        "codex".to_string(),
-        "gpt-5.4".to_string(),
-        Duration::from_secs(120),
-        state.event_bus.sender(),
-    );
+pub(crate) struct VisionWorker;
 
-    tokio::spawn(async move {
+impl super::BackgroundWorker for VisionWorker {
+    fn name(&self) -> &'static str { "vision_worker" }
+
+    async fn run(self, state: Arc<AppState>) {
+        let codex = CodexCli::new(
+            "codex".to_string(),
+            "gpt-5.4".to_string(),
+            Duration::from_secs(120),
+            state.event_bus.sender(),
+        );
+
         info!("Vision worker started (codex/gpt-5.4, poll interval: {}s)", IDLE_INTERVAL_SECS);
         let mut attempt_counts: HashMap<i64, u32> = HashMap::new();
 
@@ -271,5 +274,5 @@ pub(crate) fn spawn_vision_worker(state: Arc<AppState>) {
             // Short sleep between batches if there were items (might be more)
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
-    });
+    }
 }

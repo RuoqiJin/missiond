@@ -1418,20 +1418,31 @@ async fn main() -> Result<()> {
         });
     }
 
-    // --- Vision Worker: async image understanding pipeline ---
-    vision_worker::spawn_vision_worker(Arc::new(state.clone()));
+    // --- Background Workers (unified lifecycle via BackgroundWorker trait) ---
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    // --- Briefing Worker: async semantic summarization via MiniMax M2.5 ---
-    briefing_worker::spawn_briefing_worker(Arc::new(state.clone()));
-
-    // --- Step Narrator: async GPT-5.4 conversation step explanation ---
-    step_narrator::spawn_step_narrator(Arc::new(state.clone()));
-
-    // --- Translation Worker: async thinking→Chinese translation via MiniMax ---
-    translation_worker::spawn_translation_worker(
-        Arc::new(state.clone()),
-        timeline_broadcast_tx.subscribe(),
+    workers::spawn_worker(
+        vision_worker::VisionWorker,
+        Arc::new(state.clone()), shutdown_rx.clone(),
     );
+    workers::spawn_worker(
+        step_narrator::StepNarratorWorker,
+        Arc::new(state.clone()), shutdown_rx.clone(),
+    );
+    if state.minimax.is_some() {
+        workers::spawn_worker(
+            briefing_worker::BriefingWorker,
+            Arc::new(state.clone()), shutdown_rx.clone(),
+        );
+        workers::spawn_worker(
+            translation_worker::TranslationWorker {
+                timeline_rx: timeline_broadcast_tx.subscribe(),
+            },
+            Arc::new(state.clone()), shutdown_rx.clone(),
+        );
+    } else {
+        warn!("MinimaxGateway not available, briefing and translation workers disabled");
+    }
 
     // --- P0: IPC listener in dedicated task (never starved by other work) ---
     // Previously inside the main select! loop — a single slow branch (e.g. 120s PTY spawn)
@@ -2249,6 +2260,8 @@ async fn main() -> Result<()> {
     // Keep main alive — all work is in spawned tasks above.
     // Ctrl+C or SIGTERM triggers graceful shutdown.
     tokio::signal::ctrl_c().await.ok();
-    info!("Received shutdown signal, exiting");
+    info!("Received shutdown signal, notifying workers");
+    let _ = shutdown_tx.send(true);
+    info!("Exiting");
     Ok(())
 }
