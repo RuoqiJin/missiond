@@ -6,3 +6,47 @@ pub mod briefing_worker;
 pub mod code_prefetch;
 pub mod experience_harvester;
 pub mod ast_sync_worker;
+
+use std::future::Future;
+use std::sync::Arc;
+use tracing::info;
+
+use crate::state::AppState;
+
+/// Unified lifecycle trait for background workers.
+///
+/// Workers implement `run()` which contains their main loop.
+/// Shutdown is handled externally by `spawn_worker()` via `tokio::select!`
+/// — when the shutdown signal fires, the worker's future is dropped.
+pub(crate) trait BackgroundWorker: Send + 'static {
+    /// Human-readable name for logging.
+    fn name(&self) -> &'static str;
+
+    /// Run the worker's main loop. This future runs until natural completion
+    /// or is cancelled by the shutdown signal in `spawn_worker`.
+    fn run(self, state: Arc<AppState>) -> impl Future<Output = ()> + Send;
+}
+
+/// Spawn a background worker with unified lifecycle management.
+///
+/// - Logs start/stop with worker name
+/// - Integrates with the shutdown watch channel for graceful termination
+/// - Returns a JoinHandle for optional tracking
+pub(crate) fn spawn_worker<W: BackgroundWorker>(
+    worker: W,
+    state: Arc<AppState>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    let name = worker.name();
+    tokio::spawn(async move {
+        tokio::select! {
+            biased;
+            Ok(_) = shutdown.wait_for(|&v| v) => {
+                info!(worker = name, "Background worker: shutdown");
+            }
+            _ = worker.run(state) => {
+                info!(worker = name, "Background worker: completed");
+            }
+        }
+    })
+}

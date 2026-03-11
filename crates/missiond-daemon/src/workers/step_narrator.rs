@@ -69,15 +69,19 @@ struct NarrationEntry {
     step_result: String,
 }
 
-pub(crate) fn spawn_step_narrator(state: Arc<AppState>) {
-    let codex = CodexCli::new(
-        "codex".to_string(),
-        "gpt-5.4".to_string(),
-        Duration::from_secs(180),
-        state.event_bus.sender(),
-    );
+pub(crate) struct StepNarratorWorker;
 
-    tokio::spawn(async move {
+impl super::BackgroundWorker for StepNarratorWorker {
+    fn name(&self) -> &'static str { "step_narrator" }
+
+    async fn run(self, state: Arc<AppState>) {
+        let codex = CodexCli::new(
+            "codex".to_string(),
+            "gpt-5.4".to_string(),
+            Duration::from_secs(180),
+            state.event_bus.sender(),
+        );
+
         info!("Step Narrator started (batch_size: {BATCH_SIZE}, poll: {POLL_INTERVAL_SECS}s)");
         tokio::time::sleep(Duration::from_secs(STARTUP_DELAY_SECS)).await;
 
@@ -87,7 +91,7 @@ pub(crate) fn spawn_step_narrator(state: Arc<AppState>) {
             }
             tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
         }
-    });
+    }
 }
 
 async fn process_pending(state: &AppState, codex: &CodexCli) -> anyhow::Result<()> {

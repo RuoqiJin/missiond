@@ -215,17 +215,14 @@ fn truncate_at_boundary(text: &str, max_chars: usize) -> String {
     format!("{}...", &window[..window.len().min(max_chars - 3)])
 }
 
-/// Spawn the briefing worker as a hybrid event-driven + polling background task.
-/// Requires MinimaxGateway to be initialized (state.minimax must be Some).
-pub(crate) fn spawn_briefing_worker(state: Arc<AppState>) {
-    if state.minimax.is_none() {
-        warn!("Briefing worker: MinimaxGateway not available, worker disabled");
-        return;
-    }
+pub(crate) struct BriefingWorker;
 
-    let notify = Arc::clone(&state.briefing_notify);
+impl super::BackgroundWorker for BriefingWorker {
+    fn name(&self) -> &'static str { "briefing_worker" }
 
-    tokio::spawn(async move {
+    async fn run(self, state: Arc<AppState>) {
+        let notify = Arc::clone(&state.briefing_notify);
+
         info!("Briefing worker started (hybrid event+poll, rate: gateway-managed)");
 
         // Initial delay to let the daemon stabilize
@@ -267,11 +264,9 @@ pub(crate) fn spawn_briefing_worker(state: Arc<AppState>) {
                     Ok(ProcessResult::Llm) => {
                         processed += 1;
                         llm_calls += 1;
-                        // No local sleep — Gateway handles rate limiting
                     }
                     Ok(ProcessResult::Local) => {
                         processed += 1;
-                        // No delay for static rules / tool skips
                     }
                     Ok(ProcessResult::Skipped) => {}
                     Err(e) => {
@@ -285,5 +280,5 @@ pub(crate) fn spawn_briefing_worker(state: Arc<AppState>) {
                 info!(processed, llm_calls, batch_size, "Briefing worker: batch completed");
             }
         }
-    });
+    }
 }
