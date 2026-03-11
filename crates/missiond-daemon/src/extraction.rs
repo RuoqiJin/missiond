@@ -220,13 +220,24 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
                 warn!(error = %e, "realtime extraction trigger failed");
                 let _ = mission.db().slot_task_set_failed(&slot_task_id_clone, &e.to_string());
                 let mut es = extraction_state.write().await;
+                // P5 fix: advance watermarks even on send() failure to prevent infinite loop.
+                // Messages were already prepared; not advancing causes permanent stall.
+                if matches!(es.active_type, Some("realtime")) && !es.watermark_targets.is_empty() {
+                    let db = mission.db();
+                    for (session_id, timestamp) in &es.watermark_targets {
+                        if let Err(we) = db.update_realtime_forwarded_at(session_id, timestamp) {
+                            warn!(session_id, error = %we, "Failed to advance watermark on send error");
+                        }
+                    }
+                    warn!(sessions = es.watermark_targets.len(), "Realtime: advanced watermarks on send failure (preventing stall)");
+                }
+                es.watermark_targets.clear();
                 es.phase = ExtractionPhase::Idle;
                 es.active_type = None;
                 es.current_task_id = None;
                 es.current_slot_task_id = None;
                 es.is_checkpoint = false;
                 es.checkpoint_message_id = None;
-                es.watermark_targets.clear();
             }
         }
     });

@@ -65,8 +65,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             } else {
                 String::new()
             };
+            let batch_id = format!("batch-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
             let header = format!(
-                "[realtime-extract] {} 个会话, {} 条消息 (其中 {} 条用户消息){}\n\n\
+                "[realtime-extract] [{}] {} 个会话, {} 条消息 (其中 {} 条用户消息){}\n\
+                 水位线由系统自动管理，处理完毕后直接输出总结即可，无需调用 done 工具。\n\n\
                  ★ = 用户原话，优先级最高。每句用户消息都是刻意的。\n\
                  assistant 消息仅提供上下文，不需逐条分析。\n\
                  tool_result 消息包含工具输出（文件内容、命令结果），提供操作上下文。\n\n\
@@ -78,16 +80,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                  - 运维痛点/调试弯路 → category: memory:ops / memory:debug\n\
                  - 不存: 纯任务指令、当天工作日志、代码提交记录\n\
                  - 存入前用 mission_kb_search 检查去重\n\n",
-                session_count, msg_count, user_count, truncated_note,
+                batch_id, session_count, msg_count, user_count, truncated_note,
             );
 
             Ok(ToolResult::text(&format!("{}{}", header, output)))
-        }
-
-        // Deprecated: pipeline state table has been removed. Both realtime and deep_analysis
-        // now use conversation-level watermarks. Kept for backward compat with old agent prompts.
-        "mission_memory_done" => {
-            Ok(ToolResult::text("已废弃。系统现在使用会话级水位线自动管理状态，无需手动调用。"))
         }
 
         "mission_memory_pause" => {
