@@ -69,6 +69,10 @@ pub(crate) struct GatewayRequest {
     pub caller: &'static str,
     pub priority: Priority,
     pub task_id: Option<String>,
+    /// Causal trace ID (for cross-lane linking in Cognitive Timeline).
+    pub trace_id: Option<String>,
+    /// Parent span ID (links WorkerLlmCall back to caller's span).
+    pub parent_span_id: Option<String>,
     pub reply_tx: oneshot::Sender<Result<String>>,
 }
 
@@ -140,6 +144,8 @@ impl MinimaxHandle {
         caller: &'static str,
         priority: Priority,
         task_id: Option<String>,
+        trace_id: Option<String>,
+        parent_span_id: Option<String>,
     ) -> Result<String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let req = GatewayRequest {
@@ -148,6 +154,8 @@ impl MinimaxHandle {
             caller,
             priority,
             task_id,
+            trace_id,
+            parent_span_id,
             reply_tx,
         };
         tx.send(req).await.map_err(|_| anyhow!("MinimaxGateway channel closed"))?;
@@ -161,7 +169,7 @@ impl MinimaxHandle {
         max_tokens: Option<u32>,
         caller: &'static str,
     ) -> Result<String> {
-        Self::send(&self.tx_interactive, messages, max_tokens, caller, Priority::Interactive, None).await
+        Self::send(&self.tx_interactive, messages, max_tokens, caller, Priority::Interactive, None, None, None).await
     }
 
     /// P1: Embedding worker calls.
@@ -171,17 +179,19 @@ impl MinimaxHandle {
         max_tokens: Option<u32>,
         task_id: Option<String>,
     ) -> Result<String> {
-        Self::send(&self.tx_embedding, messages, max_tokens, "embedding", Priority::Embedding, task_id).await
+        Self::send(&self.tx_embedding, messages, max_tokens, "embedding", Priority::Embedding, task_id, None, None).await
     }
 
-    /// P2: Translation worker calls.
+    /// P2: Translation worker calls (with optional causal linking context).
     pub async fn call_translation(
         &self,
         messages: Vec<ChatMessage>,
         max_tokens: Option<u32>,
         task_id: Option<String>,
+        trace_id: Option<String>,
+        parent_span_id: Option<String>,
     ) -> Result<String> {
-        Self::send(&self.tx_translation, messages, max_tokens, "translation", Priority::Translation, task_id).await
+        Self::send(&self.tx_translation, messages, max_tokens, "translation", Priority::Translation, task_id, trace_id, parent_span_id).await
     }
 
     /// P3: Briefing worker calls (lowest priority).
@@ -191,7 +201,7 @@ impl MinimaxHandle {
         max_tokens: Option<u32>,
         task_id: Option<String>,
     ) -> Result<String> {
-        Self::send(&self.tx_briefing, messages, max_tokens, "briefing", Priority::Briefing, task_id).await
+        Self::send(&self.tx_briefing, messages, max_tokens, "briefing", Priority::Briefing, task_id, None, None).await
     }
 }
 
@@ -334,11 +344,14 @@ impl MinimaxGateway {
                     duration_ms,
                     queue_wait_ms,
                 };
+                // Use explicit trace context if provided (e.g. translation → thinking_message link),
+                // otherwise fall back to task_id as trace_id for backward compat.
+                let entry_trace_id = req.trace_id.or(req.task_id);
                 let entry = TimelineEntry {
                     event,
-                    trace_id: req.task_id,
+                    trace_id: entry_trace_id,
                     span_id: uuid::Uuid::new_v4().to_string(),
-                    parent_span_id: None,
+                    parent_span_id: req.parent_span_id,
                     summary: Some(summary),
                 };
                 let _ = event_tx.send(entry);

@@ -79,6 +79,17 @@ pub(crate) async fn handle_ipc_request(state: AppState, request: Request) -> Res
             };
             Response::success(id, serde_json::json!({ "instructions": instructions }))
         }
+        "context/prefetch" => {
+            let req: crate::context_pipeline::PrefetchRequest = match serde_json::from_value(params.clone()) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Response::from_error(id, RpcError::InvalidParams(format!("Bad prefetch params: {}", e)));
+                }
+            };
+            let result = crate::context_pipeline::execute(&state, &req).await;
+            let tool_result = missiond_mcp::tools::ToolResult::text(&result.assembled);
+            Response::success(id, serde_json::to_value(tool_result).unwrap_or(Value::Null))
+        }
         "tools/call" => {
             let name = match params.get("name").and_then(|v| v.as_str()) {
                 Some(n) => n.to_string(),

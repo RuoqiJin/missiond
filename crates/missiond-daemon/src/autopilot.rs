@@ -280,19 +280,21 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
             p
         };
 
-        // Inject context from Phase B skills
-        let context = state.skills.build_context(&task.title);
-        let full_prompt = if context.contains("No matching skills") {
-            prompt
-        } else {
-            format!("{}\n\n{}", context, prompt)
-        };
-
-        // P3: Inject code context from AST hybrid search (Holographic Context Engine)
-        let full_prompt = if let Some(code_ctx) = crate::code_prefetch::code_prefetch(state, &task).await {
-            format!("{}\n\n{}", full_prompt, code_ctx)
-        } else {
-            full_prompt
+        // Unified context injection via Context Prefetch Pipeline
+        let full_prompt = {
+            let req = crate::context_pipeline::PrefetchRequest {
+                query: task.title.clone(),
+                source: crate::context_pipeline::PrefetchSource::Autopilot {
+                    task_id: task.id.clone(),
+                },
+                token_budget: 4000,
+            };
+            let result = crate::context_pipeline::execute(state, &req).await;
+            if result.assembled.is_empty() {
+                prompt
+            } else {
+                format!("{}\n\n{}", result.assembled, prompt)
+            }
         };
 
         // Slot throttling: skip if slot has 3+ consecutive failures within 30 min

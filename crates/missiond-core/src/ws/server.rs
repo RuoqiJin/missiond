@@ -28,7 +28,19 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::{accept_hdr_async, tungstenite::Message};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
+
+/// Callback type for context enrichment before sending to PTY.
+/// Implemented by daemon to inject KB/Skill/Code context into Jarvis messages.
+/// Takes user query, returns enriched context string (empty = no context).
+pub type ContextEnricherFn = Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Late-bound container for context enricher (set after AppState is constructed).
+pub type ContextEnricherSlot = Arc<tokio::sync::RwLock<Option<ContextEnricherFn>>>;
 
 /// WebSocket server options
 pub struct WSServerOptions {
@@ -46,6 +58,8 @@ pub struct WSServerOptions {
     pub frontend_events_tx: Option<broadcast::Sender<String>>,
     /// Database for timeline catch-up queries (Phase 6)
     pub db: Option<Arc<crate::db::MissionDB>>,
+    /// Context enricher for Jarvis chat completions (late-bound by daemon)
+    pub context_enricher: ContextEnricherSlot,
 }
 
 /// PTY WebSocket Server
@@ -59,6 +73,7 @@ pub struct PTYWebSocketServer {
     incident_tx: Option<tokio::sync::mpsc::Sender<crate::types::MissionIncident>>,
     frontend_events_tx: Option<broadcast::Sender<String>>,
     db: Option<Arc<crate::db::MissionDB>>,
+    context_enricher: ContextEnricherSlot,
 }
 
 // ── AIOps Webhook Parsers ──
@@ -244,12 +259,18 @@ impl PTYWebSocketServer {
             incident_tx: options.incident_tx,
             frontend_events_tx: options.frontend_events_tx,
             db: options.db,
+            context_enricher: Arc::clone(&options.context_enricher),
         }
     }
 
     /// Get a reference to the Jarvis trace store (for MCP tools)
     pub fn jarvis_trace_store(&self) -> &JarvisTraceStore {
         &self.jarvis_trace
+    }
+
+    /// Get the context enricher slot for late-binding by daemon.
+    pub fn context_enricher_slot(&self) -> &ContextEnricherSlot {
+        &self.context_enricher
     }
 
     /// Start the server
@@ -269,6 +290,7 @@ impl PTYWebSocketServer {
         let incident_tx = self.incident_tx.clone();
         let frontend_events_tx = self.frontend_events_tx.clone();
         let db = self.db.clone();
+        let context_enricher = self.context_enricher.clone();
 
         tokio::spawn(async move {
             let mut shutdown_rx = shutdown_tx.subscribe();
@@ -284,8 +306,9 @@ impl PTYWebSocketServer {
                                 let incident_tx = incident_tx.clone();
                                 let frontend_events_tx = frontend_events_tx.clone();
                                 let db = db.clone();
+                                let context_enricher = context_enricher.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, frontend_events_tx, db).await {
+                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, frontend_events_tx, db, context_enricher).await {
                                         error!(?e, ?addr, "WebSocket connection error");
                                     }
                                 });
@@ -461,6 +484,7 @@ impl PTYWebSocketServer {
         addr: SocketAddr,
         pty_manager: Arc<PTYManager>,
         trace_store: JarvisTraceStore,
+        context_enricher: ContextEnricherSlot,
     ) -> anyhow::Result<()> {
         // Disable Nagle — SSE needs every chunk sent immediately
         stream.set_nodelay(true)?;
@@ -592,9 +616,27 @@ impl PTYWebSocketServer {
         stream.write_all(sse_headers.as_bytes()).await?;
         stream.flush().await?;
 
+        // Context enrichment: inject KB/Skill/Code context before sending to PTY
+        let enriched_message = {
+            let enricher_guard = context_enricher.read().await;
+            if let Some(ref enricher) = *enricher_guard {
+                let enricher = Arc::clone(enricher);
+                drop(enricher_guard); // release lock before async call
+                let ctx = enricher(user_message.clone()).await;
+                if ctx.is_empty() {
+                    user_message.clone()
+                } else {
+                    debug!(slot_id, ctx_len = ctx.len(), "Jarvis: context enrichment injected");
+                    format!("{}\n\n{}", ctx, user_message)
+                }
+            } else {
+                user_message.clone()
+            }
+        };
+
         // Phase 1: blocking send — get full response, then emit as single SSE chunk.
         let timeout_ms = 300_000u64; // 5 min
-        match pty_manager.send(slot_id, &user_message, timeout_ms).await {
+        match pty_manager.send(slot_id, &enriched_message, timeout_ms).await {
             Ok(result) => {
                 // Record trace completion
                 trace_store.complete_trace(&chat_id, &result.response, result.duration_ms).await;
@@ -670,6 +712,7 @@ impl PTYWebSocketServer {
         incident_tx: Option<tokio::sync::mpsc::Sender<crate::types::MissionIncident>>,
         frontend_events_tx: Option<broadcast::Sender<String>>,
         db: Option<Arc<crate::db::MissionDB>>,
+        context_enricher: ContextEnricherSlot,
     ) -> anyhow::Result<()> {
         // Peek at first bytes to detect non-WebSocket HTTP requests
         let mut peek_buf = [0u8; 512];
@@ -687,7 +730,7 @@ impl PTYWebSocketServer {
             // Chat completions SSE endpoint
             if request_line.starts_with("POST /v1/chat/completions") {
                 return match pty_manager {
-                    Some(pm) => Self::handle_chat_completions(stream, addr, pm, jarvis_trace).await,
+                    Some(pm) => Self::handle_chat_completions(stream, addr, pm, jarvis_trace, context_enricher).await,
                     None => {
                         let mut s = stream;
                         let err = serde_json::json!({"error": {"message": "PTY manager not available"}});

@@ -347,6 +347,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let policy_cache_size = state.embedding_cache.read().await.len();
             let skill_cache_size = state.skill_embedding_cache.read().await.len();
             let conv_cache_size = state.conversation_topic_cache.read().await.len();
+            let ast_cache_size = state.ast_embedding_cache.read().await.len();
             let provider = state.embedding_service.as_ref()
                 .map(|svc| svc.provider_id())
                 .unwrap_or("none");
@@ -355,8 +356,24 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "policyDecision": policy_cache_size,
                 "skill": skill_cache_size,
                 "conversation": conv_cache_size,
+                "ast": ast_cache_size,
             });
             stats["currentProvider"] = serde_json::json!(provider);
+            // AST embedding stats (code intelligence health)
+            if let Ok(ast) = db.ast_stats() {
+                let coverage = if ast.total_nodes > 0 {
+                    format!("{:.1}%", ast.embedded_nodes as f64 / ast.total_nodes as f64 * 100.0)
+                } else {
+                    "N/A".to_string()
+                };
+                stats["ast"] = serde_json::json!({
+                    "totalNodes": ast.total_nodes,
+                    "embeddedNodes": ast.embedded_nodes,
+                    "coverage": coverage,
+                    "totalFiles": ast.total_files,
+                    "totalRepos": ast.total_repos,
+                });
+            }
             Ok(ToolResult::json_pretty(&stats))
         }
 

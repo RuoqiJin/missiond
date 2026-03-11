@@ -132,7 +132,7 @@ async fn process_session(state: &AppState, codex: &CodexCli, session_id: &str) -
           "Step Narrator: starting session");
 
     let trace_ctx = || TraceContext {
-        trace_id: Some(session_id.to_string()),
+        trace_id: Some(format!("narrator-{}", short_id)),
         ..Default::default()
     };
 

@@ -11,6 +11,9 @@
 //! Translation lifecycle events (TranslationStarted/Completed/Failed) are
 //! published to EventBus with a virtual slot_id for Slot swimlane visibility.
 //! Rate limiting delegated to MinimaxGateway (no local sleep).
+//!
+//! Cross-lane causal linking: thinking_message (Chat) → Translation (Slot) → WorkerLlmCall (GPT).
+//! Trace context is extracted from broadcast/DB and propagated through function params.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +22,7 @@ use anyhow::Result;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
-use crate::event_bus::{DaemonEvent, TimelineEvent};
+use crate::event_bus::{DaemonEvent, TraceContext, TimelineEvent};
 use crate::minimax_client::ChatMessage;
 use crate::state::AppState;
 
@@ -40,10 +43,19 @@ const TRANSLATION_SYSTEM_PROMPT: &str = "\
 4. 专业计算机术语请使用行业通用中文表达（如 token, prompt, agent 也可以保留英文原文）。
 5. 仅输出翻译后的结果，不要包含任何解释、寒暄或额外的包装词（如\"这是翻译结果\"）。";
 
+/// Trace context extracted from the source thinking_message event.
+struct ThinkingTraceCtx {
+    message_id: i64,
+    trace_id: Option<String>,
+    /// span_id of the thinking_message event (becomes parent of translation span).
+    span_id: Option<String>,
+}
+
 /// Translate a single thinking message via MinimaxGateway (P2: translation priority).
+/// `ctx` carries the source thinking_message's trace context for causal linking.
 async fn translate_message(
     state: &AppState,
-    message_id: i64,
+    ctx: &ThinkingTraceCtx,
     content: &str,
 ) -> Result<()> {
     let content_chars = content.len();
@@ -51,12 +63,24 @@ async fn translate_message(
     let minimax = state.minimax.as_ref()
         .ok_or_else(|| anyhow::anyhow!("MiniMax gateway not available"))?;
 
+    // Single span_id for the entire translation lifecycle (Started + Completed/Failed)
+    let translation_span_id = uuid::Uuid::new_v4().to_string();
+    let trace_ctx = || TraceContext {
+        trace_id: ctx.trace_id.clone(),
+        span_id: Some(translation_span_id.clone()),
+        parent_span_id: ctx.span_id.clone(), // Links back to thinking_message
+        ..Default::default()
+    };
+
     // Publish TranslationStarted
-    state.event_bus.publish(DaemonEvent::TranslationStarted {
-        message_id,
-        slot_id: TRANSLATION_SLOT_ID.to_string(),
-        content_chars,
-    });
+    state.event_bus.publish_traced(
+        DaemonEvent::TranslationStarted {
+            message_id: ctx.message_id,
+            slot_id: TRANSLATION_SLOT_ID.to_string(),
+            content_chars,
+        },
+        trace_ctx(),
+    );
 
     let start = std::time::Instant::now();
 
@@ -74,7 +98,14 @@ async fn translate_message(
 
     // Use higher max_tokens for translation (output ~ input length)
     let max_tokens = ((content_chars / 2) as u32 + 500).min(8192);
-    let result = minimax.call_translation(messages, Some(max_tokens), None).await;
+    // Pass trace context to MiniMax Gateway for WorkerLlmCall linking
+    let result = minimax.call_translation(
+        messages,
+        Some(max_tokens),
+        None,
+        ctx.trace_id.clone(),
+        Some(translation_span_id.clone()), // WorkerLlmCall's parent = translation span
+    ).await;
 
     let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -82,7 +113,7 @@ async fn translate_message(
         Ok(translation) if !translation.is_empty() => {
             // Store in DB
             state.mission.db().insert_translation(
-                message_id,
+                ctx.message_id,
                 &translation,
                 "MiniMax-M2.5-highspeed",
                 duration_ms,
@@ -91,45 +122,59 @@ async fn translate_message(
             // Preview: first ~80 chars
             let preview: String = translation.chars().take(80).collect();
 
-            state.event_bus.publish(DaemonEvent::TranslationCompleted {
-                message_id,
-                slot_id: TRANSLATION_SLOT_ID.to_string(),
-                preview,
-                duration_ms,
-            });
+            state.event_bus.publish_traced(
+                DaemonEvent::TranslationCompleted {
+                    message_id: ctx.message_id,
+                    slot_id: TRANSLATION_SLOT_ID.to_string(),
+                    preview,
+                    duration_ms,
+                },
+                trace_ctx(),
+            );
 
-            info!(message_id, duration_ms, chars = translation.len(), "Translation completed");
+            info!(message_id = ctx.message_id, duration_ms, chars = translation.len(), "Translation completed");
             Ok(())
         }
         Ok(_) => {
             let err = "empty translation returned";
-            state.event_bus.publish(DaemonEvent::TranslationFailed {
-                message_id,
-                slot_id: TRANSLATION_SLOT_ID.to_string(),
-                error: err.to_string(),
-            });
-            warn!(message_id, "Translation: empty response from MiniMax");
+            state.event_bus.publish_traced(
+                DaemonEvent::TranslationFailed {
+                    message_id: ctx.message_id,
+                    slot_id: TRANSLATION_SLOT_ID.to_string(),
+                    error: err.to_string(),
+                },
+                trace_ctx(),
+            );
+            warn!(message_id = ctx.message_id, "Translation: empty response from MiniMax");
             Err(anyhow::anyhow!(err))
         }
         Err(e) => {
-            state.event_bus.publish(DaemonEvent::TranslationFailed {
-                message_id,
-                slot_id: TRANSLATION_SLOT_ID.to_string(),
-                error: e.to_string(),
-            });
-            warn!(message_id, error = %e, "Translation failed");
+            state.event_bus.publish_traced(
+                DaemonEvent::TranslationFailed {
+                    message_id: ctx.message_id,
+                    slot_id: TRANSLATION_SLOT_ID.to_string(),
+                    error: e.to_string(),
+                },
+                trace_ctx(),
+            );
+            warn!(message_id = ctx.message_id, error = %e, "Translation failed");
             Err(e)
         }
     }
 }
 
-/// Extract message_id from a thinking_message TimelineEvent payload.
-fn extract_thinking_message_id(event: &TimelineEvent) -> Option<i64> {
+/// Extract trace context from a thinking_message TimelineEvent.
+fn extract_thinking_ctx(event: &TimelineEvent) -> Option<ThinkingTraceCtx> {
     if event.event.wire_type() != "thinking_message" {
         return None;
     }
     let payload = event.event.to_frontend_payload();
-    payload.get("message_id").and_then(|v| v.as_i64())
+    let message_id = payload.get("message_id").and_then(|v| v.as_i64())?;
+    Some(ThinkingTraceCtx {
+        message_id,
+        trace_id: event.trace_id.clone(),
+        span_id: Some(event.span_id.clone()),
+    })
 }
 
 /// Spawn the translation worker.
@@ -159,10 +204,10 @@ async fn run_loop(
 ) {
     loop {
         // Hybrid wait: event-driven (broadcast) OR idle timeout (DB poll)
-        let maybe_msg_id = tokio::select! {
+        let maybe_ctx = tokio::select! {
             result = timeline_rx.recv() => {
                 match result {
-                    Ok(event) => extract_thinking_message_id(&event),
+                    Ok(event) => extract_thinking_ctx(&event),
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(skipped = n, "Translation worker: broadcast lagged, will poll DB");
                         None // Trigger DB poll below
@@ -178,9 +223,9 @@ async fn run_loop(
             }
         };
 
-        if let Some(msg_id) = maybe_msg_id {
+        if let Some(ctx) = maybe_ctx {
             // Event-driven path: translate a specific message
-            process_single(&state, msg_id).await;
+            process_single(&state, ctx).await;
             // No local sleep — Gateway handles rate limiting
         } else {
             // Poll path: find thinking messages without translations
@@ -189,42 +234,42 @@ async fn run_loop(
     }
 }
 
-/// Process a single message by ID.
-async fn process_single(state: &AppState, message_id: i64) {
+/// Process a single message with its trace context.
+async fn process_single(state: &AppState, ctx: ThinkingTraceCtx) {
     // Check if already translated
-    match state.mission.db().has_translation(message_id) {
+    match state.mission.db().has_translation(ctx.message_id) {
         Ok(true) => {
-            debug!(message_id, "Translation: already exists, skipping");
+            debug!(message_id = ctx.message_id, "Translation: already exists, skipping");
             return;
         }
         Err(e) => {
-            warn!(message_id, error = %e, "Translation: DB check failed");
+            warn!(message_id = ctx.message_id, error = %e, "Translation: DB check failed");
             return;
         }
         _ => {}
     }
 
     // Fetch full content
-    let content = match state.mission.db().get_conversation_message_by_id(message_id) {
+    let content = match state.mission.db().get_conversation_message_by_id(ctx.message_id) {
         Ok(Some(msg)) => msg.content,
         Ok(None) => {
-            debug!(message_id, "Translation: message not found");
+            debug!(message_id = ctx.message_id, "Translation: message not found");
             return;
         }
         Err(e) => {
-            warn!(message_id, error = %e, "Translation: DB fetch failed");
+            warn!(message_id = ctx.message_id, error = %e, "Translation: DB fetch failed");
             return;
         }
     };
 
     // Skip very short thinking blocks (< 50 chars not worth translating)
     if content.len() < 50 {
-        debug!(message_id, len = content.len(), "Translation: too short, skipping");
+        debug!(message_id = ctx.message_id, len = content.len(), "Translation: too short, skipping");
         return;
     }
 
-    if let Err(e) = translate_message(state, message_id, &content).await {
-        warn!(message_id, error = %e, "Translation: failed");
+    if let Err(e) = translate_message(state, &ctx, &content).await {
+        warn!(message_id = ctx.message_id, error = %e, "Translation: failed");
     }
 }
 
@@ -263,7 +308,14 @@ async fn poll_pending(state: &AppState) {
             _ => {}
         }
 
-        process_single(state, msg_id).await;
+        // Build trace context from DB row (for causal linking on poll path)
+        let ctx = ThinkingTraceCtx {
+            message_id: msg_id,
+            trace_id: row.trace_id.clone(),
+            span_id: row.span_id.clone(),
+        };
+
+        process_single(state, ctx).await;
         translated += 1;
         // No local sleep — Gateway handles rate limiting
     }
