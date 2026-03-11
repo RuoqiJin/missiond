@@ -353,17 +353,14 @@ pub(crate) async fn check_slot_stuck(
         if let Some(ref st_id) = es.current_slot_task_id {
             let _ = state.mission.db().slot_task_set_failed(st_id, "slot stuck, force reset");
         }
-        es.phase = ExtractionPhase::Idle;
-        es.active_type = None;
-        es.current_task_id = None;
-        es.current_slot_task_id = None;
-        es.is_checkpoint = false;
-        es.checkpoint_message_id = None;
-        // Advance realtime watermarks before clearing — same fix as check_extraction_gate.
-        if matches!(es.active_type, Some("realtime")) && !es.watermark_targets.is_empty() {
+        // Advance realtime watermarks BEFORE clearing active_type (P0 fix: use-after-clear)
+        let was_realtime = matches!(es.active_type, Some("realtime"));
+        if was_realtime && !es.watermark_targets.is_empty() {
             let db = state.mission.db();
             for (session_id, timestamp) in &es.watermark_targets {
-                let _ = db.update_realtime_forwarded_at(session_id, timestamp);
+                if let Err(e) = db.update_realtime_forwarded_at(session_id, timestamp) {
+                    warn!(slot_id, session_id, error = %e, "Failed to advance watermark on slot kill");
+                }
             }
             warn!(
                 slot_id,
@@ -372,6 +369,12 @@ pub(crate) async fn check_slot_stuck(
             );
         }
         es.watermark_targets.clear();
+        es.phase = ExtractionPhase::Idle;
+        es.active_type = None;
+        es.current_task_id = None;
+        es.current_slot_task_id = None;
+        es.is_checkpoint = false;
+        es.checkpoint_message_id = None;
     }
     // Don't reset to 0 — set to now so we can detect if respawn also gets stuck
     busy_since_atomic.store(now, std::sync::atomic::Ordering::SeqCst);
@@ -404,19 +407,14 @@ pub(crate) async fn check_extraction_gate(
             if let Some(ref st_id) = es.current_slot_task_id {
                 let _ = mission.db().slot_task_set_failed(st_id, "WaitingForSlotIdle timeout");
             }
-            es.phase = ExtractionPhase::Idle;
-            es.active_type = None;
-            es.current_task_id = None;
-            es.current_slot_task_id = None;
-            es.is_checkpoint = false;
-            es.checkpoint_message_id = None;
-            // Advance realtime watermarks before clearing — prevents permanent
-            // watermark stall. Messages were already sent to slot; even if
-            // processing was incomplete, not advancing causes 100% message leak.
-            if matches!(es.active_type, Some("realtime")) && !es.watermark_targets.is_empty() {
+            // Advance realtime watermarks BEFORE clearing active_type (P0 fix: use-after-clear)
+            let was_realtime = matches!(es.active_type, Some("realtime"));
+            if was_realtime && !es.watermark_targets.is_empty() {
                 let db = mission.db();
                 for (session_id, timestamp) in &es.watermark_targets {
-                    let _ = db.update_realtime_forwarded_at(session_id, timestamp);
+                    if let Err(e) = db.update_realtime_forwarded_at(session_id, timestamp) {
+                        warn!(session_id, error = %e, "{}: failed to advance watermark on timeout", label);
+                    }
                 }
                 warn!(
                     sessions = es.watermark_targets.len(),
@@ -424,6 +422,12 @@ pub(crate) async fn check_extraction_gate(
                 );
             }
             es.watermark_targets.clear();
+            es.phase = ExtractionPhase::Idle;
+            es.active_type = None;
+            es.current_task_id = None;
+            es.current_slot_task_id = None;
+            es.is_checkpoint = false;
+            es.checkpoint_message_id = None;
             return true;
         }
     } else {

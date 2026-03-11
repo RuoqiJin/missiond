@@ -66,6 +66,9 @@ mod defaults {
 2. 用 mission_kb_search 去重检查
 3. 用 mission_kb_remember 存入新知识
 4. 发现 bug → mission_board_create 上报
+5. 处理完毕后输出简短总结即可结束（如'提取了 2 条知识'或'无新知识'）
+
+⚠️ 水位线由系统自动管理，不需要调用任何 done/finish/complete 工具。你的文本回复即代表本轮处理结束。
 
 ⚠️ 异常处理（重要）:
 如果 MCP 工具调用失败、超时或不可用:

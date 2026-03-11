@@ -1,4 +1,5 @@
 use rusqlite::params;
+use tracing::{debug, warn};
 use super::error::DbResult;
 use crate::types::*;
 use super::MissionDB;
@@ -596,10 +597,15 @@ impl MissionDB {
     /// Update realtime_forwarded_at watermark for a conversation.
     pub fn update_realtime_forwarded_at(&self, session_id: &str, timestamp: &str) -> DbResult<()> {
         let conn = self.conn();
-        conn.execute(
+        let rows = conn.execute(
             "UPDATE conversations SET realtime_forwarded_at = ?1 WHERE id = ?2",
             params![timestamp, session_id],
         )?;
+        if rows == 0 {
+            warn!(session_id, timestamp, "Watermark update: session not found (0 rows affected)");
+        } else {
+            debug!(session_id, timestamp, "Watermark advanced");
+        }
         Ok(())
     }
 

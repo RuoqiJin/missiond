@@ -29,23 +29,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-        ToolDefinition::new(
-            "mission_memory_done",
-            "兼容工具：手动确认一批消息已被 realtime 管道处理完成。\
-             当前系统默认由 daemon 自动管理状态，通常不需要调用本工具。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "message_ids": {
-                        "type": "array",
-                        "items": { "type": "integer" },
-                        "description": "已处理完成的消息 ID 列表 (来自 mission_memory_pending 的 batch_msg_ids)"
-                    }
-                },
-                "required": ["message_ids"]
-            }),
-        ),
-
         // ===== Token Stats =====
         ToolDefinition::new(
             "mission_token_stats",
