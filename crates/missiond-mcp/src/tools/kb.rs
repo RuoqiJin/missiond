@@ -73,6 +73,41 @@ pub fn definitions() -> Vec<ToolDefinition> {
             }),
         ),
         ToolDefinition::new(
+            "mission_kb_update",
+            "部分更新 KB 条目。只传需要改的字段，无需重传全部内容。\
+             改 category 不触发内容质检，改 summary/detail 才重算 embedding。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "要更新的条目 key"
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "新分类（可选）"
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "新摘要（可选，≤400字）"
+                    },
+                    "detail": {
+                        "type": "object",
+                        "description": "新详情 JSON（可选）"
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": "新置信度 0.0-1.0（可选）"
+                    },
+                    "linked_task_id": {
+                        "type": "string",
+                        "description": "关联 Board 任务 ID（可选，传空字符串清除）"
+                    }
+                },
+                "required": ["key"]
+            }),
+        ),
+        ToolDefinition::new(
             "mission_kb_search",
             "搜索知识库（FTS5 + Embedding 混合 RRF）。\
              理解子系统架构 → category=\"architecture:summary\" 获取基石描述(L2); \
