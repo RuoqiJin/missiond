@@ -434,6 +434,14 @@ impl MissionDB {
             )?;
         }
 
+        // AIOps alert aggregation: dedupe_key for state-based dedup
+        if !columns.iter().any(|c| c == "dedupe_key") {
+            conn.execute_batch(
+                "ALTER TABLE board_tasks ADD COLUMN dedupe_key TEXT;
+                 CREATE INDEX IF NOT EXISTS idx_board_tasks_dedupe ON board_tasks(dedupe_key, status);"
+            )?;
+        }
+
         // Knowledge Base: create FTS index if knowledge table exists but FTS doesn't
         let has_knowledge: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='knowledge'",

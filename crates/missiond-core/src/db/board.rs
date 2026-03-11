@@ -11,8 +11,8 @@ impl MissionDB {
         let conn = self.conn();
         let depends_on_json = serde_json::to_string(&task.depends_on).unwrap_or_else(|_| "[]".to_string());
         conn.execute(
-            "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, hidden, retry_count, max_retries, order_idx, created_at, updated_at, depends_on)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, hidden, retry_count, max_retries, order_idx, created_at, updated_at, depends_on, dedupe_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 task.id,
                 task.title,
@@ -34,6 +34,7 @@ impl MissionDB {
                 task.created_at,
                 task.updated_at,
                 depends_on_json,
+                task.dedupe_key,
             ],
         )?;
         Ok(())
@@ -91,10 +92,48 @@ impl MissionDB {
             flow_template: None,
             depends_on: input.depends_on.clone().unwrap_or_default(),
             lease_expires_at: None,
+            dedupe_key: input.dedupe_key.clone(),
         };
 
         self.insert_board_task(&task)?;
         Ok(task)
+    }
+
+    /// Find an open board task by dedupe_key (for AIOps alert aggregation).
+    /// Returns the first open task matching the key, or None.
+    pub fn find_open_task_by_dedupe_key(&self, dedupe_key: &str) -> DbResult<Option<BoardTask>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM board_tasks WHERE dedupe_key = ?1 AND status = 'open' LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![dedupe_key])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::row_to_board_task(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Close an open board task by dedupe_key (for AIOps auto-recovery).
+    /// Returns the closed task, or None if no matching open task found.
+    pub fn close_task_by_dedupe_key(&self, dedupe_key: &str) -> DbResult<Option<BoardTask>> {
+        let conn = self.read_conn();
+        let task_id: Option<String> = conn.query_row(
+            "SELECT id FROM board_tasks WHERE dedupe_key = ?1 AND status = 'open' LIMIT 1",
+            params![dedupe_key],
+            |row| row.get(0),
+        ).optional()?;
+        drop(conn);
+
+        if let Some(id) = task_id {
+            let update = UpdateBoardTaskInput {
+                status: Some("done".to_string()),
+                ..Default::default()
+            };
+            self.update_board_task(&id, &update)
+        } else {
+            Ok(None)
+        }
     }
 
     /// Get a board task by ID
@@ -622,6 +661,7 @@ impl MissionDB {
                 serde_json::from_str(&raw).unwrap_or_default()
             },
             lease_expires_at: row.get("lease_expires_at").unwrap_or(None),
+            dedupe_key: row.get("dedupe_key").unwrap_or(None),
         })
     }
 

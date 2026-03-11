@@ -508,6 +508,10 @@ pub struct BoardTask {
     /// Tasks running past this time are considered stale and recoverable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lease_expires_at: Option<String>,
+    /// Alert fingerprint for AIOps deduplication (e.g. "health_check:ECS 健康检查失败").
+    /// Used to find existing open tasks and aggregate repeated alerts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dedupe_key: Option<String>,
 }
 
 fn default_max_retries() -> i64 { 2 }
@@ -612,6 +616,9 @@ pub struct CreateBoardTaskInput {
     /// DAG dependency: IDs of tasks that must complete before this task
     #[serde(default, rename = "dependsOn")]
     pub depends_on: Option<Vec<String>>,
+    /// Alert fingerprint for AIOps deduplication (set internally, not from MCP)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_key: Option<String>,
 }
 
 /// Partial update for a board task

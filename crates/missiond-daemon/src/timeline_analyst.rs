@@ -349,6 +349,7 @@ async fn execute_insights(state: &AppState, insights: &[Insight]) -> usize {
                         hidden: None,
                         flow_template: None,
                         depends_on: None,
+                        dedupe_key: None,
                     },
                 ) {
                     Ok(task) => {
