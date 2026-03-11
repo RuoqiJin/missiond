@@ -1,12 +1,13 @@
-//! Step Narrator Worker — async GPT-5.4 conversation step explanation pipeline.
+//! Step Narrator Worker — batch-based GPT-5.4 conversation step explanation pipeline.
 //!
-//! Periodically scans for sessions with unnarrated messages,
-//! sends compressed conversation context to GPT-5.4 for step-by-step
-//! explanations, and persists results to `message_narrations` table.
+//! Architecture: cursor-driven batch processing.
+//! Each session is processed in batches of BATCH_SIZE messages.
+//! A cursor table tracks progress (last_processed_id, batch_index) for
+//! crash-safe resume. Between batches, context is passed via the last
+//! message + its narration from the previous batch.
 //!
-//! Architecture: polling-based with debounce. Only processes sessions
-//! where the conversation has been idle for >60s or has accumulated
-//! enough unnarrated messages.
+//! Flow: discover sessions → for each session → fetch next batch →
+//! build prompt with context → call GPT-5.4 → commit results + advance cursor.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,6 +19,9 @@ use crate::codex_cli::CodexCli;
 use crate::event_bus::{DaemonEvent, TraceContext};
 use crate::state::AppState;
 
+/// Messages per batch sent to GPT-5.4.
+const BATCH_SIZE: i64 = 10;
+
 /// Minimum unnarrated messages before triggering analysis.
 const MIN_UNNARRATED: i64 = 3;
 
@@ -27,13 +31,13 @@ const POLL_INTERVAL_SECS: u64 = 120;
 /// Startup delay to let the system stabilize.
 const STARTUP_DELAY_SECS: u64 = 60;
 
-/// Max conversation messages to send per request (cost control).
-const MAX_CONTEXT_MESSAGES: usize = 200;
+/// Max retries per batch before marking session as error.
+const MAX_RETRIES: i64 = 3;
 
-/// Max chars per tool result in compressed output.
-const MAX_TOOL_RESULT_CHARS: usize = 500;
+/// Rate limit between batches (seconds).
+const BATCH_DELAY_SECS: u64 = 3;
 
-const NARRATOR_PROMPT: &str = r#"你是一个资深代码审查员和技术解说员。请分析这段 AI 编程助手 (Claude Code) 的操作日志，为每条消息生成精准凝练的上下文解说。
+const NARRATOR_SYSTEM_PROMPT: &str = r#"你是一个资深代码审查员和技术解说员。请分析这段 AI 编程助手 (Claude Code) 的操作日志，为每条消息生成精准凝练的上下文解说。
 
 要求：
 1. step_title: 一行概括这步做了什么（如"读取 Timeline 组件以了解胶囊渲染逻辑"）
@@ -74,7 +78,7 @@ pub(crate) fn spawn_step_narrator(state: Arc<AppState>) {
     );
 
     tokio::spawn(async move {
-        info!("Step Narrator started (poll interval: {POLL_INTERVAL_SECS}s, min unnarrated: {MIN_UNNARRATED})");
+        info!("Step Narrator started (batch_size: {BATCH_SIZE}, poll: {POLL_INTERVAL_SECS}s)");
         tokio::time::sleep(Duration::from_secs(STARTUP_DELAY_SECS)).await;
 
         loop {
@@ -87,138 +91,244 @@ pub(crate) fn spawn_step_narrator(state: Arc<AppState>) {
 }
 
 async fn process_pending(state: &AppState, codex: &CodexCli) -> anyhow::Result<()> {
-    // Find sessions with enough unnarrated messages
+    // Discover sessions with unnarrated messages
     let pending = state.mission.db().get_sessions_needing_narration(MIN_UNNARRATED)?;
-
     if pending.is_empty() {
         return Ok(());
     }
 
-    let total_unnarrated: usize = pending.iter().map(|(_, c)| *c as usize).sum();
-    info!(sessions = pending.len(), total_unnarrated, "Step Narrator: found sessions needing narration");
+    info!(sessions = pending.len(), "Step Narrator: found sessions needing narration");
 
-    // Batch-level event (no trace context — worker-level)
-    state.event_bus.publish(DaemonEvent::NarrationBatchStarted {
-        pending_sessions: pending.len(),
-        total_unnarrated,
-    });
-
-    for (session_id, unnarrated_count) in pending {
-        info!(session = %&session_id[..8.min(session_id.len())], unnarrated = unnarrated_count,
-              "Step Narrator: processing session");
-
-        let trace_ctx = || TraceContext {
-            trace_id: Some(session_id.clone()),
-            ..Default::default()
-        };
-
-        // Session-level start event (traced by session_id)
-        state.event_bus.publish_traced(
-            DaemonEvent::NarrationSessionStarted {
-                session_id: session_id.clone(),
-                unnarrated_count: unnarrated_count as usize,
-            },
-            trace_ctx(),
-        );
-
-        let start = Instant::now();
-
-        match narrate_session(state, codex, &session_id).await {
-            Ok(count) => {
-                let duration_ms = start.elapsed().as_millis() as u64;
-                info!(session = %&session_id[..8.min(session_id.len())], narrated = count, duration_ms,
-                      "Step Narrator: completed");
-                state.event_bus.publish_traced(
-                    DaemonEvent::NarrationCompleted {
-                        session_id: session_id.clone(),
-                        narrated_count: count,
-                        duration_ms,
-                    },
-                    trace_ctx(),
-                );
-            }
-            Err(e) => {
-                warn!(session = %&session_id[..8.min(session_id.len())], error = %e,
-                      "Step Narrator: failed");
-                state.event_bus.publish_traced(
-                    DaemonEvent::NarrationFailed {
-                        session_id: session_id.clone(),
-                        error: format!("{e:#}"),
-                    },
-                    trace_ctx(),
-                );
-            }
-        }
-
-        // Rate limiting between sessions
+    // Process one session at a time (strict serial)
+    for (session_id, _unnarrated_count) in pending {
+        process_session(state, codex, &session_id).await?;
+        // Rate limit between sessions
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
 
     Ok(())
 }
 
-async fn narrate_session(state: &AppState, codex: &CodexCli, session_id: &str) -> anyhow::Result<usize> {
+/// Process a single session: iterate batches until all messages are narrated.
+async fn process_session(state: &AppState, codex: &CodexCli, session_id: &str) -> anyhow::Result<()> {
     let db = state.mission.db();
+    let short_id = &session_id[..8.min(session_id.len())];
 
-    // Fetch messages and existing narrations
-    let messages = db.get_conversation_messages(session_id, None, MAX_CONTEXT_MESSAGES as i64)?;
-    let narrations = db.get_narrations_for_session(session_id)?;
-    let existing_ids: std::collections::HashSet<i64> = narrations.iter().map(|(id, _, _, _)| *id).collect();
+    // Get or create cursor
+    let (last_processed_id, batch_index, status, _retry_count, total_messages) =
+        db.get_or_create_narration_cursor(session_id)?;
 
-    if messages.is_empty() {
-        return Ok(0);
+    if status == "error" {
+        info!(session = %short_id, "Step Narrator: skipping errored session");
+        return Ok(());
     }
 
-    // Build compressed conversation for GPT
-    let mut prompt_parts = Vec::new();
-    prompt_parts.push(NARRATOR_PROMPT.to_string());
-    prompt_parts.push("\n\n<conversation>\n".to_string());
+    // Count already narrated
+    let narrations = db.get_narrations_for_session(session_id)?;
+    let already_narrated = narrations.len();
 
-    let mut unnarrated_ids = Vec::new();
+    info!(session = %short_id, total = total_messages, already = already_narrated,
+          cursor = last_processed_id, batch = batch_index,
+          "Step Narrator: starting session");
 
-    for msg in &messages {
-        let role = msg.role.as_str();
-        let content = compress_message_content(&msg.content, role);
-        let marker = if existing_ids.contains(&msg.id) { " [已解说]" } else { "" };
+    let trace_ctx = || TraceContext {
+        trace_id: Some(session_id.to_string()),
+        ..Default::default()
+    };
 
-        if !existing_ids.contains(&msg.id)
-            && (role == "user" || role == "assistant")
-        {
-            unnarrated_ids.push(msg.id);
+    state.event_bus.publish_traced(
+        DaemonEvent::NarrationSessionStarted {
+            session_id: session_id.to_string(),
+            total_messages: total_messages as usize,
+            already_narrated,
+        },
+        trace_ctx(),
+    );
+
+    let mut current_cursor = last_processed_id;
+    let mut current_batch_index = batch_index;
+    let mut session_narrated_count = 0usize;
+
+    loop {
+        // Fetch next batch
+        let batch = db.fetch_narration_batch(session_id, current_cursor, BATCH_SIZE)?;
+        if batch.is_empty() {
+            break; // All messages processed
         }
 
-        prompt_parts.push(format!(
-            "[MSG_ID:{}] [{}]{}\n{}\n\n",
-            msg.id, role, marker, content
+        let batch_size = batch.len();
+        let batch_last_id = batch.last().map(|m| m.id).unwrap_or(current_cursor);
+
+        info!(session = %short_id, batch = current_batch_index, messages = batch_size,
+              "Step Narrator: processing batch");
+
+        // Mark cursor as processing
+        db.mark_narration_cursor_processing(session_id)?;
+
+        // Build prompt with context
+        let prompt = build_batch_prompt(db, session_id, current_batch_index, &batch)?;
+
+        let batch_start = Instant::now();
+
+        // Call GPT-5.4
+        match codex.call(
+            &prompt,
+            "step_narrator",
+            None,
+            None,
+            Some(Duration::from_secs(180)),
+            None,
+        ).await {
+            Ok(resp) => {
+                let duration_ms = batch_start.elapsed().as_millis() as u64;
+
+                // Parse response
+                match parse_narration_response(&resp.content) {
+                    Ok(parsed) => {
+                        let narration_batch: Vec<(i64, &str, &str, &str, &str)> = parsed.narrations.iter()
+                            .map(|n| (n.message_id, session_id, n.step_title.as_str(), n.step_intent.as_str(), n.step_result.as_str()))
+                            .collect();
+
+                        let count = db.commit_narration_batch(session_id, batch_last_id, &narration_batch)?;
+                        session_narrated_count += count;
+
+                        info!(session = %short_id, batch = current_batch_index,
+                              narrated = count, duration_ms,
+                              "Step Narrator: batch completed");
+
+                        state.event_bus.publish_traced(
+                            DaemonEvent::NarrationBatchCompleted {
+                                session_id: session_id.to_string(),
+                                batch_index: current_batch_index as usize,
+                                processed_count: count,
+                                total_messages: total_messages as usize,
+                                duration_ms,
+                            },
+                            trace_ctx(),
+                        );
+
+                        current_cursor = batch_last_id;
+                        current_batch_index += 1;
+                    }
+                    Err(e) => {
+                        warn!(session = %short_id, batch = current_batch_index, error = %e,
+                              "Step Narrator: failed to parse response");
+                        let permanently_failed = db.mark_narration_cursor_failed(session_id, MAX_RETRIES)?;
+                        state.event_bus.publish_traced(
+                            DaemonEvent::NarrationFailed {
+                                session_id: session_id.to_string(),
+                                batch_index: current_batch_index as usize,
+                                error: format!("Parse error: {e}"),
+                                will_retry: !permanently_failed,
+                            },
+                            trace_ctx(),
+                        );
+                        return Ok(()); // Stop this session, try next
+                    }
+                }
+            }
+            Err(e) => {
+                let duration_ms = batch_start.elapsed().as_millis() as u64;
+                warn!(session = %short_id, batch = current_batch_index, error = %e, duration_ms,
+                      "Step Narrator: codex call failed");
+                let permanently_failed = db.mark_narration_cursor_failed(session_id, MAX_RETRIES)?;
+                state.event_bus.publish_traced(
+                    DaemonEvent::NarrationFailed {
+                        session_id: session_id.to_string(),
+                        batch_index: current_batch_index as usize,
+                        error: format!("{e}"),
+                        will_retry: !permanently_failed,
+                    },
+                    trace_ctx(),
+                );
+                return Ok(()); // Stop this session, try next
+            }
+        }
+
+        // Rate limit between batches
+        tokio::time::sleep(Duration::from_secs(BATCH_DELAY_SECS)).await;
+    }
+
+    // Session fully processed
+    if session_narrated_count > 0 {
+        info!(session = %short_id, total_narrated = session_narrated_count,
+              "Step Narrator: session completed");
+        state.event_bus.publish_traced(
+            DaemonEvent::NarrationSessionCompleted {
+                session_id: session_id.to_string(),
+                total_narrated: session_narrated_count,
+            },
+            trace_ctx(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Build the prompt for a single batch, including context from previous batches.
+fn build_batch_prompt(
+    db: &missiond_core::db::MissionDB,
+    session_id: &str,
+    batch_index: i64,
+    batch_messages: &[missiond_core::types::ConversationMessage],
+) -> anyhow::Result<String> {
+    let mut parts = Vec::new();
+
+    // System prompt
+    parts.push(NARRATOR_SYSTEM_PROMPT.to_string());
+
+    // Batch context header
+    parts.push(format!("\n\n--- 这是第 {} 批（每批最多 {} 条消息）---\n",
+        batch_index + 1, BATCH_SIZE));
+
+    // Previous context (for batch_index > 0)
+    if batch_index > 0 {
+        parts.push("<previous_context>\n".to_string());
+        if let Ok(Some((last_msg_id, title, intent, result))) = db.get_last_narration(session_id) {
+            // Get the actual message content for anchoring
+            if let Ok(Some(msg)) = db.get_conversation_message_by_id(last_msg_id) {
+                parts.push(format!(
+                    "上一批最后一条消息 [MSG_ID:{}] [{}]：\n{}\n\n该消息的解说：\n- step_title: {}\n- step_intent: {}\n- step_result: {}\n",
+                    msg.id, msg.role, msg.content, title, intent, result
+                ));
+            } else {
+                parts.push(format!(
+                    "上一批最后一条消息的解说：\n- step_title: {}\n- step_intent: {}\n- step_result: {}\n",
+                    title, intent, result
+                ));
+            }
+        }
+        parts.push("</previous_context>\n\n".to_string());
+    } else {
+        parts.push("<previous_context>\n这是会话的开头，没有前置上下文。\n</previous_context>\n\n".to_string());
+    }
+
+    // Current batch messages (原文，不压缩)
+    parts.push("<conversation>\n".to_string());
+
+    let mut msg_ids = Vec::new();
+    for msg in batch_messages {
+        parts.push(format!(
+            "[MSG_ID:{}] [{}]\n{}\n\n",
+            msg.id, msg.role, msg.content
         ));
+        msg_ids.push(msg.id);
     }
 
-    prompt_parts.push("</conversation>\n".to_string());
+    parts.push("</conversation>\n".to_string());
 
-    if unnarrated_ids.is_empty() {
-        return Ok(0);
-    }
-
-    prompt_parts.push(format!(
-        "\n请只为以下 message_id 生成解说（跳过已标记 [已解说] 的）：{:?}",
-        unnarrated_ids
+    // Instruction
+    parts.push(format!(
+        "\n请为以下 message_id 生成解说：{:?}",
+        msg_ids
     ));
 
-    let full_prompt = prompt_parts.join("");
+    Ok(parts.join(""))
+}
 
-    // Call GPT-5.4
-    let resp = codex.call(
-        &full_prompt,
-        "step_narrator",
-        None,
-        None,
-        Some(Duration::from_secs(180)),
-        None,
-    ).await?;
-
-    // Parse JSON response
-    let content = resp.content.trim();
-    // Try to extract JSON from possible markdown fences
+/// Parse GPT-5.4 narration response, handling markdown fences.
+fn parse_narration_response(content: &str) -> anyhow::Result<NarrationResponse> {
+    let content = content.trim();
     let json_str = if let Some(start) = content.find('{') {
         if let Some(end) = content.rfind('}') {
             &content[start..=end]
@@ -229,58 +339,6 @@ async fn narrate_session(state: &AppState, codex: &CodexCli, session_id: &str) -
         content
     };
 
-    let parsed: NarrationResponse = serde_json::from_str(json_str)
-        .map_err(|e| anyhow::anyhow!("Failed to parse GPT narration response: {e}\nRaw: {}", &json_str[..200.min(json_str.len())]))?;
-
-    if parsed.narrations.is_empty() {
-        return Ok(0);
-    }
-
-    // Persist narrations
-    let narrations = parsed.narrations;
-    let batch: Vec<(i64, &str, &str, &str, &str)> = narrations.iter()
-        .map(|n| (n.message_id, session_id, n.step_title.as_str(), n.step_intent.as_str(), n.step_result.as_str()))
-        .collect();
-    let count = db.insert_narrations(&batch)?;
-
-    Ok(count)
-}
-
-/// Compress message content for GPT prompt (cost control).
-fn compress_message_content(content: &str, role: &str) -> String {
-    if role == "user" {
-        // User messages are usually short, keep as-is (truncate if huge)
-        if content.len() > 2000 {
-            format!("{}...[truncated {} chars]", &content[..1500], content.len() - 1500)
-        } else {
-            content.to_string()
-        }
-    } else {
-        // Assistant messages: compress tool calls and long outputs
-        let mut result = String::new();
-        let lines: Vec<&str> = content.lines().collect();
-
-        if lines.len() <= 30 {
-            // Short enough, keep as-is
-            if content.len() > MAX_TOOL_RESULT_CHARS * 4 {
-                result.push_str(&content[..MAX_TOOL_RESULT_CHARS * 2]);
-                result.push_str(&format!("\n...[truncated {} chars]\n", content.len() - MAX_TOOL_RESULT_CHARS * 3));
-                result.push_str(&content[content.len() - MAX_TOOL_RESULT_CHARS..]);
-            } else {
-                return content.to_string();
-            }
-        } else {
-            // Long content: keep first 15 and last 10 lines
-            for line in &lines[..15] {
-                result.push_str(line);
-                result.push('\n');
-            }
-            result.push_str(&format!("...[{} lines truncated]\n", lines.len() - 25));
-            for line in &lines[lines.len() - 10..] {
-                result.push_str(line);
-                result.push('\n');
-            }
-        }
-        result
-    }
+    serde_json::from_str(json_str)
+        .map_err(|e| anyhow::anyhow!("Failed to parse GPT narration: {e}\nRaw: {}", &json_str[..200.min(json_str.len())]))
 }

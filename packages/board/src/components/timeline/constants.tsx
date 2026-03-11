@@ -50,10 +50,10 @@ export const EVENT_COLORS: Record<string, { dot: string; glow: string; bg: strin
   translation_completed:    { dot: 'bg-indigo-500',  glow: 'shadow-indigo-500/50',  bg: 'bg-indigo-500/10',  text: 'text-indigo-400',  label: 'Translated',  icon: <CheckCheck className="w-3 h-3" /> },
   translation_failed:       { dot: 'bg-red-400',     glow: 'shadow-red-400/50',     bg: 'bg-red-400/10',     text: 'text-red-400',     label: 'Trans Err',   icon: <AlertTriangle className="w-3 h-3" /> },
   // ── Step Narrator (violet) ──
-  narration_batch_started:  { dot: 'bg-violet-300',  glow: 'shadow-violet-300/50',  bg: 'bg-violet-300/10',  text: 'text-violet-300',  label: 'Narrator',    icon: <Sparkles className="w-3 h-3" /> },
-  narration_session_started:{ dot: 'bg-violet-400',  glow: 'shadow-violet-400/50',  bg: 'bg-violet-400/10',  text: 'text-violet-400',  label: 'Narrating',   icon: <Sparkles className="w-3 h-3" /> },
-  narration_completed:      { dot: 'bg-violet-500',  glow: 'shadow-violet-500/50',  bg: 'bg-violet-500/10',  text: 'text-violet-400',  label: 'Narrated',    icon: <CheckCheck className="w-3 h-3" /> },
-  narration_failed:         { dot: 'bg-red-400',     glow: 'shadow-red-400/50',     bg: 'bg-red-400/10',     text: 'text-red-400',     label: 'Narr Err',    icon: <AlertTriangle className="w-3 h-3" /> },
+  narration_session_started:  { dot: 'bg-violet-300',  glow: 'shadow-violet-300/50',  bg: 'bg-violet-300/10',  text: 'text-violet-300',  label: 'Narrating',   icon: <Sparkles className="w-3 h-3" /> },
+  narration_batch_completed:  { dot: 'bg-violet-400',  glow: 'shadow-violet-400/50',  bg: 'bg-violet-400/10',  text: 'text-violet-400',  label: 'Batch Done',  icon: <CheckCheck className="w-3 h-3" /> },
+  narration_session_completed:{ dot: 'bg-violet-500',  glow: 'shadow-violet-500/50',  bg: 'bg-violet-500/10',  text: 'text-violet-400',  label: 'Narrated',    icon: <CheckCheck className="w-3 h-3" /> },
+  narration_failed:           { dot: 'bg-red-400',     glow: 'shadow-red-400/50',     bg: 'bg-red-400/10',     text: 'text-red-400',     label: 'Narr Err',    icon: <AlertTriangle className="w-3 h-3" /> },
 };
 
 // ── Slot Colors ──
@@ -92,7 +92,7 @@ export const SWIMLANES = [
   { id: 'code',    label: 'Code',      accent: { dot: 'bg-blue-400',    css: '#60a5fa', bg: 'bg-blue-500/[0.03]' },   types: ['git_commit'] },
   { id: 'flow',    label: 'Flow',      accent: { dot: 'bg-orange-400',  css: '#fb923c', bg: 'bg-orange-500/[0.03]' }, types: ['task_lifecycle', 'question_created', 'question_resolved'] },
   { id: 'board',   label: 'Board',     accent: { dot: 'bg-pink-400',    css: '#f472b6', bg: 'bg-pink-500/[0.03]' },   types: ['board_task_created', 'board_task_status_changed', 'board_task_note_added', 'board_task_claimed', 'board_task_deleted', 'board_task_updated'] },
-  { id: 'sys',     label: 'System',    accent: { dot: 'bg-slate-400',   css: '#94a3b8', bg: 'bg-slate-500/[0.03]' },  types: ['slot_state_changed', 'memory_phase_changed', 'briefing_batch_started', 'briefing_summary_generated', 'narration_batch_started', 'narration_session_started', 'narration_completed', 'narration_failed'] },
+  { id: 'sys',     label: 'System',    accent: { dot: 'bg-slate-400',   css: '#94a3b8', bg: 'bg-slate-500/[0.03]' },  types: ['slot_state_changed', 'memory_phase_changed', 'briefing_batch_started', 'briefing_summary_generated', 'narration_session_started', 'narration_batch_completed', 'narration_session_completed', 'narration_failed'] },
 ];
 
 export const SLOT_LANE_IDX = SWIMLANES.findIndex(s => s.id === 'slot');
