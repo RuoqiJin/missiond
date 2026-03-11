@@ -255,27 +255,32 @@ pub(crate) enum DaemonEvent {
         error: String,
     },
 
-    // ===== Step Narrator Worker =====
-    /// Step Narrator found sessions needing narration and started a batch.
-    NarrationBatchStarted {
-        pending_sessions: usize,
-        total_unnarrated: usize,
-    },
+    // ===== Step Narrator Worker (batch-based) =====
     /// Step Narrator started processing a specific session.
     NarrationSessionStarted {
         session_id: String,
-        unnarrated_count: usize,
+        total_messages: usize,
+        already_narrated: usize,
     },
-    /// Step narration completed for a session.
-    NarrationCompleted {
+    /// A single batch (≤10 messages) completed successfully.
+    NarrationBatchCompleted {
         session_id: String,
-        narrated_count: usize,
+        batch_index: usize,
+        processed_count: usize,
+        total_messages: usize,
         duration_ms: u64,
     },
-    /// Step narration failed for a session.
+    /// All pending batches for a session have been processed.
+    NarrationSessionCompleted {
+        session_id: String,
+        total_narrated: usize,
+    },
+    /// A batch failed for a session.
     NarrationFailed {
         session_id: String,
+        batch_index: usize,
         error: String,
+        will_retry: bool,
     },
 
     // ===== MiniMax Gateway =====
@@ -376,9 +381,9 @@ impl DaemonEvent {
             Self::TranslationStarted { .. } => "translation_started",
             Self::TranslationCompleted { .. } => "translation_completed",
             Self::TranslationFailed { .. } => "translation_failed",
-            Self::NarrationBatchStarted { .. } => "narration_batch_started",
             Self::NarrationSessionStarted { .. } => "narration_session_started",
-            Self::NarrationCompleted { .. } => "narration_completed",
+            Self::NarrationBatchCompleted { .. } => "narration_batch_completed",
+            Self::NarrationSessionCompleted { .. } => "narration_session_completed",
             Self::NarrationFailed { .. } => "narration_failed",
             Self::WorkerLlmCall { .. } => "worker_llm_call",
             Self::CliRequestStarted { .. } => "cli_request_started",
@@ -504,14 +509,14 @@ impl DaemonEvent {
                 json!({ "message_id": message_id, "slot_id": slot_id, "preview": preview, "duration_ms": duration_ms }),
             Self::TranslationFailed { message_id, slot_id, error } =>
                 json!({ "message_id": message_id, "slot_id": slot_id, "error": error }),
-            Self::NarrationBatchStarted { pending_sessions, total_unnarrated } =>
-                json!({ "pending_sessions": pending_sessions, "total_unnarrated": total_unnarrated }),
-            Self::NarrationSessionStarted { session_id, unnarrated_count } =>
-                json!({ "session_id": session_id, "unnarrated_count": unnarrated_count }),
-            Self::NarrationCompleted { session_id, narrated_count, duration_ms } =>
-                json!({ "session_id": session_id, "narrated_count": narrated_count, "duration_ms": duration_ms }),
-            Self::NarrationFailed { session_id, error } =>
-                json!({ "session_id": session_id, "error": error }),
+            Self::NarrationSessionStarted { session_id, total_messages, already_narrated } =>
+                json!({ "session_id": session_id, "total_messages": total_messages, "already_narrated": already_narrated }),
+            Self::NarrationBatchCompleted { session_id, batch_index, processed_count, total_messages, duration_ms } =>
+                json!({ "session_id": session_id, "batch_index": batch_index, "processed_count": processed_count, "total_messages": total_messages, "duration_ms": duration_ms }),
+            Self::NarrationSessionCompleted { session_id, total_narrated } =>
+                json!({ "session_id": session_id, "total_narrated": total_narrated }),
+            Self::NarrationFailed { session_id, batch_index, error, will_retry } =>
+                json!({ "session_id": session_id, "batch_index": batch_index, "error": error, "will_retry": will_retry }),
             Self::WorkerLlmCall {
                 caller, task_id, status, prompt_chars,
                 response_chars, duration_ms, queue_wait_ms,

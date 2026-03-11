@@ -53,6 +53,8 @@ export function EventSummaryView({ event }: { event: TimelineEvent }) {
     case 'question_created':
     case 'question_resolved':
       return <QuestionSummary event={event} />;
+    case 'system_message':
+      return <SystemMessageSummary event={event} />;
     default:
       return <DefaultSummary event={event} />;
   }
@@ -277,6 +279,28 @@ function ThinkingSummary({ event }: { event: TimelineEvent }) {
   );
 }
 
+function SystemMessageSummary({ event }: { event: TimelineEvent }) {
+  const { preview, content_chars, message_id, slot_id, role } = event.payload || {};
+  const fullMsg = useFullMessage(message_id, true);
+  const displayText = fullMsg?.content ?? preview;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] uppercase tracking-wider text-neutral-500 font-medium">Daemon</span>
+        {slot_id && <span className="text-[10px] text-teal-400/70 bg-teal-500/10 px-1.5 py-0.5 rounded font-mono">{slot_id}</span>}
+        {role && <span className="text-[10px] text-neutral-600 bg-neutral-900 px-1.5 py-0.5 rounded">{role}</span>}
+        <span className="text-[10px] text-neutral-600 bg-neutral-900 px-1.5 py-0.5 rounded font-mono">{content_chars} chars</span>
+      </div>
+      {displayText && (
+        <div className="p-3 rounded-lg text-sm leading-relaxed bg-slate-500/10 border border-slate-500/20 max-h-[600px] overflow-auto">
+          <MarkdownContent content={displayText} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SlotStateSummary({ event }: { event: TimelineEvent }) {
   const { slot_id, prev_state, new_state } = event.payload || {};
   return (
@@ -342,7 +366,10 @@ function TaskSummary({ event }: { event: TimelineEvent }) {
 function LlmRequestSummary({ event }: { event: TimelineEvent }) {
   const p = event.payload || {};
   const isStarted = event.event_type.endsWith('_started');
-  const isCodex = event.event_type.startsWith('codex_');
+  // Unified cli_request_* events carry engine in payload; legacy codex_* events are always codex
+  const engine = p.engine || (event.event_type.startsWith('codex_') ? 'codex' : 'gemini');
+  const isCodex = engine === 'codex';
+  const engineLabel = engine === 'codex' ? 'GPT' : engine === 'gemini' ? 'Gemini' : engine;
   const accent = isCodex ? 'sky' : 'purple';
   const [imageExpanded, setImageExpanded] = useState(false);
 
@@ -357,7 +384,7 @@ function LlmRequestSummary({ event }: { event: TimelineEvent }) {
       <div className="flex items-center gap-2 p-3 pb-0">
         <Cpu className={cn('w-4 h-4', isCodex ? 'text-sky-400' : 'text-purple-400')} />
         <span className={cn('text-xs font-medium', isCodex ? 'text-sky-300' : 'text-purple-300')}>
-          {isCodex ? 'GPT' : 'Gemini'} — {isStarted ? 'Request Sent' : 'Response Received'}
+          {engineLabel} — {isStarted ? 'Request Sent' : 'Response Received'}
         </span>
         {p.error && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/20 text-red-400">Error</span>}
       </div>
