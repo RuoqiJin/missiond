@@ -302,9 +302,20 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Extract progress event from a tool_use NDJSON event.
+///
+/// Gemini CLI stream-json format:
+/// ```json
+/// {"type":"tool_use","tool_name":"read_file","tool_id":"...","parameters":{...}}
+/// ```
 fn extract_tool_use_progress(event: &Value, tool_seq: u32) -> GeminiCliProgress {
-    let tool_name = event.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let input_preview = event.get("input")
+    // Gemini CLI uses "tool_name"; fallback to "name" for forward compat
+    let tool_name = event.get("tool_name")
+        .or_else(|| event.get("name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    // Gemini CLI uses "parameters"; fallback to "input" for forward compat
+    let input_preview = event.get("parameters")
+        .or_else(|| event.get("input"))
         .map(|v| {
             if let Some(s) = v.as_str() {
                 truncate(s, 200)
@@ -323,9 +334,21 @@ fn extract_tool_use_progress(event: &Value, tool_seq: u32) -> GeminiCliProgress 
 }
 
 /// Extract progress event from a tool_result NDJSON event.
+///
+/// Gemini CLI stream-json format:
+/// ```json
+/// {"type":"tool_result","tool_id":"...","status":"success","output":"..."}
+/// ```
 fn extract_tool_result_progress(event: &Value, tool_seq: u32) -> GeminiCliProgress {
-    let is_error = event.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
-    let result_preview = event.get("result")
+    // Gemini CLI uses "status" string; fallback to "is_error" bool
+    let is_error = event.get("status")
+        .and_then(|v| v.as_str())
+        .map(|s| s != "success")
+        .or_else(|| event.get("is_error").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+    // Gemini CLI uses "output"; fallback to "result"/"content" for forward compat
+    let result_preview = event.get("output")
+        .or_else(|| event.get("result"))
         .or_else(|| event.get("content"))
         .map(|v| {
             if let Some(s) = v.as_str() {
@@ -334,10 +357,16 @@ fn extract_tool_result_progress(event: &Value, tool_seq: u32) -> GeminiCliProgre
                 truncate(&v.to_string(), 500)
             }
         });
+    // Gemini CLI tool_result includes tool_id but not tool_name; extract from tool_id prefix
+    let tool_name = event.get("tool_id")
+        .and_then(|v| v.as_str())
+        .and_then(|id| id.split('_').next())
+        .filter(|name| !name.is_empty())
+        .map(|s| s.to_string());
     GeminiCliProgress {
         tool_seq,
         activity: "tool_result".to_string(),
-        tool_name: None,
+        tool_name,
         input_preview: None,
         result_preview,
         is_error,

@@ -805,8 +805,15 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 mode, entries.len(), kb_jsonl.len(), model, url);
 
             // 7. Call router API (rate-limited with 429 retry)
+            // Large KB analysis (consolidation_plan with detail) needs extended idle timeout:
+            // Gemini thinking phase for 100K+ prompts can exceed the default 120s before first token.
+            let idle_timeout = if kb_jsonl.len() > 50_000 {
+                Some(std::time::Duration::from_secs(300)) // 5 min for large prompts
+            } else {
+                None // default 120s
+            };
             let result = REQUEST_CALLER.scope("kb_analyze".to_string(), async {
-                state.gemini.send(&state.http_client, &url, &jwt, &body).await
+                state.gemini.send_with_timeout(&state.http_client, &url, &jwt, &body, idle_timeout).await
             }).await?;
 
             let content = result
