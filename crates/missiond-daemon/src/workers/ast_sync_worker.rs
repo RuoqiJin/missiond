@@ -53,7 +53,7 @@ pub(crate) enum AstSyncTask {
 pub(crate) async fn run_ast_sync_worker(
     mut rx: mpsc::Receiver<AstSyncTask>,
     mission: std::sync::Arc<MissionControl>,
-    embedding_tx: mpsc::Sender<super::state::EmbeddingTask>,
+    embedding_tx: mpsc::Sender<crate::state::EmbeddingTask>,
 ) {
     info!("AST sync worker started");
 
@@ -143,7 +143,7 @@ fn process_commit_sync(
     repo_name: &str,
     old_hash: &str,
     new_hash: &str,
-    embedding_tx: &mpsc::Sender<super::state::EmbeddingTask>,
+    embedding_tx: &mpsc::Sender<crate::state::EmbeddingTask>,
 ) {
     let changed = git_diff_files(repo_path, old_hash, new_hash);
     if changed.is_empty() {
@@ -196,7 +196,7 @@ fn process_full_sync(
     db: &MissionDB,
     repo_path: &Path,
     repo_name: &str,
-    embedding_tx: &mpsc::Sender<super::state::EmbeddingTask>,
+    embedding_tx: &mpsc::Sender<crate::state::EmbeddingTask>,
 ) {
     let head_hash = git_head_hash(repo_path).unwrap_or_default();
     if head_hash.is_empty() {
@@ -259,7 +259,7 @@ fn process_file_sync(
     repo_path: &Path,
     repo_name: &str,
     file_path: &str,
-    embedding_tx: &mpsc::Sender<super::state::EmbeddingTask>,
+    embedding_tx: &mpsc::Sender<crate::state::EmbeddingTask>,
 ) {
     let hash = git_head_hash(repo_path).unwrap_or_else(|| "worktree".to_string());
     let ids = sync_single_file(db, repo_path, repo_name, file_path, &hash);
@@ -463,14 +463,14 @@ pub(crate) fn git_status_changed_files(repo: &Path) -> Vec<String> {
 /// Trigger embedding for AST node IDs via the existing embedding channel.
 /// Uses try_send to avoid blocking the sync worker.
 fn trigger_embedding(
-    embedding_tx: &mpsc::Sender<super::state::EmbeddingTask>,
+    embedding_tx: &mpsc::Sender<crate::state::EmbeddingTask>,
     node_ids: Vec<String>,
 ) {
     if node_ids.is_empty() {
         return;
     }
     debug!(count = node_ids.len(), "AST: triggering embedding batch");
-    if embedding_tx.try_send(super::state::EmbeddingTask::ProcessAstBatch(node_ids)).is_err() {
+    if embedding_tx.try_send(crate::state::EmbeddingTask::ProcessAstBatch(node_ids)).is_err() {
         debug!("AST: embedding channel full, backfill will catch up");
     }
 }

@@ -5,48 +5,29 @@
 //! - Provide a stable WebSocket endpoint for attach + tasks events
 //! - Expose an IPC JSON-RPC endpoint for MCP proxy processes
 
+// ── Subdirectory modules ──
+mod llm;
+mod workers;
+mod engine;
+mod context;
+mod infra;
+
+// ── Root-level modules ──
 mod events_sync;
 mod lenient;
 mod state;
-mod mcp_client;
 mod helpers;
 mod handlers;
-mod aiops;
-mod decision_engine;
-mod decision_harvest;
-mod autopilot;
-mod flow_engine;
-mod llm_gateway;
 mod event_bus;
 mod event_router;
-mod extraction;
 mod supervisor;
-mod memory_scheduler;
-mod embedding_worker;
-mod vision_worker;
-mod slot_env;
-mod claude_md_sync;
-mod context_budget;
-mod codex_cli;
-mod gemini_client;
-mod gemini_cli;
-mod message_handler;
-mod ipc_handler;
-mod daemon_stats;
-mod prompts;
-mod session_util;
-mod timeline_analyst;
-mod git_watcher;
-mod ast_sync_worker;
-mod code_prefetch;
-mod minimax_client;
-mod minimax_gateway;
-mod briefing_worker;
-mod translation_worker;
-mod step_narrator;
-mod context_pipeline;
-mod experience_harvester;
-mod topology_map;
+
+// ── Re-exports for backward-compatible `use crate::xxx` paths ──
+use llm::{gemini_client, gemini_cli, minimax_client, minimax_gateway, codex_cli, llm_gateway, prompts};
+use workers::{embedding_worker, vision_worker, step_narrator, translation_worker, briefing_worker, code_prefetch, experience_harvester, ast_sync_worker};
+use engine::{autopilot, decision_engine, decision_harvest, flow_engine, extraction, memory_scheduler, timeline_analyst};
+use context::{slot_env, context_pipeline, claude_md_sync, topology_map, context_budget};
+use infra::{ipc_handler, message_handler, aiops, session_util, mcp_client, daemon_stats, git_watcher};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
