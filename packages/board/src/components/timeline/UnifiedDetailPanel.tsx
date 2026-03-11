@@ -34,8 +34,8 @@ export function UnifiedDetailPanel({ selection, focusedEvent, sessionsMeta, filt
     }
   }, [scopeKey]);
 
-  // Fetch narrations when in session scope
-  const sessionId = selection.scope === 'session' ? selection.scopeId : null;
+  // Fetch narrations when in session or trace scope (trace_id is often session_id)
+  const sessionId = (selection.scope === 'session' || selection.scope === 'trace') ? selection.scopeId : null;
   useEffect(() => {
     if (!sessionId) { setNarrations(new Map()); return; }
     let cancelled = false;
@@ -232,6 +232,12 @@ export function UnifiedDetailPanel({ selection, focusedEvent, sessionsMeta, filt
             )}
             {focusedEvent.payload?.message_id != null && (
               <span>MsgID: {focusedEvent.payload.message_id}</span>
+            )}
+            {focusedEvent.span_id && (
+              <span title={focusedEvent.span_id}>Span: {focusedEvent.span_id.slice(0, 8)}</span>
+            )}
+            {focusedEvent.parent_span_id && (
+              <span title={focusedEvent.parent_span_id} className="text-teal-600">Parent: {focusedEvent.parent_span_id.slice(0, 8)}</span>
             )}
           </div>
           {stepInfo.subtitle && <p className="text-xs text-neutral-400 truncate mt-1 font-mono">{stepInfo.subtitle}</p>}

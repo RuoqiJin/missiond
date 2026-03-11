@@ -3,7 +3,7 @@ use missiond_core::ipc::{IpcListener, IpcStream};
 use missiond_mcp::protocol::{self, Request, RequestId, Response, RpcError};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use crate::gemini_client::REQUEST_SESSION_ID;
+use crate::gemini_client::{REQUEST_SESSION_ID, PARENT_SPAN_ID};
 use crate::state::AppState;
 use serde_json::Value;
 
@@ -94,7 +94,19 @@ pub(crate) async fn handle_ipc_request(state: AppState, request: Request) -> Res
                 .cloned()
                 .unwrap_or(Value::Object(serde_json::Map::new()));
 
-            let tool_res = state.call_tool(&name, arguments).await;
+            // Cross-lane causal linking: read session's last assistant_message span_id
+            // and inject as PARENT_SPAN_ID so downstream CliRequestStarted events
+            // get parent_span_id set, linking AI/LLM lane back to Chat lane.
+            let session_id = REQUEST_SESSION_ID.try_with(|id| id.clone()).unwrap_or_default();
+            let parent_span = state.last_msg_span.lock().unwrap().get(&session_id).cloned();
+
+            let tool_res = if let Some(parent) = parent_span {
+                PARENT_SPAN_ID.scope(parent, async {
+                    state.call_tool(&name, arguments).await
+                }).await
+            } else {
+                state.call_tool(&name, arguments).await
+            };
             Response::success(id, serde_json::to_value(tool_res).unwrap_or(Value::Null))
         }
         _ => Response::from_error(id, RpcError::MethodNotFound(method.to_string())),

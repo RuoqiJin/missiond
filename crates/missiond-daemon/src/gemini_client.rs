@@ -35,6 +35,9 @@ tokio::task_local! {
     pub(crate) static REQUEST_SESSION_ID: String;
     /// Caller identity — set by each call site before calling send().
     pub(crate) static REQUEST_CALLER: String;
+    /// Parent span ID for cross-lane causal linking (OpenTelemetry-style context propagation).
+    /// Set by IPC handler from AppState.last_msg_span cache; read by emit_started_event().
+    pub(crate) static PARENT_SPAN_ID: String;
 }
 
 /// Read session ID from task-local context (returns None if not set).
@@ -45,6 +48,12 @@ fn current_session_id() -> Option<String> {
 /// Read caller identity from task-local context.
 fn current_caller() -> String {
     REQUEST_CALLER.try_with(|c| c.clone()).unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// Read parent span ID from task-local context (returns None if not set).
+/// Used for cross-lane causal linking: parent's span_id → child's parent_span_id.
+pub(crate) fn current_parent_span_id() -> Option<String> {
+    PARENT_SPAN_ID.try_with(|id| id.clone()).ok()
 }
 
 
@@ -350,6 +359,7 @@ impl GeminiClient {
             .map(|s| s.to_string());
 
         let trace_id = session_id.clone();
+        let parent = current_parent_span_id(); // Cross-lane causal link
         let event = DaemonEvent::CliRequestStarted {
             engine: missiond_core::CliEngine::Gemini,
             request_id: request_id.to_string(),
@@ -364,7 +374,7 @@ impl GeminiClient {
             event,
             trace_id,
             span_id: span_id.to_string(),
-            parent_span_id: None,
+            parent_span_id: parent,
             summary: Some(format!("{} → {} (prompt {}ch)", caller, model, prompt_chars)),
         };
         let _ = self.event_tx.send(entry);
@@ -415,6 +425,7 @@ impl GeminiClient {
         );
 
         let trace_id = session_id.clone();
+        let parent = current_parent_span_id(); // Cross-lane causal link (same as started)
         let event = DaemonEvent::CliRequestCompleted {
             engine: missiond_core::CliEngine::Gemini,
             request_id: request_id.to_string(),
@@ -438,7 +449,7 @@ impl GeminiClient {
             event,
             trace_id,
             span_id: span_id.to_string(),
-            parent_span_id: None,
+            parent_span_id: parent,
             summary: Some(format!("{} → {} ({}ms)", caller, model, api_duration.as_millis())),
         };
         let _ = self.event_tx.send(entry);

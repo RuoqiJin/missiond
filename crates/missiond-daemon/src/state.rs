@@ -168,6 +168,10 @@ pub(crate) struct AppState {
     pub(crate) ast_sync_tx: tokio::sync::mpsc::Sender<crate::ast_sync_worker::AstSyncTask>,
     /// In-memory AST embedding cache for code prefetch hybrid search (P3).
     pub(crate) ast_embedding_cache: missiond_core::embedding::EmbeddingCache,
+    /// Cache: session_id → last assistant_message span_id.
+    /// Written by message_handler, read by ipc_handler for cross-lane causal linking.
+    /// Links assistant_message (Chat lane) → CliRequestStarted (AI/LLM lane).
+    pub(crate) last_msg_span: Arc<std::sync::Mutex<HashMap<String, String>>>,
 }
 
 /// Event-driven embedding tasks — the Worker sleeps until triggered.
