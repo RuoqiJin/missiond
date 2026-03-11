@@ -8,12 +8,13 @@ export function getDotStatus(ev: TimelineEvent, sel: SelectionState, contextSeqS
   if (sel.focusedSeq === ev.seq) return 'focused';
   if (sel.scope === 'trace' && contextSeqSet.has(ev.seq)) return 'highlighted';
   if (sel.scope === 'session' && ev.payload?.session_id === sel.scopeId) return 'highlighted';
+  if (sel.scope === 'slot' && ev.payload?.slot_id === sel.scopeId) return 'highlighted';
   if (sel.scope !== 'global') return 'dimmed';
   return 'normal';
 }
 
 export function getCapsuleStatus(sid: string, sel: SelectionState): CapsuleVisualStatus {
-  if (sel.scope === 'session' && sel.scopeId === sid) return 'selected';
+  if ((sel.scope === 'session' || sel.scope === 'slot') && sel.scopeId === sid) return 'selected';
   if (sel.scope !== 'global') return 'dimmed';
   return 'normal';
 }
