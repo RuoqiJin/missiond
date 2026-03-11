@@ -84,6 +84,21 @@ struct KBKeyArgs {
 }
 
 #[derive(Deserialize)]
+struct KBUpdateArgs {
+    key: String,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    detail: Option<serde_json::Value>,
+    #[serde(default)]
+    confidence: Option<f64>,
+    #[serde(default)]
+    linked_task_id: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct KBSearchArgs {
     #[serde(default)]
     query: Option<String>,
@@ -189,6 +204,39 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "deleted_count": count,
                 "requested_keys": keys.len(),
             })))
+        }
+        "mission_kb_update" => {
+            let args: KBUpdateArgs = serde_json::from_value(args)?;
+            // Content quality check only if summary is being updated
+            if let Some(ref summary) = args.summary {
+                if let Some(rejection) = check_content_quality(summary, &args.detail, args.category.as_deref()) {
+                    return Ok(ToolResult::error(&rejection));
+                }
+            }
+            let result = state.mission.db()
+                .kb_update(
+                    &args.key,
+                    args.category.as_deref(),
+                    args.summary.as_deref(),
+                    args.detail.as_ref(),
+                    args.confidence,
+                    args.linked_task_id.as_deref(),
+                )
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            match result {
+                Some((entry, content_changed)) => {
+                    // Only re-embed if summary/detail changed
+                    if content_changed {
+                        let _ = state.embedding_tx.try_send(EmbeddingTask::ProcessKBEntry(entry.id.clone()));
+                    }
+                    Ok(ToolResult::json_pretty(&serde_json::json!({
+                        "updated": true,
+                        "content_changed": content_changed,
+                        "entry": entry,
+                    })))
+                }
+                None => Ok(ToolResult::error(&format!("key '{}' not found", args.key))),
+            }
         }
         "mission_kb_search" => {
             let KBSearchArgs { query, category } = serde_json::from_value(args)

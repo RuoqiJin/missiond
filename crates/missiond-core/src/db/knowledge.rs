@@ -227,6 +227,81 @@ impl MissionDB {
         Ok(updated > 0)
     }
 
+    /// Partial update: only modify specified fields. Returns (updated_entry, content_changed).
+    pub fn kb_update(
+        &self,
+        key: &str,
+        new_category: Option<&str>,
+        new_summary: Option<&str>,
+        new_detail: Option<&serde_json::Value>,
+        new_confidence: Option<f64>,
+        new_linked_task_id: Option<&str>,
+    ) -> DbResult<Option<(KnowledgeEntry, bool)>> {
+        let conn = self.conn();
+        // Find existing entry
+        let existing: Option<KnowledgeEntry> = {
+            let mut stmt = conn.prepare("SELECT * FROM knowledge WHERE key = ?1")?;
+            let mut rows = stmt.query(params![key])?;
+            if let Some(row) = rows.next()? {
+                Some(Self::row_to_knowledge_entry(row)?)
+            } else {
+                None
+            }
+        };
+        let existing = match existing {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut content_changed = false;
+
+        // Build dynamic SET clauses
+        let mut sets: Vec<String> = vec!["updated_at = ?1".to_string()];
+        let mut param_idx = 2u32;
+
+        // Collect values as strings for rusqlite params
+        let detail_str = new_detail.map(|d| serde_json::to_string(d).unwrap_or_default());
+
+        if new_category.is_some() { sets.push(format!("category = ?{}", param_idx)); param_idx += 1; }
+        if new_summary.is_some() { sets.push(format!("summary = ?{}", param_idx)); param_idx += 1; content_changed = true; }
+        if detail_str.is_some() { sets.push(format!("detail = ?{}", param_idx)); param_idx += 1; content_changed = true; }
+        if new_confidence.is_some() { sets.push(format!("confidence = ?{}", param_idx)); param_idx += 1; }
+        if new_linked_task_id.is_some() { sets.push(format!("linked_task_id = ?{}", param_idx)); param_idx += 1; }
+
+        // Only updated_at — nothing else to change
+        if param_idx == 2 {
+            return Ok(Some((existing, false)));
+        }
+
+        let sql = format!("UPDATE knowledge SET {} WHERE id = ?{}", sets.join(", "), param_idx);
+
+        // Build params dynamically
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(now)];
+        if let Some(v) = new_category { param_values.push(Box::new(v.to_string())); }
+        if let Some(v) = new_summary { param_values.push(Box::new(v.to_string())); }
+        if let Some(v) = detail_str { param_values.push(Box::new(v)); }
+        if let Some(v) = new_confidence { param_values.push(Box::new(v)); }
+        if let Some(v) = new_linked_task_id {
+            let val = if v.is_empty() { None } else { Some(v.to_string()) };
+            param_values.push(Box::new(val));
+        }
+        param_values.push(Box::new(existing.id.clone()));
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
+        conn.execute(&sql, param_refs.as_slice())?;
+
+        // Re-fetch & sync FTS
+        let final_category = new_category.unwrap_or(&existing.category);
+        let entry = Self::kb_get_by_category_key_with_conn(&conn, final_category, key)?;
+        if let Some(ref e) = entry {
+            Self::kb_sync_fts_with_conn(&conn, e)?;
+        }
+
+        let entry = entry.unwrap_or(existing);
+        Ok(Some((entry, content_changed)))
+    }
+
     /// Get a knowledge entry by key
     pub fn kb_get(&self, key: &str) -> DbResult<Option<KnowledgeEntry>> {
         let conn = self.conn(); // Need write conn for access_count update
