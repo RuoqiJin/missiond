@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Activity, Crosshair, FlaskConical, Rocket, Gauge, Zap, GitFork } from 'lucide-react';
+import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Activity, Crosshair, FlaskConical, Rocket, Gauge, Zap, GitFork, Radar } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
@@ -21,9 +21,10 @@ import { DeployDashboard } from './components/DeployDashboard';
 import { EngineDashboard } from './components/EngineDashboard';
 import { CognitiveTimeline } from './components/timeline';
 import { ArchitectureView } from './components/architecture';
+import { AutopilotMonitor } from './components/AutopilotMonitor';
 import { useEventStream, useConnectionState } from './hooks/useEventStream';
 
-type Tab = 'board' | 'terminal' | 'knowledge' | 'conversations' | 'memory' | 'decisions' | 'research' | 'deploy' | 'engine' | 'timeline' | 'architecture';
+type Tab = 'board' | 'terminal' | 'knowledge' | 'conversations' | 'memory' | 'decisions' | 'research' | 'deploy' | 'engine' | 'timeline' | 'architecture' | 'autopilot';
 
 interface SlotDef { id: string; label: string; role: string; running?: boolean }
 
@@ -71,9 +72,9 @@ export default function App() {
     fetchSlots();
   }, [fetchTasks, fetchSlots]);
 
-  // Refresh slots when on Terminal tab
+  // Refresh slots when on Terminal or Autopilot tab
   useEffect(() => {
-    if (tab !== 'terminal') return;
+    if (tab !== 'terminal' && tab !== 'autopilot') return;
     const id = setInterval(fetchSlots, 5000);
     return () => clearInterval(id);
   }, [tab, fetchSlots]);
@@ -111,7 +112,7 @@ export default function App() {
           </div>
 
           {/* Tabs */}
-          <div className="flex items-center gap-1 ml-4 bg-neutral-900 rounded-lg p-0.5">
+          <div className="flex items-center gap-1 ml-4 bg-neutral-900 rounded-lg p-0.5 overflow-x-auto overflow-y-hidden">
             <button
               onClick={() => setTab('board')}
               className={cn(
@@ -130,6 +131,16 @@ export default function App() {
             >
               <MonitorUp className="w-3 h-3" />
               Terminal
+            </button>
+            <button
+              onClick={() => setTab('autopilot')}
+              className={cn(
+                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
+                tab === 'autopilot' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
+              )}
+            >
+              <Radar className="w-3 h-3" />
+              Pilot
             </button>
             <button
               onClick={() => setTab('knowledge')}
@@ -279,6 +290,8 @@ export default function App() {
             <div className="flex items-center justify-center h-full text-neutral-500 text-sm">Loading slots...</div>
           )}
         </div>
+      ) : tab === 'autopilot' ? (
+        <AutopilotMonitor slots={slots} />
       ) : tab === 'knowledge' ? (
         <KnowledgeBase />
       ) : tab === 'conversations' ? (
