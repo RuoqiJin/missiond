@@ -3,8 +3,7 @@
 //! Unified management of task queue, slot configuration, agent processes, and inbox.
 
 use super::{
-    Inbox, PermissionConfig, PermissionPolicy, PermissionRule, ProcessManager, SlotManager,
-    SpawnOptions,
+    Inbox, PermissionConfig, PermissionPolicy, PermissionRule, SlotManager,
 };
 use crate::db::MissionDB;
 use crate::types::{
@@ -51,11 +50,11 @@ pub struct MissionControlOptions {
 
 /// Mission Control
 ///
-/// Main coordinator for task queue, slot configuration, agent processes, and inbox.
+/// Main coordinator for task queue, slot configuration, and inbox.
+/// Agent process lifecycle is managed by PTYManager (single source of truth).
 pub struct MissionControl {
     db: Arc<MissionDB>,
     slot_manager: SlotManager,
-    process_manager: ProcessManager,
     permission_policy: PermissionPolicy,
     inbox: Inbox,
     started: RwLock<bool>,
@@ -80,7 +79,6 @@ impl MissionControl {
 
         // Initialize components
         let slot_manager = SlotManager::new(Arc::clone(&db));
-        let process_manager = ProcessManager::new(Arc::clone(&db), logs_dir.clone());
         let inbox = Inbox::new(Arc::clone(&db));
 
         // Load permission config
@@ -99,7 +97,6 @@ impl MissionControl {
         let mc = Self {
             db,
             slot_manager,
-            process_manager,
             permission_policy,
             inbox,
             started: RwLock::new(false),
@@ -122,31 +119,17 @@ impl MissionControl {
         // Load into SlotManager
         self.slot_manager.load_slots(config.slots.clone());
 
-        // Initialize process state
-        for slot_config in &config.slots {
-            if let Some(slot) = self.slot_manager.get_slot(&slot_config.id) {
-                self.process_manager.init_slot(&slot);
-            }
-        }
-
         info!(count = config.slots.len(), "Slots loaded");
         Ok(())
     }
 
     /// Reload slots configuration (hot-reload).
-    /// Returns diff of what changed. Only initializes process state for newly added slots.
+    /// Returns diff of what changed.
     pub fn reload_slots_config(&self) -> Result<super::SlotReloadResult> {
         let content = std::fs::read_to_string(&self.slots_config_path)?;
         let config: SlotsConfig = serde_yaml::from_str(&content)?;
 
         let result = self.slot_manager.reload_slots(config.slots);
-
-        // Initialize process state for newly added slots only
-        for slot_id in &result.added {
-            if let Some(slot) = self.slot_manager.get_slot(slot_id) {
-                self.process_manager.init_slot(&slot);
-            }
-        }
 
         if result.has_changes() {
             info!(
@@ -182,9 +165,6 @@ impl MissionControl {
         }
         *started = false;
 
-        // Shutdown all processes
-        self.process_manager.shutdown().await;
-
         info!("MissionControl stopped");
         Ok(())
     }
@@ -211,7 +191,8 @@ impl MissionControl {
         Ok(task.id)
     }
 
-    /// Synchronous ask (submit + wait)
+    /// Synchronous ask — creates a task and returns its ID.
+    /// Actual execution is dispatched via PTY by the caller (mission_ask handler).
     pub async fn ask_expert(
         &self,
         role: &str,
@@ -223,9 +204,7 @@ impl MissionControl {
             prompt: question.to_string(),
         };
         let task = self.create_task(input)?;
-
-        // Synchronous execution
-        self.process_task(&task).await
+        Ok(task.id)
     }
 
     /// Create a task
@@ -259,126 +238,12 @@ impl MissionControl {
         Ok(task)
     }
 
-    /// Process a task
-    async fn process_task(&self, task: &Task) -> Result<String> {
-        // Find slots for the role
-        let slots = self.slot_manager.get_slots_by_role(&task.role);
-        if slots.is_empty() {
-            return Err(anyhow!("No slot found for role: {}", task.role));
-        }
-
-        // Find an available slot (idle)
-        let mut target_slot: Option<Slot> = None;
-        for slot in &slots {
-            if self.process_manager.is_available(&slot.config.id) {
-                target_slot = Some(slot.clone());
-                break;
-            }
-        }
-
-        // If no available slot, try to spawn one
-        if target_slot.is_none() {
-            for slot in &slots {
-                if let Some(status) = self.process_manager.get_status(&slot.config.id) {
-                    if status.status == super::AgentStatus::Stopped {
-                        self.process_manager
-                            .spawn(slot, SpawnOptions::default())
-                            .await?;
-                        target_slot = Some(slot.clone());
-                        break;
-                    }
-                }
-            }
-        }
-
-        let target_slot =
-            target_slot.ok_or_else(|| anyhow!("No available slot for role: {}", task.role))?;
-
-        let now = chrono::Utc::now().timestamp_millis();
-
-        // Update task status
-        if let Err(e) = self.db.update_task(
-            &task.id,
-            &TaskUpdate {
-                status: Some(TaskStatus::Running),
-                slot_id: Some(target_slot.config.id.clone()),
-                started_at: Some(now),
-                ..Default::default()
-            },
-        ) {
-            error!(task_id = %task.id, error = %e, "Failed to update task status to Running");
-        }
-
-        let data = serde_json::json!({ "slotId": target_slot.config.id });
-        if let Err(e) = self.db.insert_event(&task.id, EventType::TaskStarted, Some(&data), now) {
-            error!(task_id = %task.id, error = %e, "Failed to persist TaskStarted event");
-        }
-
-        info!(task_id = %task.id, slot_id = %target_slot.config.id, "Task started");
-
-        // Execute task
-        match self.process_manager.execute_task(&target_slot, task).await {
-            Ok(result) => {
-                let now = chrono::Utc::now().timestamp_millis();
-
-                // Update task status
-                if let Err(e) = self.db.update_task(
-                    &task.id,
-                    &TaskUpdate {
-                        status: Some(TaskStatus::Done),
-                        session_id: Some(result.session_id.clone()),
-                        result: Some(result.result.clone()),
-                        finished_at: Some(now),
-                        ..Default::default()
-                    },
-                ) {
-                    error!(task_id = %task.id, error = %e, "Failed to update task status to Done");
-                }
-
-                let data = serde_json::json!({ "resultLength": result.result.len() });
-                if let Err(e) = self.db.insert_event(&task.id, EventType::TaskDone, Some(&data), now) {
-                    error!(task_id = %task.id, error = %e, "Failed to persist TaskDone event");
-                }
-
-                // Add to inbox
-                self.inbox.add_message(&task.id, &task.role, &result.result);
-
-                info!(task_id = %task.id, "Task completed");
-                Ok(result.result)
-            }
-            Err(e) => {
-                let error_msg = e.to_string();
-                let now = chrono::Utc::now().timestamp_millis();
-
-                if let Err(db_e) = self.db.update_task(
-                    &task.id,
-                    &TaskUpdate {
-                        status: Some(TaskStatus::Failed),
-                        error: Some(error_msg.clone()),
-                        finished_at: Some(now),
-                        ..Default::default()
-                    },
-                ) {
-                    error!(task_id = %task.id, error = %db_e, "Failed to update task status to Failed");
-                }
-
-                let data = serde_json::json!({ "error": error_msg });
-                if let Err(db_e) = self.db.insert_event(&task.id, EventType::TaskFailed, Some(&data), now) {
-                    error!(task_id = %task.id, error = %db_e, "Failed to persist TaskFailed event");
-                }
-
-                error!(task_id = %task.id, error = %error_msg, "Task failed");
-                Err(e)
-            }
-        }
-    }
-
     /// Get task status
     pub fn get_status(&self, task_id: &str) -> Option<Task> {
         self.db.get_task(task_id).ok().flatten()
     }
 
-    /// Cancel a task
+    /// Cancel a task (DB status update only; PTY kill is caller's responsibility)
     pub async fn cancel(&self, task_id: &str) -> Result<bool> {
         let task = match self.db.get_task(task_id).ok().flatten() {
             Some(t) => t,
@@ -387,7 +252,7 @@ impl MissionControl {
 
         let now = chrono::Utc::now().timestamp_millis();
 
-        if task.status == TaskStatus::Queued {
+        if task.status == TaskStatus::Queued || task.status == TaskStatus::Running {
             if let Err(e) = self.db.update_task(
                 task_id,
                 &TaskUpdate {
@@ -396,76 +261,12 @@ impl MissionControl {
                     ..Default::default()
                 },
             ) {
-                error!(task_id = %task_id, error = %e, "Failed to cancel queued task");
+                error!(task_id = %task_id, error = %e, "Failed to cancel task");
             }
             return Ok(true);
         }
 
-        if task.status == TaskStatus::Running {
-            if let Some(slot_id) = &task.slot_id {
-                self.process_manager.kill(slot_id).await?;
-                if let Err(e) = self.db.update_task(
-                    task_id,
-                    &TaskUpdate {
-                        status: Some(TaskStatus::Cancelled),
-                        finished_at: Some(now),
-                        ..Default::default()
-                    },
-                ) {
-                    error!(task_id = %task_id, error = %e, "Failed to cancel running task");
-                }
-                return Ok(true);
-            }
-        }
-
         Ok(false)
-    }
-
-    // ============ Process Control ============
-
-    /// Spawn an agent process
-    pub async fn spawn_agent(
-        &self,
-        slot_id: &str,
-        options: Option<SpawnOptions>,
-    ) -> Result<super::AgentProcess> {
-        let slot = self
-            .slot_manager
-            .get_slot(slot_id)
-            .ok_or_else(|| anyhow!("Slot not found: {}", slot_id))?;
-        self.process_manager
-            .spawn(&slot, options.unwrap_or_default())
-            .await
-    }
-
-    /// Kill an agent process
-    pub async fn kill_agent(&self, slot_id: &str) -> Result<()> {
-        self.process_manager.kill(slot_id).await
-    }
-
-    /// Restart an agent process
-    pub async fn restart_agent(
-        &self,
-        slot_id: &str,
-        options: Option<SpawnOptions>,
-    ) -> Result<super::AgentProcess> {
-        let slot = self
-            .slot_manager
-            .get_slot(slot_id)
-            .ok_or_else(|| anyhow!("Slot not found: {}", slot_id))?;
-        self.process_manager
-            .restart(&slot, options.unwrap_or_default())
-            .await
-    }
-
-    /// Get all agent statuses
-    pub fn get_agents(&self) -> Vec<super::AgentProcess> {
-        self.process_manager.get_all_status()
-    }
-
-    /// Get a specific agent's status
-    pub fn get_agent(&self, slot_id: &str) -> Option<super::AgentProcess> {
-        self.process_manager.get_status(slot_id)
     }
 
     // ============ Inbox Operations ============
@@ -501,7 +302,6 @@ impl MissionControl {
 
     /// Get statistics
     pub fn get_stats(&self) -> MissionStats {
-        let process_stats = self.process_manager.get_stats();
         let slot_stats = self.slot_manager.get_stats();
 
         MissionStats {
@@ -526,12 +326,6 @@ impl MissionControl {
                     .get_tasks_by_status(TaskStatus::Failed)
                     .map(|v| v.len())
                     .unwrap_or(0),
-            },
-            agents: AgentStats {
-                total: process_stats.total,
-                stopped: process_stats.stopped,
-                idle: process_stats.idle,
-                busy: process_stats.busy,
             },
             slots: SlotStats {
                 total: slot_stats.total,
@@ -612,15 +406,6 @@ pub struct TaskStats {
     pub failed: usize,
 }
 
-/// Agent statistics
-#[derive(Debug, Clone)]
-pub struct AgentStats {
-    pub total: usize,
-    pub stopped: usize,
-    pub idle: usize,
-    pub busy: usize,
-}
-
 /// Slot statistics
 #[derive(Debug, Clone)]
 pub struct SlotStats {
@@ -638,7 +423,6 @@ pub struct InboxStats {
 #[derive(Debug, Clone)]
 pub struct MissionStats {
     pub tasks: TaskStats,
-    pub agents: AgentStats,
     pub slots: SlotStats,
     pub inbox: InboxStats,
 }
@@ -701,8 +485,6 @@ slots:
 
         let stats = mc.get_stats();
         assert_eq!(stats.slots.total, 2);
-        assert_eq!(stats.agents.total, 2);
-        assert_eq!(stats.agents.stopped, 2);
     }
 
     #[tokio::test]

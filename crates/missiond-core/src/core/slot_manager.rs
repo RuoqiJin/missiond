@@ -1,6 +1,6 @@
 //! Slot Manager - Workstation configuration management
 //!
-//! Manages slot configurations. Process state is handled by ProcessManager.
+//! Manages slot configurations. Process lifecycle is handled by PTYManager.
 
 use crate::db::MissionDB;
 use crate::types::{Slot, SlotConfig};
@@ -10,7 +10,7 @@ use tracing::{debug, info};
 
 /// Slot Manager
 ///
-/// Manages workstation configurations (not process state, which is managed by ProcessManager)
+/// Manages workstation configurations (process lifecycle handled by PTYManager)
 pub struct SlotManager {
     slots: Arc<RwLock<HashMap<String, Slot>>>,
     db: Arc<MissionDB>,
@@ -214,6 +214,7 @@ mod tests {
                 engine: Default::default(),
                 cwd: None,
                 mcp_config: None,
+                lifecycle: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
@@ -226,6 +227,7 @@ mod tests {
                 engine: Default::default(),
                 cwd: None,
                 mcp_config: None,
+                lifecycle: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
@@ -238,6 +240,7 @@ mod tests {
                 engine: Default::default(),
                 cwd: None,
                 mcp_config: None,
+                lifecycle: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
@@ -276,6 +279,7 @@ mod tests {
             engine: Default::default(),
             cwd: None,
             mcp_config: None,
+            lifecycle: None,
             auto_start: None,
             dangerously_skip_permissions: None,
             traits: vec![],
@@ -313,6 +317,7 @@ mod tests {
                 engine: Default::default(),
                 cwd: None,
                 mcp_config: None,
+                lifecycle: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
@@ -325,6 +330,7 @@ mod tests {
                 engine: Default::default(),
                 cwd: None,
                 mcp_config: None,
+                lifecycle: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
@@ -344,6 +350,7 @@ mod tests {
                 engine: Default::default(),
                 cwd: None,
                 mcp_config: None,
+                lifecycle: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
@@ -356,6 +363,7 @@ mod tests {
                 engine: Default::default(),
                 cwd: None,
                 mcp_config: None,
+                lifecycle: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
@@ -394,6 +402,7 @@ mod tests {
                 engine: Default::default(),
                 cwd: None,
                 mcp_config: None,
+                lifecycle: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
@@ -406,6 +415,7 @@ mod tests {
                 engine: Default::default(),
                 cwd: None,
                 mcp_config: None,
+                lifecycle: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
@@ -418,6 +428,7 @@ mod tests {
                 engine: Default::default(),
                 cwd: None,
                 mcp_config: None,
+                lifecycle: None,
                 auto_start: None,
                 dangerously_skip_permissions: None,
                 traits: vec![],
