@@ -26,7 +26,7 @@ pub(crate) struct PtyEventWorker {
 impl super::BackgroundWorker for PtyEventWorker {
     fn name(&self) -> &'static str { "pty_events" }
 
-    async fn run(self, state: Arc<AppState>) {
+    async fn run(self, state: Arc<AppState>, _ctx: super::WorkerContext) {
         let mut rx = self.pty_rx;
         loop {
             match rx.recv().await {

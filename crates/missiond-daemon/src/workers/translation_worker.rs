@@ -193,24 +193,28 @@ pub(crate) struct TranslationWorker {
 impl super::BackgroundWorker for TranslationWorker {
     fn name(&self) -> &'static str { "translation_worker" }
 
-    async fn run(self, state: Arc<AppState>) {
+    async fn run(self, state: Arc<AppState>, ctx: super::WorkerContext) {
         info!("Translation worker started (event-driven + {IDLE_POLL_SECS}s fallback poll, rate: gateway-managed)");
 
         // Initial delay to let daemon stabilize
         tokio::time::sleep(Duration::from_secs(15)).await;
 
-        run_loop(state, self.timeline_rx).await;
+        run_loop(state, self.timeline_rx, ctx).await;
     }
 }
 
 async fn run_loop(
     state: Arc<AppState>,
     mut timeline_rx: broadcast::Receiver<TimelineEvent>,
+    mut wctx: super::WorkerContext,
 ) {
     let mut last_poll = tokio::time::Instant::now() - Duration::from_secs(POLL_COOLDOWN_SECS + 1);
     let mut consecutive_failures: u32 = 0;
 
     loop {
+        // Cooperative pause: block here if externally paused via WorkerRegistry
+        wctx.wait_if_paused().await;
+
         // Circuit breaker: pause after repeated failures
         if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
             warn!(
@@ -222,7 +226,7 @@ async fn run_loop(
             consecutive_failures = 0;
         }
 
-        // Fix 1: Only thinking_message events trigger process_single.
+        // Only thinking_message events trigger process_single.
         // All other events (including our own translation_started/failed) are ignored.
         // poll_pending is ONLY triggered by idle timeout, never by broadcast events.
         let maybe_ctx = tokio::select! {
@@ -231,7 +235,7 @@ async fn run_loop(
                     Ok(event) => extract_thinking_ctx(&event),
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(skipped = n, "Translation worker: broadcast lagged");
-                        None // Do NOT poll — just continue to next event
+                        None
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         info!("Translation worker: broadcast closed, shutting down");
@@ -240,19 +244,27 @@ async fn run_loop(
                 }
             }
             _ = tokio::time::sleep(Duration::from_secs(IDLE_POLL_SECS)) => {
-                // Fix 3: Cooldown — skip if polled recently
                 if last_poll.elapsed() >= Duration::from_secs(POLL_COOLDOWN_SECS) {
                     last_poll = tokio::time::Instant::now();
                     poll_pending(&state, &mut consecutive_failures).await;
                 }
                 continue;
             }
+            // Allow external pause to interrupt sleep/recv immediately
+            _ = wctx.state_changed() => {
+                continue;
+            }
         };
 
-        // Only thinking_message events reach here; all others are None → ignored
         if let Some(ctx) = maybe_ctx {
             let ok = process_single(&state, ctx).await;
-            if ok { consecutive_failures = 0; } else { consecutive_failures += 1; }
+            if ok {
+                consecutive_failures = 0;
+                wctx.record_success();
+            } else {
+                consecutive_failures += 1;
+                wctx.record_failure();
+            }
         }
     }
 }

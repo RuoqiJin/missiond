@@ -481,6 +481,7 @@ async fn main() -> Result<()> {
         ast_sync_tx,
         ast_embedding_cache: missiond_core::embedding::new_cache(),
         last_msg_span: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        worker_registry: Arc::new(workers::WorkerRegistry::new()),
     };
 
     // Late-bind context enricher for Jarvis chat completions

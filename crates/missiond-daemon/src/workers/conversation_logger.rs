@@ -24,7 +24,7 @@ pub(crate) struct ConversationLoggerWorker {
 impl super::BackgroundWorker for ConversationLoggerWorker {
     fn name(&self) -> &'static str { "conversation_logger" }
 
-    async fn run(self, state: Arc<AppState>) {
+    async fn run(self, state: Arc<AppState>, _ctx: super::WorkerContext) {
         let mut rx = self.conv_logger_rx;
         run_loop(&state, &mut rx).await;
     }
