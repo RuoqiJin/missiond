@@ -508,7 +508,35 @@ async fn main() -> Result<()> {
         let slots = state.mission.list_slots();
         for slot in &slots {
             if slot.config.auto_start == Some(true) {
-                info!(slot_id = %slot.config.id, "Auto-starting slot on daemon boot");
+                info!(slot_id = %slot.config.id, role = %slot.config.role, "Auto-starting slot on daemon boot");
+
+                // Jarvis role needs a live PTY session (not headless)
+                if slot.config.role == "jarvis" {
+                    let pty_slot = missiond_core::PTYSlot {
+                        id: slot.config.id.clone(),
+                        role: slot.config.role.clone(),
+                        cwd: slot.config.cwd.as_deref().map(std::path::PathBuf::from),
+                        engine: slot.config.engine,
+                    };
+                    let mcp_config = slot.config.mcp_config.clone().map(std::path::PathBuf::from);
+                    let (extra_env, session_file) = slot_env::build_slot_tracking_env(&slot.config.id, slot.config.env.as_ref()).await;
+                    match state.pty.spawn(&pty_slot, missiond_core::PTYSpawnOptions {
+                        auto_restart: true,
+                        wait_for_idle: false,
+                        timeout_secs: None,
+                        mcp_config,
+                        dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+                        extra_env,
+                    }).await {
+                        Ok(_) => {
+                            slot_env::capture_slot_session_uuid(&state, &slot.config.id, &session_file).await;
+                            info!(slot_id = %slot.config.id, "Auto-started Jarvis PTY session");
+                        }
+                        Err(e) => warn!(slot_id = %slot.config.id, error = %e, "Failed to auto-start Jarvis PTY"),
+                    }
+                }
+
+                // Also register in process_manager (for status tracking)
                 match state.mission.spawn_agent(
                     &slot.config.id,
                     Some(missiond_core::SpawnOptions {
