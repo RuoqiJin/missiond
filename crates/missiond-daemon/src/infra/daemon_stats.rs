@@ -90,6 +90,18 @@ pub(crate) struct DaemonStats {
     pub decisions_tier1_hit: AtomicU64,
     pub decisions_tier2_hit: AtomicU64,
     pub decisions_tier3_dispatched: AtomicU64,
+
+    // Context Prefetch v2
+    pub prefetch_total: AtomicU64,
+    pub prefetch_intent_chat: AtomicU64,
+    pub prefetch_intent_code: AtomicU64,
+    pub prefetch_intent_general: AtomicU64,
+    pub prefetch_bypass: AtomicU64,
+    pub prefetch_router_calls: AtomicU64,
+    pub prefetch_router_errors: AtomicU64,
+    pub prefetch_fallback: AtomicU64,
+    pub prefetch_router_latency: Histogram,
+    pub prefetch_cosine_filtered: AtomicU64,
 }
 
 impl DaemonStats {
@@ -118,6 +130,16 @@ impl DaemonStats {
             decisions_tier1_hit: AtomicU64::new(0),
             decisions_tier2_hit: AtomicU64::new(0),
             decisions_tier3_dispatched: AtomicU64::new(0),
+            prefetch_total: AtomicU64::new(0),
+            prefetch_intent_chat: AtomicU64::new(0),
+            prefetch_intent_code: AtomicU64::new(0),
+            prefetch_intent_general: AtomicU64::new(0),
+            prefetch_bypass: AtomicU64::new(0),
+            prefetch_router_calls: AtomicU64::new(0),
+            prefetch_router_errors: AtomicU64::new(0),
+            prefetch_fallback: AtomicU64::new(0),
+            prefetch_router_latency: Histogram::new(1000),
+            prefetch_cosine_filtered: AtomicU64::new(0),
         }
     }
 
@@ -174,6 +196,24 @@ impl DaemonStats {
             },
             "tasks": { "dispatched": t_disp, "completed": t_comp },
             "decisions": { "tier1_hit": d_t1, "tier2_hit": d_t2, "tier3_dispatched": d_t3 },
+            "prefetch": {
+                "total": Self::l(&self.prefetch_total),
+                "intents": {
+                    "chat": Self::l(&self.prefetch_intent_chat),
+                    "code": Self::l(&self.prefetch_intent_code),
+                    "general": Self::l(&self.prefetch_intent_general),
+                },
+                "bypass": Self::l(&self.prefetch_bypass),
+                "router": {
+                    "calls": Self::l(&self.prefetch_router_calls),
+                    "errors": Self::l(&self.prefetch_router_errors),
+                    "p50_ms": self.prefetch_router_latency.percentiles().0 / 1000,
+                    "p95_ms": self.prefetch_router_latency.percentiles().1 / 1000,
+                    "p99_ms": self.prefetch_router_latency.percentiles().2 / 1000,
+                },
+                "fallback": Self::l(&self.prefetch_fallback),
+                "cosine_filtered": Self::l(&self.prefetch_cosine_filtered),
+            },
         })
     }
 }
