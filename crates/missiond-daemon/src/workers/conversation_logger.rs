@@ -78,6 +78,11 @@ async fn handle_new_messages_event(
             s.pty_session_uuids.write().await.insert(session_id.clone());
             compaction_task_id = old_task_id;
             is_pty = true;
+
+            // Fix A: 补齐 compacted session 的向量/摘要
+            // handle_session_inactive() 跳过 compacted session，此处显式补发
+            let _ = s.embedding_tx.try_send(EmbeddingTask::ProcessSession(old_uuid.clone()));
+            info!(old_session = %old_uuid, "Compaction: queued embedding for compacted session");
         }
     }
 

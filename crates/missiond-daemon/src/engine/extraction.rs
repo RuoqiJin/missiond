@@ -78,11 +78,19 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
         Err(_) => return,
     };
 
-    // Triage: skip sessions with zero user messages, auto-advance their watermarks
+    // Triage: skip sessions with zero user messages, auto-advance their watermarks.
+    // Exception: compacted sessions always pass through (their tail won't get new user messages).
     let db = state.mission.db();
     let mut pending = Vec::new();
     for (session_id, project, msgs) in raw_pending {
-        if msgs.iter().any(|m| m.role == "user") {
+        let has_user = msgs.iter().any(|m| m.role == "user");
+        // Lazy: only query DB for compacted status when no user messages (short-circuit)
+        let is_compacted = || {
+            db.get_conversation(&session_id)
+                .map(|opt| opt.map_or(false, |c| c.status == "compacted"))
+                .unwrap_or(false)
+        };
+        if has_user || is_compacted() {
             pending.push((session_id, project, msgs));
         } else {
             if let Some(last) = msgs.last() {
