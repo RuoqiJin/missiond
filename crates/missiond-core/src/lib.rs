@@ -1,7 +1,7 @@
 //! missiond-core - Core library for Mission Control daemon
 //!
 //! This crate provides core functionality for missiond, including:
-//! - Core management (SlotManager, ProcessManager, PermissionPolicy, MissionControl)
+//! - Core management (SlotManager, PermissionPolicy, MissionControl)
 //! - Core types (Task, InboxMessage, TaskEvent, etc.)
 //! - Semantic terminal parsing (state detection, confirmation dialogs)
 //! - PTY session management
@@ -24,15 +24,15 @@ pub mod ws;
 
 // Re-export core management types
 pub use crate::core::{
-    AgentProcess, AgentStatus, ExecuteResult, ExecutionMode, Inbox, MissionControl,
+    ExecutionMode, Inbox, MissionControl,
     MissionControlOptions, PermissionConfig, PermissionDecision as CorePermissionDecision,
-    PermissionPolicy, PermissionRule, ProcessManager, SlotManager, SlotReloadResult, SpawnOptions,
+    PermissionPolicy, PermissionRule, SlotManager, SlotReloadResult,
 };
 
 // Re-export core types
 pub use types::{
     CliEngine, CreateTaskInput, Credential, EventType, InboxMessage, InfraConfig, InfraServer,
-    KBOperation, KBOperationRow, KBRememberInput, KnowledgeEntry, SkillBlock, SkillSearchResult,
+    KBOperation, KBOperationRow, KBRememberInput, KnowledgeEntry, Lifecycle, SkillBlock, SkillSearchResult,
     SkillExecutionStat, SkillTopic, SkillVersion, Slot, SlotConfig, SlotsConfig, Task, TaskEvent, TaskStatus, TaskUpdate,
 };
 

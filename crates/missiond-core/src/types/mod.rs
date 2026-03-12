@@ -94,6 +94,7 @@ mod tests {
             engine: CliEngine::default(),
             cwd: Some("/path/to/work".to_string()),
             mcp_config: None,
+            lifecycle: None,
             auto_start: Some(true),
             dangerously_skip_permissions: None,
             traits: vec![],
@@ -137,7 +138,7 @@ mod tests {
         let mut config = SlotConfig {
             id: "s1".into(), role: "worker".into(), description: "test".into(),
             engine: CliEngine::ClaudeCode,
-            cwd: None, mcp_config: None, auto_start: None,
+            cwd: None, mcp_config: None, lifecycle: None, auto_start: None,
             dangerously_skip_permissions: None, traits: vec![], env: None,
         };
         config.apply_default_traits();
@@ -148,7 +149,7 @@ mod tests {
         let mut config = SlotConfig {
             id: "s2".into(), role: "vision".into(), description: "test".into(),
             engine: CliEngine::Codex,
-            cwd: None, mcp_config: None, auto_start: None,
+            cwd: None, mcp_config: None, lifecycle: None, auto_start: None,
             dangerously_skip_permissions: None, traits: vec![], env: None,
         };
         config.apply_default_traits();
@@ -159,12 +160,40 @@ mod tests {
         let mut config = SlotConfig {
             id: "s3".into(), role: "memory".into(), description: "test".into(),
             engine: CliEngine::ClaudeCode,
-            cwd: None, mcp_config: None, auto_start: None,
+            cwd: None, mcp_config: None, lifecycle: None, auto_start: None,
             dangerously_skip_permissions: None, traits: vec![], env: None,
         };
         config.apply_default_traits();
         assert!(config.is_meta_agent());
         assert!(config.supports_mcp());
+    }
+
+    #[test]
+    fn test_lifecycle_is_persistent() {
+        // lifecycle: persistent → true
+        let json = r#"{"id":"s1","role":"w","description":"t","lifecycle":"persistent"}"#;
+        let config: SlotConfig = serde_json::from_str(json).unwrap();
+        assert!(config.is_persistent());
+
+        // lifecycle: on_demand → false
+        let json = r#"{"id":"s2","role":"w","description":"t","lifecycle":"on_demand"}"#;
+        let config: SlotConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.is_persistent());
+
+        // No lifecycle, auto_start: true → true (legacy)
+        let json = r#"{"id":"s3","role":"w","description":"t","autoStart":true}"#;
+        let config: SlotConfig = serde_json::from_str(json).unwrap();
+        assert!(config.is_persistent());
+
+        // No lifecycle, no auto_start → false
+        let json = r#"{"id":"s4","role":"w","description":"t"}"#;
+        let config: SlotConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.is_persistent());
+
+        // lifecycle overrides auto_start
+        let json = r#"{"id":"s5","role":"w","description":"t","lifecycle":"on_demand","autoStart":true}"#;
+        let config: SlotConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.is_persistent());
     }
 
     #[test]

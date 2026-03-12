@@ -27,6 +27,28 @@ impl std::fmt::Display for CliEngine {
     }
 }
 
+// ============ Lifecycle ============
+
+/// Agent lifecycle mode — determines how the daemon manages the slot's PTY session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Lifecycle {
+    /// Daemon auto-starts on boot and auto-restarts on crash.
+    #[default]
+    Persistent,
+    /// Started on demand (task dispatch, manual spawn). No auto-restart.
+    OnDemand,
+}
+
+impl std::fmt::Display for Lifecycle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Lifecycle::Persistent => write!(f, "persistent"),
+            Lifecycle::OnDemand => write!(f, "on_demand"),
+        }
+    }
+}
+
 // ============ Slot Config ============
 
 /// Slot traits: declarative capabilities that control pipeline routing.
@@ -59,6 +81,10 @@ pub struct SlotConfig {
     pub cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_config: Option<String>,
+    /// Agent lifecycle mode. If set, takes precedence over `auto_start`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<Lifecycle>,
+    /// Legacy auto-start flag. Prefer `lifecycle: persistent` in new configs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_start: Option<bool>,
     /// Skip all permission prompts and trust dialogs (--dangerously-skip-permissions)
@@ -76,6 +102,16 @@ pub struct SlotConfig {
 }
 
 impl SlotConfig {
+    /// Should this slot be auto-started on daemon boot and auto-restarted on crash?
+    /// Checks `lifecycle` first (new), falls back to `auto_start` (legacy).
+    pub fn is_persistent(&self) -> bool {
+        match self.lifecycle {
+            Some(Lifecycle::Persistent) => true,
+            Some(Lifecycle::OnDemand) => false,
+            None => self.auto_start == Some(true),
+        }
+    }
+
     /// Is this a system/meta agent whose conversations should be excluded from pipelines?
     pub fn is_meta_agent(&self) -> bool {
         self.traits.contains(&SlotTrait::IsMetaAgent)
@@ -122,7 +158,7 @@ impl SlotConfig {
     }
 }
 
-/// Slot = Config + session (process state managed by ProcessManager)
+/// Slot = Config + session (process lifecycle managed by PTYManager)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Slot {

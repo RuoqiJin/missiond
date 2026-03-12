@@ -218,8 +218,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 timeout_ms,
             } = serde_json::from_value(args)?;
             let timeout_ms = timeout_ms.unwrap_or(120_000);
-            let result = state.mission.ask_expert(&role, &question, timeout_ms).await?;
-            Ok(ToolResult::text(result))
+            let task_id = state.mission.ask_expert(&role, &question, timeout_ms).await?;
+            Ok(ToolResult::json(&serde_json::json!({
+                "taskId": task_id,
+                "hint": "Task created. Use mission_submit for PTY dispatch."
+            })))
         }
         "mission_status" => {
             let StatusArgs { task_id } = serde_json::from_value(args)?;
