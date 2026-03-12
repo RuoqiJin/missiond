@@ -19,6 +19,7 @@ mod misc;
 mod health;
 mod timeline;
 mod minimax;
+mod worker;
 
 use anyhow::Result;
 use serde_json::Value;
@@ -54,6 +55,7 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
             || n == "mission_os_diagnose" => infra::handle(state, n, args).await,
         n if n.starts_with("mission_incident_") || n == "mission_health"
             || n == "mission_power_control" => health::handle(state, n, args).await,
+        "mission_workers" | "mission_worker_control" => worker::handle(state, name, args).await,
 
         // ===== Explicit name routing =====
         "mission_submit" | "mission_ask" | "mission_status" | "mission_cancel"

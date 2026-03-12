@@ -220,7 +220,7 @@ pub(crate) struct BriefingWorker;
 impl super::BackgroundWorker for BriefingWorker {
     fn name(&self) -> &'static str { "briefing_worker" }
 
-    async fn run(self, state: Arc<AppState>) {
+    async fn run(self, state: Arc<AppState>, _ctx: super::WorkerContext) {
         let notify = Arc::clone(&state.briefing_notify);
 
         info!("Briefing worker started (hybrid event+poll, rate: gateway-managed)");

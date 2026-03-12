@@ -18,7 +18,7 @@ pub(crate) struct GeminiLoggerWorker {
 impl super::BackgroundWorker for GeminiLoggerWorker {
     fn name(&self) -> &'static str { "gemini_logger" }
 
-    async fn run(self, state: Arc<AppState>) {
+    async fn run(self, state: Arc<AppState>, _ctx: super::WorkerContext) {
         let mut rx = self.timeline_rx;
         let db = state.mission.db();
 

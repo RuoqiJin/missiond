@@ -13,6 +13,7 @@ use crate::gemini_client::GeminiClient;
 use crate::mcp_client::McpProcessClient;
 use crate::minimax_gateway::MinimaxHandle;
 use crate::prompts::PromptStore;
+use crate::workers::WorkerRegistry;
 
 // --- Well-known slot IDs (shared across all daemon modules) ---
 pub(crate) const MEMORY_SLOT_ID: &str = "slot-memory";           // Fast lane (realtime)
@@ -172,6 +173,8 @@ pub(crate) struct AppState {
     /// Written by message_handler, read by ipc_handler for cross-lane causal linking.
     /// Links assistant_message (Chat lane) → CliRequestStarted (AI/LLM lane).
     pub(crate) last_msg_span: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    /// Runtime worker registry — pause/resume/stats for all background workers.
+    pub(crate) worker_registry: Arc<WorkerRegistry>,
 }
 
 /// Event-driven embedding tasks — the Worker sleeps until triggered.

@@ -212,7 +212,7 @@ pub(crate) struct VisionWorker;
 impl super::BackgroundWorker for VisionWorker {
     fn name(&self) -> &'static str { "vision_worker" }
 
-    async fn run(self, state: Arc<AppState>) {
+    async fn run(self, state: Arc<AppState>, mut ctx: super::WorkerContext) {
         let codex = CodexCli::new(
             "codex".to_string(),
             "gpt-5.4".to_string(),
@@ -224,6 +224,7 @@ impl super::BackgroundWorker for VisionWorker {
         let mut attempt_counts: HashMap<i64, u32> = HashMap::new();
 
         loop {
+            ctx.wait_if_paused().await;
             // Find unprocessed image messages
             let pending = match state.mission.db().find_unprocessed_image_messages(BATCH_SIZE) {
                 Ok(p) => p,

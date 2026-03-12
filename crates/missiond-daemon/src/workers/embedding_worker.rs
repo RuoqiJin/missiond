@@ -620,7 +620,7 @@ pub(crate) struct EmbeddingLoopWorker {
 impl super::BackgroundWorker for EmbeddingLoopWorker {
     fn name(&self) -> &'static str { "embedding" }
 
-    async fn run(self, state: Arc<AppState>) {
+    async fn run(self, state: Arc<AppState>, _ctx: super::WorkerContext) {
         let mut rx = self.rx;
         info!("Embedding worker started (event-driven)");
         while let Some(task) = rx.recv().await {

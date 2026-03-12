@@ -74,7 +74,7 @@ pub(crate) struct StepNarratorWorker;
 impl super::BackgroundWorker for StepNarratorWorker {
     fn name(&self) -> &'static str { "step_narrator" }
 
-    async fn run(self, state: Arc<AppState>) {
+    async fn run(self, state: Arc<AppState>, mut ctx: super::WorkerContext) {
         let codex = CodexCli::new(
             "codex".to_string(),
             "gpt-5.4".to_string(),
@@ -86,6 +86,7 @@ impl super::BackgroundWorker for StepNarratorWorker {
         tokio::time::sleep(Duration::from_secs(STARTUP_DELAY_SECS)).await;
 
         loop {
+            ctx.wait_if_paused().await;
             if let Err(e) = process_pending(&state, &codex).await {
                 warn!(error = %e, "Step Narrator: processing error");
             }
