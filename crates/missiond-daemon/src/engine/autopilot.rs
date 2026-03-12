@@ -202,6 +202,20 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     // Time-based fallback: recover running tasks stuck > 15 min (catch-all)
     let _ = state.mission.db().recover_stale_running_tasks(15);
 
+    dispatch_board_tasks(state).await?;
+
+    // Record tick timing to DaemonStats
+    let tick_ms = tick_start.elapsed().as_millis() as u64;
+    state.stats.autopilot_ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state.stats.autopilot_total_ms.fetch_add(tick_ms, std::sync::atomic::Ordering::Relaxed);
+    state.stats.autopilot_latency.record(tick_ms * 1000); // histogram expects microseconds
+
+    Ok(())
+}
+
+/// Board task dispatch — extracted for reuse by idle-triggered dispatch.
+/// Called from autopilot_tick (60s) and event-driven (slot became idle).
+pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
     let tasks = state.mission.db().list_autopilot_tasks()
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
@@ -447,16 +461,27 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
             });
         }
 
-        // Pre-send state verification: confirm slot is Idle before sending.
-        // Guards against race where MCP init began after ensure_autopilot_pty returned.
+        // Pre-send state verification with dispatch guard: atomically check idle + send.
+        if !state.slot_dispatch.try_acquire(&slot_id) {
+            debug!(task_id = %task.id, slot_id = %slot_id,
+                "Autopilot: slot dispatch guard busy, releasing task");
+            let _ = state.mission.db().unclaim_board_task(&task.id);
+            continue;
+        }
         if let Some(pre_send_status) = state.pty.get_status(&slot_id).await {
             if pre_send_status.state != SessionState::Idle {
+                state.slot_dispatch.release(&slot_id);
                 debug!(task_id = %task.id, slot_id = %slot_id, state = ?pre_send_status.state,
                     "Autopilot: slot not Idle pre-send, releasing task without penalty");
                 let _ = state.mission.db().unclaim_board_task(&task.id);
                 continue;
             }
         }
+        // Guard held: slot confirmed idle, send will transition state.
+        // Release after send initiation (pty.send blocks until completion, but state transitions immediately).
+        // We release here because pty.send() is blocking — holding the guard for 10min would starve other callers.
+        // After this point, PTY state is non-Idle so other callers will see it as busy.
+        state.slot_dispatch.release(&slot_id);
 
         // Send prompt and wait for response
         let timeout_ms = 600_000; // 10 minutes
@@ -650,12 +675,6 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
             }
         }
     }
-
-    // Record tick timing to DaemonStats
-    let tick_ms = tick_start.elapsed().as_millis() as u64;
-    state.stats.autopilot_ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state.stats.autopilot_total_ms.fetch_add(tick_ms, std::sync::atomic::Ordering::Relaxed);
-    state.stats.autopilot_latency.record(tick_ms * 1000); // histogram expects microseconds
 
     Ok(())
 }
