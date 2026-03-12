@@ -6,6 +6,8 @@ pub mod briefing_worker;
 pub mod code_prefetch;
 pub mod experience_harvester;
 pub mod ast_sync_worker;
+pub mod gemini_logger;
+pub mod conversation_logger;
 
 use std::future::Future;
 use std::sync::Arc;

@@ -27,7 +27,7 @@ use llm::{gemini_client, gemini_cli, minimax_client, minimax_gateway, codex_cli,
 use workers::{embedding_worker, vision_worker, step_narrator, translation_worker, briefing_worker, code_prefetch, experience_harvester, ast_sync_worker};
 use engine::{autopilot, decision_engine, decision_harvest, flow_engine, extraction, memory_scheduler, timeline_analyst};
 use context::{slot_env, context_pipeline, claude_md_sync, topology_map, context_budget};
-use infra::{ipc_handler, message_handler, aiops, session_util, mcp_client, daemon_stats, git_watcher};
+use infra::{ipc_handler, message_handler, aiops, mcp_client, daemon_stats, git_watcher};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -39,7 +39,7 @@ use missiond_core::{
     PTYManager, PTYWebSocketServer, WSServerOptions, SkillIndex, InfraConfig,
 };
 use missiond_core::SessionState;
-use missiond_core::{CCTasksWatcher, CCTasksWatcherOptions, WatcherEvent};
+use missiond_core::{CCTasksWatcher, CCTasksWatcherOptions};
 use missiond_mcp::tools::ToolResult;
 use serde_json::Value;
 use tokio::io::BufReader;
@@ -53,11 +53,10 @@ use helpers::*;
 use ipc_handler::{handle_ipc_connection, bind_ipc_listener};
 use embedding_worker::{init_embedding_provider, generate_and_store_conv_embedding};
 use autopilot::autopilot_tick;
-use session_util::detect_compaction;
 use state::{MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 use supervisor::get_task_jsonl_path;
 use aiops::{process_incident, health_scan};
-use message_handler::{handle_new_messages, handle_pty_text_complete};
+use message_handler::handle_pty_text_complete;
 
 impl AppState {
     pub(crate) async fn call_tool(&self, name: &str, args: Value) -> ToolResult {
@@ -566,7 +565,7 @@ async fn main() -> Result<()> {
     let cc_tasks = Arc::new(Mutex::new(cc));
 
     // Conversation logger: subscribe to watcher events (processed in main select loop)
-    let mut conv_logger_rx = cc_tasks.lock().await.subscribe();
+    let conv_logger_rx = cc_tasks.lock().await.subscribe();
     // PTY conversation logger: subscribe to manager events
     let mut pty_logger_rx = pty.subscribe();
 
@@ -1298,128 +1297,17 @@ async fn main() -> Result<()> {
         });
     }
 
-    // --- Gemini request log subscriber (Timeline → DB persistence) ---
-    // Two-step: insert on started (with prompt_text), update on completed (with response_text).
-    // Full content lives in gemini_requests table; timeline only stores request_id references.
-    {
-        let mut rx = timeline_broadcast_tx.subscribe();
-        let log_db = Arc::clone(&state.mission);
-        tokio::spawn(async move {
-            // Startup cleanup: remove logs older than 7 days
-            if let Ok(deleted) = log_db.db().gemini_log_cleanup(7) {
-                if deleted > 0 {
-                    info!(deleted, "Gemini log: cleaned up old entries");
-                }
-            }
-            loop {
-                match rx.recv().await {
-                    Ok(te) => match &te.event {
-                        // Unified CLI engine events — log to gemini_requests table
-                        event_bus::DaemonEvent::CliRequestStarted {
-                            engine, request_id, caller, session_id, model,
-                            prompt_chars, prompt_text, ..
-                        } => {
-                            if let Err(e) = log_db.db().gemini_log_insert_started(
-                                request_id, caller, session_id.as_deref(),
-                                model, *prompt_chars as i64,
-                                prompt_text.as_deref(),
-                            ) {
-                                warn!(error = %e, engine = %engine, "CLI log: failed to insert started");
-                            }
-                        }
-                        event_bus::DaemonEvent::CliRequestCompleted {
-                            engine, request_id, response_chars, duration_ms,
-                            status, error_msg, response_text, extra, ..
-                        } => {
-                            let api_mode_default = format!("{}-cli", engine);
-                            let api_mode = extra.get("api_mode")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or(&api_mode_default);
-                            let queue_wait_ms = extra.get("queue_wait_ms")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            let retry_count = extra.get("retry_count")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            if let Err(e) = log_db.db().gemini_log_update_completed(
-                                request_id, api_mode,
-                                *response_chars as i64, queue_wait_ms as i64,
-                                *duration_ms as i64, retry_count as i64,
-                                status, error_msg.as_deref(),
-                                response_text.as_deref(),
-                            ) {
-                                warn!(error = %e, engine = %engine, "CLI log: failed to update completed");
-                            }
-                        }
-                        // Legacy engine-specific events (for backward compat with old timeline data)
-                        event_bus::DaemonEvent::GeminiRequestStarted {
-                            request_id, caller, session_id, model,
-                            prompt_chars, prompt_text,
-                        } => {
-                            if let Err(e) = log_db.db().gemini_log_insert_started(
-                                request_id, caller, session_id.as_deref(),
-                                model, *prompt_chars as i64,
-                                prompt_text.as_deref(),
-                            ) {
-                                warn!(error = %e, "Gemini log: failed to insert started");
-                            }
-                        }
-                        event_bus::DaemonEvent::GeminiRequestCompleted {
-                            request_id, api_mode,
-                            response_chars, queue_wait_ms, duration_ms,
-                            retry_count, status, error_msg, response_text, ..
-                        } => {
-                            if let Err(e) = log_db.db().gemini_log_update_completed(
-                                request_id, api_mode,
-                                *response_chars as i64, *queue_wait_ms as i64,
-                                *duration_ms as i64, *retry_count as i64,
-                                status, error_msg.as_deref(),
-                                response_text.as_deref(),
-                            ) {
-                                warn!(error = %e, "Gemini log: failed to update completed");
-                            }
-                        }
-                        event_bus::DaemonEvent::CodexRequestStarted {
-                            request_id, caller, model, prompt_chars, prompt_text, ..
-                        } => {
-                            if let Err(e) = log_db.db().gemini_log_insert_started(
-                                request_id, caller, None,
-                                model, *prompt_chars as i64,
-                                prompt_text.as_deref(),
-                            ) {
-                                warn!(error = %e, "Codex log: failed to insert started");
-                            }
-                        }
-                        event_bus::DaemonEvent::CodexRequestCompleted {
-                            request_id, response_chars, duration_ms,
-                            status, error_msg, response_text, ..
-                        } => {
-                            if let Err(e) = log_db.db().gemini_log_update_completed(
-                                request_id, "codex-cli",
-                                *response_chars as i64, 0,
-                                *duration_ms as i64, 0,
-                                status, error_msg.as_deref(),
-                                response_text.as_deref(),
-                            ) {
-                                warn!(error = %e, "Codex log: failed to update completed");
-                            }
-                        }
-                        _ => {}
-                    },
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(skipped = n, "Gemini log subscriber lagged, some requests not logged");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        info!("Gemini log subscriber: event bus closed");
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
     // --- Background Workers (unified lifecycle via BackgroundWorker trait) ---
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // Gemini request log subscriber (Timeline → DB persistence)
+    workers::spawn_worker(
+        workers::gemini_logger::GeminiLoggerWorker {
+            timeline_rx: timeline_broadcast_tx.subscribe(),
+        },
+        Arc::new(state.clone()),
+        shutdown_rx.clone(),
+    );
 
     workers::spawn_worker(
         vision_worker::VisionWorker,
@@ -1679,157 +1567,13 @@ async fn main() -> Result<()> {
     }
 
     // Conversation logger event stream
-    {
-        let s = state.clone();
-        tokio::spawn(async move {
-            loop {
-                match conv_logger_rx.recv().await {
-                    Ok(WatcherEvent::NewMessages { session_id, project_path, jsonl_path, messages }) => {
-                        let mut is_pty = s.pty_session_uuids.read().await.contains(&session_id);
-
-                        // Compaction detection
-                        let mut compaction_task_id: Option<String> = None;
-                        if !is_pty {
-                            if let Some((slot_id, old_uuid, old_task_id)) = detect_compaction(&s, &session_id, &project_path) {
-                                info!(
-                                    slot_id = %slot_id,
-                                    old_session = %old_uuid,
-                                    new_session = %session_id,
-                                    "Compaction detected: session replaced by context compaction"
-                                );
-                                let db = s.mission.db();
-                                let _ = db.mark_conversation_compacted(&old_uuid);
-                                let _ = db.set_slot_session(&slot_id, &session_id);
-                                s.pty_session_uuids.write().await.remove(&old_uuid);
-                                s.pty_session_uuids.write().await.insert(session_id.clone());
-                                compaction_task_id = old_task_id;
-                                is_pty = true;
-                            }
-                        }
-
-                        // Progress tracking
-                        if is_pty {
-                            if let Ok(Some(slot_id)) = s.mission.db().get_slot_for_session(&session_id) {
-                                let mut progress = s.slot_progress.write().await;
-                                let sp = progress.entry(slot_id).or_default();
-                                if sp.session_id != session_id {
-                                    *sp = SlotProgress { session_id: session_id.clone(), ..Default::default() };
-                                }
-                                for msg in &messages {
-                                    if let Some(blocks) = msg.message.content.as_array() {
-                                        for block in blocks {
-                                            match block.get("type").and_then(|t| t.as_str()) {
-                                                Some("tool_use") => {
-                                                    let name = block.get("name")
-                                                        .and_then(|n| n.as_str())
-                                                        .unwrap_or("unknown")
-                                                        .to_string();
-                                                    *sp.tool_counts.entry(name.clone()).or_insert(0) += 1;
-                                                    sp.total_calls += 1;
-                                                    sp.current_tool = Some(CurrentToolInfo {
-                                                        name,
-                                                        started_at: msg.timestamp.clone(),
-                                                    });
-                                                    sp.last_activity = Some(msg.timestamp.clone());
-                                                }
-                                                Some("tool_result") => {
-                                                    sp.total_results += 1;
-                                                    sp.current_tool = None;
-                                                    if block.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false) {
-                                                        sp.error_count += 1;
-                                                    }
-                                                    sp.last_activity = Some(msg.timestamp.clone());
-                                                }
-                                                _ => {}
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        let db_messages: Vec<_> = messages.into_iter()
-                            .filter(|m| m.message_type != "tool_use")
-                            .collect();
-                        handle_new_messages(&s, session_id.clone(), project_path, jsonl_path, db_messages, is_pty);
-
-                        if let Some(tid) = compaction_task_id {
-                            let _ = s.mission.db().set_conversation_task_id(&session_id, &tid);
-                        }
-                    }
-                    Ok(WatcherEvent::NewEvents { session_id, events }) => {
-                        events_sync::handle_new_events(s.mission.db(), session_id, events);
-                    }
-                    Ok(WatcherEvent::SessionInactive(session)) => {
-                        if let Ok(Some(conv)) = s.mission.db().get_conversation(&session.session_id) {
-                            if conv.status == "compacted" {
-                                debug!(session = %session.session_id, "Skipping inactive check for compacted session");
-                                continue;
-                            }
-                        }
-                        if let Err(e) = s.mission.db().complete_conversation(&session.session_id) {
-                            warn!(session = %session.session_id, error = %e, "Failed to complete conversation");
-                        } else {
-                            info!(session = %session.session_id, "Conversation marked completed");
-                            // Build session timeline if this parent has compaction fragments
-                            {
-                                let db = s.mission.db();
-                                let sid = &session.session_id;
-                                let frags = db.get_compaction_fragments(sid).unwrap_or_default();
-                                if !frags.is_empty() {
-                                    let mut entries = Vec::new();
-                                    for (idx, (frag_id, started_at, msg_count)) in frags.iter().enumerate() {
-                                        let summary = db.get_last_assistant_content(frag_id).unwrap_or(None);
-                                        let summary_tokens = summary.as_ref().map(|s| s.len() / 4).unwrap_or(0);
-                                        entries.push(serde_json::json!({
-                                            "fragment_id": frag_id,
-                                            "shard_index": idx,
-                                            "started_at": started_at,
-                                            "message_count": msg_count,
-                                            "summary_tokens": summary_tokens,
-                                            "summary": summary,
-                                            "segment_embedding_id": null,
-                                        }));
-                                    }
-                                    if let Ok(json) = serde_json::to_string(&entries) {
-                                        match db.set_session_timeline(sid, &json) {
-                                            Ok(true) => info!(session = %sid, fragments = frags.len(), "Session timeline built"),
-                                            Ok(false) => debug!(session = %sid, "Session timeline already exists"),
-                                            Err(e) => warn!(session = %sid, error = %e, "Failed to build session timeline"),
-                                        }
-                                    }
-                                }
-                            }
-                            // Trigger embedding worker (event-driven, no spawn)
-                            let _ = s.embedding_tx.try_send(EmbeddingTask::ProcessSession(session.session_id.clone()));
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(skipped = n, "Conversation logger lagged — triggering reconciliation");
-                        // Reconcile: re-scan active sessions' JSONL to recover lost messages
-                        let reconcile_state = s.clone();
-                        tokio::spawn(async move {
-                            let db = reconcile_state.mission.db();
-                            let convs = db.list_conversations(Some("active"), 100, Some("all"), None)
-                                .unwrap_or_default();
-                            let mut reconciled = 0usize;
-                            for conv in &convs {
-                                if let Some(ref path) = conv.jsonl_path {
-                                    events_sync::reconcile_conversation_messages(db, &conv.id, path).await;
-                                    reconciled += 1;
-                                }
-                            }
-                            if reconciled > 0 {
-                                info!(reconciled, "Lag reconciliation complete");
-                            }
-                        });
-                    }
-                    Err(_) => {}
-                }
-            }
-        });
-    }
+    workers::spawn_worker(
+        workers::conversation_logger::ConversationLoggerWorker {
+            conv_logger_rx,
+        },
+        Arc::new(state.clone()),
+        shutdown_rx.clone(),
+    );
 
     // PTY manager event stream
     {
