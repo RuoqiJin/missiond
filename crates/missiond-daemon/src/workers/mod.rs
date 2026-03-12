@@ -8,6 +8,7 @@ pub mod experience_harvester;
 pub mod ast_sync_worker;
 pub mod gemini_logger;
 pub mod conversation_logger;
+pub mod pty_event_worker;
 
 use std::future::Future;
 use std::sync::Arc;
