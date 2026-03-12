@@ -14,7 +14,7 @@ use super::jarvis_trace::JarvisTraceStore;
 use crate::cc_tasks::{
     CCSession, CCTask, CCTaskChangeEvent, CCTasksOverview, CCTasksWatcher, WatcherEvent,
 };
-use crate::pty::{PTYManager, SessionEvent, SessionState};
+use crate::pty::{PTYManager, SessionEvent, SessionState, TextOutputEvent};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -77,6 +77,42 @@ pub struct PTYWebSocketServer {
 }
 
 // ── AIOps Webhook Parsers ──
+
+/// Clean Jarvis PTY response using UUID boundary marker.
+///
+/// The injected message has format: `{context}\n\n{user_message}\n<<<BOUNDARY_{id}>>>`
+/// PTY echoes back the entire input, then Claude's response follows.
+/// We find the LAST occurrence of the boundary marker and take everything after it.
+fn clean_jarvis_response(raw: &str, boundary_id: &str) -> String {
+    let marker = format!("<<<BOUNDARY_{}>>>", boundary_id);
+
+    // 1. Find boundary marker — take everything after the last occurrence
+    let text = if let Some(pos) = raw.rfind(&marker) {
+        &raw[pos + marker.len()..]
+    } else {
+        // Fallback: boundary not found (PTY buffer overflow or truncation).
+        // Try stripping from last ⏺ block as best-effort.
+        tracing::warn!(boundary_id, "Boundary marker not found in PTY output, using fallback");
+        raw
+    };
+
+    // 2. Strip Claude Code TUI bullet markers (⏺)
+    let cleaned: String = text
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if let Some(after) = trimmed.strip_prefix('⏺') {
+                after.strip_prefix(' ').unwrap_or(after)
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // 3. Trim whitespace
+    cleaned.trim().to_string()
+}
 
 /// Parse Deploy Center failure webhook into an incident.
 /// Returns None for non-failure events (e.g. deploy success).
@@ -695,6 +731,7 @@ impl PTYWebSocketServer {
 
         let slot_id = "slot-jarvis";
         let chat_id = format!("chatcmpl-jarvis-{}", chrono::Utc::now().timestamp_millis());
+        let boundary_id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
 
         // Extract Router's trace_id from X-Trace-Id header
         let router_trace_id = headers
@@ -764,38 +801,165 @@ impl PTYWebSocketServer {
                 drop(enricher_guard); // release lock before async call
                 let ctx = enricher(user_message.clone()).await;
                 if ctx.is_empty() {
-                    user_message.clone()
+                    format!("{}\n<<<BOUNDARY_{}>>>", user_message, boundary_id)
                 } else {
                     debug!(slot_id, ctx_len = ctx.len(), "Jarvis: context enrichment injected");
-                    format!("{}\n\n{}", ctx, user_message)
+                    format!("{}\n\n{}\n<<<BOUNDARY_{}>>>", ctx, user_message, boundary_id)
                 }
             } else {
                 user_message.clone()
             }
         };
 
-        // Phase 1: blocking send — get full response, then emit as single SSE chunk.
-        let timeout_ms = 300_000u64; // 5 min
-        match pty_manager.send(slot_id, &enriched_message, timeout_ms).await {
-            Ok(result) => {
-                // Record trace completion
-                trace_store.complete_trace(&chat_id, &result.response, result.duration_ms).await;
+        // Dual-track streaming:
+        // 1. Subscribe to session events → forward status/tool events as SSE (activity view)
+        // 2. Use blocking send() → get clean final response (handles turn management correctly)
+        //
+        // send_fire_and_forget causes spurious Complete events from paste notification.
+        // send() properly waits for the real Complete, so we use it for the response.
+        let mut rx = match pty_manager.subscribe_session(slot_id).await {
+            Ok(rx) => rx,
+            Err(e) => {
+                let err = serde_json::json!({"error": {"message": format!("Subscribe failed: {}", e)}});
+                let event = format!("data: {}\n\n", err);
+                let _ = stream.write_all(event.as_bytes()).await;
+                let _ = stream.write_all(b"data: [DONE]\n\n").await;
+                stream.shutdown().await?;
+                return Ok(());
+            }
+        };
+
+        // Spawn blocking send() in a background task — it returns the final clean response.
+        let pty_for_send = Arc::clone(&pty_manager);
+        let send_msg = enriched_message.clone();
+        let send_slot = slot_id.to_string();
+        let send_handle = tokio::spawn(async move {
+            let timeout_ms = 300_000u64; // 5 min
+            pty_for_send.send(&send_slot, &send_msg, timeout_ms).await
+        });
+
+        // Forward activity events via SSE while send() is running
+        let start_time = std::time::Instant::now();
+        let heartbeat_interval = tokio::time::Duration::from_secs(15);
+        let mut tool_seq: u32 = 0;
+        let mut last_event_time = std::time::Instant::now();
+        let mut last_status_phase = String::new();
+        let mut last_status_sent = std::time::Instant::now() - std::time::Duration::from_secs(1); // Allow first status immediately
+        let status_throttle = std::time::Duration::from_millis(500);
+
+        loop {
+            // Check if send() has completed
+            if send_handle.is_finished() {
+                break;
+            }
+
+            // Poll for events with heartbeat timeout
+            let recv_timeout = heartbeat_interval.saturating_sub(last_event_time.elapsed());
+            match tokio::time::timeout(recv_timeout, rx.recv()).await {
+                Ok(Ok(event)) => {
+                    last_event_time = std::time::Instant::now();
+                    match event {
+                        SessionEvent::StatusUpdate(status) => {
+                            let phase = format!("{}", status.phase);
+                            let phase_changed = phase != last_status_phase;
+                            let throttle_elapsed = last_status_sent.elapsed() >= status_throttle;
+                            // Send immediately on phase change, or throttle within same phase
+                            if phase_changed || throttle_elapsed {
+                                last_status_phase = phase.clone();
+                                last_status_sent = std::time::Instant::now();
+                                let evt = serde_json::json!({
+                                    "phase": phase,
+                                    "text": status.status_text,
+                                });
+                                let sse = format!("event: status\ndata: {}\n\n", evt);
+                                let _ = stream.write_all(sse.as_bytes()).await;
+                                let _ = stream.flush().await;
+                            }
+                        }
+                        SessionEvent::ToolOutput(tool_output) => {
+                            use crate::semantic::ToolStatus;
+                            match tool_output.status {
+                                ToolStatus::Running => {
+                                    tool_seq += 1;
+                                    let id = format!("t{}", tool_seq);
+                                    let param_summary = tool_output.params.values().next()
+                                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                                        .unwrap_or_default();
+                                    let evt = serde_json::json!({
+                                        "id": id,
+                                        "tool": tool_output.tool_name,
+                                        "params": param_summary,
+                                    });
+                                    let sse = format!("event: tool_start\ndata: {}\n\n", evt);
+                                    let _ = stream.write_all(sse.as_bytes()).await;
+                                    let _ = stream.flush().await;
+                                }
+                                ToolStatus::Completed => {
+                                    let id = format!("t{}", tool_seq);
+                                    let evt = serde_json::json!({
+                                        "id": id,
+                                        "tool": tool_output.tool_name,
+                                        "duration_ms": tool_output.duration_ms,
+                                    });
+                                    let sse = format!("event: tool_end\ndata: {}\n\n", evt);
+                                    let _ = stream.write_all(sse.as_bytes()).await;
+                                    let _ = stream.flush().await;
+                                }
+                            }
+                        }
+                        SessionEvent::StateChange { new_state, .. } => {
+                            match new_state {
+                                SessionState::Thinking => {
+                                    let evt = serde_json::json!({"phase": "thinking", "text": "Thinking..."});
+                                    let sse = format!("event: status\ndata: {}\n\n", evt);
+                                    let _ = stream.write_all(sse.as_bytes()).await;
+                                    let _ = stream.flush().await;
+                                }
+                                SessionState::ToolRunning => {
+                                    let evt = serde_json::json!({"phase": "tool_running", "text": ""});
+                                    let sse = format!("event: status\ndata: {}\n\n", evt);
+                                    let _ = stream.write_all(sse.as_bytes()).await;
+                                    let _ = stream.flush().await;
+                                }
+                                _ => {}
+                            }
+                        }
+                        SessionEvent::Exit(code) => {
+                            let err_msg = format!("PTY session exited with code {}", code);
+                            trace_store.error_trace(&chat_id, &err_msg, None).await;
+                            let err = serde_json::json!({"error": {"message": err_msg}});
+                            let _ = stream.write_all(format!("data: {}\n\n", err).as_bytes()).await;
+                            let _ = stream.write_all(b"data: [DONE]\n\n").await;
+                            warn!(?addr, slot_id, code, trace_id = %chat_id, "PTY exited during streaming");
+                            let _ = stream.shutdown().await;
+                            return Ok(());
+                        }
+                        _ => {} // Ignore Data, ScreenText, TitleChange, TextOutput::Stream/Complete
+                    }
+                }
+                Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
+                    warn!(slot_id, lagged = n, "Broadcast lagged, continuing");
+                }
+                Ok(Err(broadcast::error::RecvError::Closed)) => {
+                    break;
+                }
+                Err(_) => {
+                    // Heartbeat — send SSE comment to keep connection alive
+                    let _ = stream.write_all(b":\n\n").await;
+                    let _ = stream.flush().await;
+                    last_event_time = std::time::Instant::now();
+                }
+            }
+        }
+
+        // send() has completed — get the result and emit final response
+        match send_handle.await {
+            Ok(Ok(result)) => {
+                let duration_ms = start_time.elapsed().as_millis() as u64;
+                trace_store.complete_trace(&chat_id, &result.response, duration_ms).await;
 
                 if !result.response.is_empty() {
-                    // Clean Claude Code TUI artifacts from the response
-                    let cleaned: String = result
-                        .response
-                        .lines()
-                        .map(|line| {
-                            let trimmed = line.trim_start();
-                            if let Some(after) = trimmed.strip_prefix('⏺') {
-                                after.strip_prefix(' ').unwrap_or(after)
-                            } else {
-                                line
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
+                    let cleaned = clean_jarvis_response(&result.response, &boundary_id);
                     let chunk = serde_json::json!({
                         "id": &chat_id,
                         "object": "chat.completion.chunk",
@@ -806,10 +970,8 @@ impl PTYWebSocketServer {
                             "finish_reason": serde_json::Value::Null,
                         }]
                     });
-                    let event = format!("data: {}\n\n", chunk);
-                    let _ = stream.write_all(event.as_bytes()).await;
+                    let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
                 }
-                // Send stop chunk
                 let stop = serde_json::json!({
                     "id": &chat_id,
                     "object": "chat.completion.chunk",
@@ -822,19 +984,20 @@ impl PTYWebSocketServer {
                 });
                 let _ = stream.write_all(format!("data: {}\n\n", stop).as_bytes()).await;
                 let _ = stream.write_all(b"data: [DONE]\n\n").await;
-                info!(?addr, slot_id, response_len = result.response.len(), duration_ms = result.duration_ms, trace_id = %chat_id, "Chat completions done");
+                info!(?addr, slot_id, response_len = result.response.len(), duration_ms, trace_id = %chat_id, "Chat completions done (streaming)");
             }
-            Err(e) => {
-                // Record trace error
+            Ok(Err(e)) => {
                 trace_store.error_trace(&chat_id, &e.to_string(), None).await;
-
-                let err_chunk = serde_json::json!({
-                    "error": {"message": format!("Claude Code error: {}", e)}
-                });
-                let event = format!("data: {}\n\n", err_chunk);
-                let _ = stream.write_all(event.as_bytes()).await;
+                let err = serde_json::json!({"error": {"message": format!("Claude Code error: {}", e)}});
+                let _ = stream.write_all(format!("data: {}\n\n", err).as_bytes()).await;
                 let _ = stream.write_all(b"data: [DONE]\n\n").await;
                 warn!(?addr, slot_id, error = %e, trace_id = %chat_id, "Chat completions error");
+            }
+            Err(e) => {
+                trace_store.error_trace(&chat_id, &e.to_string(), None).await;
+                let err = serde_json::json!({"error": {"message": format!("Internal error: {}", e)}});
+                let _ = stream.write_all(format!("data: {}\n\n", err).as_bytes()).await;
+                let _ = stream.write_all(b"data: [DONE]\n\n").await;
             }
         }
 
