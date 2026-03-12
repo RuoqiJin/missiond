@@ -160,12 +160,12 @@ impl MissionDB {
             params.push(Box::new(tid.to_string()));
         }
         if let Some(s) = since {
-            let ts = Self::parse_relative_time(s);
+            let ts = Self::parse_since(s);
             conditions.push(format!("created_at >= ?{}", params.len() + 1));
             params.push(Box::new(ts));
         }
         if let Some(u) = until {
-            let ts = Self::parse_relative_time(u);
+            let ts = Self::parse_until(u);
             conditions.push(format!("created_at <= ?{}", params.len() + 1));
             params.push(Box::new(ts));
         }
@@ -212,8 +212,8 @@ impl MissionDB {
         type_limits: &std::collections::HashMap<String, i64>,
     ) -> DbResult<Vec<TimelineRow>> {
         let conn = self.read_conn();
-        let ts_since = Self::parse_relative_time(since);
-        let ts_until = Self::parse_relative_time(until);
+        let ts_since = Self::parse_since(since);
+        let ts_until = Self::parse_until(until);
 
         // Build per-type CASE expression for custom limits
         let limit_expr = if type_limits.is_empty() {
@@ -284,12 +284,12 @@ impl MissionDB {
         let mut conditions = Vec::new();
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         if let Some(s) = since {
-            let ts = Self::parse_relative_time(s);
+            let ts = Self::parse_since(s);
             conditions.push(format!("created_at >= ?{}", params.len() + 1));
             params.push(Box::new(ts));
         }
         if let Some(u) = until {
-            let ts = Self::parse_relative_time(u);
+            let ts = Self::parse_until(u);
             conditions.push(format!("created_at <= ?{}", params.len() + 1));
             params.push(Box::new(ts));
         }
@@ -380,12 +380,12 @@ impl MissionDB {
         ];
 
         if let Some(s) = since {
-            let ts = Self::parse_relative_time(s);
+            let ts = Self::parse_since(s);
             conditions.push(format!("created_at >= ?{}", params.len() + 1));
             params.push(Box::new(ts));
         }
         if let Some(u) = until {
-            let ts = Self::parse_relative_time(u);
+            let ts = Self::parse_until(u);
             conditions.push(format!("created_at <= ?{}", params.len() + 1));
             params.push(Box::new(ts));
         }
@@ -415,7 +415,8 @@ impl MissionDB {
     }
 
     /// Parse relative time strings like "10min", "1h", "24h", "7d" into SQLite datetime expressions.
-    fn parse_relative_time(s: &str) -> String {
+    /// Also normalizes ISO datetime (T separator → space) to match DB storage format.
+    pub fn parse_relative_time(s: &str) -> String {
         let s = s.trim();
         if let Some(mins) = s.strip_suffix("min").and_then(|v| v.parse::<i64>().ok()) {
             return format!("{}", (chrono::Utc::now() - chrono::Duration::minutes(mins)).format("%Y-%m-%d %H:%M:%S"));
@@ -426,8 +427,24 @@ impl MissionDB {
         if let Some(days) = s.strip_suffix('d').and_then(|v| v.parse::<i64>().ok()) {
             return format!("{}", (chrono::Utc::now() - chrono::Duration::days(days)).format("%Y-%m-%d %H:%M:%S"));
         }
-        // Assume ISO datetime, pass through
+        // ISO datetime with T separator: 2026-03-11T00:00:00(.000Z) → 2026-03-11 00:00:00
+        if s.contains('T') {
+            return s.replace('T', " ").chars().take(19).collect();
+        }
+        // Pass through (pure date or already formatted)
         s.to_string()
+    }
+
+    /// Parse time string for "since" context: pure date → start of day (00:00:00)
+    pub fn parse_since(s: &str) -> String {
+        let ts = Self::parse_relative_time(s);
+        if ts.len() == 10 { format!("{} 00:00:00", ts) } else { ts }
+    }
+
+    /// Parse time string for "until" context: pure date → end of day (23:59:59)
+    pub fn parse_until(s: &str) -> String {
+        let ts = Self::parse_relative_time(s);
+        if ts.len() == 10 { format!("{} 23:59:59", ts) } else { ts }
     }
 
     /// Fetch briefing summaries for a session's conversation messages.

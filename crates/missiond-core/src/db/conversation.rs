@@ -313,9 +313,9 @@ impl MissionDB {
 
     /// List conversations, optionally filtered by status, conversation_type, and task_id.
     /// conv_type: None = user+worker (default), Some("meta") = system, Some("system") = meta+worker, Some("all") = everything.
-    /// List conversations, optionally filtered by status, conversation_type, and task_id.
+    /// List conversations, optionally filtered by status, conversation_type, task_id, and time range.
     /// conv_type: None = user+worker (default), Some("meta") = system, Some("system") = meta+worker, Some("all") = everything.
-    pub fn list_conversations(&self, status: Option<&str>, limit: i64, conv_type: Option<&str>, task_id: Option<&str>) -> DbResult<Vec<Conversation>> {
+    pub fn list_conversations(&self, status: Option<&str>, limit: i64, conv_type: Option<&str>, task_id: Option<&str>, since: Option<&str>, until: Option<&str>) -> DbResult<Vec<Conversation>> {
         let conn = self.read_conn();
         let mut convs = Vec::new();
         let type_clause = match conv_type {
@@ -326,14 +326,48 @@ impl MissionDB {
             _ => " AND conversation_type IN ('user', 'worker')".to_string(),
         };
 
+        // Build time range clause
+        // Note: conversations.started_at uses ISO format with T separator (e.g., "2026-03-11T05:03:41.382Z")
+        // while system_timeline.created_at uses space separator. We normalize to ISO T format here.
+        let time_clause = {
+            let mut parts = Vec::new();
+            if let Some(s) = since {
+                let ts = Self::parse_since(s).replace(' ', "T");
+                parts.push(format!("started_at >= '{}'", ts.replace('\'', "''")));
+            }
+            if let Some(u) = until {
+                let ts = Self::parse_until(u).replace(' ', "T");
+                parts.push(format!("started_at <= '{}'", ts.replace('\'', "''")));
+            }
+            if parts.is_empty() { String::new() } else { format!(" AND {}", parts.join(" AND ")) }
+        };
+
         // Fast path: filter by task_id (returns all matching conversations)
         if let Some(tid) = task_id {
             let sql = format!(
-                "SELECT * FROM conversations WHERE task_id = ?1{} ORDER BY started_at ASC LIMIT ?2",
-                if matches!(conv_type, Some("all")) { String::new() } else { type_clause.clone() }
+                "SELECT * FROM conversations WHERE task_id = ?1{}{} ORDER BY started_at ASC LIMIT ?2",
+                if matches!(conv_type, Some("all")) { String::new() } else { type_clause.clone() },
+                time_clause
             );
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map(params![tid, limit], |row| Self::row_to_conversation(row))?;
+            for c in rows { convs.push(c?); }
+            return Ok(convs);
+        }
+
+        // When time range is specified, use simplified query path
+        if since.is_some() || until.is_some() {
+            let status_clause = if let Some(s) = status {
+                format!("status = '{}'", s.replace('\'', "''"))
+            } else {
+                "1=1".to_string()
+            };
+            let sql = format!(
+                "SELECT * FROM conversations WHERE {}{}{} ORDER BY started_at DESC LIMIT ?1",
+                status_clause, type_clause, time_clause
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params![limit], |row| Self::row_to_conversation(row))?;
             for c in rows { convs.push(c?); }
             return Ok(convs);
         }

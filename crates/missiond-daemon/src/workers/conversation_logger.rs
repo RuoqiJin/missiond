@@ -186,7 +186,7 @@ fn build_session_timeline(s: &AppState, session_id: &str) {
 /// Reconcile: re-scan active sessions' JSONL to recover lost messages after broadcast lag.
 async fn reconcile(s: &AppState) {
     let db = s.mission.db();
-    let convs = db.list_conversations(Some("active"), 100, Some("all"), None)
+    let convs = db.list_conversations(Some("active"), 100, Some("all"), None, None, None)
         .unwrap_or_default();
     let mut reconciled = 0usize;
     for conv in &convs {
