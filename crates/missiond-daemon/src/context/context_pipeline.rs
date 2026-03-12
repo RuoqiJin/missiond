@@ -14,7 +14,8 @@
 //! Fallback: if CC slot unavailable, degrades to v1 rule-based classification.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -178,11 +179,18 @@ fn is_obvious_chat(query: &str) -> bool {
 /// Stateless HTTP call — no slot contention, no conversation pollution.
 /// Returns None on any error (caller falls back to rules).
 async fn route_intent_via_router(state: &AppState, query: &str) -> Option<IntentResult> {
+    state.stats.prefetch_router_calls.fetch_add(1, Ordering::Relaxed);
+    let start = Instant::now();
+
     let result = route_intent_http(state, query).await;
+    let elapsed_us = start.elapsed().as_micros() as u64;
+    state.stats.prefetch_router_latency.record(elapsed_us);
+
     match result {
         Ok(intent) => Some(intent),
         Err(e) => {
-            warn!(error = %e, "Intent router: API call failed, falling back to rules");
+            state.stats.prefetch_router_errors.fetch_add(1, Ordering::Relaxed);
+            warn!(error = %e, elapsed_ms = elapsed_us / 1000, "Intent router: API call failed, falling back to rules");
             None
         }
     }
@@ -355,9 +363,13 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
         return PrefetchResult::empty();
     }
 
+    state.stats.prefetch_total.fetch_add(1, Ordering::Relaxed);
+
     // Phase 1: Quick rule pre-screen — obvious chat bypasses everything (no CC call)
     if is_obvious_chat(&query) {
         debug!(query = query.trim(), "Context prefetch: obvious chat → bypass");
+        state.stats.prefetch_intent_chat.fetch_add(1, Ordering::Relaxed);
+        state.stats.prefetch_bypass.fetch_add(1, Ordering::Relaxed);
         return PrefetchResult {
             intent: Some("chat:rules".to_string()),
             ..PrefetchResult::empty()
@@ -378,6 +390,7 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
         }
         None => {
             // Fallback: v1 rule-based classification
+            state.stats.prefetch_fallback.fetch_add(1, Ordering::Relaxed);
             let rule_intent = classify_intent(&query);
             debug!(
                 query = query.trim(),
@@ -399,6 +412,8 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
             source = intent_result.source,
             "Context prefetch: intent router → no context needed, bypass"
         );
+        state.stats.prefetch_intent_chat.fetch_add(1, Ordering::Relaxed);
+        state.stats.prefetch_bypass.fetch_add(1, Ordering::Relaxed);
         return PrefetchResult {
             intent: Some(format!("bypass:{}", intent_result.source)),
             ..PrefetchResult::empty()
@@ -406,6 +421,11 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
     }
 
     let intent = intent_result.intent_type;
+    match intent {
+        QueryIntent::Code => state.stats.prefetch_intent_code.fetch_add(1, Ordering::Relaxed),
+        QueryIntent::General => state.stats.prefetch_intent_general.fetch_add(1, Ordering::Relaxed),
+        QueryIntent::Chat => unreachable!(),
+    };
 
     // Use refined search queries if CC provided them, otherwise use original query
     let search_query = if intent_result.search_queries.is_empty() {
@@ -547,6 +567,9 @@ async fn search_skills(state: &AppState, query: &str) -> Vec<SkillHint> {
                     if let Some(&(idx0, sim0)) = sims.first() {
                         let name0 = &cache[idx0].0;
                         debug!(query, top1_skill = %name0, top1_sim = sim0, "Skill vector top-1 sim");
+                        if sim0 <= MIN_COSINE_SIM {
+                            state.stats.prefetch_cosine_filtered.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
 
                     for (rank, (idx, _sim)) in sims.iter().filter(|(_, s)| *s > MIN_COSINE_SIM).take(10).enumerate() {
@@ -621,6 +644,9 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
             if let Some(&(idx0, sim0)) = scores.first() {
                 let name0 = &cache[idx0].0;
                 debug!(query, top1_kb = %name0, top1_sim = sim0, "KB vector top-1 sim");
+                if sim0 <= MIN_COSINE_SIM {
+                    state.stats.prefetch_cosine_filtered.fetch_add(1, Ordering::Relaxed);
+                }
             }
 
             scores.iter()
