@@ -966,6 +966,14 @@ async fn main() -> Result<()> {
         match state.mission.reload_slots_config() {
             Ok(result) => {
                 if result.has_changes() {
+                    // Kill PTY sessions for removed slots (prevent orphan processes)
+                    for slot_id in &result.removed {
+                        info!(slot_id = %slot_id, "Killing PTY for removed slot");
+                        if let Err(e) = state.pty.kill(slot_id).await {
+                            warn!(slot_id = %slot_id, error = %e, "Failed to kill removed slot PTY");
+                        }
+                    }
+
                     // Auto-start newly added slots with auto_start: true
                     for slot_id in &result.added {
                         if let Some(slot) = state.mission.get_slot(slot_id) {

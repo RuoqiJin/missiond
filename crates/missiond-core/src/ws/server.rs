@@ -275,7 +275,7 @@ impl PTYWebSocketServer {
 
     /// Start the server
     pub async fn start(&mut self) -> anyhow::Result<()> {
-        let addr = format!("0.0.0.0:{}", self.port);
+        let addr = format!("127.0.0.1:{}", self.port);
         let listener = TcpListener::bind(&addr).await?;
 
         info!(port = self.port, "PTY WebSocket server started");
@@ -512,11 +512,23 @@ impl PTYWebSocketServer {
                 }
             });
 
-        // TODO: validate token against Secret Store. For now accept any Bearer token.
-        if auth_token.is_none() {
-            let err = serde_json::json!({"error": {"message": "Missing Authorization header"}});
-            Self::send_http_error(&mut stream, 401, "Unauthorized", &err.to_string()).await?;
-            return Ok(());
+        // Validate Bearer token: require match against MISSIOND_API_TOKEN if set.
+        // If env var is unset, accept any non-empty token (backward compatible).
+        match &auth_token {
+            None => {
+                let err = serde_json::json!({"error": {"message": "Missing Authorization header"}});
+                Self::send_http_error(&mut stream, 401, "Unauthorized", &err.to_string()).await?;
+                return Ok(());
+            }
+            Some(token) => {
+                if let Ok(expected) = std::env::var("MISSIOND_API_TOKEN") {
+                    if token != &expected {
+                        let err = serde_json::json!({"error": {"message": "Invalid API token"}});
+                        Self::send_http_error(&mut stream, 401, "Unauthorized", &err.to_string()).await?;
+                        return Ok(());
+                    }
+                }
+            }
         }
 
         // Parse request body

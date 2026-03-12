@@ -553,7 +553,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .ok_or_else(|| anyhow!("Task not found: {}", args.task_id))?;
 
             let reset_ids = state.mission.db()
-                .retry_board_task(&args.task_id, args.reset_downstream)
+                .retry_board_task(&task.id, args.reset_downstream)
                 .map_err(|e| anyhow!("DB error: {}", e))?;
 
             // Write note
