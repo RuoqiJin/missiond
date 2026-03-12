@@ -43,11 +43,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 limit: Option<i64>,
                 conversation_type: Option<String>,
                 task_id: Option<String>,
+                since: Option<String>,
+                until: Option<String>,
             }
-            let Args { status, limit, conversation_type, task_id } =
-                serde_json::from_value(args).unwrap_or(Args { status: None, limit: None, conversation_type: None, task_id: None });
+            let Args { status, limit, conversation_type, task_id, since, until } =
+                serde_json::from_value(args).unwrap_or(Args { status: None, limit: None, conversation_type: None, task_id: None, since: None, until: None });
             let convs = state.mission.db()
-                .list_conversations(status.as_deref(), limit.unwrap_or(20), conversation_type.as_deref(), task_id.as_deref())
+                .list_conversations(status.as_deref(), limit.unwrap_or(20), conversation_type.as_deref(), task_id.as_deref(), since.as_deref(), until.as_deref())
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&convs))
         }
@@ -488,6 +490,79 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "session_id": session_id,
                 "narrations": items,
                 "count": items.len(),
+            })))
+        }
+
+        // ===== Activity Report =====
+        "mission_activity_report" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                since: String,
+                until: Option<String>,
+            }
+            let Args { since, until } = serde_json::from_value(args)?;
+            let until = until.unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string());
+            let db = state.mission.db();
+
+            // 1. Conversations
+            let convs = db.list_conversations(None, 500, Some("all"), None, Some(&since), Some(&until))
+                .unwrap_or_default();
+            let mut by_source: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+            let mut by_type: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+            for c in &convs {
+                *by_source.entry(c.source.clone()).or_default() += 1;
+                *by_type.entry(c.conversation_type.clone()).or_default() += 1;
+            }
+
+            // 2. Board tasks — direct SQL for time-based filtering
+            let since_iso = db.parse_time_since(&since).replace(' ', "T");
+            let until_iso = db.parse_time_until(&until).replace(' ', "T");
+            let board_created = db.query_board_tasks_in_range("created_at", &since_iso, &until_iso)
+                .unwrap_or_default();
+            let board_completed = db.query_board_tasks_in_range_with_status("done", &since_iso, &until_iso)
+                .unwrap_or_default();
+
+            // 3. Timeline stats
+            let timeline_stats = db.query_timeline_stats(Some(&since), Some(&until)).ok();
+
+            // 4. Git commits (graceful degradation)
+            let git_commits = {
+                let git_since = db.parse_time_since(&since);
+                let git_until = db.parse_time_until(&until);
+                match std::process::Command::new("git")
+                    .args(["log", "--oneline", &format!("--after={}", git_since), &format!("--before={}", git_until), "--all"])
+                    .output()
+                {
+                    Ok(output) if output.status.success() => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        let commits: Vec<serde_json::Value> = stdout.lines()
+                            .filter(|l| !l.is_empty())
+                            .map(|l| {
+                                let (hash, msg) = l.split_once(' ').unwrap_or((l, ""));
+                                serde_json::json!({"hash": hash, "message": msg})
+                            })
+                            .collect();
+                        serde_json::json!({"total": commits.len(), "commits": commits})
+                    }
+                    _ => serde_json::json!({"error": "git not available or not a repository", "total": 0}),
+                }
+            };
+
+            Ok(ToolResult::json_pretty(&serde_json::json!({
+                "since": since,
+                "until": until,
+                "conversations": {
+                    "total": convs.len(),
+                    "by_source": by_source,
+                    "by_type": by_type,
+                },
+                "board": {
+                    "created": board_created,
+                    "completed": board_completed,
+                },
+                "timeline": timeline_stats,
+                "git": git_commits,
             })))
         }
 

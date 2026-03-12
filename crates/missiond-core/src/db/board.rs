@@ -462,9 +462,9 @@ impl MissionDB {
     }
 
     /// List board tasks eligible for autopilot execution
-    /// (auto_execute=true, status=open, due_date <= now, has assignee)
+    /// (auto_execute=true, status=open, due_date <= today local, has assignee)
     pub fn list_autopilot_tasks(&self) -> DbResult<Vec<BoardTask>> {
-        let now = chrono::Utc::now().to_rfc3339();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT * FROM board_tasks
@@ -474,7 +474,7 @@ impl MissionDB {
                AND (due_date IS NULL OR due_date <= ?1)
              ORDER BY order_idx ASC"
         )?;
-        let rows = stmt.query_map(params![now], |row| Self::row_to_board_task(row))?;
+        let rows = stmt.query_map(params![today], |row| Self::row_to_board_task(row))?;
         let mut tasks = Vec::new();
         for task in rows {
             tasks.push(task?);
@@ -950,6 +950,56 @@ impl MissionDB {
             author: row.get("author")?,
             created_at: row.get("created_at")?,
         })
+    }
+
+    /// Query board tasks where a time column falls within a range.
+    /// Used by activity_report to find created/updated tasks in a date range.
+    pub fn query_board_tasks_in_range(&self, time_col: &str, since: &str, until: &str) -> DbResult<Vec<serde_json::Value>> {
+        let conn = self.read_conn();
+        // Only allow safe column names
+        let col = match time_col {
+            "created_at" | "updated_at" => time_col,
+            _ => return Ok(Vec::new()),
+        };
+        let sql = format!(
+            "SELECT id, title, status, priority, project, {} as ts FROM board_tasks WHERE {} >= ?1 AND {} <= ?2 ORDER BY {} DESC LIMIT 50",
+            col, col, col, col
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![since, until], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "title": row.get::<_, String>(1)?,
+                "status": row.get::<_, String>(2)?,
+                "priority": row.get::<_, String>(3)?,
+                "project": row.get::<_, Option<String>>(4)?,
+                "time": row.get::<_, String>(5)?,
+            }))
+        })?;
+        let mut tasks = Vec::new();
+        for r in rows { tasks.push(r?); }
+        Ok(tasks)
+    }
+
+    /// Query board tasks that reached a specific status within a time range.
+    pub fn query_board_tasks_in_range_with_status(&self, status: &str, since: &str, until: &str) -> DbResult<Vec<serde_json::Value>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, status, priority, project, updated_at FROM board_tasks WHERE status = ?1 AND updated_at >= ?2 AND updated_at <= ?3 ORDER BY updated_at DESC LIMIT 50"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![status, since, until], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "title": row.get::<_, String>(1)?,
+                "status": row.get::<_, String>(2)?,
+                "priority": row.get::<_, String>(3)?,
+                "project": row.get::<_, Option<String>>(4)?,
+                "completed_at": row.get::<_, String>(5)?,
+            }))
+        })?;
+        let mut tasks = Vec::new();
+        for r in rows { tasks.push(r?); }
+        Ok(tasks)
     }
 
 

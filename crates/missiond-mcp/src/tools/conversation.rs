@@ -25,6 +25,14 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "taskId": {
                         "type": "string",
                         "description": "按 Board 任务 ID 过滤，返回该任务关联的所有会话（PTY、Gemini 咨询等）"
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": "起始时间过滤(ISO datetime/纯日期/相对格式 1h/24h/7d)"
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": "结束时间过滤(格式同 since)"
                     }
                 }
             }),
@@ -158,6 +166,25 @@ pub fn definitions() -> Vec<ToolDefinition> {
             }),
         ),
 
+        // ===== Activity Report =====
+        ToolDefinition::new(
+            "mission_activity_report",
+            "活动报告：一次调用返回时间范围内的对话统计、Board 任务流转、Timeline 事件分布。支持日报/周报。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "since": {
+                        "type": "string",
+                        "description": "起始时间(ISO datetime/纯日期/相对格式 1h/24h/7d)"
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": "结束时间(格式同 since，不传则为当前时间)"
+                    }
+                },
+                "required": ["since"]
+            }),
+        ),
 
     ]
 }
