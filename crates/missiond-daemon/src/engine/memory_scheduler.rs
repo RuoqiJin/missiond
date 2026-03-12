@@ -174,36 +174,61 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
         }
     }
 
-    // Phase 2: Wake-on-Demand — auto-spawn stopped slots for roles that still have queued tasks
+    // Phase 2: Wake-on-Demand — auto-spawn stopped slots for queued tasks
+    // Respects pinned slot_id: if task specifies a slot, only wake that exact slot.
     {
         let remaining = match state.db_exec.run(|db| db.get_tasks_by_status(missiond_core::types::TaskStatus::Queued)).await {
             Ok(t) => t,
             Err(_) => vec![],
         };
-        let remaining_roles: HashSet<String> = remaining.iter().map(|t| t.role.clone()).collect();
-        if !remaining_roles.is_empty() {
+        if !remaining.is_empty() {
             let slots = state.mission.list_slots();
-            for role in &remaining_roles {
-                for slot in slots.iter().filter(|s| s.config.role == *role) {
-                    let slot_id = &slot.config.id;
-                    if used_slots.contains(slot_id) { continue; }
-                    let status = state.pty.get_status(slot_id).await;
-                    let is_spawnable = match &status {
-                        Some(s) => s.state == missiond_core::pty::SessionState::Exited,
-                        None => true,
-                    };
-                    if !is_spawnable { continue; }
+            let mut woken_slots: HashSet<String> = HashSet::new();
+            for task in &remaining {
+                // Determine target slot(s) to wake
+                let target_slot_id = if let Some(ref pinned) = task.slot_id {
+                    // Pinned task: only wake the exact slot
+                    if !slots.iter().any(|s| s.config.id == *pinned) {
+                        warn!(task_id = %task.id, slot_id = %pinned, "Autopilot: pinned slot not found, marking task Failed");
+                        let now = chrono::Utc::now().timestamp_millis();
+                        let _ = state.mission.db().update_task(
+                            &task.id,
+                            &missiond_core::types::TaskUpdate {
+                                status: Some(missiond_core::types::TaskStatus::Failed),
+                                finished_at: Some(now),
+                                result: Some(format!("pinned slot '{pinned}' not found in slots.yaml")),
+                                ..Default::default()
+                            },
+                        );
+                        continue;
+                    }
+                    pinned.clone()
+                } else {
+                    // Unpinned: find any slot with matching role
+                    match slots.iter().find(|s| s.config.role == task.role && !used_slots.contains(&s.config.id) && !woken_slots.contains(&s.config.id)) {
+                        Some(s) => s.config.id.clone(),
+                        None => continue,
+                    }
+                };
 
-                    let state_clone = state.clone();
-                    let slot_id_clone = slot_id.clone();
-                    info!(slot_id = %slot_id, role = %role, "Autopilot: auto-spawning slot for queued tasks (Wake-on-Demand)");
-                    tokio::spawn(async move {
-                        if ensure_memory_slot_by_id(&state_clone, &slot_id_clone).await {
-                            state_clone.event_bus.publish(crate::event_bus::DaemonEvent::TaskCreated { task_id: String::new() });
-                        }
-                    });
-                    break; // One spawn attempt per role
-                }
+                if used_slots.contains(&target_slot_id) || woken_slots.contains(&target_slot_id) { continue; }
+
+                let status = state.pty.get_status(&target_slot_id).await;
+                let is_spawnable = match &status {
+                    Some(s) => s.state == missiond_core::pty::SessionState::Exited,
+                    None => true,
+                };
+                if !is_spawnable { continue; }
+
+                woken_slots.insert(target_slot_id.clone());
+                let state_clone = state.clone();
+                let slot_id_clone = target_slot_id.clone();
+                info!(slot_id = %target_slot_id, role = %task.role, task_id = %task.id, "Autopilot: auto-spawning slot for queued task (Wake-on-Demand)");
+                tokio::spawn(async move {
+                    if ensure_memory_slot_by_id(&state_clone, &slot_id_clone).await {
+                        state_clone.event_bus.publish(crate::event_bus::DaemonEvent::TaskCreated { task_id: String::new() });
+                    }
+                });
             }
         }
     }
