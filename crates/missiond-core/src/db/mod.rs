@@ -26,7 +26,7 @@ pub use timeline::{TimelineRow, TimelineStats, LatencyStats};
 use rusqlite::Connection;
 use error::DbResult;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Extract parent session ID from a subagent's jsonl_path.
 /// Path pattern: .../PARENT_SESSION_ID/subagents/agent-xxx.jsonl
@@ -105,8 +105,26 @@ impl MissionDB {
 
     /// Create an in-memory database (for testing)
     pub fn in_memory() -> DbResult<Self> {
-        let conn = Connection::open_in_memory()?;
-        let read_conn = Connection::open_in_memory()?;
+        // Use a shared in-memory database so both connections see the same tables.
+        // file::memory: with cache=shared creates a named in-memory DB shared across connections.
+        use std::sync::atomic::AtomicU64;
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let uri = format!("file:testdb{}?mode=memory&cache=shared", id);
+        let conn = Connection::open_with_flags(
+            &uri,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        let read_conn = Connection::open_with_flags(
+            &uri,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )?;
         let db = Self {
             conn: std::sync::Mutex::new(conn),
             read_conn: std::sync::Mutex::new(read_conn),

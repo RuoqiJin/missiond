@@ -663,7 +663,7 @@ slots:
         assert_eq!(slots.len(), 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_stats() {
         let dir = tempdir().unwrap();
         let (db_path, slots_config_path) = create_test_config(dir.path());

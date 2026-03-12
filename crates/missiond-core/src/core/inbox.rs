@@ -80,12 +80,9 @@ impl Inbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
 
     fn create_test_db() -> Arc<MissionDB> {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-        Arc::new(MissionDB::open(db_path).unwrap())
+        Arc::new(MissionDB::in_memory().unwrap())
     }
 
     #[test]

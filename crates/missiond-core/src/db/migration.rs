@@ -110,11 +110,12 @@ CREATE TABLE IF NOT EXISTS agent_questions (
     options TEXT,
     decision_type TEXT NOT NULL DEFAULT 'implementation',
     retry_count INTEGER NOT NULL DEFAULT 0,
+    routing_trace TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agent_questions_status ON agent_questions(status);
--- Note: idx_agent_questions_target is created in migration block (target column added via ALTER TABLE)
+CREATE INDEX IF NOT EXISTS idx_agent_questions_target ON agent_questions(target, status);
 
 -- Knowledge base (Jarvis Memory)
 CREATE TABLE IF NOT EXISTS knowledge (
@@ -129,6 +130,9 @@ CREATE TABLE IF NOT EXISTS knowledge (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     last_accessed_at TEXT,
+    linked_task_id TEXT,
+    embedding BLOB,
+    embedding_provider TEXT,
     UNIQUE(category, key)
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_category ON knowledge(category);
@@ -157,7 +161,22 @@ CREATE TABLE IF NOT EXISTS conversations (
     ended_at TEXT,
     status TEXT DEFAULT 'active',
     analyzed_at TEXT,
-    updated_at TEXT
+    updated_at TEXT,
+    memory_forwarded_at TEXT,
+    user_voice_forwarded_at TEXT,
+    realtime_forwarded_at TEXT,
+    analysis_version INTEGER DEFAULT 0,
+    analysis_retries INTEGER DEFAULT 0,
+    parent_session_id TEXT,
+    deep_analyzed_message_id INTEGER DEFAULT 0,
+    task_id TEXT,
+    chat_type TEXT DEFAULT 'pty',
+    conversation_type TEXT NOT NULL DEFAULT 'user',
+    llm_summary TEXT,
+    embedding_provider TEXT,
+    embedding BLOB,
+    session_timeline TEXT,
+    timeline_built_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_conv_status ON conversations(status);
 
