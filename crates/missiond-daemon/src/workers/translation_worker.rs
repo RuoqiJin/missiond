@@ -32,6 +32,15 @@ const TRANSLATION_SLOT_ID: &str = "translation-worker";
 /// Poll interval when idle (no pending translations).
 const IDLE_POLL_SECS: u64 = 120;
 
+/// Minimum seconds between poll_pending calls (cooldown).
+const POLL_COOLDOWN_SECS: u64 = 60;
+
+/// Consecutive failures before circuit breaker trips.
+const CIRCUIT_BREAKER_THRESHOLD: u32 = 5;
+
+/// How long the circuit breaker stays open (seconds).
+const CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 300;
+
 /// System prompt for structure-preserving translation.
 const TRANSLATION_SYSTEM_PROMPT: &str = "\
 你是一个专业的 IT 技术翻译引擎。你的任务是将大语言模型的内部思考过程 (Thinking Process) 准确、流畅地翻译成简体中文。
@@ -198,15 +207,31 @@ async fn run_loop(
     state: Arc<AppState>,
     mut timeline_rx: broadcast::Receiver<TimelineEvent>,
 ) {
+    let mut last_poll = tokio::time::Instant::now() - Duration::from_secs(POLL_COOLDOWN_SECS + 1);
+    let mut consecutive_failures: u32 = 0;
+
     loop {
-        // Hybrid wait: event-driven (broadcast) OR idle timeout (DB poll)
+        // Circuit breaker: pause after repeated failures
+        if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
+            warn!(
+                failures = consecutive_failures,
+                cooldown_secs = CIRCUIT_BREAKER_COOLDOWN_SECS,
+                "Translation worker: circuit breaker tripped, pausing"
+            );
+            tokio::time::sleep(Duration::from_secs(CIRCUIT_BREAKER_COOLDOWN_SECS)).await;
+            consecutive_failures = 0;
+        }
+
+        // Fix 1: Only thinking_message events trigger process_single.
+        // All other events (including our own translation_started/failed) are ignored.
+        // poll_pending is ONLY triggered by idle timeout, never by broadcast events.
         let maybe_ctx = tokio::select! {
             result = timeline_rx.recv() => {
                 match result {
                     Ok(event) => extract_thinking_ctx(&event),
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(skipped = n, "Translation worker: broadcast lagged, will poll DB");
-                        None // Trigger DB poll below
+                        warn!(skipped = n, "Translation worker: broadcast lagged");
+                        None // Do NOT poll — just continue to next event
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         info!("Translation worker: broadcast closed, shutting down");
@@ -215,32 +240,34 @@ async fn run_loop(
                 }
             }
             _ = tokio::time::sleep(Duration::from_secs(IDLE_POLL_SECS)) => {
-                None // Trigger DB poll
+                // Fix 3: Cooldown — skip if polled recently
+                if last_poll.elapsed() >= Duration::from_secs(POLL_COOLDOWN_SECS) {
+                    last_poll = tokio::time::Instant::now();
+                    poll_pending(&state, &mut consecutive_failures).await;
+                }
+                continue;
             }
         };
 
+        // Only thinking_message events reach here; all others are None → ignored
         if let Some(ctx) = maybe_ctx {
-            // Event-driven path: translate a specific message
-            process_single(&state, ctx).await;
-            // No local sleep — Gateway handles rate limiting
-        } else {
-            // Poll path: find thinking messages without translations
-            poll_pending(&state).await;
+            let ok = process_single(&state, ctx).await;
+            if ok { consecutive_failures = 0; } else { consecutive_failures += 1; }
         }
     }
 }
 
-/// Process a single message with its trace context.
-async fn process_single(state: &AppState, ctx: ThinkingTraceCtx) {
+/// Process a single message with its trace context. Returns true on success (or skip), false on failure.
+async fn process_single(state: &AppState, ctx: ThinkingTraceCtx) -> bool {
     // Check if already translated
     match state.mission.db().has_translation(ctx.message_id) {
         Ok(true) => {
             debug!(message_id = ctx.message_id, "Translation: already exists, skipping");
-            return;
+            return true;
         }
         Err(e) => {
             warn!(message_id = ctx.message_id, error = %e, "Translation: DB check failed");
-            return;
+            return false;
         }
         _ => {}
     }
@@ -250,27 +277,31 @@ async fn process_single(state: &AppState, ctx: ThinkingTraceCtx) {
         Ok(Some(msg)) => msg.content,
         Ok(None) => {
             debug!(message_id = ctx.message_id, "Translation: message not found");
-            return;
+            return true; // Not a failure — message just doesn't exist
         }
         Err(e) => {
             warn!(message_id = ctx.message_id, error = %e, "Translation: DB fetch failed");
-            return;
+            return false;
         }
     };
 
     // Skip very short thinking blocks (< 50 chars not worth translating)
     if content.len() < 50 {
         debug!(message_id = ctx.message_id, len = content.len(), "Translation: too short, skipping");
-        return;
+        return true;
     }
 
-    if let Err(e) = translate_message(state, &ctx, &content).await {
-        warn!(message_id = ctx.message_id, error = %e, "Translation: failed");
+    match translate_message(state, &ctx, &content).await {
+        Ok(()) => true,
+        Err(e) => {
+            warn!(message_id = ctx.message_id, error = %e, "Translation: failed");
+            false
+        }
     }
 }
 
 /// Poll DB for thinking messages that don't have translations yet.
-async fn poll_pending(state: &AppState) {
+async fn poll_pending(state: &AppState, consecutive_failures: &mut u32) {
     // Find thinking_message timeline entries from the last 24h that lack translations
     let db = state.mission.db();
     let rows = match db.query_timeline_filtered(
@@ -290,6 +321,12 @@ async fn poll_pending(state: &AppState) {
 
     let mut translated = 0;
     for row in &rows {
+        // Circuit breaker: stop batch early if too many failures
+        if *consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
+            debug!("Translation poll: circuit breaker threshold reached, stopping batch");
+            break;
+        }
+
         // Extract message_id from payload
         let payload: serde_json::Value = serde_json::from_str(&row.payload).unwrap_or_default();
         let msg_id = match payload.get("message_id").and_then(|v| v.as_i64()) {
@@ -311,9 +348,13 @@ async fn poll_pending(state: &AppState) {
             span_id: row.span_id.clone(),
         };
 
-        process_single(state, ctx).await;
-        translated += 1;
-        // No local sleep — Gateway handles rate limiting
+        let ok = process_single(state, ctx).await;
+        if ok {
+            *consecutive_failures = 0;
+            translated += 1;
+        } else {
+            *consecutive_failures += 1;
+        }
     }
 
     if translated > 0 {
