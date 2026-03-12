@@ -275,10 +275,12 @@ impl PTYWebSocketServer {
 
     /// Start the server
     pub async fn start(&mut self) -> anyhow::Result<()> {
-        let addr = format!("127.0.0.1:{}", self.port);
+        let bind_addr = std::env::var("MISSION_WS_BIND")
+            .unwrap_or_else(|_| "0.0.0.0".to_string());
+        let addr = format!("{}:{}", bind_addr, self.port);
         let listener = TcpListener::bind(&addr).await?;
 
-        info!(port = self.port, "PTY WebSocket server started");
+        info!(port = self.port, bind = %bind_addr, "PTY WebSocket server started");
 
         let (shutdown_tx, _) = broadcast::channel::<()>(1);
         self.shutdown_tx = Some(shutdown_tx.clone());
@@ -351,6 +353,122 @@ impl PTYWebSocketServer {
     }
 
     /// Send an HTTP error response
+    /// Extract text + images from OpenAI multimodal content array.
+    /// Images (base64 data URLs) are saved to temp files; local paths are injected into the prompt.
+    async fn extract_multimodal_content(parts: &[serde_json::Value]) -> String {
+        let media_dir = std::path::Path::new("/tmp/missiond_media");
+        let mut text_parts: Vec<String> = Vec::new();
+        let mut image_paths: Vec<String> = Vec::new();
+
+        for part in parts {
+            let part_type = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            match part_type {
+                "text" => {
+                    if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                        text_parts.push(text.to_string());
+                    }
+                }
+                "image_url" => {
+                    if let Some(url) = part
+                        .get("image_url")
+                        .and_then(|u| u.get("url"))
+                        .and_then(|u| u.as_str())
+                    {
+                        if let Some(path) = Self::save_data_url_to_file(url, media_dir).await {
+                            image_paths.push(path);
+                        }
+                    }
+                }
+                _ => {
+                    // video_url, file_url etc — log and skip for now
+                    debug!(part_type, "Multimodal: unsupported content part type, skipping");
+                }
+            }
+        }
+
+        // Build combined prompt: images first (as path references), then text
+        let mut result = String::new();
+        if !image_paths.is_empty() {
+            result.push_str("[用户附带了图片，已保存到本机。请使用 Read 工具查看图片后回答：]\n");
+            for path in &image_paths {
+                result.push_str(&format!("- {}\n", path));
+            }
+            result.push('\n');
+        }
+        result.push_str(&text_parts.join("\n"));
+        result
+    }
+
+    /// Decode a data URL (data:image/jpeg;base64,...) and save to a temp file.
+    /// Returns the local file path on success.
+    async fn save_data_url_to_file(
+        url: &str,
+        media_dir: &std::path::Path,
+    ) -> Option<String> {
+        use base64::Engine;
+
+        // Parse data URL: data:<mime>;base64,<data>
+        let prefix = "data:";
+        if !url.starts_with(prefix) {
+            debug!(url_len = url.len(), "Multimodal: not a data URL, skipping");
+            return None;
+        }
+
+        let rest = &url[prefix.len()..];
+        let (mime, b64_data) = if let Some(pos) = rest.find(";base64,") {
+            (&rest[..pos], &rest[pos + 8..])
+        } else {
+            debug!("Multimodal: data URL missing ;base64, marker");
+            return None;
+        };
+
+        // Determine file extension from MIME type
+        let ext = match mime {
+            "image/jpeg" | "image/jpg" => "jpg",
+            "image/png" => "png",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            "image/heic" => "heic",
+            _ => "bin",
+        };
+
+        // Decode base64
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(b64_data) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(error = %e, "Multimodal: base64 decode failed");
+                return None;
+            }
+        };
+
+        // Ensure media directory exists
+        if let Err(e) = tokio::fs::create_dir_all(media_dir).await {
+            warn!(error = %e, "Multimodal: failed to create media dir");
+            return None;
+        }
+
+        // Write to file with timestamp-based name
+        let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S_%3f");
+        let filename = format!("img_{}.{}", ts, ext);
+        let filepath = media_dir.join(&filename);
+
+        match tokio::fs::write(&filepath, &bytes).await {
+            Ok(_) => {
+                info!(
+                    path = %filepath.display(),
+                    size_kb = bytes.len() / 1024,
+                    mime,
+                    "Multimodal: saved image to temp file"
+                );
+                Some(filepath.to_string_lossy().to_string())
+            }
+            Err(e) => {
+                warn!(error = %e, path = %filepath.display(), "Multimodal: failed to write image file");
+                None
+            }
+        }
+    }
+
     async fn send_http_error(
         stream: &mut TcpStream,
         status: u16,
@@ -549,21 +667,31 @@ impl PTYWebSocketServer {
         }
         let messages = messages.unwrap();
 
-        // Extract the last user message
+        // Extract the last user message (supports both string and multimodal array content)
         let last_user_msg = messages
             .iter()
             .rev()
-            .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-            .and_then(|m| m.get("content").and_then(|c| c.as_str()));
+            .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"));
 
         let user_message = match last_user_msg {
-            Some(msg) => msg.to_string(),
-            None => {
-                let err = serde_json::json!({"error": {"message": "No user message found"}});
-                Self::send_http_error(&mut stream, 400, "Bad Request", &err.to_string()).await?;
-                return Ok(());
+            Some(msg) => {
+                match msg.get("content") {
+                    Some(serde_json::Value::String(text)) => text.clone(),
+                    Some(serde_json::Value::Array(parts)) => {
+                        // Multimodal content: extract text + save images to temp files
+                        Self::extract_multimodal_content(parts).await
+                    }
+                    _ => String::new(),
+                }
             }
+            None => String::new(),
         };
+
+        if user_message.is_empty() {
+            let err = serde_json::json!({"error": {"message": "No user message found"}});
+            Self::send_http_error(&mut stream, 400, "Bad Request", &err.to_string()).await?;
+            return Ok(());
+        }
 
         let slot_id = "slot-jarvis";
         let chat_id = format!("chatcmpl-jarvis-{}", chrono::Utc::now().timestamp_millis());
