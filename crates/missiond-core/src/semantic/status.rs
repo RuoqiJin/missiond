@@ -8,7 +8,8 @@ use regex::Regex;
 use super::types::{ClaudeCodeStatus, ParserContext, ParserMeta, StatusParser, StatusPhase};
 
 /// Spinner characters used by Claude Code
-pub const SPINNER_CHARS: &[char] = &['·', '✻', '✽', '✶', '✳', '✢'];
+/// Includes ASCII `*` for non-native/basic terminal mode (e.g., headless VPS).
+pub const SPINNER_CHARS: &[char] = &['·', '✻', '✽', '✶', '✳', '✢', '*'];
 
 /// Status text pattern: spinner + text + (stats/info)
 ///
@@ -18,7 +19,7 @@ pub const SPINNER_CHARS: &[char] = &['·', '✻', '✽', '✶', '✳', '✢'];
 ///
 /// This pattern matches both: spinner + status_text + (anything in parens)
 static STATUS_PATTERN: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^([·✻✽✶✳✢])\s+(\S+…?)\s*\((.+)\)\s*$").unwrap()
+    Regex::new(r"^([·✻✽✶✳✢*])\s+(\S+…?)\s*\((.+)\)\s*$").unwrap()
 });
 
 /// Claude Code status parser
@@ -169,13 +170,14 @@ mod tests {
 
     #[test]
     fn test_spinner_chars() {
-        assert_eq!(SPINNER_CHARS.len(), 6);
+        assert_eq!(SPINNER_CHARS.len(), 7);
         assert!(SPINNER_CHARS.contains(&'·'));
         assert!(SPINNER_CHARS.contains(&'✻'));
         assert!(SPINNER_CHARS.contains(&'✽'));
         assert!(SPINNER_CHARS.contains(&'✶'));
         assert!(SPINNER_CHARS.contains(&'✳'));
         assert!(SPINNER_CHARS.contains(&'✢'));
+        assert!(SPINNER_CHARS.contains(&'*'));
     }
 
     #[test]
@@ -197,6 +199,22 @@ mod tests {
         let context =
             make_context(&["✽ Undulating… (3m 27s · ↓ 3.5k tokens · thought for 14s)"]);
         assert!(parser.can_parse(&context));
+    }
+
+    #[test]
+    fn test_can_parse_ascii_spinner() {
+        let parser = ClaudeCodeStatusParser::new();
+
+        // ASCII `*` spinner from non-native/basic terminal mode (VPS)
+        let context = make_context(&["* Honking… (3s · thinking)"]);
+        assert!(parser.can_parse(&context));
+
+        let result = parser.parse(&context);
+        assert!(result.is_some());
+        let status = result.unwrap();
+        assert_eq!(status.spinner, "*");
+        assert_eq!(status.status_text, "Honking…");
+        assert_eq!(status.phase, StatusPhase::Thinking);
     }
 
     #[test]

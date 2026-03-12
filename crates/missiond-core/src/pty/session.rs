@@ -915,7 +915,7 @@ impl PTYSession {
                 }).collect::<Vec<_>>().join(" | ");
                 // Extract spinner status line for diagnostics
                 let spinner_line = active.iter()
-                    .find(|l| l.trim().starts_with(|c: char| "·✻✽✶✳✢".contains(c)))
+                    .find(|l| l.trim().starts_with(|c: char| "·✻✽✶✳✢*".contains(c)))
                     .map(|s| {
                         let t: String = s.chars().take(80).collect();
                         t

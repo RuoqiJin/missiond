@@ -776,6 +776,27 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_thinking_ascii_spinner() {
+        let parser = ClaudeCodeStateParser::new();
+
+        // ASCII `*` spinner from non-native/basic terminal mode (VPS)
+        let context = make_context(&[
+            "* Honking… (3s · thinking)",
+            "────────────────────",
+            "❯ ",
+        ]);
+        let result = parser.detect_state(&context);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().state, State::Thinking);
+
+        // ASCII `*` without phase hint → still Thinking
+        let context = make_context(&["* Twisting…"]);
+        let result = parser.detect_state(&context);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().state, State::Thinking);
+    }
+
+    #[test]
     fn test_spinner_line_pattern_no_false_positive() {
         // Bottom bar should NOT match spinner pattern
         assert!(!SPINNER_LINE_PATTERN
@@ -787,6 +808,9 @@ mod tests {
         assert!(SPINNER_LINE_PATTERN.is_match("✳ Determining…"));
         assert!(SPINNER_LINE_PATTERN.is_match("  ✻ Reading file..."));
         assert!(SPINNER_LINE_PATTERN.is_match("· Processing (esc to interrupt)"));
+        // ASCII `*` spinner (non-native/basic terminal mode on VPS)
+        assert!(SPINNER_LINE_PATTERN.is_match("* Honking…"));
+        assert!(SPINNER_LINE_PATTERN.is_match("  * Embellishing… (5s · thinking)"));
     }
 
     #[test]

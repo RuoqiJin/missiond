@@ -24,10 +24,11 @@ static STATUSBAR_PATTERN: Lazy<Regex> =
 /// Prompt-only line (e.g., "> " or "❯ ")
 static PROMPT_ONLY_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[❯>]\s*$").unwrap());
 
-/// Spinner status line (e.g., "✳ Determining…", "· Processing…")
+/// Spinner status line (e.g., "✳ Determining…", "· Processing…", "* Honking…")
 /// These lines are transient — the spinner character and timer update every frame.
+/// Includes ASCII `*` for non-native/basic terminal mode (e.g., headless VPS).
 static SPINNER_LINE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*[·✻✽✶✳✢]\s+\S").unwrap());
+    Lazy::new(|| Regex::new(r"^\s*[·✻✽✶✳✢*]\s+\S").unwrap());
 
 // ========== Types ==========
 
@@ -594,6 +595,10 @@ mod tests {
         assert!(!extractor.is_stable_line("✢ Incubating… (3s · thinking)"));
         assert!(!extractor.is_stable_line("· Contemplating…"));
         assert!(!extractor.is_stable_line("  ✻ Processing…"));
+        // ASCII fallback spinners (non-native/basic terminal mode on VPS)
+        assert!(!extractor.is_stable_line("* Honking…"));
+        assert!(!extractor.is_stable_line("* Twisting…"));
+        assert!(!extractor.is_stable_line("  * Embellishing… (5s · thinking)"));
 
         // Response lines starting with ⏺ should still be stable
         assert!(extractor.is_stable_line("⏺ Hello, I am Claude."));
