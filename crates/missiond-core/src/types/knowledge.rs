@@ -21,6 +21,9 @@ pub struct KnowledgeEntry {
     pub last_accessed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub linked_task_id: Option<String>,
+    /// FTS5 snippet with highlighted hit context (search results only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_snippet: Option<String>,
 }
 
 /// Input for remembering (upserting) knowledge
