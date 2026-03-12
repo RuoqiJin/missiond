@@ -1,22 +1,29 @@
-//! Context Prefetch Pipeline ("懂我")
+//! Context Prefetch Pipeline v2 ("懂我")
 //!
 //! Unified context injection for all entry points:
 //! - UserPromptSubmit Hook (Shell → IPC)
 //! - iOS Jarvis (WebSocket)
 //! - Autopilot (Board task dispatch)
 //!
-//! Fan-out parallel search with per-engine timeout + global 700ms hard timeout.
-//! Fail-open: any timed-out dimension is silently skipped.
+//! v2 architecture:
+//! 1. Quick rule pre-screen (obvious chat/greeting → instant bypass)
+//! 2. Router API intent routing (Claude semantic classification → bypass or refined queries)
+//! 3. Cosine similarity cutoff (prevents "tallest dwarf" noise injection)
+//! 4. Fan-out parallel search + RRF + budgeted assembly
+//!
+//! Fallback: if CC slot unavailable, degrades to v1 rule-based classification.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use missiond_core::embedding;
 use missiond_core::types::KnowledgeEntry;
 
+use crate::embedding_worker::resolve_llm_credentials;
 use crate::state::AppState;
 
 // --- Timeout budgets ---
@@ -25,9 +32,264 @@ const KB_TIMEOUT_MS: u64 = 300;
 const SKILL_TIMEOUT_MS: u64 = 100;
 const CODE_TIMEOUT_MS: u64 = 600;
 const TASK_ACK_TIMEOUT_MS: u64 = 50;
+/// CC slot intent routing timeout. Needs to accommodate cold-slot overhead
+/// (CLAUDE.md loading, skill loading). Observed: supervisor ~2s, cold slot ~6-8s.
+const INTENT_ROUTE_TIMEOUT_MS: u64 = 10000;
 
-/// Light token budget for interactive queries (Hook / Jarvis).
-const LIGHT_CODE_BUDGET: usize = 2000;
+// --- Intent triage ---
+/// Minimum RRF score for KB/Skill results. Below this → discard as noise.
+/// Math: k=60, W_fts=0.4, W_vec=0.6 → pure Vec rank-1 = 0.00984, pure FTS rank-1 = 0.00656.
+/// Threshold 0.008 tolerates single-side Top-1 hit.
+const MIN_RRF_SCORE: f64 = 0.008;
+
+/// Minimum cosine similarity for vector search candidates.
+/// Entries below this are discarded BEFORE entering RRF ranking.
+/// Prevents irrelevant queries (e.g. "what is 2+2") from injecting noise
+/// via the "tallest dwarf" effect (rank-1 with low absolute similarity).
+/// BGE-small-zh baseline for unrelated text is ~0.4-0.5; set conservatively.
+const MIN_COSINE_SIM: f32 = 0.35;
+
+// --- Token budget (char-based estimate: 1 token ≈ 2.5 CJK chars / 4 EN chars) ---
+const GENERAL_TOKEN_BUDGET: usize = 2000;
+const CODE_TOKEN_BUDGET: usize = 4000;
+
+/// Estimate token count from text (rough char-based, no tokenizer).
+fn estimate_tokens(text: &str) -> usize {
+    // Mix of CJK and ASCII: ~2.5 chars per token on average
+    (text.len() as f64 / 2.5) as usize
+}
+
+// --- Intent classification ---
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum QueryIntent {
+    /// Greeting / chitchat / status check → bypass all search
+    Chat,
+    /// Code-related question → all dimensions
+    Code,
+    /// General question → KB + Skills, skip Code
+    General,
+}
+
+/// Lightweight intent triage (pure rules, <0.1ms, no LLM call).
+fn classify_intent(query: &str) -> QueryIntent {
+    let q = query.trim();
+    let q_lower = q.to_lowercase();
+    let char_count = q.chars().count();
+
+    // Greeting / chat patterns (CN + EN) — must be short
+    static CHAT_PATTERNS: &[&str] = &[
+        "hi", "hello", "hey", "你好", "嗨", "在吗", "收得到",
+        "测试", "ping", "test", "谢谢", "thanks", "thank you",
+        "ok", "好的", "好", "嗯", "对", "是的",
+        "早上好", "晚上好", "早安", "晚安",
+        "good morning", "good night",
+    ];
+    if char_count < 20 && CHAT_PATTERNS.iter().any(|p| q_lower.contains(p)) {
+        return QueryIntent::Chat;
+    }
+
+    // Very short with no technical signal → Chat
+    if char_count < 6 {
+        let has_signal = q_lower.contains("::")
+            || q_lower.contains("fn ")
+            || q_lower.contains("err")
+            || q_lower.contains("bug")
+            || q_lower.contains("fix")
+            || q_lower.contains("修")
+            || q_lower.contains("改")
+            || q_lower.contains("查")
+            || q_lower.contains("看")
+            || q_lower.contains("删")
+            || q_lower.contains("加");
+        if !has_signal {
+            return QueryIntent::Chat;
+        }
+    }
+
+    // Code signals → full pipeline
+    static CODE_SIGNALS: &[&str] = &[
+        "::", "fn ", "struct ", "impl ", "mod ", "crate",
+        ".rs", ".ts", ".py", ".swift", ".go",
+        "error", "bug", "fix", "compile", "build",
+        "deploy", "refactor", "migration",
+        "代码", "编译", "报错", "修复", "部署",
+        "函数", "模块", "重构", "接口", "数据库",
+    ];
+    if CODE_SIGNALS.iter().any(|s| q_lower.contains(s)) {
+        return QueryIntent::Code;
+    }
+
+    QueryIntent::General
+}
+
+// --- v2: Router API Intent Classification ---
+
+/// Model for intent classification via XJP router (clewdr Claude).
+/// Opus 4.6 for best semantic understanding; cost negligible (~200 tokens per call).
+const INTENT_MODEL: &str = "claude-opus-4.6";
+
+/// Result of intent classification.
+#[derive(Debug, Clone)]
+struct IntentResult {
+    /// Whether the query needs project-specific context injection.
+    needs_context: bool,
+    /// Classified intent type.
+    intent_type: QueryIntent,
+    /// Refined search queries (empty = use original query).
+    search_queries: Vec<String>,
+    /// How intent was determined.
+    source: &'static str, // "router", "rules", "fallback"
+}
+
+/// Quick pre-screen for obvious chat (no API call needed).
+/// Only catches the most obvious cases; ambiguous queries go to router.
+fn is_obvious_chat(query: &str) -> bool {
+    let q = query.trim();
+    let q_lower = q.to_lowercase();
+    let char_count = q.chars().count();
+
+    static OBVIOUS_PATTERNS: &[&str] = &[
+        "hi", "hello", "hey", "你好", "嗨", "在吗",
+        "谢谢", "thanks", "thank you", "ok", "好的", "好", "嗯",
+        "早上好", "晚上好", "早安", "晚安", "good morning", "good night",
+        "测试", "ping", "test",
+    ];
+    if char_count < 20 && OBVIOUS_PATTERNS.iter().any(|p| q_lower.contains(p)) {
+        return true;
+    }
+
+    if char_count < 6 {
+        let has_signal = q_lower.contains("::")
+            || q_lower.contains("fn ")
+            || q_lower.contains("err")
+            || q_lower.contains("bug")
+            || q_lower.contains("fix");
+        if !has_signal {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Route intent via XJP router API (claude-sonnet via clewdr).
+///
+/// Stateless HTTP call — no slot contention, no conversation pollution.
+/// Returns None on any error (caller falls back to rules).
+async fn route_intent_via_router(state: &AppState, query: &str) -> Option<IntentResult> {
+    let result = route_intent_http(state, query).await;
+    match result {
+        Ok(intent) => Some(intent),
+        Err(e) => {
+            warn!(error = %e, "Intent router: API call failed, falling back to rules");
+            None
+        }
+    }
+}
+
+async fn route_intent_http(state: &AppState, query: &str) -> Result<IntentResult> {
+    let (base_url, jwt) = resolve_llm_credentials().await?;
+
+    let prompt = format!(
+        "Classify this user query. Respond with ONLY a JSON object, no markdown.\n\
+         Query: \"{}\"\n\n\
+         Output: {{\"needs_context\": bool, \"intent\": \"chat|code|general\", \"search_queries\": []}}\n\n\
+         Rules:\n\
+         - chat/math/greeting/general-knowledge/casual-conversation → needs_context: false, intent: \"chat\"\n\
+         - project code/architecture/debug/deploy question → needs_context: true, intent: \"code\"\n\
+         - project knowledge/config/ops question → needs_context: true, intent: \"general\"\n\
+         - Mixed intent (greeting + technical) or unsure → needs_context: true, intent: \"general\"\n\
+         - SEARCH QUERIES: If needs_context is true, extract 1-3 concise keywords optimized for retrieval. If false, leave empty [].",
+        query.chars().take(300).collect::<String>()
+    );
+
+    let url = format!("{}/v1/chat/completions", base_url);
+    let body = serde_json::json!({
+        "model": INTENT_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 256,
+    });
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(INTENT_ROUTE_TIMEOUT_MS),
+        state.http_client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", jwt))
+            .json(&body)
+            .send(),
+    ).await
+        .map_err(|_| anyhow::anyhow!("Intent router timeout ({}ms)", INTENT_ROUTE_TIMEOUT_MS))?
+        .map_err(|e| anyhow::anyhow!("Intent router HTTP error: {}", e))?;
+
+    let status = result.status();
+    let resp: serde_json::Value = result.json().await
+        .map_err(|e| anyhow::anyhow!("Intent router: failed to parse response: {}", e))?;
+
+    if !status.is_success() {
+        let err_msg = resp.pointer("/error/message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        return Err(anyhow::anyhow!("Intent router: API {} — {}", status, err_msg));
+    }
+
+    let content = resp.pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Intent router: no content in response"))?;
+
+    info!(
+        model = INTENT_MODEL,
+        response_preview = %content.chars().take(200).collect::<String>(),
+        "Intent router: classification received"
+    );
+
+    parse_intent_response(content)
+        .ok_or_else(|| anyhow::anyhow!("Intent router: failed to parse JSON from: {}", content.chars().take(300).collect::<String>()))
+}
+
+/// Parse JSON response from CC slot intent classification.
+/// Tolerates markdown code fences and partial JSON.
+fn parse_intent_response(response: &str) -> Option<IntentResult> {
+    // Strip markdown code fences if present
+    let json_str = response
+        .trim()
+        .strip_prefix("```json").or_else(|| response.trim().strip_prefix("```"))
+        .and_then(|s| s.strip_suffix("```"))
+        .unwrap_or(response)
+        .trim();
+
+    // Try to extract JSON object if there's surrounding text
+    let json_str = if let (Some(start), Some(end)) = (json_str.find('{'), json_str.rfind('}')) {
+        &json_str[start..=end]
+    } else {
+        json_str
+    };
+
+    #[derive(Deserialize)]
+    struct RawIntent {
+        needs_context: bool,
+        #[serde(default)]
+        intent: String,
+        #[serde(default)]
+        search_queries: Vec<String>,
+    }
+
+    let raw: RawIntent = serde_json::from_str(json_str).ok()?;
+
+    let intent_type = match raw.intent.as_str() {
+        "code" => QueryIntent::Code,
+        "chat" => QueryIntent::Chat,
+        _ => QueryIntent::General,
+    };
+
+    Some(IntentResult {
+        needs_context: raw.needs_context,
+        intent_type: if raw.needs_context { intent_type } else { QueryIntent::Chat },
+        search_queries: raw.search_queries,
+        source: "router",
+    })
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct PrefetchRequest {
@@ -76,18 +338,81 @@ pub(crate) struct PrefetchResult {
     pub task_updates: Vec<TaskUpdate>,
     /// Pre-assembled text ready for injection.
     pub assembled: String,
+    /// Classified intent of the query.
+    pub intent: Option<String>,
 }
 
-/// Execute the Context Prefetch Pipeline.
+/// Execute the Context Prefetch Pipeline (v2).
 ///
-/// Fan-out: 4 parallel searches with individual timeouts.
-/// Fan-in: assemble results into formatted text.
-/// Global 700ms hard timeout with fail-open on any dimension.
+/// Phase 1: Quick rule pre-screen (obvious chat → instant bypass)
+/// Phase 2: CC slot intent routing (semantic classification → bypass or refined queries)
+/// Phase 3: Selective fan-out search → score threshold → budgeted assembly
+///
+/// Fallback: CC unavailable → v1 rule-based classification + cosine cutoff.
 pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> PrefetchResult {
     let query = req.query.chars().take(500).collect::<String>();
     if query.trim().is_empty() {
         return PrefetchResult::empty();
     }
+
+    // Phase 1: Quick rule pre-screen — obvious chat bypasses everything (no CC call)
+    if is_obvious_chat(&query) {
+        debug!(query = query.trim(), "Context prefetch: obvious chat → bypass");
+        return PrefetchResult {
+            intent: Some("chat:rules".to_string()),
+            ..PrefetchResult::empty()
+        };
+    }
+
+    // Phase 2: CC slot intent routing (semantic classification)
+    let intent_result = match route_intent_via_router(state, &query).await {
+        Some(result) => {
+            info!(
+                query = query.trim(),
+                needs_context = result.needs_context,
+                intent = ?result.intent_type,
+                search_queries = ?result.search_queries,
+                "Intent router: classified"
+            );
+            result
+        }
+        None => {
+            // Fallback: v1 rule-based classification
+            let rule_intent = classify_intent(&query);
+            debug!(
+                query = query.trim(),
+                intent = ?rule_intent,
+                "Intent router: fallback to rules"
+            );
+            IntentResult {
+                needs_context: rule_intent != QueryIntent::Chat,
+                intent_type: rule_intent,
+                search_queries: vec![],
+                source: "fallback",
+            }
+        }
+    };
+
+    // CC says no context needed → bypass
+    if !intent_result.needs_context {
+        debug!(
+            source = intent_result.source,
+            "Context prefetch: intent router → no context needed, bypass"
+        );
+        return PrefetchResult {
+            intent: Some(format!("bypass:{}", intent_result.source)),
+            ..PrefetchResult::empty()
+        };
+    }
+
+    let intent = intent_result.intent_type;
+
+    // Use refined search queries if CC provided them, otherwise use original query
+    let search_query = if intent_result.search_queries.is_empty() {
+        query.clone()
+    } else {
+        intent_result.search_queries.join(" ")
+    };
 
     let global_timeout = Duration::from_millis(GLOBAL_TIMEOUT_MS);
 
@@ -97,25 +422,72 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
         _ => None,
     };
 
-    // Fan-out: 4 parallel searches
-    let result = tokio::time::timeout(global_timeout, async {
-        tokio::join!(
-            search_skills(state, &query),
-            search_kb(state, &query),
-            search_code(state, &query, &req.source),
-            search_task_ack(state, ppid),
-        )
-    }).await;
-
-    let (skills, kb_entries, code_context, task_updates) = match result {
-        Ok((s, k, c, t)) => (s, k, c, t),
-        Err(_) => {
-            warn!("Context prefetch global timeout ({}ms)", GLOBAL_TIMEOUT_MS);
-            (vec![], vec![], None, vec![])
+    // Phase 3: Selective fan-out based on intent
+    let (skills, kb_entries, code_context, task_updates) = match intent {
+        QueryIntent::Code => {
+            // Full pipeline: Skills + KB + Code + TaskAck
+            let result = tokio::time::timeout(global_timeout, async {
+                tokio::join!(
+                    search_skills(state, &search_query),
+                    search_kb(state, &search_query),
+                    search_code(state, &query, &req.source), // code search uses original query
+                    search_task_ack(state, ppid),
+                )
+            }).await;
+            match result {
+                Ok((s, k, c, t)) => (s, k, c, t),
+                Err(_) => {
+                    warn!("Context prefetch global timeout ({}ms)", GLOBAL_TIMEOUT_MS);
+                    (vec![], vec![], None, vec![])
+                }
+            }
         }
+        QueryIntent::General => {
+            // KB + Skills only, skip Code (saves 600ms)
+            let result = tokio::time::timeout(global_timeout, async {
+                tokio::join!(
+                    search_skills(state, &search_query),
+                    search_kb(state, &search_query),
+                    search_task_ack(state, ppid),
+                )
+            }).await;
+            match result {
+                Ok((s, k, t)) => (s, k, None, t),
+                Err(_) => {
+                    warn!("Context prefetch global timeout ({}ms)", GLOBAL_TIMEOUT_MS);
+                    (vec![], vec![], None, vec![])
+                }
+            }
+        }
+        QueryIntent::Chat => unreachable!(), // handled above
     };
 
-    let assembled = assemble(&skills, &kb_entries, &code_context, &task_updates);
+    let intent_str = match intent {
+        QueryIntent::Code => "code",
+        QueryIntent::General => "general",
+        QueryIntent::Chat => "chat",
+    };
+
+    let routed_by = intent_result.source;
+
+    let token_budget = match intent {
+        QueryIntent::Code => CODE_TOKEN_BUDGET,
+        QueryIntent::General => GENERAL_TOKEN_BUDGET,
+        QueryIntent::Chat => 0,
+    };
+
+    let assembled = assemble_budgeted(&skills, &kb_entries, &code_context, &task_updates, token_budget);
+
+    info!(
+        intent = intent_str,
+        routed_by,
+        skills = skills.len(),
+        kb = kb_entries.len(),
+        code = code_context.is_some(),
+        tasks = task_updates.len(),
+        assembled_len = assembled.len(),
+        "Context prefetch complete"
+    );
 
     PrefetchResult {
         skills,
@@ -123,10 +495,11 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
         code_context,
         task_updates,
         assembled,
+        intent: Some(format!("{}:{}", intent_str, routed_by)),
     }
 }
 
-// --- Individual search functions (each with its own timeout) ---
+// --- Individual search functions (each with its own timeout + score threshold) ---
 
 async fn search_skills(state: &AppState, query: &str) -> Vec<SkillHint> {
     let fut = async {
@@ -170,7 +543,13 @@ async fn search_skills(state: &AppState, query: &str) -> Vec<SkillHint> {
                         .collect();
                     sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-                    for (rank, (idx, _sim)) in sims.iter().take(10).enumerate() {
+                    // Log top-1 sim for threshold calibration
+                    if let Some(&(idx0, sim0)) = sims.first() {
+                        let name0 = &cache[idx0].0;
+                        debug!(query, top1_skill = %name0, top1_sim = sim0, "Skill vector top-1 sim");
+                    }
+
+                    for (rank, (idx, _sim)) in sims.iter().filter(|(_, s)| *s > MIN_COSINE_SIM).take(10).enumerate() {
                         let topic_name = &cache[*idx].0;
                         let entry = topic_scores.entry(topic_name.clone()).or_insert_with(|| {
                             (0.0, None, Some(rank), serde_json::json!({
@@ -184,13 +563,14 @@ async fn search_skills(state: &AppState, query: &str) -> Vec<SkillHint> {
             }
         }
 
-        // 4. RRF merge
+        // 4. RRF merge + score threshold
         let mut scored: Vec<(String, f64, serde_json::Value)> = topic_scores
             .into_iter()
             .map(|(topic, (bonus, fts_rank, vec_rank, meta))| {
                 let rrf = embedding::rrf_score(fts_rank, vec_rank, 60);
                 (topic, bonus + rrf, meta)
             })
+            .filter(|(_, score, _)| *score >= MIN_RRF_SCORE) // ← score threshold
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -216,12 +596,14 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
 
         // 1. FTS5 ranked (spawn_blocking)
         let q = query.to_string();
-        let fts_ranked = state.db_exec.run(move |db| {
-            let mut ranked = db.kb_search_fts_ranked(&q, None).unwrap_or_default();
+        let fts_ranked: Vec<(String, usize, Option<String>)> = state.db_exec.run(move |db| {
+            let ranked = db.kb_search_fts_ranked(&q, None).unwrap_or_default();
             if ranked.is_empty() {
-                ranked = db.kb_search_like_ranked(&q, None).unwrap_or_default();
+                let like = db.kb_search_like_ranked(&q, None).unwrap_or_default();
+                Ok(like.into_iter().map(|(id, rank)| (id, rank, None)).collect())
+            } else {
+                Ok(ranked)
             }
-            Ok(ranked)
         }).await.unwrap_or_default();
 
         // 2. Embedding cosine similarity
@@ -234,7 +616,15 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
                 .map(|(i, (_, vec))| (i, embedding::cosine_similarity(qe, vec)))
                 .collect();
             scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            // Log top-1 sim for threshold calibration
+            if let Some(&(idx0, sim0)) = scores.first() {
+                let name0 = &cache[idx0].0;
+                debug!(query, top1_kb = %name0, top1_sim = sim0, "KB vector top-1 sim");
+            }
+
             scores.iter()
+                .filter(|(_, sim)| *sim > MIN_COSINE_SIM) // cosine cutoff before ranking
                 .take(top_k * 3)
                 .enumerate()
                 .map(|(rank, (idx, sim))| (cache[*idx].0.clone(), rank, *sim))
@@ -244,10 +634,10 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
         };
         drop(cache);
 
-        // 3. RRF merge
+        // 3. RRF merge + score threshold
         let rrf_k = 60;
         let mut merged: HashMap<String, (Option<usize>, Option<usize>, Option<f32>)> = HashMap::new();
-        for (id, rank) in &fts_ranked {
+        for (id, rank, _snippet) in &fts_ranked {
             merged.entry(id.clone()).or_insert((None, None, None)).0 = Some(*rank);
         }
         for (id, rank, sim) in &vec_ranked {
@@ -260,6 +650,7 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
                 let score = embedding::rrf_score(fts_r, vec_r, rrf_k);
                 (id, score)
             })
+            .filter(|(_, score)| *score >= MIN_RRF_SCORE) // ← score threshold
             .collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         ranked.truncate(top_k * 3);
@@ -313,8 +704,6 @@ async fn search_task_ack(state: &AppState, ppid: Option<u32>) -> Vec<TaskUpdate>
     };
 
     let fut = async {
-        // Read watermark from daemon-side per-ppid cache
-        // For now, delegate to existing DB function with since=last_1h fallback
         let db = state.mission.db();
         let tasks = db.ack_completed_tasks(None).unwrap_or_default();
         tasks.into_iter().map(|t| TaskUpdate {
@@ -338,45 +727,93 @@ async fn search_task_ack(state: &AppState, ppid: Option<u32>) -> Vec<TaskUpdate>
         })
 }
 
-// --- Assembly ---
+// --- Budgeted Assembly ---
 
-fn assemble(
+/// Assemble context with token budget control.
+/// Priority: TaskAck (guaranteed) > Top-1 Skill (guaranteed) > KB > remaining Skills > Code.
+fn assemble_budgeted(
     skills: &[SkillHint],
     kb_entries: &[KbHint],
     code_context: &Option<String>,
     task_updates: &[TaskUpdate],
+    token_budget: usize,
 ) -> String {
+    if token_budget == 0 {
+        return String::new();
+    }
+
     let mut parts: Vec<String> = Vec::new();
+    let mut used_tokens: usize = 0;
 
-    if !skills.is_empty() {
-        let mut block = "[Matched Skills — 建议先 Read 对应 Skill 文件]\n".to_string();
-        for s in skills {
-            block.push_str(&format!("- {}: {}\n", s.name, s.path.as_deref().unwrap_or("null")));
-        }
-        parts.push(block);
-    }
-
-    if !kb_entries.is_empty() {
-        let mut block = "[Knowledge Base]\n".to_string();
-        for e in kb_entries {
-            block.push_str(&format!("- [{}] {}: {}\n", e.category, e.key, e.summary));
-        }
-        parts.push(block);
-    }
-
-    if let Some(ref code) = code_context {
-        if !code.is_empty() {
-            parts.push(format!("[Code Context]\n{}", code));
-        }
-    }
-
+    // 1. TaskAck — guaranteed (small, high priority)
     if !task_updates.is_empty() {
         let mut block = "[Background Task Updates]\n".to_string();
         for t in task_updates {
             let icon = if t.status == "done" { "✅" } else { "❌" };
             block.push_str(&format!("- {} task {} (slot: {}): {}\n", icon, t.id, t.slot_id, t.detail));
         }
-        parts.push(block);
+        let tokens = estimate_tokens(&block);
+        if used_tokens + tokens <= token_budget {
+            used_tokens += tokens;
+            parts.push(block);
+        }
+    }
+
+    // 2. Skills — top-1 guaranteed, rest budget-gated
+    if !skills.is_empty() {
+        let mut block = "[Matched Skills — 建议先 Read 对应 Skill 文件]\n".to_string();
+        for s in skills {
+            block.push_str(&format!("- {}: {}\n", s.name, s.path.as_deref().unwrap_or("null")));
+        }
+        let tokens = estimate_tokens(&block);
+        if used_tokens + tokens <= token_budget {
+            used_tokens += tokens;
+            parts.push(block);
+        } else if !parts.is_empty() || used_tokens > 0 {
+            // At least inject top-1 skill
+            let s = &skills[0];
+            let mini = format!("[Matched Skills]\n- {}: {}\n", s.name, s.path.as_deref().unwrap_or("null"));
+            let tokens = estimate_tokens(&mini);
+            if used_tokens + tokens <= token_budget {
+                used_tokens += tokens;
+                parts.push(mini);
+            }
+        }
+    }
+
+    // 3. KB — budget-gated, truncate from bottom
+    if !kb_entries.is_empty() {
+        let header = "[Knowledge Base]\n";
+        let mut block = header.to_string();
+        let mut kb_tokens = estimate_tokens(header);
+
+        for e in kb_entries {
+            let line = format!("- [{}] {}: {}\n", e.category, e.key, e.summary);
+            let line_tokens = estimate_tokens(&line);
+            if used_tokens + kb_tokens + line_tokens > token_budget {
+                break; // truncate remaining KB entries
+            }
+            kb_tokens += line_tokens;
+            block.push_str(&line);
+        }
+
+        if kb_tokens > estimate_tokens(header) {
+            used_tokens += kb_tokens;
+            parts.push(block);
+        }
+    }
+
+    // 4. Code — budget-gated (largest, lowest priority in assembly)
+    if let Some(ref code) = code_context {
+        if !code.is_empty() {
+            let block = format!("[Code Context]\n{}", code);
+            let tokens = estimate_tokens(&block);
+            if used_tokens + tokens <= token_budget {
+                parts.push(block);
+            }
+            // If code exceeds remaining budget, skip entirely
+            // (code_prefetch already has its own internal budget)
+        }
     }
 
     parts.join("\n")
@@ -390,6 +827,7 @@ impl PrefetchResult {
             code_context: None,
             task_updates: vec![],
             assembled: String::new(),
+            intent: None,
         }
     }
 }
