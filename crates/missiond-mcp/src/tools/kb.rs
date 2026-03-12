@@ -129,6 +129,17 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "type": "integer",
                         "description": "返回条数上限(默认 10，最大 50)",
                         "default": 10
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "分页偏移(默认 0)。前 N 条不够时可 offset=10 翻页",
+                        "default": 0
+                    },
+                    "search_mode": {
+                        "type": "string",
+                        "enum": ["exact", "explore"],
+                        "description": "exact=精确查找(跳过 MMR 多样性,按纯相关性排序); explore=探索(默认,含 MMR 多样性重排)",
+                        "default": "explore"
                     }
                 }
             }),

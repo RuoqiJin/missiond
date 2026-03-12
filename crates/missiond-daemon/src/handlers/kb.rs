@@ -106,6 +106,10 @@ struct KBSearchArgs {
     category: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    search_mode: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -241,8 +245,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
         }
         "mission_kb_search" => {
-            let KBSearchArgs { query, category, limit } = serde_json::from_value(args)
-                .unwrap_or(KBSearchArgs { query: None, category: None, limit: None });
+            let KBSearchArgs { query, category, limit, offset, search_mode } = serde_json::from_value(args)
+                .unwrap_or(KBSearchArgs { query: None, category: None, limit: None, offset: None, search_mode: None });
             let query = query.unwrap_or_default();
             if query.is_empty() && category.is_none() {
                 let entries = state.mission.db()
@@ -252,6 +256,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
 
             let top_k = limit.unwrap_or(10).clamp(1, 50);
+            let offset = offset.unwrap_or(0).min(100);
+            let exact_mode = search_mode.as_deref() == Some("exact");
 
             // 1. FTS5 ranked IDs (fallback to LIKE for Chinese) — spawn_blocking
             let q = query.clone();
@@ -267,8 +273,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }).await.unwrap_or_default();
 
             // 2. Embedding cosine similarity against kb_search_cache
-            // Use floor of 60 candidates to ensure enough diversity for RRF
-            let fetch_k = (top_k * 3).max(60);
+            // Use floor of 60 candidates; expand for offset pagination
+            let output_k = top_k + offset;
+            let fetch_k = (output_k * 3).max(60);
             let query_embedding = state.embedding_service.as_ref()
                 .and_then(|svc| svc.embed(&query));
             let cache = state.kb_search_cache.read().await;
@@ -277,6 +284,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     .enumerate()
                     .map(|(i, (_, vec))| (i, missiond_core::embedding::cosine_similarity(qe, vec)))
                     .collect();
+                // Pre-RRF cosine floor: discard semantically unrelated candidates.
+                // NOTE: threshold assumes Cosine Similarity [-1, 1] with BGE model.
+                // Revisit if switching to L2 distance or unnormalized inner product.
+                scores.retain(|(_, sim)| *sim >= 0.3);
                 scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 scores.iter()
                     .take(fetch_k)
@@ -336,34 +347,46 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 }
             }
 
-            // Trim to top_k * 2 before MMR (MMR needs a reasonable pool, not all 60)
-            scored_entries.truncate(top_k * 2);
+            // Trim candidate pool before final selection
+            scored_entries.truncate(output_k * 2);
 
-            // 5. MMR diversity re-ranking with min-max normalized scores + embedding cosine
-            let (min_s, max_s) = scored_entries.iter()
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), (_, s)| (mn.min(*s), mx.max(*s)));
-            let score_range = max_s - min_s;
+            // 5. Final selection: exact mode skips MMR, explore mode uses MMR diversity
+            let mut results: Vec<missiond_core::types::KnowledgeEntry> = if exact_mode {
+                // Exact mode: pure relevance order, skip MMR diversity injection
+                scored_entries.iter()
+                    .skip(offset)
+                    .take(top_k)
+                    .map(|(e, _)| e.clone())
+                    .collect()
+            } else {
+                // Explore mode: MMR diversity re-ranking
+                let (min_s, max_s) = scored_entries.iter()
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), (_, s)| (mn.min(*s), mx.max(*s)));
+                let score_range = max_s - min_s;
 
-            // Build embedding lookup from cache for MMR cosine similarity
-            let cache = state.kb_search_cache.read().await;
-            let emb_map: std::collections::HashMap<String, &Vec<f32>> = cache.iter()
-                .map(|(id, vec)| (id.clone(), vec))
-                .collect();
+                let cache = state.kb_search_cache.read().await;
+                let emb_map: std::collections::HashMap<String, &Vec<f32>> = cache.iter()
+                    .map(|(id, vec)| (id.clone(), vec))
+                    .collect();
 
-            let candidates: Vec<(usize, f64, Vec<f32>)> = scored_entries.iter()
-                .enumerate()
-                .map(|(i, (e, score))| {
-                    let norm_score = if score_range > 0.0 { (score - min_s) / score_range } else { 1.0 };
-                    let emb = emb_map.get(&e.id).map(|v| (*v).clone()).unwrap_or_default();
-                    (i, norm_score, emb)
-                })
-                .collect();
-            drop(cache);
+                let candidates: Vec<(usize, f64, Vec<f32>)> = scored_entries.iter()
+                    .enumerate()
+                    .map(|(i, (e, score))| {
+                        let norm_score = if score_range > 0.0 { (score - min_s) / score_range } else { 1.0 };
+                        let emb = emb_map.get(&e.id).map(|v| (*v).clone()).unwrap_or_default();
+                        (i, norm_score, emb)
+                    })
+                    .collect();
+                drop(cache);
 
-            let mmr_indices = missiond_core::embedding::mmr_rerank_cosine(&candidates, top_k, 0.7);
-            let mut results: Vec<missiond_core::types::KnowledgeEntry> = mmr_indices.iter()
-                .filter_map(|&i| scored_entries.get(i).map(|(e, _)| e.clone()))
-                .collect();
+                // MMR selects output_k items, then skip offset for pagination
+                let mmr_indices = missiond_core::embedding::mmr_rerank_cosine(&candidates, output_k, 0.7);
+                mmr_indices.iter()
+                    .skip(offset)
+                    .take(top_k)
+                    .filter_map(|&i| scored_entries.get(i).map(|(e, _)| e.clone()))
+                    .collect()
+            };
 
             // 6. Slim down detail field by category to reduce token usage
             for entry in &mut results {
