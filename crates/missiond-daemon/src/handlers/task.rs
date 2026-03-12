@@ -71,64 +71,69 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             };
 
             for candidate_id in &candidates {
-                if let Some(status) = state.pty.get_status(candidate_id).await {
+                // Acquire per-slot dispatch guard to prevent concurrent sends
+                if !state.slot_dispatch.try_acquire(candidate_id) {
+                    continue; // another caller is dispatching to this slot
+                }
+                let sent = if let Some(status) = state.pty.get_status(candidate_id).await {
                     if status.state == missiond_core::pty::SessionState::Idle {
-                        match state.pty.send_fire_and_forget(candidate_id, &prompt).await {
-                            Ok(()) => {
-                                let now = chrono::Utc::now().timestamp_millis();
-                                let slot_session = state.mission.db().get_slot_session(candidate_id).ok().flatten();
-                                let _ = state.mission.db().update_task(
-                                    &task_id,
-                                    &missiond_core::types::TaskUpdate {
-                                        status: Some(missiond_core::types::TaskStatus::Running),
-                                        slot_id: Some(candidate_id.to_string()),
-                                        session_id: slot_session,
-                                        started_at: Some(now),
-                                        ..Default::default()
-                                    },
-                                );
-                                // Emit dispatch event for timeline visibility
-                                let preview = if prompt.len() > 200 {
-                                    let mut end = 200;
-                                    while end > 0 && !prompt.is_char_boundary(end) { end -= 1; }
-                                    format!("{}...", &prompt[..end])
-                                } else { prompt.clone() };
-                                state.event_bus.publish(
-                                    crate::event_bus::DaemonEvent::SlotTaskDispatched {
-                                        slot_id: candidate_id.to_string(),
-                                        task_id: Some(task_id.clone()),
-                                        purpose: "submit".to_string(),
-                                        prompt_chars: prompt.len(),
-                                        preview,
-                                    },
-                                );
-                                dispatched_to = Some(candidate_id.to_string());
-                                info!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: dispatched to idle slot");
-                                break;
-                            }
-                            Err(e) => {
-                                warn!(task_id = %task_id, slot_id = %candidate_id, error = %e, "mission_submit: dispatch failed");
-                            }
-                        }
-                    }
+                        state.pty.send_fire_and_forget(candidate_id, &prompt).await.ok().is_some()
+                    } else { false }
+                } else { false };
+                state.slot_dispatch.release(candidate_id);
+
+                if sent {
+                    let now = chrono::Utc::now().timestamp_millis();
+                    let slot_session = state.mission.db().get_slot_session(candidate_id).ok().flatten();
+                    let _ = state.mission.db().update_task(
+                        &task_id,
+                        &missiond_core::types::TaskUpdate {
+                            status: Some(missiond_core::types::TaskStatus::Running),
+                            slot_id: Some(candidate_id.to_string()),
+                            session_id: slot_session,
+                            started_at: Some(now),
+                            ..Default::default()
+                        },
+                    );
+                    let preview = if prompt.len() > 200 {
+                        let mut end = 200;
+                        while end > 0 && !prompt.is_char_boundary(end) { end -= 1; }
+                        format!("{}...", &prompt[..end])
+                    } else { prompt.clone() };
+                    state.event_bus.publish(
+                        crate::event_bus::DaemonEvent::SlotTaskDispatched {
+                            slot_id: candidate_id.to_string(),
+                            task_id: Some(task_id.clone()),
+                            purpose: "submit".to_string(),
+                            prompt_chars: prompt.len(),
+                            preview,
+                        },
+                    );
+                    dispatched_to = Some(candidate_id.to_string());
+                    info!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: dispatched to idle slot");
+                    break;
                 }
             }
 
             // Phase 2: No idle slot — auto-spawn an exited/no-session slot then dispatch
             if dispatched_to.is_none() {
                 for candidate_id in &candidates {
+                    if !state.slot_dispatch.try_acquire(candidate_id) {
+                        continue;
+                    }
                     let status = state.pty.get_status(candidate_id).await;
                     let is_spawnable = match &status {
                         Some(s) => s.state == missiond_core::pty::SessionState::Exited,
-                        None => true, // no session at all
+                        None => true,
                     };
-                    if !is_spawnable { continue; }
+                    if !is_spawnable {
+                        state.slot_dispatch.release(candidate_id);
+                        continue;
+                    }
 
-                    // Find slot config for spawn
-                    let slot = slots.iter().find(|s| s.config.id == *candidate_id);
-                    let slot = match slot {
+                    let slot = match slots.iter().find(|s| s.config.id == *candidate_id) {
                         Some(s) => s,
-                        None => continue,
+                        None => { state.slot_dispatch.release(candidate_id); continue; }
                     };
 
                     let pty_slot = missiond_core::PTYSlot {
@@ -141,53 +146,54 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     let (extra_env, session_file) = build_slot_tracking_env(candidate_id, slot.config.env.as_ref()).await;
 
                     info!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: auto-spawning exited slot");
-                    match state.pty.spawn(&pty_slot, PTYSpawnOptions {
+                    let spawn_ok = state.pty.spawn(&pty_slot, PTYSpawnOptions {
                         auto_restart: false,
                         wait_for_idle: true,
                         timeout_secs: Some(30),
                         mcp_config,
                         dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
                         extra_env,
-                    }).await {
-                        Ok(_info) => {
-                            capture_slot_session_uuid(state, candidate_id, &session_file).await;
-                            match state.pty.send_fire_and_forget(candidate_id, &prompt).await {
-                                Ok(()) => {
-                                    let now = chrono::Utc::now().timestamp_millis();
-                                    let slot_session = state.mission.db().get_slot_session(candidate_id).ok().flatten();
-                                    let _ = state.mission.db().update_task(
-                                        &task_id,
-                                        &missiond_core::types::TaskUpdate {
-                                            status: Some(missiond_core::types::TaskStatus::Running),
-                                            slot_id: Some(candidate_id.to_string()),
-                                            session_id: slot_session,
-                                            started_at: Some(now),
-                                            ..Default::default()
-                                        },
-                                    );
-                                    // Emit dispatch event for timeline visibility
-                                    let preview = if prompt.len() > 200 {
-                                        let mut end = 200;
-                                        while end > 0 && !prompt.is_char_boundary(end) { end -= 1; }
-                                        format!("{}...", &prompt[..end])
-                                    } else { prompt.clone() };
-                                    state.event_bus.publish(
-                                        crate::event_bus::DaemonEvent::SlotTaskDispatched {
-                                            slot_id: candidate_id.to_string(),
-                                            task_id: Some(task_id.clone()),
-                                            purpose: "submit".to_string(),
-                                            prompt_chars: prompt.len(),
-                                            preview,
-                                        },
-                                    );
-                                    dispatched_to = Some(candidate_id.to_string());
-                                    info!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: spawned + dispatched");
-                                    break;
-                                }
-                                Err(e) => warn!(task_id = %task_id, slot_id = %candidate_id, error = %e, "mission_submit: send after spawn failed"),
-                            }
-                        }
-                        Err(e) => warn!(task_id = %task_id, slot_id = %candidate_id, error = %e, "mission_submit: auto-spawn failed"),
+                    }).await.is_ok();
+
+                    let sent = if spawn_ok {
+                        capture_slot_session_uuid(state, candidate_id, &session_file).await;
+                        state.pty.send_fire_and_forget(candidate_id, &prompt).await.ok().is_some()
+                    } else {
+                        warn!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: auto-spawn failed");
+                        false
+                    };
+                    state.slot_dispatch.release(candidate_id);
+
+                    if sent {
+                        let now = chrono::Utc::now().timestamp_millis();
+                        let slot_session = state.mission.db().get_slot_session(candidate_id).ok().flatten();
+                        let _ = state.mission.db().update_task(
+                            &task_id,
+                            &missiond_core::types::TaskUpdate {
+                                status: Some(missiond_core::types::TaskStatus::Running),
+                                slot_id: Some(candidate_id.to_string()),
+                                session_id: slot_session,
+                                started_at: Some(now),
+                                ..Default::default()
+                            },
+                        );
+                        let preview = if prompt.len() > 200 {
+                            let mut end = 200;
+                            while end > 0 && !prompt.is_char_boundary(end) { end -= 1; }
+                            format!("{}...", &prompt[..end])
+                        } else { prompt.clone() };
+                        state.event_bus.publish(
+                            crate::event_bus::DaemonEvent::SlotTaskDispatched {
+                                slot_id: candidate_id.to_string(),
+                                task_id: Some(task_id.clone()),
+                                purpose: "submit".to_string(),
+                                prompt_chars: prompt.len(),
+                                preview,
+                            },
+                        );
+                        dispatched_to = Some(candidate_id.to_string());
+                        info!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: spawned + dispatched");
+                        break;
                     }
                 }
             }

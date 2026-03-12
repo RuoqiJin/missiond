@@ -121,51 +121,50 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
             if used_slots.contains(slot_id) {
                 continue;
             }
-            let status = match state.pty.get_status(slot_id).await {
-                Some(s) => s,
-                None => continue,
-            };
-            if status.state != missiond_core::pty::SessionState::Idle {
+            // Acquire per-slot dispatch guard
+            if !state.slot_dispatch.try_acquire(slot_id) {
                 continue;
             }
+            let status = match state.pty.get_status(slot_id).await {
+                Some(s) => s,
+                None => { state.slot_dispatch.release(slot_id); continue; }
+            };
+            let sent = if status.state == missiond_core::pty::SessionState::Idle {
+                state.pty.send_fire_and_forget(slot_id, &task.prompt).await.ok().is_some()
+            } else { false };
+            state.slot_dispatch.release(slot_id);
 
-            match state.pty.send_fire_and_forget(slot_id, &task.prompt).await {
-                Ok(()) => {
-                    let now = chrono::Utc::now().timestamp_millis();
-                    let _ = state.mission.db().update_task(
-                        &task.id,
-                        &missiond_core::types::TaskUpdate {
-                            status: Some(missiond_core::types::TaskStatus::Running),
-                            slot_id: Some(slot_id.clone()),
-                            started_at: Some(now),
-                            ..Default::default()
-                        },
-                    );
-                    // Emit dispatch event for timeline visibility
-                    let preview = if task.prompt.len() > 200 {
-                        let mut end = 200;
-                        while end > 0 && !task.prompt.is_char_boundary(end) { end -= 1; }
-                        format!("{}...", &task.prompt[..end])
-                    } else { task.prompt.clone() };
-                    state.event_bus.publish(
-                        crate::event_bus::DaemonEvent::SlotTaskDispatched {
-                            slot_id: slot_id.clone(),
-                            task_id: Some(task.id.clone()),
-                            purpose: "submit".to_string(),
-                            prompt_chars: task.prompt.len(),
-                            preview,
-                        },
-                    );
-                    info!(task_id = %task.id, slot_id = %slot_id, role = %task.role, "Autopilot: dispatched queued submit task");
-                    state.stats.tasks_dispatched.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    used_slots.insert(slot_id.clone());
-                    dispatched = true;
-                    any_dispatched = true;
-                    break;
-                }
-                Err(e) => {
-                    warn!(task_id = %task.id, slot_id = %slot_id, error = %e, "Autopilot: dispatch to slot failed");
-                }
+            if sent {
+                let now = chrono::Utc::now().timestamp_millis();
+                let _ = state.mission.db().update_task(
+                    &task.id,
+                    &missiond_core::types::TaskUpdate {
+                        status: Some(missiond_core::types::TaskStatus::Running),
+                        slot_id: Some(slot_id.clone()),
+                        started_at: Some(now),
+                        ..Default::default()
+                    },
+                );
+                let preview = if task.prompt.len() > 200 {
+                    let mut end = 200;
+                    while end > 0 && !task.prompt.is_char_boundary(end) { end -= 1; }
+                    format!("{}...", &task.prompt[..end])
+                } else { task.prompt.clone() };
+                state.event_bus.publish(
+                    crate::event_bus::DaemonEvent::SlotTaskDispatched {
+                        slot_id: slot_id.clone(),
+                        task_id: Some(task.id.clone()),
+                        purpose: "submit".to_string(),
+                        prompt_chars: task.prompt.len(),
+                        preview,
+                    },
+                );
+                info!(task_id = %task.id, slot_id = %slot_id, role = %task.role, "Autopilot: dispatched queued submit task");
+                state.stats.tasks_dispatched.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                used_slots.insert(slot_id.clone());
+                dispatched = true;
+                any_dispatched = true;
+                break;
             }
         }
 

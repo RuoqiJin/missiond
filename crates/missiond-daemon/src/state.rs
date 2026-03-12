@@ -13,6 +13,7 @@ use crate::gemini_client::GeminiClient;
 use crate::mcp_client::McpProcessClient;
 use crate::minimax_gateway::MinimaxHandle;
 use crate::prompts::PromptStore;
+use crate::slot_dispatch::SlotDispatchGuard;
 use crate::workers::WorkerRegistry;
 
 // --- Well-known slot IDs (shared across all daemon modules) ---
@@ -175,6 +176,10 @@ pub(crate) struct AppState {
     pub(crate) last_msg_span: Arc<std::sync::Mutex<HashMap<String, String>>>,
     /// Runtime worker registry — pause/resume/stats for all background workers.
     pub(crate) worker_registry: Arc<WorkerRegistry>,
+    /// Per-slot dispatch guard — prevents concurrent dispatch to the same PTY slot.
+    pub(crate) slot_dispatch: Arc<SlotDispatchGuard>,
+    /// Wakeup signal for board dispatch when a slot becomes idle.
+    pub(crate) board_dispatch_notify: Arc<tokio::sync::Notify>,
 }
 
 /// Event-driven embedding tasks — the Worker sleeps until triggered.

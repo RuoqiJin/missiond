@@ -96,6 +96,17 @@ async fn handle_state_change(
     // Close Running submit tasks when slot returns to Idle
     if new_state == missiond_core::SessionState::Idle && prev_state != missiond_core::SessionState::Idle {
         handle_submit_task_closure(s, slot_id).await;
+
+        // Emit SlotBecameIdle for ALL slots (not just memory).
+        // Memory slots already emit via handle_memory_lane_state; non-memory slots need this
+        // to trigger event-driven board dispatch instead of waiting for 60s autopilot tick.
+        if slot_id != MEMORY_SLOT_ID && slot_id != MEMORY_SLOW_SLOT_ID {
+            s.event_bus.publish(event_bus::DaemonEvent::SlotBecameIdle {
+                slot_id: slot_id.to_string(),
+            });
+        }
+        // Signal autopilot to try board dispatch immediately
+        s.board_dispatch_notify.notify_one();
     }
 }
 

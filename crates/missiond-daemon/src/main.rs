@@ -21,6 +21,7 @@ mod handlers;
 mod event_bus;
 mod event_router;
 mod supervisor;
+mod slot_dispatch;
 
 // ── Re-exports for backward-compatible `use crate::xxx` paths ──
 use llm::{gemini_client, gemini_cli, minimax_client, minimax_gateway, codex_cli, llm_gateway, prompts};
@@ -482,6 +483,8 @@ async fn main() -> Result<()> {
         ast_embedding_cache: missiond_core::embedding::new_cache(),
         last_msg_span: Arc::new(std::sync::Mutex::new(HashMap::new())),
         worker_registry: Arc::new(workers::WorkerRegistry::new()),
+        slot_dispatch: Arc::new(slot_dispatch::SlotDispatchGuard::new()),
+        board_dispatch_notify: Arc::new(tokio::sync::Notify::new()),
     };
 
     // Late-bind context enricher for Jarvis chat completions
@@ -759,14 +762,25 @@ async fn main() -> Result<()> {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                interval.tick().await;
-                if let Err(e) = autopilot_tick(&auto_state).await {
-                    warn!(error = %e, "Autopilot tick failed");
+                // Wait for either: 60s timer tick OR slot-became-idle signal
+                tokio::select! {
+                    _ = interval.tick() => {
+                        // Full autopilot tick: maintenance + dispatch
+                        if let Err(e) = autopilot_tick(&auto_state).await {
+                            warn!(error = %e, "Autopilot tick failed");
+                        }
+                    }
+                    _ = auto_state.board_dispatch_notify.notified() => {
+                        // Slot became idle — run board dispatch immediately (skip maintenance)
+                        if let Err(e) = autopilot::dispatch_board_tasks(&auto_state).await {
+                            warn!(error = %e, "Board dispatch (idle-triggered) failed");
+                        }
+                    }
                 }
             }
         });
     }
-    info!("Autopilot scheduler started (60s interval, isolated task)");
+    info!("Autopilot scheduler started (60s interval + idle-triggered, isolated task)");
 
     // --- AST Embedding Health Monitor (periodic self-healing, Gemini-reviewed) ---
     // Every 15 min: check AST coverage, trigger BackfillAll if gaps detected.
