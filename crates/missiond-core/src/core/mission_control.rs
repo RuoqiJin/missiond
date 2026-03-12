@@ -245,9 +245,15 @@ impl MissionControl {
             finished_at: None,
         };
 
-        let _ = self.db.insert_task(&task);
+        if let Err(e) = self.db.insert_task(&task) {
+            error!(task_id = %task.id, error = %e, "Failed to persist task to DB");
+            return Err(anyhow!("Failed to create task: {}", e));
+        }
         let data = serde_json::json!({ "role": input.role });
-        let _ = self.db.insert_event(&task.id, EventType::TaskCreated, Some(&data), now);
+        if let Err(e) = self.db.insert_event(&task.id, EventType::TaskCreated, Some(&data), now) {
+            error!(task_id = %task.id, error = %e, "Failed to persist task event");
+            // Non-fatal: task row exists, event is supplementary
+        }
 
         info!(task_id = %task.id, role = %input.role, "Task created");
         Ok(task)
@@ -291,7 +297,7 @@ impl MissionControl {
         let now = chrono::Utc::now().timestamp_millis();
 
         // Update task status
-        let _ = self.db.update_task(
+        if let Err(e) = self.db.update_task(
             &task.id,
             &TaskUpdate {
                 status: Some(TaskStatus::Running),
@@ -299,10 +305,14 @@ impl MissionControl {
                 started_at: Some(now),
                 ..Default::default()
             },
-        );
+        ) {
+            error!(task_id = %task.id, error = %e, "Failed to update task status to Running");
+        }
 
         let data = serde_json::json!({ "slotId": target_slot.config.id });
-        let _ = self.db.insert_event(&task.id, EventType::TaskStarted, Some(&data), now);
+        if let Err(e) = self.db.insert_event(&task.id, EventType::TaskStarted, Some(&data), now) {
+            error!(task_id = %task.id, error = %e, "Failed to persist TaskStarted event");
+        }
 
         info!(task_id = %task.id, slot_id = %target_slot.config.id, "Task started");
 
@@ -312,7 +322,7 @@ impl MissionControl {
                 let now = chrono::Utc::now().timestamp_millis();
 
                 // Update task status
-                let _ = self.db.update_task(
+                if let Err(e) = self.db.update_task(
                     &task.id,
                     &TaskUpdate {
                         status: Some(TaskStatus::Done),
@@ -321,10 +331,14 @@ impl MissionControl {
                         finished_at: Some(now),
                         ..Default::default()
                     },
-                );
+                ) {
+                    error!(task_id = %task.id, error = %e, "Failed to update task status to Done");
+                }
 
                 let data = serde_json::json!({ "resultLength": result.result.len() });
-                let _ = self.db.insert_event(&task.id, EventType::TaskDone, Some(&data), now);
+                if let Err(e) = self.db.insert_event(&task.id, EventType::TaskDone, Some(&data), now) {
+                    error!(task_id = %task.id, error = %e, "Failed to persist TaskDone event");
+                }
 
                 // Add to inbox
                 self.inbox.add_message(&task.id, &task.role, &result.result);
@@ -336,7 +350,7 @@ impl MissionControl {
                 let error_msg = e.to_string();
                 let now = chrono::Utc::now().timestamp_millis();
 
-                let _ = self.db.update_task(
+                if let Err(db_e) = self.db.update_task(
                     &task.id,
                     &TaskUpdate {
                         status: Some(TaskStatus::Failed),
@@ -344,10 +358,14 @@ impl MissionControl {
                         finished_at: Some(now),
                         ..Default::default()
                     },
-                );
+                ) {
+                    error!(task_id = %task.id, error = %db_e, "Failed to update task status to Failed");
+                }
 
                 let data = serde_json::json!({ "error": error_msg });
-                let _ = self.db.insert_event(&task.id, EventType::TaskFailed, Some(&data), now);
+                if let Err(db_e) = self.db.insert_event(&task.id, EventType::TaskFailed, Some(&data), now) {
+                    error!(task_id = %task.id, error = %db_e, "Failed to persist TaskFailed event");
+                }
 
                 error!(task_id = %task.id, error = %error_msg, "Task failed");
                 Err(e)
@@ -370,28 +388,32 @@ impl MissionControl {
         let now = chrono::Utc::now().timestamp_millis();
 
         if task.status == TaskStatus::Queued {
-            let _ = self.db.update_task(
+            if let Err(e) = self.db.update_task(
                 task_id,
                 &TaskUpdate {
                     status: Some(TaskStatus::Cancelled),
                     finished_at: Some(now),
                     ..Default::default()
                 },
-            );
+            ) {
+                error!(task_id = %task_id, error = %e, "Failed to cancel queued task");
+            }
             return Ok(true);
         }
 
         if task.status == TaskStatus::Running {
             if let Some(slot_id) = &task.slot_id {
                 self.process_manager.kill(slot_id).await?;
-                let _ = self.db.update_task(
+                if let Err(e) = self.db.update_task(
                     task_id,
                     &TaskUpdate {
                         status: Some(TaskStatus::Cancelled),
                         finished_at: Some(now),
                         ..Default::default()
                     },
-                );
+                ) {
+                    error!(task_id = %task_id, error = %e, "Failed to cancel running task");
+                }
                 return Ok(true);
             }
         }
