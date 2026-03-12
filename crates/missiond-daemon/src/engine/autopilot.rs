@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use anyhow::{anyhow, Result};
 use tracing::{debug, info, warn};
 
@@ -210,11 +211,20 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
 
     info!(count = tasks.len(), "Autopilot: found executable tasks");
 
+    // Slot-level exclusivity: only dispatch ONE task per slot per tick
+    let mut dispatched_slots: HashSet<String> = HashSet::new();
+
     for task in tasks {
         let slot_id = match &task.assignee {
             Some(id) => id.clone(),
             None => continue,
         };
+
+        // Skip if this slot already received a task in this tick
+        if dispatched_slots.contains(&slot_id) {
+            debug!(task_id = %task.id, slot_id = %slot_id, "Autopilot: slot already dispatched this tick, skipping");
+            continue;
+        }
 
         // ===== DAG dependency check =====
         if !task.depends_on.is_empty() {
@@ -260,6 +270,7 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
 
         // ===== Flow task handling =====
         if task.flow_phase.is_some() {
+            dispatched_slots.insert(slot_id.clone());
             if let Err(e) = execute_flow_task(state, &task, &slot_id).await {
                 warn!(task_id = %task.id, error = %e, "Flow task error");
             }
@@ -314,6 +325,7 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
         // Atomically claim the task (CAS: only succeeds if open + unclaimed)
         match state.mission.db().claim_board_task(&task.id, &slot_id, "pty_slot") {
             Ok(Some(_)) => {
+                dispatched_slots.insert(slot_id.clone());
                 // Set lease: normal autopilot tasks get 20 minutes
                 let lease = (chrono::Utc::now() + chrono::TimeDelta::minutes(20)).to_rfc3339();
                 let _ = state.mission.db().set_board_task_lease(&task.id, &lease);
@@ -328,8 +340,11 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
             }
         }
 
-        // Dynamic LLM model routing based on task characteristics
-        let task_env = determine_llm_env(&task);
+        // Dynamic LLM model routing based on task characteristics + slot role
+        let slot_role = state.mission.get_slot(&slot_id)
+            .map(|s| s.config.role.clone())
+            .unwrap_or_default();
+        let task_env = determine_llm_env(&task, &slot_role);
 
         // Check if PTY session exists, spawn if needed
         if !ensure_autopilot_pty(state, &task, &slot_id, task_env).await {
@@ -430,6 +445,17 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                 prompt_chars: full_prompt.len(),
                 preview,
             });
+        }
+
+        // Pre-send state verification: confirm slot is Idle before sending.
+        // Guards against race where MCP init began after ensure_autopilot_pty returned.
+        if let Some(pre_send_status) = state.pty.get_status(&slot_id).await {
+            if pre_send_status.state != SessionState::Idle {
+                debug!(task_id = %task.id, slot_id = %slot_id, state = ?pre_send_status.state,
+                    "Autopilot: slot not Idle pre-send, releasing task without penalty");
+                let _ = state.mission.db().unclaim_board_task(&task.id);
+                continue;
+            }
         }
 
         // Send prompt and wait for response
@@ -566,49 +592,60 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                 }
             }
             Err(e) => {
-                // Record failure as a note
-                let note_content = format!("**Autopilot 执行失败** (retry {}/{})\n\n{}", task.retry_count + 1, task.max_retries, e);
-                let _ = state.mission.db().add_board_task_note(
-                    &missiond_core::types::AddBoardTaskNoteInput {
-                        task_id: task.id.clone(),
-                        content: note_content,
-                        note_type: Some("note".to_string()),
-                        author: Some("autopilot".to_string()),
-                    },
-                );
+                // Use {:#} to print full anyhow error chain (prevents .context() from hiding inner message)
+                let err_msg = format!("{:#}", e);
+                let is_transient = err_msg.contains("Cannot send message in state:");
 
-                // Track slot consecutive failures
-                {
-                    let mut fail_map = state.slot_fail_counts.lock().unwrap();
-                    let entry = fail_map.entry(slot_id.clone()).or_insert((0, 0));
-                    entry.0 += 1;
-                    entry.1 = chrono::Utc::now().timestamp();
-                    if entry.0 >= 3 {
-                        warn!(slot_id = %slot_id, failures = entry.0, "Slot throttled for 30 min due to consecutive failures");
-                    }
-                }
-
-                // Retry logic: increment count, mark failed if exhausted
-                let new_retry = task.retry_count + 1;
-                if new_retry >= task.max_retries {
-                    let _ = state.mission.db().update_board_task(
-                        &task.id,
-                        &missiond_core::types::UpdateBoardTaskInput {
-                            status: Some("failed".to_string()),
-                            ..Default::default()
-                        },
-                    );
-                    state.event_bus.publish_traced(
-                        DaemonEvent::BoardTaskStatusChanged {
-                            task_id: task.id.clone(), old_status: format!("{:?}", task.status), new_status: "failed".to_string(),
-                        },
-                        TraceContext { trace_id: Some(task.id.clone()), summary: Some(format!("board: {} → failed", task.title)), ..Default::default() },
-                    );
-                    warn!(task_id = %task.id, retries = new_retry, "Autopilot: task failed after max retries");
+                if is_transient {
+                    // Slot not ready — transient failure, just unclaim without penalty
+                    debug!(task_id = %task.id, slot_id = %slot_id, error = %err_msg,
+                        "Autopilot: slot not ready (transient), returning task to queue");
+                    let _ = state.mission.db().unclaim_board_task(&task.id);
                 } else {
-                    // Back to open for retry, increment retry_count
-                    let _ = state.mission.db().increment_board_task_retry(&task.id, new_retry);
-                    warn!(task_id = %task.id, retry = new_retry, max = task.max_retries, error = %e, "Autopilot: task failed, will retry");
+                    // Real execution failure — track and retry
+                    let note_content = format!("**Autopilot 执行失败** (retry {}/{})\n\n{}", task.retry_count + 1, task.max_retries, err_msg);
+                    let _ = state.mission.db().add_board_task_note(
+                        &missiond_core::types::AddBoardTaskNoteInput {
+                            task_id: task.id.clone(),
+                            content: note_content,
+                            note_type: Some("note".to_string()),
+                            author: Some("autopilot".to_string()),
+                        },
+                    );
+
+                    // Track slot consecutive failures
+                    {
+                        let mut fail_map = state.slot_fail_counts.lock().unwrap();
+                        let entry = fail_map.entry(slot_id.clone()).or_insert((0, 0));
+                        entry.0 += 1;
+                        entry.1 = chrono::Utc::now().timestamp();
+                        if entry.0 >= 3 {
+                            warn!(slot_id = %slot_id, failures = entry.0, "Slot throttled for 30 min due to consecutive failures");
+                        }
+                    }
+
+                    // Retry logic: increment count, mark failed if exhausted
+                    let new_retry = task.retry_count + 1;
+                    if new_retry >= task.max_retries {
+                        let _ = state.mission.db().update_board_task(
+                            &task.id,
+                            &missiond_core::types::UpdateBoardTaskInput {
+                                status: Some("failed".to_string()),
+                                ..Default::default()
+                            },
+                        );
+                        state.event_bus.publish_traced(
+                            DaemonEvent::BoardTaskStatusChanged {
+                                task_id: task.id.clone(), old_status: format!("{:?}", task.status), new_status: "failed".to_string(),
+                            },
+                            TraceContext { trace_id: Some(task.id.clone()), summary: Some(format!("board: {} → failed", task.title)), ..Default::default() },
+                        );
+                        warn!(task_id = %task.id, retries = new_retry, "Autopilot: task failed after max retries");
+                    } else {
+                        // Back to open for retry, increment retry_count
+                        let _ = state.mission.db().increment_board_task_retry(&task.id, new_retry);
+                        warn!(task_id = %task.id, retry = new_retry, max = task.max_retries, error = %err_msg, "Autopilot: task failed, will retry");
+                    }
                 }
             }
         }
