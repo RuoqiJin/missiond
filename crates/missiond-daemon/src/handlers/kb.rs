@@ -104,6 +104,8 @@ struct KBSearchArgs {
     query: Option<String>,
     #[serde(default)]
     category: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -239,8 +241,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
         }
         "mission_kb_search" => {
-            let KBSearchArgs { query, category } = serde_json::from_value(args)
-                .unwrap_or(KBSearchArgs { query: None, category: None });
+            let KBSearchArgs { query, category, limit } = serde_json::from_value(args)
+                .unwrap_or(KBSearchArgs { query: None, category: None, limit: None });
             let query = query.unwrap_or_default();
             if query.is_empty() && category.is_none() {
                 let entries = state.mission.db()
@@ -249,7 +251,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 return Ok(ToolResult::json_pretty(&entries));
             }
 
-            let top_k = 20usize;
+            let top_k = limit.unwrap_or(10).clamp(1, 50);
 
             // 1. FTS5 ranked IDs (fallback to LIKE for Chinese) — spawn_blocking
             let q = query.clone();
@@ -265,6 +267,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }).await.unwrap_or_default();
 
             // 2. Embedding cosine similarity against kb_search_cache
+            // Use floor of 60 candidates to ensure enough diversity for RRF
+            let fetch_k = (top_k * 3).max(60);
             let query_embedding = state.embedding_service.as_ref()
                 .and_then(|svc| svc.embed(&query));
             let cache = state.kb_search_cache.read().await;
@@ -275,7 +279,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     .collect();
                 scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 scores.iter()
-                    .take(top_k * 3)
+                    .take(fetch_k)
                     .enumerate()
                     .map(|(rank, (idx, sim))| (cache[*idx].0.clone(), rank, *sim))
                     .collect()
@@ -304,8 +308,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 })
                 .collect();
             ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            // Keep enlarged candidate pool (top_k * 3) so temporal decay can resurface evergreen docs
-            ranked.truncate(top_k * 3);
+            // Keep enlarged candidate pool so temporal decay can resurface evergreen docs
+            ranked.truncate(fetch_k);
 
             // 4. Fetch full entries + apply temporal decay on enlarged pool
             let db = state.mission.db();
@@ -322,6 +326,16 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
             // Re-sort by decayed score
             scored_entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            // 4b. RRF drop-off filter: discard entries scoring < 50% of top score
+            // RRF scores are compressed (rank 50 ≈ 55% of rank 1), so 0.5 cuts single-path noise
+            if let Some(max_score) = scored_entries.first().map(|(_, s)| *s) {
+                if max_score > 0.0 {
+                    let threshold = max_score * 0.5;
+                    scored_entries.retain(|(_, s)| *s >= threshold);
+                }
+            }
+
             // Trim to top_k * 2 before MMR (MMR needs a reasonable pool, not all 60)
             scored_entries.truncate(top_k * 2);
 
@@ -347,9 +361,59 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             drop(cache);
 
             let mmr_indices = missiond_core::embedding::mmr_rerank_cosine(&candidates, top_k, 0.7);
-            let results: Vec<missiond_core::types::KnowledgeEntry> = mmr_indices.iter()
+            let mut results: Vec<missiond_core::types::KnowledgeEntry> = mmr_indices.iter()
                 .filter_map(|&i| scored_entries.get(i).map(|(e, _)| e.clone()))
                 .collect();
+
+            // 6. Slim down detail field by category to reduce token usage
+            for entry in &mut results {
+                let cat = entry.category.as_str();
+
+                // architecture:module — strip detail entirely (file/function lists are huge)
+                if cat.starts_with("architecture:module") {
+                    entry.detail = None;
+                    continue;
+                }
+
+                // Core policy/architecture decisions — higher truncation threshold
+                let is_core = cat.starts_with("policy")
+                    || cat.starts_with("memory:architecture")
+                    || cat.starts_with("decision");
+                let max_len: usize = if is_core { 2000 } else { 800 };
+
+                if let Some(detail) = entry.detail.take() {
+                    match detail {
+                        serde_json::Value::String(s) => {
+                            if s.len() > max_len {
+                                // Find a valid char boundary at or before max_len
+                                let mut boundary = max_len;
+                                while boundary > 0 && !s.is_char_boundary(boundary) {
+                                    boundary -= 1;
+                                }
+                                entry.detail = Some(serde_json::Value::String(
+                                    format!("{}... (truncated)", &s[..boundary])
+                                ));
+                            } else {
+                                entry.detail = Some(serde_json::Value::String(s));
+                            }
+                        }
+                        serde_json::Value::Object(obj) => {
+                            let s = serde_json::to_string(&obj).unwrap_or_default();
+                            if s.len() > max_len {
+                                // Don't break JSON structure — replace with hint
+                                entry.detail = Some(serde_json::Value::String(
+                                    format!("[JSON object omitted for brevity, {} chars. Use mission_kb_get(key) for full detail]", s.len())
+                                ));
+                            } else {
+                                entry.detail = Some(serde_json::Value::Object(obj));
+                            }
+                        }
+                        other => {
+                            entry.detail = Some(other);
+                        }
+                    }
+                }
+            }
 
             // Update access stats
             if !results.is_empty() {

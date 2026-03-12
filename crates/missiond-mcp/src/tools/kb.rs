@@ -109,20 +109,26 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "mission_kb_search",
-            "搜索知识库（FTS5 + Embedding 混合 RRF）。\
+            "搜索知识库(FTS5 + Embedding 混合 RRF)。\
              理解子系统架构 → category=\"architecture:summary\" 获取基石描述(L2); \
-             具体问题/经验 → 直接搜索碎片记忆(L4)。不传 query 列出最近条目。",
+             具体问题/经验 → 直接搜索碎片记忆(L4)。不传 query 列出最近条目。\
+             返回结果已按相关性排序并自动瘦身(module detail 省略、低分过滤)。",
             json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "搜索关键词（不传则返回最近条目）",
+                        "description": "搜索关键词(不传则返回最近条目)",
                         "default": ""
                     },
                     "category": {
                         "type": "string",
                         "description": "按分类过滤"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "返回条数上限(默认 10，最大 50)",
+                        "default": 10
                     }
                 }
             }),
