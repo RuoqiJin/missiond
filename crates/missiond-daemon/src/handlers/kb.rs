@@ -262,14 +262,17 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             // 1. FTS5 ranked IDs (fallback to LIKE for Chinese) — spawn_blocking
             let q = query.clone();
             let cat = category.clone();
-            let fts_ranked = state.db_exec.run(move |db| {
-                let mut ranked = db.kb_search_fts_ranked(&q, cat.as_deref())
+            let fts_ranked: Vec<(String, usize, Option<String>)> = state.db_exec.run(move |db| {
+                let ranked = db.kb_search_fts_ranked(&q, cat.as_deref())
                     .unwrap_or_default();
                 if ranked.is_empty() {
-                    ranked = db.kb_search_like_ranked(&q, cat.as_deref())
+                    // like_ranked returns (id, rank) — pad with None snippet
+                    let like = db.kb_search_like_ranked(&q, cat.as_deref())
                         .unwrap_or_default();
+                    Ok(like.into_iter().map(|(id, rank)| (id, rank, None)).collect())
+                } else {
+                    Ok(ranked)
                 }
-                Ok(ranked)
             }).await.unwrap_or_default();
 
             // 2. Embedding cosine similarity against kb_search_cache
@@ -301,9 +304,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
             // 3. RRF merge
             let rrf_k = 60;
+            // Collect FTS snippets for later injection
+            let fts_snippets: std::collections::HashMap<String, String> = fts_ranked.iter()
+                .filter_map(|(id, _, snip)| snip.as_ref().map(|s| (id.clone(), s.clone())))
+                .collect();
             let mut merged: std::collections::HashMap<String, (Option<usize>, Option<usize>, Option<f32>)> =
                 std::collections::HashMap::new();
-            for (id, rank) in &fts_ranked {
+            for (id, rank, _snippet) in &fts_ranked {
                 merged.entry(id.clone()).or_insert((None, None, None)).0 = Some(*rank);
             }
             for (id, rank, sim) in &vec_ranked {
@@ -435,6 +442,15 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                             entry.detail = Some(other);
                         }
                     }
+                }
+            }
+
+            // 7. Inject FTS snippets for entries that had FTS hits
+            // When snippet exists, clear detail to avoid redundant content
+            for entry in &mut results {
+                if let Some(snippet) = fts_snippets.get(&entry.id) {
+                    entry.context_snippet = Some(snippet.clone());
+                    entry.detail = None;
                 }
             }
 

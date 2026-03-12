@@ -66,6 +66,7 @@ impl MissionDB {
                     updated_at: now.clone(),
                     last_accessed_at: None,
                     linked_task_id: None,
+                    context_snippet: None,
                 },
                 action: "rejected".into(),
                 merged_key: None,
@@ -181,6 +182,7 @@ impl MissionDB {
             updated_at: now,
             last_accessed_at: None,
             linked_task_id: None,
+            context_snippet: None,
         };
 
         Self::kb_sync_fts_with_conn(&conn, &entry)?;
@@ -409,7 +411,10 @@ impl MissionDB {
     }
 
     /// FTS5-based search returning ranked (id, rank) pairs for RRF merge.
-    pub fn kb_search_fts_ranked(&self, query: &str, category: Option<&str>) -> DbResult<Vec<(String, usize)>> {
+    /// FTS5 ranked search returning (id, rank, snippet).
+    /// Snippet extracts hit context from detail (col 2) with markdown bold highlights,
+    /// falling back to summary (col 1) if detail has no match.
+    pub fn kb_search_fts_ranked(&self, query: &str, category: Option<&str>) -> DbResult<Vec<(String, usize, Option<String>)>> {
         let fts_query = query.split_whitespace()
             .map(|w| format!("\"{}\"", w.replace('"', "")))
             .collect::<Vec<_>>()
@@ -419,32 +424,65 @@ impl MissionDB {
         }
         let conn = self.read_conn();
         let mut results = Vec::new();
+        // snippet(fts_table, col_idx, open_mark, close_mark, ellipsis, max_tokens)
+        // col 2 = detail, col 1 = summary
+        let snippet_sql = "snippet(knowledge_fts, 2, '**', '**', '...', 40)";
+        let snippet_fallback_sql = "snippet(knowledge_fts, 1, '**', '**', '...', 30)";
         if let Some(cat) = category {
             let like_pattern = format!("{}:%", cat);
-            let mut stmt = conn.prepare(
-                "SELECT k.id FROM knowledge k
+            let sql = format!(
+                "SELECT k.id, {snip}, {snip_fb} FROM knowledge k
                  JOIN knowledge_fts f ON k.rowid = f.rowid
                  WHERE knowledge_fts MATCH ?1 AND (k.category = ?2 OR k.category LIKE ?3)
-                 ORDER BY rank"
-            )?;
+                 ORDER BY rank LIMIT 100",
+                snip = snippet_sql, snip_fb = snippet_fallback_sql
+            );
+            let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map(params![fts_query, cat, like_pattern], |row| {
-                row.get::<_, String>(0)
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })?;
-            for (rank, id) in rows.enumerate() {
-                results.push((id?, rank));
+            for (rank, row) in rows.enumerate() {
+                let (id, detail_snip, summary_snip) = row?;
+                // Use detail snippet if non-empty and contains highlight markers
+                let snippet = if !detail_snip.is_empty() && detail_snip.contains("**") {
+                    Some(detail_snip)
+                } else if !summary_snip.is_empty() && summary_snip.contains("**") {
+                    Some(summary_snip)
+                } else {
+                    None
+                };
+                results.push((id, rank, snippet));
             }
         } else {
-            let mut stmt = conn.prepare(
-                "SELECT k.id FROM knowledge k
+            let sql = format!(
+                "SELECT k.id, {snip}, {snip_fb} FROM knowledge k
                  JOIN knowledge_fts f ON k.rowid = f.rowid
                  WHERE knowledge_fts MATCH ?1
-                 ORDER BY rank"
-            )?;
+                 ORDER BY rank LIMIT 100",
+                snip = snippet_sql, snip_fb = snippet_fallback_sql
+            );
+            let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map(params![fts_query], |row| {
-                row.get::<_, String>(0)
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })?;
-            for (rank, id) in rows.enumerate() {
-                results.push((id?, rank));
+            for (rank, row) in rows.enumerate() {
+                let (id, detail_snip, summary_snip) = row?;
+                let snippet = if !detail_snip.is_empty() && detail_snip.contains("**") {
+                    Some(detail_snip)
+                } else if !summary_snip.is_empty() && summary_snip.contains("**") {
+                    Some(summary_snip)
+                } else {
+                    None
+                };
+                results.push((id, rank, snippet));
             }
         }
         Ok(results)
@@ -1235,6 +1273,7 @@ impl MissionDB {
             updated_at: row.get("updated_at")?,
             last_accessed_at: row.get("last_accessed_at")?,
             linked_task_id: row.get("linked_task_id").unwrap_or(None),
+            context_snippet: None,
         })
     }
 }
