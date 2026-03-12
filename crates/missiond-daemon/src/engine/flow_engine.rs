@@ -198,7 +198,10 @@ pub(crate) async fn execute_flow_task(state: &AppState, task: &missiond_core::ty
             }
 
             // Ensure PTY is running (flow tasks also get model routing)
-            let task_env = determine_llm_env(task);
+            let slot_role = state.mission.get_slot(slot_id)
+                .map(|s| s.config.role.clone())
+                .unwrap_or_default();
+            let task_env = determine_llm_env(task, &slot_role);
             if !ensure_autopilot_pty(state, task, slot_id, task_env).await {
                 return Ok(());
             }
@@ -231,6 +234,18 @@ pub(crate) async fn execute_flow_task(state: &AppState, task: &missiond_core::ty
             };
 
             let timeout_ms = p.timeout_secs() * 1000;
+
+            // Pre-send state verification: confirm slot is Idle before sending.
+            // Guards against race where MCP init began after ensure_autopilot_pty returned.
+            if let Some(pre_send_status) = state.pty.get_status(slot_id).await {
+                if pre_send_status.state != SessionState::Idle {
+                    debug!(task_id = %task.id, phase = %phase_str, slot_id, state = ?pre_send_status.state,
+                        "Flow engine: slot not Idle pre-send, releasing task without penalty");
+                    let _ = state.mission.db().unclaim_board_task(&task.id);
+                    return Ok(());
+                }
+            }
+
             info!(task_id = %task.id, phase = %phase_str, timeout_ms, "Flow engine: sending phase prompt to PTY");
 
             // Emit dispatch event for timeline visibility
@@ -312,23 +327,43 @@ pub(crate) async fn execute_flow_task(state: &AppState, task: &missiond_core::ty
                     }
                 }
                 Err(e) => {
-                    warn!(task_id = %task.id, phase = %phase_str, error = %e, "Flow engine: PTY send failed");
-                    let _ = state.mission.db().add_board_task_note(
-                        &missiond_core::types::AddBoardTaskNoteInput {
-                            task_id: task.id.clone(),
-                            content: format!("❌ Flow Phase {} PTY 失败: {}", p.display_name(), e),
-                            note_type: Some("note".to_string()),
-                            author: Some("flow-engine".to_string()),
-                        },
-                    );
-                    // Revert to open for retry
-                    let _ = state.mission.db().unclaim_board_task(&task.id);
-                    // Track failure
-                    {
-                        let mut fail_map = state.slot_fail_counts.lock().unwrap();
-                        let entry = fail_map.entry(slot_id.to_string()).or_insert((0, 0));
-                        entry.0 += 1;
-                        entry.1 = chrono::Utc::now().timestamp();
+                    // Use {:#} to print full anyhow error chain (prevents .context() from hiding inner message)
+                    let err_msg = format!("{:#}", e);
+                    let is_transient = err_msg.contains("Cannot send message in state:");
+
+                    if is_transient {
+                        // Slot not ready (Confirming/Thinking/ToolRunning) — transient failure.
+                        // Just unclaim, do NOT track as slot failure. Next tick will retry.
+                        debug!(task_id = %task.id, phase = %phase_str, error = %err_msg,
+                            "Flow engine: slot not ready (transient), returning task to queue");
+                        let _ = state.mission.db().add_board_task_note(
+                            &missiond_core::types::AddBoardTaskNoteInput {
+                                task_id: task.id.clone(),
+                                content: format!("⏳ Flow Phase {} 工位暂未就绪（瞬态），已释放等待重试。\n{}", p.display_name(), err_msg),
+                                note_type: Some("note".to_string()),
+                                author: Some("flow-engine".to_string()),
+                            },
+                        );
+                        let _ = state.mission.db().unclaim_board_task(&task.id);
+                    } else {
+                        warn!(task_id = %task.id, phase = %phase_str, error = %err_msg, "Flow engine: PTY send failed");
+                        let _ = state.mission.db().add_board_task_note(
+                            &missiond_core::types::AddBoardTaskNoteInput {
+                                task_id: task.id.clone(),
+                                content: format!("❌ Flow Phase {} PTY 失败: {}", p.display_name(), err_msg),
+                                note_type: Some("note".to_string()),
+                                author: Some("flow-engine".to_string()),
+                            },
+                        );
+                        // Revert to open for retry
+                        let _ = state.mission.db().unclaim_board_task(&task.id);
+                        // Track failure (only real failures)
+                        {
+                            let mut fail_map = state.slot_fail_counts.lock().unwrap();
+                            let entry = fail_map.entry(slot_id.to_string()).or_insert((0, 0));
+                            entry.0 += 1;
+                            entry.1 = chrono::Utc::now().timestamp();
+                        }
                     }
                 }
             }
@@ -357,8 +392,30 @@ pub(crate) async fn ensure_autopilot_pty(state: &AppState, task: &missiond_core:
                 info!(task_id = %task.id, slot_id, new_model = %new_model, "Autopilot: model changed, killing PTY for respawn");
                 let _ = state.pty.kill(slot_id).await;
                 // Fall through to spawn below
-            } else {
+            } else if info.state == SessionState::Idle {
                 return true;
+            } else {
+                // Session exists but is busy (Thinking/ToolRunning/etc.) — wait up to 30s for Idle
+                debug!(task_id = %task.id, slot_id, state = ?info.state, "Autopilot: slot busy, waiting for Idle");
+                for _ in 0..30 {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    if let Some(updated) = state.pty.get_status(slot_id).await {
+                        if updated.state == SessionState::Idle {
+                            return true;
+                        }
+                        if updated.state == SessionState::Exited {
+                            break; // Fall through to spawn below
+                        }
+                    }
+                }
+                // Still not idle after 30s — skip this tick, don't waste retry
+                if let Some(current) = state.pty.get_status(slot_id).await {
+                    if current.state != SessionState::Exited {
+                        debug!(task_id = %task.id, slot_id, state = ?current.state, "Autopilot: slot still busy after 30s, skipping this tick");
+                        return false;
+                    }
+                }
+                // Exited during wait — fall through to spawn
             }
         }
     }

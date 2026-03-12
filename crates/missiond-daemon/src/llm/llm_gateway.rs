@@ -67,14 +67,20 @@ pub(crate) async fn call_gemini_for_flow(state: &AppState, task_id: &str, prompt
     Ok(content)
 }
 
-/// Dynamic LLM model selector based on task characteristics.
+/// Dynamic LLM model selector based on task characteristics and slot role.
 /// Returns env var overrides that get merged into PTY spawn environment.
-pub(crate) fn determine_llm_env(task: &missiond_core::types::BoardTask) -> HashMap<String, String> {
+pub(crate) fn determine_llm_env(task: &missiond_core::types::BoardTask, slot_role: &str) -> HashMap<String, String> {
     let mut envs = HashMap::new();
 
-    // Rule 1: urgent priority / ops / architecture → full-power Sonnet (or Opus)
+    // Coder slots always use Opus for best coding quality
+    if slot_role == "coder" {
+        envs.insert("ANTHROPIC_MODEL".to_string(), "claude-opus-4-6".to_string());
+        return envs;
+    }
+
+    // Rule 1: urgent priority / ops → Opus
     if task.priority == "urgent" || task.category == "ops" {
-        envs.insert("ANTHROPIC_MODEL".to_string(), "claude-sonnet-4-6".to_string());
+        envs.insert("ANTHROPIC_MODEL".to_string(), "claude-opus-4-6".to_string());
     }
     // Rule 2: docs / test / chore → fast & cheap Haiku
     else if task.category == "docs" || task.category == "test" || task.category == "chore" {
