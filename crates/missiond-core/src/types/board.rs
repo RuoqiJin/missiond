@@ -222,7 +222,12 @@ pub struct BoardTask {
     /// Used to find existing open tasks and aggregate repeated alerts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dedupe_key: Option<String>,
+    /// Number of notes attached to this task (populated by list queries)
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub notes_count: i64,
 }
+
+fn is_zero(v: &i64) -> bool { *v == 0 }
 
 fn default_max_retries() -> i64 { 2 }
 
