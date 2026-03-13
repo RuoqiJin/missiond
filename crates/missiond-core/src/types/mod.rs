@@ -97,6 +97,7 @@ mod tests {
             lifecycle: None,
             auto_start: Some(true),
             dangerously_skip_permissions: None,
+            model: None,
             traits: vec![],
             env: None,
         };
@@ -139,7 +140,7 @@ mod tests {
             id: "s1".into(), role: "worker".into(), description: "test".into(),
             engine: CliEngine::ClaudeCode,
             cwd: None, mcp_config: None, lifecycle: None, auto_start: None,
-            dangerously_skip_permissions: None, traits: vec![], env: None,
+            dangerously_skip_permissions: None, model: None, traits: vec![], env: None,
         };
         config.apply_default_traits();
         assert!(config.supports_mcp());
@@ -150,7 +151,7 @@ mod tests {
             id: "s2".into(), role: "vision".into(), description: "test".into(),
             engine: CliEngine::Codex,
             cwd: None, mcp_config: None, lifecycle: None, auto_start: None,
-            dangerously_skip_permissions: None, traits: vec![], env: None,
+            dangerously_skip_permissions: None, model: None, traits: vec![], env: None,
         };
         config.apply_default_traits();
         assert!(config.supports_vision());
@@ -161,7 +162,7 @@ mod tests {
             id: "s3".into(), role: "memory".into(), description: "test".into(),
             engine: CliEngine::ClaudeCode,
             cwd: None, mcp_config: None, lifecycle: None, auto_start: None,
-            dangerously_skip_permissions: None, traits: vec![], env: None,
+            dangerously_skip_permissions: None, model: None, traits: vec![], env: None,
         };
         config.apply_default_traits();
         assert!(config.is_meta_agent());

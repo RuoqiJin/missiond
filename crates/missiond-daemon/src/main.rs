@@ -375,6 +375,7 @@ async fn main() -> Result<()> {
             current_slot_task_id: None,
             is_checkpoint: false,
             checkpoint_message_id: None,
+            pending_served: false,
         })),
         slow_extraction_state: Arc::new(tokio::sync::RwLock::new(ExtractionState {
             phase: ExtractionPhase::Idle,
@@ -386,6 +387,7 @@ async fn main() -> Result<()> {
             current_slot_task_id: None,
             is_checkpoint: false,
             checkpoint_message_id: None,
+            pending_served: false,
         })),
         memory_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         slow_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
@@ -526,6 +528,7 @@ async fn main() -> Result<()> {
                     timeout_secs: None,
                     mcp_config,
                     dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+                    model: slot.config.model.clone(),
                     extra_env,
                 }).await {
                     Ok(_) => {
@@ -1027,6 +1030,7 @@ async fn main() -> Result<()> {
                                     timeout_secs: None,
                                     mcp_config,
                                     dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+                                    model: slot.config.model.clone(),
                                     extra_env,
                                 }).await {
                                     Ok(_) => {

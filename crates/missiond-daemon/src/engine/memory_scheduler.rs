@@ -43,6 +43,7 @@ pub(crate) async fn ensure_memory_slot_by_id(state: &AppState, slot_id: &str) ->
         timeout_secs: Some(120),
         mcp_config,
         dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+        model: slot.config.model.clone(),
         extra_env,
     }).await {
         Ok(_) => {

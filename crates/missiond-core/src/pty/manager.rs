@@ -55,6 +55,8 @@ pub struct PTYSpawnOptions {
     pub mcp_config: Option<PathBuf>,
     /// Skip all permission prompts and trust dialogs
     pub dangerously_skip_permissions: bool,
+    /// Model override (e.g., "sonnet", "opus"). Passed as --model to Claude Code.
+    pub model: Option<String>,
     /// Extra environment variables to inject into the PTY child process
     /// Used for slot tracking (MISSIOND_SLOT_ID, MISSIOND_SESSION_FILE)
     pub extra_env: HashMap<String, String>,
@@ -296,6 +298,7 @@ impl PTYManager {
             engine: slot.engine,
             mcp_config: options.mcp_config.clone(),
             dangerously_skip_permissions: options.dangerously_skip_permissions,
+            model: options.model.clone(),
         })?;
 
         // Set up permission check
@@ -567,6 +570,7 @@ impl PTYManager {
                             mcp_config: restart_options.mcp_config.clone(),
                             dangerously_skip_permissions: restart_options
                                 .dangerously_skip_permissions,
+                            model: restart_options.model.clone(),
                         }) {
                             // Set up permission check
                             let policy = manager_policy.read().await.clone();

@@ -90,6 +90,10 @@ pub struct SlotConfig {
     /// Skip all permission prompts and trust dialogs (--dangerously-skip-permissions)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dangerously_skip_permissions: Option<bool>,
+    /// Model override for the CLI session (e.g., "sonnet", "opus", "haiku").
+    /// Passed as `--model <model>` to Claude Code. Ignored for other engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Declarative traits controlling pipeline behavior.
     /// If empty/absent, defaults are inferred from role at load time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
