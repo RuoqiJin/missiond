@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use missiond_mcp::tools::ToolResult;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::state::AppState;
 
@@ -157,9 +157,19 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "analysis": null,
     });
 
-    // detailed / full mode: placeholder for fine-grained analysis dimensions
+    // detailed / full mode: fine-grained analysis dimensions
     if depth == "detailed" || depth == "full" {
-        result["analysis"] = json!("detailed analysis not yet implemented");
+        let detailed = run_detailed_analysis(state, &session_id).await;
+        match detailed {
+            Ok(d) => {
+                result["fileHeatmap"] = d.file_heatmap;
+                result["serverMap"] = d.server_map;
+                result["errorRecoveryChains"] = d.error_chains;
+            }
+            Err(e) => {
+                result["detailedError"] = json!(format!("{}", e));
+            }
+        }
     }
 
     // full mode: call Gemini for qualitative analysis (with detailed data if available)
@@ -219,6 +229,329 @@ fn safe_truncate(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+// ============ Detailed Analysis ============
+
+struct DetailedAnalysis {
+    file_heatmap: Value,
+    server_map: Value,
+    error_chains: Value,
+}
+
+/// Build detailed analysis: file heatmap, server map, error recovery chains
+async fn run_detailed_analysis(state: &AppState, session_id: &str) -> Result<DetailedAnalysis> {
+    let db = state.mission.db();
+
+    let tool_calls = db
+        .get_tool_calls_for_detailed_analysis(session_id)
+        .map_err(|e| anyhow!("DB error: {}", e))?;
+
+    let timeline = db
+        .get_tool_calls_with_status_timeline(session_id)
+        .map_err(|e| anyhow!("DB error: {}", e))?;
+
+    let file_heatmap = build_file_heatmap(&tool_calls);
+    let server_map = build_server_map(&tool_calls);
+    let error_chains = build_error_recovery_chains(&timeline);
+
+    Ok(DetailedAnalysis {
+        file_heatmap,
+        server_map,
+        error_chains,
+    })
+}
+
+/// Extract file paths from tool call input_summary and track operations
+fn build_file_heatmap(calls: &[(String, String, String, String)]) -> Value {
+    // Track per-file: reads, edits, writes, and reread-after-edit
+    struct FileStats {
+        reads: u32,
+        edits: u32,
+        writes: u32,
+        rereads_after_edit: u32,
+        last_op: String,
+    }
+
+    let mut files: BTreeMap<String, FileStats> = BTreeMap::new();
+
+    for (tool_name, input_summary, _output, _status) in calls {
+        let path = match tool_name.as_str() {
+            "Read" | "read" => extract_file_path(input_summary),
+            "Edit" | "edit" => extract_file_path(input_summary),
+            "Write" | "write" => extract_file_path(input_summary),
+            "Glob" | "glob" | "Grep" | "grep" => None, // skip search tools
+            _ => None,
+        };
+        if let Some(path) = path {
+            let short = shorten_path(&path);
+            let stats = files.entry(short).or_insert(FileStats {
+                reads: 0,
+                edits: 0,
+                writes: 0,
+                rereads_after_edit: 0,
+                last_op: String::new(),
+            });
+            match tool_name.as_str() {
+                "Read" | "read" => {
+                    if stats.last_op == "edit" || stats.last_op == "write" {
+                        stats.rereads_after_edit += 1;
+                    }
+                    stats.reads += 1;
+                    stats.last_op = "read".to_string();
+                }
+                "Edit" | "edit" => {
+                    stats.edits += 1;
+                    stats.last_op = "edit".to_string();
+                }
+                "Write" | "write" => {
+                    stats.writes += 1;
+                    stats.last_op = "write".to_string();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Sort by total ops descending, take top 15
+    let mut sorted: Vec<_> = files.into_iter().collect();
+    sorted.sort_by(|a, b| {
+        let total_a = a.1.reads + a.1.edits + a.1.writes;
+        let total_b = b.1.reads + b.1.edits + b.1.writes;
+        total_b.cmp(&total_a)
+    });
+    sorted.truncate(15);
+
+    let items: Vec<Value> = sorted
+        .iter()
+        .map(|(path, s)| {
+            let total = s.reads + s.edits + s.writes;
+            let churn = if total > 0 {
+                s.rereads_after_edit as f64 / total as f64
+            } else {
+                0.0
+            };
+            json!({
+                "file": path,
+                "reads": s.reads,
+                "edits": s.edits,
+                "writes": s.writes,
+                "rereadsAfterEdit": s.rereads_after_edit,
+                "totalOps": total,
+                "churnRatio": format!("{:.2}", churn),
+            })
+        })
+        .collect();
+    json!(items)
+}
+
+/// Extract server/agent operations from xjp_agent_exec calls
+fn build_server_map(calls: &[(String, String, String, String)]) -> Value {
+    // Track per-server: command categories
+    let mut servers: HashMap<String, HashMap<String, u32>> = HashMap::new();
+
+    for (tool_name, input_summary, _output, _status) in calls {
+        if !tool_name.contains("agent_exec")
+            && !tool_name.contains("agent_file")
+            && !tool_name.contains("agent_container")
+            && !tool_name.contains("agent_service")
+            && !tool_name.contains("agent_logs")
+        {
+            continue;
+        }
+        let server = extract_field(input_summary, "agent_url")
+            .or_else(|| extract_field(input_summary, "agentUrl"))
+            .or_else(|| extract_field(input_summary, "agent"))
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let category = if tool_name.contains("container") {
+            "docker"
+        } else if tool_name.contains("service") {
+            "service"
+        } else if tool_name.contains("logs") {
+            "logs"
+        } else {
+            // Classify command from input_summary
+            let cmd = extract_field(input_summary, "command").unwrap_or_default();
+            classify_command(&cmd)
+        };
+
+        *servers
+            .entry(server)
+            .or_default()
+            .entry(category.to_string())
+            .or_default() += 1;
+    }
+
+    let items: Vec<Value> = servers
+        .iter()
+        .map(|(server, cmds)| {
+            let total: u32 = cmds.values().sum();
+            json!({
+                "server": server,
+                "totalOps": total,
+                "commands": cmds,
+            })
+        })
+        .collect();
+    json!(items)
+}
+
+/// Trace error→recovery sequences and classify strategies
+fn build_error_recovery_chains(timeline: &[(String, String, String, String)]) -> Value {
+    let mut chains: Vec<Value> = Vec::new();
+    let mut i = 0;
+
+    while i < timeline.len() {
+        let (ref tool, ref status, ref input, ref ts) = timeline[i];
+        if status != "error" {
+            i += 1;
+            continue;
+        }
+
+        // Found an error; trace recovery
+        let error_tool = tool.clone();
+        let error_ts = ts.clone();
+        let error_input = safe_truncate(input, 200).to_string();
+        let mut recovery_steps: Vec<Value> = Vec::new();
+        let mut j = i + 1;
+        let mut resolved = false;
+
+        // Look ahead up to 20 steps for recovery
+        while j < timeline.len() && j - i <= 20 {
+            let (ref rt, ref rs, ref ri, ref rts) = timeline[j];
+            recovery_steps.push(json!({
+                "tool": rt,
+                "status": rs,
+                "input": safe_truncate(ri, 100),
+                "timestamp": rts,
+            }));
+            // Resolution: same tool succeeds, or a different fix tool succeeds
+            if rs == "success" && (rt == &error_tool || rt == "Edit" || rt == "Write" || rt == "edit" || rt == "write") {
+                resolved = true;
+                break;
+            }
+            j += 1;
+        }
+
+        let strategy = classify_recovery_strategy(&error_tool, &recovery_steps, resolved);
+        let steps_count = recovery_steps.len();
+
+        chains.push(json!({
+            "errorTool": error_tool,
+            "errorInput": error_input,
+            "errorTimestamp": error_ts,
+            "recoverySteps": steps_count,
+            "resolved": resolved,
+            "strategy": strategy,
+        }));
+
+        i = if resolved { j + 1 } else { j.max(i + 1) };
+    }
+
+    // Sort by recovery steps descending (costliest first), take top 10
+    chains.sort_by(|a, b| {
+        let sa = a["recoverySteps"].as_u64().unwrap_or(0);
+        let sb = b["recoverySteps"].as_u64().unwrap_or(0);
+        sb.cmp(&sa)
+    });
+    chains.truncate(10);
+    json!(chains)
+}
+
+/// Classify recovery strategy
+fn classify_recovery_strategy(error_tool: &str, steps: &[Value], resolved: bool) -> &'static str {
+    if !resolved && steps.len() > 10 {
+        return "flailing";
+    }
+    if !resolved {
+        return "abandoned";
+    }
+    if steps.len() <= 2 {
+        return "quick_fix";
+    }
+    // Check if it's a blind retry (same tool repeated)
+    let retry_count = steps
+        .iter()
+        .filter(|s| s["tool"].as_str() == Some(error_tool))
+        .count();
+    if retry_count > steps.len() / 2 {
+        return "blind_retry";
+    }
+    "diagnose_then_fix"
+}
+
+/// Extract file path from input_summary (e.g., "file_path: /foo/bar.rs, ...")
+fn extract_file_path(input: &str) -> Option<String> {
+    // Try "file_path: /..." pattern
+    if let Some(idx) = input.find("file_path:") {
+        let rest = &input[idx + 10..];
+        let rest = rest.trim_start();
+        let end = rest.find(',').or_else(|| rest.find('}')).unwrap_or(rest.len());
+        let path = rest[..end].trim().trim_matches('"');
+        if !path.is_empty() && path.starts_with('/') {
+            return Some(path.to_string());
+        }
+    }
+    // Try "path: /..." pattern
+    if let Some(idx) = input.find("path:") {
+        let rest = &input[idx + 5..];
+        let rest = rest.trim_start();
+        let end = rest.find(',').or_else(|| rest.find('}')).unwrap_or(rest.len());
+        let path = rest[..end].trim().trim_matches('"');
+        if !path.is_empty() && path.starts_with('/') {
+            return Some(path.to_string());
+        }
+    }
+    None
+}
+
+/// Extract a key-value field from input_summary
+fn extract_field(input: &str, field: &str) -> Option<String> {
+    let pattern = format!("{}:", field);
+    if let Some(idx) = input.find(&pattern) {
+        let rest = &input[idx + pattern.len()..];
+        let rest = rest.trim_start();
+        let end = rest.find(',').or_else(|| rest.find('}')).unwrap_or(rest.len());
+        let val = rest[..end].trim().trim_matches('"').trim();
+        if !val.is_empty() {
+            return Some(val.to_string());
+        }
+    }
+    None
+}
+
+/// Shorten absolute paths for readability
+fn shorten_path(path: &str) -> String {
+    // Remove common prefixes
+    for prefix in &["/Users/jinchen/Projects/", "/home/"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            return rest.to_string();
+        }
+    }
+    path.to_string()
+}
+
+/// Classify a shell command into a category
+fn classify_command(cmd: &str) -> &'static str {
+    let cmd_lower = cmd.to_lowercase();
+    if cmd_lower.contains("docker") || cmd_lower.contains("container") {
+        "docker"
+    } else if cmd_lower.contains("curl") || cmd_lower.contains("wget") {
+        "http"
+    } else if cmd_lower.contains("git") {
+        "git"
+    } else if cmd_lower.contains("cargo") || cmd_lower.contains("npm") || cmd_lower.contains("make") {
+        "build"
+    } else if cmd_lower.contains("cat") || cmd_lower.contains("ls") || cmd_lower.contains("find") {
+        "inspect"
+    } else if cmd_lower.contains("ssh") || cmd_lower.contains("scp") {
+        "ssh"
+    } else if cmd_lower.contains("systemctl") || cmd_lower.contains("service") {
+        "service"
+    } else {
+        "other"
+    }
+}
+
 /// Full analysis: compose prompt from aggregated data + Gemini
 async fn run_full_analysis(state: &AppState, session_id: &str, stats: &Value) -> Result<Value> {
     let db = state.mission.db();
@@ -265,6 +598,25 @@ async fn run_full_analysis(state: &AppState, session_id: &str, stats: &Value) ->
         .map(|t| t.title)
         .unwrap_or_default();
 
+    // Build detailed sections for prompt (if available)
+    let file_heatmap_str = stats.get("fileHeatmap")
+        .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+        .filter(|s| s != "[]" && s != "null")
+        .map(|s| format!("\n### 文件热力图（操作频次/Churn 比）\n{s}\n"))
+        .unwrap_or_default();
+
+    let server_map_str = stats.get("serverMap")
+        .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+        .filter(|s| s != "[]" && s != "null")
+        .map(|s| format!("\n### 服务器操作分布\n{s}\n"))
+        .unwrap_or_default();
+
+    let error_chains_str = stats.get("errorRecoveryChains")
+        .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+        .filter(|s| s != "[]" && s != "null")
+        .map(|s| format!("\n### 错误恢复链（策略分类）\n{s}\n"))
+        .unwrap_or_default();
+
     // Compose prompt
     let prompt = format!(
         r#"## 会话复盘分析请求
@@ -293,12 +645,14 @@ async fn run_full_analysis(state: &AppState, session_id: &str, stats: &Value) ->
 
 ### 错误样本
 {error_samples_str}
-
+{file_heatmap_str}{server_map_str}{error_chains_str}
 请分析:
 1. 主要弯路及根因 (每个弯路 1 行)
 2. 时间黑洞的优化建议
-3. 可固化为 MCP 工具或自动化的重复操作
-4. 对 MissionD 基建的改进建议
+3. 文件 Churn 高的根因及改进建议
+4. 错误恢复策略评估（哪些是 flailing、哪些可自动化）
+5. 可固化为 MCP 工具或自动化的重复操作
+6. 对 MissionD 基建的改进建议
 
 返回 JSON: {{"findings": ["..."], "recommendations": ["..."], "automatable": ["..."]}}"#,
         task_title = if task_title.is_empty() { "(无关联任务)" } else { &task_title },
