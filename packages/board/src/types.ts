@@ -1,6 +1,6 @@
 export type TaskStatus = 'open' | 'running' | 'verifying' | 'done' | 'blocked' | 'failed' | 'skipped';
 export type TaskPriority = 'high' | 'medium' | 'low';
-export type TaskCategory = 'deploy' | 'dev' | 'infra' | 'test' | 'research' | 'other';
+export type TaskCategory = 'deploy' | 'dev' | 'infra' | 'test' | 'research' | 'diagnosis' | 'other';
 export type GroupBy = 'none' | 'category' | 'priority' | 'project';
 
 export type FlowPhase = 'investigate' | 'consult_gemini_1' | 'plan' | 'consult_gemini_2' | 'execute' | 'finalize' | 'done';
@@ -55,6 +55,7 @@ export interface TaskFiltersState {
   search: string;
   category: TaskCategory | 'all';
   priority: TaskPriority | 'all';
+  status: TaskStatus | 'all' | 'active';
 }
 
 // ============ Board Task Notes ============

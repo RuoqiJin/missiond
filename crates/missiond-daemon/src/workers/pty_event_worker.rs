@@ -193,6 +193,7 @@ async fn handle_memory_lane_state(
                 es.current_slot_task_id = None;
                 es.is_checkpoint = false;
                 es.checkpoint_message_id = None;
+                es.pending_served = false;
                 s.event_bus.publish(event_bus::DaemonEvent::SlotBecameIdle { slot_id: slot_id.to_string() });
             }
         }

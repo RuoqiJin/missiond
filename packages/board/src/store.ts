@@ -52,7 +52,7 @@ export const useTaskCenterStore = create<TaskCenterState>()(
     tasks: [],
     isLoading: false,
     isSynced: false,
-    filters: { search: '', category: 'all', priority: 'all' },
+    filters: { search: '', category: 'all', priority: 'all', status: 'active' },
     groupBy: 'category',
     showDone: false,
     showHidden: false,

@@ -9,7 +9,17 @@ import {
 } from '@/components/ui/select';
 import { useTaskCenterStore } from '../store';
 import { CATEGORY_CONFIG, PRIORITY_CONFIG, GROUP_OPTIONS } from '../constants';
-import type { TaskCategory, TaskPriority, GroupBy } from '../types';
+import type { TaskCategory, TaskPriority, TaskStatus, GroupBy } from '../types';
+
+const STATUS_OPTIONS: { value: TaskStatus | 'all' | 'active'; label: string }[] = [
+  { value: 'active', label: '进行中' },
+  { value: 'all', label: '全部状态' },
+  { value: 'open', label: '待办' },
+  { value: 'running', label: '执行中' },
+  { value: 'done', label: '已完成' },
+  { value: 'failed', label: '失败' },
+  { value: 'blocked', label: '阻塞' },
+];
 
 export function TaskFilters() {
   const filters = useTaskCenterStore((s) => s.filters);
@@ -38,6 +48,17 @@ export function TaskFilters() {
             <SelectItem key={opt.value} value={opt.value} className="text-white focus:bg-neutral-700 focus:text-white">
               {opt.label}
             </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+
+      <Select value={filters.status || 'active'} onValueChange={(v) => setFilters({ status: v as TaskStatus | 'all' | 'active' })}>
+        <SelectTrigger className="bg-neutral-900 border-neutral-800 text-white h-8 text-sm w-full sm:w-[110px]">
+          <SelectValue placeholder="进行中" />
+        </SelectTrigger>
+        <SelectContent className="bg-neutral-800 border-neutral-700">
+          {STATUS_OPTIONS.map((opt) => (
+            <SelectItem key={opt.value} value={opt.value} className="text-white focus:bg-neutral-700 focus:text-white">{opt.label}</SelectItem>
           ))}
         </SelectContent>
       </Select>

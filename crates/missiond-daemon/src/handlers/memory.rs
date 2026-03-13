@@ -17,6 +17,19 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         // Message-level pipeline tracking: returns pending messages with IDs.
         // State auto-committed by Daemon on extraction completion — no manual done() needed.
         "mission_memory_pending" | "mission_memory_pending_user" => {
+            // De-bounce guard: if realtime extraction is in-flight and we already served
+            // pending messages in this cycle, return early to prevent the agent from
+            // polling the same messages repeatedly (watermark advances only on completion).
+            {
+                let es = state.extraction_state.read().await;
+                if es.pending_served && matches!(es.phase, crate::state::ExtractionPhase::Sending | crate::state::ExtractionPhase::WaitingForSlotIdle) {
+                    return Ok(ToolResult::text(
+                        "本批次内容已获取。请分析已获取的消息后输出总结即可。\n\
+                         ⚠️ 水位线由系统自动管理，重复调用不会返回新消息。下一批将在本次处理完成后自动调度。"
+                    ));
+                }
+            }
+
             const PENDING_MSG_LIMIT: usize = 60;
             // spawn_blocking: complex join + watermark query
             let pending = state.db_exec.run(move |db| db.get_pending_realtime_messages_with_limit(PENDING_MSG_LIMIT))
@@ -82,6 +95,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                  - 存入前用 mission_kb_search 检查去重\n\n",
                 batch_id, session_count, msg_count, user_count, truncated_note,
             );
+
+            // Set latch: mark pending as served for this extraction cycle
+            {
+                let mut es = state.extraction_state.write().await;
+                if matches!(es.phase, crate::state::ExtractionPhase::Sending | crate::state::ExtractionPhase::WaitingForSlotIdle) {
+                    es.pending_served = true;
+                }
+            }
 
             Ok(ToolResult::text(&format!("{}{}", header, output)))
         }

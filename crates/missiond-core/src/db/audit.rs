@@ -769,7 +769,8 @@ impl MissionDB {
         Ok(count > 0)
     }
 
-    /// Get sessions needing retrospective (completed, not yet analyzed, meeting threshold)
+    /// Get sessions needing retrospective (completed, not yet analyzed, meeting threshold).
+    /// Belt-and-suspenders: excludes meta-agent sessions by both conversation_type AND slot_id prefix.
     pub fn get_sessions_needing_retrospective(&self) -> DbResult<Vec<(String, i64, i64, f64)>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
@@ -782,6 +783,11 @@ impl MissionDB {
              FROM conversations c
              WHERE c.status = 'completed'
                AND c.conversation_type = 'user'
+               AND (c.slot_id IS NULL OR (
+                   c.slot_id NOT LIKE 'slot-memory%'
+                   AND c.slot_id NOT LIKE 'slot-diagnosis%'
+                   AND c.slot_id NOT LIKE 'agent-%'
+               ))
                AND c.id NOT IN (SELECT session_id FROM retrospective_results)
                AND (
                    c.message_count > 100
@@ -792,6 +798,47 @@ impl MissionDB {
              LIMIT 5"
         )?;
         let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })?;
+        let mut result = Vec::new();
+        for r in rows { result.push(r?); }
+        Ok(result)
+    }
+
+    /// Get ALL user sessions since a given time for retrospective backfill (no threshold filtering).
+    /// Skips sessions that already have retrospective results unless `force` is true.
+    /// Belt-and-suspenders: excludes meta-agent sessions by both conversation_type AND slot_id prefix.
+    pub fn get_sessions_for_retro_backfill(&self, since: &str, force: bool) -> DbResult<Vec<(String, i64, i64, f64)>> {
+        let conn = self.read_conn();
+        let exclude_clause = if force { "" } else {
+            "AND c.id NOT IN (SELECT session_id FROM retrospective_results)"
+        };
+        let sql = format!(
+            "SELECT c.id, c.message_count,
+                    COALESCE((SELECT COUNT(*) FROM conversation_tool_calls tc WHERE tc.session_id = c.id), 0) as tool_count,
+                    COALESCE(
+                        (SELECT 100.0 * SUM(CASE WHEN tc2.status='error' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)
+                         FROM conversation_tool_calls tc2 WHERE tc2.session_id = c.id), 0
+                    ) as error_rate
+             FROM conversations c
+             WHERE c.conversation_type = 'user'
+               AND (c.slot_id IS NULL OR (
+                   c.slot_id NOT LIKE 'slot-memory%'
+                   AND c.slot_id NOT LIKE 'slot-diagnosis%'
+                   AND c.slot_id NOT LIKE 'agent-%'
+               ))
+               AND c.message_count >= 6
+               AND c.started_at >= ?1
+               {exclude_clause}
+             ORDER BY c.started_at ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![since], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,

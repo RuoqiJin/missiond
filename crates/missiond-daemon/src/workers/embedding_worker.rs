@@ -230,17 +230,24 @@ impl missiond_core::embedding::EmbeddingProvider for OllamaProvider {
 }
 
 /// Initialize embedding provider: try Ollama first (better quality), fall back to FastEmbed.
+///
+/// Set `MISSIOND_DISABLE_EMBEDDING=1` to skip entirely (useful on CPUs without AVX2).
 
 pub(crate) async fn init_embedding_provider(
     http_client: &reqwest::Client,
 ) -> Option<Arc<dyn missiond_core::embedding::EmbeddingProvider>> {
+    if std::env::var("MISSIOND_DISABLE_EMBEDDING").is_ok() {
+        info!("Embedding disabled via MISSIOND_DISABLE_EMBEDDING");
+        return None;
+    }
+
     // Try Ollama first
     if let Some(ollama) = OllamaProvider::try_new(http_client).await {
         return Some(Arc::new(ollama));
     }
     info!("Ollama not available, falling back to FastEmbed");
 
-    // Fallback to FastEmbed
+    // Fallback to FastEmbed (requires AVX2)
     missiond_core::embedding::EmbeddingService::new()
         .map(|svc| Arc::new(svc) as Arc<dyn missiond_core::embedding::EmbeddingProvider>)
 }

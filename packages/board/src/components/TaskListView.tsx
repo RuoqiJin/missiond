@@ -196,6 +196,13 @@ export function TaskListView() {
       }
       if (filters.category !== 'all' && task.category !== filters.category) return false;
       if (filters.priority !== 'all' && task.priority !== filters.priority) return false;
+      // Status filter: 'active' = all non-done/non-skipped (default), 'all' = everything, or specific status
+      const statusFilter = filters.status || 'active';
+      if (statusFilter === 'active') {
+        if (task.status === 'done') return false;
+      } else if (statusFilter !== 'all') {
+        if (task.status !== statusFilter) return false;
+      }
       return true;
     });
   }, [tasks, filters]);
@@ -213,16 +220,21 @@ export function TaskListView() {
   const { roots, childrenMap, doneCountMap } = useMemo(() => buildTree(filtered), [filtered]);
 
   const ACTIVE_STATUSES = new Set(['open', 'running', 'verifying', 'blocked', 'failed']);
+  const statusFilter = filters.status || 'active';
 
-  const openRoots = useMemo(() =>
-    roots.filter((t) => ACTIVE_STATUSES.has(t.status)).sort((a, b) => a.order - b.order),
-    [roots],
-  );
+  const openRoots = useMemo(() => {
+    // When filtering by specific status (including 'done'), show all matching in main list
+    if (statusFilter !== 'active') {
+      return roots.sort((a, b) => a.order - b.order);
+    }
+    return roots.filter((t) => ACTIVE_STATUSES.has(t.status)).sort((a, b) => a.order - b.order);
+  }, [roots, statusFilter]);
 
-  const doneRoots = useMemo(() =>
-    roots.filter((t) => t.status === 'done'),
-    [roots],
-  );
+  const doneRoots = useMemo(() => {
+    // Hide done section when explicitly filtering by status
+    if (statusFilter !== 'active') return [];
+    return roots.filter((t) => t.status === 'done');
+  }, [roots, statusFilter]);
 
   const groups = useMemo(() => groupTasks(openRoots, groupBy), [openRoots, groupBy]);
   const allRootIds = useMemo(() => openRoots.map((t) => t.id), [openRoots]);

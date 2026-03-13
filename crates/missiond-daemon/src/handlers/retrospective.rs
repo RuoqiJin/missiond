@@ -10,6 +10,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     if name == "mission_retrospective_list" {
         return handle_list(state, args).await;
     }
+    if name == "mission_retrospective_backfill" {
+        return handle_backfill(state, args).await;
+    }
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -20,6 +23,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     }
     let Args { session_id, depth } = serde_json::from_value(args)?;
     let depth = depth.as_deref().unwrap_or("quick");
+
+    run_analysis(state, &session_id, depth).await
+}
+
+/// Core analysis logic — called by both the MCP handler and retro_worker.
+/// Factored out of `handle()` to break circular Send dependency
+/// (handle → handle_backfill → spawn(backfill) → analyze_session → handle).
+pub(crate) async fn run_analysis(state: &AppState, session_id: &str, depth: &str) -> Result<ToolResult> {
     let db = state.mission.db();
 
     // 1. Session meta
@@ -758,4 +769,45 @@ async fn handle_list(state: &AppState, args: Value) -> Result<ToolResult> {
         "results": items,
         "count": items.len(),
     })))
+}
+
+/// Handle mission_retrospective_backfill — analyze ALL sessions since a given time.
+async fn handle_backfill(state: &AppState, args: Value) -> Result<ToolResult> {
+    #[derive(Deserialize)]
+    struct Args {
+        since: String,
+    }
+    let Args { since } = serde_json::from_value(args)?;
+
+    // Count sessions first (before spawning)
+    let count = state.mission.db()
+        .get_sessions_for_retro_backfill(&since, false)
+        .map(|v| v.len())
+        .unwrap_or(0);
+
+    if count == 0 {
+        return Ok(ToolResult::text("没有需要回填的会话（全部已有复盘结果或无符合条件的会话）。"));
+    }
+
+    let msg = format!(
+        "回填任务已启动（后台执行）。预计分析 {} 个会话（since: {}）。每个间隔 10s，总耗时约 {} 分钟。",
+        count, since, (count * 10) / 60 + 1
+    );
+
+    // Spawn background task — calls retro_worker::backfill which uses run_analysis
+    // (not handle), breaking the circular Send dependency.
+    let state_clone = state.clone();
+    let since_clone = since.clone();
+    tokio::spawn(async move {
+        match crate::workers::retro_worker::backfill(&state_clone, &since_clone).await {
+            Ok((analyzed, skipped)) => {
+                tracing::info!(analyzed, skipped, since = %since_clone, "Retrospective backfill completed");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, since = %since_clone, "Retrospective backfill failed");
+            }
+        }
+    });
+
+    Ok(ToolResult::text(&msg))
 }

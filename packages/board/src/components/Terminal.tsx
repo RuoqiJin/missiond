@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback, Component, type ReactNode } from 'react';
 
-const WS_PORT = 9120;
+const WS_PORT = parseInt(process.env.NEXT_PUBLIC_WS_PORT || '9120', 10);
 
 interface TerminalProps {
   slotId: string;
@@ -171,7 +171,8 @@ function TerminalInner({ slotId }: TerminalProps) {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     setWsStatus('connecting');
-    const ws = new WebSocket(`ws://localhost:${WS_PORT}/pty/${slot}`);
+    const wsHost = process.env.NEXT_PUBLIC_WS_HOST || window.location.hostname;
+    const ws = new WebSocket(`ws://${wsHost}:${WS_PORT}/pty/${slot}`);
     wsRef.current = ws;
 
     ws.onopen = () => {
