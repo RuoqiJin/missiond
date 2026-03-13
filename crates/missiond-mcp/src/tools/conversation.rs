@@ -179,8 +179,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "depth": {
                         "type": "string",
-                        "enum": ["quick", "full"],
-                        "description": "分析深度: quick(默认,纯 SQL) / full(+ Gemini 根因分析)"
+                        "enum": ["quick", "detailed", "full"],
+                        "description": "分析深度: quick(默认,纯 SQL) / detailed(+ 文件热力图/服务器分布/错误恢复链) / full(detailed + Gemini 根因分析)"
                     }
                 },
                 "required": ["sessionId"]

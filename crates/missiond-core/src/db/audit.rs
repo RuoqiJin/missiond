@@ -699,6 +699,46 @@ impl MissionDB {
         }
     }
 
+    /// Get tool calls with input_summary for detailed analysis (file paths, server names)
+    pub fn get_tool_calls_for_detailed_analysis(&self, session_id: &str) -> DbResult<Vec<(String, String, String, String)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT tool_name, COALESCE(input_summary, ''), COALESCE(output_summary, ''), status
+             FROM conversation_tool_calls WHERE session_id = ?1 ORDER BY rowid ASC"
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut result = Vec::new();
+        for r in rows { result.push(r?); }
+        Ok(result)
+    }
+
+    /// Get tool calls with timestamps for error recovery chain analysis
+    pub fn get_tool_calls_with_status_timeline(&self, session_id: &str) -> DbResult<Vec<(String, String, String, String)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT tool_name, status, COALESCE(input_summary, ''), timestamp
+             FROM conversation_tool_calls WHERE session_id = ?1 ORDER BY rowid ASC"
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut result = Vec::new();
+        for r in rows { result.push(r?); }
+        Ok(result)
+    }
+
     // ============ Retrospective Results Persistence ============
 
     /// Save retrospective quick stats for a session
