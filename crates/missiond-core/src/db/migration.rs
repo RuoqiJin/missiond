@@ -1130,6 +1130,18 @@ impl MissionDB {
             );"
         )?;
 
+        // ── Retrospective Results — session performance analysis ──
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS retrospective_results (
+                session_id TEXT PRIMARY KEY,
+                trigger_reason TEXT NOT NULL,
+                quick_stats TEXT NOT NULL,
+                full_analysis TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_retro_created ON retrospective_results(created_at);"
+        )?;
+
         Ok(())
     }
 }

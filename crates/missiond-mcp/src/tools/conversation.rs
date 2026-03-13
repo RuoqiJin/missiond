@@ -166,6 +166,41 @@ pub fn definitions() -> Vec<ToolDefinition> {
             }),
         ),
 
+        // ===== Retrospective Analysis =====
+        ToolDefinition::new(
+            "mission_retrospective",
+            "会话复盘分析。quick 模式纯 Rust SQL 聚合（零 LLM），返回工具频次/时间黑洞/重复模式/N-Gram 弯路/高错误率。full 模式额外调 Gemini 做根因分析。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "sessionId": {
+                        "type": "string",
+                        "description": "要复盘的会话 ID"
+                    },
+                    "depth": {
+                        "type": "string",
+                        "enum": ["quick", "full"],
+                        "description": "分析深度: quick(默认,纯 SQL) / full(+ Gemini 根因分析)"
+                    }
+                },
+                "required": ["sessionId"]
+            }),
+        ),
+
+        ToolDefinition::new(
+            "mission_retrospective_list",
+            "列出已完成的复盘结果。显示会话 ID、触发原因、分析时间。用于查看后台 RetroWorker 的自动复盘产出。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "最大返回数（默认 10）"
+                    }
+                }
+            }),
+        ),
+
         // ===== Activity Report =====
         ToolDefinition::new(
             "mission_activity_report",
