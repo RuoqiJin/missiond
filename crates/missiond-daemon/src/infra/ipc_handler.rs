@@ -70,7 +70,8 @@ pub(crate) async fn handle_ipc_request(state: AppState, request: Request) -> Res
                             Search Path: 1. L2(Arch): kb_search(category=\"architecture:summary\") \
                             2. L3(Code): code_search / beacon_map \
                             3. L4(Details): kb_search for bugs/policies. \
-                            Use mission_kb_search before guessing. Use mission_kb_remember when learning.",
+                            Use mission_kb_search before guessing. Use mission_kb_remember when learning. \
+                            会话复盘 → mission_retrospective(sessionId, depth=quick/detailed/full)，不要手动拼 audit_trace。",
                             parts.join(", ")
                         )
                     }
