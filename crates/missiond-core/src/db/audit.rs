@@ -543,6 +543,269 @@ impl MissionDB {
         Ok(())
     }
 
+    // ============ Retrospective Analysis ============
+
+    /// Get retrospective stats for a session: tool frequency, avg duration, error rates
+    pub fn get_retrospective_tool_stats(&self, session_id: &str, limit: i64) -> DbResult<Vec<(String, i64, i64, i64, f64)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT tool_name,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
+                    SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_count,
+                    COALESCE(AVG(duration_ms), 0) as avg_duration
+             FROM conversation_tool_calls WHERE session_id = ?1
+             GROUP BY tool_name ORDER BY total DESC LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(params![session_id, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, f64>(4)?,
+            ))
+        })?;
+        let mut stats = Vec::new();
+        for r in rows { stats.push(r?); }
+        Ok(stats)
+    }
+
+    /// Get session meta: total calls, total duration, unique tools, compaction count
+    pub fn get_retrospective_meta(&self, session_id: &str) -> DbResult<(i64, i64, i64, i64)> {
+        let conn = self.read_conn();
+        let (total_calls, total_duration, unique_tools): (i64, i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(duration_ms), 0), COUNT(DISTINCT tool_name)
+             FROM conversation_tool_calls WHERE session_id = ?1",
+            params![session_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let compact_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM conversation_events
+             WHERE session_id = ?1 AND event_type = 'compact_boundary'",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        Ok((total_calls, total_duration, unique_tools, compact_count))
+    }
+
+    /// Detect consecutive repeat patterns (Gaps-and-Islands)
+    pub fn get_retrospective_repeat_patterns(&self, session_id: &str, min_streak: i64) -> DbResult<Vec<(String, i64, String, String)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "WITH numbered AS (
+                SELECT tool_name, timestamp,
+                       ROW_NUMBER() OVER (ORDER BY rowid) as rn,
+                       ROW_NUMBER() OVER (PARTITION BY tool_name ORDER BY rowid) as grn
+                FROM conversation_tool_calls WHERE session_id = ?1
+            )
+            SELECT tool_name, COUNT(*) as streak, MIN(timestamp) as start_t, MAX(timestamp) as end_t
+            FROM numbered GROUP BY tool_name, (rn - grn)
+            HAVING COUNT(*) >= ?2 ORDER BY streak DESC"
+        )?;
+        let rows = stmt.query_map(params![session_id, min_streak], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut patterns = Vec::new();
+        for r in rows { patterns.push(r?); }
+        Ok(patterns)
+    }
+
+    /// Get ordered tool names for N-Gram analysis
+    pub fn get_tool_name_sequence(&self, session_id: &str) -> DbResult<Vec<String>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT tool_name FROM conversation_tool_calls WHERE session_id = ?1 ORDER BY rowid ASC"
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| row.get::<_, String>(0))?;
+        let mut seq = Vec::new();
+        for r in rows { seq.push(r?); }
+        Ok(seq)
+    }
+
+    /// Get high error rate tools
+    pub fn get_retrospective_high_error_tools(&self, session_id: &str, min_error_rate: f64) -> DbResult<Vec<(String, f64, i64)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT tool_name,
+                    ROUND(100.0 * SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) / COUNT(*), 1) as error_rate,
+                    COUNT(*) as total
+             FROM conversation_tool_calls WHERE session_id = ?1
+             GROUP BY tool_name HAVING error_rate > ?2 ORDER BY error_rate DESC"
+        )?;
+        let rows = stmt.query_map(params![session_id, min_error_rate], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut tools = Vec::new();
+        for r in rows { tools.push(r?); }
+        Ok(tools)
+    }
+
+    /// Get error samples for a tool (first and last error)
+    pub fn get_tool_error_samples(&self, session_id: &str, tool_name: &str) -> DbResult<Vec<(String, String, String)>> {
+        let conn = self.read_conn();
+        // Get first error
+        let mut samples = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT input_summary, output_summary, timestamp FROM conversation_tool_calls
+             WHERE session_id = ?1 AND tool_name = ?2 AND status = 'error'
+             ORDER BY rowid ASC LIMIT 1"
+        )?;
+        let rows = stmt.query_map(params![session_id, tool_name], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?;
+        for r in rows { samples.push(r?); }
+        // Get last error (if different from first)
+        let mut stmt2 = conn.prepare(
+            "SELECT input_summary, output_summary, timestamp FROM conversation_tool_calls
+             WHERE session_id = ?1 AND tool_name = ?2 AND status = 'error'
+             ORDER BY rowid DESC LIMIT 1"
+        )?;
+        let rows2 = stmt2.query_map(params![session_id, tool_name], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?;
+        for r in rows2 {
+            let sample = r?;
+            if samples.is_empty() || samples[0].2 != sample.2 {
+                samples.push(sample);
+            }
+        }
+        Ok(samples)
+    }
+
+    /// Get first user message of a session (mission objective)
+    pub fn get_first_user_message(&self, session_id: &str) -> DbResult<Option<String>> {
+        let conn = self.read_conn();
+        let result = conn.query_row(
+            "SELECT content FROM conversation_messages
+             WHERE session_id = ?1 AND role = 'user'
+             ORDER BY id ASC LIMIT 1",
+            params![session_id],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(content) => Ok(Some(content)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    // ============ Retrospective Results Persistence ============
+
+    /// Save retrospective quick stats for a session
+    pub fn save_retrospective_result(
+        &self,
+        session_id: &str,
+        trigger_reason: &str,
+        quick_stats: &str,
+        full_analysis: Option<&str>,
+    ) -> DbResult<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT OR REPLACE INTO retrospective_results (session_id, trigger_reason, quick_stats, full_analysis, created_at)
+             VALUES (?1, ?2, ?3, ?4, datetime('now'))",
+            params![session_id, trigger_reason, quick_stats, full_analysis],
+        )?;
+        Ok(())
+    }
+
+    /// Check if a session already has a retrospective result
+    pub fn has_retrospective_result(&self, session_id: &str) -> DbResult<bool> {
+        let conn = self.read_conn();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM retrospective_results WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Get sessions needing retrospective (completed, not yet analyzed, meeting threshold)
+    pub fn get_sessions_needing_retrospective(&self) -> DbResult<Vec<(String, i64, i64, f64)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.message_count,
+                    COALESCE((SELECT COUNT(*) FROM conversation_tool_calls tc WHERE tc.session_id = c.id), 0) as tool_count,
+                    COALESCE(
+                        (SELECT 100.0 * SUM(CASE WHEN tc2.status='error' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)
+                         FROM conversation_tool_calls tc2 WHERE tc2.session_id = c.id), 0
+                    ) as error_rate
+             FROM conversations c
+             WHERE c.status = 'completed'
+               AND c.conversation_type = 'user'
+               AND c.id NOT IN (SELECT session_id FROM retrospective_results)
+               AND (
+                   c.message_count > 100
+                   OR (SELECT COUNT(*) FROM conversation_tool_calls tc3 WHERE tc3.session_id = c.id) > 50
+                   OR CAST((julianday(c.ended_at) - julianday(c.started_at)) * 24 * 60 AS INTEGER) > 60
+               )
+             ORDER BY c.ended_at DESC
+             LIMIT 5"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })?;
+        let mut result = Vec::new();
+        for r in rows { result.push(r?); }
+        Ok(result)
+    }
+
+    /// List retrospective results, newest first
+    pub fn list_retrospective_results(&self, limit: i64) -> DbResult<Vec<(String, String, String, Option<String>, String)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, trigger_reason, quick_stats, full_analysis, created_at
+             FROM retrospective_results ORDER BY created_at DESC LIMIT ?1"
+        )?;
+        let rows = stmt.query_map(params![limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut result = Vec::new();
+        for r in rows { result.push(r?); }
+        Ok(result)
+    }
+
+    /// Get retrospective result for a specific session
+    pub fn get_retrospective_result(&self, session_id: &str) -> DbResult<Option<(String, String, Option<String>, String)>> {
+        let conn = self.read_conn();
+        let result = conn.query_row(
+            "SELECT trigger_reason, quick_stats, full_analysis, created_at
+             FROM retrospective_results WHERE session_id = ?1",
+            params![session_id],
+            |row| Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+            )),
+        );
+        match result {
+            Ok(r) => Ok(Some(r)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Get pending messages for unified realtime extraction (replaces separate user_voice + memory).
     /// Returns all user+assistant messages since realtime_forwarded_at watermark.
     /// Uses fair-queuing: per-session cap (10 msgs) + oldest-first ordering to prevent starvation.

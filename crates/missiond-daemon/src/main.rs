@@ -984,6 +984,13 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     );
 
+    // Retrospective worker — automatic session performance analysis
+    workers::spawn_worker(
+        workers::retro_worker::RetroWorker,
+        Arc::new(state.clone()),
+        shutdown_rx.clone(),
+    );
+
     info!("All event handlers started (isolated tasks)");
 
     // ---- Slots hot-reload: SIGHUP + fsnotify ----

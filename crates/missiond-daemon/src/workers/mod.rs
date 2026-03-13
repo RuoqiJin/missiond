@@ -9,6 +9,7 @@ pub mod ast_sync_worker;
 pub mod gemini_logger;
 pub mod conversation_logger;
 pub mod pty_event_worker;
+pub mod retro_worker;
 pub mod registry;
 
 use std::future::Future;
