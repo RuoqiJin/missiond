@@ -729,8 +729,19 @@ impl PTYWebSocketServer {
             return Ok(());
         }
 
-        let slot_id = "slot-jarvis";
-        let chat_id = format!("chatcmpl-jarvis-{}", chrono::Utc::now().timestamp_millis());
+        // Slot selection: X-Slot-Id header > default "slot-jarvis"
+        let slot_id = headers
+            .lines()
+            .find_map(|line| {
+                let lower = line.to_lowercase();
+                if lower.starts_with("x-slot-id:") {
+                    Some(line.splitn(2, ':').nth(1)?.trim().to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "slot-jarvis".to_string());
+        let chat_id = format!("chatcmpl-{}-{}", &slot_id, chrono::Utc::now().timestamp_millis());
         let boundary_id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
 
         // Extract Router's trace_id from X-Trace-Id header
@@ -748,23 +759,23 @@ impl PTYWebSocketServer {
         info!(?addr, slot_id, msg_len = user_message.len(), trace_id = %chat_id, "Chat completions request");
 
         // Check slot status
-        let status = pty_manager.get_status(slot_id).await;
+        let status = pty_manager.get_status(&slot_id).await;
         let state = status.as_ref().map(|s| s.state.clone());
 
         match &state {
             None | Some(SessionState::Exited) => {
-                let error_msg = "Jarvis slot not running. Start slot-jarvis first.";
+                let error_msg = format!("Slot {} not running.", slot_id);
                 trace_store.unavailable_trace(
-                    chat_id, addr, slot_id, &user_message, error_msg, router_trace_id,
+                    chat_id, addr, &slot_id, &user_message, &error_msg, router_trace_id,
                 ).await;
-                let err = serde_json::json!({"error": {"message": error_msg}});
+                let err = serde_json::json!({"error": {"message": &error_msg}});
                 Self::send_http_error(&mut stream, 503, "Service Unavailable", &err.to_string()).await?;
                 return Ok(());
             }
             Some(s) if *s != SessionState::Idle => {
-                let error_msg = format!("Jarvis is busy (state: {:?}). Try again later.", s);
+                let error_msg = format!("{} is busy (state: {:?}). Try again later.", slot_id, s);
                 trace_store.unavailable_trace(
-                    chat_id, addr, slot_id, &user_message, &error_msg, router_trace_id,
+                    chat_id, addr, &slot_id, &user_message, &error_msg, router_trace_id,
                 ).await;
                 let err = serde_json::json!({"error": {"message": &error_msg}, "retry_after": 5});
                 let response = format!(
@@ -780,7 +791,7 @@ impl PTYWebSocketServer {
 
         // Start trace
         trace_store.start_trace(
-            chat_id.clone(), addr, slot_id, &user_message, router_trace_id,
+            chat_id.clone(), addr, &slot_id, &user_message, router_trace_id,
         ).await;
 
         // Write SSE response headers immediately — flush for curl to see
@@ -817,7 +828,7 @@ impl PTYWebSocketServer {
         //
         // send_fire_and_forget causes spurious Complete events from paste notification.
         // send() properly waits for the real Complete, so we use it for the response.
-        let mut rx = match pty_manager.subscribe_session(slot_id).await {
+        let mut rx = match pty_manager.subscribe_session(&slot_id).await {
             Ok(rx) => rx,
             Err(e) => {
                 let err = serde_json::json!({"error": {"message": format!("Subscribe failed: {}", e)}});
