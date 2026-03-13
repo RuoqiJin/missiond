@@ -32,6 +32,10 @@ pub struct SkillMeta {
     /// Phase 4: pre-flight context hooks
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_hooks: Option<Vec<ContextHook>>,
+    /// Phase 5: exact trigger phrases for context prefetch hardmatch.
+    /// Must be specific compound phrases (not short generic words).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub triggers: Option<Vec<String>>,
 }
 
 /// Skill dependency declaration (Phase 2: cross-domain context aggregation)
@@ -175,6 +179,9 @@ struct Frontmatter {
     /// Phase 4: pre-flight context hooks
     #[serde(default, rename = "context_hooks")]
     context_hooks: Option<Vec<ContextHook>>,
+    /// Phase 5: exact trigger phrases for context prefetch hardmatch
+    #[serde(default)]
+    triggers: Option<Vec<String>>,
 }
 
 /// In-memory skill index
@@ -394,6 +401,7 @@ fn parse_skill_file(path: &Path) -> Option<SkillMeta> {
         requires: fm.requires,
         actions: fm.actions,
         context_hooks: fm.context_hooks,
+        triggers: fm.triggers,
     })
 }
 
