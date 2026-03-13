@@ -157,7 +157,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "analysis": null,
     });
 
-    // full mode: call Gemini for qualitative analysis
+    // detailed / full mode: placeholder for fine-grained analysis dimensions
+    if depth == "detailed" || depth == "full" {
+        result["analysis"] = json!("detailed analysis not yet implemented");
+    }
+
+    // full mode: call Gemini for qualitative analysis (with detailed data if available)
     if depth == "full" {
         let analysis = run_full_analysis(state, &session_id, &result).await;
         result["analysis"] = match analysis {

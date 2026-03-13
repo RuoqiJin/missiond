@@ -174,6 +174,21 @@ fn is_obvious_chat(query: &str) -> bool {
     false
 }
 
+/// High-confidence DevOps heuristic — compound phrases that unambiguously indicate
+/// deployment/infrastructure queries. Skips the 10s Router API call.
+/// Rule: only compound phrases / proper nouns, never single generic words.
+fn is_high_confidence_devops(query: &str) -> bool {
+    let q = query.to_lowercase();
+    const PATTERNS: &[&str] = &[
+        "docker build", "docker compose", "docker image",
+        "github action", "ci/cd", "k8s",
+        "deploy agent", "deploy center",
+        "backend-deploy", "xjp-deploy",
+        "部署到", "发布到", "上线到",
+    ];
+    PATTERNS.iter().any(|p| q.contains(p))
+}
+
 /// Route intent via XJP router API (claude-sonnet via clewdr).
 ///
 /// Stateless HTTP call — no slot contention, no conversation pollution.
@@ -208,6 +223,7 @@ async fn route_intent_http(state: &AppState, query: &str) -> Result<IntentResult
          - project code/architecture/debug/deploy question → needs_context: true, intent: \"code\"\n\
          - project knowledge/config/ops question → needs_context: true, intent: \"general\"\n\
          - Mixed intent (greeting + technical) or unsure → needs_context: true, intent: \"general\"\n\
+         - Deployment/release/containerization/CI-CD/server operations → needs_context: true, intent: \"code\"\n\
          - SEARCH QUERIES: If needs_context is true, extract 1-3 concise keywords optimized for retrieval. If false, leave empty [].",
         query.chars().take(300).collect::<String>()
     );
@@ -376,6 +392,61 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
         };
     }
 
+    // Phase 1b: High-confidence DevOps heuristic — skip Router API for obvious deploy queries
+    if is_high_confidence_devops(&query) {
+        info!(query = query.trim(), "Context prefetch: DevOps heuristic → skip router, go to Phase 3");
+        state.stats.prefetch_devops_heuristic.fetch_add(1, Ordering::Relaxed);
+
+        // Jump directly to Phase 3 search (Code intent, original query)
+        let search_query = query.clone();
+        let global_timeout = Duration::from_millis(GLOBAL_TIMEOUT_MS);
+        let ppid = match &req.source {
+            PrefetchSource::Hook { ppid } => Some(*ppid),
+            _ => None,
+        };
+
+        state.stats.prefetch_intent_code.fetch_add(1, Ordering::Relaxed);
+
+        let (skills, kb_entries, code_context, task_updates) = {
+            let result = tokio::time::timeout(global_timeout, async {
+                tokio::join!(
+                    search_skills(state, &search_query),
+                    search_kb(state, &search_query),
+                    search_code(state, &query, &req.source),
+                    search_task_ack(state, ppid),
+                )
+            }).await;
+            match result {
+                Ok((s, k, c, t)) => (s, k, c, t),
+                Err(_) => {
+                    warn!("Context prefetch global timeout ({}ms)", GLOBAL_TIMEOUT_MS);
+                    (vec![], vec![], None, vec![])
+                }
+            }
+        };
+
+        let assembled = assemble_budgeted(&skills, &kb_entries, &code_context, &task_updates, CODE_TOKEN_BUDGET);
+        info!(
+            intent = "code",
+            routed_by = "devops_heuristic",
+            skills = skills.len(),
+            kb = kb_entries.len(),
+            code = code_context.is_some(),
+            tasks = task_updates.len(),
+            assembled_len = assembled.len(),
+            "Context prefetch complete (DevOps bypass)"
+        );
+
+        return PrefetchResult {
+            skills,
+            kb_entries,
+            code_context,
+            task_updates,
+            assembled,
+            intent: Some("code:devops_heuristic".to_string()),
+        };
+    }
+
     // Phase 2: CC slot intent routing (semantic classification)
     let intent_result = match route_intent_via_router(state, &query).await {
         Some(result) => {
@@ -523,8 +594,31 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
 
 async fn search_skills(state: &AppState, query: &str) -> Vec<SkillHint> {
     let fut = async {
+        let query_lower = query.to_lowercase();
         let mut topic_scores: HashMap<String, (f64, Option<usize>, Option<usize>, serde_json::Value)> =
             HashMap::new();
+
+        // Step 0: Trigger hardmatch — exact phrases from skill frontmatter, score=1.0
+        let mut trigger_matched: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for s in state.skills.list() {
+            if trigger_matched.contains(&s.name) {
+                continue; // Dedup: one skill matched is enough
+            }
+            if let Some(ref triggers) = s.triggers {
+                for trigger in triggers {
+                    if query_lower.contains(&trigger.to_lowercase()) {
+                        debug!(skill = %s.name, trigger = %trigger, "Skill trigger hardmatch");
+                        state.stats.prefetch_skill_trigger_hit.fetch_add(1, Ordering::Relaxed);
+                        topic_scores.insert(s.name.clone(), (1.0, None, None, serde_json::json!({
+                            "name": s.name,
+                            "path": s.path,
+                        })));
+                        trigger_matched.insert(s.name.clone());
+                        break; // First trigger match per skill is enough
+                    }
+                }
+            }
+        }
 
         // 1. Name/aka exact match → bonus +0.3
         for s in state.skills.search(query).iter().take(10) {
@@ -597,7 +691,9 @@ async fn search_skills(state: &AppState, query: &str) -> Vec<SkillHint> {
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        scored.iter().take(3).map(|(_, _, meta)| {
+        // Top-K: 3 base + trigger-matched extras (so triggers don't squeeze out semantic results)
+        let top_k = 3 + trigger_matched.len();
+        scored.iter().take(top_k).map(|(_, _, meta)| {
             SkillHint {
                 name: meta.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 path: meta.get("path").and_then(|v| v.as_str()).map(|s| s.to_string()),

@@ -102,6 +102,8 @@ pub(crate) struct DaemonStats {
     pub prefetch_fallback: AtomicU64,
     pub prefetch_router_latency: Histogram,
     pub prefetch_cosine_filtered: AtomicU64,
+    pub prefetch_devops_heuristic: AtomicU64,
+    pub prefetch_skill_trigger_hit: AtomicU64,
 }
 
 impl DaemonStats {
@@ -140,6 +142,8 @@ impl DaemonStats {
             prefetch_fallback: AtomicU64::new(0),
             prefetch_router_latency: Histogram::new(1000),
             prefetch_cosine_filtered: AtomicU64::new(0),
+            prefetch_devops_heuristic: AtomicU64::new(0),
+            prefetch_skill_trigger_hit: AtomicU64::new(0),
         }
     }
 
@@ -213,6 +217,8 @@ impl DaemonStats {
                 },
                 "fallback": Self::l(&self.prefetch_fallback),
                 "cosine_filtered": Self::l(&self.prefetch_cosine_filtered),
+                "devops_heuristic": Self::l(&self.prefetch_devops_heuristic),
+                "skill_trigger_hit": Self::l(&self.prefetch_skill_trigger_hit),
             },
         })
     }
