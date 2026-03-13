@@ -140,6 +140,20 @@ pub fn definitions() -> Vec<ToolDefinition> {
             }),
         ),
         ToolDefinition::new(
+            "mission_router_chat_delete_message",
+            "精确删除单条 Gemini 对话消息（按消息 ID）。归档后删除，可用 restore 恢复。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "message_id": {
+                        "type": "integer",
+                        "description": "消息 ID（conversation_messages 表的自增主键）"
+                    }
+                },
+                "required": ["message_id"]
+            }),
+        ),
+        ToolDefinition::new(
             "mission_router_chat_stats",
             "Gemini 对话统计：总对话数、总消息数、总字符/估算 token、按模型/按天分布。",
             json!({

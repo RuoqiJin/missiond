@@ -367,6 +367,25 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         }
 
 
+        "mission_router_chat_delete_message" => {
+            let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
+            let message_id = args_val.get("message_id").and_then(|v| v.as_i64())
+                .ok_or_else(|| anyhow!("需要提供 message_id (整数)"))?;
+            match state.mission.db().router_chat_delete_message(message_id)
+                .map_err(|e| anyhow!("DB error: {}", e))? {
+                Some(conversation_id) => {
+                    Ok(ToolResult::json(&serde_json::json!({
+                        "deleted_message_id": message_id,
+                        "conversation_id": conversation_id,
+                        "note": "已归档到 router_chat_archive，可用 mission_router_chat_restore 恢复",
+                    })))
+                }
+                None => Ok(ToolResult::error(&format!(
+                    "消息 {} 不存在或不属于 router_chat 对话", message_id
+                ))),
+            }
+        }
+
         "mission_router_chat_restore" => {
             let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
             let conv_id = args_val.get("conversation_id").and_then(|v| v.as_str())

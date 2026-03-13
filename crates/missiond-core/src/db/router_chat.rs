@@ -229,6 +229,45 @@ impl MissionDB {
         Ok(total)
     }
 
+    /// Delete a single router_chat message by its ID. Archives first, then deletes.
+    pub fn router_chat_delete_message(&self, message_id: i64) -> DbResult<Option<String>> {
+        let conn = self.conn();
+        // Verify it belongs to a router_chat conversation
+        let session_id: Option<String> = conn.query_row(
+            "SELECT cm.session_id FROM conversation_messages cm
+             JOIN conversations c ON c.id = cm.session_id
+             WHERE cm.id = ?1 AND c.chat_type = 'router_chat'",
+            params![message_id],
+            |row| row.get(0),
+        ).optional()?;
+
+        let session_id = match session_id {
+            Some(sid) => sid,
+            None => return Ok(None),
+        };
+
+        let tx = conn.unchecked_transaction()?;
+        // Archive
+        tx.execute(
+            "INSERT INTO router_chat_archive (original_id, session_id, role, content, timestamp, archive_reason)
+             SELECT id, session_id, role, content, timestamp, 'delete_message'
+             FROM conversation_messages WHERE id = ?1",
+            params![message_id],
+        )?;
+        // Delete
+        tx.execute(
+            "DELETE FROM conversation_messages WHERE id = ?1",
+            params![message_id],
+        )?;
+        // Update message_count
+        tx.execute(
+            "UPDATE conversations SET message_count = (SELECT COUNT(*) FROM conversation_messages WHERE session_id = ?1) WHERE id = ?1",
+            params![session_id],
+        )?;
+        tx.commit()?;
+        Ok(Some(session_id))
+    }
+
     /// Archive + delete a router_chat conversation and all its messages.
     pub fn router_chat_delete(&self, conversation_id: &str) -> DbResult<(i64, i64)> {
         let conn = self.conn();
