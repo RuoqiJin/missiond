@@ -130,6 +130,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                         timeout_secs,
                         mcp_config,
                         dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+                        model: slot.config.model.clone(),
                         extra_env,
                     },
                 )

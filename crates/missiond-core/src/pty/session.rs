@@ -194,6 +194,8 @@ pub struct PTYSessionOptions {
     pub mcp_config: Option<PathBuf>,
     /// Skip all permission prompts and trust dialogs
     pub dangerously_skip_permissions: bool,
+    /// Model override (e.g., "sonnet", "opus"). Passed as --model to Claude Code.
+    pub model: Option<String>,
 }
 
 impl Default for PTYSessionOptions {
@@ -208,6 +210,7 @@ impl Default for PTYSessionOptions {
             engine: crate::types::CliEngine::default(),
             mcp_config: None,
             dangerously_skip_permissions: false,
+            model: None,
         }
     }
 }
@@ -277,6 +280,9 @@ pub struct PTYSession {
     // Permission bypass
     dangerously_skip_permissions: bool,
 
+    // Model override (--model flag)
+    model: Option<String>,
+
     // Extra environment variables (slot tracking, etc.)
     env: Option<HashMap<String, String>>,
 
@@ -327,6 +333,7 @@ fn build_cli_command(
     cwd: &std::path::Path,
     mcp_config: Option<&std::path::Path>,
     dangerously_skip_permissions: bool,
+    model: Option<&str>,
 ) -> String {
     use crate::types::CliEngine;
 
@@ -340,6 +347,10 @@ fn build_cli_command(
             if dangerously_skip_permissions {
                 parts.push_str(" --dangerously-skip-permissions");
                 info!("Dangerous mode: skipping all permission prompts");
+            }
+            if let Some(m) = model {
+                parts.push_str(&format!(" --model {}", m));
+                info!(model = %m, "Model override for session");
             }
             parts
         }
@@ -427,6 +438,7 @@ impl PTYSession {
             shutdown_tx: None,
             mcp_config: options.mcp_config,
             dangerously_skip_permissions: options.dangerously_skip_permissions,
+            model: options.model,
             env: options.env,
             log_file: options.log_file,
 
@@ -561,7 +573,7 @@ impl PTYSession {
         })?;
 
         // Build CLI command based on engine type
-        let cli_cmd = build_cli_command(self.engine, &self.cwd, self.mcp_config.as_deref(), self.dangerously_skip_permissions);
+        let cli_cmd = build_cli_command(self.engine, &self.cwd, self.mcp_config.as_deref(), self.dangerously_skip_permissions, self.model.as_deref());
 
         #[cfg(unix)]
         let mut cmd = {

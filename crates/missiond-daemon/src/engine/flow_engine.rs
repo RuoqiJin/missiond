@@ -483,6 +483,7 @@ pub(crate) async fn ensure_autopilot_pty(state: &AppState, task: &missiond_core:
         timeout_secs: Some(120),
         mcp_config,
         dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+        model: slot.config.model.clone(),
         extra_env,
     }).await {
         Ok(_) => {

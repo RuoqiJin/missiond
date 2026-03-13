@@ -71,6 +71,7 @@ pub(crate) async fn check_slot_context_levels(state: &AppState) {
                         timeout_secs: Some(120),
                         mcp_config,
                         dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+                        model: slot.config.model.clone(),
                         extra_env,
                     }).await {
                         Ok(_) => {
@@ -254,6 +255,10 @@ pub(crate) async fn schedule_supervisor_patrol(state: &AppState) {
 /// Threshold for considering the memory slot stuck (10 minutes).
 const STUCK_THRESHOLD_SECS: i64 = 600;
 
+/// Absolute ceiling: kill slot regardless of JSONL activity (90 minutes).
+/// Prevents infinite loops where model produces tool calls that keep JSONL active.
+const ABSOLUTE_STUCK_CEILING_SECS: i64 = 90 * 60;
+
 /// Detect and recover from a memory slot stuck in non-Idle state.
 pub(crate) async fn check_slot_stuck(
     state: &AppState,
@@ -294,26 +299,37 @@ pub(crate) async fn check_slot_stuck(
     }
 
     // P2: Check JSONL activity before killing — slot may be doing bulk MCP tool_use
-    // which shows as Thinking the entire time (especially with MiniMax M2.5)
-    if let Ok(Some(session_uuid)) = state.mission.db().get_slot_session(slot_id) {
-        if let Ok(Some(conv)) = state.mission.db().get_conversation(&session_uuid) {
-            if let Some(ref jsonl_path) = conv.jsonl_path {
-                if let Ok(metadata) = std::fs::metadata(jsonl_path) {
-                    if let Ok(modified) = metadata.modified() {
-                        let elapsed = modified.elapsed().unwrap_or_default();
-                        if elapsed.as_secs() < 120 {
-                            info!(
-                                slot_id,
-                                stuck_secs = stuck_duration,
-                                jsonl_activity_secs_ago = elapsed.as_secs(),
-                                "Slot appears stuck but JSONL is active, deferring kill"
-                            );
-                            return;
+    // which shows as Thinking the entire time (especially with MiniMax M2.5).
+    // However, enforce an absolute ceiling to prevent infinite loops where the model
+    // produces useless tool calls that keep JSONL active indefinitely.
+    if stuck_duration < ABSOLUTE_STUCK_CEILING_SECS {
+        if let Ok(Some(session_uuid)) = state.mission.db().get_slot_session(slot_id) {
+            if let Ok(Some(conv)) = state.mission.db().get_conversation(&session_uuid) {
+                if let Some(ref jsonl_path) = conv.jsonl_path {
+                    if let Ok(metadata) = std::fs::metadata(jsonl_path) {
+                        if let Ok(modified) = metadata.modified() {
+                            let elapsed = modified.elapsed().unwrap_or_default();
+                            if elapsed.as_secs() < 120 {
+                                info!(
+                                    slot_id,
+                                    stuck_secs = stuck_duration,
+                                    jsonl_activity_secs_ago = elapsed.as_secs(),
+                                    "Slot appears stuck but JSONL is active, deferring kill"
+                                );
+                                return;
+                            }
                         }
                     }
                 }
             }
         }
+    } else {
+        warn!(
+            slot_id,
+            stuck_secs = stuck_duration,
+            ceiling = ABSOLUTE_STUCK_CEILING_SECS,
+            "Slot exceeded absolute stuck ceiling despite JSONL activity, force killing"
+        );
     }
 
     warn!(
@@ -375,6 +391,7 @@ pub(crate) async fn check_slot_stuck(
         es.current_slot_task_id = None;
         es.is_checkpoint = false;
         es.checkpoint_message_id = None;
+        es.pending_served = false;
     }
     // Don't reset to 0 — set to now so we can detect if respawn also gets stuck
     busy_since_atomic.store(now, std::sync::atomic::Ordering::SeqCst);
@@ -428,6 +445,7 @@ pub(crate) async fn check_extraction_gate(
             es.current_slot_task_id = None;
             es.is_checkpoint = false;
             es.checkpoint_message_id = None;
+            es.pending_served = false;
             return true;
         }
     } else {
