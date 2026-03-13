@@ -54,6 +54,9 @@ pub(crate) struct ExtractionState {
     pub(crate) is_checkpoint: bool,
     /// Max message ID in the batch being analyzed (for advancing checkpoint watermark on completion).
     pub(crate) checkpoint_message_id: Option<i64>,
+    /// Latch: mission_memory_pending already returned data in this extraction cycle.
+    /// Prevents the agent from polling the same messages repeatedly (watermark advances only on completion).
+    pub(crate) pending_served: bool,
 }
 
 /// Deep analysis schema version. Bump this when the analysis prompt changes

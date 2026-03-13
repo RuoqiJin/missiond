@@ -188,6 +188,21 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ),
 
         ToolDefinition::new(
+            "mission_retrospective_backfill",
+            "批量回填复盘：分析指定时间以来的所有会话（无阈值过滤）。后台逐个执行 L1(detailed)+L2(MiniMax)，高严重度自动建 Board 任务。跳过已有复盘结果的会话。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "since": {
+                        "type": "string",
+                        "description": "起始时间(ISO datetime，如 2026-03-11T18:00:00)"
+                    }
+                },
+                "required": ["since"]
+            }),
+        ),
+
+        ToolDefinition::new(
             "mission_retrospective_list",
             "列出已完成的复盘结果。显示会话 ID、触发原因、分析时间。用于查看后台 RetroWorker 的自动复盘产出。",
             json!({

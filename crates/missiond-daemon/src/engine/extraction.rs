@@ -195,6 +195,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
                     es.current_slot_task_id = None;
                     es.is_checkpoint = false;
                     es.checkpoint_message_id = None;
+                    es.pending_served = false;
                     return;
                 }
                 info!(duration_ms = res.duration_ms, "realtime extraction send() returned");
@@ -222,6 +223,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
                     es.current_slot_task_id = None;
                     es.is_checkpoint = false;
                     es.checkpoint_message_id = None;
+                    es.pending_served = false;
                 }
             }
             Err(e) => {
@@ -246,6 +248,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
                 es.current_slot_task_id = None;
                 es.is_checkpoint = false;
                 es.checkpoint_message_id = None;
+                es.pending_served = false;
             }
         }
     });

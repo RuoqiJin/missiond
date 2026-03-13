@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-const WS_PORT = 9120;
+const WS_PORT = parseInt(process.env.NEXT_PUBLIC_WS_PORT || '9120', 10);
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected';
 
@@ -200,7 +200,8 @@ export const useEventStreamStore = create<EventStreamState>()((set, get) => ({
     // Don't connect if already connecting/connected
     if (state.ws && state.connectionState !== 'disconnected') return;
 
-    const ws = new WebSocket(`ws://localhost:${WS_PORT}/events`);
+    const wsHost = process.env.NEXT_PUBLIC_WS_HOST || (typeof window !== 'undefined' ? window.location.hostname : 'localhost');
+    const ws = new WebSocket(`ws://${wsHost}:${WS_PORT}/events`);
     set({ ws, connectionState: 'connecting' });
 
     ws.onopen = () => {
