@@ -93,6 +93,7 @@ impl MissionDB {
             depends_on: input.depends_on.clone().unwrap_or_default(),
             lease_expires_at: None,
             dedupe_key: input.dedupe_key.clone(),
+            notes_count: 0,
         };
 
         self.insert_board_task(&task)?;
@@ -186,20 +187,21 @@ impl MissionDB {
         let conn = self.read_conn();
         let mut tasks = Vec::new();
         let hidden_clause = if include_hidden { "" } else { " AND hidden = 0" };
+        let notes_sub = "(SELECT COUNT(*) FROM board_task_notes WHERE task_id = board_tasks.id) AS notes_count";
 
         if let Some(s) = status {
-            let sql = format!("SELECT * FROM board_tasks WHERE status = ?1{} ORDER BY order_idx ASC", hidden_clause);
+            let sql = format!("SELECT *, {} FROM board_tasks WHERE status = ?1{} ORDER BY order_idx ASC", notes_sub, hidden_clause);
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map(params![s], |row| Self::row_to_board_task(row))?;
             for task in rows {
                 tasks.push(task?);
             }
         } else {
-            let sql = if include_hidden {
-                "SELECT * FROM board_tasks ORDER BY order_idx ASC".to_string()
-            } else {
-                "SELECT * FROM board_tasks WHERE hidden = 0 ORDER BY order_idx ASC".to_string()
-            };
+            let sql = format!(
+                "SELECT *, {} FROM board_tasks{} ORDER BY order_idx ASC",
+                notes_sub,
+                if include_hidden { "" } else { " WHERE hidden = 0" }
+            );
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map([], |row| Self::row_to_board_task(row))?;
             for task in rows {
@@ -662,6 +664,7 @@ impl MissionDB {
             },
             lease_expires_at: row.get("lease_expires_at").unwrap_or(None),
             dedupe_key: row.get("dedupe_key").unwrap_or(None),
+            notes_count: row.get("notes_count").unwrap_or(0),
         })
     }
 

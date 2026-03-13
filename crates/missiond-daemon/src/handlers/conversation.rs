@@ -41,7 +41,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 status: Option<String>,
                 #[serde(default, deserialize_with = "lenient::option_i64")]
                 limit: Option<i64>,
+                #[serde(alias = "conversation_type")]
                 conversation_type: Option<String>,
+                #[serde(alias = "task_id")]
                 task_id: Option<String>,
                 since: Option<String>,
                 until: Option<String>,
@@ -57,12 +59,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             #[derive(Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct Args {
+                #[serde(alias = "session_id")]
                 session_id: String,
                 #[serde(default, deserialize_with = "lenient::option_i64")]
                 tail: Option<i64>,
-                #[serde(default, deserialize_with = "lenient::option_i64")]
+                #[serde(default, deserialize_with = "lenient::option_i64", alias = "since_id")]
                 since_id: Option<i64>,
-                #[serde(default, deserialize_with = "lenient::option_bool")]
+                #[serde(default, deserialize_with = "lenient::option_bool", alias = "include_raw")]
                 include_raw: Option<bool>,
             }
             let Args { session_id, tail, since_id, include_raw } = serde_json::from_value(args)?;
@@ -130,11 +133,15 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 limit: Option<i64>,
                 #[serde(default, deserialize_with = "lenient::option_i64")]
                 offset: Option<i64>,
+                #[serde(alias = "session_id")]
                 session_id: Option<String>,
+                #[serde(alias = "exclude_session_id")]
                 exclude_session_id: Option<String>,
                 /// hybrid (default), fts, semantic
+                #[serde(alias = "query_mode")]
                 query_mode: Option<String>,
                 /// last_24h, last_7d, last_30d
+                #[serde(alias = "time_range")]
                 time_range: Option<String>,
                 project: Option<String>,
             }
@@ -384,7 +391,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             #[derive(Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct Args {
+                #[serde(alias = "session_id")]
                 session_id: Option<String>,
+                #[serde(alias = "event_type")]
                 event_type: Option<String>,
                 #[serde(default, deserialize_with = "lenient::option_i64")]
                 limit: Option<i64>,
@@ -417,6 +426,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             #[derive(Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct Args {
+                #[serde(alias = "tool_use_id")]
                 tool_use_id: String,
                 #[serde(default, deserialize_with = "lenient::option_i64")]
                 limit: Option<i64>,

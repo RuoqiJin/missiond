@@ -14,6 +14,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Args {
+        #[serde(alias = "session_id")]
         session_id: String,
         depth: Option<String>,
     }
