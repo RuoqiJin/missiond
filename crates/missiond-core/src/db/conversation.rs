@@ -262,11 +262,12 @@ impl MissionDB {
     pub fn insert_conversation_message(&self, msg: &ConversationMessage) -> DbResult<i64> {
         let conn = self.conn();
         conn.execute(
-            "INSERT OR IGNORE INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT OR IGNORE INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 msg.session_id, msg.role, msg.content, msg.raw_content,
                 msg.message_uuid, msg.parent_uuid, msg.model, msg.timestamp, msg.metadata,
+                msg.tool_name,
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -283,11 +284,12 @@ impl MissionDB {
         let mut inserted_ids = Vec::new();
         for msg in messages {
             tx.execute(
-                "INSERT OR IGNORE INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT OR IGNORE INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     msg.session_id, msg.role, msg.content, msg.raw_content,
                     msg.message_uuid, msg.parent_uuid, msg.model, msg.timestamp, msg.metadata,
+                    msg.tool_name,
                 ],
             )?;
             if tx.changes() > 0 {
@@ -454,6 +456,61 @@ impl MissionDB {
         Ok(msgs)
     }
 
+    /// Get messages around a specific message ID (context anchoring).
+    /// Returns None if messageId not found. Otherwise returns (session_id, messages).
+    pub fn get_messages_around(
+        &self,
+        message_id: i64,
+        before: i64,
+        after: i64,
+    ) -> DbResult<Option<(String, Vec<ConversationMessage>)>> {
+        let conn = self.read_conn();
+
+        // Resolve session_id from anchor message
+        let session_id: Option<String> = conn.query_row(
+            "SELECT session_id FROM conversation_messages WHERE id = ?1",
+            params![message_id],
+            |row| row.get(0),
+        ).optional()?;
+
+        let session_id = match session_id {
+            Some(sid) => sid,
+            None => return Ok(None),
+        };
+
+        let sql = "\
+            WITH before_msgs AS (
+                SELECT * FROM conversation_messages
+                WHERE session_id = ?1 AND id < ?2
+                ORDER BY id DESC LIMIT ?3
+            ),
+            after_msgs AS (
+                SELECT * FROM conversation_messages
+                WHERE session_id = ?1 AND id > ?2
+                ORDER BY id ASC LIMIT ?4
+            ),
+            anchor AS (
+                SELECT * FROM conversation_messages WHERE id = ?2
+            )
+            SELECT * FROM (
+                SELECT * FROM before_msgs
+                UNION ALL
+                SELECT * FROM anchor
+                UNION ALL
+                SELECT * FROM after_msgs
+            ) ORDER BY id ASC";
+
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(
+            params![session_id, message_id, before, after],
+            |row| Self::row_to_conversation_message(row),
+        )?;
+        let mut msgs = Vec::new();
+        for m in rows { msgs.push(m?); }
+
+        Ok(Some((session_id, msgs)))
+    }
+
     /// Search conversation messages: AND-first FTS5, OR fallback, then LIKE.
     pub fn search_conversation_messages(&self, query: &str, limit: i64) -> DbResult<Vec<ConversationMessage>> {
         let conn = self.read_conn();
@@ -502,6 +559,105 @@ impl MissionDB {
         let mut msgs = Vec::new();
         for m in rows { msgs.push(m?); }
         Ok(msgs)
+    }
+
+    /// Message-level search with SQL-pushed filters (session_id, role, tool_name, time_after).
+    /// Fixes the .retain() bug by filtering at DB level instead of in memory.
+    /// Three-phase strategy: AND → OR → LIKE fallback.
+    pub fn search_messages_filtered(
+        &self,
+        query: &str,
+        session_id: Option<&str>,
+        role: Option<&str>,
+        tool_name: Option<&str>,
+        time_after: Option<&str>,
+        limit: i64,
+    ) -> DbResult<Vec<ConversationMessage>> {
+        let conn = self.read_conn();
+        let (and_query, or_query) = Self::build_conv_fts_queries(query);
+
+        // Build dynamic WHERE conditions and params (after ?1=query, ?2=limit)
+        let mut extra_conds = Vec::new();
+        let mut extra_vals: Vec<String> = Vec::new();
+
+        extra_conds.push("c.conversation_type NOT IN ('meta', 'compaction')".to_string());
+
+        if let Some(sid) = session_id {
+            extra_conds.push(format!("m.session_id = ?{}", 3 + extra_vals.len()));
+            extra_vals.push(sid.to_string());
+        }
+        if let Some(r) = role {
+            extra_conds.push(format!("m.role = ?{}", 3 + extra_vals.len()));
+            extra_vals.push(r.to_string());
+        }
+        if let Some(tn) = tool_name {
+            let idx = 3 + extra_vals.len();
+            // Wrap field with commas to match first/last elements in CSV:
+            // "Bash,Read" → ",Bash,Read," LIKE "%,Bash,%" ✓
+            extra_conds.push(format!(
+                "(',' || m.tool_name || ',') LIKE ?{idx}"
+            ));
+            extra_vals.push(format!("%,{},%", tn));
+        }
+        if let Some(ta) = time_after {
+            extra_conds.push(format!("m.timestamp >= ?{}", 3 + extra_vals.len()));
+            extra_vals.push(ta.to_string());
+        }
+
+        let where_clause = extra_conds.join(" AND ");
+
+        let fts_sql = format!(
+            "SELECT m.* FROM conversation_messages m
+             JOIN conversation_msg_fts f ON m.id = f.rowid
+             JOIN conversations c ON m.session_id = c.id
+             WHERE conversation_msg_fts MATCH ?1
+               AND {where_clause}
+             ORDER BY f.rank
+             LIMIT ?2"
+        );
+
+        let like_sql = format!(
+            "SELECT m.* FROM conversation_messages m
+             JOIN conversations c ON m.session_id = c.id
+             WHERE m.content LIKE ?1
+               AND {where_clause}
+             ORDER BY m.timestamp DESC LIMIT ?2"
+        );
+
+        // Build rusqlite::types::Value vector for dynamic params
+        fn make_params(query_val: &str, limit: i64, extra: &[String]) -> Vec<rusqlite::types::Value> {
+            let mut v: Vec<rusqlite::types::Value> = Vec::new();
+            v.push(rusqlite::types::Value::Text(query_val.to_string()));
+            v.push(rusqlite::types::Value::Integer(limit));
+            for s in extra {
+                v.push(rusqlite::types::Value::Text(s.clone()));
+            }
+            v
+        }
+
+        fn exec_query(conn: &rusqlite::Connection, sql: &str, params: &[rusqlite::types::Value]) -> DbResult<Vec<ConversationMessage>> {
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p as &dyn rusqlite::types::ToSql).collect();
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map(param_refs.as_slice(), |row| MissionDB::row_to_conversation_message(row))?;
+            let mut msgs = Vec::new();
+            for m in rows { msgs.push(m?); }
+            Ok(msgs)
+        }
+
+        // Phase 1: AND
+        let params = make_params(&and_query, limit, &extra_vals);
+        let results = exec_query(&conn, &fts_sql, &params)?;
+        if !results.is_empty() { return Ok(results); }
+
+        // Phase 2: OR
+        let params = make_params(&or_query, limit, &extra_vals);
+        let results = exec_query(&conn, &fts_sql, &params)?;
+        if !results.is_empty() { return Ok(results); }
+
+        // Phase 3: LIKE fallback
+        let pattern = format!("%{}%", query);
+        let params = make_params(&pattern, limit, &extra_vals);
+        exec_query(&conn, &like_sql, &params)
     }
 
     /// FTS5 search grouped by session — returns (session_id, best_bm25_score) ranked by BM25.
@@ -1005,6 +1161,7 @@ impl MissionDB {
             model: row.get("model")?,
             timestamp: row.get("timestamp")?,
             metadata: row.get("metadata")?,
+            tool_name: row.get("tool_name").unwrap_or(None),
         })
     }
 }
