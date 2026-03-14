@@ -96,9 +96,20 @@ fn clean_jarvis_response(raw: &str, boundary_id: &str) -> String {
         raw
     };
 
-    // 2. Strip Claude Code TUI markers (⏺ bullet, ● thinking indicator)
+    // 2. Strip Claude Code TUI markers and status bar noise
     let cleaned: String = text
         .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            // Drop Claude Code status bar lines
+            if trimmed.contains("Auto-update failed") { return false; }
+            if trimmed.contains("bypass permissions on") { return false; }
+            if trimmed.contains("Try claude doctor") { return false; }
+            if trimmed.contains("npm i -g @anthropic-ai") { return false; }
+            if trimmed.starts_with("▸▸") || trimmed.starts_with(">>") { return false; }
+            if trimmed.starts_with("✕ ") || trimmed.starts_with("✗ ") { return false; }
+            true
+        })
         .map(|line| {
             let trimmed = line.trim_start();
             if let Some(after) = trimmed.strip_prefix('⏺') {
@@ -728,40 +739,65 @@ impl PTYWebSocketServer {
         }
         let messages = messages.unwrap();
 
-        // Extract system message (if any) — pass through to Claude Code as context prefix
-        let system_message: Option<String> = messages
-            .iter()
-            .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
-            .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
-            .reduce(|a, b| { let _ = a; b }) // take last system message
-            .map(|s| s.to_string());
+        // Stateless proxy mode: format all messages into a single prompt
+        // (MISSIOND_DISABLE_CONTEXT_ENRICHMENT implies proxy mode)
+        let proxy_mode = std::env::var("MISSIOND_DISABLE_CONTEXT_ENRICHMENT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
-        // Extract the last user message (supports both string and multimodal array content)
-        let last_user_msg = messages
-            .iter()
-            .rev()
-            .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"));
-
-        let raw_user_message = match last_user_msg {
-            Some(msg) => {
-                match msg.get("content") {
+        let user_message = if proxy_mode {
+            // Proxy mode: format full messages array as structured prompt
+            let mut parts: Vec<String> = Vec::new();
+            for msg in messages {
+                let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+                let content = match msg.get("content") {
                     Some(serde_json::Value::String(text)) => text.clone(),
-                    Some(serde_json::Value::Array(parts)) => {
-                        // Multimodal content: extract text + save images to temp files
-                        Self::extract_multimodal_content(parts).await
+                    Some(serde_json::Value::Array(arr)) => {
+                        Self::extract_multimodal_content(arr).await
                     }
-                    _ => String::new(),
+                    _ => continue,
+                };
+                if content.is_empty() { continue; }
+                match role {
+                    "system" => parts.push(format!("[System Instructions]\n{}\n[End System Instructions]", content)),
+                    "assistant" => parts.push(format!("[Previous Assistant Response]\n{}\n[End Previous Response]", content)),
+                    _ => parts.push(content), // user messages as-is
                 }
             }
-            None => String::new(),
-        };
+            parts.join("\n\n")
+        } else {
+            // Legacy mode: extract last user message + system prefix
+            let system_message: Option<String> = messages
+                .iter()
+                .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+                .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+                .reduce(|a, b| { let _ = a; b })
+                .map(|s| s.to_string());
 
-        // Prepend system message as instructions prefix so Claude Code follows caller's persona
-        let user_message = match &system_message {
-            Some(sys) if !sys.is_empty() => {
-                format!("[Instructions from caller — follow these for your response]\n{}\n[End instructions]\n\n{}", sys, raw_user_message)
+            let last_user_msg = messages
+                .iter()
+                .rev()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"));
+
+            let raw_user_message = match last_user_msg {
+                Some(msg) => {
+                    match msg.get("content") {
+                        Some(serde_json::Value::String(text)) => text.clone(),
+                        Some(serde_json::Value::Array(parts)) => {
+                            Self::extract_multimodal_content(parts).await
+                        }
+                        _ => String::new(),
+                    }
+                }
+                None => String::new(),
+            };
+
+            match &system_message {
+                Some(sys) if !sys.is_empty() => {
+                    format!("[Instructions from caller — follow these for your response]\n{}\n[End instructions]\n\n{}", sys, raw_user_message)
+                }
+                _ => raw_user_message,
             }
-            _ => raw_user_message,
         };
 
         if user_message.is_empty() {
@@ -828,6 +864,24 @@ impl PTYWebSocketServer {
                 return Ok(());
             }
             _ => {} // Idle — good to go
+        }
+
+        // Proxy mode: /clear Claude Code context before each request for stateless operation
+        if proxy_mode {
+            debug!(slot_id, "Proxy mode: clearing Claude Code context before request");
+            if let Err(e) = pty_manager.send_fire_and_forget(&slot_id, "/clear").await {
+                warn!(slot_id, error = %e, "Failed to send /clear");
+            } else {
+                // Wait for Claude Code to process /clear and return to Idle
+                for _ in 0..20 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+                    if let Some(s) = pty_manager.get_status(&slot_id).await {
+                        if s.state == SessionState::Idle {
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
         // Start trace

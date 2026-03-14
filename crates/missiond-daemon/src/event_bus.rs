@@ -308,6 +308,14 @@ pub(crate) enum DaemonEvent {
         output_summary: String,
     },
 
+    // ===== Perception Layer: Config Awareness =====
+    /// A monitored config file was changed (slots.yaml, prompts, servers.yaml, etc.).
+    ConfigFileChanged {
+        path: String,
+        /// "modified", "created", "deleted"
+        kind: String,
+    },
+
     // ===== Unified CLI Engine Events =====
     /// Unified: an external CLI engine request was sent.
     /// Replaces engine-specific GeminiRequestStarted / CodexRequestStarted.
@@ -400,6 +408,7 @@ impl DaemonEvent {
             Self::NarrationFailed { .. } => "narration_failed",
             Self::WorkerLlmCall { .. } => "worker_llm_call",
             Self::ToolCompleted { .. } => "tool_completed",
+            Self::ConfigFileChanged { .. } => "config_file_changed",
             Self::CliRequestStarted { .. } => "cli_request_started",
             Self::CliRequestCompleted { .. } => "cli_request_completed",
             Self::CliToolActivity { .. } => "cli_tool_activity",
@@ -610,6 +619,10 @@ impl DaemonEvent {
                 "input_preview": input_preview,
                 "result_preview": result_preview,
                 "is_error": is_error,
+            }),
+            Self::ConfigFileChanged { path, kind } => json!({
+                "path": path,
+                "kind": kind,
             }),
         }
     }
