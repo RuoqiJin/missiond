@@ -105,7 +105,7 @@ impl MissionDB {
     pub fn find_open_task_by_dedupe_key(&self, dedupe_key: &str) -> DbResult<Option<BoardTask>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
-            "SELECT * FROM board_tasks WHERE dedupe_key = ?1 AND status = 'open' LIMIT 1",
+            "SELECT * FROM board_tasks WHERE dedupe_key = ?1 AND status NOT IN ('done', 'failed', 'skipped') LIMIT 1",
         )?;
         let mut rows = stmt.query(params![dedupe_key])?;
         if let Some(row) = rows.next()? {

@@ -11,7 +11,7 @@ use crate::llm_gateway::determine_llm_env;
 use missiond_core::SessionState;
 use crate::helpers::default_mission_home;
 use crate::supervisor::truncate_safe;
-use crate::supervisor::is_auth_error;
+use crate::supervisor::{is_auth_error, is_quota_exhausted};
 use crate::memory_scheduler::{dispatch_queued_submit_tasks, schedule_memory_tasks, reap_stale_submit_tasks};
 use crate::claude_md_sync::sync_claude_md;
 use crate::extraction::check_kb_auto_gc;
@@ -539,6 +539,62 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                         let _ = state.mission.db().increment_board_task_retry(&task.id, new_retry);
                     }
                     continue;
+                }
+
+                // Check for quota exhaustion — circuit breaker: auto global_pause
+                if is_quota_exhausted(&res.response) {
+                    warn!(slot_id = %slot_id, task_id = %task.id, "🚨 Autopilot: API quota exhausted! Activating global pause circuit breaker");
+                    // Activate global pause
+                    state.global_paused.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let now = chrono::Utc::now().timestamp();
+                    state.global_paused_at.store(now, std::sync::atomic::Ordering::Relaxed);
+                    let _ = std::fs::write(
+                        crate::helpers::default_mission_home().join("global_paused"),
+                        now.to_string(),
+                    );
+                    // Add note to the task
+                    let _ = state.mission.db().add_board_task_note(
+                        &missiond_core::types::AddBoardTaskNoteInput {
+                            task_id: task.id.clone(),
+                            content: format!(
+                                "🚨 **Quota Exhausted** — API 配额耗尽，已自动激活全局暂停\n\nslot: {}\n\n{}",
+                                slot_id,
+                                &truncate_safe(&res.response, 500),
+                            ),
+                            note_type: Some("note".to_string()),
+                            author: Some("circuit-breaker".to_string()),
+                        },
+                    );
+                    // Return task to open for retry after quota resets
+                    let _ = state.mission.db().update_board_task(
+                        &task.id,
+                        &missiond_core::types::UpdateBoardTaskInput {
+                            status: Some("open".to_string()),
+                            ..Default::default()
+                        },
+                    );
+                    // Create incident for visibility
+                    let incident = missiond_core::types::MissionIncident {
+                        id: format!("inc-{}", uuid::Uuid::new_v4()),
+                        severity: missiond_core::types::IncidentSeverity::Critical,
+                        source: missiond_core::types::IncidentSource::PtySlot,
+                        title: "API 配额耗尽 — 全局暂停已激活".to_string(),
+                        description: format!(
+                            "工位 {} 检测到 API 配额耗尽，系统已自动激活全局暂停。\n\
+                             所有任务派发已停止，需手动 mission_pause(action=\"resume\") 恢复。",
+                            slot_id
+                        ),
+                        server_id: None,
+                        raw_payload: serde_json::json!({
+                            "slot_id": slot_id,
+                            "task_id": task.id,
+                            "trigger": "quota_exhausted",
+                        }),
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                    };
+                    let _ = state.incident_tx.try_send(incident);
+                    // Stop processing remaining tasks — quota is gone
+                    break;
                 }
 
                 // Record result as a board note

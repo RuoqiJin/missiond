@@ -349,7 +349,33 @@ async fn handle_confirm_required(
     }
 }
 
+/// In-memory rate limiter for MCP tool error incidents.
+/// Key: "slot_id:tool_name", Value: last incident creation time.
+/// Prevents the same slot+tool from flooding incidents (30-second cooldown).
+static MCP_ERROR_COOLDOWN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Cooldown period: same slot+tool can only create 1 incident per 30 seconds.
+const MCP_ERROR_COOLDOWN_SECS: u64 = 30;
+
 fn handle_mcp_tool_error(s: &AppState, slot_id: &str, tool_name: &str, error: &str) {
+    let cooldown_key = format!("{}:{}", slot_id, tool_name);
+    {
+        let mut cache = MCP_ERROR_COOLDOWN.lock().unwrap();
+        let now = std::time::Instant::now();
+        if let Some(last) = cache.get(&cooldown_key) {
+            if now.duration_since(*last).as_secs() < MCP_ERROR_COOLDOWN_SECS {
+                debug!(slot_id = %slot_id, tool = %tool_name, "MCP tool error suppressed (cooldown)");
+                return;
+            }
+        }
+        // Lazy cleanup: purge expired entries when map exceeds 100 keys
+        if cache.len() > 100 {
+            cache.retain(|_, last_time| now.duration_since(*last_time).as_secs() < MCP_ERROR_COOLDOWN_SECS);
+        }
+        cache.insert(cooldown_key, now);
+    }
+
     warn!(slot_id = %slot_id, tool = %tool_name, "MCP tool error detected, creating incident");
     let incident = missiond_core::types::MissionIncident {
         id: uuid::Uuid::new_v4().to_string(),

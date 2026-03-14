@@ -132,7 +132,8 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
     // PtySlot incidents: dispatch remediation to a Claude Code (Opus) slot
     if matches!(incident.source, missiond_core::types::IncidentSource::PtySlot) {
         if let Some(slot_id) = incident.raw_payload.get("slot_id").and_then(|v| v.as_str()) {
-            // Dedup: check if an open remediation task already exists for this slot+tool
+            // Dedup: check if an active remediation task already exists for this slot+tool
+            // Now checks open, in_progress, and queued tasks (not just open)
             let existing = db.find_open_task_by_dedupe_key(&dedupe_key).ok().flatten();
             if let Some(ref task) = existing {
                 let note = format!("🔄 告警重复触发 +1 ({})", chrono::Utc::now().format("%m-%d %H:%M UTC"));
@@ -142,7 +143,7 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
                     note_type: Some("progress".to_string()),
                     author: Some("aiops".to_string()),
                 });
-                debug!(task_id = %task.id, "AIOps: PTY alert aggregated into existing task");
+                debug!(task_id = %task.id, status = task.status.as_str(), "AIOps: PTY alert aggregated into existing task");
             } else {
                 create_pty_remediation_task(state, slot_id, &incident.title, &incident.description, &dedupe_key);
             }

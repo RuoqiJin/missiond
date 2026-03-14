@@ -284,8 +284,9 @@ async fn main() -> Result<()> {
     // PTY conversation logger: subscribe to manager events
     let pty_logger_rx = pty.subscribe();
 
-    // AIOps: incident event bus (capacity 100, try_send only — "宁丢不阻塞")
-    let (incident_tx, incident_rx) = tokio::sync::mpsc::channel::<missiond_core::types::MissionIncident>(100);
+    // AIOps: incident event bus (capacity 500, try_send only — "宁丢不阻塞")
+    // Increased from 100 to handle MCP error burst scenarios without losing incidents.
+    let (incident_tx, incident_rx) = tokio::sync::mpsc::channel::<missiond_core::types::MissionIncident>(500);
 
     // Embedding worker channel: event-driven, 0 CPU when idle
     let (embedding_tx, embedding_rx) = tokio::sync::mpsc::channel::<EmbeddingTask>(256);
