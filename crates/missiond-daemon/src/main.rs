@@ -1102,14 +1102,15 @@ async fn main() -> Result<()> {
         });
     }
 
-    // fsnotify watcher for slots.yaml
+    // Perception Layer: config file watcher (slots.yaml + servers.yaml + prompts + MCP config)
     {
         let watch_state = state.clone();
         let watch_path = slots_path.clone();
+        let mission_home = helpers::default_mission_home();
         tokio::spawn(async move {
             use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(16);
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(32);
 
             let mut watcher = match RecommendedWatcher::new(
                 move |res: Result<Event, notify::Error>| {
@@ -1121,47 +1122,115 @@ async fn main() -> Result<()> {
             ) {
                 Ok(w) => w,
                 Err(e) => {
-                    error!(error = %e, "Failed to create slots.yaml file watcher");
+                    error!(error = %e, "Failed to create config file watcher");
                     return;
                 }
             };
 
-            // Watch the parent directory (NonRecursive) to catch file renames/creates
+            // Watch the mission home directory (non-recursive) for config files
             let watch_dir = watch_path.parent().unwrap_or(&watch_path);
             if let Err(e) = watcher.watch(watch_dir, RecursiveMode::NonRecursive) {
-                error!(error = %e, path = %watch_dir.display(), "Failed to watch slots.yaml directory");
+                error!(error = %e, path = %watch_dir.display(), "Failed to watch config directory");
                 return;
             }
 
-            info!(path = %watch_path.display(), "Watching slots.yaml for changes");
+            // Watch prompts directory (recursive) if it exists
+            let prompts_dir = mission_home.join("prompts");
+            if prompts_dir.exists() {
+                if let Err(e) = watcher.watch(&prompts_dir, RecursiveMode::Recursive) {
+                    warn!(error = %e, "Failed to watch prompts directory");
+                }
+            }
 
-            // Debounce: wait 500ms after last event before reloading
-            let mut debounce_timer: Option<tokio::time::Instant> = None;
+            // Monitored config files (emit Timeline events on change)
+            let monitored_files: std::collections::HashSet<&str> = [
+                "slots.yaml", "servers.yaml", "xjp-mcp-config.json",
+            ].into_iter().collect();
+
+            info!(path = %watch_dir.display(), "Perception: watching config files for changes");
+
+            // Debounce per file: wait 500ms after last event
+            let mut debounce_slots: Option<tokio::time::Instant> = None;
+            let mut pending_config_events: Vec<(String, String)> = Vec::new();
+            let mut debounce_config: Option<tokio::time::Instant> = None;
 
             loop {
                 tokio::select! {
                     Some(event) = rx.recv() => {
-                        // Only react to modifications/creates of the actual slots.yaml file
-                        let is_slots_file = event.paths.iter().any(|p| {
-                            p.file_name().map(|n| n == "slots.yaml").unwrap_or(false)
-                        });
                         let is_relevant = matches!(
                             event.kind,
-                            EventKind::Modify(_) | EventKind::Create(_)
+                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
                         );
-                        if is_slots_file && is_relevant {
-                            debounce_timer = Some(tokio::time::Instant::now() + std::time::Duration::from_millis(500));
+                        if !is_relevant { continue; }
+
+                        let kind = match event.kind {
+                            EventKind::Remove(_) => "deleted",
+                            EventKind::Create(_) => "created",
+                            _ => "modified",
+                        };
+
+                        for path in &event.paths {
+                            let file_name = path.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("");
+
+                            // slots.yaml: special handling (reload slots)
+                            if file_name == "slots.yaml" && kind != "deleted" {
+                                debounce_slots = Some(tokio::time::Instant::now() + std::time::Duration::from_millis(500));
+                            }
+
+                            // Any monitored config file OR prompts dir: emit Timeline event
+                            let is_config = monitored_files.contains(file_name);
+                            let is_prompt = path.starts_with(&prompts_dir);
+                            if is_config || is_prompt {
+                                let display = path.display().to_string();
+                                pending_config_events.push((display, kind.to_string()));
+                                debounce_config = Some(tokio::time::Instant::now() + std::time::Duration::from_millis(500));
+                            }
                         }
                     }
                     _ = async {
-                        match debounce_timer {
-                            Some(deadline) => tokio::time::sleep_until(deadline).await,
-                            None => std::future::pending().await,
+                        // Pick the earliest deadline
+                        match (debounce_slots, debounce_config) {
+                            (Some(a), Some(b)) => tokio::time::sleep_until(a.min(b)).await,
+                            (Some(a), None) => tokio::time::sleep_until(a).await,
+                            (None, Some(b)) => tokio::time::sleep_until(b).await,
+                            (None, None) => std::future::pending().await,
                         }
                     } => {
-                        debounce_timer = None;
-                        info!("slots.yaml changed on disk, reloading");
-                        handle_slots_reload(&watch_state).await;
+                        let now = tokio::time::Instant::now();
+
+                        // Handle slots.yaml reload
+                        if let Some(deadline) = debounce_slots {
+                            if now >= deadline {
+                                debounce_slots = None;
+                                info!("slots.yaml changed on disk, reloading");
+                                handle_slots_reload(&watch_state).await;
+                            }
+                        }
+
+                        // Handle config change events
+                        if let Some(deadline) = debounce_config {
+                            if now >= deadline {
+                                debounce_config = None;
+                                let events = std::mem::take(&mut pending_config_events);
+                                for (path, kind) in events {
+                                    info!(path = %path, kind = %kind, "Config file changed");
+                                    watch_state.event_bus.publish(
+                                        event_bus::DaemonEvent::ConfigFileChanged {
+                                            path: path.clone(),
+                                            kind: kind.clone(),
+                                        },
+                                    );
+
+                                    // Hot-reload prompts if a prompt file changed
+                                    if path.contains("/prompts/") {
+                                        watch_state.prompts.reload();
+                                        info!("Prompts hot-reloaded from file change");
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
