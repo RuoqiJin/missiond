@@ -14,7 +14,7 @@ use crate::state::AppState;
 use crate::slot_env::{build_slot_tracking_env, capture_slot_session_uuid};
 use crate::decision_harvest::harvest_decisions_for_task;
 use crate::llm_gateway::{call_gemini_for_flow, determine_llm_env};
-use crate::supervisor::{strip_prompt_echo, truncate_safe, is_auth_error};
+use crate::supervisor::{strip_prompt_echo, truncate_safe, is_auth_error, is_quota_exhausted};
 use missiond_core::SessionState;
 use missiond_core::PTYSpawnOptions;
 
@@ -285,6 +285,31 @@ pub(crate) async fn execute_flow_task(state: &AppState, task: &missiond_core::ty
                             entry.0 += 1;
                             entry.1 = chrono::Utc::now().timestamp();
                         }
+                        return Ok(());
+                    }
+
+                    // Check for quota exhaustion — circuit breaker
+                    if is_quota_exhausted(&res.response) {
+                        warn!(task_id = %task.id, slot_id, phase = %phase_str, "🚨 Flow engine: API quota exhausted! Activating global pause");
+                        state.global_paused.store(true, std::sync::atomic::Ordering::Relaxed);
+                        let now = chrono::Utc::now().timestamp();
+                        state.global_paused_at.store(now, std::sync::atomic::Ordering::Relaxed);
+                        let _ = std::fs::write(
+                            crate::helpers::default_mission_home().join("global_paused"),
+                            now.to_string(),
+                        );
+                        let _ = state.mission.db().add_board_task_note(
+                            &missiond_core::types::AddBoardTaskNoteInput {
+                                task_id: task.id.clone(),
+                                content: format!(
+                                    "🚨 **Quota Exhausted** — API 配额耗尽，全局暂停已激活\n\nslot: {}, phase: {}",
+                                    slot_id, p.display_name(),
+                                ),
+                                note_type: Some("note".to_string()),
+                                author: Some("circuit-breaker".to_string()),
+                            },
+                        );
+                        let _ = state.mission.db().unclaim_board_task(&task.id);
                         return Ok(());
                     }
 

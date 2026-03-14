@@ -4,7 +4,7 @@ use tracing::{debug, info, warn};
 use crate::state::{AppState, ExtractionPhase, ExtractionState};
 use crate::state::{MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 use crate::event_bus::{DaemonEvent, EventBus, TraceContext};
-use crate::supervisor::is_auth_error;
+use crate::supervisor::{is_auth_error, is_quota_exhausted};
 use crate::memory_scheduler::{ensure_memory_slot, ensure_memory_slot_by_id};
 use missiond_core::SessionState;
 use std::sync::Arc;
@@ -185,9 +185,10 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
     tokio::spawn(async move {
         match pty.send(MEMORY_SLOT_ID, &prompt, 300_000).await {
             Ok(res) => {
-                if is_auth_error(&res.response) {
-                    warn!("Realtime extraction: auth error on {}, aborting", MEMORY_SLOT_ID);
-                    let _ = mission.db().slot_task_set_failed(&slot_task_id_clone, "OAuth token expired");
+                if is_auth_error(&res.response) || is_quota_exhausted(&res.response) {
+                    let reason = if is_quota_exhausted(&res.response) { "API quota exhausted" } else { "OAuth token expired" };
+                    warn!("Realtime extraction: {} on {}, aborting", reason, MEMORY_SLOT_ID);
+                    let _ = mission.db().slot_task_set_failed(&slot_task_id_clone, reason);
                     let mut es = extraction_state.write().await;
                     es.phase = ExtractionPhase::Idle;
                     es.active_type = None;
@@ -412,9 +413,10 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
         tokio::spawn(async move {
             match pty.send(MEMORY_SLOW_SLOT_ID, &prompt, 900_000).await {
                 Ok(res) => {
-                    if is_auth_error(&res.response) {
-                        warn!(conv_id = %conv_id, "Deep analysis: auth error on {}, aborting", MEMORY_SLOW_SLOT_ID);
-                        let _ = mission.db().slot_task_set_failed(&slot_task_id, "OAuth token expired");
+                    if is_auth_error(&res.response) || is_quota_exhausted(&res.response) {
+                        let reason = if is_quota_exhausted(&res.response) { "API quota exhausted" } else { "OAuth token expired" };
+                        warn!(conv_id = %conv_id, "Deep analysis: {} on {}, aborting", reason, MEMORY_SLOW_SLOT_ID);
+                        let _ = mission.db().slot_task_set_failed(&slot_task_id, reason);
                         let mut es = extraction_state.write().await;
                         es.phase = ExtractionPhase::Idle;
                         es.active_type = None;
@@ -575,9 +577,10 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
     tokio::spawn(async move {
         match pty.send(MEMORY_SLOW_SLOT_ID, prompt, 900_000).await {
             Ok(res) => {
-                if is_auth_error(&res.response) {
-                    warn!("KB consolidation: auth error on {}, aborting", MEMORY_SLOW_SLOT_ID);
-                    let _ = mission.db().slot_task_set_failed(&slot_task_id, "OAuth token expired");
+                if is_auth_error(&res.response) || is_quota_exhausted(&res.response) {
+                    let reason = if is_quota_exhausted(&res.response) { "API quota exhausted" } else { "OAuth token expired" };
+                    warn!("KB consolidation: {} on {}, aborting", reason, MEMORY_SLOW_SLOT_ID);
+                    let _ = mission.db().slot_task_set_failed(&slot_task_id, reason);
                     let mut es = extraction_state.write().await;
                     es.phase = ExtractionPhase::Idle;
                     es.active_type = None;

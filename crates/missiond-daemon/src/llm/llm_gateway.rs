@@ -69,31 +69,28 @@ pub(crate) async fn call_gemini_for_flow(state: &AppState, task_id: &str, prompt
 
 /// Dynamic LLM model selector based on task characteristics and slot role.
 /// Returns env var overrides that get merged into PTY spawn environment.
-pub(crate) fn determine_llm_env(task: &missiond_core::types::BoardTask, slot_role: &str) -> HashMap<String, String> {
+///
+/// NOTE: Does NOT blindly override to Opus for coder slots. The slot's own
+/// `model` config in slots.yaml is respected (applied at PTY spawn). This
+/// function only sets task-type-based routing. If no override is set here,
+/// the slot uses its configured model (or Claude Code's default).
+pub(crate) fn determine_llm_env(task: &missiond_core::types::BoardTask, _slot_role: &str) -> HashMap<String, String> {
     let mut envs = HashMap::new();
 
-    // Coder slots always use Opus for best coding quality
-    if slot_role == "coder" {
-        envs.insert("ANTHROPIC_MODEL".to_string(), "claude-opus-4-6".to_string());
-        return envs;
-    }
-
-    // Rule 1: urgent priority / ops → Opus
-    if task.priority == "urgent" || task.category == "ops" {
+    // Rule 1: urgent priority → Opus (critical tasks need best quality)
+    if task.priority == "urgent" {
         envs.insert("ANTHROPIC_MODEL".to_string(), "claude-opus-4-6".to_string());
     }
-    // Rule 2: docs / test / chore → fast & cheap Haiku
+    // Rule 2: ops category → Sonnet (balanced for remediation tasks)
+    else if task.category == "ops" {
+        envs.insert("ANTHROPIC_MODEL".to_string(), "claude-sonnet-4-6".to_string());
+    }
+    // Rule 3: docs / test / chore → fast & cheap Haiku
     else if task.category == "docs" || task.category == "test" || task.category == "chore" {
         envs.insert("ANTHROPIC_MODEL".to_string(), "claude-haiku-4-5-20251001".to_string());
     }
-    // Rule 3: very long description (>2000 chars) → complex context, upgrade
-    else if task.description.len() > 2000 {
-        envs.insert("ANTHROPIC_MODEL".to_string(), "claude-sonnet-4-6".to_string());
-    }
-    // Default: sonnet (balanced cost/performance)
-    else {
-        envs.insert("ANTHROPIC_MODEL".to_string(), "claude-sonnet-4-6".to_string());
-    }
+    // Default: no override — let slot's own model config apply
+    // (slots.yaml `model` field or Claude Code's default)
 
     envs
 }

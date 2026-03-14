@@ -186,6 +186,41 @@ pub(crate) fn is_auth_error(response: &str) -> bool {
         || lower.contains("auth error")
 }
 
+/// Detect Claude API quota/usage exhaustion in PTY response content.
+/// Checks the TAIL of the response (errors appear at end of PTY output).
+pub(crate) fn is_quota_exhausted(response: &str) -> bool {
+    // Check last ~8KB — PTY errors appear at the end, after command echo/spinners
+    let len = response.len();
+    let check_start = if len > 8000 {
+        let mut start = len - 8000;
+        while start < len && !response.is_char_boundary(start) {
+            start += 1;
+        }
+        start
+    } else {
+        0
+    };
+    let lower = response[check_start..].to_lowercase();
+    // Hard quota / billing exhaustion (should NOT auto-recover)
+    lower.contains("out of extra usage")
+        || lower.contains("usage limit exceeded")
+        || lower.contains("you've exceeded")
+        || lower.contains("quota exceeded")
+        || lower.contains("billing limit")
+        || lower.contains("spending limit")
+        || lower.contains("credit balance")
+        || lower.contains("insufficient_quota")
+        || lower.contains("exceeded your current quota")
+        || lower.contains("over_limit_error")
+        || lower.contains("402 payment required")
+        || lower.contains("credit balance is too low")
+        || lower.contains("organization has been restricted")
+        // Rate limit (temporary, but still should pause to prevent cascade)
+        || lower.contains("rate limit exceeded")
+        || lower.contains("rate_limit_error")
+        || lower.contains("429 too many requests")
+}
+
 pub(crate) fn truncate_safe(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
