@@ -132,7 +132,20 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
     // PtySlot incidents: dispatch remediation to a Claude Code (Opus) slot
     if matches!(incident.source, missiond_core::types::IncidentSource::PtySlot) {
         if let Some(slot_id) = incident.raw_payload.get("slot_id").and_then(|v| v.as_str()) {
-            create_pty_remediation_task(state, slot_id, &incident.title, &incident.description);
+            // Dedup: check if an open remediation task already exists for this slot+tool
+            let existing = db.find_open_task_by_dedupe_key(&dedupe_key).ok().flatten();
+            if let Some(ref task) = existing {
+                let note = format!("🔄 告警重复触发 +1 ({})", chrono::Utc::now().format("%m-%d %H:%M UTC"));
+                let _ = db.add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                    task_id: task.id.clone(),
+                    content: note,
+                    note_type: Some("progress".to_string()),
+                    author: Some("aiops".to_string()),
+                });
+                debug!(task_id = %task.id, "AIOps: PTY alert aggregated into existing task");
+            } else {
+                create_pty_remediation_task(state, slot_id, &incident.title, &incident.description, &dedupe_key);
+            }
             if let Err(e) = db.insert_incident(
                 &incident.id,
                 &incident.severity.to_string(),
@@ -278,6 +291,7 @@ pub(crate) fn create_pty_remediation_task(
     target_slot_id: &str,
     incident_title: &str,
     incident_description: &str,
+    dedupe_key: &str,
 ) {
     let description = format!(
         "## PTY 工位自愈任务\n\n\
@@ -314,7 +328,7 @@ pub(crate) fn create_pty_remediation_task(
         hidden: None,
         flow_template: None,
         depends_on: None,
-        dedupe_key: None,
+        dedupe_key: Some(dedupe_key.to_string()),
     };
 
     match state.mission.db().create_board_task(&task_input) {

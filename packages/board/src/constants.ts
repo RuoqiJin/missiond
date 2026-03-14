@@ -7,6 +7,7 @@ export const CATEGORY_CONFIG: Record<TaskCategory, { label: string; className: s
   test: { label: '测试', className: 'bg-green-500/10 text-green-400 border-green-500/20' },
   research: { label: '研究', className: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20' },
   diagnosis: { label: '诊断', className: 'bg-rose-500/10 text-rose-400 border-rose-500/20' },
+  investigation: { label: '调查', className: 'bg-amber-500/10 text-amber-400 border-amber-500/20' },
   other: { label: '其他', className: 'bg-neutral-500/10 text-neutral-400 border-neutral-500/20' },
 };
 

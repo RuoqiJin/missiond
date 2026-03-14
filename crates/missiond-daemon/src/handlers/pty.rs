@@ -179,6 +179,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_pty_kill" => {
             let PTYKillArgs { slot_id } = serde_json::from_value(args)?;
             state.pty.kill(&slot_id).await?;
+            // Clear from compact restart pending set (slot is being rebuilt)
+            state.pending_compact_restart.lock().unwrap().remove(&slot_id);
             // Requeue any Running submit tasks assigned to this slot
             let requeued = state.mission.db().requeue_running_tasks_for_slot(&slot_id).unwrap_or(0);
             // Release any board task claims held by this slot
@@ -316,18 +318,23 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
             state.pty.confirm(&slot_id, resp).await?;
 
-            // Auto-record permission for approved tool confirmations
-            if is_approval {
-                if let Some(ref info) = pending {
-                    if let Some(ref tool) = info.tool {
+            // Learn permission from user's decision
+            if let Some(ref info) = pending {
+                if let Some(ref tool) = info.tool {
+                    if let Some(learned) = state.permission.learned() {
+                        let decision = if is_approval { "allow" } else { "deny" };
                         if let Some(status) = state.pty.get_status(&slot_id).await {
-                            state.permission.add_role_auto_allow(&status.role, &tool.name);
-                            info!(
-                                role = %status.role,
-                                pattern = %tool.name,
-                                slot_id = %slot_id,
-                                "Auto-allow recorded after confirm approval"
-                            );
+                            if let Err(e) = learned.learn("role", &status.role, &tool.name, decision, None) {
+                                tracing::warn!(error = %e, "Failed to record learned permission");
+                            } else {
+                                tracing::info!(
+                                    role = %status.role,
+                                    tool = %tool.name,
+                                    decision,
+                                    slot_id = %slot_id,
+                                    "Permission learned from user confirmation"
+                                );
+                            }
                         }
                     }
                 }

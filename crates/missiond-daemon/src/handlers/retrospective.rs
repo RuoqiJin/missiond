@@ -176,6 +176,7 @@ pub(crate) async fn run_analysis(state: &AppState, session_id: &str, depth: &str
                 result["fileHeatmap"] = d.file_heatmap;
                 result["serverMap"] = d.server_map;
                 result["errorRecoveryChains"] = d.error_chains;
+                result["errorTypeDistribution"] = d.error_type_distribution;
             }
             Err(e) => {
                 result["detailedError"] = json!(format!("{}", e));
@@ -240,12 +241,89 @@ fn safe_truncate(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+// ============ Error Type Classification ============
+
+/// Classify error type from tool output (heuristic, no DB schema change).
+/// - system_error: MCP/IPC/network infrastructure failures (not Agent's fault)
+/// - client_error: bad parameters, wrong paths (Agent can improve)
+/// - business_error: compile/test/logic failures (needs human decision)
+fn classify_error_type(output: &str) -> &'static str {
+    let lower = output.to_lowercase();
+    // System errors: infrastructure / MCP / IPC / network
+    if lower.contains("no such tool")
+        || lower.contains("mcp error")
+        || lower.contains("tool_use_error")
+        || lower.contains("connection refused")
+        || lower.contains("broken pipe")
+        || lower.contains("connection reset")
+        || lower.contains("unexpected eof")
+        || lower.contains("ipc error")
+        || lower.contains("timed out")
+        || lower.contains("daemon closed")
+        || lower.contains("socket closed")
+        || lower.contains("bad gateway")
+        || lower.contains("rate limit")
+    {
+        return "system_error";
+    }
+    // Client errors: bad parameters, wrong paths
+    if lower.contains("no such file or directory")
+        || lower.contains("file not found")
+        || lower.contains("is not unique")
+        || lower.contains("not found in file")
+        || lower.contains("missing required")
+        || lower.contains("invalid argument")
+        || lower.contains("does not exist")
+    {
+        return "client_error";
+    }
+    // Everything else: compile fails, test fails, logic errors
+    "business_error"
+}
+
+/// Build error type distribution from tool calls
+fn build_error_type_distribution(calls: &[(String, String, String, String)]) -> Value {
+    let mut system: Vec<(&str, &str)> = Vec::new();
+    let mut client: Vec<(&str, &str)> = Vec::new();
+    let mut business: Vec<(&str, &str)> = Vec::new();
+
+    for (tool_name, _input, output, status) in calls {
+        if status != "error" { continue; }
+        let etype = classify_error_type(output);
+        let bucket = match etype {
+            "system_error" => &mut system,
+            "client_error" => &mut client,
+            _ => &mut business,
+        };
+        bucket.push((tool_name.as_str(), output.as_str()));
+    }
+
+    let summarize = |items: &[(&str, &str)]| -> Value {
+        if items.is_empty() { return json!(null); }
+        let mut tool_counts: HashMap<&str, u32> = HashMap::new();
+        for (tool, _) in items {
+            *tool_counts.entry(tool).or_default() += 1;
+        }
+        let samples: Vec<Value> = items.iter().take(3).map(|(tool, output)| {
+            json!({ "tool": tool, "sample": safe_truncate(output, 100) })
+        }).collect();
+        json!({ "count": items.len(), "tools": tool_counts, "samples": samples })
+    };
+
+    let mut result = json!({});
+    if !system.is_empty() { result["system_error"] = summarize(&system); }
+    if !client.is_empty() { result["client_error"] = summarize(&client); }
+    if !business.is_empty() { result["business_error"] = summarize(&business); }
+    result
+}
+
 // ============ Detailed Analysis ============
 
 struct DetailedAnalysis {
     file_heatmap: Value,
     server_map: Value,
     error_chains: Value,
+    error_type_distribution: Value,
 }
 
 /// Build detailed analysis: file heatmap, server map, error recovery chains
@@ -263,11 +341,13 @@ async fn run_detailed_analysis(state: &AppState, session_id: &str) -> Result<Det
     let file_heatmap = build_file_heatmap(&tool_calls);
     let server_map = build_server_map(&tool_calls);
     let error_chains = build_error_recovery_chains(&timeline);
+    let error_type_distribution = build_error_type_distribution(&tool_calls);
 
     Ok(DetailedAnalysis {
         file_heatmap,
         server_map,
         error_chains,
+        error_type_distribution,
     })
 }
 
@@ -628,6 +708,12 @@ async fn run_full_analysis(state: &AppState, session_id: &str, stats: &Value) ->
         .map(|s| format!("\n### 错误恢复链（策略分类）\n{s}\n"))
         .unwrap_or_default();
 
+    let error_type_str = stats.get("errorTypeDistribution")
+        .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+        .filter(|s| s != "{}" && s != "null")
+        .map(|s| format!("\n### 错误类型分布（system/client/business）\n{s}\n"))
+        .unwrap_or_default();
+
     // Compose prompt
     let prompt = format!(
         r#"## 会话复盘分析请求
@@ -656,7 +742,7 @@ async fn run_full_analysis(state: &AppState, session_id: &str, stats: &Value) ->
 
 ### 错误样本
 {error_samples_str}
-{file_heatmap_str}{server_map_str}{error_chains_str}
+{file_heatmap_str}{server_map_str}{error_chains_str}{error_type_str}
 请分析:
 1. 主要弯路及根因 (每个弯路 1 行)
 2. 时间黑洞的优化建议

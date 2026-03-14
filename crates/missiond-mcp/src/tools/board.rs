@@ -315,6 +315,45 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
+        ToolDefinition::new(
+            "mission_board_batch_update",
+            "批量更新任务。对多个任务应用相同的字段变更（如批量关闭、批量改优先级）。返回每个任务的更新结果。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "任务 ID 列表"
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "新状态: open, done"
+                    },
+                    "priority": {
+                        "type": "string",
+                        "description": "新优先级: high, medium, low"
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "新分类: deploy, dev, infra, test, other"
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "新关联项目"
+                    },
+                    "assignee": {
+                        "type": "string",
+                        "description": "分配的 PTY 工位 ID"
+                    },
+                    "hidden": {
+                        "type": "boolean",
+                        "description": "隐藏任务"
+                    }
+                },
+                "required": ["ids"]
+            }),
+        ),
         // ===== Task Decompose =====
         ToolDefinition::new(
             "mission_board_decompose",

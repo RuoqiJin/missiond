@@ -224,6 +224,12 @@ async fn call_minimax_triage(
   ]
 }}
 
+## 错误类型分类（如 errorTypeDistribution 字段存在）
+数据中可能包含 `errorTypeDistribution` 字段，按错误归因分为三类：
+- system_error: MCP/IPC/网络基础设施故障（非 Agent 的责任）
+- client_error: 参数错误、路径不存在（Agent 可改进）
+- business_error: 编译/测试/逻辑失败（业务问题）
+
 ## 严重度判定标准
 - critical: 错误率>50% 或 浪费比>70% 或 flailing 策略 ≥3 个
 - high: 错误率>35% 或 浪费比>50% 或 blind_retry ≥5次 或 单文件改动>20次
@@ -231,6 +237,8 @@ async fn call_minimax_triage(
 - low: 正常范围（浪费比<30%，无明显错误模式）
 
 ## 重要规则
+- 错误率阈值仅统计 client_error + business_error。system_error 单独在 findings 中报告但不升级 severity
+- system_error 占总错误 >80% 时，actionable=false（Agent 无法改善基础设施问题，需独立的基建告警处理）
 - 百分比阈值（错误率/浪费比）仅在总调用次数>10时严格适用。调用<10次的会话最高判 medium
 - 读操作（Read/Grep/Glob）的浪费可适度宽容（探索性搜索是正常行为）；写操作（Edit/Write/Bash）连续失败应优先升级
 - 如果高浪费比是任务性质决定的正常试错（如在大型遗留项目中搜索），severity 不变但 actionable=false
@@ -271,10 +279,12 @@ fn create_anomaly_board_task(
          3. 总结根因(Root Cause)和改进建议\n\
          4. 调用 `mission_kb_remember(category=\"memory:debug\")` 将异常原因和结论记录到知识库\n\
          5. **判定修复状态**：\n\
-            - 如果问题**已修复**（代码已有 fix）或**误报**（正常行为被误判）→ 在报告中注明，跳到步骤 7\n\
-            - 如果问题**未修复**且可操作 → 创建修复子任务（步骤 6）\n\
-         6. 为未修复问题创建子任务：调用 `mission_board_create(title=\"[待修复] 简述问题\", description=\"根因+修复建议\", parentId=\"{{TASK_ID}}\", priority=\"medium\", category=\"dev\", project=\"missiond\")`。注意：不要设置 assignee 和 autoExecute，由人工审核后决定执行\n\
-         7. CRITICAL: 调用 board_note_add 写入诊断报告（含结论: resolved_no_action / repair_task_created / escalated_to_human），然后调用 board_update 设为 done",
+            - 如果问题**已修复**（代码已有 fix）或**误报**（正常行为被误判）→ 在报告中注明，跳到步骤 9\n\
+            - 如果问题**未修复**且可操作 → 创建调查+修复子任务（步骤 6-8）\n\
+         6. 创建根因调查子任务：调用 `mission_board_create(title=\"[根因调查] 简述问题\", description=\"## 调查目标\\n简述需要定位的问题\\n\\n## 关键线索\\n从诊断中提取的错误消息、可疑代码路径、相关会话 ID\\n\\n## 调查步骤\\n1. mission_conversation_get 查看实际错误\\n2. 读相关 handler/DB 源码\\n3. 追踪错误产生路径\\n\\n## 约束\\nCRITICAL: 这是 INVESTIGATION ONLY 任务。禁止修改任何代码文件。只做调查和报告。\", parentId=\"{{TASK_ID}}\", category=\"investigation\", assignee=\"slot-coder-1\", autoExecute=true, priority=\"medium\", project=\"missiond\")`。记录返回的调查任务 ID\n\
+         7. 创建待修复子任务：调用 `mission_board_create(title=\"[待修复] 简述问题\", description=\"根因+修复建议（调查完成后 DAG 自动注入调查报告）\", parentId=\"{{TASK_ID}}\", category=\"dev\", dependsOn=[步骤6返回的调查任务ID], priority=\"medium\", project=\"missiond\")`。注意：不要设置 assignee 和 autoExecute，由人工审核调查报告后决定\n\
+         8. 确认两个子任务都已创建成功\n\
+         9. CRITICAL: 调用 board_note_add 写入诊断报告（含结论: resolved_no_action / investigation_dispatched / escalated_to_human），然后调用 board_update 设为 done",
         session_id = session_id,
         trigger = trigger,
         severity = severity,

@@ -34,6 +34,44 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             Ok(ToolResult::json(&messages))
         }
 
+        "mission_pause" => {
+            use std::sync::atomic::Ordering;
+            let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("status");
+            let home = crate::helpers::default_mission_home();
+            let flag = home.join("global_paused");
+
+            match action {
+                "pause" => {
+                    state.global_paused.store(true, Ordering::Relaxed);
+                    let now = chrono::Utc::now().timestamp();
+                    state.global_paused_at.store(now, Ordering::Relaxed);
+                    let _ = std::fs::write(&flag, now.to_string());
+                    warn!("Global pause activated via MCP tool");
+                    Ok(ToolResult::text("✅ 全局暂停已激活。所有工位任务分派已停止。"))
+                }
+                "resume" => {
+                    state.global_paused.store(false, Ordering::Relaxed);
+                    state.global_paused_at.store(0, Ordering::Relaxed);
+                    let _ = std::fs::remove_file(&flag);
+                    info!("Global pause deactivated via MCP tool");
+                    Ok(ToolResult::text("▶️ 全局暂停已解除。工位恢复正常工作。"))
+                }
+                _ => {
+                    let paused = state.global_paused.load(Ordering::Relaxed);
+                    let since = state.global_paused_at.load(Ordering::Relaxed);
+                    let msg = if paused {
+                        format!("⏸ 当前处于全局暂停状态 (始于 {})", 
+                            chrono::DateTime::from_timestamp(since, 0)
+                                .map(|dt| dt.to_rfc3339())
+                                .unwrap_or_else(|| "未知时间".to_string()))
+                    } else {
+                        "🟢 当前工作正常，未暂停。".to_string()
+                    };
+                    Ok(ToolResult::text(msg))
+                }
+            }
+        }
+
         // ===== Health =====
         "mission_health" => {
             let agents = state.pty.get_all_status().await;
@@ -428,6 +466,147 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
         }
 
+        // ===== Gemini Watch (health probe) =====
+        "mission_gemini_watch" => {
+            let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
+            let action = args_val.get("action").and_then(|v| v.as_str()).unwrap_or("status");
+            gemini_watch(state, action).await
+        }
+
         _ => Err(anyhow!("Unknown misc tool: {name}")),
+    }
+}
+
+/// Gemini 429 recovery watch — background probe with 10-min timeout per attempt.
+async fn gemini_watch(state: &AppState, action: &str) -> Result<ToolResult> {
+    use std::sync::atomic::Ordering;
+
+    match action {
+        "start" => {
+            if state.gemini_watch_active.load(Ordering::Relaxed) {
+                let attempts = state.gemini_watch_attempts.load(Ordering::Relaxed);
+                return Ok(ToolResult::text(format!(
+                    "监测已在运行中 (第 {} 次探测)", attempts
+                )));
+            }
+
+            state.gemini_watch_active.store(true, Ordering::Relaxed);
+            state.gemini_watch_attempts.store(0, Ordering::Relaxed);
+            state.gemini_watch_started_at.store(
+                chrono::Utc::now().timestamp(), Ordering::Relaxed,
+            );
+
+            let st = state.clone();
+            let handle = tokio::spawn(async move {
+                gemini_watch_loop(st).await;
+            });
+
+            *state.gemini_watch_handle.lock().await = Some(handle);
+            info!("Gemini watch started");
+            Ok(ToolResult::text("✅ Gemini 监测已启动。每 10 分钟探测一次 gemini-3.1-pro-preview，恢复后自动创建 Board 通知。"))
+        }
+
+        "stop" => {
+            if !state.gemini_watch_active.load(Ordering::Relaxed) {
+                return Ok(ToolResult::text("监测未在运行"));
+            }
+            state.gemini_watch_active.store(false, Ordering::Relaxed);
+            if let Some(handle) = state.gemini_watch_handle.lock().await.take() {
+                handle.abort();
+            }
+            state.gemini_watch_started_at.store(0, Ordering::Relaxed);
+            info!("Gemini watch stopped");
+            Ok(ToolResult::text("⏹ Gemini 监测已停止"))
+        }
+
+        "status" => {
+            let active = state.gemini_watch_active.load(Ordering::Relaxed);
+            let attempts = state.gemini_watch_attempts.load(Ordering::Relaxed);
+            let started = state.gemini_watch_started_at.load(Ordering::Relaxed);
+            Ok(ToolResult::json_pretty(&json!({
+                "active": active,
+                "attempts": attempts,
+                "started_at": if started > 0 {
+                    chrono::DateTime::from_timestamp(started, 0)
+                        .map(|dt| dt.to_rfc3339())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                },
+            })))
+        }
+
+        _ => Ok(ToolResult::error("Unknown action. Use: start, stop, status")),
+    }
+}
+
+/// Background loop: probe Gemini every 10 minutes until success.
+async fn gemini_watch_loop(state: AppState) {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    let model = "gemini-3.1-pro-preview";
+    let probe_timeout = Duration::from_secs(600); // 10 min per attempt
+
+    loop {
+        if !state.gemini_watch_active.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let attempt = state.gemini_watch_attempts.fetch_add(1, Ordering::Relaxed) + 1;
+        info!(attempt, model, "Gemini watch: probing...");
+
+        // Spawn gemini CLI with 10-min timeout
+        let result = tokio::time::timeout(probe_timeout, async {
+            let output = tokio::process::Command::new("gemini")
+                .args(["-p", "say OK", "-m", model, "-o", "text", "--yolo"])
+                .output()
+                .await;
+            output
+        }).await;
+
+        let ok = match result {
+            Ok(Ok(output)) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                stdout.to_lowercase().contains("ok")
+            }
+            _ => false,
+        };
+
+        if ok {
+            info!(attempt, "Gemini watch: ✅ recovered!");
+            state.gemini_watch_active.store(false, Ordering::Relaxed);
+            state.gemini_watch_started_at.store(0, Ordering::Relaxed);
+
+            // Create Board notification
+            let input = missiond_core::types::CreateBoardTaskInput {
+                title: format!("✅ Gemini {} 已恢复", model),
+                description: Some(format!(
+                    "经过 {} 次探测，模型已恢复可用。之前被阻塞的任务可以继续了。",
+                    attempt
+                )),
+                category: Some("infra".to_string()),
+                priority: Some("high".to_string()),
+                project: None,
+                server: None,
+                due_date: None,
+                parent_id: None,
+                assignee: None,
+                auto_execute: None,
+                prompt_template: None,
+                hidden: None,
+                flow_template: None,
+                depends_on: None,
+                dedupe_key: None,
+            };
+            if let Err(e) = state.mission.db().create_board_task(&input) {
+                warn!("Gemini watch: failed to create board task: {}", e);
+            }
+            break;
+        }
+
+        info!(attempt, "Gemini watch: ❌ still unavailable, waiting 10 min...");
+        // Wait 10 minutes before next probe (interruptible via abort)
+        tokio::time::sleep(Duration::from_secs(600)).await;
     }
 }

@@ -170,6 +170,87 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 None => Ok(ToolResult::error("Task not found")),
             }
         }
+        "mission_board_batch_update" => {
+            let ids = args.get("ids")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| anyhow!("Missing 'ids' array"))?
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect::<Vec<_>>();
+            if ids.is_empty() {
+                return Ok(ToolResult::error("'ids' array is empty"));
+            }
+
+            // Build shared update from remaining fields (exclude ids)
+            let is_marking_done = args.get("status")
+                .and_then(|v| v.as_str())
+                .map(|s| s == "done")
+                .unwrap_or(false);
+            let is_status_change = args.get("status").and_then(|v| v.as_str()).is_some();
+
+            // Parse update template once
+            let update_template: missiond_core::types::UpdateBoardTaskInput =
+                serde_json::from_value(args)?;
+
+            let mut results = Vec::new();
+            let mut success_count = 0u32;
+            let mut fail_count = 0u32;
+
+            for id in &ids {
+                let old_status = if is_status_change {
+                    state.mission.db().get_board_task(id).ok().flatten()
+                        .map(|t| format!("{:?}", t.status))
+                } else { None };
+
+                match state.mission.db().update_board_task(id, &update_template) {
+                    Ok(Some(t)) => {
+                        if let Some(old) = old_status {
+                            publish_board_status_changed(state, &t, &old);
+                        } else {
+                            publish_board_update(state, &t);
+                        }
+                        if is_marking_done {
+                            let state = state.clone();
+                            let task_id = t.id.clone();
+                            let task_title = t.title.clone();
+                            tokio::spawn(async move {
+                                harvest_decisions_for_task(&state, &task_id, &task_title).await;
+                            });
+                        }
+                        success_count += 1;
+                        results.push(serde_json::json!({
+                            "id": t.id,
+                            "title": t.title,
+                            "status": format!("{:?}", t.status),
+                            "ok": true,
+                        }));
+                    }
+                    Ok(None) => {
+                        fail_count += 1;
+                        results.push(serde_json::json!({
+                            "id": id,
+                            "ok": false,
+                            "error": "not found",
+                        }));
+                    }
+                    Err(e) => {
+                        fail_count += 1;
+                        results.push(serde_json::json!({
+                            "id": id,
+                            "ok": false,
+                            "error": e.to_string(),
+                        }));
+                    }
+                }
+            }
+
+            Ok(ToolResult::json(&serde_json::json!({
+                "total": ids.len(),
+                "success": success_count,
+                "failed": fail_count,
+                "results": results,
+            })))
+        }
         "mission_board_get" => {
             // Support both single `id` and batch `ids`, with optional `includeChildren`
             let include_children = args.get("includeChildren")

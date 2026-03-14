@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use missiond_core::{
-    MissionControl, MissionControlOptions, PermissionPolicy,
+    MissionControl, MissionControlOptions, PermissionPolicy, LearnedPermissions,
     PTYManager, PTYWebSocketServer, WSServerOptions, SkillIndex, InfraConfig,
 };
 use missiond_core::{CCTasksWatcher, CCTasksWatcherOptions};
@@ -224,7 +224,21 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| Path::new("."))
         .join("config")
         .join("permissions.yaml");
-    let permission = Arc::new(PermissionPolicy::new(&permission_config_path));
+    let learned_db_path = db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("learned_permissions.db");
+    let learned = match LearnedPermissions::new(&learned_db_path) {
+        Ok(lp) => {
+            info!(path = %learned_db_path.display(), "Learned permissions DB ready");
+            Some(Arc::new(lp))
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to init learned permissions DB, learning disabled");
+            None
+        }
+    };
+    let permission = Arc::new(PermissionPolicy::new_with_learned(&permission_config_path, learned.clone()));
 
     let mission = Arc::new(MissionControl::new(MissionControlOptions {
         db_path: db_path.clone(),
@@ -406,7 +420,21 @@ async fn main() -> Result<()> {
                 0
             }
         })),
+        global_paused: Arc::new(std::sync::atomic::AtomicBool::new(
+            home.join("global_paused").exists()
+        )),
+        global_paused_at: Arc::new(std::sync::atomic::AtomicI64::new({
+            let flag = home.join("global_paused");
+            if flag.exists() {
+                std::fs::read_to_string(&flag).ok()
+                    .and_then(|s| s.trim().parse::<i64>().ok())
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp())
+            } else {
+                0
+            }
+        })),
         slot_fail_counts: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        pending_compact_restart: Arc::new(std::sync::Mutex::new(HashSet::new())),
         slot_current_model: Arc::new(std::sync::Mutex::new(HashMap::new())),
         screenshot_broker: Arc::clone(&screenshot_broker),
         jarvis_trace: ws_server.jarvis_trace_store().clone(),
@@ -487,6 +515,10 @@ async fn main() -> Result<()> {
         worker_registry: Arc::new(workers::WorkerRegistry::new()),
         slot_dispatch: Arc::new(slot_dispatch::SlotDispatchGuard::new()),
         board_dispatch_notify: Arc::new(tokio::sync::Notify::new()),
+        gemini_watch_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        gemini_watch_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        gemini_watch_attempts: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        gemini_watch_started_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
     };
 
     // Late-bind context enricher for Jarvis chat completions

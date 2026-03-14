@@ -42,13 +42,15 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         n if n.starts_with("mission_router_chat") => router_chat::handle(state, n, args).await,
         n if n.starts_with("mission_memory_") => memory::handle(state, n, args).await,
         n if n.starts_with("mission_board_") => board::handle(state, n, args).await,
-        n if n.starts_with("mission_skill_") || n.starts_with("mission_context_") => skill::handle(state, n, args).await,
+        n if n.starts_with("mission_skill_") || (n.starts_with("mission_context_") && n != "mission_context_around") => skill::handle(state, n, args).await,
         n if n.starts_with("mission_question_") || n == "mission_decision_stats" => question::handle(state, n, args).await,
         n if n.starts_with("mission_conversation_") || n == "mission_agent_trajectory"
             || n == "mission_trigger_backfill" || n == "mission_embedding_stats"
             || n == "mission_token_stats"
             || n == "mission_session_narrations"
-            || n == "mission_activity_report" => conversation::handle(state, n, args).await,
+            || n == "mission_activity_report"
+            || n == "mission_message_search"
+            || n == "mission_context_around" => conversation::handle(state, n, args).await,
         n if n.starts_with("mission_timeline_") => timeline::handle(state, n, args).await,
         n if n.starts_with("mission_minimax_") => minimax::handle(state, n, args).await,
         n if n.starts_with("mission_audit_") => audit::handle(state, n, args).await,
@@ -69,6 +71,7 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         "mission_slots" | "mission_inbox" | "mission_submit_phase_result"
             | "mission_slot_history" | "mission_jarvis_logs" | "mission_jarvis_trace"
             | "mission_gemini_trace" | "mission_gemini_stats" | "mission_gemini_content"
+            | "mission_gemini_watch"
             => misc::handle(state, name, args).await,
 
         // ===== xjp proxy =====

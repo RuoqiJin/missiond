@@ -22,6 +22,10 @@ pub(crate) struct LlmConfig {
     default_model: String,
     #[serde(default)]
     pub(crate) gemini_cli: Option<GeminiCliConfig>,
+    /// Gemini API key for multimodal (video/image) File API uploads.
+    /// Get from https://aistudio.google.com/app/apikey
+    #[serde(default)]
+    pub(crate) gemini_api_key: Option<String>,
 }
 
 #[derive(serde::Deserialize, Clone)]
