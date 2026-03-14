@@ -30,6 +30,44 @@ use crate::gemini_client::current_parent_span_id;
 /// Absolute safety cap: kill process no matter what after this duration.
 const ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(300); // 5 min
 
+/// Check if Codex is disabled via persistent flag file.
+/// Flag file: `$MISSIOND_HOME/codex_disabled` (or `~/.xjp-mission/codex_disabled`).
+pub(crate) fn is_codex_disabled() -> bool {
+    let home = std::env::var("MISSIOND_HOME")
+        .or_else(|_| std::env::var("XJP_MISSION_HOME"))
+        .unwrap_or_else(|_| {
+            let h = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+            if h.join(".missiond").exists() {
+                h.join(".missiond").to_string_lossy().to_string()
+            } else {
+                h.join(".xjp-mission").to_string_lossy().to_string()
+            }
+        });
+    std::path::Path::new(&home).join("codex_disabled").exists()
+}
+
+/// Set or clear the Codex disabled flag file.
+pub(crate) fn set_codex_disabled(disabled: bool) {
+    let home = std::env::var("MISSIOND_HOME")
+        .or_else(|_| std::env::var("XJP_MISSION_HOME"))
+        .unwrap_or_else(|_| {
+            let h = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+            if h.join(".missiond").exists() {
+                h.join(".missiond").to_string_lossy().to_string()
+            } else {
+                h.join(".xjp-mission").to_string_lossy().to_string()
+            }
+        });
+    let flag = std::path::PathBuf::from(home).join("codex_disabled");
+    if disabled {
+        let _ = std::fs::write(&flag, chrono::Utc::now().to_rfc3339());
+        warn!("Codex disabled — flag file created at {:?}", flag);
+    } else {
+        let _ = std::fs::remove_file(&flag);
+        info!("Codex enabled — flag file removed");
+    }
+}
+
 /// Codex CLI subprocess wrapper with timeline instrumentation.
 #[derive(Clone)]
 pub(crate) struct CodexCli {
@@ -72,6 +110,12 @@ impl CodexCli {
         idle_timeout_override: Option<Duration>,
         image_hash: Option<&str>,
     ) -> Result<CodexCliResponse> {
+        // Persistent kill switch: skip all Codex calls when disabled
+        if is_codex_disabled() {
+            info!(caller, "Codex CLI disabled via flag file, skipping call");
+            return Err(anyhow!("Codex CLI is disabled (codex_disabled flag is set)"));
+        }
+
         let model = model.unwrap_or(&self.default_model);
         let idle_timeout = idle_timeout_override.unwrap_or(self.idle_timeout);
         let has_image = image_path.is_some();
