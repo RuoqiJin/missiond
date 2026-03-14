@@ -34,5 +34,19 @@ pub fn definitions() -> Vec<ToolDefinition> {
             }),
         ),
 
+        ToolDefinition::new(
+            "mission_pause",
+            "全局暂停所有工位的工作分派。防止在余额耗尽或异常情况下系统继续推送任务。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["pause", "resume", "status"],
+                        "description": "执行动作：pause (暂停), resume (恢复), status (查看状态)。默认为 status"
+                    }
+                }
+            }),
+        ),
     ]
 }

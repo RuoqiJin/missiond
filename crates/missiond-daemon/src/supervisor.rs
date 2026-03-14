@@ -5,24 +5,23 @@ use crate::state::{AppState, ExtractionPhase, ExtractionState, MAX_WAIT_FOR_IDLE
 use crate::state::SUPERVISOR_SLOT_ID;
 use missiond_core::SessionState;
 use crate::memory_scheduler::ensure_memory_slot_by_id;
-use missiond_core::PTYSpawnOptions;
-use std::path::PathBuf;
-use crate::slot_env::{build_slot_tracking_env, capture_slot_session_uuid};
 use crate::helpers::char_boundary_at;
 use std::sync::Arc;
 use missiond_core::MissionControl;
 
+/// Threshold: mark for graceful restart when context drops below this %.
+const COMPACT_GRACEFUL_THRESHOLD: u32 = 15;
+/// Emergency threshold: force-kill immediately regardless of slot state.
+const COMPACT_EMERGENCY_THRESHOLD: u32 = 3;
+
 pub(crate) async fn check_slot_context_levels(state: &AppState) {
     let slots = state.mission.list_slots();
-    // P2: Spawn each slot's check+restart concurrently so total time = max(per-slot)
-    // instead of sum(per-slot). Previously N low-context slots blocked N × 123s.
     let mut handles = Vec::new();
     for slot in slots {
         let state = state.clone();
         handles.push(tokio::spawn(async move {
             let status = state.pty.get_status(&slot.config.id).await;
             let Some(info) = status else { return };
-            // Only check running slots
             if info.state == SessionState::Exited {
                 return;
             }
@@ -32,63 +31,109 @@ pub(crate) async fn check_slot_context_levels(state: &AppState) {
                 Err(_) => return,
             };
 
-            // Look for "Context left until auto-compact: XX%"
             if let Some(pct) = extract_context_percentage(&screen) {
-                if pct < 10 {
+                if pct < COMPACT_EMERGENCY_THRESHOLD {
+                    // Emergency: context about to hit zero, force-kill immediately
                     warn!(
                         slot_id = %slot.config.id,
                         context_pct = pct,
-                        "Slot context critically low, restarting"
+                        "Slot context critically low, emergency kill"
                     );
-                    // Kill the slot
                     if let Err(e) = state.pty.kill(&slot.config.id).await {
-                        warn!(error = %e, slot_id = %slot.config.id, "Failed to kill low-context slot");
+                        warn!(error = %e, slot_id = %slot.config.id, "Failed to emergency kill slot");
                         return;
                     }
-                    // Requeue any Running submit tasks assigned to this slot
                     match state.mission.db().requeue_running_tasks_for_slot(&slot.config.id) {
-                        Ok(n) if n > 0 => warn!(slot_id = %slot.config.id, count = n, "Requeued running submit tasks after low-context restart"),
-                        Err(e) => warn!(slot_id = %slot.config.id, error = %e, "Failed to requeue tasks after low-context restart"),
+                        Ok(n) if n > 0 => warn!(slot_id = %slot.config.id, count = n, "Requeued tasks after emergency kill"),
+                        Err(e) => warn!(slot_id = %slot.config.id, error = %e, "Failed to requeue after emergency kill"),
                         _ => {}
                     }
-                    // Release any board task claims held by this slot
                     let _ = state.mission.db().release_board_claims_by_executor(&slot.config.id);
-                    // Wait for exit
+                    // Clear from pending set (will be respawned by ensure_memory_slot or autopilot)
+                    state.pending_compact_restart.lock().unwrap().remove(&slot.config.id);
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-                    // Respawn
-                    let pty_slot = missiond_core::PTYSlot {
-                        id: slot.config.id.clone(),
-                        role: slot.config.role.clone(),
-                        cwd: slot.config.cwd.as_deref().map(PathBuf::from),
-                        engine: slot.config.engine,
-                    };
-                    let mcp_config = slot.config.mcp_config.clone().map(PathBuf::from);
-                    let (extra_env, session_file) = build_slot_tracking_env(&slot.config.id, slot.config.env.as_ref()).await;
-                    match state.pty.spawn(&pty_slot, PTYSpawnOptions {
-                        auto_restart: false,
-                        wait_for_idle: true,
-                        timeout_secs: Some(120),
-                        mcp_config,
-                        dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
-                        model: slot.config.model.clone(),
-                        extra_env,
-                    }).await {
-                        Ok(_) => {
-                            capture_slot_session_uuid(&state, &slot.config.id, &session_file).await;
-                            info!(slot_id = %slot.config.id, "Slot restarted due to low context");
-                        }
-                        Err(e) => {
-                            warn!(error = %e, slot_id = %slot.config.id, "Failed to respawn slot after context kill");
-                        }
+                    let _ = ensure_memory_slot_by_id(&state, &slot.config.id).await;
+                } else if pct < COMPACT_GRACEFUL_THRESHOLD {
+                    // Graceful: mark for restart when slot becomes Idle
+                    let mut pending = state.pending_compact_restart.lock().unwrap();
+                    if pending.insert(slot.config.id.clone()) {
+                        warn!(
+                            slot_id = %slot.config.id,
+                            context_pct = pct,
+                            "Slot context low, marked for graceful restart on idle"
+                        );
                     }
                 }
             }
         }));
     }
-    // Wait for all slot checks to complete concurrently
     for handle in handles {
         let _ = handle.await;
+    }
+}
+
+/// Restart slots that were marked for compact restart once they become Idle.
+/// Must be called BEFORE any task dispatch to avoid missing the Idle window.
+pub(crate) async fn check_pending_compact_restarts(state: &AppState) {
+    let pending: Vec<String> = {
+        let set = state.pending_compact_restart.lock().unwrap();
+        if set.is_empty() { return; }
+        set.iter().cloned().collect()
+    };
+
+    for slot_id in pending {
+        let status = state.pty.get_status(&slot_id).await;
+        let is_idle = status.as_ref()
+            .map(|s| s.state == SessionState::Idle)
+            .unwrap_or(false);
+
+        if !is_idle {
+            continue;
+        }
+
+        // Acquire dispatch guard to prevent task dispatch racing with restart
+        if !state.slot_dispatch.try_acquire(&slot_id) {
+            debug!(slot_id = %slot_id, "Compact restart: dispatch guard busy, deferring");
+            continue;
+        }
+
+        // Re-verify idle after acquiring guard (double-check)
+        let still_idle = state.pty.get_status(&slot_id).await
+            .map(|s| s.state == SessionState::Idle)
+            .unwrap_or(false);
+        if !still_idle {
+            state.slot_dispatch.release(&slot_id);
+            continue;
+        }
+
+        info!(slot_id = %slot_id, "Slot idle with pending compact restart, restarting now");
+
+        // Kill
+        if let Err(e) = state.pty.kill(&slot_id).await {
+            warn!(error = %e, slot_id = %slot_id, "Failed to kill slot for compact restart");
+            state.slot_dispatch.release(&slot_id);
+            continue;
+        }
+        // Requeue any Running submit tasks
+        match state.mission.db().requeue_running_tasks_for_slot(&slot_id) {
+            Ok(n) if n > 0 => warn!(slot_id = %slot_id, count = n, "Requeued running submit tasks after compact restart"),
+            Err(e) => warn!(slot_id = %slot_id, error = %e, "Failed to requeue tasks after compact restart"),
+            _ => {}
+        }
+        let _ = state.mission.db().release_board_claims_by_executor(&slot_id);
+
+        // Release dispatch guard before blocking sleep+respawn
+        state.slot_dispatch.release(&slot_id);
+
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        // Respawn
+        let _ = ensure_memory_slot_by_id(state, &slot_id).await;
+
+        // Remove from pending set
+        state.pending_compact_restart.lock().unwrap().remove(&slot_id);
+
+        info!(slot_id = %slot_id, "Slot restarted due to compact (graceful)");
     }
 }
 
@@ -343,6 +388,8 @@ pub(crate) async fn check_slot_stuck(
     if let Err(e) = state.pty.kill(slot_id).await {
         warn!(slot_id, error = %e, "Failed to kill stuck memory slot");
     }
+    // Clear from compact restart pending set (slot is being rebuilt)
+    state.pending_compact_restart.lock().unwrap().remove(slot_id);
 
     // Requeue any Running submit tasks assigned to this slot — they were lost with the old session
     match state.mission.db().requeue_running_tasks_for_slot(slot_id) {

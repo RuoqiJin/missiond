@@ -4,7 +4,7 @@ use tracing::{debug, info, warn};
 
 use crate::state::{AppState, MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 use crate::event_bus::{DaemonEvent, TraceContext};
-use crate::supervisor::{check_slot_context_levels, check_slot_stuck};
+use crate::supervisor::{check_slot_context_levels, check_slot_stuck, check_pending_compact_restarts};
 use crate::memory_scheduler::ensure_memory_slot_by_id;
 use crate::decision_harvest::harvest_decisions_for_task;
 use crate::llm_gateway::determine_llm_env;
@@ -23,8 +23,10 @@ use crate::flow_engine::{execute_flow_task, ensure_autopilot_pty};
 pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     let tick_start = std::time::Instant::now();
 
-    // Check PTY slots for low context — restart if < 10%
+    // Check PTY slots for low context — mark for graceful restart
     check_slot_context_levels(state).await;
+    // Restart marked slots once they become Idle (before any task dispatch)
+    check_pending_compact_restarts(state).await;
 
     // Complete stale active conversations (no messages for > 10 minutes)
     let cutoff = (chrono::Utc::now() - chrono::TimeDelta::minutes(10))
@@ -36,6 +38,7 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     }
 
     let mut memory_paused = state.memory_paused.load(std::sync::atomic::Ordering::Relaxed);
+    let global_paused = state.global_paused.load(std::sync::atomic::Ordering::Relaxed);
 
     // TTL auto-resume: if paused for > 2 hours, auto-resume
     if memory_paused {
@@ -53,10 +56,14 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
         }
     }
 
-    // Submit task dispatch — always runs, not gated by memory_paused
-    dispatch_queued_submit_tasks(state).await;
+    if global_paused {
+        debug!("autopilot: global pause active, skipping all task dispatches");
+    } else {
+        // Submit task dispatch — always runs, not gated by memory_paused
+        dispatch_queued_submit_tasks(state).await;
+    }
 
-    if !memory_paused {
+    if !memory_paused && !global_paused {
         // Check if memory slots are stuck in non-Idle state for too long
         check_slot_stuck(state, MEMORY_SLOT_ID, &state.memory_slot_busy_since, &state.extraction_state).await;
         check_slot_stuck(state, MEMORY_SLOW_SLOT_ID, &state.slow_slot_busy_since, &state.slow_extraction_state).await;
@@ -216,6 +223,10 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
 /// Board task dispatch — extracted for reuse by idle-triggered dispatch.
 /// Called from autopilot_tick (60s) and event-driven (slot became idle).
 pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
+    if state.global_paused.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(());
+    }
+
     let tasks = state.mission.db().list_autopilot_tasks()
         .map_err(|e| anyhow!("DB error: {}", e))?;
 

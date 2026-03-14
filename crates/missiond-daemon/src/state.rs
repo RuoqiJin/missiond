@@ -121,6 +121,10 @@ pub(crate) struct AppState {
     pub(crate) memory_paused: Arc<std::sync::atomic::AtomicBool>,
     /// Epoch secs when memory was paused. 0 = not paused. Used for TTL auto-resume.
     pub(crate) memory_paused_at: Arc<std::sync::atomic::AtomicI64>,
+    /// Pause switch for ALL autopilot tasks (board tasks, submit tasks).
+    pub(crate) global_paused: Arc<std::sync::atomic::AtomicBool>,
+    /// Epoch secs when global pause was activated. 0 = not paused.
+    pub(crate) global_paused_at: Arc<std::sync::atomic::AtomicI64>,
     /// Per-slot consecutive failure count for autopilot throttling.
     pub(crate) slot_fail_counts: Arc<std::sync::Mutex<HashMap<String, (i32, i64)>>>,  // (count, last_fail_at)
     /// Per-slot current model (ANTHROPIC_MODEL) for env-change detection.
@@ -183,6 +187,17 @@ pub(crate) struct AppState {
     pub(crate) slot_dispatch: Arc<SlotDispatchGuard>,
     /// Wakeup signal for board dispatch when a slot becomes idle.
     pub(crate) board_dispatch_notify: Arc<tokio::sync::Notify>,
+    /// Gemini watch: background health probe active flag.
+    pub(crate) gemini_watch_active: Arc<std::sync::atomic::AtomicBool>,
+    /// Gemini watch: abort handle for the background probe task.
+    pub(crate) gemini_watch_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Gemini watch: attempt counter (for status reporting).
+    pub(crate) gemini_watch_attempts: Arc<std::sync::atomic::AtomicU32>,
+    /// Gemini watch: start timestamp (epoch secs). 0 = not running.
+    pub(crate) gemini_watch_started_at: Arc<std::sync::atomic::AtomicI64>,
+    /// Slots pending graceful restart due to low context (detected "until auto-compact").
+    /// Restart is deferred until the slot becomes Idle to avoid interrupting tasks.
+    pub(crate) pending_compact_restart: Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
 /// Event-driven embedding tasks — the Worker sleeps until triggered.
