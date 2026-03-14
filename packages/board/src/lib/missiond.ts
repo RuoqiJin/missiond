@@ -2,6 +2,7 @@ import fs from 'fs';
 import net from 'net';
 import os from 'os';
 import path from 'path';
+import { headers } from 'next/headers';
 
 function resolveSocketPath(): string {
   if (process.env.MISSION_IPC_ENDPOINT) return process.env.MISSION_IPC_ENDPOINT;
@@ -46,6 +47,10 @@ export async function callMissiond(method: string, params: Record<string, unknow
 }
 
 export async function callTool(name: string, args: Record<string, unknown> = {}): Promise<unknown> {
+  // Reading headers() implicitly opts all callers into dynamic rendering,
+  // preventing Next.js from caching API route responses at build time.
+  headers();
+
   const result = await callMissiond('tools/call', { name, arguments: args }) as {
     content?: Array<{ text?: string }>;
   };

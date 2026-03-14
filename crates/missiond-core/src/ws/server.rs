@@ -14,7 +14,7 @@ use super::jarvis_trace::JarvisTraceStore;
 use crate::cc_tasks::{
     CCSession, CCTask, CCTaskChangeEvent, CCTasksOverview, CCTasksWatcher, WatcherEvent,
 };
-use crate::pty::{PTYManager, SessionEvent, SessionState, TextOutputEvent};
+use crate::pty::{PTYManager, SessionEvent, SessionState};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -380,6 +380,29 @@ impl PTYWebSocketServer {
         let body = r#"{"status":"ok"}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).await?;
+        stream.shutdown().await?;
+        Ok(())
+    }
+
+    /// #2: HTTP API — slot status endpoint
+    async fn handle_slot_status(mut stream: TcpStream, pty_manager: Arc<PTYManager>) -> anyhow::Result<()> {
+        // Consume the request
+        let mut buf = vec![0u8; 4096];
+        let _ = stream.read(&mut buf).await;
+
+        let all_status = pty_manager.get_all_status().await;
+        let body = serde_json::to_string(&all_status).unwrap_or_else(|_| "[]".to_string());
+        let response = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/json\r\n\
+             Access-Control-Allow-Origin: *\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n{}",
             body.len(),
             body
         );
@@ -1045,6 +1068,17 @@ impl PTYWebSocketServer {
             if request_line.starts_with("POST /v1/chat/completions") {
                 return match pty_manager {
                     Some(pm) => Self::handle_chat_completions(stream, addr, pm, jarvis_trace, context_enricher).await,
+                    None => {
+                        let mut s = stream;
+                        let err = serde_json::json!({"error": {"message": "PTY manager not available"}});
+                        Self::send_http_error(&mut s, 503, "Service Unavailable", &err.to_string()).await
+                    }
+                };
+            }
+            // Slot status API
+            if request_line.starts_with("GET /api/slots") && !request_line.contains("Upgrade:") {
+                return match pty_manager {
+                    Some(pm) => Self::handle_slot_status(stream, pm).await,
                     None => {
                         let mut s = stream;
                         let err = serde_json::json!({"error": {"message": "PTY manager not available"}});
