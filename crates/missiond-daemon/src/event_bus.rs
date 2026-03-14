@@ -295,6 +295,19 @@ pub(crate) enum DaemonEvent {
         queue_wait_ms: u64,
     },
 
+    // ===== Tool Completion (auto-instrumentation) =====
+    /// A high-value tool completed execution (Bash, Write, Edit, MCP tools).
+    /// Emitted from message_handler when tool_result arrives for whitelisted tools.
+    ToolCompleted {
+        session_id: String,
+        slot_id: Option<String>,
+        tool_name: String,
+        status: String,
+        is_error: bool,
+        input_summary: Option<String>,
+        output_summary: String,
+    },
+
     // ===== Unified CLI Engine Events =====
     /// Unified: an external CLI engine request was sent.
     /// Replaces engine-specific GeminiRequestStarted / CodexRequestStarted.
@@ -386,6 +399,7 @@ impl DaemonEvent {
             Self::NarrationSessionCompleted { .. } => "narration_session_completed",
             Self::NarrationFailed { .. } => "narration_failed",
             Self::WorkerLlmCall { .. } => "worker_llm_call",
+            Self::ToolCompleted { .. } => "tool_completed",
             Self::CliRequestStarted { .. } => "cli_request_started",
             Self::CliRequestCompleted { .. } => "cli_request_completed",
             Self::CliToolActivity { .. } => "cli_tool_activity",
@@ -496,6 +510,18 @@ impl DaemonEvent {
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "image_hash": image_hash,
+            }),
+            Self::ToolCompleted {
+                session_id, slot_id, tool_name, status,
+                is_error, input_summary, output_summary,
+            } => json!({
+                "session_id": session_id,
+                "slot_id": slot_id,
+                "tool_name": tool_name,
+                "status": status,
+                "is_error": is_error,
+                "input_summary": input_summary,
+                "output_summary": output_summary,
             }),
             Self::ImageMessageInserted { message_id, session_id } =>
                 json!({ "message_id": message_id, "session_id": session_id }),

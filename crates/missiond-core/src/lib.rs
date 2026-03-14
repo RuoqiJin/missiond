@@ -24,7 +24,7 @@ pub mod ws;
 
 // Re-export core management types
 pub use crate::core::{
-    ExecutionMode, Inbox, MissionControl,
+    ExecutionMode, Inbox, LearnedPermission, LearnedPermissions, MissionControl,
     MissionControlOptions, PermissionConfig, PermissionDecision as CorePermissionDecision,
     PermissionPolicy, PermissionRule, SlotManager, SlotReloadResult,
 };

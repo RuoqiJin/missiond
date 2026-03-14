@@ -31,6 +31,13 @@ pub fn extract_visible_text(content: &Value) -> String {
     }
 }
 
+/// Extract tool names as comma-separated string (for conversation_messages.tool_name column).
+/// Returns None if no tool_use blocks found.
+pub fn extract_tool_names_csv(content: &Value) -> Option<String> {
+    let names = extract_tool_names(content);
+    if names.is_empty() { None } else { Some(names.join(",")) }
+}
+
 /// Extract tool names from content blocks (for tool_use preview on timeline).
 pub fn extract_tool_names(content: &Value) -> Vec<String> {
     match content {
@@ -450,6 +457,7 @@ pub fn handle_new_events(db: &MissionDB, session_id: String, events: Vec<Value>)
                                         serde_json::to_string(&meta).ok()
                                     };
 
+                                    let tool_name = extract_tool_names_csv(&content_val);
                                     agent_messages.push(
                                         missiond_core::types::ConversationMessage {
                                             id: 0,
@@ -462,6 +470,7 @@ pub fn handle_new_events(db: &MissionDB, session_id: String, events: Vec<Value>)
                                             model,
                                             timestamp: inner_timestamp,
                                             metadata,
+                                            tool_name,
                                         },
                                     );
                                 }
@@ -874,6 +883,7 @@ pub async fn reconcile_conversation_messages(db: &MissionDB, session_id: &str, j
         };
         let raw_content = sanitize_raw_content(&msg.message.content);
 
+        let tool_name = extract_tool_names_csv(&msg.message.content);
         batch.push(missiond_core::types::ConversationMessage {
             id: 0,
             session_id: sid.clone(),
@@ -885,6 +895,7 @@ pub async fn reconcile_conversation_messages(db: &MissionDB, session_id: &str, j
             model: msg.message.model.clone(),
             timestamp: msg.timestamp.clone(),
             metadata: None,
+            tool_name,
         });
     }).await;
 
