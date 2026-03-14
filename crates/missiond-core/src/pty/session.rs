@@ -619,6 +619,35 @@ impl PTYSession {
             }
         }
 
+        // #5: Pre-spawn credential permission check
+        #[cfg(unix)]
+        {
+            let home = std::env::var("HOME").unwrap_or_default();
+            if !home.is_empty() {
+                let cred_path = std::path::Path::new(&home).join(".claude").join(".credentials.json");
+                if cred_path.exists() {
+                    // Check if credentials file is readable by current process
+                    match std::fs::File::open(&cred_path) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            warn!(
+                                slot_id = %self.slot_id,
+                                path = %cred_path.display(),
+                                error = %e,
+                                "Cannot read credentials file — Claude Code may fail to authenticate"
+                            );
+                        }
+                    }
+                } else {
+                    warn!(
+                        slot_id = %self.slot_id,
+                        path = %cred_path.display(),
+                        "Credentials file not found — Claude Code may require interactive login"
+                    );
+                }
+            }
+        }
+
         // Spawn child process
         let mut child = pty_pair.slave.spawn_command(cmd)?;
         let pid = child.process_id().unwrap_or(0);
@@ -845,6 +874,8 @@ impl PTYSession {
         const DEBOUNCE_THRESHOLD: u32 = 3; // 3 * 100ms = 300ms
 
         let mut heartbeat_tick: u64 = 0;
+        let mut starting_since: Option<std::time::Instant> = Some(std::time::Instant::now());
+        let mut starting_warned = false;
         while running.load(Ordering::SeqCst) {
             check_interval.tick().await;
             heartbeat_tick += 1;
@@ -899,20 +930,53 @@ impl PTYSession {
             if heartbeat_tick % 50 == 0 {
                 let non_empty: Vec<_> = last_lines.iter()
                     .filter(|l| !l.trim().is_empty())
-                    .take(3)
+                    .take(5)
                     .map(|s| {
-                        let t: String = s.chars().take(60).collect();
+                        let t: String = s.chars().take(80).collect();
                         t
                     })
                     .collect();
-                debug!(
-                    slot = %slot_id,
-                    tick = heartbeat_tick,
-                    current = ?current_state,
-                    detected = ?detected_state,
-                    screen_sample = ?non_empty,
-                    "state_check_loop heartbeat"
-                );
+                // #4: Promote to INFO when Starting (aids remote debugging)
+                if current_state == SessionState::Starting {
+                    info!(
+                        slot = %slot_id,
+                        tick = heartbeat_tick,
+                        current = ?current_state,
+                        detected = ?detected_state,
+                        screen_sample = ?non_empty,
+                        "state_check_loop heartbeat (Starting)"
+                    );
+                } else {
+                    debug!(
+                        slot = %slot_id,
+                        tick = heartbeat_tick,
+                        current = ?current_state,
+                        detected = ?detected_state,
+                        screen_sample = ?non_empty,
+                        "state_check_loop heartbeat"
+                    );
+                }
+            }
+
+            // #3: Starting state timeout — progressive warnings
+            if current_state == SessionState::Starting {
+                if let Some(since) = starting_since {
+                    let elapsed = since.elapsed();
+                    if !starting_warned && elapsed.as_secs() >= 30 {
+                        let screen_snapshot: Vec<_> = last_lines.iter()
+                            .filter(|l| !l.trim().is_empty())
+                            .take(5)
+                            .map(|s| s.chars().take(80).collect::<String>())
+                            .collect();
+                        warn!(
+                            slot = %slot_id,
+                            elapsed_secs = elapsed.as_secs(),
+                            screen_snapshot = ?screen_snapshot,
+                            "PTY stuck in Starting state for >30s — check screen output"
+                        );
+                        starting_warned = true;
+                    }
+                }
             }
 
             // Diagnostic logging (once per second = every 10 ticks at 100ms)
@@ -1038,6 +1102,15 @@ impl PTYSession {
                 }
 
                 if new_state != current_state {
+                    // #3: Track Starting state entry/exit for timeout warning
+                    if new_state == SessionState::Starting {
+                        starting_since = Some(std::time::Instant::now());
+                        starting_warned = false;
+                    } else if current_state == SessionState::Starting {
+                        starting_since = None;
+                        starting_warned = false;
+                    }
+
                     // Diagnostic: dump active screen on state transition
                     let active = context.last_non_empty_lines(8);
                     let active_dump = active.iter().map(|s| {
