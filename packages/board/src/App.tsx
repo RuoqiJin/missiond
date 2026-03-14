@@ -1,30 +1,20 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Activity, Crosshair, FlaskConical, Rocket, Gauge, Zap, GitFork, Radar } from 'lucide-react';
+import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Gauge, Crosshair } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
 import { useTaskCenterStore } from './store';
-import { QuickAdd } from './components/QuickAdd';
-import { TaskFilters } from './components/TaskFilters';
-import { TaskListView } from './components/TaskListView';
-import { TaskDialog } from './components/TaskDialog';
 import { Terminal } from './components/Terminal';
-import { KnowledgeBase } from './components/KnowledgeBase';
-import { Conversations } from './components/Conversations';
-import { PendingQuestions } from './components/PendingQuestions';
-import { MemoryDashboard } from './components/MemoryDashboard';
-import { DecisionDashboard } from './components/DecisionDashboard';
-import { ResearchBoard } from './components/ResearchBoard';
-import { DeployDashboard } from './components/DeployDashboard';
-import { EngineDashboard } from './components/EngineDashboard';
-import { CognitiveTimeline } from './components/timeline';
-import { ArchitectureView } from './components/architecture';
-import { AutopilotMonitor } from './components/AutopilotMonitor';
+import { BoardConsolidated } from './components/BoardConsolidated';
+import { ExecDashboard } from './components/ExecDashboard';
+import { SystemDashboard } from './components/SystemDashboard';
+import { KnowledgeConsolidated } from './components/KnowledgeConsolidated';
+import { LogsConsolidated } from './components/LogsConsolidated';
 import { useEventStream, useConnectionState } from './hooks/useEventStream';
 
-type Tab = 'board' | 'terminal' | 'knowledge' | 'conversations' | 'memory' | 'decisions' | 'research' | 'deploy' | 'engine' | 'timeline' | 'architecture' | 'autopilot';
+type Tab = 'board' | 'terminal' | 'exec' | 'system' | 'knowledge' | 'logs';
 
 interface SlotDef { id: string; label: string; role: string; running?: boolean }
 
@@ -38,7 +28,16 @@ export default function App() {
   const [mounted, setMounted] = useState(false);
   const [tab, setTab] = useState<Tab>(() => {
     if (typeof window === 'undefined') return 'board';
-    return (localStorage.getItem('board:tab') as Tab) || 'board';
+    // Migrate old tab values to new ones
+    const saved = localStorage.getItem('board:tab') as string || 'board';
+    const migration: Record<string, Tab> = {
+      'autopilot': 'exec', 'decisions': 'exec',
+      'memory': 'system', 'engine': 'system',
+      'conversations': 'logs', 'timeline': 'logs',
+      'architecture': 'knowledge',
+      'deploy': 'board', 'research': 'board',
+    };
+    return (migration[saved] || saved) as Tab;
   });
   const [slots, setSlots] = useState<SlotDef[]>([]);
   const [activeSlot, setActiveSlot] = useState<string>(() => {
@@ -72,9 +71,9 @@ export default function App() {
     fetchSlots();
   }, [fetchTasks, fetchSlots]);
 
-  // Refresh slots when on Terminal or Autopilot tab
+  // Refresh slots when on Terminal or Exec tab
   useEffect(() => {
-    if (tab !== 'terminal' && tab !== 'autopilot') return;
+    if (tab !== 'terminal' && tab !== 'exec') return;
     const id = setInterval(fetchSlots, 5000);
     return () => clearInterval(id);
   }, [tab, fetchSlots]);
@@ -92,6 +91,15 @@ export default function App() {
       </div>
     );
   }
+
+  const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
+    { id: 'board', label: 'Board', icon: ClipboardList },
+    { id: 'terminal', label: 'Terminal', icon: MonitorUp },
+    { id: 'exec', label: 'Exec', icon: Crosshair },
+    { id: 'system', label: 'System', icon: Gauge },
+    { id: 'knowledge', label: 'Knowledge', icon: Brain },
+    { id: 'logs', label: 'Logs', icon: MessageSquareText },
+  ];
 
   return (
     <div className="h-screen flex flex-col bg-background">
@@ -111,127 +119,21 @@ export default function App() {
             </div>
           </div>
 
-          {/* Tabs */}
+          {/* Tabs — 6 consolidated */}
           <div className="flex items-center gap-1 ml-4 bg-neutral-900 rounded-lg p-0.5 overflow-x-auto overflow-y-hidden">
-            <button
-              onClick={() => setTab('board')}
-              className={cn(
-                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors',
-                tab === 'board' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
-              )}
-            >
-              Tasks
-            </button>
-            <button
-              onClick={() => setTab('terminal')}
-              className={cn(
-                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                tab === 'terminal' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
-              )}
-            >
-              <MonitorUp className="w-3 h-3" />
-              Terminal
-            </button>
-            <button
-              onClick={() => setTab('autopilot')}
-              className={cn(
-                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                tab === 'autopilot' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
-              )}
-            >
-              <Radar className="w-3 h-3" />
-              Pilot
-            </button>
-            <button
-              onClick={() => setTab('knowledge')}
-              className={cn(
-                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                tab === 'knowledge' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
-              )}
-            >
-              <Brain className="w-3 h-3" />
-              Knowledge
-            </button>
-            <button
-              onClick={() => setTab('conversations')}
-              className={cn(
-                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                tab === 'conversations' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
-              )}
-            >
-              <MessageSquareText className="w-3 h-3" />
-              Logs
-            </button>
-            <button
-              onClick={() => setTab('memory')}
-              className={cn(
-                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                tab === 'memory' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
-              )}
-            >
-              <Activity className="w-3 h-3" />
-              Memory
-            </button>
-            <button
-              onClick={() => setTab('decisions')}
-              className={cn(
-                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                tab === 'decisions' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
-              )}
-            >
-              <Crosshair className="w-3 h-3" />
-              Decisions
-            </button>
-            <button
-              onClick={() => setTab('deploy')}
-              className={cn(
-                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                tab === 'deploy' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
-              )}
-            >
-              <Rocket className="w-3 h-3" />
-              Deploy
-            </button>
-            <button
-              onClick={() => setTab('research')}
-              className={cn(
-                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                tab === 'research' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
-              )}
-            >
-              <FlaskConical className="w-3 h-3" />
-              Research
-            </button>
-            <button
-              onClick={() => setTab('engine')}
-              className={cn(
-                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                tab === 'engine' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
-              )}
-            >
-              <Gauge className="w-3 h-3" />
-              Engine
-            </button>
-            <button
-              onClick={() => setTab('timeline')}
-              className={cn(
-                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                tab === 'timeline' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
-              )}
-            >
-              <Zap className="w-3 h-3" />
-              Timeline
-            </button>
-            <button
-              onClick={() => setTab('architecture')}
-              className={cn(
-                'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                tab === 'architecture' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
-              )}
-            >
-              <GitFork className="w-3 h-3" />
-              Arch
-            </button>
+            {tabs.map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                onClick={() => setTab(id)}
+                className={cn(
+                  'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
+                  tab === id ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
+                )}
+              >
+                <Icon className="w-3 h-3" />
+                {label}
+              </button>
+            ))}
           </div>
         </div>
 
@@ -271,17 +173,9 @@ export default function App() {
         </div>
       </div>
 
-      {/* Content */}
+      {/* Content — 6 tabs */}
       {tab === 'board' ? (
-        <div className="flex-1 overflow-auto px-4 sm:px-8 pb-8 max-w-4xl">
-          <PendingQuestions />
-          <div className="mb-4">
-            <QuickAdd />
-          </div>
-          <TaskFilters />
-          <TaskListView />
-          <TaskDialog />
-        </div>
+        <BoardConsolidated />
       ) : tab === 'terminal' ? (
         <div className="flex-1 min-h-0 mx-4 sm:mx-8 mb-4 rounded-lg border border-neutral-800 overflow-hidden">
           {activeSlot ? (
@@ -290,26 +184,14 @@ export default function App() {
             <div className="flex items-center justify-center h-full text-neutral-500 text-sm">Loading slots...</div>
           )}
         </div>
-      ) : tab === 'autopilot' ? (
-        <AutopilotMonitor slots={slots} />
+      ) : tab === 'exec' ? (
+        <ExecDashboard slots={slots} />
+      ) : tab === 'system' ? (
+        <SystemDashboard />
       ) : tab === 'knowledge' ? (
-        <KnowledgeBase />
-      ) : tab === 'conversations' ? (
-        <Conversations />
-      ) : tab === 'decisions' ? (
-        <DecisionDashboard />
-      ) : tab === 'deploy' ? (
-        <DeployDashboard />
-      ) : tab === 'research' ? (
-        <ResearchBoard />
-      ) : tab === 'engine' ? (
-        <EngineDashboard />
-      ) : tab === 'timeline' ? (
-        <CognitiveTimeline />
-      ) : tab === 'architecture' ? (
-        <ArchitectureView />
+        <KnowledgeConsolidated />
       ) : (
-        <MemoryDashboard />
+        <LogsConsolidated />
       )}
     </div>
   );
