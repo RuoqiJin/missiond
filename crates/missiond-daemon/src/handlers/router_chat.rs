@@ -11,15 +11,51 @@ use crate::embedding_worker::resolve_llm_credentials;
 use crate::context_budget::apply_context_budget;
 use crate::context_budget::MAX_ROUTER_PAYLOAD_BYTES;
 use crate::gemini_client::REQUEST_CALLER;
+use crate::llm::gemini_file_api::{GeminiFileApi, PreparedFile, detect_mime};
 
-/// Allowed directory prefixes for file attachments (path jail).
-const FILE_ALLOWED_PREFIXES: &[&str] = &[
-    "/Users/jinchen/Projects/",
-    "/Users/jinchen/.claude/",
-    "/Users/jinchen/.xjp-mission/",
+/// Denied path patterns for file attachments (security denylist).
+/// Single-user local service: block known sensitive paths instead of whitelist.
+const FILE_DENY_PATTERNS: &[&str] = &[
+    "/.ssh/", "/.aws/", "/.gnupg/", "/.kube/", "/.docker/config", "/.netrc",
 ];
-/// Max file size for attachments (500 KB).
-const FILE_MAX_SIZE: u64 = 500 * 1024;
+/// Denied file names (exact match on filename component).
+const FILE_DENY_NAMES: &[&str] = &[
+    ".env", ".env.local", ".env.production", ".env.development",
+    "credentials.json", "service-account.json", "id_rsa", "id_ed25519",
+];
+/// Max text file size (1 MB). Larger files are auto-truncated, not rejected.
+const FILE_MAX_SIZE_TEXT: u64 = 1024 * 1024;
+/// Max binary file size (10 MB) for File API uploads.
+const FILE_MAX_SIZE_BINARY: u64 = 10 * 1024 * 1024;
+
+/// Resolve Gemini API key from llm.yaml (for multimodal File API).
+fn resolve_gemini_api_key() -> Option<String> {
+    let llm_yaml = missiond_core::default_mission_home().join("llm.yaml");
+    if !llm_yaml.exists() { return None; }
+    let content = std::fs::read_to_string(&llm_yaml).ok()?;
+    let config: serde_yaml::Value = serde_yaml::from_str(&content).ok()?;
+    config.get("gemini_api_key")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Check if a file path matches the security denylist.
+fn is_file_denied(path: &Path) -> Option<&'static str> {
+    let path_str = path.to_string_lossy();
+    for pattern in FILE_DENY_PATTERNS {
+        if path_str.contains(pattern) {
+            return Some(pattern);
+        }
+    }
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        for denied in FILE_DENY_NAMES {
+            if name == *denied {
+                return Some(denied);
+            }
+        }
+    }
+    None
+}
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
@@ -122,46 +158,127 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
 
             // Process file attachments: read files and append to last user message
+            // Security: denylist (not whitelist) — block sensitive paths, allow everything else.
+            // Soft failure: errors become placeholder content, never abort the whole request.
+            // Binary files (images/video/PDF): uploaded via Gemini File API if API key available.
+            let mut multimodal_files: Vec<PreparedFile> = Vec::new();
+            let mut multimodal_use_direct_api = false;
+
             if let Some(files) = params.get("files").and_then(|v| v.as_array()) {
                 let mut file_contents = Vec::new();
+                let gemini_api_key = resolve_gemini_api_key();
+                let file_api = gemini_api_key.as_ref().map(|k| GeminiFileApi::new(k.clone()));
+
                 for file_val in files {
                     let path_str = file_val.as_str()
                         .ok_or_else(|| anyhow!("file path must be a string"))?;
-                    let path = Path::new(path_str).canonicalize()
-                        .map_err(|e| anyhow!("Cannot resolve path '{}': {}", path_str, e))?;
 
-                    // Security: path jail check
-                    if !FILE_ALLOWED_PREFIXES.iter().any(|p| path.starts_with(p)) {
-                        return Err(anyhow!("File path not in allowed directories: {}", path.display()));
+                    // Resolve path (canonicalize validates existence + resolves symlinks)
+                    let path = match Path::new(path_str).canonicalize() {
+                        Ok(p) => p,
+                        Err(e) => {
+                            file_contents.push(format!(
+                                "\n\n<file path=\"{}\">\n[Error: cannot resolve path — {}]\n</file>",
+                                path_str, e
+                            ));
+                            continue;
+                        }
+                    };
+
+                    // Security: denylist check (soft fail — report, don't abort)
+                    if let Some(pattern) = is_file_denied(&path) {
+                        file_contents.push(format!(
+                            "\n\n<file path=\"{}\">\n[Denied: matched security denylist pattern '{}'. Sensitive files cannot be attached.]\n</file>",
+                            path.display(), pattern
+                        ));
+                        warn!(path = %path.display(), pattern, "File denied by security denylist");
+                        continue;
                     }
 
-                    // Security: file size check
-                    let metadata = tokio::fs::metadata(&path).await
-                        .map_err(|e| anyhow!("Cannot stat '{}': {}", path.display(), e))?;
-                    if metadata.len() > FILE_MAX_SIZE {
-                        return Err(anyhow!("File too large ({} bytes, max {}): {}",
-                            metadata.len(), FILE_MAX_SIZE, path.display()));
+                    // Stat file
+                    let metadata = match tokio::fs::metadata(&path).await {
+                        Ok(m) => m,
+                        Err(e) => {
+                            file_contents.push(format!(
+                                "\n\n<file path=\"{}\">\n[Error: {}]\n</file>",
+                                path.display(), e
+                            ));
+                            continue;
+                        }
+                    };
+
+                    // Hard size limit: skip files > 10MB
+                    if metadata.len() > FILE_MAX_SIZE_BINARY {
+                        file_contents.push(format!(
+                            "\n\n<file path=\"{}\">\n[File too large: {:.1}MB, max {:.1}MB]\n</file>",
+                            path.display(),
+                            metadata.len() as f64 / 1_048_576.0,
+                            FILE_MAX_SIZE_BINARY as f64 / 1_048_576.0
+                        ));
+                        continue;
                     }
 
-                    // Read (UTF-8 validated by read_to_string)
-                    let content = tokio::fs::read_to_string(&path).await
-                        .map_err(|e| anyhow!("Failed to read '{}' (must be UTF-8): {}", path.display(), e))?;
-
-                    let filename = path.file_name()
-                        .map(|f| f.to_string_lossy().to_string())
-                        .unwrap_or_else(|| path_str.to_string());
-                    file_contents.push(format!("\n\n<file path=\"{}\">\n{}\n</file>", filename, content));
+                    // Try reading as UTF-8 text
+                    match tokio::fs::read_to_string(&path).await {
+                        Ok(content) => {
+                            if content.len() > FILE_MAX_SIZE_TEXT as usize {
+                                // Auto-truncate large text files instead of rejecting
+                                let target_chars = FILE_MAX_SIZE_TEXT as usize / 3;
+                                let truncated: String = content.chars().take(target_chars).collect();
+                                file_contents.push(format!(
+                                    "\n\n<file path=\"{}\">\n{}\n\n[... truncated: {:.0}KB of {:.0}KB shown ...]\n</file>",
+                                    path.display(), truncated,
+                                    truncated.len() as f64 / 1024.0,
+                                    content.len() as f64 / 1024.0
+                                ));
+                            } else {
+                                file_contents.push(format!(
+                                    "\n\n<file path=\"{}\">\n{}\n</file>",
+                                    path.display(), content
+                                ));
+                            }
+                        }
+                        Err(_) => {
+                            // Binary file — try multimodal upload via Gemini File API
+                            let mime = detect_mime(&path);
+                            if let Some(ref api) = file_api {
+                                match api.prepare_file(&path, state.mission.db()).await {
+                                    Ok(prepared) => {
+                                        info!(path = %path.display(), mime, "Multimodal file prepared");
+                                        multimodal_files.push(prepared);
+                                        multimodal_use_direct_api = true;
+                                        // Add a text note so the model knows about the file
+                                        file_contents.push(format!(
+                                            "\n\n[Attached multimodal file: {} ({})]",
+                                            path.display(), mime
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        file_contents.push(format!(
+                                            "\n\n<file path=\"{}\">\n[Multimodal upload failed: {}]\n</file>",
+                                            path.display(), e
+                                        ));
+                                    }
+                                }
+                            } else {
+                                file_contents.push(format!(
+                                    "\n\n<file path=\"{}\">\n[Binary file: {} ({:.1}KB). Set gemini_api_key in llm.yaml to enable multimodal.]\n</file>",
+                                    path.display(), mime, metadata.len() as f64 / 1024.0
+                                ));
+                            }
+                        }
+                    }
                 }
 
                 if !file_contents.is_empty() {
-                    // Append to the last user message
+                    // Append to the last user message (full path preserved in XML tags)
                     if let Some(last_user) = messages.iter_mut().rev()
                         .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
                     {
                         let original = last_user.get("content").and_then(|c| c.as_str()).unwrap_or("");
                         last_user["content"] = serde_json::json!(format!("{}{}", original, file_contents.join("")));
                     }
-                    info!("Router chat: attached {} files", files.len());
+                    info!("Router chat: attached {} file(s)", files.len());
                 }
             }
 
@@ -188,40 +305,85 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 r
             };
 
-            // Resolve LLM credentials
-            let (base_url, jwt) = resolve_llm_credentials().await?;
+            // --- Send to LLM: multimodal direct API or normal Router/CLI ---
+            let (content, finish_reason_owned, usage, resp_model_owned);
 
-            // Call router API
-            let url = format!("{}/v1/chat/completions", base_url);
-            let mut body = serde_json::json!({
-                "model": model,
-                "messages": messages,
-                "max_tokens": max_tokens,
-            });
-            if search_enabled {
-                body["tools"] = serde_json::json!([{"type": "google_search"}]);
-            }
+            if multimodal_use_direct_api && !multimodal_files.is_empty() {
+                // Multimodal path: call Gemini generateContent API directly with file parts.
+                // Bypasses Router/CLI because OpenAI format doesn't support fileData/inlineData.
+                let api_key = resolve_gemini_api_key()
+                    .ok_or_else(|| anyhow!("gemini_api_key required for multimodal but not found in llm.yaml"))?;
+                let file_api = GeminiFileApi::new(api_key);
 
-            let total_chars: usize = messages.iter()
-                .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
-                .map(|s| s.len())
-                .sum();
-            info!("Router chat: {} messages ({} chars) to {} via {}", messages.len(), total_chars, model, url);
+                // Extract the full text prompt from messages
+                let text_prompt: String = messages.iter()
+                    .filter_map(|m| {
+                        let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                        let c = m.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                        if c.is_empty() { return None; }
+                        Some(format!("[{}]: {}", role, c))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
 
-            let result = REQUEST_CALLER.scope("router_chat".to_string(), async {
-                state.gemini.send_with_timeout(&state.http_client, &url, &jwt, &body, idle_timeout).await
-            }).await?;
+                info!(
+                    model = %model,
+                    multimodal_files = multimodal_files.len(),
+                    prompt_len = text_prompt.len(),
+                    "Router chat: using direct Gemini API for multimodal"
+                );
 
-            let content = result
-                .pointer("/choices/0/message/content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("(empty response)");
-            let finish_reason = result
-                .pointer("/choices/0/finish_reason")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let usage = result.get("usage");
-            let resp_model = result.get("model").and_then(|v| v.as_str()).unwrap_or(&model);
+                let response_text = file_api.generate_content(
+                    &model, &text_prompt, &multimodal_files, max_tokens,
+                ).await?;
+
+                content = response_text;
+                finish_reason_owned = "stop".to_string();
+                usage = None::<Value>;
+                resp_model_owned = model.clone();
+            } else {
+                // Normal path: Router API or Gemini CLI
+                let (base_url, jwt) = resolve_llm_credentials().await?;
+
+                let url = format!("{}/v1/chat/completions", base_url);
+                let mut body = serde_json::json!({
+                    "model": model,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                });
+                if search_enabled {
+                    body["tools"] = serde_json::json!([{"type": "google_search"}]);
+                }
+
+                let total_chars: usize = messages.iter()
+                    .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+                    .map(|s| s.len())
+                    .sum();
+                info!("Router chat: {} messages ({} chars) to {} via {}", messages.len(), total_chars, model, url);
+
+                let result = REQUEST_CALLER.scope("router_chat".to_string(), async {
+                    state.gemini.send_with_timeout(&state.http_client, &url, &jwt, &body, idle_timeout).await
+                }).await?;
+
+                content = result
+                    .pointer("/choices/0/message/content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(empty response)")
+                    .to_string();
+                finish_reason_owned = result
+                    .pointer("/choices/0/finish_reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                usage = result.get("usage").cloned();
+                resp_model_owned = result.get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&model)
+                    .to_string();
+            };
+
+            let finish_reason = finish_reason_owned.as_str();
+            let resp_model = resp_model_owned.as_str();
 
             // When files are attached, output truncation is unacceptable — return error with partial content
             if has_files && (finish_reason == "length" || finish_reason == "max_tokens") {
