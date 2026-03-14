@@ -3,70 +3,36 @@ use super::ToolDefinition;
 
 pub fn definitions() -> Vec<ToolDefinition> {
     vec![
-        // ===== Process Control =====
+        // ===== Agent (merged: spawn + kill + restart + agents) =====
         ToolDefinition::new(
-            "mission_spawn",
-            "启动工位 Agent 进程",
+            "mission_agent",
+            "Agent 进程管理。action: spawn(启动), kill(停止), restart(重启), list(查看所有状态)。",
             json!({
                 "type": "object",
                 "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["spawn", "kill", "restart", "list"],
+                        "description": "spawn=启动, kill=停止, restart=重启, list=查看所有状态"
+                    },
                     "slotId": {
                         "type": "string",
-                        "description": "工位 ID"
+                        "description": "工位 ID (action=spawn/kill/restart 时必填)"
                     },
                     "visible": {
                         "type": "boolean",
-                        "description": "是否打开终端窗口可观看"
+                        "description": "是否打开终端窗口可观看 (action=spawn/restart 时可选)"
                     },
                     "autoRestart": {
                         "type": "boolean",
-                        "description": "崩溃后自动重启"
+                        "description": "崩溃后自动重启 (action=spawn 时可选)"
                     }
                 },
-                "required": ["slotId"]
+                "required": ["action"]
             }),
         ),
-        ToolDefinition::new(
-            "mission_kill",
-            "停止 Agent 进程",
-            json!({
-                "type": "object",
-                "properties": {
-                    "slotId": {
-                        "type": "string",
-                        "description": "工位 ID"
-                    }
-                },
-                "required": ["slotId"]
-            }),
-        ),
-        ToolDefinition::new(
-            "mission_restart",
-            "重启 Agent 进程",
-            json!({
-                "type": "object",
-                "properties": {
-                    "slotId": {
-                        "type": "string",
-                        "description": "工位 ID"
-                    },
-                    "visible": {
-                        "type": "boolean",
-                        "description": "是否打开终端窗口"
-                    }
-                },
-                "required": ["slotId"]
-            }),
-        ),
-        ToolDefinition::new(
-            "mission_agents",
-            "查看所有 Agent 状态",
-            json!({
-                "type": "object",
-                "properties": {}
-            }),
-        ),
-        // ===== Information Query =====
+
+        // ===== Information Query (KEEP AS-IS) =====
         ToolDefinition::new(
             "mission_slots",
             "列出所有工位配置",
@@ -92,6 +58,5 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-
     ]
 }

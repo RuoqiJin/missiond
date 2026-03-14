@@ -89,6 +89,28 @@ struct PTYScreenshotArgs {
 }
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    // Consolidated tools
+    if name == "mission_pty_read" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("screen");
+        return match action {
+            "screen" => handle_inner(state, "mission_pty_screen", args).await,
+            "history" => handle_inner(state, "mission_pty_history", args).await,
+            "logs" => handle_inner(state, "mission_pty_logs", args).await,
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
+    if name == "mission_pty_signal" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("kill");
+        return match action {
+            "kill" => handle_inner(state, "mission_pty_kill", args).await,
+            "interrupt" => handle_inner(state, "mission_pty_interrupt", args).await,
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
+    handle_inner(state, name, args).await
+}
+
+async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== PTY =====
         "mission_pty_spawn" => {

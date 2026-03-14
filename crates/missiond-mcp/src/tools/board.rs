@@ -3,24 +3,68 @@ use super::ToolDefinition;
 
 pub fn definitions() -> Vec<ToolDefinition> {
     vec![
-        // ===== Board Tasks (Personal Task Board) =====
+        // ===== Consolidated Query Tool =====
         ToolDefinition::new(
-            "mission_board_list",
-            "列出个人任务板上的所有任务。返回树形结构（含子任务）。可按状态筛选。默认隐藏 hidden 任务（续费等手动处理项）。",
+            "mission_board_query",
+            "任务板统一查询。通过 action 区分操作：list(树形列表), get(详情), search(搜索), summary(摘要统计)。\
+             不传 action 时默认 list。search 返回精简格式，优先使用。",
             json!({
                 "type": "object",
                 "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "get", "search", "summary"],
+                        "description": "查询类型: list(树形列表), get(详情+notes), search(精简搜索), summary(统计)。默认 list"
+                    },
                     "status": {
                         "type": "string",
-                        "description": "按状态筛选: open, done (不传则返回全部)"
+                        "description": "[list/search] 按状态筛选: open, done, running, failed, blocked"
                     },
                     "includeHidden": {
                         "type": "boolean",
-                        "description": "是否包含隐藏任务（续费等手动处理项）。默认 false"
+                        "description": "[list/search] 是否包含隐藏任务。默认 false"
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "[get] 单个任务 ID"
+                    },
+                    "ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "[get] 批量任务 ID 列表"
+                    },
+                    "includeChildren": {
+                        "type": "boolean",
+                        "description": "[get] 是否内嵌子任务详情。默认 false"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "[search] 全文搜索 title+description"
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "[search] 按项目过滤"
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "[search] 按分类过滤: deploy, dev, infra, test, other"
+                    },
+                    "parentId": {
+                        "type": "string",
+                        "description": "[search] 按父任务 ID 过滤"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "[search] 最大返回条数（默认 50）"
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": "[summary] 起始时间(ISO 8601)"
                     }
                 }
             }),
         ),
+        // ===== Create =====
         ToolDefinition::new(
             "mission_board_create",
             "在个人任务板上创建新任务。支持子任务（通过 parentId）。",
@@ -88,15 +132,22 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["title"]
             }),
         ),
+        // ===== Unified Update (absorbs batch_update + toggle) =====
         ToolDefinition::new(
             "mission_board_update",
-            "更新任务板上的任务。可修改标题、状态、优先级等任意字段。",
+            "更新任务。传 id 更新单个，传 ids 批量更新。可修改标题、状态、优先级等任意字段。\
+             切换状态直接用 status 字段（如 status: 'done'）。",
             json!({
                 "type": "object",
                 "properties": {
                     "id": {
                         "type": "string",
-                        "description": "任务 ID"
+                        "description": "单个任务 ID（与 ids 二选一）"
+                    },
+                    "ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "批量任务 ID 列表（与 id 二选一）"
                     },
                     "title": {
                         "type": "string",
@@ -108,7 +159,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "status": {
                         "type": "string",
-                        "description": "新状态: open, done"
+                        "description": "新状态: open, done, running, failed, blocked"
                     },
                     "priority": {
                         "type": "string",
@@ -163,69 +214,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "items": { "type": "string" },
                         "description": "DAG 依赖：前置任务 ID 列表"
                     }
-                },
-                "required": ["id"]
-            }),
-        ),
-        ToolDefinition::new(
-            "mission_board_get",
-            "获取任务详情。支持批量 IDs 和内嵌子任务。单个 id 返回对象，多个 ids 返回数组。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "string",
-                        "description": "单个任务 ID（与 ids 二选一）"
-                    },
-                    "ids": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "批量任务 ID 列表（与 id 二选一）"
-                    },
-                    "includeChildren": {
-                        "type": "boolean",
-                        "description": "是否内嵌子任务详情（含 notes）。默认 false"
-                    }
                 }
             }),
         ),
-        ToolDefinition::new(
-            "mission_board_search",
-            "搜索任务板。返回精简格式（id+title+status+priority+parentId），适合快速定位。支持关键词、项目、分类等过滤。优先用此工具代替 board_list 以节省上下文。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "全文搜索 title+description（模糊匹配）"
-                    },
-                    "project": {
-                        "type": "string",
-                        "description": "按项目过滤（精确匹配）"
-                    },
-                    "category": {
-                        "type": "string",
-                        "description": "按分类过滤: deploy, dev, infra, test, other"
-                    },
-                    "status": {
-                        "type": "string",
-                        "description": "按状态过滤: open, done, running, failed, blocked"
-                    },
-                    "parentId": {
-                        "type": "string",
-                        "description": "按父任务 ID 过滤（获取某任务的所有子任务）"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "最大返回条数（默认 50）"
-                    },
-                    "includeHidden": {
-                        "type": "boolean",
-                        "description": "是否包含隐藏任务。默认 false"
-                    }
-                }
-            }),
-        ),
+        // ===== Delete =====
         ToolDefinition::new(
             "mission_board_delete",
             "删除任务板上的任务（级联删除所有子任务）",
@@ -240,20 +232,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["id"]
             }),
         ),
-        ToolDefinition::new(
-            "mission_board_toggle",
-            "切换任务状态 (open ↔ done)",
-            json!({
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "string",
-                        "description": "任务 ID"
-                    }
-                },
-                "required": ["id"]
-            }),
-        ),
+        // ===== Claim =====
         ToolDefinition::new(
             "mission_board_claim",
             "认领任务。原子操作：仅当任务状态为 open 且未被其他执行者认领时成功。防止多个 Claude Code 实例重复执行同一任务。认领成功后任务状态自动变为 running。",
@@ -276,6 +255,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["taskId"]
             }),
         ),
+        // ===== Note =====
         ToolDefinition::new(
             "mission_board_note_add",
             "为任务添加进度笔记。用于记录阶段进度、完成摘要或一般备注。",
@@ -302,59 +282,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["taskId", "content"]
             }),
         ),
-        ToolDefinition::new(
-            "mission_board_summary",
-            "任务板执行摘要。返回各状态任务计数、待处理问题数、新 KB 条目数。用于用户回来后快速了解全貌。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "since": {
-                        "type": "string",
-                        "description": "起始时间(ISO 8601)，统计该时间之后完成/失败的任务和新增 KB。不传则统计全部"
-                    }
-                }
-            }),
-        ),
-        ToolDefinition::new(
-            "mission_board_batch_update",
-            "批量更新任务。对多个任务应用相同的字段变更（如批量关闭、批量改优先级）。返回每个任务的更新结果。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "ids": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "任务 ID 列表"
-                    },
-                    "status": {
-                        "type": "string",
-                        "description": "新状态: open, done"
-                    },
-                    "priority": {
-                        "type": "string",
-                        "description": "新优先级: high, medium, low"
-                    },
-                    "category": {
-                        "type": "string",
-                        "description": "新分类: deploy, dev, infra, test, other"
-                    },
-                    "project": {
-                        "type": "string",
-                        "description": "新关联项目"
-                    },
-                    "assignee": {
-                        "type": "string",
-                        "description": "分配的 PTY 工位 ID"
-                    },
-                    "hidden": {
-                        "type": "boolean",
-                        "description": "隐藏任务"
-                    }
-                },
-                "required": ["ids"]
-            }),
-        ),
-        // ===== Task Decompose =====
+        // ===== Decompose =====
         ToolDefinition::new(
             "mission_board_decompose",
             "一键拆分任务。派 Opus 工位调查代码后，自动创建带 DAG 依赖链的子任务序列，关键节点插入 user_review 检查点。\
@@ -379,6 +307,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["taskId"]
             }),
         ),
+        // ===== Retry =====
         ToolDefinition::new(
             "mission_board_retry",
             "重试失败/阻塞的任务。重置任务状态为 open 并解除 claim，可选级联重置所有下游任务。",
@@ -427,6 +356,5 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["taskId", "artifactType", "content"]
             }),
         ),
-
     ]
 }

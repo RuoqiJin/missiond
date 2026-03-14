@@ -3,134 +3,102 @@ use super::ToolDefinition;
 
 pub fn definitions() -> Vec<ToolDefinition> {
     vec![
-        // ===== Skill Knowledge Hub =====
+        // ===== Skill Query (merged: skill_list + skill_search + skill_topics + skill_actions + skill_stats) =====
         ToolDefinition::new(
-            "mission_skill_list",
-            "列出所有已索引的 Skill（知识库条目）。返回 name、description、aka、路径。",
-            json!({
-                "type": "object",
-                "properties": {}
-            }),
-        ),
-        ToolDefinition::new(
-            "mission_skill_search",
-            "按关键词搜索 Skill。支持 name/aka/description 模糊匹配。返回匹配的 Skill 元数据。",
+            "mission_skill_query",
+            "Skill 知识库查询。action: list(列出全部 Skill), search(关键词搜索), topics(主题统计), actions(可执行动作), stats(执行统计)。",
             json!({
                 "type": "object",
                 "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "search", "topics", "actions", "stats"],
+                        "description": "查询类型: list=列出全部, search=关键词搜索, topics=主题统计, actions=可执行动作, stats=执行统计"
+                    },
                     "query": {
                         "type": "string",
-                        "description": "搜索关键词 (如 deploy, auth, 部署)"
-                    }
-                },
-                "required": ["query"]
-            }),
-        ),
-        ToolDefinition::new(
-            "mission_context_build",
-            "根据任务关键词自动匹配相关 Skill 并生成 [Context] 块。用于 Agent 派任务前自动注入上下文。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "query": {
+                        "description": "搜索关键词 (action=search 时必填，如 deploy, auth, 部署)"
+                    },
+                    "skill": {
                         "type": "string",
-                        "description": "任务关键词 (如 '部署 auth 服务')"
+                        "description": "按 Skill 名筛选 (action=actions/stats 时可选)"
                     }
                 },
-                "required": ["query"]
+                "required": ["action"]
             }),
         ),
 
-        // ===== Skill Engine (CQRS write tools) =====
+        // ===== Skill Context (merged: context_build + context_resolve) =====
         ToolDefinition::new(
-            "mission_skill_upsert",
-            "创建或更新 Skill 的某个章节。写入 DB 后自动生成 SKILL.md 文件。",
+            "mission_skill_context",
+            "Skill 上下文构建。action: build(按关键词匹配 Skill 生成 Context 块), resolve(跨域递归聚合完整认知上下文，含 requires 依赖)。",
             json!({
                 "type": "object",
                 "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["build", "resolve"],
+                        "description": "build=简单匹配生成 Context, resolve=递归解析依赖聚合完整上下文"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "任务关键词/描述 (如 '部署 auth 服务到 GCP')"
+                    },
+                    "skill": {
+                        "type": "string",
+                        "description": "直接指定 skill name 跳过搜索 (action=resolve 时可选)"
+                    },
+                    "include_board": {
+                        "type": "boolean",
+                        "description": "是否包含 Board 相关任务 (action=resolve 时可选，默认 false)"
+                    }
+                },
+                "required": ["action", "query"]
+            }),
+        ),
+
+        // ===== Skill Mutate (merged: skill_upsert + skill_record + skill_render + skill_rollback) =====
+        ToolDefinition::new(
+            "mission_skill_mutate",
+            "Skill 写操作。action: upsert(创建/更新章节), record(快速记录碎片), render(重新生成 .md 文件), rollback(回滚到历史版本)。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["upsert", "record", "render", "rollback"],
+                        "description": "upsert=创建/更新章节, record=记录碎片, render=重建 .md, rollback=回滚版本"
+                    },
                     "topic": {
                         "type": "string",
                         "description": "Skill 主题名 (如 missiond, deployment)"
                     },
                     "section_title": {
                         "type": "string",
-                        "description": "章节标题 (如 '# API', '## 配置')"
+                        "description": "章节标题 (action=upsert 时必填，如 '# API')"
                     },
                     "content": {
                         "type": "string",
-                        "description": "章节的 Markdown 内容"
+                        "description": "内容 (action=upsert/record 时必填)"
                     },
                     "sort_order": {
                         "type": "integer",
-                        "description": "章节排序（默认追加到末尾）"
-                    }
-                },
-                "required": ["topic", "section_title", "content"]
-            }),
-        ),
-        ToolDefinition::new(
-            "mission_skill_record",
-            "快速记录一条知识碎片到指定 Skill。低认知负担，积累后可用 optimize 合并整理。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "Skill 主题名"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "碎片内容"
-                    }
-                },
-                "required": ["topic", "content"]
-            }),
-        ),
-        ToolDefinition::new(
-            "mission_skill_render",
-            "从 DB 重新生成 SKILL.md 文件。可指定 topic 单个渲染或全量重建。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "主题名（空=全部重建）"
-                    }
-                }
-            }),
-        ),
-        ToolDefinition::new(
-            "mission_skill_topics",
-            "列出所有 Skill 主题及统计信息（命中次数、碎片数、行数）。",
-            json!({
-                "type": "object",
-                "properties": {}
-            }),
-        ),
-        ToolDefinition::new(
-            "mission_context_resolve",
-            "跨域上下文聚合。根据任务描述自动匹配 Skill，递归解析 requires 依赖（skills/infra/kb），一次性返回完整认知上下文。替代 mission_context_build 用于复杂任务。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "任务描述 (如 '部署 auth 服务到 GCP')"
+                        "description": "章节排序 (action=upsert 时可选，默认追加末尾)"
                     },
                     "skill": {
                         "type": "string",
-                        "description": "可选，直接指定 skill name 跳过搜索"
+                        "description": "Skill 名称 (action=rollback 时必填)"
                     },
-                    "include_board": {
-                        "type": "boolean",
-                        "description": "是否包含 Board 相关任务（默认 false）"
+                    "version_id": {
+                        "type": "integer",
+                        "description": "版本 ID (action=rollback 时可选，不指定则列出版本)"
                     }
                 },
-                "required": ["query"]
+                "required": ["action"]
             }),
         ),
 
-        // ===== Skill Execution (Phase 3) =====
+        // ===== Skill Execution (KEEP AS-IS) =====
         ToolDefinition::new(
             "mission_skill_exec",
             "执行 Skill 中定义的 workflow。顺序执行 MCP 工具步骤，支持 dry_run 预览。",
@@ -157,55 +125,5 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["skill", "action"]
             }),
         ),
-        ToolDefinition::new(
-            "mission_skill_actions",
-            "列出可执行的 Skill Actions。可按 skill 名筛选。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "skill": {
-                        "type": "string",
-                        "description": "按 Skill 名筛选（空=列出全部）"
-                    }
-                }
-            }),
-        ),
-
-        // ===== Skill Execution Stats (Phase 4) =====
-        ToolDefinition::new(
-            "mission_skill_stats",
-            "查看 Skill workflow 执行统计（成功率、平均耗时）。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "skill": {
-                        "type": "string",
-                        "description": "Skill 名称（空=全部 skill 汇总）"
-                    }
-                }
-            }),
-        ),
-
-        // ===== Skill Version Rollback (Phase 4) =====
-        ToolDefinition::new(
-            "mission_skill_rollback",
-            "回滚 Skill 到历史版本。不指定 version_id 则列出可用版本。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "skill": {
-                        "type": "string",
-                        "description": "Skill 名称（如 backend-deploy）"
-                    },
-                    "version_id": {
-                        "type": "integer",
-                        "description": "版本 ID（不指定则列出最近版本）"
-                    }
-                },
-                "required": ["skill"]
-            }),
-        ),
-
-
     ]
 }

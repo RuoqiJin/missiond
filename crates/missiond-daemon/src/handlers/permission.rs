@@ -46,6 +46,30 @@ struct LearnedRevokeArgs {
 }
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    // Consolidated tools
+    if name == "mission_permission_query" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("get");
+        return match action {
+            "get" => handle_inner(state, "mission_permission_get", args).await,
+            "learned_list" => handle_inner(state, "mission_permission_learned_list", args).await,
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
+    if name == "mission_permission_mutate" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("reload");
+        return match action {
+            "set_role" => handle_inner(state, "mission_permission_set_role", args).await,
+            "set_slot" => handle_inner(state, "mission_permission_set_slot", args).await,
+            "auto_allow" => handle_inner(state, "mission_permission_add_auto_allow", args).await,
+            "reload" => handle_inner(state, "mission_permission_reload", args).await,
+            "revoke" => handle_inner(state, "mission_permission_learned_revoke", args).await,
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
+    handle_inner(state, name, args).await
+}
+
+async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== Permission =====
         "mission_permission_get" => Ok(ToolResult::json_pretty(

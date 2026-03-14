@@ -8,6 +8,37 @@ use crate::event_bus::{DaemonEvent, TraceContext};
 use crate::lenient;
 use crate::decision_harvest::harvest_decisions_for_task;
 
+/// Extracted board_get logic (used by query action="get")
+async fn board_get(state: &AppState, args: Value) -> Result<ToolResult> {
+    let include_children = args.get("includeChildren")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let ids: Vec<String> = if let Some(id_val) = args.get("ids").and_then(|v| v.as_array()) {
+        id_val.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+    } else if let Some(id) = args.get("id").and_then(|v| v.as_str()) {
+        vec![id.to_string()]
+    } else {
+        return Ok(ToolResult::error("Either 'id' or 'ids' is required"));
+    };
+    let single_mode = args.get("ids").is_none() && args.get("id").is_some();
+    if include_children || ids.len() > 1 {
+        let results = state.mission.db()
+            .get_board_tasks_with_context(&ids, include_children)
+            .map_err(|e| anyhow!("DB error: {}", e))?;
+        if results.is_empty() { return Ok(ToolResult::error("Task not found")); }
+        if single_mode { Ok(ToolResult::json_pretty(&results[0])) }
+        else { Ok(ToolResult::json_pretty(&results)) }
+    } else {
+        let task = state.mission.db()
+            .get_board_task_with_notes(&ids[0])
+            .map_err(|e| anyhow!("DB error: {}", e))?;
+        match task {
+            Some(t) => Ok(ToolResult::json_pretty(&t)),
+            None => Ok(ToolResult::error("Task not found")),
+        }
+    }
+}
+
 /// Publish BoardTaskCreated event.
 fn publish_board_created(state: &AppState, task: &missiond_core::types::BoardTask) {
     state.event_bus.publish_traced(
@@ -83,16 +114,47 @@ struct BoardNoteAddArgs {
 // @beacon: board
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
-        // ===== Board Tasks (Personal Task Board) =====
-        "mission_board_list" => {
-            let BoardListArgs { status, include_hidden } =
-                serde_json::from_value(args).unwrap_or(BoardListArgs { status: None, include_hidden: None });
-            let tasks = state
-                .mission
-                .db()
-                .list_board_tasks(status.as_deref(), include_hidden.unwrap_or(false))
-                .map_err(|e| anyhow!("DB error: {}", e))?;
-            Ok(ToolResult::json_pretty(&tasks))
+        // ===== Consolidated Query =====
+        "mission_board_query" | "mission_board_list" | "mission_board_get"
+            | "mission_board_search" | "mission_board_summary" => {
+            // Determine action from tool name or action parameter
+            let action = if name != "mission_board_query" {
+                // Backward compat: old tool names map to actions
+                name.trim_start_matches("mission_board_").to_string()
+            } else {
+                args.get("action").and_then(|v| v.as_str()).unwrap_or("list").to_string()
+            };
+            match action.as_str() {
+                "list" => {
+                    let BoardListArgs { status, include_hidden } =
+                        serde_json::from_value(args).unwrap_or(BoardListArgs { status: None, include_hidden: None });
+                    let tasks = state.mission.db()
+                        .list_board_tasks(status.as_deref(), include_hidden.unwrap_or(false))
+                        .map_err(|e| anyhow!("DB error: {}", e))?;
+                    Ok(ToolResult::json_pretty(&tasks))
+                }
+                "get" => {
+                    board_get(state, args).await
+                }
+                "search" => {
+                    let input: missiond_core::types::BoardSearchInput =
+                        serde_json::from_value(args).unwrap_or_default();
+                    let result = state.mission.db()
+                        .search_board_tasks(&input)
+                        .map_err(|e| anyhow!("DB error: {}", e))?;
+                    Ok(ToolResult::json_pretty(&result))
+                }
+                "summary" => {
+                    #[derive(Deserialize)]
+                    struct SummaryArgs { since: Option<String> }
+                    let a: SummaryArgs = serde_json::from_value(args)?;
+                    let summary = state.mission.db()
+                        .board_summary(a.since.as_deref())
+                        .map_err(|e| anyhow!("DB error: {}", e))?;
+                    Ok(ToolResult::json_pretty(&summary))
+                }
+                _ => Ok(ToolResult::error(format!("Unknown board_query action: {action}. Use: list, get, search, summary"))),
+            }
         }
         "mission_board_create" => {
             let input: missiond_core::types::CreateBoardTaskInput =
@@ -125,188 +187,82 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             publish_board_created(state, &task);
             Ok(ToolResult::json_pretty(&task))
         }
-        "mission_board_update" => {
-            let args_val: Value = args;
-            let id = args_val
-                .get("id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("Missing 'id' field"))?
-                .to_string();
-            let is_status_change = args_val.get("status").and_then(|v| v.as_str()).is_some();
-            let is_marking_done = args_val.get("status")
-                .and_then(|v| v.as_str())
-                .map(|s| s == "done")
-                .unwrap_or(false);
-            // Fetch old status before update for status change tracking
-            let old_status = if is_status_change {
-                state.mission.db().get_board_task(&id).ok().flatten()
-                    .map(|t| format!("{:?}", t.status))
-            } else { None };
-            let update: missiond_core::types::UpdateBoardTaskInput =
-                serde_json::from_value(args_val)?;
-            let task = state
-                .mission
-                .db()
-                .update_board_task(&id, &update)
-                .map_err(|e| anyhow!("DB error: {}", e))?;
-            match task {
-                Some(t) => {
-                    if let Some(old) = old_status {
-                        publish_board_status_changed(state, &t, &old);
-                    } else {
-                        publish_board_update(state, &t);
-                    }
-                    // Decision Engine: harvest decisions when task marked done
-                    if is_marking_done {
-                        let state = state.clone();
-                        let task_id = t.id.clone();
-                        let task_title = t.title.clone();
-                        tokio::spawn(async move {
-                            harvest_decisions_for_task(&state, &task_id, &task_title).await;
-                        });
-                    }
-                    Ok(ToolResult::json_pretty(&t))
-                }
-                None => Ok(ToolResult::error("Task not found")),
-            }
-        }
-        "mission_board_batch_update" => {
-            let ids = args.get("ids")
-                .and_then(|v| v.as_array())
-                .ok_or_else(|| anyhow!("Missing 'ids' array"))?
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect::<Vec<_>>();
-            if ids.is_empty() {
-                return Ok(ToolResult::error("'ids' array is empty"));
-            }
+        // ===== Unified Update (single + batch, absorbs toggle) =====
+        "mission_board_update" | "mission_board_batch_update" | "mission_board_toggle" => {
+            // Detect batch mode: explicit ids array or old batch_update tool name
+            let has_ids = args.get("ids").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
 
-            // Build shared update from remaining fields (exclude ids)
-            let is_marking_done = args.get("status")
-                .and_then(|v| v.as_str())
-                .map(|s| s == "done")
-                .unwrap_or(false);
-            let is_status_change = args.get("status").and_then(|v| v.as_str()).is_some();
-
-            // Parse update template once
-            let update_template: missiond_core::types::UpdateBoardTaskInput =
-                serde_json::from_value(args)?;
-
-            let mut results = Vec::new();
-            let mut success_count = 0u32;
-            let mut fail_count = 0u32;
-
-            for id in &ids {
-                let old_status = if is_status_change {
-                    state.mission.db().get_board_task(id).ok().flatten()
-                        .map(|t| format!("{:?}", t.status))
-                } else { None };
-
-                match state.mission.db().update_board_task(id, &update_template) {
-                    Ok(Some(t)) => {
-                        if let Some(old) = old_status {
-                            publish_board_status_changed(state, &t, &old);
-                        } else {
-                            publish_board_update(state, &t);
+            if has_ids {
+                // === Batch update path ===
+                let ids = args.get("ids").unwrap().as_array().unwrap()
+                    .iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>();
+                let is_marking_done = args.get("status").and_then(|v| v.as_str()).map(|s| s == "done").unwrap_or(false);
+                let is_status_change = args.get("status").and_then(|v| v.as_str()).is_some();
+                let update_template: missiond_core::types::UpdateBoardTaskInput = serde_json::from_value(args)?;
+                let mut results = Vec::new();
+                let (mut success_count, mut fail_count) = (0u32, 0u32);
+                for id in &ids {
+                    let old_status = if is_status_change {
+                        state.mission.db().get_board_task(id).ok().flatten().map(|t| format!("{:?}", t.status))
+                    } else { None };
+                    match state.mission.db().update_board_task(id, &update_template) {
+                        Ok(Some(t)) => {
+                            if let Some(old) = old_status { publish_board_status_changed(state, &t, &old); }
+                            else { publish_board_update(state, &t); }
+                            if is_marking_done {
+                                let state = state.clone(); let task_id = t.id.clone(); let task_title = t.title.clone();
+                                tokio::spawn(async move { harvest_decisions_for_task(&state, &task_id, &task_title).await; });
+                            }
+                            success_count += 1;
+                            results.push(serde_json::json!({"id": t.id, "title": t.title, "status": format!("{:?}", t.status), "ok": true}));
                         }
-                        if is_marking_done {
-                            let state = state.clone();
-                            let task_id = t.id.clone();
-                            let task_title = t.title.clone();
-                            tokio::spawn(async move {
-                                harvest_decisions_for_task(&state, &task_id, &task_title).await;
-                            });
-                        }
-                        success_count += 1;
-                        results.push(serde_json::json!({
-                            "id": t.id,
-                            "title": t.title,
-                            "status": format!("{:?}", t.status),
-                            "ok": true,
-                        }));
-                    }
-                    Ok(None) => {
-                        fail_count += 1;
-                        results.push(serde_json::json!({
-                            "id": id,
-                            "ok": false,
-                            "error": "not found",
-                        }));
-                    }
-                    Err(e) => {
-                        fail_count += 1;
-                        results.push(serde_json::json!({
-                            "id": id,
-                            "ok": false,
-                            "error": e.to_string(),
-                        }));
+                        Ok(None) => { fail_count += 1; results.push(serde_json::json!({"id": id, "ok": false, "error": "not found"})); }
+                        Err(e) => { fail_count += 1; results.push(serde_json::json!({"id": id, "ok": false, "error": e.to_string()})); }
                     }
                 }
-            }
-
-            Ok(ToolResult::json(&serde_json::json!({
-                "total": ids.len(),
-                "success": success_count,
-                "failed": fail_count,
-                "results": results,
-            })))
-        }
-        "mission_board_get" => {
-            // Support both single `id` and batch `ids`, with optional `includeChildren`
-            let include_children = args.get("includeChildren")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            let ids: Vec<String> = if let Some(id_val) = args.get("ids").and_then(|v| v.as_array()) {
-                id_val.iter().filter_map(|v| v.as_str().map(String::from)).collect()
-            } else if let Some(id) = args.get("id").and_then(|v| v.as_str()) {
-                vec![id.to_string()]
-            } else {
-                return Ok(ToolResult::error("Either 'id' or 'ids' is required"));
-            };
-
-            let single_mode = args.get("ids").is_none() && args.get("id").is_some();
-
-            if include_children || ids.len() > 1 {
-                // Use batch method (max 3 SQL queries)
-                let results = state
-                    .mission
-                    .db()
-                    .get_board_tasks_with_context(&ids, include_children)
-                    .map_err(|e| anyhow!("DB error: {}", e))?;
-
-                if results.is_empty() {
-                    return Ok(ToolResult::error("Task not found"));
-                }
-
-                if single_mode {
-                    // Single id mode: return object (backward compatible)
-                    Ok(ToolResult::json_pretty(&results[0]))
-                } else {
-                    Ok(ToolResult::json_pretty(&results))
-                }
-            } else {
-                // Single id, no children: use original method (backward compatible)
-                let task = state
-                    .mission
-                    .db()
-                    .get_board_task_with_notes(&ids[0])
-                    .map_err(|e| anyhow!("DB error: {}", e))?;
+                Ok(ToolResult::json(&serde_json::json!({"total": ids.len(), "success": success_count, "failed": fail_count, "results": results})))
+            } else if name == "mission_board_toggle" {
+                // === Toggle path (backward compat) ===
+                let BoardIdArgs { id } = serde_json::from_value(args)?;
+                let old_status = state.mission.db().get_board_task(&id).ok().flatten()
+                    .map(|t| format!("{:?}", t.status)).unwrap_or_else(|| "unknown".to_string());
+                let task = state.mission.db().toggle_board_task(&id).map_err(|e| anyhow!("DB error: {}", e))?;
                 match task {
-                    Some(t) => Ok(ToolResult::json_pretty(&t)),
+                    Some(t) => {
+                        publish_board_status_changed(state, &t, &old_status);
+                        if t.status == missiond_core::types::BoardTaskStatus::Done {
+                            let state = state.clone(); let task_id = t.id.clone(); let task_title = t.title.clone();
+                            tokio::spawn(async move { harvest_decisions_for_task(&state, &task_id, &task_title).await; });
+                        }
+                        Ok(ToolResult::json_pretty(&t))
+                    }
+                    None => Ok(ToolResult::error("Task not found")),
+                }
+            } else {
+                // === Single update path ===
+                let args_val: Value = args;
+                let id = args_val.get("id").and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("Either 'id' or 'ids' is required"))?.to_string();
+                let is_status_change = args_val.get("status").and_then(|v| v.as_str()).is_some();
+                let is_marking_done = args_val.get("status").and_then(|v| v.as_str()).map(|s| s == "done").unwrap_or(false);
+                let old_status = if is_status_change {
+                    state.mission.db().get_board_task(&id).ok().flatten().map(|t| format!("{:?}", t.status))
+                } else { None };
+                let update: missiond_core::types::UpdateBoardTaskInput = serde_json::from_value(args_val)?;
+                let task = state.mission.db().update_board_task(&id, &update).map_err(|e| anyhow!("DB error: {}", e))?;
+                match task {
+                    Some(t) => {
+                        if let Some(old) = old_status { publish_board_status_changed(state, &t, &old); }
+                        else { publish_board_update(state, &t); }
+                        if is_marking_done {
+                            let state = state.clone(); let task_id = t.id.clone(); let task_title = t.title.clone();
+                            tokio::spawn(async move { harvest_decisions_for_task(&state, &task_id, &task_title).await; });
+                        }
+                        Ok(ToolResult::json_pretty(&t))
+                    }
                     None => Ok(ToolResult::error("Task not found")),
                 }
             }
-        }
-        "mission_board_search" => {
-            let input: missiond_core::types::BoardSearchInput =
-                serde_json::from_value(args).unwrap_or_default();
-            let result = state
-                .mission
-                .db()
-                .search_board_tasks(&input)
-                .map_err(|e| anyhow!("DB error: {}", e))?;
-            Ok(ToolResult::json_pretty(&result))
         }
         "mission_board_delete" => {
             let BoardIdArgs { id } = serde_json::from_value(args)?;
@@ -335,33 +291,6 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "deleted": deleted,
                 "id": id,
             })))
-        }
-        "mission_board_toggle" => {
-            let BoardIdArgs { id } = serde_json::from_value(args)?;
-            // Fetch old status before toggle
-            let old_status = state.mission.db().get_board_task(&id).ok().flatten()
-                .map(|t| format!("{:?}", t.status)).unwrap_or_else(|| "unknown".to_string());
-            let task = state
-                .mission
-                .db()
-                .toggle_board_task(&id)
-                .map_err(|e| anyhow!("DB error: {}", e))?;
-            match task {
-                Some(t) => {
-                    publish_board_status_changed(state, &t, &old_status);
-                    // Decision Engine: harvest decisions when toggled to done
-                    if t.status == missiond_core::types::BoardTaskStatus::Done {
-                        let state = state.clone();
-                        let task_id = t.id.clone();
-                        let task_title = t.title.clone();
-                        tokio::spawn(async move {
-                            harvest_decisions_for_task(&state, &task_id, &task_title).await;
-                        });
-                    }
-                    Ok(ToolResult::json_pretty(&t))
-                }
-                None => Ok(ToolResult::error("Task not found")),
-            }
         }
         "mission_board_claim" => {
             let task_id = args.get("taskId").and_then(|v| v.as_str())
@@ -433,20 +362,6 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 },
             );
             Ok(ToolResult::json_pretty(&note))
-        }
-
-        "mission_board_summary" => {
-            #[derive(Deserialize)]
-            struct SummaryArgs {
-                since: Option<String>,
-            }
-            let args: SummaryArgs = serde_json::from_value(args)?;
-            let summary = state
-                .mission
-                .db()
-                .board_summary(args.since.as_deref())
-                .map_err(|e| anyhow!("DB error: {}", e))?;
-            Ok(ToolResult::json_pretty(&summary))
         }
 
         // ===== Task Decompose =====

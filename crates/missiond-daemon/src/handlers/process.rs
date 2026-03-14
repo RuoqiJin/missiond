@@ -31,6 +31,21 @@ struct RestartArgs {
 }
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    // Consolidated tool: mission_agent with action parameter
+    if name == "mission_agent" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        return match action {
+            "spawn" => handle_inner(state, "mission_spawn", args).await,
+            "kill" => handle_inner(state, "mission_kill", args).await,
+            "restart" => handle_inner(state, "mission_restart", args).await,
+            "list" => handle_inner(state, "mission_agents", args).await,
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
+    handle_inner(state, name, args).await
+}
+
+async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== Process control (all via PTYManager) =====
         "mission_spawn" => {

@@ -32,18 +32,61 @@ use crate::state::AppState;
 /// Dispatch a tool call to the appropriate handler module.
 pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
-        // ===== Prefix-based routing =====
+        // ===== Consolidated tools (new names) =====
+        "mission_task_submit" | "mission_task_query" | "mission_task_cancel"
+            => task::handle(state, name, args).await,
+        "mission_agent" => process::handle(state, name, args).await,
+        "mission_pty_spawn" | "mission_pty_send" | "mission_pty_read"
+            | "mission_pty_signal" | "mission_pty_confirm" | "mission_pty_status"
+            | "mission_pty_screenshot"
+            => pty::handle(state, name, args).await,
+        "mission_permission_query" | "mission_permission_mutate"
+            => permission::handle(state, name, args).await,
+        "mission_cc_query" | "mission_cc_swarm"
+            => cc_tasks::handle(state, name, args).await,
+        "mission_skill_query" | "mission_skill_context" | "mission_skill_mutate"
+            | "mission_skill_exec"
+            => skill::handle(state, name, args).await,
+        "mission_question" | "mission_decision_stats" | "mission_incident"
+            | "mission_llm_trace"
+            => question::handle(state, name, args).await,
+        "mission_router_chat" | "mission_router_chat_manage"
+            => router_chat::handle(state, name, args).await,
+        "mission_memory" => memory::handle(state, name, args).await,
+        "mission_audit" => audit::handle(state, name, args).await,
+        "mission_timeline" => timeline::handle(state, name, args).await,
+        "mission_infra_query" | "mission_infra_ops"
+            => infra::handle(state, name, args).await,
+        "mission_worker" => worker::handle(state, name, args).await,
+
+        // ===== Legacy names (backward compatibility) =====
+        "mission_submit" | "mission_ask" | "mission_status" | "mission_cancel"
+            | "mission_task" | "mission_task_ack" | "mission_task_track"
+            => task::handle(state, name, args).await,
+        "mission_spawn" | "mission_kill" | "mission_restart" | "mission_agents"
+            => process::handle(state, name, args).await,
         n if n.starts_with("mission_pty_") => pty::handle(state, n, args).await,
         n if n.starts_with("mission_permission_") => permission::handle(state, n, args).await,
         n if n.starts_with("mission_cc_") => cc_tasks::handle(state, n, args).await,
+        n if n.starts_with("mission_skill_") || (n.starts_with("mission_context_") && n != "mission_context_around")
+            => skill::handle(state, n, args).await,
+        n if n.starts_with("mission_question_") => question::handle(state, n, args).await,
+        n if n.starts_with("mission_router_chat") => router_chat::handle(state, n, args).await,
+        n if n.starts_with("mission_memory_") => memory::handle(state, n, args).await,
+        n if n.starts_with("mission_audit_") => audit::handle(state, n, args).await,
+        n if n.starts_with("mission_timeline_") => timeline::handle(state, n, args).await,
+        n if n.starts_with("mission_infra_") | (n == "mission_reachability")
+            | (n == "mission_os_diagnose") => infra::handle(state, n, args).await,
+        n if n.starts_with("mission_incident_") | (n == "mission_health")
+            | (n == "mission_power_control") => health::handle(state, n, args).await,
+        "mission_workers" | "mission_worker_control" => worker::handle(state, name, args).await,
+
+        // ===== Unchanged tools =====
         n if n.starts_with("mission_kb_") => kb::handle(state, n, args).await,
         "mission_code_search" => kb::handle(state, name, args).await,
         n if n.starts_with("mission_beacon_") => kb::handle(state, n, args).await,
-        n if n.starts_with("mission_router_chat") => router_chat::handle(state, n, args).await,
-        n if n.starts_with("mission_memory_") => memory::handle(state, n, args).await,
         n if n.starts_with("mission_board_") => board::handle(state, n, args).await,
-        n if n.starts_with("mission_skill_") || (n.starts_with("mission_context_") && n != "mission_context_around") => skill::handle(state, n, args).await,
-        n if n.starts_with("mission_question_") || n == "mission_decision_stats" => question::handle(state, n, args).await,
+        n if n.starts_with("mission_minimax_") => minimax::handle(state, n, args).await,
         n if n.starts_with("mission_conversation_") || n == "mission_agent_trajectory"
             || n == "mission_trigger_backfill" || n == "mission_embedding_stats"
             || n == "mission_token_stats"
@@ -51,23 +94,10 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
             || n == "mission_activity_report"
             || n == "mission_message_search"
             || n == "mission_context_around" => conversation::handle(state, n, args).await,
-        n if n.starts_with("mission_timeline_") => timeline::handle(state, n, args).await,
-        n if n.starts_with("mission_minimax_") => minimax::handle(state, n, args).await,
-        n if n.starts_with("mission_audit_") => audit::handle(state, n, args).await,
-        n if n.starts_with("mission_infra_") || n == "mission_reachability"
-            || n == "mission_os_diagnose" => infra::handle(state, n, args).await,
-        n if n.starts_with("mission_incident_") || n == "mission_health"
-            || n == "mission_power_control" => health::handle(state, n, args).await,
-        "mission_workers" | "mission_worker_control" => worker::handle(state, name, args).await,
         "mission_retrospective" | "mission_retrospective_list" | "mission_retrospective_backfill"
             => retrospective::handle(state, name, args).await,
 
-        // ===== Explicit name routing =====
-        "mission_submit" | "mission_ask" | "mission_status" | "mission_cancel"
-            | "mission_task" | "mission_task_ack" | "mission_task_track"
-            => task::handle(state, name, args).await,
-        "mission_spawn" | "mission_kill" | "mission_restart" | "mission_agents"
-            => process::handle(state, name, args).await,
+        // ===== Misc (slots, inbox, etc.) =====
         "mission_slots" | "mission_inbox" | "mission_submit_phase_result"
             | "mission_slot_history" | "mission_jarvis_logs" | "mission_jarvis_trace"
             | "mission_gemini_trace" | "mission_gemini_stats" | "mission_gemini_content"

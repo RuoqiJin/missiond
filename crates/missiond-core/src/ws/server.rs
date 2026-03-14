@@ -728,13 +728,21 @@ impl PTYWebSocketServer {
         }
         let messages = messages.unwrap();
 
+        // Extract system message (if any) — pass through to Claude Code as context prefix
+        let system_message: Option<String> = messages
+            .iter()
+            .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+            .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+            .reduce(|a, b| { let _ = a; b }) // take last system message
+            .map(|s| s.to_string());
+
         // Extract the last user message (supports both string and multimodal array content)
         let last_user_msg = messages
             .iter()
             .rev()
             .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"));
 
-        let user_message = match last_user_msg {
+        let raw_user_message = match last_user_msg {
             Some(msg) => {
                 match msg.get("content") {
                     Some(serde_json::Value::String(text)) => text.clone(),
@@ -746,6 +754,14 @@ impl PTYWebSocketServer {
                 }
             }
             None => String::new(),
+        };
+
+        // Prepend system message as instructions prefix so Claude Code follows caller's persona
+        let user_message = match &system_message {
+            Some(sys) if !sys.is_empty() => {
+                format!("[Instructions from caller — follow these for your response]\n{}\n[End instructions]\n\n{}", sys, raw_user_message)
+            }
+            _ => raw_user_message,
         };
 
         if user_message.is_empty() {
@@ -830,7 +846,13 @@ impl PTYWebSocketServer {
         stream.flush().await?;
 
         // Context enrichment: inject KB/Skill/Code context before sending to PTY
-        let enriched_message = {
+        // Disabled when MISSIOND_DISABLE_CONTEXT_ENRICHMENT=1 (e.g. VDS transparent API proxy mode)
+        let context_enrichment_disabled = std::env::var("MISSIOND_DISABLE_CONTEXT_ENRICHMENT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let enriched_message = if context_enrichment_disabled {
+            format!("{}\n<<<BOUNDARY_{}>>>", user_message, boundary_id)
+        } else {
             let enricher_guard = context_enricher.read().await;
             if let Some(ref enricher) = *enricher_guard {
                 let enricher = Arc::clone(enricher);
@@ -843,7 +865,7 @@ impl PTYWebSocketServer {
                     format!("{}\n\n{}\n<<<BOUNDARY_{}>>>", ctx, user_message, boundary_id)
                 }
             } else {
-                user_message.clone()
+                format!("{}\n<<<BOUNDARY_{}>>>", user_message, boundary_id)
             }
         };
 

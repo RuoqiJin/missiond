@@ -58,6 +58,24 @@ fn is_file_denied(path: &Path) -> Option<&'static str> {
 }
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    // Consolidated tool: mission_router_chat_manage
+    if name == "mission_router_chat_manage" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        return match action {
+            "history" => handle_inner(state, "mission_router_chat_history", args).await,
+            "list" => handle_inner(state, "mission_router_chat_list", args).await,
+            "delete" => handle_inner(state, "mission_router_chat_delete", args).await,
+            "clear" => handle_inner(state, "mission_router_chat_clear", args).await,
+            "delete_message" => handle_inner(state, "mission_router_chat_delete_message", args).await,
+            "restore" => handle_inner(state, "mission_router_chat_restore", args).await,
+            "stats" => handle_inner(state, "mission_router_chat_stats", args).await,
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
+    handle_inner(state, name, args).await
+}
+
+async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== Router Chat =====
         "mission_router_chat" => {

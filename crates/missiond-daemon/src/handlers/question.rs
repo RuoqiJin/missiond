@@ -52,6 +52,48 @@ struct QuestionIdArgs {
 }
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    // Consolidated tools
+    if name == "mission_question" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        return match action {
+            "create" => handle_inner(state, "mission_question_create", args).await,
+            "list" => handle_inner(state, "mission_question_list", args).await,
+            "get" => handle_inner(state, "mission_question_get", args).await,
+            "answer" => handle_inner(state, "mission_question_answer", args).await,
+            "dismiss" => handle_inner(state, "mission_question_dismiss", args).await,
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
+    if name == "mission_llm_trace" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("gemini_trace");
+        return match action {
+            "gemini_trace" => crate::handlers::misc::handle(state, "mission_gemini_trace", args).await,
+            "gemini_stats" => crate::handlers::misc::handle(state, "mission_gemini_stats", args).await,
+            "gemini_watch" => {
+                // Map watch_action to the action field expected by the handler
+                let mut args = args;
+                if let Some(wa) = args.get("watch_action").cloned() {
+                    args.as_object_mut().map(|m| m.insert("action".to_string(), wa));
+                }
+                crate::handlers::misc::handle(state, "mission_gemini_watch", args).await
+            }
+            "jarvis_logs" => crate::handlers::misc::handle(state, "mission_jarvis_logs", args).await,
+            "jarvis_trace" => crate::handlers::misc::handle(state, "mission_jarvis_trace", args).await,
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
+    if name == "mission_incident" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        return match action {
+            "test" => crate::handlers::misc::handle(state, "mission_incident_test", args).await,
+            "list" => crate::handlers::misc::handle(state, "mission_incident_list", args).await,
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
+    handle_inner(state, name, args).await
+}
+
+async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== Agent Questions (Pending Decisions) =====
         "mission_question_create" => {

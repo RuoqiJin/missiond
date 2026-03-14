@@ -163,11 +163,11 @@ mod tests {
         }
 
         for required in [
-            "mission_submit",
-            "mission_ask",
+            "mission_task_submit",
+            "mission_task_query",
             "mission_pty_spawn",
             "mission_kb_remember",
-            "mission_cc_overview",
+            "mission_cc_query",
         ] {
             assert!(names.contains(required), "missing required tool: {required}");
         }
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn test_get_tool() {
-        assert!(get_tool("mission_submit").is_some());
+        assert!(get_tool("mission_task_submit").is_some());
         assert!(get_tool("mission_pty_send").is_some());
         assert!(get_tool("unknown_tool").is_none());
     }
