@@ -292,8 +292,9 @@ mod tests {
     async fn test_handle_tools_call() {
         let server = McpServer::new(TestHandler);
         let params = json!({
-            "name": "mission_submit",
+            "name": "mission_task_submit",
             "arguments": {
+                "action": "async",
                 "role": "test",
                 "prompt": "test prompt"
             }

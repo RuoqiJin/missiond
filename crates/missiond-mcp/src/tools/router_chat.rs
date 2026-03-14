@@ -3,7 +3,7 @@ use super::ToolDefinition;
 
 pub fn definitions() -> Vec<ToolDefinition> {
     vec![
-        // ===== Router Chat =====
+        // ===== Router Chat (KEEP AS-IS) =====
         ToolDefinition::new(
             "mission_router_chat",
             "通过 AI 路由器与 Gemini 等模型多轮对话。传 task_id 自动持久化对话历史（同 Board 任务下连续对话）。不传 task_id 则无状态。",
@@ -59,106 +59,41 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
-        ToolDefinition::new(
-            "mission_router_chat_history",
-            "查看与某 Board 任务关联的 Gemini 对话历史",
-            json!({
-                "type": "object",
-                "properties": {
-                    "task_id": {
-                        "type": "string",
-                        "description": "Board 任务 ID"
-                    }
-                },
-                "required": ["task_id"]
-            }),
-        ),
 
+        // ===== Router Chat Manage (merged: history + list + delete + clear + delete_message + restore + stats) =====
         ToolDefinition::new(
-            "mission_router_chat_list",
-            "列出所有 Gemini 对话。显示 ID、关联任务、模型、消息数、总字符数、估算 token、日期。",
+            "mission_router_chat_manage",
+            "Gemini 对话管理。action: history(查看对话历史), list(列出所有对话), delete(删除对话), clear(清理消息), delete_message(删除单条), restore(恢复已删除), stats(统计)。",
             json!({
                 "type": "object",
                 "properties": {
-                    "limit": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["history", "list", "delete", "clear", "delete_message", "restore", "stats"],
+                        "description": "history=查看历史, list=列出全部, delete=删除对话, clear=清理消息, delete_message=删单条, restore=恢复, stats=统计"
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Board 任务 ID (action=history/delete/clear 时可用)"
+                    },
+                    "conversation_id": {
+                        "type": "string",
+                        "description": "对话 ID (action=delete/clear/restore 时可用)"
+                    },
+                    "message_id": {
                         "type": "integer",
-                        "description": "最大返回数（默认 50）"
-                    }
-                }
-            }),
-        ),
-        ToolDefinition::new(
-            "mission_router_chat_delete",
-            "删除 Gemini 对话（含所有消息）。消息会先归档到 router_chat_archive 表，可用 restore 恢复。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "conversation_id": {
-                        "type": "string",
-                        "description": "对话 ID（直接删除）"
-                    },
-                    "task_id": {
-                        "type": "string",
-                        "description": "Board 任务 ID（删除该任务关联的所有 Gemini 对话）"
-                    }
-                }
-            }),
-        ),
-        ToolDefinition::new(
-            "mission_router_chat_clear",
-            "清理 Gemini 对话消息。默认只清最后一轮（2条：1问1答），传 count:-1 清全部。消息归档到 router_chat_archive，可用 restore 恢复。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "conversation_id": {
-                        "type": "string",
-                        "description": "对话 ID"
-                    },
-                    "task_id": {
-                        "type": "string",
-                        "description": "Board 任务 ID（清理该任务关联的所有 Gemini 对话）"
+                        "description": "消息 ID (action=delete_message 时必填)"
                     },
                     "count": {
                         "type": "integer",
-                        "description": "清理最后 N 条消息（默认 2 = 最后一轮问答）。传 -1 清全部。"
-                    }
-                }
-            }),
-        ),
-        ToolDefinition::new(
-            "mission_router_chat_restore",
-            "从归档恢复已清理/删除的 Gemini 对话消息。将 router_chat_archive 中的消息还原到 conversation_messages。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "conversation_id": {
-                        "type": "string",
-                        "description": "对话 ID（恢复该对话的所有归档消息）"
-                    }
-                },
-                "required": ["conversation_id"]
-            }),
-        ),
-        ToolDefinition::new(
-            "mission_router_chat_delete_message",
-            "精确删除单条 Gemini 对话消息（按消息 ID）。归档后删除，可用 restore 恢复。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "message_id": {
+                        "description": "清理最后 N 条消息 (action=clear 时可选，默认 2=最后一轮问答，-1=全部)"
+                    },
+                    "limit": {
                         "type": "integer",
-                        "description": "消息 ID（conversation_messages 表的自增主键）"
+                        "description": "最大返回数 (action=list 时可选，默认 50)"
                     }
                 },
-                "required": ["message_id"]
-            }),
-        ),
-        ToolDefinition::new(
-            "mission_router_chat_stats",
-            "Gemini 对话统计：总对话数、总消息数、总字符/估算 token、按模型/按天分布。",
-            json!({
-                "type": "object",
-                "properties": {}
+                "required": ["action"]
             }),
         ),
     ]

@@ -18,6 +18,40 @@ struct ContextBuildArgs {
 }
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    // Consolidated tools
+    if name == "mission_skill_query" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        return match action {
+            "list" => handle_inner(state, "mission_skill_list", args).await,
+            "search" => handle_inner(state, "mission_skill_search", args).await,
+            "topics" => handle_inner(state, "mission_skill_topics", args).await,
+            "actions" => handle_inner(state, "mission_skill_actions", args).await,
+            "stats" => handle_inner(state, "mission_skill_stats", args).await,
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
+    if name == "mission_skill_context" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("build");
+        return match action {
+            "build" => handle_inner(state, "mission_context_build", args).await,
+            "resolve" => handle_inner(state, "mission_context_resolve", args).await,
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
+    if name == "mission_skill_mutate" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("upsert");
+        return match action {
+            "upsert" => handle_inner(state, "mission_skill_upsert", args).await,
+            "record" => handle_inner(state, "mission_skill_record", args).await,
+            "render" => handle_inner(state, "mission_skill_render", args).await,
+            "rollback" => handle_inner(state, "mission_skill_rollback", args).await,
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
+    handle_inner(state, name, args).await
+}
+
+async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== Skill Knowledge Hub =====
         "mission_skill_list" => {

@@ -35,6 +35,24 @@ struct CCTriggerSwarmArgs {
 
 // Board tasks args
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    // Consolidated tools
+    if name == "mission_cc_query" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("overview");
+        return match action {
+            "sessions" => handle_inner(state, "mission_cc_sessions", args).await,
+            "tasks" => handle_inner(state, "mission_cc_tasks", args).await,
+            "overview" => handle_inner(state, "mission_cc_overview", args).await,
+            "in_progress" => handle_inner(state, "mission_cc_in_progress", args).await,
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
+    if name == "mission_cc_swarm" {
+        return handle_inner(state, "mission_cc_trigger_swarm", args).await;
+    }
+    handle_inner(state, name, args).await
+}
+
+async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== Claude Code Tasks =====
         "mission_cc_sessions" => {

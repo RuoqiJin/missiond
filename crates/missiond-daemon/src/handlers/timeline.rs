@@ -7,6 +7,21 @@ use crate::state::AppState;
 use crate::lenient;
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    // Consolidated tool: mission_timeline
+    if name == "mission_timeline" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("query");
+        return match action {
+            "query" => handle_inner(state, "mission_timeline_query", args).await,
+            "trace" => handle_inner(state, "mission_timeline_trace", args).await,
+            "stats" => handle_inner(state, "mission_timeline_stats", args).await,
+            "search" => handle_inner(state, "mission_timeline_search", args).await,
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
+    handle_inner(state, name, args).await
+}
+
+async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         "mission_timeline_query" => {
             #[derive(Deserialize)]

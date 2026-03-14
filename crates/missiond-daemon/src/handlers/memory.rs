@@ -12,6 +12,23 @@ use crate::events_sync;
 use crate::helpers::default_mission_home;
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    // Consolidated tool: mission_memory
+    if name == "mission_memory" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("pending");
+        return match action {
+            "pending" => handle_inner(state, "mission_memory_pending", args).await,
+            "pause" => handle_inner(state, "mission_memory_pause", args).await,
+            "token_stats" => {
+                // Delegate to conversation handler which has mission_token_stats
+                crate::handlers::conversation::handle(state, "mission_token_stats", args).await
+            }
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
+    handle_inner(state, name, args).await
+}
+
+async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== Memory Extraction =====
         // Message-level pipeline tracking: returns pending messages with IDs.

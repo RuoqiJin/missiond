@@ -33,6 +33,28 @@ struct OsDiagnoseArgs {
 }
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    // Consolidated tools
+    if name == "mission_infra_query" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        return match action {
+            "list" => handle_inner(state, "mission_infra_list", args).await,
+            "get" => handle_inner(state, "mission_infra_get", args).await,
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
+    if name == "mission_infra_ops" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("health");
+        return match action {
+            "health" => crate::handlers::misc::handle(state, "mission_health", args).await,
+            "reachability" => handle_inner(state, "mission_reachability", args).await,
+            "diagnose" => handle_inner(state, "mission_os_diagnose", args).await,
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
+    handle_inner(state, name, args).await
+}
+
+async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== Infrastructure Registry =====
         "mission_infra_list" => {

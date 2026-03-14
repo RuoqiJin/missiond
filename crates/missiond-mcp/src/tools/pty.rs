@@ -3,7 +3,7 @@ use super::ToolDefinition;
 
 pub fn definitions() -> Vec<ToolDefinition> {
     vec![
-        // ===== PTY Interactive Sessions =====
+        // ===== PTY Spawn (KEEP AS-IS) =====
         ToolDefinition::new(
             "mission_pty_spawn",
             "启动 PTY 交互式会话（像人一样操作 Claude Code）。默认异步返回，不等待 Idle。可通过 mcpConfigPath 注入 MCP 工具配置。",
@@ -34,9 +34,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["slotId"]
             }),
         ),
+
+        // ===== PTY Send (KEEP AS-IS) =====
         ToolDefinition::new(
             "mission_pty_send",
-            "向 PTY 会话发送消息。默认 fire-and-forget（立即返回），用 pty_status/pty_screen 轮询结果。设 waitForResponse=true 阻塞等待回复",
+            "向 PTY 会话发送消息。默认 fire-and-forget（立即返回），用 pty_read/pty_status 轮询结果。设 waitForResponse=true 阻塞等待回复",
             json!({
                 "type": "object",
                 "properties": {
@@ -60,65 +62,54 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["slotId", "message"]
             }),
         ),
+
+        // ===== PTY Read (merged: pty_screen + pty_history + pty_logs) =====
         ToolDefinition::new(
-            "mission_pty_kill",
-            "停止 PTY 会话",
+            "mission_pty_read",
+            "读取 PTY 会话内容。action: screen(屏幕内容), history(对话历史), logs(日志文件路径)。",
             json!({
                 "type": "object",
                 "properties": {
-                    "slotId": {
+                    "action": {
                         "type": "string",
-                        "description": "工位 ID"
-                    }
-                },
-                "required": ["slotId"]
-            }),
-        ),
-        ToolDefinition::new(
-            "mission_pty_screen",
-            "获取 PTY 屏幕内容",
-            json!({
-                "type": "object",
-                "properties": {
+                        "enum": ["screen", "history", "logs"],
+                        "description": "screen=获取屏幕内容, history=获取对话历史, logs=获取日志文件路径"
+                    },
                     "slotId": {
                         "type": "string",
                         "description": "工位 ID"
                     },
                     "lines": {
                         "type": "number",
-                        "description": "获取最后 N 行 (不填返回全部)"
+                        "description": "获取最后 N 行 (action=screen 时可选，不填返回全部)"
                     }
                 },
-                "required": ["slotId"]
+                "required": ["action", "slotId"]
             }),
         ),
+
+        // ===== PTY Signal (merged: pty_kill + pty_interrupt) =====
         ToolDefinition::new(
-            "mission_pty_history",
-            "获取 PTY 对话历史",
+            "mission_pty_signal",
+            "向 PTY 会话发送信号。action: kill(停止会话), interrupt(发送 Ctrl+C 中断)。",
             json!({
                 "type": "object",
                 "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["kill", "interrupt"],
+                        "description": "kill=停止会话, interrupt=发送 Ctrl+C"
+                    },
                     "slotId": {
                         "type": "string",
                         "description": "工位 ID"
                     }
                 },
-                "required": ["slotId"]
+                "required": ["action", "slotId"]
             }),
         ),
-        ToolDefinition::new(
-            "mission_pty_status",
-            "获取 PTY 会话状态",
-            json!({
-                "type": "object",
-                "properties": {
-                    "slotId": {
-                        "type": "string",
-                        "description": "工位 ID (不填返回所有)"
-                    }
-                }
-            }),
-        ),
+
+        // ===== PTY Confirm (KEEP AS-IS) =====
         ToolDefinition::new(
             "mission_pty_confirm",
             "发送确认响应（用于工具使用确认对话框）",
@@ -141,34 +132,23 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["slotId", "response"]
             }),
         ),
+
+        // ===== PTY Status (KEEP AS-IS) =====
         ToolDefinition::new(
-            "mission_pty_interrupt",
-            "发送 Ctrl+C 中断信号",
+            "mission_pty_status",
+            "获取 PTY 会话状态",
             json!({
                 "type": "object",
                 "properties": {
                     "slotId": {
                         "type": "string",
-                        "description": "工位 ID"
+                        "description": "工位 ID (不填返回所有)"
                     }
-                },
-                "required": ["slotId"]
+                }
             }),
         ),
-        ToolDefinition::new(
-            "mission_pty_logs",
-            "获取 PTY 日志文件路径（用于 tail -f 实时查看）",
-            json!({
-                "type": "object",
-                "properties": {
-                    "slotId": {
-                        "type": "string",
-                        "description": "工位 ID"
-                    }
-                },
-                "required": ["slotId"]
-            }),
-        ),
+
+        // ===== PTY Screenshot (KEEP AS-IS) =====
         ToolDefinition::new(
             "mission_pty_screenshot",
             "截取 PTY 终端屏幕截图（PNG），返回文件路径。Claude Code 可用 Read 工具查看图片来可视化调试终端状态。",
@@ -183,6 +163,5 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["slotId"]
             }),
         ),
-
     ]
 }

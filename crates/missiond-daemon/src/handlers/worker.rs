@@ -8,6 +8,22 @@ use crate::state::AppState;
 use crate::workers::registry::WorkerState;
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    // Consolidated tool: mission_worker
+    if name == "mission_worker" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        return match action {
+            "list" => list_workers(state),
+            "control" => {
+                // Remap control_action to action for the inner handler
+                let mut inner_args = args.clone();
+                if let Some(ca) = args.get("control_action").cloned() {
+                    inner_args.as_object_mut().map(|m| m.insert("action".to_string(), ca));
+                }
+                worker_control(state, inner_args)
+            }
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
     match name {
         "mission_workers" => list_workers(state),
         "mission_worker_control" => worker_control(state, args),

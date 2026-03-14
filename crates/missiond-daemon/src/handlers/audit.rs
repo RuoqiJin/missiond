@@ -8,6 +8,21 @@ use crate::lenient;
 use crate::context_budget::format_tool_call_trace;
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    // Consolidated tool: mission_audit
+    if name == "mission_audit" {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("trace");
+        return match action {
+            "trace" => handle_inner(state, "mission_audit_trace", args).await,
+            "detail" => handle_inner(state, "mission_audit_detail", args).await,
+            "stats" => handle_inner(state, "mission_audit_stats", args).await,
+            "export" => handle_inner(state, "mission_audit_export", args).await,
+            _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
+        };
+    }
+    handle_inner(state, name, args).await
+}
+
+async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== Audit (Conversation Tool Call Analysis) =====
         "mission_audit_trace" => {
