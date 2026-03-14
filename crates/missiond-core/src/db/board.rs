@@ -484,6 +484,33 @@ impl MissionDB {
         Ok(tasks)
     }
 
+    /// Count open board tasks with priority in the given set (for idle exploration gating).
+    pub fn count_open_tasks_by_priority(&self, priorities: &[&str]) -> DbResult<i64> {
+        let conn = self.read_conn();
+        let placeholders = priorities.iter().enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT COUNT(*) FROM board_tasks WHERE status IN ('open','running') AND priority IN ({}) AND hidden = 0",
+            placeholders
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> = priorities.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        let count: i64 = stmt.query_row(params.as_slice(), |r| r.get(0))?;
+        Ok(count)
+    }
+
+    /// Count open/running board tasks with the given category.
+    pub fn count_tasks_by_category(&self, category: &str) -> DbResult<i64> {
+        let conn = self.read_conn();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM board_tasks WHERE category = ?1 AND status IN ('open','running') AND hidden = 0",
+            params![category],
+            |r| r.get(0),
+        )?;
+        Ok(count)
+    }
+
     /// Board summary: status counts + pending questions + recent activity
     pub fn board_summary(&self, since: Option<&str>) -> DbResult<serde_json::Value> {
         tokio::task::block_in_place(|| {
