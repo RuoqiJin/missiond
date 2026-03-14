@@ -46,7 +46,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "files": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "本地文件路径列表。文件内容自动读取并追加到最后一条 user 消息。限制: 项目目录内、单文件 ≤ 500KB、UTF-8"
+                        "description": "本地文件路径列表（完整路径保留）。安全: 黑名单拦截敏感路径(.ssh/.env等)，其余均可。文本 ≤ 1MB（超出自动截断），二进制 ≤ 10MB。失败不中断，以占位符报错"
                     },
                     "message": {
                         "type": "string",
