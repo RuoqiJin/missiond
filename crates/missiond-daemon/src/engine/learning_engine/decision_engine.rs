@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 use crate::state::AppState;
 use crate::event_bus::{DaemonEvent, TraceContext};
 use crate::llm_gateway::call_gemini_for_flow;
-use crate::memory_scheduler::ensure_memory_slot_by_id;
+use crate::engine::intent_engine::request_execution_slot;
 
 pub(crate) struct TierResult {
     hit: bool,
@@ -590,7 +590,7 @@ pub(crate) async fn decision_tier3_dispatch(state: &AppState, question: &mission
     };
 
     // Ensure slot-decision PTY is running (reuse memory slot spawn pattern)
-    if !ensure_memory_slot_by_id(state, slot_id).await {
+    if !request_execution_slot(state, slot_id).await {
         return Err(anyhow!("Failed to ensure slot-decision PTY"));
     }
 

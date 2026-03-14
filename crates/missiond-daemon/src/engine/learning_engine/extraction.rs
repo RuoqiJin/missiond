@@ -5,7 +5,7 @@ use crate::state::{AppState, ExtractionPhase, ExtractionState};
 use crate::state::{MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 use crate::event_bus::{DaemonEvent, EventBus, TraceContext};
 use crate::supervisor::{is_auth_error, is_quota_exhausted};
-use crate::memory_scheduler::{ensure_memory_slot, ensure_memory_slot_by_id};
+use crate::engine::intent_engine::{request_default_slot, request_execution_slot};
 use missiond_core::SessionState;
 use std::sync::Arc;
 use crate::state::{CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES};
@@ -115,7 +115,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
     let msg_count: usize = pending.iter().map(|(_, _, msgs)| msgs.len()).sum();
 
     // Ensure memory slot is spawned, then check it's idle
-    if !ensure_memory_slot(state).await {
+    if !request_default_slot(state).await {
         debug!("realtime: memory slot not available");
         return;
     }
@@ -317,7 +317,7 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
 
         // Meta-sessions excluded at SQL level via conversation_type = 'user'.
 
-        if !ensure_memory_slot_by_id(state, MEMORY_SLOW_SLOT_ID).await {
+        if !request_execution_slot(state, MEMORY_SLOW_SLOT_ID).await {
             break;
         }
 
@@ -501,7 +501,7 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
     }
 
     // Ensure slow slot is spawned and idle
-    if !ensure_memory_slot_by_id(state, MEMORY_SLOW_SLOT_ID).await {
+    if !request_execution_slot(state, MEMORY_SLOW_SLOT_ID).await {
         return;
     }
     let status = state.pty.get_status(MEMORY_SLOW_SLOT_ID).await;

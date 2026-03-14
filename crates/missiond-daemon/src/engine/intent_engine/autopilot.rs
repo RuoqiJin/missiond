@@ -6,7 +6,6 @@ use crate::state::{AppState, MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 use crate::event_bus::{DaemonEvent, TraceContext};
 use crate::supervisor::{check_slot_context_levels, check_slot_stuck, check_pending_compact_restarts};
 use crate::memory_scheduler::ensure_memory_slot_by_id;
-use crate::decision_harvest::harvest_decisions_for_task;
 use crate::llm_gateway::determine_llm_env;
 use missiond_core::SessionState;
 use crate::helpers::default_mission_home;
@@ -14,8 +13,7 @@ use crate::supervisor::truncate_safe;
 use crate::supervisor::{is_auth_error, is_quota_exhausted};
 use crate::memory_scheduler::{dispatch_queued_submit_tasks, schedule_memory_tasks, reap_stale_submit_tasks};
 use crate::claude_md_sync::sync_claude_md;
-use crate::extraction::check_kb_auto_gc;
-use crate::decision_engine::reap_stale_decision_tasks;
+use crate::engine::learning_engine;
 use crate::supervisor::schedule_supervisor_patrol;
 use crate::flow_engine::{execute_flow_task, ensure_autopilot_pty};
 
@@ -82,8 +80,8 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     // Sync KB preferences + hot topics into CLAUDE.md
     sync_claude_md(state);
 
-    // KB auto-GC: every hour
-    check_kb_auto_gc(state);
+    // ── Learning Engine tick (KB GC, decision reaper, harvest, timeline) ──
+    learning_engine::learning_tick(state).await;
 
     // Hot-reload LLM prompts from ~/.xjp-mission/prompts/ (every 10 ticks ≈ 10 min)
     if state.stats.autopilot_ticks.load(std::sync::atomic::Ordering::Relaxed) % 10 == 0 {
@@ -96,32 +94,6 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
         Err(e) => warn!(error = %e, "Slot task reaper failed"),
         _ => {}
     }
-
-    // Decision Engine reaper: 15min timeout for master questions
-    reap_stale_decision_tasks(state).await;
-
-    // Decision Engine: checkpoint harvester (every 24h, tasks with ≥3 unharvested decisions)
-    {
-        let now = chrono::Utc::now().timestamp();
-        let last = state.mission.db().daemon_state_get("last_decision_harvest_at").unwrap_or(None).unwrap_or(0);
-        if now - last > 86400 {
-            let _ = state.mission.db().daemon_state_set("last_decision_harvest_at", now);
-            if let Ok(tasks) = state.mission.db().find_tasks_with_unharvested_decisions(3) {
-                for (task_id, task_title, count) in &tasks {
-                    info!(task_id, count, "Decision harvester checkpoint: incremental harvest");
-                    let state_clone = state.clone();
-                    let tid = task_id.clone();
-                    let tt = task_title.clone();
-                    tokio::spawn(async move {
-                        harvest_decisions_for_task(&state_clone, &tid, &tt).await;
-                    });
-                }
-            }
-        }
-    }
-
-    // L4: Timeline Analyst (12h cadence)
-    crate::timeline_analyst::check_timeline_analysis(state).await;
 
     // Reaper: timeout Running submit tasks after 15 minutes
     reap_stale_submit_tasks(state).await;
