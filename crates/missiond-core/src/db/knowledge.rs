@@ -1100,6 +1100,18 @@ impl MissionDB {
     }
 
 
+    /// List KB entries with confidence below threshold (for idle exploration).
+    pub fn kb_list_low_confidence(&self, threshold: f64, limit: usize) -> DbResult<Vec<KnowledgeEntry>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM knowledge WHERE confidence < ?1 ORDER BY confidence ASC LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(params![threshold, limit as i64], |row| Self::row_to_knowledge_entry(row))?;
+        let mut entries = Vec::new();
+        for entry in rows { entries.push(entry?); }
+        Ok(entries)
+    }
+
     // ============ KB Operation Queue ============
 
     /// Save a consolidation plan from kb_analyze into the operation queue

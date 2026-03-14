@@ -7,6 +7,7 @@ pub mod decision_engine;
 pub mod extraction;
 pub mod decision_harvest;
 pub mod timeline_analyst;
+pub mod idle_explorer;
 
 use tracing::info;
 use crate::state::AppState;
@@ -47,4 +48,7 @@ pub(crate) async fn learning_tick(state: &AppState) {
 
     // L4: Timeline Analyst (12h cadence, internal guard)
     timeline_analyst::check_timeline_analysis(state).await;
+
+    // L5: Idle Exploration (2h cadence, only when system has spare capacity)
+    idle_explorer::check_idle_exploration(state).await;
 }
