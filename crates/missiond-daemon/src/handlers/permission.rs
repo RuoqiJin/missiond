@@ -27,6 +27,24 @@ struct AddAutoAllowArgs {
     pattern: String,
 }
 
+#[derive(Deserialize)]
+struct GetLearnedArgs {
+    #[serde(rename = "scopeType")]
+    scope_type: Option<String>,
+    #[serde(rename = "scopeId")]
+    scope_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LearnedRevokeArgs {
+    #[serde(rename = "scopeType")]
+    scope_type: String,
+    #[serde(rename = "scopeId")]
+    scope_id: String,
+    #[serde(rename = "toolPattern")]
+    tool_pattern: String,
+}
+
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== Permission =====
@@ -80,6 +98,39 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             Ok(ToolResult::json(&serde_json::json!({ "success": true })))
         }
 
+        // ===== Learned Permissions =====
+        "mission_permission_learned_list" => {
+            let GetLearnedArgs {
+                scope_type,
+                scope_id,
+            } = serde_json::from_value(args)?;
+
+            let learned = state.permission.learned()
+                .ok_or_else(|| anyhow!("Learned permissions not initialized"))?;
+
+            let result = if let (Some(st), Some(si)) = (scope_type, scope_id) {
+                learned.get_for_scope(&st, &si)?
+            } else {
+                learned.get_all()?
+            };
+            Ok(ToolResult::json_pretty(&result))
+        }
+        "mission_permission_learned_revoke" => {
+            let LearnedRevokeArgs {
+                scope_type,
+                scope_id,
+                tool_pattern,
+            } = serde_json::from_value(args)?;
+
+            let learned = state.permission.learned()
+                .ok_or_else(|| anyhow!("Learned permissions not initialized"))?;
+
+            let deleted = learned.forget(&scope_type, &scope_id, &tool_pattern)?;
+            Ok(ToolResult::json(&serde_json::json!({
+                "success": true,
+                "deleted": deleted,
+            })))
+        }
 
         _ => Err(anyhow!("Unknown permission tool: {name}")),
     }
