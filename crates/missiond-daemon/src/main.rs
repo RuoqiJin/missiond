@@ -26,7 +26,7 @@ mod slot_dispatch;
 // ── Re-exports for backward-compatible `use crate::xxx` paths ──
 use llm::{gemini_client, gemini_cli, minimax_client, minimax_gateway, codex_cli, llm_gateway, prompts};
 use workers::{embedding_worker, vision_worker, step_narrator, translation_worker, briefing_worker, code_prefetch, experience_harvester, ast_sync_worker};
-use engine::{autopilot, decision_engine, decision_harvest, flow_engine, extraction, memory_scheduler, timeline_analyst};
+use engine::{autopilot, decision_engine, decision_harvest, flow_engine, extraction, memory_scheduler};
 use context::{slot_env, context_pipeline, claude_md_sync, topology_map, context_budget};
 use infra::{ipc_handler, aiops, mcp_client, daemon_stats, git_watcher};
 
