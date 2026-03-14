@@ -77,7 +77,7 @@ function groupTasks(tasks: Task[], groupBy: GroupBy): TaskGroup[] {
     const priorityOrder = ['high', 'medium', 'low'];
     order.sort((a, b) => priorityOrder.indexOf(a) - priorityOrder.indexOf(b));
   } else if (groupBy === 'category') {
-    const categoryOrder = ['deploy', 'dev', 'infra', 'test', 'research', 'other'];
+    const categoryOrder = ['deploy', 'dev', 'infra', 'test', 'research', 'diagnosis', 'investigation', 'other'];
     order.sort((a, b) => categoryOrder.indexOf(a) - categoryOrder.indexOf(b));
   }
 

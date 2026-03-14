@@ -201,6 +201,21 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {}
             }),
         ),
+        ToolDefinition::new(
+            "mission_gemini_watch",
+            "Gemini 可用性监测。429 时启动，daemon 后台每 10 分钟探测一次，恢复后自动创建 Board 通知并停止。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "start: 启动监测, stop: 停止, status: 查看状态",
+                        "enum": ["start", "stop", "status"]
+                    }
+                },
+                "required": ["action"]
+            }),
+        ),
         // ── AIOps Incidents ──
         ToolDefinition::new(
             "mission_incident_test",

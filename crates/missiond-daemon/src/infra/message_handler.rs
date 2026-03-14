@@ -111,6 +111,7 @@ pub(crate) fn handle_new_messages(
                 msg.message.role.clone()
             };
             let raw_content = events_sync::sanitize_raw_content(&msg.message.content);
+            let tool_name = events_sync::extract_tool_names_csv(&msg.message.content);
             Some(missiond_core::types::ConversationMessage {
                 id: 0,
                 session_id: session_id.clone(),
@@ -122,6 +123,7 @@ pub(crate) fn handle_new_messages(
                 model: msg.message.model.clone(),
                 timestamp: msg.timestamp.clone(),
                 metadata: None,
+                tool_name,
             })
         })
         .collect();
@@ -250,6 +252,45 @@ pub(crate) fn handle_new_messages(
                 warn!(tool_use_id, error = %e, "Failed to update tool call output");
             }
         }
+
+        // ── Auto-instrumentation: emit timeline events for high-value tool completions ──
+        const HIGH_VALUE_TOOLS: &[&str] = &["Bash", "Write", "Edit"];
+        for (tool_use_id, summary, _raw, status) in &tool_results {
+            if let Ok(Some(tc)) = db.get_tool_call_by_id(tool_use_id) {
+                let is_high_value = HIGH_VALUE_TOOLS.iter().any(|t| tc.tool_name == *t)
+                    || tc.tool_name.starts_with("mcp__");
+                if is_high_value {
+                    let is_error = status == "error";
+                    let tool_summary = {
+                        let s = format!("{}: {}", tc.tool_name, summary);
+                        if s.len() > 200 {
+                            let mut end = 200;
+                            while end > 0 && !s.is_char_boundary(end) { end -= 1; }
+                            format!("{}...", &s[..end])
+                        } else {
+                            s
+                        }
+                    };
+                    state.event_bus.publish_traced(
+                        DaemonEvent::ToolCompleted {
+                            session_id: session_id.clone(),
+                            slot_id: slot_id.clone(),
+                            tool_name: tc.tool_name.clone(),
+                            status: status.clone(),
+                            is_error,
+                            input_summary: tc.input_summary.clone(),
+                            output_summary: summary.clone(),
+                        },
+                        TraceContext {
+                            trace_id: Some(session_id.clone()),
+                            span_id: Some(tool_use_id.clone()),
+                            summary: Some(tool_summary),
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+        }
     }
 
     // ── Token usage ledger ─────────────────────────────────────────
@@ -350,6 +391,7 @@ pub(crate) fn handle_pty_text_complete(
         model: None,
         timestamp: ts,
         metadata: Some(format!("{{\"turn_id\":{}}}", turn_id)),
+        tool_name: None,
     };
 
     // INSERT OR IGNORE handles dedup via UNIQUE index on message_uuid

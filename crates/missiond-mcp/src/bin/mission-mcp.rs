@@ -124,16 +124,51 @@ struct ProxyHandler {
     client: IpcClient,
 }
 
+/// Classify whether an IPC error is transient (worth retrying) or deterministic.
+/// Transient: connection refused, socket gone, broken pipe, daemon restart.
+/// Deterministic: IPC protocol errors, deserialization failures, daemon-side errors.
+///
+/// NOTE: Post-connect failures (broken pipe, connection reset) mean the request
+/// may have been sent to daemon. Retrying non-idempotent tools could cause
+/// duplicate execution. Accepted risk for v1 — most MCP tools are read-heavy.
+fn is_transient_error(err: &anyhow::Error) -> bool {
+    let msg = err.to_string().to_lowercase();
+    msg.contains("failed to connect")
+        || msg.contains("connection refused")
+        || msg.contains("broken pipe")
+        || msg.contains("connection reset")
+        || msg.contains("daemon closed connection")
+        || msg.contains("no such file or directory")
+        || msg.contains("timed out")
+        || msg.contains("unexpected eof")
+}
+
 #[async_trait::async_trait]
 impl ToolHandler for ProxyHandler {
     async fn call(&self, name: &str, arguments: Value) -> ToolResult {
-        match self.client.call_tool(name, arguments).await {
-            Ok(res) => res,
-            Err(e) => {
-                error!(tool = %name, error = %e, "IPC tool call failed");
-                ToolResult::error(e.to_string())
+        const MAX_RETRIES: u32 = 2;
+        const BASE_DELAY_MS: u64 = 200;
+
+        let mut last_error = String::new();
+        for attempt in 0..=MAX_RETRIES {
+            match self.client.call_tool(name, arguments.clone()).await {
+                Ok(res) => return res,
+                Err(e) => {
+                    if attempt < MAX_RETRIES && is_transient_error(&e) {
+                        let delay = BASE_DELAY_MS * (1 << attempt);
+                        warn!(tool = %name, attempt, delay_ms = delay, error = %e,
+                              "IPC transient error, retrying");
+                        sleep(Duration::from_millis(delay)).await;
+                        last_error = e.to_string();
+                        continue;
+                    }
+                    error!(tool = %name, attempt, error = %e, "IPC tool call failed");
+                    return ToolResult::error(e.to_string());
+                }
             }
         }
+        error!(tool = %name, retries = MAX_RETRIES, "IPC tool call exhausted retries");
+        ToolResult::error(format!("IPC connection failed after retries: {}", last_error))
     }
 }
 

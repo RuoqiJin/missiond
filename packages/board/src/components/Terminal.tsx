@@ -40,6 +40,8 @@ function TerminalInner({ slotId }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<import('xterm').Terminal | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptRef = useRef(0);
   const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'disconnected'>('disconnected');
   const [ptyState, setPtyState] = useState<PTYState>('unknown');
   const [statusText, setStatusText] = useState<string | null>(null);
@@ -121,6 +123,10 @@ function TerminalInner({ slotId }: TerminalProps) {
 
     return () => {
       disposed = true;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       wsRef.current?.close();
       wsRef.current = null;
       if ((el as any).__cleanup) {
@@ -138,10 +144,12 @@ function TerminalInner({ slotId }: TerminalProps) {
     const term = termRef.current;
     if (!term) return;
 
-    // Close previous WS
+    // Close previous WS and cancel pending reconnects
+    clearReconnectTimer();
+    reconnectAttemptRef.current = 0;
     wsRef.current?.close();
     wsRef.current = null;
-    term.clear();
+    safeClear(term);
 
     let cancelled = false;
 
@@ -155,21 +163,66 @@ function TerminalInner({ slotId }: TerminalProps) {
           connectWs(term, slotId);
         } else {
           setPtyState('not_running');
-          term.writeln('\x1b[90m● No active session. Press Start to launch Claude Code.\x1b[0m');
+          safeWriteln(term, '\x1b[90m● No active session. Press Start to launch Claude Code.\x1b[0m');
         }
       })
       .catch(() => {
         if (cancelled) return;
         setPtyState('not_running');
-        term.writeln('\x1b[90m● Cannot reach missiond.\x1b[0m');
+        safeWriteln(term, '\x1b[90m● Cannot reach missiond.\x1b[0m');
       });
 
     return () => { cancelled = true; };
   }, [slotId, ready]);
 
-  function connectWs(term: import('xterm').Terminal, slot: string) {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+  function clearReconnectTimer() {
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  }
 
+  function scheduleReconnect(term: import('xterm').Terminal, slot: string) {
+    clearReconnectTimer();
+    const attempt = reconnectAttemptRef.current;
+    // Exponential backoff: 1s, 2s, 4s, 8s, max 15s
+    const delay = Math.min(1000 * Math.pow(2, attempt), 15000);
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectAttemptRef.current = attempt + 1;
+      connectWs(term, slot);
+    }, delay);
+  }
+
+  /** Check if terminal container has dimensions (safe to write) */
+  function isTermReady(term: import('xterm').Terminal): boolean {
+    const el = containerRef.current;
+    return !!(el && el.clientWidth > 0 && el.clientHeight > 0 && (term as any)._core);
+  }
+
+  /** Safe write — skip if container has no dimensions to avoid xterm runtime error */
+  function safeWrite(term: import('xterm').Terminal, data: string) {
+    try {
+      if (isTermReady(term)) term.write(data);
+    } catch { /* swallow dimensions error */ }
+  }
+
+  function safeWriteln(term: import('xterm').Terminal, data: string) {
+    try {
+      if (isTermReady(term)) term.writeln(data);
+    } catch { /* swallow dimensions error */ }
+  }
+
+  function safeClear(term: import('xterm').Terminal) {
+    try {
+      if (isTermReady(term)) term.clear();
+    } catch { /* swallow dimensions error */ }
+  }
+
+  function connectWs(term: import('xterm').Terminal, slot: string) {
+    if (wsRef.current?.readyState === WebSocket.OPEN ||
+        wsRef.current?.readyState === WebSocket.CONNECTING) return;
+
+    clearReconnectTimer();
     setWsStatus('connecting');
     const wsHost = process.env.NEXT_PUBLIC_WS_HOST || window.location.hostname;
     const ws = new WebSocket(`ws://${wsHost}:${WS_PORT}/pty/${slot}`);
@@ -177,16 +230,17 @@ function TerminalInner({ slotId }: TerminalProps) {
 
     ws.onopen = () => {
       setWsStatus('connected');
+      reconnectAttemptRef.current = 0;
     };
 
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === 'data' && msg.data) {
-          term.write(msg.data);
+          safeWrite(term, msg.data);
         } else if (msg.type === 'screen' && msg.data) {
-          term.clear();
-          term.write(msg.data);
+          safeClear(term);
+          safeWrite(term, msg.data);
         } else if (msg.type === 'state') {
           const newState = msg.state || 'unknown';
           setPtyState(newState);
@@ -194,9 +248,12 @@ function TerminalInner({ slotId }: TerminalProps) {
           const processing = ['thinking', 'responding', 'tool_running'].includes(newState);
           setStatusText(processing ? (msg.statusText || null) : null);
         } else if (msg.type === 'exit') {
-          term.writeln(`\r\n\x1b[31m[exited: code ${msg.code}]\x1b[0m`);
+          safeWriteln(term, `\r\n\x1b[31m[exited: code ${msg.code}]\x1b[0m`);
+          clearReconnectTimer();
           setWsStatus('disconnected');
           setPtyState('not_running');
+          // Server will close with 4003 after this, onclose won't auto-reconnect
+          return;
         } else if (msg.type === 'screenshot_request') {
           const requestId = msg.requestId;
           try {
@@ -225,36 +282,46 @@ function TerminalInner({ slotId }: TerminalProps) {
           }
         }
       } catch {
-        term.write(event.data);
+        safeWrite(term, event.data);
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       setWsStatus('disconnected');
-      term.writeln(`\r\n\x1b[90m● Disconnected\x1b[0m`);
+      // 4001 = session not found, 4003 = PTY exited — don't auto-reconnect
+      if (event.code === 4001 || event.code === 4003) {
+        safeWriteln(term, `\r\n\x1b[90m● Disconnected\x1b[0m`);
+        return;
+      }
+      // Auto-reconnect for unexpected disconnects
+      safeWriteln(term, `\r\n\x1b[90m● Disconnected — reconnecting...\x1b[0m`);
+      scheduleReconnect(term, slot);
     };
 
     ws.onerror = () => {
-      setWsStatus('disconnected');
+      // onclose will fire after onerror, reconnect is handled there
     };
   }
 
   const handleConnect = useCallback(() => {
     const term = termRef.current;
-    if (term) connectWs(term, slotId);
+    if (term) {
+      reconnectAttemptRef.current = 0;
+      connectWs(term, slotId);
+    }
   }, [slotId]);
 
   const handleSpawn = useCallback(async () => {
     setSpawning(true);
     const term = termRef.current;
     try {
-      term?.writeln('\x1b[33m● Starting Claude Code...\x1b[0m');
+      if (term) safeWriteln(term, '\x1b[33m● Starting Claude Code...\x1b[0m');
       let res = await fetch(`/api/pty/spawn?slotId=${slotId}`, { method: 'POST' });
       let data = await res.json();
 
       // If stale session exists, kill it and retry
       if (data.error && /already running/i.test(String(data.error))) {
-        term?.writeln('\x1b[90m● Cleaning up stale session...\x1b[0m');
+        if (term) safeWriteln(term, '\x1b[90m● Cleaning up stale session...\x1b[0m');
         await fetch(`/api/pty/kill?slotId=${slotId}`, { method: 'POST' });
         await new Promise((r) => setTimeout(r, 500));
         res = await fetch(`/api/pty/spawn?slotId=${slotId}`, { method: 'POST' });
@@ -262,14 +329,14 @@ function TerminalInner({ slotId }: TerminalProps) {
       }
 
       if (data.error) {
-        term?.writeln(`\x1b[31m✗ ${data.error}\x1b[0m`);
+        if (term) safeWriteln(term, `\x1b[31m✗ ${data.error}\x1b[0m`);
         return;
       }
-      term?.writeln(`\x1b[32m● Spawned (pid: ${data.pid || '?'})\x1b[0m\r\n`);
+      if (term) safeWriteln(term, `\x1b[32m● Spawned (pid: ${data.pid || '?'})\x1b[0m\r\n`);
       setPtyState('starting');
       setTimeout(() => { if (term) connectWs(term, slotId); }, 500);
     } catch (err) {
-      term?.writeln(`\x1b[31m✗ Failed: ${err}\x1b[0m`);
+      if (term) safeWriteln(term, `\x1b[31m✗ Failed: ${err}\x1b[0m`);
     } finally {
       setSpawning(false);
     }
@@ -277,10 +344,11 @@ function TerminalInner({ slotId }: TerminalProps) {
 
   const handleKill = useCallback(async () => {
     try {
+      clearReconnectTimer();
       await fetch(`/api/pty/kill?slotId=${slotId}`, { method: 'POST' });
       setPtyState('not_running');
       wsRef.current?.close();
-      termRef.current?.writeln('\r\n\x1b[31m● Session killed\x1b[0m');
+      if (termRef.current) safeWriteln(termRef.current, '\r\n\x1b[31m● Session killed\x1b[0m');
     } catch { /* ignore */ }
   }, [slotId]);
 
