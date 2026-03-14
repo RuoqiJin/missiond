@@ -278,6 +278,7 @@ fn create_anomaly_board_task(
          2. 调用 `mission_conversation_get(sessionId=\"{session_id}\", tail=15)` 查看关键消息\n\
          3. 总结根因(Root Cause)和改进建议\n\
          4. 调用 `mission_kb_remember(category=\"memory:debug\")` 将异常原因和结论记录到知识库\n\
+         4b. **Skill 更新建议**：如果异常与某个 Skill 的操作流程相关（如部署失败→deployment skill），调用 `mission_skill_search` 定位对应 Skill，然后在 Board note 中建议更新该 Skill 的 `# MUST` 或 `# TODO` 区\n\
          5. **判定修复状态**：\n\
             - 如果问题**已修复**（代码已有 fix）或**误报**（正常行为被误判）→ 在报告中注明，跳到步骤 9\n\
             - 如果问题**未修复**且可操作 → 创建调查+修复子任务（步骤 6-8）\n\

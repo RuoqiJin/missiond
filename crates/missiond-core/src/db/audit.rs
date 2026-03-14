@@ -384,6 +384,16 @@ impl MissionDB {
         Ok(())
     }
 
+    /// Save exit code on a conversation (for ground truth learning).
+    pub fn save_conversation_exit_code(&self, id: &str, exit_code: i32) -> DbResult<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE conversations SET exit_code = ?1 WHERE id = ?2",
+            params![exit_code, id],
+        )?;
+        Ok(())
+    }
+
     /// Complete stale active conversations whose last message is older than the given cutoff.
     /// Returns the number of conversations marked completed.
     pub fn complete_stale_conversations(&self, cutoff: &str) -> DbResult<usize> {
