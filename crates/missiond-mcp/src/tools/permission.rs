@@ -110,6 +110,47 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {}
             }),
         ),
-
+        // ===== Learned Permission Management =====
+        ToolDefinition::new(
+            "mission_permission_learned_list",
+            "列出已学习的权限规则（从用户确认中自动学习）",
+            json!({
+                "type": "object",
+                "properties": {
+                    "scopeType": {
+                        "type": "string",
+                        "enum": ["role", "slot"],
+                        "description": "过滤作用域类型"
+                    },
+                    "scopeId": {
+                        "type": "string",
+                        "description": "过滤作用域 ID（角色名或工位 ID）"
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "mission_permission_learned_revoke",
+            "撤销已学习的权限（删除学习记录，恢复为需要确认）",
+            json!({
+                "type": "object",
+                "properties": {
+                    "scopeType": {
+                        "type": "string",
+                        "enum": ["role", "slot"],
+                        "description": "作用域类型"
+                    },
+                    "scopeId": {
+                        "type": "string",
+                        "description": "作用域 ID（角色名或工位 ID）"
+                    },
+                    "toolPattern": {
+                        "type": "string",
+                        "description": "工具名称或模式"
+                    }
+                },
+                "required": ["scopeType", "scopeId", "toolPattern"]
+            }),
+        ),
     ]
 }
