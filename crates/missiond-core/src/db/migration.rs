@@ -206,6 +206,14 @@ BEGIN
         updated_at = NEW.timestamp
     WHERE id = NEW.session_id;
 END;
+
+-- Gemini File API upload cache (avoid re-uploading unchanged files)
+CREATE TABLE IF NOT EXISTS gemini_file_uploads (
+    file_hash TEXT PRIMARY KEY,
+    file_uri TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
 "#;
 
 impl MissionDB {
@@ -1142,6 +1150,105 @@ impl MissionDB {
             CREATE INDEX IF NOT EXISTS idx_retro_created ON retrospective_results(created_at);"
         )?;
 
+        // ── Add tool_name column to conversation_messages ──
+        // Stores comma-separated tool names extracted from raw_content for searchability.
+        let has_tool_name: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('conversation_messages') WHERE name = 'tool_name'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_tool_name {
+            conn.execute_batch("ALTER TABLE conversation_messages ADD COLUMN tool_name TEXT")?;
+
+            // Backfill: extract tool names from raw_content JSON
+            let mut stmt = conn.prepare(
+                "SELECT id, raw_content FROM conversation_messages WHERE raw_content IS NOT NULL"
+            )?;
+            let rows: Vec<(i64, String)> = stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?.filter_map(|r| r.ok()).collect();
+
+            let mut update_stmt = conn.prepare(
+                "UPDATE conversation_messages SET tool_name = ?1 WHERE id = ?2"
+            )?;
+            let mut backfilled = 0usize;
+            for (id, raw) in &rows {
+                if let Some(tool_names) = extract_tool_names_from_raw(raw) {
+                    update_stmt.execute(rusqlite::params![tool_names, id])?;
+                    backfilled += 1;
+                }
+            }
+            if backfilled > 0 {
+                tracing::info!(backfilled, "Migration: backfilled tool_name for conversation_messages");
+            }
+
+            // Index for tool_name filtering
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_conv_msg_tool_name ON conversation_messages(tool_name)"
+            )?;
+            tracing::info!("Migration: added tool_name column to conversation_messages");
+        }
+
+        // ── Timeline FTS5 — full-text search for system_timeline ──
+        let has_timeline_fts: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='system_timeline_fts'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_timeline_fts {
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE system_timeline_fts USING fts5(
+                    summary, payload,
+                    event_type UNINDEXED,
+                    content='system_timeline', content_rowid='seq',
+                    tokenize='unicode61'
+                );
+
+                -- Populate from existing data
+                INSERT INTO system_timeline_fts(rowid, summary, payload, event_type)
+                    SELECT seq, COALESCE(summary, ''), payload, event_type FROM system_timeline;
+
+                -- Auto-sync triggers
+                CREATE TRIGGER IF NOT EXISTS trg_timeline_fts_insert
+                AFTER INSERT ON system_timeline BEGIN
+                    INSERT INTO system_timeline_fts(rowid, summary, payload, event_type)
+                    VALUES (NEW.seq, COALESCE(NEW.summary, ''), NEW.payload, NEW.event_type);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_timeline_fts_delete
+                AFTER DELETE ON system_timeline BEGIN
+                    INSERT INTO system_timeline_fts(system_timeline_fts, rowid, summary, payload, event_type)
+                    VALUES ('delete', OLD.seq, OLD.summary, OLD.payload, OLD.event_type);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_timeline_fts_update
+                AFTER UPDATE ON system_timeline BEGIN
+                    INSERT INTO system_timeline_fts(system_timeline_fts, rowid, summary, payload, event_type)
+                    VALUES ('delete', OLD.seq, OLD.summary, OLD.payload, OLD.event_type);
+                    INSERT INTO system_timeline_fts(rowid, summary, payload, event_type)
+                    VALUES (NEW.seq, COALESCE(NEW.summary, ''), NEW.payload, NEW.event_type);
+                END;"
+            )?;
+            tracing::info!("Migration: created system_timeline_fts with auto-sync triggers");
+        }
+
         Ok(())
     }
+}
+
+/// Extract tool names from raw_content JSON (content blocks array).
+/// Returns comma-separated tool names or None if no tool_use blocks found.
+fn extract_tool_names_from_raw(raw_content: &str) -> Option<String> {
+    let content: serde_json::Value = serde_json::from_str(raw_content).ok()?;
+    let names: Vec<String> = content.as_array()?
+        .iter()
+        .filter_map(|block| {
+            if block.get("type")?.as_str()? == "tool_use" {
+                block.get("name")?.as_str().map(String::from)
+            } else {
+                None
+            }
+        })
+        .collect();
+    if names.is_empty() { None } else { Some(names.join(",")) }
 }

@@ -361,7 +361,8 @@ impl MissionDB {
         Ok(TimelineStats { total_events, by_type, traced_events, unique_traces, gemini_latency })
     }
 
-    /// Search timeline by keyword in summary and payload.
+    /// Search timeline by keyword using FTS5 full-text search on summary and payload.
+    /// Falls back to LIKE if FTS table doesn't exist yet.
     pub fn query_timeline_search(
         &self,
         keyword: &str,
@@ -370,48 +371,102 @@ impl MissionDB {
         limit: i64,
     ) -> DbResult<Vec<TimelineRow>> {
         let conn = self.read_conn();
-        let like_pattern = format!("%{}%", keyword);
-        let mut conditions = vec![
-            format!("(summary LIKE ?{} OR payload LIKE ?{})", 1, 2),
-        ];
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
-            Box::new(like_pattern.clone()),
-            Box::new(like_pattern),
-        ];
 
-        if let Some(s) = since {
-            let ts = Self::parse_since(s);
-            conditions.push(format!("created_at >= ?{}", params.len() + 1));
-            params.push(Box::new(ts));
+        // Check if FTS table exists
+        let has_fts: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='system_timeline_fts'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        if has_fts {
+            // FTS5 path: escape double quotes for phrase query
+            let fts_query = format!("\"{}\"", keyword.replace('"', "\"\""));
+            let mut conditions = vec!["system_timeline_fts MATCH ?1".to_string()];
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+                Box::new(fts_query),
+            ];
+
+            if let Some(s) = since {
+                let ts = Self::parse_since(s);
+                conditions.push(format!("s.created_at >= ?{}", params.len() + 1));
+                params.push(Box::new(ts));
+            }
+            if let Some(u) = until {
+                let ts = Self::parse_until(u);
+                conditions.push(format!("s.created_at <= ?{}", params.len() + 1));
+                params.push(Box::new(ts));
+            }
+
+            let sql = format!(
+                "SELECT s.seq, s.trace_id, s.span_id, s.parent_span_id, s.event_type, s.summary, s.payload, s.created_at
+                 FROM system_timeline_fts f
+                 JOIN system_timeline s ON f.rowid = s.seq
+                 WHERE {} ORDER BY rank LIMIT ?{}",
+                conditions.join(" AND "), params.len() + 1
+            );
+            params.push(Box::new(limit));
+
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(param_refs.as_slice(), |row| {
+                Ok(TimelineRow {
+                    seq: row.get(0)?,
+                    trace_id: row.get(1)?,
+                    span_id: row.get(2)?,
+                    parent_span_id: row.get(3)?,
+                    event_type: row.get(4)?,
+                    summary: row.get(5)?,
+                    payload: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })?.collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        } else {
+            // Fallback: LIKE-based search (pre-migration)
+            let like_pattern = format!("%{}%", keyword);
+            let mut conditions = vec![
+                format!("(summary LIKE ?{} OR payload LIKE ?{})", 1, 2),
+            ];
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+                Box::new(like_pattern.clone()),
+                Box::new(like_pattern),
+            ];
+
+            if let Some(s) = since {
+                let ts = Self::parse_since(s);
+                conditions.push(format!("created_at >= ?{}", params.len() + 1));
+                params.push(Box::new(ts));
+            }
+            if let Some(u) = until {
+                let ts = Self::parse_until(u);
+                conditions.push(format!("created_at <= ?{}", params.len() + 1));
+                params.push(Box::new(ts));
+            }
+
+            let sql = format!(
+                "SELECT seq, trace_id, span_id, parent_span_id, event_type, summary, payload, created_at
+                 FROM system_timeline WHERE {} ORDER BY seq DESC LIMIT ?{}",
+                conditions.join(" AND "), params.len() + 1
+            );
+            params.push(Box::new(limit));
+
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(param_refs.as_slice(), |row| {
+                Ok(TimelineRow {
+                    seq: row.get(0)?,
+                    trace_id: row.get(1)?,
+                    span_id: row.get(2)?,
+                    parent_span_id: row.get(3)?,
+                    event_type: row.get(4)?,
+                    summary: row.get(5)?,
+                    payload: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })?.collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
         }
-        if let Some(u) = until {
-            let ts = Self::parse_until(u);
-            conditions.push(format!("created_at <= ?{}", params.len() + 1));
-            params.push(Box::new(ts));
-        }
-
-        let sql = format!(
-            "SELECT seq, trace_id, span_id, parent_span_id, event_type, summary, payload, created_at
-             FROM system_timeline WHERE {} ORDER BY seq DESC LIMIT ?{}",
-            conditions.join(" AND "), params.len() + 1
-        );
-        params.push(Box::new(limit));
-
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(param_refs.as_slice(), |row| {
-            Ok(TimelineRow {
-                seq: row.get(0)?,
-                trace_id: row.get(1)?,
-                span_id: row.get(2)?,
-                parent_span_id: row.get(3)?,
-                event_type: row.get(4)?,
-                summary: row.get(5)?,
-                payload: row.get(6)?,
-                created_at: row.get(7)?,
-            })
-        })?.collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
     }
 
     /// Parse relative time strings like "10min", "1h", "24h", "7d" into SQLite datetime expressions.

@@ -96,12 +96,14 @@ fn clean_jarvis_response(raw: &str, boundary_id: &str) -> String {
         raw
     };
 
-    // 2. Strip Claude Code TUI bullet markers (⏺)
+    // 2. Strip Claude Code TUI markers (⏺ bullet, ● thinking indicator)
     let cleaned: String = text
         .lines()
         .map(|line| {
             let trimmed = line.trim_start();
             if let Some(after) = trimmed.strip_prefix('⏺') {
+                after.strip_prefix(' ').unwrap_or(after)
+            } else if let Some(after) = trimmed.strip_prefix('●') {
                 after.strip_prefix(' ').unwrap_or(after)
             } else {
                 line
@@ -1248,7 +1250,11 @@ impl PTYWebSocketServer {
                 evt = session_rx.recv() => {
                     let evt = match evt {
                         Ok(e) => e,
-                        Err(_) => break,
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!(slot_id, lagged = n, "PTY broadcast lagged, continuing");
+                            continue;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
                     };
 
                     match evt {

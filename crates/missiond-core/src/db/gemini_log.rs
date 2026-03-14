@@ -204,4 +204,50 @@ impl MissionDB {
         )? as i64;
         Ok(deleted)
     }
+
+    // ============ Gemini File Upload Cache ============
+
+    /// Get cached file URI by SHA-256 hash (returns None if expired or missing).
+    pub fn gemini_file_cache_get(&self, file_hash: &str) -> DbResult<Option<String>> {
+        let conn = self.read_conn();
+        let now = chrono::Utc::now().timestamp();
+        let result = conn.query_row(
+            "SELECT file_uri FROM gemini_file_uploads WHERE file_hash = ?1 AND expires_at > ?2",
+            params![file_hash, now],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(uri) => Ok(Some(uri)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Cache a file upload result.
+    pub fn gemini_file_cache_put(
+        &self,
+        file_hash: &str,
+        file_uri: &str,
+        mime_type: &str,
+        expires_at: i64,
+    ) -> DbResult<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT OR REPLACE INTO gemini_file_uploads (file_hash, file_uri, mime_type, expires_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![file_hash, file_uri, mime_type, expires_at],
+        )?;
+        Ok(())
+    }
+
+    /// Evict expired entries from file upload cache (lazy GC).
+    pub fn gemini_file_cache_gc(&self) -> DbResult<i64> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().timestamp();
+        let deleted = conn.execute(
+            "DELETE FROM gemini_file_uploads WHERE expires_at < ?1",
+            params![now],
+        )? as i64;
+        Ok(deleted)
+    }
 }
