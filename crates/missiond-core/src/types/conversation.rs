@@ -85,6 +85,9 @@ pub struct ConversationMessage {
     pub timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<String>,
+    /// Comma-separated tool names extracted from raw_content (for tool_use/tool_result messages)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
 }
 
 /// A non-dialog system event from JSONL (turn_duration, compact_boundary, hook_progress, etc.)

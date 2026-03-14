@@ -109,6 +109,66 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ),
 
         ToolDefinition::new(
+            "mission_message_search",
+            "消息级搜索。在所有对话消息中搜索关键词，支持按会话/角色/工具名过滤。适合查找特定工具调用、用户指令、错误信息。返回消息详情而非会话摘要。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索关键词（支持中英混合）"
+                    },
+                    "sessionId": {
+                        "type": "string",
+                        "description": "限定在特定会话中搜索"
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": ["user", "assistant", "tool_result", "system", "thinking"],
+                        "description": "过滤消息角色"
+                    },
+                    "toolName": {
+                        "type": "string",
+                        "description": "过滤工具名（如 Bash, Read, mission_kb_search）"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "最大返回数（默认 20）"
+                    },
+                    "timeRange": {
+                        "type": "string",
+                        "enum": ["last_24h", "last_7d", "last_30d"],
+                        "description": "时间范围过滤"
+                    }
+                },
+                "required": ["query"]
+            }),
+        ),
+
+        ToolDefinition::new(
+            "mission_context_around",
+            "上下文锚定。根据 messageId 获取同会话内周围消息，配合 message_search 精准定位上下文。替代拉取全量会话。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "messageId": {
+                        "type": "integer",
+                        "description": "锚点消息 ID（来自 message_search 结果）"
+                    },
+                    "before": {
+                        "type": "integer",
+                        "description": "锚点前取几条消息（默认 3，最大 50）"
+                    },
+                    "after": {
+                        "type": "integer",
+                        "description": "锚点后取几条消息（默认 5，最大 50）"
+                    }
+                },
+                "required": ["messageId"]
+            }),
+        ),
+
+        ToolDefinition::new(
             "mission_trigger_backfill",
             "触发全系统 Embedding 回填（KB 知识库 → Skill 技能 → 对话日志）。后台 Worker 按批处理，包括 provider 切换后的 stale 重刷。返回各系统 missing/stale 统计。可多次调用查看剩余量。",
             json!({

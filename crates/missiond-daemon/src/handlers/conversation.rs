@@ -165,18 +165,20 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     .to_rfc3339())
             });
 
-            // ── Path A: single-session message search (FTS5 snippet) ──
+            // ── Path A: single-session message search (SQL-pushed filter) ──
             if let Some(ref sid) = session_id {
                 let q = query.clone();
-                let limit = (top_k * 3) as i64;
-                let mut msgs = state.db_exec.run(move |db| db.search_conversation_messages(&q, limit)).await
-                    .map_err(|e| anyhow!("DB error: {}", e))?;
-                msgs.retain(|m| m.session_id == *sid);
-                msgs.truncate(top_k);
+                let sid_owned = sid.clone();
+                let ta = time_after.clone();
+                let lim = top_k as i64;
+                let msgs = state.db_exec.run(move |db| {
+                    db.search_messages_filtered(&q, Some(&sid_owned), None, None, ta.as_deref(), lim)
+                }).await.map_err(|e| anyhow!("DB error: {}", e))?;
                 let msgs_lite: Vec<serde_json::Value> = msgs.iter().map(|m| {
                     serde_json::json!({
                         "id": m.id, "sessionId": m.session_id,
                         "role": m.role, "content": m.content, "timestamp": m.timestamp,
+                        "toolName": m.tool_name,
                     })
                 }).collect();
                 return Ok(ToolResult::json(&serde_json::json!({
@@ -310,6 +312,130 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "ftsHits": fts_ranked.len(),
                 "vecHits": vec_ranked.len(),
             })))
+        }
+
+        "mission_message_search" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                query: String,
+                #[serde(alias = "session_id")]
+                session_id: Option<String>,
+                role: Option<String>,
+                #[serde(alias = "tool_name")]
+                tool_name: Option<String>,
+                #[serde(default, deserialize_with = "lenient::option_i64")]
+                limit: Option<i64>,
+                #[serde(alias = "time_range")]
+                time_range: Option<String>,
+            }
+            let Args { query, session_id, role, tool_name, limit, time_range } =
+                serde_json::from_value(args)?;
+            let lim = limit.unwrap_or(20);
+
+            let time_after: Option<String> = time_range.as_deref().and_then(|tr| {
+                let hours = match tr {
+                    "last_24h" => 24,
+                    "last_7d" => 24 * 7,
+                    "last_30d" => 24 * 30,
+                    _ => return None,
+                };
+                Some(chrono::Utc::now()
+                    .checked_sub_signed(chrono::Duration::hours(hours))?
+                    .to_rfc3339())
+            });
+
+            let q = query.clone();
+            let sid = session_id.clone();
+            let r = role.clone();
+            let tn = tool_name.clone();
+            let ta = time_after.clone();
+            let msgs = state.db_exec.run(move |db| {
+                db.search_messages_filtered(
+                    &q,
+                    sid.as_deref(),
+                    r.as_deref(),
+                    tn.as_deref(),
+                    ta.as_deref(),
+                    lim,
+                )
+            }).await.map_err(|e| anyhow!("DB error: {}", e))?;
+
+            let results: Vec<serde_json::Value> = msgs.iter().map(|m| {
+                serde_json::json!({
+                    "id": m.id,
+                    "sessionId": m.session_id,
+                    "role": m.role,
+                    "content": m.content,
+                    "timestamp": m.timestamp,
+                    "toolName": m.tool_name,
+                })
+            }).collect();
+
+            Ok(ToolResult::json(&serde_json::json!({
+                "results": results,
+                "count": results.len(),
+                "query": query,
+                "filters": {
+                    "sessionId": session_id,
+                    "role": role,
+                    "toolName": tool_name,
+                    "timeRange": time_range,
+                },
+            })))
+        }
+
+        "mission_context_around" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                #[serde(default, deserialize_with = "lenient::option_i64", alias = "message_id")]
+                message_id: Option<i64>,
+                #[serde(default, deserialize_with = "lenient::option_i64")]
+                before: Option<i64>,
+                #[serde(default, deserialize_with = "lenient::option_i64")]
+                after: Option<i64>,
+            }
+            let Args { message_id, before, after } = serde_json::from_value(args)?;
+            let message_id = message_id.ok_or_else(|| anyhow!("messageId is required"))?;
+
+            // Defensive limits
+            let before = before.unwrap_or(3).min(50);
+            let after = after.unwrap_or(5).min(50);
+
+            let db = state.mission.db();
+            let result = db.get_messages_around(message_id, before, after)
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+
+            match result {
+                None => Ok(ToolResult::json(&serde_json::json!({
+                    "error": "message not found",
+                    "messageId": message_id,
+                }))),
+                Some((session_id, msgs)) => {
+                    let anchor_index = msgs.iter().position(|m| m.id == message_id);
+                    let total: Option<i64> = db.get_conversation(&session_id)
+                        .ok().flatten().map(|c| c.message_count);
+
+                    let messages: Vec<serde_json::Value> = msgs.iter().map(|m| {
+                        serde_json::json!({
+                            "id": m.id,
+                            "role": m.role,
+                            "content": m.content,
+                            "timestamp": m.timestamp,
+                            "toolName": m.tool_name,
+                        })
+                    }).collect();
+
+                    Ok(ToolResult::json(&serde_json::json!({
+                        "anchor": { "id": message_id, "index": anchor_index },
+                        "sessionId": session_id,
+                        "messages": messages,
+                        "count": messages.len(),
+                        "totalInSession": total,
+                    })))
+                }
+            }
         }
 
         "mission_trigger_backfill" => {
