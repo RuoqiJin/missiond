@@ -63,6 +63,8 @@ async fn handle_exited(s: &AppState, slot_id: &str, exit_code: i32) {
     let old_uuid = s.mission.db().get_slot_session(slot_id).unwrap_or(None);
     if let Some(ref uuid) = old_uuid {
         let _ = s.mission.db().complete_conversation(uuid);
+        // Ground truth: persist exit code for Learning Engine
+        let _ = s.mission.db().save_conversation_exit_code(uuid, exit_code);
         let _ = s.embedding_tx.try_send(EmbeddingTask::ProcessSession(uuid.clone()));
         s.pty_session_uuids.write().await.remove(uuid);
     }

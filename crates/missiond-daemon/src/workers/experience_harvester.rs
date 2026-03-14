@@ -363,14 +363,62 @@ pub(crate) fn harvest_session(db: &MissionDB, session_id: &str) {
         }
     }
 
+    // Track harvest frequency for skill synthesis
+    let harvest_count = db.beacon_increment_harvest(&beacon_name).unwrap_or(0);
+
     info!(
         beacon = %beacon_name,
         nodes = linked,
+        harvest_count,
         files_read = exploration.files_read.len(),
         files_modified = exploration.files_modified.len(),
         session = %&session_id[..8.min(session_id.len())],
         "Experience harvested into beacon"
     );
+
+    // Skill synthesis trigger: when same area explored 3+ times, suggest creating a Skill
+    if harvest_count == 3 {
+        let title = format!("[Skill 草稿] 为 {} 创建操作指南", beacon_name);
+        let description = format!(
+            "Beacon `{beacon}` 已被 {count} 个不同会话探索，建议合成为 Skill。\n\n\
+             ## 探索路径\n\
+             - 常读文件: {files_read:?}\n\
+             - 常改文件: {files_modified:?}\n\
+             - 搜索模式: {patterns:?}\n\n\
+             ## 执行指南\n\
+             1. 调用 `mission_beacon_map(name=\"{beacon}\")` 查看完整代码节点\n\
+             2. 调用 `mission_conversation_search(query=\"{beacon}\")` 查看历史对话上下文\n\
+             3. 综合以上信息，调用 `mission_skill_upsert` 创建 Skill 草稿\n\
+             4. Skill 应包含: 路径/端点/配置 + 操作步骤 + 常见问题\n\
+             5. 完成后标记本任务 done",
+            beacon = beacon_name,
+            count = harvest_count,
+            files_read = exploration.files_read.iter().take(5).collect::<Vec<_>>(),
+            files_modified = exploration.files_modified.iter().take(5).collect::<Vec<_>>(),
+            patterns = exploration.patterns_searched.iter().take(5).collect::<Vec<_>>(),
+        );
+        let input = missiond_core::types::CreateBoardTaskInput {
+            title,
+            description: Some(description),
+            priority: Some("low".to_string()),
+            category: Some("dev".to_string()),
+            project: Some("missiond".to_string()),
+            server: None,
+            due_date: None,
+            parent_id: None,
+            assignee: Some("slot-coder-1".to_string()),
+            auto_execute: Some(true),
+            prompt_template: None,
+            hidden: None,
+            flow_template: None,
+            depends_on: None,
+            dedupe_key: Some(format!("skill-synthesis-{}", beacon_name)),
+        };
+        match db.create_board_task(&input) {
+            Ok(task) => info!(task_id = %task.id, beacon = %beacon_name, "Skill synthesis triggered"),
+            Err(e) => debug!(error = %e, "Skill synthesis task creation failed (may be deduped)"),
+        }
+    }
 }
 
 #[cfg(test)]

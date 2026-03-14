@@ -85,6 +85,22 @@ impl MissionDB {
         Ok(id)
     }
 
+    /// Increment beacon harvest count and return new count.
+    /// Used for skill synthesis frequency tracking.
+    pub fn beacon_increment_harvest(&self, name: &str) -> DbResult<i64> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE beacons SET harvest_count = COALESCE(harvest_count, 0) + 1, updated_at = datetime('now') WHERE name = ?1",
+            params![name],
+        )?;
+        let count: i64 = conn.query_row(
+            "SELECT COALESCE(harvest_count, 0) FROM beacons WHERE name = ?1",
+            params![name],
+            |row| row.get(0),
+        ).unwrap_or(0);
+        Ok(count)
+    }
+
     /// Update beacon description.
     pub fn beacon_set_description(&self, name: &str, description: &str) -> DbResult<bool> {
         let conn = self.conn();

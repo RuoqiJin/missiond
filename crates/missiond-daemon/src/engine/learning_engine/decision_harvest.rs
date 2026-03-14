@@ -77,6 +77,7 @@ pub(crate) async fn harvest_decisions_for_task(state: &AppState, task_id: &str, 
     };
 
     let mut written = 0;
+    let mut reinforced = 0;
     for rule in &rules {
         let key = rule.get("key").and_then(|v| v.as_str()).unwrap_or_default();
         let summary = rule.get("summary").and_then(|v| v.as_str()).unwrap_or_default();
@@ -97,7 +98,30 @@ pub(crate) async fn harvest_decisions_for_task(state: &AppState, task_id: &str, 
 
         match state.mission.db().kb_remember(&input) {
             Ok(result) => {
-                info!(key, action = %result.action, "Decision harvester: wrote policy:decision");
+                let action = &result.action;
+                // ── Confidence reinforcement on repeated decisions ──
+                // When a similar policy already existed (merged/updated), boost its confidence.
+                // This implements "repeated decisions → stronger policy" self-evolution.
+                if action == "merged" || action == "updated" {
+                    let existing_confidence = result.entry.confidence;
+                    let boosted = (existing_confidence + 0.05).min(1.0);
+                    if boosted > existing_confidence {
+                        let _ = state.mission.db().kb_update(
+                            &result.entry.key,
+                            None, None, None,
+                            Some(boosted),
+                            None,
+                        );
+                        reinforced += 1;
+                        if boosted > 0.95 {
+                            info!(key, confidence = boosted, "Policy verified: repeated decision reached high confidence");
+                        } else {
+                            debug!(key, from = existing_confidence, to = boosted, "Policy reinforced: confidence boosted");
+                        }
+                    }
+                } else {
+                    info!(key, "Decision harvester: created new policy:decision");
+                }
                 written += 1;
             }
             Err(e) => {
@@ -107,12 +131,17 @@ pub(crate) async fn harvest_decisions_for_task(state: &AppState, task_id: &str, 
     }
 
     if written > 0 {
-        // Write a board note about the harvest
+        let note = if reinforced > 0 {
+            format!("[决策引擎] 从 {} 条主控决策中提炼 {} 条规则（{} 条新建，{} 条强化已有 policy confidence）",
+                master_questions.len(), written, written - reinforced, reinforced)
+        } else {
+            format!("[决策引擎] 从 {} 条主控决策中提炼了 {} 条 policy:decision 规则",
+                master_questions.len(), written)
+        };
         let _ = state.mission.db().add_board_task_note(
             &missiond_core::types::AddBoardTaskNoteInput {
                 task_id: task_id.to_string(),
-                content: format!("🧠 [决策引擎] 从 {} 条主控决策中提炼了 {} 条 policy:decision 规则，已写入肌肉记忆。",
-                    master_questions.len(), written),
+                content: note,
                 note_type: Some("progress".to_string()),
                 author: Some("decision-harvester".to_string()),
             },

@@ -1232,6 +1232,36 @@ impl MissionDB {
             tracing::info!("Migration: created system_timeline_fts with auto-sync triggers");
         }
 
+        // Phase E: beacon harvest_count (self-evolution: skill synthesis frequency tracking)
+        {
+            let cols: Vec<String> = conn
+                .prepare("PRAGMA table_info(beacons)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !cols.iter().any(|c| c == "harvest_count") {
+                conn.execute_batch(
+                    "ALTER TABLE beacons ADD COLUMN harvest_count INTEGER DEFAULT 0;"
+                )?;
+                tracing::info!("Migration: added harvest_count to beacons");
+            }
+        }
+
+        // Phase E: exit_code on conversations (self-evolution: ground truth capture)
+        {
+            let cols: Vec<String> = conn
+                .prepare("PRAGMA table_info(conversations)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !cols.iter().any(|c| c == "exit_code") {
+                conn.execute_batch(
+                    "ALTER TABLE conversations ADD COLUMN exit_code INTEGER;"
+                )?;
+                tracing::info!("Migration: added exit_code to conversations");
+            }
+        }
+
         Ok(())
     }
 }
