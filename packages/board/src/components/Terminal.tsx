@@ -225,7 +225,11 @@ function TerminalInner({ slotId }: TerminalProps) {
     clearReconnectTimer();
     setWsStatus('connecting');
     const wsHost = process.env.NEXT_PUBLIC_WS_HOST || window.location.hostname;
-    const ws = new WebSocket(`ws://${wsHost}:${WS_PORT}/pty/${slot}`);
+    // When accessed via reverse proxy (Caddy), use same port as page (proxy routes /pty/* to MissionD).
+    // Locally, NEXT_PUBLIC_WS_PORT=9120 connects directly to MissionD.
+    const isLocal = wsHost === 'localhost' || wsHost === '127.0.0.1';
+    const wsPort = isLocal ? WS_PORT : (parseInt(window.location.port, 10) || WS_PORT);
+    const ws = new WebSocket(`ws://${wsHost}:${wsPort}/pty/${slot}`);
     wsRef.current = ws;
 
     ws.onopen = () => {
