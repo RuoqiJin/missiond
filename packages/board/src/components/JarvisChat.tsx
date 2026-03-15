@@ -6,7 +6,7 @@ import remarkGfm from 'remark-gfm';
 import {
   Send, ImagePlus, Loader2, Brain, X, Plus,
   MessageSquare, ChevronLeft, ChevronDown, ChevronRight,
-  Check, AlertTriangle, Clock,
+  Check, AlertTriangle, Clock, Activity,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -49,6 +49,65 @@ interface ConfirmAction {
   info?: { type?: string; tool?: string; options?: ConfirmOption[] };
 }
 
+interface SlotStatus {
+  slotId: string;
+  state: string;
+  lastActivitySecsAgo?: number;
+  sessionId?: string;
+  progress?: {
+    toolCounts: Record<string, number>;
+    currentTool?: { name: string; startedAt: string };
+    totalCalls: number;
+    totalResults: number;
+    errorCount: number;
+  };
+}
+
+// ─── Content Cleaner ───
+
+/**
+ * Strip system prompts, boundary markers, and TUI noise from assistant content.
+ * Handles both streamed (raw PTY) and stored (pre-cleaned) messages.
+ */
+function cleanAssistantContent(content: string): string {
+  let text = content;
+
+  // 1. Strip everything before and including <<<BOUNDARY_xxx>>>
+  const boundaryMatch = text.match(/<<<BOUNDARY_[a-f0-9]+>>>/g);
+  if (boundaryMatch) {
+    const lastMarker = boundaryMatch[boundaryMatch.length - 1];
+    const pos = text.lastIndexOf(lastMarker);
+    text = text.slice(pos + lastMarker.length);
+  }
+
+  // 2. Strip <system_info>...</system_info> blocks
+  text = text.replace(/<system_info>[\s\S]*?<\/system_info>/g, '');
+
+  // 3. Strip <system-reminder>...</system-reminder> blocks
+  text = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '');
+
+  // 4. Strip Claude Code TUI markers
+  text = text
+    .split('\n')
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('▸▸') || trimmed.startsWith('>>')) return false;
+      if (trimmed.startsWith('✕ ') || trimmed.startsWith('✗ ')) return false;
+      if (trimmed.includes('Auto-update failed')) return false;
+      if (trimmed.includes('bypass permissions on')) return false;
+      return true;
+    })
+    .map((line) => {
+      const trimmed = line.trimStart();
+      if (trimmed.startsWith('⏺ ') || trimmed === '⏺') return trimmed.slice(1).trimStart();
+      if (trimmed.startsWith('● ') || trimmed === '●') return trimmed.slice(1).trimStart();
+      return line;
+    })
+    .join('\n');
+
+  return text.trim();
+}
+
 // ─── SSE Parser ───
 
 function parseSSE(chunk: string): Array<{ event?: string; data: string }> {
@@ -78,7 +137,6 @@ function parseSSE(chunk: string): Array<{ event?: string; data: string }> {
 
 function toolParamSummary(tool: ToolActivity): string {
   if (!tool.params) return '';
-  // Show most relevant param for each tool type
   const p = tool.params;
   if (tool.tool === 'Bash' && p.command) return String(p.command);
   if (tool.tool === 'Read' && p.file_path) return String(p.file_path);
@@ -87,7 +145,6 @@ function toolParamSummary(tool: ToolActivity): string {
   if (tool.tool === 'Grep' && p.pattern) return String(p.pattern);
   if (tool.tool === 'Glob' && p.pattern) return String(p.pattern);
   if (tool.tool === 'Agent' && p.description) return String(p.description);
-  // Fallback: first string value
   const first = Object.values(p).find((v) => typeof v === 'string');
   return first ? String(first) : '';
 }
@@ -99,7 +156,6 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
 
   return (
     <div className="bg-neutral-900/60 border border-neutral-800/50 rounded-lg overflow-hidden">
-      {/* Header — always visible */}
       <button
         onClick={() => hasDetails && setExpanded(!expanded)}
         className={cn(
@@ -129,10 +185,8 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
         </span>
       </button>
 
-      {/* Expanded detail */}
       {expanded && (
         <div className="border-t border-neutral-800/50 px-3 py-2 space-y-2">
-          {/* Params */}
           {tool.params && Object.keys(tool.params).length > 0 && (
             <div>
               <div className="text-[10px] text-neutral-600 mb-1 uppercase tracking-wide">Parameters</div>
@@ -141,7 +195,6 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
               </pre>
             </div>
           )}
-          {/* Output */}
           {tool.output && (
             <div>
               <div className="text-[10px] text-neutral-600 mb-1 uppercase tracking-wide">Output</div>
@@ -150,6 +203,58 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
               </pre>
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Slot Activity Bar ───
+
+function SlotActivityBar({ status, streamingConvTitle }: {
+  status: SlotStatus | null;
+  streamingConvTitle?: string;
+}) {
+  if (!status) return null;
+
+  const state = status.state?.toLowerCase() || 'unknown';
+  const progress = status.progress;
+
+  // Don't show when idle
+  if (state === 'idle') return null;
+
+  const toolEntries = progress?.toolCounts ? Object.entries(progress.toolCounts) : [];
+  const topTools = toolEntries.sort((a, b) => b[1] - a[1]).slice(0, 3);
+
+  return (
+    <div className="px-4 py-2 border-b border-amber-800/30 bg-amber-950/20">
+      <div className="flex items-center gap-2 text-[11px]">
+        <Activity className="w-3 h-3 text-amber-400 flex-shrink-0 animate-pulse" />
+        <span className="text-amber-300 font-medium capitalize">{status.state}</span>
+        {progress?.currentTool && (
+          <>
+            <ChevronRight className="w-2.5 h-2.5 text-neutral-600" />
+            <span className="text-neutral-300 font-mono">{progress.currentTool.name}</span>
+          </>
+        )}
+        {progress && progress.totalCalls > 0 && (
+          <span className="text-neutral-600 font-mono">
+            ({progress.totalCalls} calls)
+          </span>
+        )}
+        {streamingConvTitle && (
+          <span className="ml-auto text-neutral-600 truncate max-w-[200px]" title={streamingConvTitle}>
+            {streamingConvTitle}
+          </span>
+        )}
+      </div>
+      {topTools.length > 0 && (
+        <div className="flex gap-2 mt-1">
+          {topTools.map(([name, count]) => (
+            <span key={name} className="text-[10px] text-neutral-600 font-mono">
+              {name}:{count}
+            </span>
+          ))}
         </div>
       )}
     </div>
@@ -174,10 +279,25 @@ export function JarvisChat() {
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
+  // Slot status polling
+  const [slotStatus, setSlotStatus] = useState<SlotStatus | null>(null);
+
+  // Streaming conversation tracking — allows switching away during streaming
+  const streamingConvIdRef = useRef<string | null>(null);
+  const activeConvIdRef = useRef<string | null>(null);
+  const messagesCacheRef = useRef<Map<string, ChatMessage[]>>(new Map());
+  const streamingToolsRef = useRef<ToolActivity[]>([]);
+  const streamingStatusRef = useRef<string>('');
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  // Keep activeConvIdRef in sync
+  useEffect(() => {
+    activeConvIdRef.current = activeConvId;
+  }, [activeConvId]);
 
   // Auto-spawn slot-jarvis on mount
   useEffect(() => {
@@ -192,13 +312,11 @@ export function JarvisChat() {
         }
       } catch { /* slot not running */ }
 
-      // Spawn slot-jarvis
       if (!cancelled) setSlotReady(false);
       try {
         await fetch('/api/pty/spawn?slotId=slot-jarvis', { method: 'POST' });
       } catch { /* ignore spawn errors */ }
 
-      // Poll until ready (max 30s)
       for (let i = 0; i < 30 && !cancelled; i++) {
         await new Promise((r) => setTimeout(r, 1000));
         try {
@@ -210,10 +328,26 @@ export function JarvisChat() {
           }
         } catch { /* keep polling */ }
       }
-      if (!cancelled) setSlotReady(true); // optimistic after timeout
+      if (!cancelled) setSlotReady(true);
     }
     ensureSlot();
     return () => { cancelled = true; };
+  }, []);
+
+  // Slot status polling (3s interval)
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/pty/status?slotId=slot-jarvis');
+        if (res.ok) {
+          const data = await res.json();
+          setSlotStatus(data);
+        }
+      } catch { /* ignore */ }
+    };
+    poll();
+    const interval = setInterval(poll, 3000);
+    return () => clearInterval(interval);
   }, []);
 
   // Auto-scroll to bottom on new messages
@@ -243,7 +377,6 @@ export function JarvisChat() {
     initialLoadDone.current = true;
     loadConversations().then((convs) => {
       if (convs.length > 0 && !activeConvId) {
-        // Auto-load the most recent conversation
         const latest = convs[0];
         fetch(`/api/jarvis/conversations?id=${latest.id}`)
           .then((r) => r.json())
@@ -268,6 +401,27 @@ export function JarvisChat() {
 
   // Load a specific conversation's messages
   const loadConversation = useCallback(async (convId: string) => {
+    // If switching away from a streaming conversation, cache its messages
+    if (isStreaming && activeConvIdRef.current) {
+      // Don't abort streaming — let it continue in background
+      // Cache the current messages state
+      messagesCacheRef.current.set(activeConvIdRef.current, [...messages]);
+    }
+
+    // Check if target conversation has cached messages
+    const cached = messagesCacheRef.current.get(convId);
+    if (cached) {
+      setMessages(cached);
+      setActiveConvId(convId);
+      setSidebarOpen(false);
+      // Show streaming UI only if this is the streaming conversation
+      if (convId !== streamingConvIdRef.current) {
+        setTools([]);
+        setStatusText('');
+      }
+      return;
+    }
+
     try {
       const res = await fetch(`/api/jarvis/conversations?id=${convId}`);
       if (res.ok) {
@@ -283,27 +437,41 @@ export function JarvisChat() {
         setMessages(msgs);
         setActiveConvId(convId);
         setSidebarOpen(false);
+        // Clear tool/status if not viewing the streaming conversation
+        if (convId !== streamingConvIdRef.current) {
+          setTools([]);
+          setStatusText('');
+        }
       }
     } catch { /* ignore */ }
-  }, []);
+  }, [isStreaming, messages]);
 
   // New conversation
   const startNewChat = useCallback(() => {
+    // Cache current messages if streaming
+    if (isStreaming && activeConvIdRef.current) {
+      messagesCacheRef.current.set(activeConvIdRef.current, [...messages]);
+    }
     setMessages([]);
     setActiveConvId(null);
     setInput('');
     setImages([]);
     setError(null);
     setSidebarOpen(false);
+    // Clear tool/status display (streaming continues in background)
+    if (!isStreaming || activeConvIdRef.current !== streamingConvIdRef.current) {
+      setTools([]);
+      setStatusText('');
+    }
     inputRef.current?.focus();
-  }, []);
+  }, [isStreaming, messages]);
 
   // Image handling
   const handleImageUpload = useCallback((files: FileList | null) => {
     if (!files) return;
     Array.from(files).forEach((file) => {
       if (!file.type.startsWith('image/')) return;
-      if (file.size > 10 * 1024 * 1024) return; // 10MB limit
+      if (file.size > 10 * 1024 * 1024) return;
       const reader = new FileReader();
       reader.onload = (e) => {
         const dataUrl = e.target?.result as string;
@@ -317,7 +485,6 @@ export function JarvisChat() {
     setImages((prev) => prev.filter((_, i) => i !== index));
   }, []);
 
-  // Handle paste for images
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const items = e.clipboardData?.items;
     if (!items) return;
@@ -336,17 +503,21 @@ export function JarvisChat() {
     }
   }, [handleImageUpload]);
 
-  // Handle drop for images
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     handleImageUpload(e.dataTransfer.files);
   }, [handleImageUpload]);
 
+  // Check if slot is busy (another conversation is streaming)
+  const isSlotBusy = isStreaming && streamingConvIdRef.current !== activeConvId;
+  // Check if THIS conversation is the one streaming
+  const isThisConvStreaming = isStreaming && streamingConvIdRef.current === activeConvId;
+
   // Send message
   const sendMessage = useCallback(async () => {
     const text = input.trim();
     if (!text && images.length === 0) return;
-    if (isStreaming) return;
+    if (isStreaming) return; // Only one stream at a time
 
     // Build user message
     const userMsg: ChatMessage = {
@@ -364,7 +535,11 @@ export function JarvisChat() {
     setTools([]);
     setError(null);
 
-    // Build OpenAI-compatible messages (only last 20 turns to avoid huge payloads)
+    // Track which conversation is streaming
+    const currentConvId = activeConvId;
+    streamingConvIdRef.current = currentConvId;
+
+    // Build OpenAI-compatible messages
     const allMsgs = messages
       .filter((m) => m.role !== 'system')
       .concat(userMsg);
@@ -388,29 +563,61 @@ export function JarvisChat() {
     abortRef.current = controller;
 
     try {
-      // Use Next.js rewrite proxy to avoid CORS (same-origin)
-      const res = await fetch('/missiond/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer jarvis-ui',
-          'X-Slot-Id': 'slot-jarvis',
-        },
-        body: JSON.stringify({ messages: apiMessages, conversation_id: activeConvId }),
-        signal: controller.signal,
-      });
+      // Retry loop for 503 (slot busy) — wait and retry up to 60s
+      const maxRetries = 12;
+      let res: Response | null = null;
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
 
-      if (!res.ok) {
-        const errBody = await res.text();
-        try {
-          const parsed = JSON.parse(errBody);
-          throw new Error(parsed.error?.message || `HTTP ${res.status}`);
-        } catch {
-          throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 200)}`);
+        res = await fetch('/missiond/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer jarvis-ui',
+            'X-Slot-Id': 'slot-jarvis',
+          },
+          body: JSON.stringify({ messages: apiMessages, conversation_id: activeConvId }),
+          signal: controller.signal,
+        });
+
+        if (res.status === 503) {
+          const errBody = await res.text();
+          let retryAfter = 5;
+          try {
+            const parsed = JSON.parse(errBody);
+            retryAfter = parsed.retry_after || 5;
+            const slotState = parsed.error?.message?.match(/state: (\w+)/)?.[1] || 'busy';
+            setStatusText(`Jarvis is ${slotState.toLowerCase()}, waiting... (${attempt + 1}/${maxRetries})`);
+          } catch {
+            setStatusText(`Jarvis is busy, waiting... (${attempt + 1}/${maxRetries})`);
+          }
+          if (attempt < maxRetries) {
+            await new Promise((r) => setTimeout(r, retryAfter * 1000));
+            continue;
+          }
+          // Max retries exceeded
+          throw new Error('Jarvis is still busy after waiting 60s. Please try again later.');
         }
+
+        // Non-503 error
+        if (!res.ok) {
+          const errBody = await res.text();
+          let errMsg = `HTTP ${res.status}`;
+          try {
+            const parsed = JSON.parse(errBody);
+            errMsg = parsed.error?.message || errMsg;
+          } catch { /* use default */ }
+          throw new Error(errMsg);
+        }
+
+        // Success — clear waiting status
+        setStatusText('');
+        break;
       }
 
-      // Parse SSE stream
+      if (!res) throw new Error('No response');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
       const reader = res.body?.getReader();
       if (!reader) throw new Error('No response body');
 
@@ -429,11 +636,18 @@ export function JarvisChat() {
         for (const evt of events) {
           if (evt.data === '[DONE]') continue;
 
+          // Check if user is still viewing this conversation
+          const isViewing = activeConvIdRef.current === currentConvId ||
+                           (currentConvId === null && activeConvIdRef.current === null);
+
           if (evt.event === 'meta') {
             try {
               const meta = JSON.parse(evt.data);
               if (meta.conversation_id) {
-                setActiveConvId(meta.conversation_id);
+                streamingConvIdRef.current = meta.conversation_id;
+                if (isViewing || currentConvId === null) {
+                  setActiveConvId(meta.conversation_id);
+                }
               }
             } catch { /* ignore */ }
             continue;
@@ -442,7 +656,10 @@ export function JarvisChat() {
           if (evt.event === 'status') {
             try {
               const status = JSON.parse(evt.data);
-              setStatusText(status.text || status.phase || '');
+              streamingStatusRef.current = status.text || status.phase || '';
+              if (isViewing) {
+                setStatusText(streamingStatusRef.current);
+              }
             } catch { /* ignore */ }
             continue;
           }
@@ -450,11 +667,15 @@ export function JarvisChat() {
           if (evt.event === 'tool_start') {
             try {
               const tool = JSON.parse(evt.data);
-              setTools((prev) => [...prev, {
+              const newTool: ToolActivity = {
                 id: tool.id, tool: tool.tool,
                 params: typeof tool.params === 'object' ? tool.params : undefined,
                 status: 'running',
-              }]);
+              };
+              streamingToolsRef.current = [...streamingToolsRef.current, newTool];
+              if (isViewing) {
+                setTools((prev) => [...prev, newTool]);
+              }
             } catch { /* ignore */ }
             continue;
           }
@@ -462,14 +683,24 @@ export function JarvisChat() {
           if (evt.event === 'tool_end') {
             try {
               const tool = JSON.parse(evt.data);
-              setTools((prev) => prev.map((t) =>
+              streamingToolsRef.current = streamingToolsRef.current.map((t) =>
                 t.id === tool.id ? {
                   ...t,
                   status: 'done' as const,
                   durationMs: tool.duration_ms,
                   output: tool.output || undefined,
                 } : t
-              ));
+              );
+              if (isViewing) {
+                setTools((prev) => prev.map((t) =>
+                  t.id === tool.id ? {
+                    ...t,
+                    status: 'done' as const,
+                    durationMs: tool.duration_ms,
+                    output: tool.output || undefined,
+                  } : t
+                ));
+              }
             } catch { /* ignore */ }
             continue;
           }
@@ -497,35 +728,56 @@ export function JarvisChat() {
               const delta = chunk.choices?.[0]?.delta;
               if (delta?.content) {
                 assistantContent += delta.content;
-                setMessages((prev) => {
-                  const existing = prev.find((m) => m.id === 'streaming');
+                if (isViewing) {
+                  setMessages((prev) => {
+                    const existing = prev.find((m) => m.id === 'streaming');
+                    if (existing) {
+                      return prev.map((m) =>
+                        m.id === 'streaming' ? { ...m, content: assistantContent } : m
+                      );
+                    }
+                    return [...prev, {
+                      id: 'streaming',
+                      role: 'assistant' as const,
+                      content: assistantContent,
+                      timestamp: Date.now(),
+                    }];
+                  });
+                }
+                // Always update the cache
+                const cacheId = streamingConvIdRef.current || currentConvId || '__new';
+                const cached = messagesCacheRef.current.get(cacheId);
+                if (cached) {
+                  const existing = cached.find((m) => m.id === 'streaming');
                   if (existing) {
-                    return prev.map((m) =>
+                    messagesCacheRef.current.set(cacheId, cached.map((m) =>
                       m.id === 'streaming' ? { ...m, content: assistantContent } : m
-                    );
+                    ));
+                  } else {
+                    messagesCacheRef.current.set(cacheId, [...cached, {
+                      id: 'streaming',
+                      role: 'assistant' as const,
+                      content: assistantContent,
+                      timestamp: Date.now(),
+                    }]);
                   }
-                  return [...prev, {
-                    id: 'streaming',
-                    role: 'assistant' as const,
-                    content: assistantContent,
-                    timestamp: Date.now(),
-                  }];
-                });
+                }
               }
               if (chunk.choices?.[0]?.finish_reason === 'stop') {
-                // Finalize the streaming message
-                setMessages((prev) =>
-                  prev.map((m) =>
-                    m.id === 'streaming' ? { ...m, id: `asst-${Date.now()}` } : m
-                  )
-                );
+                if (isViewing) {
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === 'streaming' ? { ...m, id: `asst-${Date.now()}` } : m
+                    )
+                  );
+                }
               }
             } catch { /* ignore malformed JSON */ }
           }
         }
       }
 
-      // Refresh conversation list (messages are persisted by the backend)
+      // Refresh conversation list
       if (assistantContent) {
         loadConversations();
       }
@@ -538,7 +790,14 @@ export function JarvisChat() {
     } finally {
       setIsStreaming(false);
       setStatusText('');
+      streamingConvIdRef.current = null;
+      streamingToolsRef.current = [];
+      streamingStatusRef.current = '';
       abortRef.current = null;
+      // Clear message cache for this conversation (now persisted in DB)
+      if (currentConvId) {
+        messagesCacheRef.current.delete(currentConvId);
+      }
     }
   }, [input, images, messages, isStreaming, activeConvId, loadConversations]);
 
@@ -547,6 +806,8 @@ export function JarvisChat() {
     abortRef.current?.abort();
     setIsStreaming(false);
     setStatusText('');
+    streamingConvIdRef.current = null;
+    streamingToolsRef.current = [];
   }, []);
 
   // Keyboard handling
@@ -565,6 +826,11 @@ export function JarvisChat() {
       el.style.height = Math.min(el.scrollHeight, 200) + 'px';
     }
   }, []);
+
+  // Find the title of the streaming conversation for the activity bar
+  const streamingConvTitle = isStreaming && streamingConvIdRef.current
+    ? conversations.find((c) => c.id === streamingConvIdRef.current)?.title
+    : undefined;
 
   return (
     <div className="flex-1 flex min-h-0 mx-4 sm:mx-8 mb-4"
@@ -595,7 +861,13 @@ export function JarvisChat() {
                   activeConvId === conv.id ? 'bg-neutral-800/50 text-white' : 'text-neutral-400',
                 )}
               >
-                <div className="truncate">{conv.title}</div>
+                <div className="flex items-center gap-1.5">
+                  <span className="truncate flex-1">{conv.title}</span>
+                  {/* Show streaming indicator on the active streaming conversation */}
+                  {isStreaming && streamingConvIdRef.current === conv.id && (
+                    <Loader2 className="w-3 h-3 animate-spin text-amber-400 flex-shrink-0" />
+                  )}
+                </div>
                 <div className="text-[10px] text-neutral-600 mt-0.5">
                   {conv.messageCount} messages
                 </div>
@@ -616,12 +888,19 @@ export function JarvisChat() {
         <div className="flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-neutral-950">
           <div className="flex items-center gap-2">
             {!sidebarOpen && (
-              <button onClick={() => setSidebarOpen(true)} className="p-1 text-neutral-500 hover:text-white transition-colors" title="History">
+              <button onClick={() => { loadConversations(); setSidebarOpen(true); }} className="p-1 text-neutral-500 hover:text-white transition-colors" title="History">
                 <MessageSquare className="w-4 h-4" />
               </button>
             )}
             <span className="text-sm font-medium text-neutral-300">Jarvis</span>
-            {isStreaming && (
+            {/* Slot status dot */}
+            {slotStatus && (
+              <span className={cn(
+                'w-2 h-2 rounded-full',
+                slotStatus.state?.toLowerCase() === 'idle' ? 'bg-green-500' : 'bg-amber-400 animate-pulse',
+              )} title={slotStatus.state} />
+            )}
+            {isThisConvStreaming && (
               <span className="flex items-center gap-1 text-[10px] text-amber-400">
                 <Loader2 className="w-3 h-3 animate-spin" />
                 {statusText || 'Processing...'}
@@ -635,9 +914,12 @@ export function JarvisChat() {
           </div>
         </div>
 
+        {/* Activity bar — shows when slot is busy (visible from any conversation) */}
+        <SlotActivityBar status={slotStatus} streamingConvTitle={streamingConvTitle} />
+
         {/* Messages */}
         <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
-          {messages.length === 0 && !isStreaming && (
+          {messages.length === 0 && !isThisConvStreaming && (
             <div className="flex flex-col items-center justify-center h-full text-neutral-600">
               {slotReady === false ? (
                 <>
@@ -654,7 +936,12 @@ export function JarvisChat() {
                 <>
                   <Brain className="w-10 h-10 mb-3 text-neutral-700" />
                   <p className="text-sm">Ask Jarvis anything</p>
-                  <p className="text-xs mt-1 text-neutral-700">Supports text, images, and multi-turn conversation</p>
+                  <p className="text-xs mt-1 text-neutral-700">
+                    {isSlotBusy
+                      ? 'Jarvis is busy with another conversation. Your message will be queued.'
+                      : 'Supports text, images, and multi-turn conversation'
+                    }
+                  </p>
                 </>
               )}
             </div>
@@ -688,7 +975,7 @@ export function JarvisChat() {
                     prose-a:text-blue-400 prose-a:no-underline hover:prose-a:underline
                     prose-table:text-xs">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {msg.content}
+                      {cleanAssistantContent(msg.content)}
                     </ReactMarkdown>
                   </div>
                 ) : (
@@ -718,7 +1005,6 @@ export function JarvisChat() {
                    const l = o.label.toLowerCase();
                    return l.startsWith('yes') || l.startsWith('allow');
                  }) ? (
-                  /* AskUserQuestion — render selectable option buttons */
                   <>
                     <p className="text-sm text-neutral-200 mb-3">{confirmAction.prompt}</p>
                     <div className="flex flex-col gap-1.5">
@@ -741,7 +1027,6 @@ export function JarvisChat() {
                     </div>
                   </>
                 ) : (
-                  /* Standard tool permission confirm — Allow/Deny */
                   <>
                     <div className="flex items-center gap-2 mb-2">
                       <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
@@ -836,15 +1121,26 @@ export function JarvisChat() {
               onChange={(e) => { setInput(e.target.value); adjustTextareaHeight(); }}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              placeholder="Message Jarvis..."
+              placeholder={
+                isSlotBusy
+                  ? 'Jarvis is busy — message will be queued...'
+                  : isThisConvStreaming
+                    ? 'Jarvis is responding...'
+                    : 'Message Jarvis...'
+              }
               rows={1}
-              className="flex-1 bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-white
-                placeholder-neutral-600 resize-none focus:outline-none focus:border-neutral-600 transition-colors
-                min-h-[36px] max-h-[200px]"
-              disabled={isStreaming}
+              className={cn(
+                'flex-1 bg-neutral-900 border rounded-lg px-3 py-2 text-sm text-white',
+                'placeholder-neutral-600 resize-none focus:outline-none transition-colors',
+                'min-h-[36px] max-h-[200px]',
+                isThisConvStreaming
+                  ? 'border-amber-800/40 cursor-not-allowed'
+                  : 'border-neutral-800 focus:border-neutral-600',
+              )}
+              disabled={isThisConvStreaming}
             />
 
-            {isStreaming ? (
+            {isThisConvStreaming ? (
               <button
                 onClick={handleStop}
                 className="p-2 bg-neutral-700 hover:bg-neutral-600 rounded-lg transition-colors flex-shrink-0"
@@ -855,14 +1151,14 @@ export function JarvisChat() {
             ) : (
               <button
                 onClick={sendMessage}
-                disabled={!input.trim() && images.length === 0}
+                disabled={(!input.trim() && images.length === 0) || isStreaming}
                 className={cn(
                   'p-2 rounded-lg transition-colors flex-shrink-0',
-                  input.trim() || images.length > 0
+                  (input.trim() || images.length > 0) && !isStreaming
                     ? 'bg-blue-600 hover:bg-blue-500 text-white'
                     : 'bg-neutral-800 text-neutral-600 cursor-not-allowed',
                 )}
-                title="Send (Enter)"
+                title={isSlotBusy ? 'Jarvis is busy with another conversation' : 'Send (Enter)'}
               >
                 <Send className="w-4 h-4" />
               </button>
