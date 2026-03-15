@@ -77,6 +77,20 @@ pub struct KBOperation {
     pub rationale: Option<String>,
 }
 
+// ============ Knowledge Graph (Explicit Edges) ============
+
+/// A directed edge between two KB entries for multi-hop reasoning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KBEdge {
+    pub source_id: String,
+    pub target_id: String,
+    /// derives_from, contradicts, supersedes, related_to
+    pub relation_type: String,
+    pub weight: f64,
+    pub created_at: String,
+}
+
 /// Row from kb_operation_queue table
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

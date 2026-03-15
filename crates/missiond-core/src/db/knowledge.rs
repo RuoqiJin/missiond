@@ -1377,6 +1377,179 @@ impl MissionDB {
     }
 
     /// Infer KB type from category prefix.
+    // ============ Knowledge Graph (Edges) ============
+
+    /// Add a directed edge between two KB entries.
+    pub fn kb_add_edge(&self, source_id: &str, target_id: &str, relation_type: &str, weight: f64) -> DbResult<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT OR REPLACE INTO knowledge_edges (source_id, target_id, relation_type, weight, created_at)
+             VALUES (?1, ?2, ?3, ?4, datetime('now'))",
+            params![source_id, target_id, relation_type, weight],
+        )?;
+        Ok(())
+    }
+
+    /// Get all edges involving a KB entry (as source or target).
+    pub fn kb_get_edges(&self, id: &str) -> DbResult<Vec<crate::types::KBEdge>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT source_id, target_id, relation_type, weight, created_at
+             FROM knowledge_edges WHERE source_id = ?1 OR target_id = ?1"
+        )?;
+        let rows = stmt.query_map(params![id], |row| {
+            Ok(crate::types::KBEdge {
+                source_id: row.get(0)?,
+                target_id: row.get(1)?,
+                relation_type: row.get(2)?,
+                weight: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?.filter_map(|r| r.ok()).collect();
+        Ok(rows)
+    }
+
+    /// Expand a set of KB IDs by following 1-hop edges.
+    /// Returns neighbor IDs not already in the input set, capped at `max_extra`.
+    pub fn kb_expand_related(&self, ids: &[String], max_extra: usize) -> DbResult<Vec<String>> {
+        if ids.is_empty() || max_extra == 0 { return Ok(vec![]); }
+        let conn = self.read_conn();
+        let id_set: HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
+        let mut neighbors: Vec<(String, f64)> = Vec::new();
+        for id in ids {
+            let mut stmt = conn.prepare(
+                "SELECT target_id, weight FROM knowledge_edges WHERE source_id = ?1
+                 UNION ALL
+                 SELECT source_id, weight FROM knowledge_edges WHERE target_id = ?1"
+            )?;
+            let rows: Vec<(String, f64)> = stmt.query_map(params![id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })?.filter_map(|r| r.ok()).collect();
+            for (nid, w) in rows {
+                if !id_set.contains(nid.as_str()) {
+                    neighbors.push((nid, w));
+                }
+            }
+        }
+        // Deduplicate and sort by weight descending
+        let mut seen = HashSet::new();
+        neighbors.retain(|(id, _)| seen.insert(id.clone()));
+        neighbors.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        neighbors.truncate(max_extra);
+        Ok(neighbors.into_iter().map(|(id, _)| id).collect())
+    }
+
+    /// Delete all edges involving a KB entry (cleanup on forget).
+    pub fn kb_delete_edges_for(&self, id: &str) -> DbResult<()> {
+        let conn = self.conn();
+        conn.execute("DELETE FROM knowledge_edges WHERE source_id = ?1 OR target_id = ?1", params![id])?;
+        Ok(())
+    }
+
+    // ============ Co-access Pattern Tracking ============
+
+    /// Log a group of KB entries that were co-accessed in the same context pipeline.
+    pub fn kb_log_co_access(&self, kb_ids: &[String], source: &str) -> DbResult<()> {
+        if kb_ids.len() < 2 { return Ok(()); }
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "INSERT INTO kb_access_log (kb_id, co_accessed_ids, context_source) VALUES (?1, ?2, ?3)"
+        )?;
+        for id in kb_ids {
+            let others: Vec<&str> = kb_ids.iter().filter(|x| *x != id).map(|s| s.as_str()).collect();
+            let others_json = serde_json::to_string(&others).unwrap_or_default();
+            stmt.execute(params![id, others_json, source])?;
+        }
+        Ok(())
+    }
+
+    /// Compute co-occurrence matrix from access log.
+    /// Returns: KB ID → top co-accessed KB IDs (sorted by frequency).
+    pub fn kb_compute_cooccurrence(&self, since_hours: i64, top_n: usize) -> DbResult<std::collections::HashMap<String, Vec<String>>> {
+        let conn = self.read_conn();
+        // Clean old data first
+        conn.execute(
+            "DELETE FROM kb_access_log WHERE created_at < datetime('now', ?1)",
+            params![format!("-{} hours", since_hours * 2)], // retain 2x window
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT kb_id, co_accessed_ids FROM kb_access_log
+             WHERE created_at >= datetime('now', ?1)"
+        )?;
+        let cutoff = format!("-{} hours", since_hours);
+        let rows: Vec<(String, String)> = stmt.query_map(params![cutoff], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?.filter_map(|r| r.ok()).collect();
+
+        // Build frequency map: kb_id → { co_id → count }
+        let mut freq: std::collections::HashMap<String, std::collections::HashMap<String, u32>> = std::collections::HashMap::new();
+        for (kb_id, co_json) in &rows {
+            let co_ids: Vec<String> = serde_json::from_str(co_json).unwrap_or_default();
+            let entry = freq.entry(kb_id.clone()).or_default();
+            for co_id in co_ids {
+                *entry.entry(co_id).or_insert(0) += 1;
+            }
+        }
+
+        // Rank and truncate to top_n per entry
+        let mut result = std::collections::HashMap::new();
+        for (kb_id, counts) in freq {
+            let mut sorted: Vec<(String, u32)> = counts.into_iter().collect();
+            sorted.sort_by(|a, b| b.1.cmp(&a.1));
+            sorted.truncate(top_n);
+            if !sorted.is_empty() {
+                result.insert(kb_id, sorted.into_iter().map(|(id, _)| id).collect());
+            }
+        }
+        Ok(result)
+    }
+
+    // ============ Stale State Verification ============
+
+    /// List state-type KB entries not accessed in `stale_days` days.
+    pub fn kb_list_stale_state_entries(&self, stale_days: i64, limit: usize) -> DbResult<Vec<KnowledgeEntry>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM knowledge
+             WHERE kb_type = 'state'
+               AND (last_accessed_at IS NULL OR julianday('now') - julianday(last_accessed_at) > ?1)
+               AND confidence >= 0.3
+             ORDER BY last_accessed_at ASC NULLS FIRST
+             LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(params![stale_days, limit as i64], Self::row_to_knowledge_entry)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    // ============ Shadow Replay ============
+
+    /// List prompt snapshots where cited KB entries have been modified since snapshot creation.
+    pub fn list_modified_snapshots(&self, limit: usize) -> DbResult<Vec<(String, String, String, String)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT ps.task_id, ps.prompt, ps.cited_kb_ids, ps.created_at
+             FROM prompt_snapshots ps
+             WHERE ps.task_outcome = 'success'
+               AND ps.cited_kb_ids != '[]'
+               AND EXISTS (
+                   SELECT 1 FROM knowledge k
+                   WHERE instr(ps.cited_kb_ids, k.id) > 0
+                     AND k.updated_at > ps.created_at
+               )
+             ORDER BY ps.created_at DESC
+             LIMIT ?1"
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?.filter_map(|r| r.ok()).collect();
+        Ok(rows)
+    }
+
     /// rule: policy/preference/system_rule → always-apply directives
     /// fact: memory/architecture/frontend_standard → contextual knowledge
     /// goal: feature/project/design_spec → aspirational targets

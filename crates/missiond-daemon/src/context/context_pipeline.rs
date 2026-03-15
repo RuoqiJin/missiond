@@ -13,7 +13,7 @@
 //!
 //! Fallback: if CC slot unavailable, degrades to v1 rule-based classification.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -585,7 +585,14 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
         "Context prefetch complete"
     );
 
-    let cited_kb_ids = kb_entries.iter().map(|e| e.id.clone()).collect();
+    let cited_kb_ids: Vec<String> = kb_entries.iter().map(|e| e.id.clone()).collect();
+
+    // Log KB co-access for preemptive prefetch pattern learning
+    if cited_kb_ids.len() >= 2 {
+        let ids = cited_kb_ids.clone();
+        let _ = state.mission.db().kb_log_co_access(&ids, "prefetch");
+    }
+
     PrefetchResult {
         skills,
         kb_entries,
@@ -803,6 +810,42 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
         }
         scored_entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored_entries.truncate(top_k);
+
+        // Knowledge Graph expansion: follow 1-hop edges to include related entries
+        let primary_ids: Vec<String> = scored_entries.iter().map(|(e, _)| e.id.clone()).collect();
+        if !primary_ids.is_empty() {
+            if let Ok(related_ids) = db.kb_expand_related(&primary_ids, 3) {
+                for rid in &related_ids {
+                    if let Ok(Some(re)) = db.kb_get_by_id(rid) {
+                        if re.scope_task_id.is_none() {
+                            scored_entries.push((re, 0.0)); // appended at lower priority
+                        }
+                    }
+                }
+            }
+        }
+
+        // Co-access preloading: preload frequently co-accessed entries
+        {
+            let cache = state.kb_cooccurrence_cache.read().await;
+            let existing_ids: HashSet<String> = scored_entries.iter().map(|(e, _)| e.id.clone()).collect();
+            let mut preloaded = 0usize;
+            for (e, _) in scored_entries.iter() {
+                if preloaded >= 2 { break; }
+                if let Some(co_ids) = cache.get(&e.id) {
+                    for co_id in co_ids {
+                        if preloaded >= 2 { break; }
+                        if !existing_ids.contains(co_id) {
+                            if let Ok(Some(co_entry)) = db.kb_get_by_id(co_id) {
+                                if co_entry.scope_task_id.is_none() {
+                                    preloaded += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         scored_entries.into_iter().map(|(e, _)| KbHint {
             id: e.id,

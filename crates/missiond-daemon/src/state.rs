@@ -198,6 +198,8 @@ pub(crate) struct AppState {
     /// Cache: task_id → cited KB entry IDs at dispatch time.
     /// Used by the feedback loop to adjust confidence on task success/failure.
     pub(crate) task_cited_kbs: Arc<std::sync::Mutex<HashMap<String, Vec<String>>>>,
+    /// Co-occurrence cache: KB ID → top co-accessed KB IDs (refreshed every 6h).
+    pub(crate) kb_cooccurrence_cache: Arc<tokio::sync::RwLock<HashMap<String, Vec<String>>>>,
     /// Slots pending graceful restart due to low context (detected "until auto-compact").
     /// Restart is deferred until the slot becomes Idle to avoid interrupting tasks.
     pub(crate) pending_compact_restart: Arc<std::sync::Mutex<HashSet<String>>>,
