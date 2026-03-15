@@ -348,6 +348,14 @@ pub(crate) enum DaemonEvent {
         /// input_tokens, output_tokens for Codex).
         extra: serde_json::Value,
     },
+    // ===== Jarvis Async Dispatch =====
+    /// A Jarvis async task completed — worker slot returned result.
+    /// Frontend uses conversation_id to refetch and append the new message.
+    JarvisTaskCompleted {
+        conversation_id: String,
+        task_id: String,
+    },
+
     /// Unified: CLI engine tool activity (real-time tool use).
     /// Replaces GeminiToolActivity.
     CliToolActivity {
@@ -409,6 +417,7 @@ impl DaemonEvent {
             Self::WorkerLlmCall { .. } => "worker_llm_call",
             Self::ToolCompleted { .. } => "tool_completed",
             Self::ConfigFileChanged { .. } => "config_file_changed",
+            Self::JarvisTaskCompleted { .. } => "jarvis_task_completed",
             Self::CliRequestStarted { .. } => "cli_request_started",
             Self::CliRequestCompleted { .. } => "cli_request_completed",
             Self::CliToolActivity { .. } => "cli_tool_activity",
@@ -564,6 +573,8 @@ impl DaemonEvent {
                 "duration_ms": duration_ms,
                 "queue_wait_ms": queue_wait_ms,
             }),
+            Self::JarvisTaskCompleted { conversation_id, task_id } =>
+                json!({ "conversation_id": conversation_id, "task_id": task_id }),
             Self::CliRequestStarted {
                 engine, request_id, caller, session_id, model,
                 prompt_chars, extra, ..
