@@ -1170,7 +1170,7 @@ impl PTYWebSocketServer {
                 let response = "HTTP/1.1 204 No Content\r\n\
                     Access-Control-Allow-Origin: *\r\n\
                     Access-Control-Allow-Methods: POST, OPTIONS\r\n\
-                    Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
+                    Access-Control-Allow-Headers: Content-Type, Authorization, X-Slot-Id, X-Trace-Id\r\n\
                     Access-Control-Max-Age: 86400\r\n\
                     Content-Length: 0\r\n\
                     Connection: close\r\n\
