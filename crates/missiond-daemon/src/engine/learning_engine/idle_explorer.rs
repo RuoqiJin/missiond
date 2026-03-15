@@ -75,13 +75,15 @@ pub(crate) async fn check_idle_exploration(state: &AppState) {
         .unwrap_or(None)
         .unwrap_or(0);
 
-    let task_created = match explore_idx % 6 {
+    let task_created = match explore_idx % 8 {
         0 => explore_kb_consistency(state, &assignee).await,
         1 => explore_stale_dependencies(state, &assignee).await,
         2 => explore_unharvested_beacons(state, &assignee).await,
         3 => explore_kb_duplicates(state, &assignee).await,
         4 => explore_skill_synthesis(state, &assignee).await,
         5 => explore_memory_consolidation(state, &assignee).await,
+        6 => explore_stale_state_verification(state, &assignee).await,
+        7 => explore_shadow_replay(state, &assignee).await,
         _ => false,
     };
 
@@ -466,4 +468,86 @@ async fn explore_memory_consolidation(state: &AppState, assignee: &str) -> bool 
 
     let _ = state.mission.db().daemon_state_set("last_consolidation_at", now);
     create_explore_task(state, &format!("Explore: Memory Consolidation — {}", target_cat), &description, assignee).await
+}
+
+/// Explore 6: Stale State Verification — verify state-type KB entries that
+/// haven't been accessed recently are still accurate.
+async fn explore_stale_state_verification(state: &AppState, assignee: &str) -> bool {
+    let entries = match state.mission.db().kb_list_stale_state_entries(14, 5) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    if entries.is_empty() {
+        return false;
+    }
+
+    let keys_list: Vec<String> = entries.iter().map(|e| {
+        format!("- `{}` [{}] (conf={:.2}, last_access={})",
+            e.key, e.category, e.confidence,
+            e.last_accessed_at.as_deref().unwrap_or("never"))
+    }).collect();
+    let keys_str = keys_list.join("\n");
+
+    let description = format!(
+        "## State Verification Task\n\n\
+        Found {} state-type KB entries not accessed in 14+ days.\n\
+        These may describe outdated operational state.\n\n\
+        {}\n\n\
+        ### Instructions:\n\
+        For each entry:\n\
+        1. Use `mission_kb_get` to read the full content\n\
+        2. Verify the stated fact using appropriate tools:\n\
+           - `mission_infra_query` for server/service state\n\
+           - `mission_reachability` for connectivity checks\n\
+           - `mission_os_diagnose` for system diagnostics\n\
+        3. If CONFIRMED still true → `mission_kb_remember` with same key, confidence boosted to 0.9\n\
+        4. If STALE/WRONG → `mission_kb_forget` to remove outdated state\n\
+        5. If CANNOT VERIFY → leave unchanged\n\n\
+        Report findings as a Board note.",
+        entries.len(), keys_str,
+    );
+
+    create_explore_task(state, "Explore: Stale State Verification", &description, assignee).await
+}
+
+/// Explore 7: Shadow Replay — verify that KB mutations haven't broken
+/// previously-successful task dispatch by comparing prompt snapshots
+/// against current KB state.
+async fn explore_shadow_replay(state: &AppState, assignee: &str) -> bool {
+    let snapshots = match state.mission.db().list_modified_snapshots(3) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    if snapshots.is_empty() {
+        return false;
+    }
+
+    let snapshot_list: Vec<String> = snapshots.iter().map(|(task_id, _prompt, kb_ids, created)| {
+        format!("- task `{}` (created: {}, cited KBs: {})",
+            &task_id[..8.min(task_id.len())], created, kb_ids)
+    }).collect();
+    let list_str = snapshot_list.join("\n");
+
+    let first_prompt_preview: String = snapshots[0].1.chars().take(500).collect();
+
+    let description = format!(
+        "## Shadow Replay Verification Task\n\n\
+        Found {} successful prompt snapshots whose cited KB entries have been modified.\n\
+        This could indicate that KB mutations have invalidated previously-working dispatch.\n\n\
+        ### Snapshots to verify:\n{}\n\n\
+        ### First snapshot prompt preview:\n```\n{}\n```\n\n\
+        ### Instructions:\n\
+        For each snapshot:\n\
+        1. Read the cited KB entries using `mission_kb_get` (by key)\n\
+        2. Compare the current KB content with what the prompt expected\n\
+        3. Evaluate whether the prompt would still succeed with the current KB state\n\
+        4. If STILL VALID → no action needed\n\
+        5. If BROKEN → lower confidence of the modified KB entries via `mission_kb_remember`\n\
+        6. If entry was DELETED → note it but take no action\n\n\
+        **This is a READ-ONLY analysis task.** Do not re-execute any tasks.\n\
+        Report findings as a Board note.",
+        snapshots.len(), list_str, first_prompt_preview
+    );
+
+    create_explore_task(state, "Explore: Shadow Replay Verification", &description, assignee).await
 }

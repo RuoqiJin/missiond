@@ -233,6 +233,23 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             // Trigger async embedding update via Worker (avoids block_in_place in MCP handler)
             let _ = state.embedding_tx.try_send(EmbeddingTask::ProcessKBEntry(result.entry.id.clone()));
 
+            // Auto-edge: if detail contains consolidated_from, add supersedes edges
+            if result.action == "created" || result.action == "updated" {
+                if let Some(ref detail) = result.entry.detail {
+                    if let Some(from_keys) = detail.get("consolidated_from").and_then(|v| v.as_array()) {
+                        for key_val in from_keys {
+                            if let Some(key) = key_val.as_str() {
+                                if let Ok(Some(target_id)) = state.mission.db().kb_get_id_by_key(key) {
+                                    let _ = state.mission.db().kb_add_edge(
+                                        &result.entry.id, &target_id, "supersedes", 1.0,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Conflict detection: for new entries, check semantic similarity against existing KB
             let conflicts = if result.action == "created" {
                 detect_kb_conflicts(state, &result.entry).await
@@ -257,6 +274,15 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     );
                 }
 
+                // Add contradicts edges for detected conflicts
+                for c in &conflicts {
+                    if let Some(cid) = c.get("id").and_then(|v| v.as_str()) {
+                        let _ = state.mission.db().kb_add_edge(
+                            &result.entry.id, cid, "contradicts", 0.8,
+                        );
+                    }
+                }
+
                 let mut output = serde_json::to_value(&result)?;
                 output["conflicts"] = serde_json::json!(conflicts);
                 output["conflictWarning"] = serde_json::json!(format!(
@@ -275,9 +301,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             // Remove from embedding cache if deleted
             if deleted {
-                if let Some(id) = entry_id {
+                if let Some(ref id) = entry_id {
                     let mut guard = state.embedding_cache.write().await;
-                    guard.retain(|(eid, _)| eid != &id);
+                    guard.retain(|(eid, _)| eid != id);
+                    // Clean up knowledge graph edges
+                    let _ = state.mission.db().kb_delete_edges_for(id);
                 }
             }
             Ok(ToolResult::json(&serde_json::json!({

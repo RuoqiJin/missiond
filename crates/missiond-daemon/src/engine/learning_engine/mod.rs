@@ -50,6 +50,20 @@ pub(crate) async fn learning_tick(state: &AppState) {
     // L4: Timeline Analyst (12h cadence, internal guard)
     timeline_analyst::check_timeline_analysis(state).await;
 
+    // Co-occurrence cache refresh (every 6h) for preemptive context prefetching
+    {
+        let now = chrono::Utc::now().timestamp();
+        let last = state.mission.db().daemon_state_get("last_cooccurrence_refresh").unwrap_or(None).unwrap_or(0);
+        if now - last > 6 * 3600 {
+            let _ = state.mission.db().daemon_state_set("last_cooccurrence_refresh", now);
+            if let Ok(matrix) = state.mission.db().kb_compute_cooccurrence(168, 3) {
+                let count = matrix.len();
+                *state.kb_cooccurrence_cache.write().await = matrix;
+                info!(entries = count, "Co-occurrence cache refreshed");
+            }
+        }
+    }
+
     // L5: Idle Exploration (2h cadence, only when system has spare capacity)
     idle_explorer::check_idle_exploration(state).await;
 

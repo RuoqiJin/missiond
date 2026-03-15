@@ -1316,6 +1316,33 @@ impl MissionDB {
             }
         }
 
+        // Knowledge Graph: directed edges between KB entries for multi-hop reasoning
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS knowledge_edges (
+                source_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                relation_type TEXT NOT NULL,
+                weight REAL NOT NULL DEFAULT 1.0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (source_id, target_id, relation_type)
+            );
+            CREATE INDEX IF NOT EXISTS idx_kb_edge_source ON knowledge_edges(source_id);
+            CREATE INDEX IF NOT EXISTS idx_kb_edge_target ON knowledge_edges(target_id);"
+        )?;
+
+        // KB co-access log: tracks which entries are retrieved together
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS kb_access_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kb_id TEXT NOT NULL,
+                co_accessed_ids TEXT NOT NULL,
+                context_source TEXT NOT NULL DEFAULT 'prefetch',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_kb_access_log_kb ON kb_access_log(kb_id);
+            CREATE INDEX IF NOT EXISTS idx_kb_access_log_created ON kb_access_log(created_at);"
+        )?;
+
         Ok(())
     }
 }
