@@ -545,6 +545,40 @@ async fn main() -> Result<()> {
         info!("Jarvis context enricher activated");
     }
 
+    // Startup: kill orphan PTY processes from previous daemon instance.
+    // When daemon is killed with SIGKILL or crashes, child Claude Code processes
+    // become orphans and hold resources (file locks, ports). We detect them via
+    // the MISSIOND_SLOT_ID env var injected into all PTY children.
+    {
+        use std::process::Command;
+        // pgrep -f finds processes whose full command/env contains this marker
+        match Command::new("pgrep").args(["-f", "MISSIOND_SLOT_ID"]).output() {
+            Ok(output) if output.status.success() => {
+                let pids: Vec<&str> = std::str::from_utf8(&output.stdout)
+                    .unwrap_or("")
+                    .lines()
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !pids.is_empty() {
+                    let my_pid = std::process::id().to_string();
+                    let orphan_pids: Vec<&&str> = pids.iter()
+                        .filter(|p| **p != my_pid)
+                        .collect();
+                    if !orphan_pids.is_empty() {
+                        warn!(count = orphan_pids.len(), "Found orphan PTY processes from previous daemon, killing");
+                        for pid in &orphan_pids {
+                            let _ = Command::new("kill").args(["-9", pid]).output();
+                        }
+                        // Brief wait for OS to reclaim resources
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        info!("Orphan PTY cleanup complete");
+                    }
+                }
+            }
+            _ => {} // pgrep not found or no matches — fine
+        }
+    }
+
     // Auto-spawn persistent slots (all via PTYManager)
     {
         let slots = state.mission.list_slots();
@@ -1243,9 +1277,40 @@ async fn main() -> Result<()> {
 
     // Keep main alive — all work is in spawned tasks above.
     // Ctrl+C or SIGTERM triggers graceful shutdown.
-    tokio::signal::ctrl_c().await.ok();
-    info!("Received shutdown signal, notifying workers");
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).expect("Failed to register SIGTERM");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received SIGINT (Ctrl+C), starting graceful shutdown");
+            }
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, starting graceful shutdown");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.ok();
+        info!("Received shutdown signal, starting graceful shutdown");
+    }
+
+    // Phase 1: Notify workers to stop
     let _ = shutdown_tx.send(true);
-    info!("Exiting");
+
+    // Phase 2: Gracefully shut down all PTY sessions
+    // This sends /exit to each Claude Code instance, waits 3s, then force-kills
+    info!("Shutting down PTY sessions...");
+    state.pty.shutdown().await;
+
+    // Phase 3: Clean up IPC socket
+    let sock_path = endpoint.clone();
+    if std::path::Path::new(&sock_path).exists() {
+        let _ = std::fs::remove_file(&sock_path);
+        debug!("Removed IPC socket: {}", sock_path);
+    }
+
+    info!("Graceful shutdown complete");
     Ok(())
 }
