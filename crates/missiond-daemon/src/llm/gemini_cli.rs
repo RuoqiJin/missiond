@@ -23,8 +23,11 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
+
+/// Guard against concurrent auth fallback writes (OAuth expired → apikey switch).
+static AUTH_FALLBACK_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
 
 /// Absolute safety cap: kill process no matter what after this duration.
 const ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(900); // 15 minutes
@@ -104,28 +107,60 @@ impl GeminiCli {
         let status = child.wait().await
             .map_err(|e| anyhow!("Gemini CLI process error: {}", e))?;
         if !status.success() {
+            let exit_code = status.code();
             let stderr_msg = read_stderr(&mut child).await;
 
             // OAuth expired detection: auto-fallback to apikey and retry once
-            if auth_config.mode == "google" && is_auth_error(&stderr_msg) {
-                warn!("Gemini CLI: OAuth auth failed, attempting fallback to API key mode");
+            if auth_config.mode == "google" && is_auth_error(exit_code, &stderr_msg) {
+                warn!(exit_code = ?exit_code, "Gemini CLI: OAuth auth failed, attempting fallback to API key mode");
+                // Serialize fallback to prevent concurrent config writes
+                let _guard = AUTH_FALLBACK_LOCK.lock().await;
                 let fallback = resolve_apikey_config();
                 if let Some(ref fallback_config) = fallback {
-                    // Sync settings.json to apikey mode
                     sync_settings_json("gemini-api-key");
-                    if let Ok(mut retry_child) = self.spawn_cli(&prompt, model, fallback_config) {
-                        let retry_result = self.stream_events(&mut retry_child, idle_timeout, &progress_tx).await;
-                        let retry_status = retry_child.wait().await;
-                        if let (Ok(events), Ok(s)) = (&retry_result, &retry_status) {
-                            if s.success() {
-                                info!("Gemini CLI: fallback to API key succeeded");
-                                return parse_stream_events(events, model);
+                    match self.spawn_cli(&prompt, model, fallback_config) {
+                        Ok(mut retry_child) => {
+                            let retry_result = self.stream_events(&mut retry_child, idle_timeout, &progress_tx).await;
+                            let retry_status = retry_child.wait().await;
+                            match (&retry_result, &retry_status) {
+                                (Ok(events), Ok(s)) if s.success() => {
+                                    info!("Gemini CLI: fallback to API key succeeded");
+                                    return parse_stream_events(events, model);
+                                }
+                                (Err(retry_err), _) => {
+                                    let retry_stderr = read_stderr(&mut retry_child).await;
+                                    return Err(anyhow!(
+                                        "Gemini CLI: OAuth expired (exit {}), API key fallback also failed: {}. stderr: {}. Original stderr: {}",
+                                        exit_code.unwrap_or(-1), retry_err, retry_stderr, stderr_msg
+                                    ));
+                                }
+                                (_, Ok(s)) => {
+                                    let retry_stderr = read_stderr(&mut retry_child).await;
+                                    return Err(anyhow!(
+                                        "Gemini CLI: OAuth expired (exit {}), API key fallback exited {}: {}. Original stderr: {}",
+                                        exit_code.unwrap_or(-1), s, retry_stderr, stderr_msg
+                                    ));
+                                }
+                                (_, Err(e)) => {
+                                    return Err(anyhow!(
+                                        "Gemini CLI: OAuth expired (exit {}), API key fallback process error: {}. Original stderr: {}",
+                                        exit_code.unwrap_or(-1), e, stderr_msg
+                                    ));
+                                }
                             }
                         }
-                        let _ = retry_child.kill().await;
+                        Err(spawn_err) => {
+                            return Err(anyhow!(
+                                "Gemini CLI: OAuth expired (exit {}), failed to spawn fallback: {}. Original stderr: {}",
+                                exit_code.unwrap_or(-1), spawn_err, stderr_msg
+                            ));
+                        }
                     }
                 }
-                return Err(anyhow!("Gemini CLI: OAuth expired, API key fallback also failed. Run `gemini` to re-authenticate. stderr: {}", stderr_msg));
+                return Err(anyhow!(
+                    "Gemini CLI: OAuth expired (exit {}), no API key configured for fallback. Run `gemini` to re-authenticate. stderr: {}",
+                    exit_code.unwrap_or(-1), stderr_msg
+                ));
             }
 
             return Err(anyhow!("Gemini CLI exited with {}: {}", status, stderr_msg));
@@ -414,6 +449,7 @@ struct GeminiAuthConfig {
 
 /// Read llm.yaml to get gemini_api_key and gemini_auth_mode.
 /// Then read ~/.gemini/settings.json as fallback for mode detection.
+/// Also detects split-brain between llm.yaml and settings.json, auto-syncing if diverged.
 fn resolve_gemini_auth_config() -> GeminiAuthConfig {
     let llm_yaml = missiond_core::default_mission_home().join("llm.yaml");
     let llm_config = std::fs::read_to_string(&llm_yaml).ok()
@@ -434,9 +470,43 @@ fn resolve_gemini_auth_config() -> GeminiAuthConfig {
                 .unwrap_or_else(|| "apikey".to_string())
         });
 
+    // Split-brain detection: ensure settings.json matches llm.yaml
+    if let Some(home) = dirs::home_dir() {
+        let settings_path = home.join(".gemini/settings.json");
+        if let Ok(content) = std::fs::read_to_string(&settings_path) {
+            if let Ok(settings) = serde_json::from_str::<serde_json::Value>(&content) {
+                let settings_type = settings.pointer("/security/auth/selectedType")
+                    .and_then(|t| t.as_str()).unwrap_or("");
+                let expected_type = if mode == "apikey" { "gemini-api-key" } else { "oauth-personal" };
+                if !settings_type.is_empty() && settings_type != expected_type {
+                    warn!(
+                        llm_yaml_mode = %mode, settings_json_type = %settings_type,
+                        "Gemini auth split-brain detected, syncing settings.json to match llm.yaml"
+                    );
+                    sync_settings_json(expected_type);
+                }
+            }
+        }
+    }
+
+    if mode == "apikey" {
+        if let Some(ref key) = api_key {
+            info!(key_preview = mask_api_key(key), "Gemini CLI: using API key");
+        }
+    }
+
     GeminiAuthConfig {
         api_key: if mode == "apikey" { api_key } else { None },
         mode,
+    }
+}
+
+/// Mask API key for logging: show first 6 and last 4 chars.
+fn mask_api_key(key: &str) -> String {
+    if key.len() <= 12 {
+        "***".to_string()
+    } else {
+        format!("{}...{}", &key[..6], &key[key.len() - 4..])
     }
 }
 
@@ -484,13 +554,20 @@ async fn read_stderr(child: &mut tokio::process::Child) -> String {
     }
 }
 
-/// Detect OAuth/auth-related errors in stderr output.
-fn is_auth_error(stderr: &str) -> bool {
+/// Detect OAuth/auth-related errors from exit code and stderr.
+///
+/// Gemini CLI exits with code 41 for auth failures. We also check stderr for
+/// specific auth-related phrases, but use anchored/specific patterns to avoid
+/// false positives (e.g. "authentication" appearing in normal output).
+fn is_auth_error(exit_code: Option<i32>, stderr: &str) -> bool {
+    // Exit code 41 is Gemini CLI's definitive auth failure signal
+    if exit_code == Some(41) {
+        return true;
+    }
     let lower = stderr.to_lowercase();
     lower.contains("token expired")
         || lower.contains("auth required")
-        || lower.contains("authentication")
-        || lower.contains("login")
+        || lower.contains("authentication failed")
         || lower.contains("opening authentication page")
         || lower.contains("do you want to continue")
 }
