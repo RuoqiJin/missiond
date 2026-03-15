@@ -75,11 +75,12 @@ pub(crate) async fn check_idle_exploration(state: &AppState) {
         .unwrap_or(None)
         .unwrap_or(0);
 
-    let task_created = match explore_idx % 4 {
+    let task_created = match explore_idx % 5 {
         0 => explore_kb_consistency(state, &assignee).await,
         1 => explore_stale_dependencies(state, &assignee).await,
         2 => explore_unharvested_beacons(state, &assignee).await,
         3 => explore_kb_duplicates(state, &assignee).await,
+        4 => explore_skill_synthesis(state, &assignee).await,
         _ => false,
     };
 
@@ -257,6 +258,70 @@ async fn explore_kb_duplicates(state: &AppState, assignee: &str) -> bool {
     );
 
     create_explore_task(state, "Explore: KB Duplicate Detection", &description, assignee).await
+}
+
+/// Explore 4: Skill Synthesis — cluster high-confidence, high-access KB entries
+/// and generate Skill drafts that codify recurring patterns into reusable SOPs.
+async fn explore_skill_synthesis(state: &AppState, assignee: &str) -> bool {
+    let entries = match state.mission.db().kb_list(None) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+
+    // Find high-quality entries: confidence >= 0.9, access_count >= 5, type = rule or fact
+    let candidates: Vec<_> = entries.iter()
+        .filter(|e| e.confidence >= 0.9 && e.access_count >= 5)
+        .filter(|e| e.kb_type == "rule" || e.kb_type == "fact")
+        .collect();
+
+    if candidates.len() < 5 {
+        return false; // Not enough mature entries to synthesize
+    }
+
+    // Group by category prefix to find clusters
+    let mut clusters: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for e in &candidates {
+        let prefix = e.category.split(':').next().unwrap_or(&e.category).to_string();
+        clusters.entry(prefix).or_default().push(
+            format!("- `{}` [{}] (conf={:.2}, access={}): {}", e.key, e.category, e.confidence, e.access_count, e.summary)
+        );
+    }
+
+    // Find the largest cluster with >= 5 entries (most promising for synthesis)
+    let best_cluster = clusters.iter()
+        .filter(|(_, entries)| entries.len() >= 5)
+        .max_by_key(|(_, entries)| entries.len());
+
+    let (cluster_name, cluster_entries) = match best_cluster {
+        Some((name, entries)) => (name.clone(), entries.clone()),
+        None => return false,
+    };
+
+    let entries_str = cluster_entries.iter().take(20).cloned().collect::<Vec<_>>().join("\n");
+
+    let description = format!(
+        "## Skill Synthesis Task\n\n\
+        Found {} high-confidence, high-access KB entries in the `{}` cluster.\n\
+        These represent recurring knowledge that should be codified into a reusable Skill.\n\n\
+        ### Candidate KB entries:\n{}\n\n\
+        ### Instructions:\n\
+        1. Read each KB entry with `mission_kb_search` to understand the full context\n\
+        2. Identify the common theme/pattern across these entries\n\
+        3. Generate a Skill draft following the SKILL.md format:\n\
+           - frontmatter: name, description, allowed-tools\n\
+           - INDEX table: intent → section\n\
+           - Core sections with actionable instructions\n\
+        4. Write the draft to `~/.claude/skills/auto-generated/{cluster_name}.md`\n\
+        5. Report the synthesis as a Board note with:\n\
+           - Which KB entries were consolidated\n\
+           - The generated Skill path\n\
+           - Confidence assessment of the synthesis quality\n\n\
+        **Important**: The generated Skill should capture the *why* behind the rules, not just the *what*.\n\
+        If entries contradict each other, flag the conflict rather than arbitrarily picking one.",
+        cluster_entries.len(), cluster_name, entries_str
+    );
+
+    create_explore_task(state, &format!("Explore: Skill Synthesis — {}", cluster_name), &description, assignee).await
 }
 
 /// Helper: create an exploration Board task.
