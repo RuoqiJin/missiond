@@ -4,8 +4,9 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
-  Send, ImagePlus, Loader2, Wrench, Brain, X, Plus,
-  MessageSquare, ChevronLeft,
+  Send, ImagePlus, Loader2, Brain, X, Plus,
+  MessageSquare, ChevronLeft, ChevronDown, ChevronRight,
+  Check, AlertTriangle, Clock,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -30,9 +31,16 @@ interface Conversation {
 interface ToolActivity {
   id: string;
   tool: string;
-  params?: string;
+  params?: Record<string, unknown>;
   status: 'running' | 'done';
   durationMs?: number;
+  output?: string;
+}
+
+interface ConfirmAction {
+  actionId: string;
+  prompt: string;
+  info?: { type?: string; tool?: string; options?: string[] };
 }
 
 // ─── SSE Parser ───
@@ -60,6 +68,88 @@ function parseSSE(chunk: string): Array<{ event?: string; data: string }> {
   return events;
 }
 
+// ─── Tool Card ───
+
+function toolParamSummary(tool: ToolActivity): string {
+  if (!tool.params) return '';
+  // Show most relevant param for each tool type
+  const p = tool.params;
+  if (tool.tool === 'Bash' && p.command) return String(p.command);
+  if (tool.tool === 'Read' && p.file_path) return String(p.file_path);
+  if (tool.tool === 'Write' && p.file_path) return String(p.file_path);
+  if (tool.tool === 'Edit' && p.file_path) return String(p.file_path);
+  if (tool.tool === 'Grep' && p.pattern) return String(p.pattern);
+  if (tool.tool === 'Glob' && p.pattern) return String(p.pattern);
+  if (tool.tool === 'Agent' && p.description) return String(p.description);
+  // Fallback: first string value
+  const first = Object.values(p).find((v) => typeof v === 'string');
+  return first ? String(first) : '';
+}
+
+function ToolCard({ tool }: { tool: ToolActivity }) {
+  const [expanded, setExpanded] = useState(false);
+  const summary = toolParamSummary(tool);
+  const hasDetails = (tool.params && Object.keys(tool.params).length > 0) || tool.output;
+
+  return (
+    <div className="bg-neutral-900/60 border border-neutral-800/50 rounded-lg overflow-hidden">
+      {/* Header — always visible */}
+      <button
+        onClick={() => hasDetails && setExpanded(!expanded)}
+        className={cn(
+          'w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-left',
+          hasDetails ? 'cursor-pointer hover:bg-neutral-800/30' : 'cursor-default',
+        )}
+      >
+        {tool.status === 'running' ? (
+          <Loader2 className="w-3 h-3 animate-spin text-amber-400 flex-shrink-0" />
+        ) : (
+          <Check className="w-3 h-3 text-green-400 flex-shrink-0" />
+        )}
+        <span className="text-neutral-300 font-mono font-medium">{tool.tool}</span>
+        {summary && (
+          <span className="text-neutral-500 truncate max-w-[300px] font-mono">{summary}</span>
+        )}
+        <span className="ml-auto flex items-center gap-1.5 flex-shrink-0">
+          {tool.durationMs !== undefined && (
+            <span className="text-neutral-600 flex items-center gap-0.5">
+              <Clock className="w-2.5 h-2.5" />
+              {tool.durationMs < 1000 ? `${Math.round(tool.durationMs)}ms` : `${(tool.durationMs / 1000).toFixed(1)}s`}
+            </span>
+          )}
+          {hasDetails && (
+            expanded ? <ChevronDown className="w-3 h-3 text-neutral-600" /> : <ChevronRight className="w-3 h-3 text-neutral-600" />
+          )}
+        </span>
+      </button>
+
+      {/* Expanded detail */}
+      {expanded && (
+        <div className="border-t border-neutral-800/50 px-3 py-2 space-y-2">
+          {/* Params */}
+          {tool.params && Object.keys(tool.params).length > 0 && (
+            <div>
+              <div className="text-[10px] text-neutral-600 mb-1 uppercase tracking-wide">Parameters</div>
+              <pre className="text-[11px] text-neutral-400 bg-neutral-950 rounded px-2 py-1.5 overflow-x-auto max-h-40 font-mono whitespace-pre-wrap">
+                {JSON.stringify(tool.params, null, 2)}
+              </pre>
+            </div>
+          )}
+          {/* Output */}
+          {tool.output && (
+            <div>
+              <div className="text-[10px] text-neutral-600 mb-1 uppercase tracking-wide">Output</div>
+              <pre className="text-[11px] text-neutral-400 bg-neutral-950 rounded px-2 py-1.5 overflow-x-auto max-h-60 font-mono whitespace-pre-wrap">
+                {tool.output}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main Component ───
 
 export function JarvisChat() {
@@ -70,6 +160,7 @@ export function JarvisChat() {
   const [statusText, setStatusText] = useState('');
   const [tools, setTools] = useState<ToolActivity[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
   const [slotReady, setSlotReady] = useState<boolean | null>(null); // null = checking
 
   // Conversation history sidebar
@@ -121,8 +212,10 @@ export function JarvisChat() {
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, statusText, tools]);
+    requestAnimationFrame(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    });
+  }, [messages, statusText, tools, confirmAction]);
 
   // Load conversation list
   const loadConversations = useCallback(async () => {
@@ -311,7 +404,8 @@ export function JarvisChat() {
               const tool = JSON.parse(evt.data);
               setTools((prev) => [...prev, {
                 id: tool.id, tool: tool.tool,
-                params: tool.params, status: 'running',
+                params: typeof tool.params === 'object' ? tool.params : undefined,
+                status: 'running',
               }]);
             } catch { /* ignore */ }
             continue;
@@ -321,8 +415,25 @@ export function JarvisChat() {
             try {
               const tool = JSON.parse(evt.data);
               setTools((prev) => prev.map((t) =>
-                t.id === tool.id ? { ...t, status: 'done' as const, durationMs: tool.duration_ms } : t
+                t.id === tool.id ? {
+                  ...t,
+                  status: 'done' as const,
+                  durationMs: tool.duration_ms,
+                  output: tool.output || undefined,
+                } : t
               ));
+            } catch { /* ignore */ }
+            continue;
+          }
+
+          if (evt.event === 'confirm_required') {
+            try {
+              const confirm = JSON.parse(evt.data);
+              setConfirmAction({
+                actionId: confirm.action_id,
+                prompt: confirm.prompt,
+                info: confirm.info,
+              });
             } catch { /* ignore */ }
             continue;
           }
@@ -550,26 +661,53 @@ export function JarvisChat() {
             </div>
           ))}
 
-          {/* Tool activity indicators */}
-          {tools.length > 0 && isStreaming && (
+          {/* Tool activity — collapsible cards */}
+          {tools.length > 0 && (
             <div className="flex justify-start">
-              <div className="bg-neutral-900/60 rounded-lg px-3 py-2 space-y-1">
-                {tools.slice(-5).map((tool) => (
-                  <div key={tool.id} className="flex items-center gap-2 text-[11px]">
-                    {tool.status === 'running' ? (
-                      <Loader2 className="w-3 h-3 animate-spin text-amber-400" />
-                    ) : (
-                      <Wrench className="w-3 h-3 text-green-400" />
-                    )}
-                    <span className="text-neutral-400 font-mono">{tool.tool}</span>
-                    {tool.params && (
-                      <span className="text-neutral-600 truncate max-w-[200px]">{tool.params}</span>
-                    )}
-                    {tool.durationMs !== undefined && (
-                      <span className="text-neutral-600">{tool.durationMs}ms</span>
-                    )}
-                  </div>
+              <div className="max-w-[85%] space-y-1">
+                {tools.map((tool) => (
+                  <ToolCard key={tool.id} tool={tool} />
                 ))}
+              </div>
+            </div>
+          )}
+
+          {/* Confirm dialog */}
+          {confirmAction && (
+            <div className="flex justify-start">
+              <div className="max-w-[85%] bg-amber-900/20 border border-amber-700/40 rounded-lg px-4 py-3">
+                <div className="flex items-center gap-2 mb-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                  <span className="text-sm text-amber-300 font-medium">Permission Required</span>
+                </div>
+                <p className="text-xs text-neutral-300 mb-3">{confirmAction.prompt}</p>
+                {confirmAction.info?.tool && (
+                  <p className="text-[11px] text-neutral-500 mb-2 font-mono">Tool: {confirmAction.info.tool}</p>
+                )}
+                <div className="flex gap-2">
+                  <button
+                    onClick={async () => {
+                      try {
+                        await fetch(`/api/pty/confirm?slotId=slot-jarvis&decision=allow`, { method: 'POST' });
+                      } catch { /* ignore */ }
+                      setConfirmAction(null);
+                    }}
+                    className="px-3 py-1 text-xs bg-emerald-600/80 hover:bg-emerald-600 text-white rounded transition-colors"
+                  >
+                    Allow
+                  </button>
+                  <button
+                    onClick={async () => {
+                      try {
+                        await fetch(`/api/pty/confirm?slotId=slot-jarvis&decision=deny`, { method: 'POST' });
+                      } catch { /* ignore */ }
+                      setConfirmAction(null);
+                    }}
+                    className="px-3 py-1 text-xs bg-neutral-700/80 hover:bg-neutral-600 text-neutral-300 rounded transition-colors"
+                  >
+                    Deny
+                  </button>
+                </div>
               </div>
             </div>
           )}

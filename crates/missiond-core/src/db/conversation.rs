@@ -219,6 +219,64 @@ impl MissionDB {
     }
 
 
+    // ============ Historical Habit Scan ============
+
+    /// Get conversations not yet scanned for user habits.
+    /// Only 'user' type conversations with enough messages. Returns oldest first.
+    pub fn get_unscanned_conversations(&self, limit: usize) -> DbResult<Vec<Conversation>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM conversations
+             WHERE habit_scanned_at IS NULL
+               AND conversation_type = 'user'
+               AND message_count >= 4
+               AND status IN ('completed', 'compacted', 'active')
+             ORDER BY started_at ASC
+             LIMIT ?1"
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| Self::row_to_conversation(row))?;
+        let mut convs = Vec::new();
+        for c in rows { convs.push(c?); }
+        Ok(convs)
+    }
+
+    /// Mark a conversation as scanned for habits.
+    pub fn mark_habit_scanned(&self, id: &str) -> DbResult<()> {
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+        self.conn().execute(
+            "UPDATE conversations SET habit_scanned_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Count conversations not yet scanned for habits.
+    pub fn count_unscanned_conversations(&self) -> DbResult<i64> {
+        let conn = self.read_conn();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM conversations
+             WHERE habit_scanned_at IS NULL
+               AND conversation_type = 'user'
+               AND message_count >= 4",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Count total user conversations eligible for habit scan.
+    pub fn count_scannable_conversations(&self) -> DbResult<i64> {
+        let conn = self.read_conn();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM conversations
+             WHERE conversation_type = 'user'
+               AND message_count >= 4",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     // ============ Conversations ============
 
     /// Upsert a conversation session
