@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Gauge, Crosshair } from 'lucide-react';
+import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Gauge, Crosshair, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
@@ -12,9 +12,10 @@ import { ExecDashboard } from './components/ExecDashboard';
 import { SystemDashboard } from './components/SystemDashboard';
 import { KnowledgeConsolidated } from './components/KnowledgeConsolidated';
 import { LogsConsolidated } from './components/LogsConsolidated';
+import { JarvisChat } from './components/JarvisChat';
 import { useEventStream, useConnectionState } from './hooks/useEventStream';
 
-type Tab = 'board' | 'terminal' | 'exec' | 'system' | 'knowledge' | 'logs';
+type Tab = 'jarvis' | 'board' | 'terminal' | 'exec' | 'system' | 'knowledge' | 'logs';
 
 interface SlotDef { id: string; label: string; role: string; running?: boolean }
 
@@ -29,7 +30,7 @@ export default function App() {
   const [tab, setTab] = useState<Tab>(() => {
     if (typeof window === 'undefined') return 'board';
     // Migrate old tab values to new ones
-    const saved = localStorage.getItem('board:tab') as string || 'board';
+    const saved = localStorage.getItem('board:tab') as string || 'jarvis';
     const migration: Record<string, Tab> = {
       'autopilot': 'exec', 'decisions': 'exec',
       'memory': 'system', 'engine': 'system',
@@ -93,6 +94,7 @@ export default function App() {
   }
 
   const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
+    { id: 'jarvis', label: 'Jarvis', icon: Sparkles },
     { id: 'board', label: 'Board', icon: ClipboardList },
     { id: 'terminal', label: 'Terminal', icon: MonitorUp },
     { id: 'exec', label: 'Exec', icon: Crosshair },
@@ -173,8 +175,10 @@ export default function App() {
         </div>
       </div>
 
-      {/* Content — 6 tabs */}
-      {tab === 'board' ? (
+      {/* Content — 7 tabs */}
+      {tab === 'jarvis' ? (
+        <JarvisChat />
+      ) : tab === 'board' ? (
         <BoardConsolidated />
       ) : tab === 'terminal' ? (
         <div className="flex-1 min-h-0 mx-4 sm:mx-8 mb-4 rounded-lg border border-neutral-800 overflow-hidden">
