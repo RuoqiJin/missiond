@@ -9,8 +9,6 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-const WS_PORT = parseInt(process.env.NEXT_PUBLIC_WS_PORT || '9120', 10);
-
 // ─── Types ───
 
 interface ChatMessage {
@@ -72,6 +70,7 @@ export function JarvisChat() {
   const [statusText, setStatusText] = useState('');
   const [tools, setTools] = useState<ToolActivity[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [slotReady, setSlotReady] = useState<boolean | null>(null); // null = checking
 
   // Conversation history sidebar
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -82,6 +81,43 @@ export function JarvisChat() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  // Auto-spawn slot-jarvis on mount
+  useEffect(() => {
+    let cancelled = false;
+    async function ensureSlot() {
+      try {
+        const res = await fetch('/api/pty/status?slotId=slot-jarvis');
+        const data = await res.json();
+        if (data?.state && data.state !== 'exited') {
+          if (!cancelled) setSlotReady(true);
+          return;
+        }
+      } catch { /* slot not running */ }
+
+      // Spawn slot-jarvis
+      if (!cancelled) setSlotReady(false);
+      try {
+        await fetch('/api/pty/spawn?slotId=slot-jarvis', { method: 'POST' });
+      } catch { /* ignore spawn errors */ }
+
+      // Poll until ready (max 30s)
+      for (let i = 0; i < 30 && !cancelled; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        try {
+          const res = await fetch('/api/pty/status?slotId=slot-jarvis');
+          const data = await res.json();
+          if (data?.state === 'idle') {
+            if (!cancelled) setSlotReady(true);
+            return;
+          }
+        } catch { /* keep polling */ }
+      }
+      if (!cancelled) setSlotReady(true); // optimistic after timeout
+    }
+    ensureSlot();
+    return () => { cancelled = true; };
+  }, []);
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
@@ -221,12 +257,8 @@ export function JarvisChat() {
     abortRef.current = controller;
 
     try {
-      const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-      const isLocal = wsHost === 'localhost' || wsHost === '127.0.0.1';
-      const port = isLocal ? WS_PORT : (parseInt(window.location.port, 10) || WS_PORT);
-      const baseUrl = `http://${wsHost}:${port}`;
-
-      const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+      // Use Next.js rewrite proxy to avoid CORS (same-origin)
+      const res = await fetch('/missiond/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -459,9 +491,24 @@ export function JarvisChat() {
         <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
           {messages.length === 0 && !isStreaming && (
             <div className="flex flex-col items-center justify-center h-full text-neutral-600">
-              <Brain className="w-10 h-10 mb-3 text-neutral-700" />
-              <p className="text-sm">Ask Jarvis anything</p>
-              <p className="text-xs mt-1 text-neutral-700">Supports text, images, and multi-turn conversation</p>
+              {slotReady === false ? (
+                <>
+                  <Loader2 className="w-8 h-8 mb-3 text-amber-500 animate-spin" />
+                  <p className="text-sm text-amber-400">Jarvis is waking up...</p>
+                  <p className="text-xs mt-1 text-neutral-700">Starting slot-jarvis, this may take a moment</p>
+                </>
+              ) : slotReady === null ? (
+                <>
+                  <Loader2 className="w-8 h-8 mb-3 text-neutral-600 animate-spin" />
+                  <p className="text-sm">Checking Jarvis status...</p>
+                </>
+              ) : (
+                <>
+                  <Brain className="w-10 h-10 mb-3 text-neutral-700" />
+                  <p className="text-sm">Ask Jarvis anything</p>
+                  <p className="text-xs mt-1 text-neutral-700">Supports text, images, and multi-turn conversation</p>
+                </>
+              )}
             </div>
           )}
 
