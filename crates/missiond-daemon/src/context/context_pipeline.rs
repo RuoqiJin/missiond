@@ -790,6 +790,8 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
         let mut scored_entries: Vec<(KnowledgeEntry, f64)> = Vec::new();
         for (id, rrf) in &ranked {
             if let Ok(Some(entry)) = db.kb_get_by_id(id) {
+                // Working Memory scope: skip scratchpad entries in global retrieval
+                if entry.scope_task_id.is_some() { continue; }
                 let age_days = chrono::DateTime::parse_from_rfc3339(&entry.updated_at)
                     .map(|t| (now - t.with_timezone(&chrono::Utc)).num_hours() as f64 / 24.0)
                     .unwrap_or(0.0);

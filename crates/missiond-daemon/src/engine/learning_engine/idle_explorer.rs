@@ -75,24 +75,23 @@ pub(crate) async fn check_idle_exploration(state: &AppState) {
         .unwrap_or(None)
         .unwrap_or(0);
 
-    let task_created = match explore_idx % 5 {
+    let task_created = match explore_idx % 6 {
         0 => explore_kb_consistency(state, &assignee).await,
         1 => explore_stale_dependencies(state, &assignee).await,
         2 => explore_unharvested_beacons(state, &assignee).await,
         3 => explore_kb_duplicates(state, &assignee).await,
         4 => explore_skill_synthesis(state, &assignee).await,
+        5 => explore_memory_consolidation(state, &assignee).await,
         _ => false,
     };
 
     if task_created {
         let _ = state.mission.db().daemon_state_set("last_idle_explore_at", now);
         let _ = state.mission.db().daemon_state_set("idle_explore_idx", explore_idx + 1);
-        info!(explore_type = explore_idx % 4, assignee = %assignee, "Idle explorer: created exploration task");
+        info!(explore_type = explore_idx % 6, assignee = %assignee, "Idle explorer: created exploration task");
     } else {
-        // Even if no task was needed, advance the index to try next type on next run.
-        // But don't update the timestamp — try again sooner.
         let _ = state.mission.db().daemon_state_set("idle_explore_idx", explore_idx + 1);
-        debug!(explore_type = explore_idx % 4, "Idle explorer: no issues found for this type, advancing");
+        debug!(explore_type = explore_idx % 6, "Idle explorer: no issues found for this type, advancing");
     }
 }
 
@@ -396,4 +395,75 @@ async fn create_explore_task(
             false
         }
     }
+}
+
+/// Explore 5: Memory Consolidation — find clusters of similar KB entries within the same
+/// category that can be merged into a single Master Rule.
+async fn explore_memory_consolidation(state: &AppState, assignee: &str) -> bool {
+    let now = chrono::Utc::now().timestamp();
+
+    // Reentry guard: 7-day cooldown
+    let last_run = state.mission.db().daemon_state_get("last_consolidation_at").unwrap_or(None).unwrap_or(0);
+    if now - last_run < 7 * 86400 {
+        debug!(days_ago = (now - last_run) / 86400, "Memory consolidation: recently run, skipping");
+        return false;
+    }
+
+    let entries = match state.mission.db().kb_list(None) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+
+    // Group by category, find categories with many similar entries
+    let mut by_category: std::collections::HashMap<String, Vec<&missiond_core::types::KnowledgeEntry>> = std::collections::HashMap::new();
+    for e in &entries {
+        by_category.entry(e.category.clone()).or_default().push(e);
+    }
+
+    // Find consolidation candidates: categories with ≥8 entries
+    let mut candidates: Vec<(String, usize)> = by_category.iter()
+        .filter(|(cat, items)| {
+            // Skip categories that should not be consolidated
+            !cat.starts_with("infra") && !cat.starts_with("credential") && items.len() >= 8
+        })
+        .map(|(cat, items)| (cat.clone(), items.len()))
+        .collect();
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+
+    if candidates.is_empty() {
+        return false;
+    }
+
+    // Pick the densest category for consolidation
+    let (target_cat, count) = &candidates[0];
+    let sample_entries: Vec<String> = by_category[target_cat].iter()
+        .take(15)
+        .map(|e| format!("- `{}` (conf={:.2}): {}", e.key, e.confidence, e.summary))
+        .collect();
+    let sample_str = sample_entries.join("\n");
+
+    let description = format!(
+        "## Memory Consolidation Task\n\n\
+        Category `{}` has {} entries — likely contains redundant or overlapping knowledge.\n\n\
+        ### Sample entries:\n{}\n\n\
+        ### Instructions:\n\
+        1. Use `mission_kb_search(category=\"{}\")` to review ALL entries in this category\n\
+        2. Identify clusters of entries covering the same topic/concept\n\
+        3. For each cluster (≥3 similar entries):\n\
+           a. Synthesize a single **Master Rule** that captures the consolidated knowledge\n\
+           b. Use `mission_kb_remember` to create the master entry with:\n\
+              - key: `master-<topic>` prefix\n\
+              - confidence: MAX of the original entries\n\
+              - detail: include `{{\"consolidated_from\": [\"key1\", \"key2\", ...]}}` for traceability\n\
+           c. Use `mission_kb_forget` to remove the original fragmented entries\n\
+        4. Report consolidation results as a Board note:\n\
+           - How many clusters found\n\
+           - How many entries merged (N→1 for each cluster)\n\
+           - Net reduction in entry count\n\n\
+        **Important**: Preserve the *why* behind each piece of knowledge. If entries conflict, keep the higher-confidence one and flag the conflict.",
+        target_cat, count, sample_str, target_cat
+    );
+
+    let _ = state.mission.db().daemon_state_set("last_consolidation_at", now);
+    create_explore_task(state, &format!("Explore: Memory Consolidation — {}", target_cat), &description, assignee).await
 }

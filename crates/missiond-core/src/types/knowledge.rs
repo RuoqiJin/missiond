@@ -29,6 +29,10 @@ pub struct KnowledgeEntry {
     /// FTS5 snippet with highlighted hit context (search results only)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_snippet: Option<String>,
+    /// Working Memory scope: None=global KB, Some(task_id)=scratchpad for that task.
+    /// Scratchpad entries only visible to their owning task, not global retrieval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_task_id: Option<String>,
 }
 
 fn default_kb_type() -> String { "fact".to_string() }
