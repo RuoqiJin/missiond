@@ -360,6 +360,24 @@ impl MissionDB {
             }
         }
 
+        // KB type field: rule/fact/goal/state — inferred from category prefix
+        if has_knowledge {
+            let kb_columns: Vec<String> = conn
+                .prepare("PRAGMA table_info(knowledge)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !kb_columns.iter().any(|c| c == "kb_type") {
+                conn.execute_batch("ALTER TABLE knowledge ADD COLUMN kb_type TEXT DEFAULT 'fact';")?;
+                // Backfill existing entries based on category prefix
+                conn.execute_batch(
+                    "UPDATE knowledge SET kb_type = 'rule' WHERE category LIKE 'policy%' OR category LIKE 'preference%' OR category = 'system_rule' OR category = 'decision';
+                     UPDATE knowledge SET kb_type = 'goal' WHERE category LIKE 'feature%' OR category LIKE 'project%' OR category = 'design_spec';
+                     UPDATE knowledge SET kb_type = 'state' WHERE category LIKE 'memory:ops%' OR category LIKE 'memory:debug%' OR category LIKE 'memory:bugfix%' OR category = 'ops';"
+                )?;
+            }
+        }
+
         // Add memory_forwarded_at to conversations if missing
         let conv_columns: Vec<String> = conn
             .prepare("PRAGMA table_info(conversations)")?

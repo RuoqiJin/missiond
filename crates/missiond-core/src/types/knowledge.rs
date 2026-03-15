@@ -21,10 +21,17 @@ pub struct KnowledgeEntry {
     pub last_accessed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub linked_task_id: Option<String>,
+    /// Knowledge type: rule, fact, goal, state. Inferred from category prefix.
+    /// Rules (policy/preference) → always apply. Facts (memory/architecture) → context.
+    /// Goals (feature/project) → aspirational. State (ops/debug) → current status.
+    #[serde(default = "default_kb_type")]
+    pub kb_type: String,
     /// FTS5 snippet with highlighted hit context (search results only)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_snippet: Option<String>,
 }
+
+fn default_kb_type() -> String { "fact".to_string() }
 
 /// Input for remembering (upserting) knowledge
 #[derive(Debug, Clone, Serialize, Deserialize)]
