@@ -289,8 +289,8 @@ export function JarvisChat() {
   const streamingToolsRef = useRef<ToolActivity[]>([]);
   const streamingStatusRef = useRef<string>('');
 
-  // Async dispatch tracking — maps task_id to conversation_id
-  const pendingAsyncRef = useRef<Map<string, string>>(new Map());
+  // Async dispatch tracking
+  const pendingAsyncRef = useRef<Set<string>>(new Set());
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -302,80 +302,42 @@ export function JarvisChat() {
     activeConvIdRef.current = activeConvId;
   }, [activeConvId]);
 
-  // Listen for async Jarvis results via WebSocket
+  // Listen for Jarvis task completion via WebSocket — refetch conversation messages
+  const loadConversationsRef = useRef<() => void>(() => {});
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      if (!detail?.type) return;
+      const { conversation_id: convId, task_id: taskId } = (e as CustomEvent).detail || {};
+      if (!convId) return;
 
-      if (detail.type === 'jarvis_async_result') {
-        const taskId = detail.task_id;
-        const convId = detail.conversation_id;
-        const content = detail.content || '';
+      pendingAsyncRef.current.delete(taskId);
 
-        // Remove from pending
-        pendingAsyncRef.current.delete(taskId);
-
-        // Only update if viewing this conversation
-        if (activeConvIdRef.current === convId) {
-          // Replace the ack message or append new message
-          setMessages((prev) => {
-            const ackIdx = prev.findIndex((m) => m.id === `async-ack-${taskId}`);
-            if (ackIdx >= 0) {
-              // Replace ack with real content
-              return prev.map((m) =>
-                m.id === `async-ack-${taskId}`
-                  ? { ...m, id: `asst-${Date.now()}`, content: cleanAssistantContent(content) }
-                  : m
-              );
-            }
-            // No ack found — append new message
-            return [...prev, {
-              id: `asst-${Date.now()}`,
-              role: 'assistant' as const,
-              content: cleanAssistantContent(content),
-              timestamp: Date.now(),
-            }];
-          });
-          // Clear tools/status for this task
-          setTools([]);
-          setStatusText('');
-        }
-
-        // Refresh conversation list
-        loadConversations();
+      // Refetch messages if viewing this conversation
+      if (activeConvIdRef.current === convId) {
+        fetch(`/api/jarvis/conversations?id=${convId}`)
+          .then((r) => r.json())
+          .then((data) => {
+            const msgs: ChatMessage[] = (data.messages || [])
+              .filter((m: { role: string }) => m.role === 'user' || m.role === 'assistant')
+              .map((m: { id: number; role: string; content: string; timestamp: string }) => ({
+                id: String(m.id),
+                role: m.role as 'user' | 'assistant',
+                content: m.content,
+                timestamp: new Date(m.timestamp).getTime(),
+              }));
+            setMessages(msgs);
+            setTools([]);
+            setStatusText('');
+          })
+          .catch(() => { /* ignore */ });
       }
 
-      if (detail.type === 'jarvis_activity') {
-        const convId = detail.conversation_id;
-        if (activeConvIdRef.current !== convId) return;
-
-        if (detail.activity === 'status') {
-          setStatusText(detail.text || detail.phase || '');
-        }
-        if (detail.activity === 'tool_start') {
-          setTools((prev) => [...prev, {
-            id: `t${prev.length + 1}`,
-            tool: detail.tool,
-            params: detail.params,
-            status: 'running',
-          }]);
-        }
-        if (detail.activity === 'tool_end') {
-          setTools((prev) => {
-            // Find last running tool with matching name
-            const idx = [...prev].reverse().findIndex((t) => t.tool === detail.tool && t.status === 'running');
-            if (idx < 0) return prev;
-            const realIdx = prev.length - 1 - idx;
-            return prev.map((t, i) => i === realIdx ? { ...t, status: 'done', durationMs: detail.duration_ms, output: detail.output } : t);
-          });
-        }
-      }
+      // Refresh conversation list
+      loadConversationsRef.current();
     };
 
-    window.addEventListener('jarvis-ws-event', handler);
-    return () => window.removeEventListener('jarvis-ws-event', handler);
-  }, [loadConversations]);
+    window.addEventListener('jarvis-task-completed', handler);
+    return () => window.removeEventListener('jarvis-task-completed', handler);
+  }, []);
 
   // Auto-spawn slot-jarvis on mount
   useEffect(() => {
@@ -447,6 +409,8 @@ export function JarvisChat() {
     } catch { /* ignore */ }
     return [] as Conversation[];
   }, []);
+  // Keep ref in sync for WS event handler
+  loadConversationsRef.current = loadConversations;
 
   // Load conversation list on mount and auto-restore the most recent one
   const initialLoadDone = useRef(false);
@@ -786,19 +750,8 @@ export function JarvisChat() {
           if (evt.event === 'async_dispatch') {
             try {
               const dispatch = JSON.parse(evt.data);
-              // Track this async task so WS handler can match results
               const taskId = dispatch.task_id || '';
-              const convId = dispatch.conversation_id || streamingConvIdRef.current || '';
-              pendingAsyncRef.current.set(taskId, convId);
-
-              // Mark the current ack message with the task ID for later replacement
-              if (isViewing) {
-                setMessages((prev) =>
-                  prev.map((m) =>
-                    m.id === 'streaming' ? { ...m, id: `async-ack-${taskId}` } : m
-                  )
-                );
-              }
+              pendingAsyncRef.current.add(taskId);
             } catch { /* ignore */ }
             continue;
           }

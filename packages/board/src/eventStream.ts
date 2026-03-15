@@ -137,10 +137,11 @@ function handleEvent(
       break;
 
     // ── Jarvis async dispatch events ──
-    case 'jarvis_async_result':
-    case 'jarvis_activity':
+    case 'jarvis_task_completed':
       if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('jarvis-ws-event', { detail: event }));
+        window.dispatchEvent(new CustomEvent('jarvis-task-completed', {
+          detail: { conversation_id: event.payload?.conversation_id, task_id: event.payload?.task_id },
+        }));
       }
       break;
 

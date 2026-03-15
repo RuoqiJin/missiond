@@ -696,7 +696,6 @@ impl PTYWebSocketServer {
         trace_store: JarvisTraceStore,
         context_enricher: ContextEnricherSlot,
         db: Option<Arc<crate::db::MissionDB>>,
-        frontend_events_tx: Option<broadcast::Sender<String>>,
     ) -> anyhow::Result<()> {
         // Disable Nagle — SSE needs every chunk sent immediately
         stream.set_nodelay(true)?;
@@ -982,214 +981,104 @@ impl PTYWebSocketServer {
         };
 
         // ── Async dispatch for non-chat intents ──
-        // If the intent classifier says this is NOT a simple chat (greeting/thanks),
-        // dispatch to the slot asynchronously and return immediately.
-        // The result will be pushed to the frontend via WebSocket event.
+        // Create a Board Task and return immediately. Autopilot dispatches to a worker
+        // slot; on completion, the result is appended to the Jarvis conversation.
         let is_chat_intent = enrich_intent.as_deref()
             .map(|i| i.starts_with("bypass:chat"))
             .unwrap_or(false);
 
         if !is_chat_intent && !proxy_mode {
-            if let Some(ref events_tx) = frontend_events_tx {
-                info!(?addr, slot_id, intent = ?enrich_intent, trace_id = %chat_id, "Async dispatch (non-blocking)");
+            if let Some(ref db) = db {
+                // Build Board Task metadata
+                let conv_id_str = jarvis_conv_id.as_deref().unwrap_or("");
+                let meta = serde_json::json!({
+                    "conversation_id": conv_id_str,
+                    "user_message": raw_user_text,
+                });
+                let task_title: String = if raw_user_text.chars().count() > 80 {
+                    let truncated: String = raw_user_text.chars().take(77).collect();
+                    format!("{}...", truncated)
+                } else {
+                    raw_user_text.clone()
+                };
 
-                // Save user message immediately
-                if let (Some(ref db), Some(ref cid)) = (&db, &jarvis_conv_id) {
-                    if !raw_user_text.is_empty() {
-                        let _ = db.jarvis_save_exchange(cid, &raw_user_text, "");
-                        if conversation_id.is_none() {
-                            let title = if raw_user_text.chars().count() > 80 {
-                                let truncated: String = raw_user_text.chars().take(77).collect();
-                                format!("{}...", truncated)
-                            } else {
-                                raw_user_text.clone()
-                            };
-                            let _ = db.jarvis_update_title(cid, &title);
+                let task_input = crate::types::CreateBoardTaskInput {
+                    title: task_title,
+                    description: Some(meta.to_string()),
+                    priority: None,
+                    category: Some("jarvis".to_string()),
+                    project: None,
+                    server: None,
+                    due_date: None,
+                    parent_id: None,
+                    assignee: Some("slot-worker-1".to_string()),
+                    auto_execute: Some(true),
+                    prompt_template: Some(user_message.clone()),
+                    hidden: Some(true),
+                    flow_template: None,
+                    depends_on: None,
+                    dedupe_key: None,
+                };
+
+                match db.create_board_task(&task_input) {
+                    Ok(task) => {
+                        let task_short_id = &task.id[..8.min(task.id.len())];
+                        let ack_text = format!("好的，已安排后台处理 (#{})。完成后会自动回复。", task_short_id);
+                        info!(?addr, slot_id, task_id = %task.id, intent = ?enrich_intent, "Jarvis async → Board Task created");
+
+                        // Save exchange: user message + ack response (proper pair)
+                        if let Some(ref cid) = jarvis_conv_id {
+                            if !raw_user_text.is_empty() {
+                                let _ = db.jarvis_save_exchange(cid, &raw_user_text, &ack_text);
+                                if conversation_id.is_none() {
+                                    let _ = db.jarvis_update_title(cid, &task_input.title);
+                                }
+                            }
                         }
+
+                        // Stream ack via SSE
+                        let ack_chunk = serde_json::json!({
+                            "id": &chat_id,
+                            "object": "chat.completion.chunk",
+                            "model": "jarvis-missiond",
+                            "choices": [{
+                                "index": 0,
+                                "delta": { "content": &ack_text },
+                                "finish_reason": serde_json::Value::Null,
+                            }]
+                        });
+                        let _ = stream.write_all(format!("data: {}\n\n", ack_chunk).as_bytes()).await;
+
+                        // Send async_dispatch marker with Board Task ID
+                        let dispatch_event = serde_json::json!({
+                            "conversation_id": conv_id_str,
+                            "task_id": task.id,
+                        });
+                        let _ = stream.write_all(format!("event: async_dispatch\ndata: {}\n\n", dispatch_event).as_bytes()).await;
+
+                        let stop = serde_json::json!({
+                            "id": &chat_id,
+                            "object": "chat.completion.chunk",
+                            "model": "jarvis-missiond",
+                            "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }]
+                        });
+                        let _ = stream.write_all(format!("data: {}\n\n", stop).as_bytes()).await;
+                        let _ = stream.write_all(b"data: [DONE]\n\n").await;
+                        let _ = stream.flush().await;
+
+                        trace_store.complete_trace(&chat_id, &ack_text, 0).await;
+                        stream.shutdown().await?;
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        warn!(?addr, error = %e, "Board Task creation failed, falling back to sync path");
+                        // Fall through to synchronous path
                     }
                 }
-
-                // Send meta event (conversation_id) immediately so frontend can track
-                // (already sent above at line 948)
-
-                // Send immediate ack response via SSE
-                let ack_text = "正在处理，请稍候...";
-                let ack_chunk = serde_json::json!({
-                    "id": &chat_id,
-                    "object": "chat.completion.chunk",
-                    "model": "jarvis-missiond",
-                    "choices": [{
-                        "index": 0,
-                        "delta": { "content": ack_text },
-                        "finish_reason": serde_json::Value::Null,
-                    }]
-                });
-                let _ = stream.write_all(format!("data: {}\n\n", ack_chunk).as_bytes()).await;
-
-                // Send async_dispatch marker so frontend knows to expect WS result
-                let dispatch_event = serde_json::json!({
-                    "conversation_id": jarvis_conv_id.as_deref().unwrap_or(""),
-                    "task_id": &chat_id,
-                });
-                let _ = stream.write_all(format!("event: async_dispatch\ndata: {}\n\n", dispatch_event).as_bytes()).await;
-
-                let stop = serde_json::json!({
-                    "id": &chat_id,
-                    "object": "chat.completion.chunk",
-                    "model": "jarvis-missiond",
-                    "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }]
-                });
-                let _ = stream.write_all(format!("data: {}\n\n", stop).as_bytes()).await;
-                let _ = stream.write_all(b"data: [DONE]\n\n").await;
-                let _ = stream.flush().await;
-
-                // Spawn background task: send to slot, collect response, push via WS
-                let pty_bg = Arc::clone(&pty_manager);
-                let events_tx_bg = events_tx.clone();
-                let trace_bg = trace_store.clone();
-                let chat_id_bg = chat_id.clone();
-                let slot_id_bg = slot_id.clone();
-                let send_msg_bg = enriched_message.clone();
-                let boundary_id_bg = boundary_id.clone();
-                let db_bg = db.clone();
-                let conv_id_bg = jarvis_conv_id.clone();
-                let raw_user_bg = raw_user_text.clone();
-
-                tokio::spawn(async move {
-                    let start = std::time::Instant::now();
-
-                    // Subscribe to session events for activity forwarding via WS
-                    let mut rx = pty_bg.subscribe_session(&slot_id_bg).await.ok();
-                    let timeout_ms = 300_000u64; // 5 min
-
-                    // Forward tool events via WS while slot is working
-                    let pty_for_send = Arc::clone(&pty_bg);
-                    let send_msg = send_msg_bg.clone();
-                    let send_slot = slot_id_bg.clone();
-                    let send_handle = tokio::spawn(async move {
-                        pty_for_send.send(&send_slot, &send_msg, timeout_ms).await
-                    });
-
-                    // Forward activity events via WS
-                    if let Some(ref mut rx) = rx {
-                        let events_tx_fwd = events_tx_bg.clone();
-                        let task_id = chat_id_bg.clone();
-                        let conv_id = conv_id_bg.clone();
-                        loop {
-                            if send_handle.is_finished() { break; }
-                            match tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
-                                Ok(Ok(event)) => {
-                                    let activity_json = match event {
-                                        SessionEvent::StatusUpdate(status) => {
-                                            Some(serde_json::json!({
-                                                "type": "jarvis_activity",
-                                                "task_id": task_id,
-                                                "conversation_id": conv_id,
-                                                "activity": "status",
-                                                "phase": format!("{}", status.phase),
-                                                "text": status.status_text,
-                                            }))
-                                        }
-                                        SessionEvent::ToolOutput(tool) => {
-                                            use crate::semantic::ToolStatus;
-                                            let activity_type = match tool.status {
-                                                ToolStatus::Running => "tool_start",
-                                                ToolStatus::Completed => "tool_end",
-                                            };
-                                            Some(serde_json::json!({
-                                                "type": "jarvis_activity",
-                                                "task_id": task_id,
-                                                "conversation_id": conv_id,
-                                                "activity": activity_type,
-                                                "tool": tool.tool_name,
-                                                "params": serde_json::json!(tool.params),
-                                                "output": tool.output.as_deref().map(|o| {
-                                                    if o.len() > 4096 { format!("{}...[truncated]", &o[..4096]) }
-                                                    else { o.to_string() }
-                                                }),
-                                                "duration_ms": tool.duration_ms,
-                                            }))
-                                        }
-                                        SessionEvent::StateChange { new_state, .. } => {
-                                            Some(serde_json::json!({
-                                                "type": "jarvis_activity",
-                                                "task_id": task_id,
-                                                "conversation_id": conv_id,
-                                                "activity": "state",
-                                                "state": format!("{:?}", new_state),
-                                            }))
-                                        }
-                                        _ => None,
-                                    };
-                                    if let Some(json) = activity_json {
-                                        let _ = events_tx_fwd.send(json.to_string());
-                                    }
-                                }
-                                Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
-                                Ok(Err(broadcast::error::RecvError::Closed)) => break,
-                                Err(_) => continue, // timeout, check send_handle
-                            }
-                        }
-                    }
-
-                    // Collect final result
-                    let duration_ms = start.elapsed().as_millis() as u64;
-                    match send_handle.await {
-                        Ok(Ok(result)) => {
-                            let clean = clean_jarvis_response(&result.response, &boundary_id_bg);
-                            trace_bg.complete_trace(&chat_id_bg, &result.response, duration_ms).await;
-
-                            // Update DB with actual response
-                            if let (Some(ref db), Some(ref cid)) = (&db_bg, &conv_id_bg) {
-                                if !raw_user_bg.is_empty() {
-                                    // Delete the placeholder exchange, save with real response
-                                    let _ = db.jarvis_save_exchange(cid, &raw_user_bg, &clean);
-                                }
-                            }
-
-                            // Push result to frontend via WS
-                            let result_event = serde_json::json!({
-                                "type": "jarvis_async_result",
-                                "task_id": chat_id_bg,
-                                "conversation_id": conv_id_bg,
-                                "content": clean,
-                                "duration_ms": duration_ms,
-                            });
-                            let _ = events_tx_bg.send(result_event.to_string());
-                            info!(task_id = %chat_id_bg, duration_ms, "Async Jarvis task completed");
-                        }
-                        Ok(Err(e)) => {
-                            trace_bg.error_trace(&chat_id_bg, &e.to_string(), None).await;
-                            let err_event = serde_json::json!({
-                                "type": "jarvis_async_result",
-                                "task_id": chat_id_bg,
-                                "conversation_id": conv_id_bg,
-                                "content": format!("任务执行失败: {}", e),
-                                "error": true,
-                            });
-                            let _ = events_tx_bg.send(err_event.to_string());
-                            warn!(task_id = %chat_id_bg, error = %e, "Async Jarvis task failed");
-                        }
-                        Err(e) => {
-                            let err_event = serde_json::json!({
-                                "type": "jarvis_async_result",
-                                "task_id": chat_id_bg,
-                                "conversation_id": conv_id_bg,
-                                "content": format!("内部错误: {}", e),
-                                "error": true,
-                            });
-                            let _ = events_tx_bg.send(err_event.to_string());
-                        }
-                    }
-                });
-
-                // Close SSE connection immediately
-                stream.shutdown().await?;
-                return Ok(());
             }
         }
 
-        // ── Synchronous path (chat intents / proxy mode / no frontend_events_tx) ──
+        // ── Synchronous path (chat intents / proxy mode / Board Task fallback) ──
         // Dual-track streaming:
         // 1. Subscribe to session events → forward status/tool events as SSE (activity view)
         // 2. Use blocking send() → get clean final response (handles turn management correctly)
@@ -1525,7 +1414,7 @@ impl PTYWebSocketServer {
             // Chat completions SSE endpoint
             if request_line.starts_with("POST /v1/chat/completions") {
                 return match pty_manager {
-                    Some(pm) => Self::handle_chat_completions(stream, addr, pm, jarvis_trace, context_enricher, db, frontend_events_tx).await,
+                    Some(pm) => Self::handle_chat_completions(stream, addr, pm, jarvis_trace, context_enricher, db).await,
                     None => {
                         let mut s = stream;
                         let err = serde_json::json!({"error": {"message": "PTY manager not available"}});

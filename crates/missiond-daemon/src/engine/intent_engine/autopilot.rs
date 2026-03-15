@@ -625,6 +625,31 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                     fail_map.remove(&slot_id);
                 }
 
+                // Jarvis task post-completion: append result to conversation
+                if task.category == "jarvis" {
+                    if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&task.description) {
+                        if let Some(conv_id) = meta.get("conversation_id").and_then(|v| v.as_str()) {
+                            if !conv_id.is_empty() {
+                                let _ = state.mission.db().router_chat_append_messages(conv_id, &[
+                                    ("assistant".to_string(), res.response.clone()),
+                                ]);
+                                state.event_bus.publish_traced(
+                                    DaemonEvent::JarvisTaskCompleted {
+                                        conversation_id: conv_id.to_string(),
+                                        task_id: task.id.clone(),
+                                    },
+                                    TraceContext {
+                                        trace_id: Some(conv_id.to_string()),
+                                        summary: Some(format!("jarvis: task {} completed", &task.id[..8.min(task.id.len())])),
+                                        ..Default::default()
+                                    },
+                                );
+                                info!(task_id = %task.id, conv_id = %conv_id, "Jarvis async: result appended to conversation");
+                            }
+                        }
+                    }
+                }
+
                 // Deploy task post-mortem: trigger memory-slow to review
                 if task.category == "deploy" {
                     let review_state = state.clone();

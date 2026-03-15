@@ -299,7 +299,7 @@ pub enum DependencyStatus {
 }
 
 /// Input for creating a board task
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateBoardTaskInput {
     pub title: String,
