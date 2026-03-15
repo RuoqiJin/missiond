@@ -95,6 +95,9 @@ function cleanAssistantContent(content: string): string {
       if (trimmed.startsWith('✕ ') || trimmed.startsWith('✗ ')) return false;
       if (trimmed.includes('Auto-update failed')) return false;
       if (trimmed.includes('bypass permissions on')) return false;
+      if (trimmed.includes('switched from npm to native installer')) return false;
+      if (trimmed.includes('claude install') && trimmed.includes('docs.anthro')) return false;
+      if (trimmed.startsWith('Pasting') && trimmed.length < 20) return false;
       // Safety net: strip tool output border lines that leaked through
       if (trimmed.startsWith('⎿') || trimmed.startsWith('│')) return false;
       // Strip tool result file path references

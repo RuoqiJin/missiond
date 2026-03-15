@@ -1078,13 +1078,15 @@ impl PTYSession {
                     debounce_target = None;
                     debounce_count = 0;
                 } else {
-                    // Debounce only Thinking↔ToolRunning transitions.
-                    // The ⏺ tool line flickers in alacritty, causing rapid alternation.
+                    // Debounce state transitions that are prone to flickering:
+                    // 1. Thinking↔ToolRunning: ⏺ tool line flickers in alacritty
+                    // 2. Processing→Idle: spinner briefly disappears between tool calls,
+                    //    causing premature turn end while prompt ❯ is always visible
                     let needs_debounce = matches!(
                         (current_state, new_state),
                         (SessionState::Thinking, SessionState::ToolRunning)
                             | (SessionState::ToolRunning, SessionState::Thinking)
-                    );
+                    ) || (current_state.is_processing() && !new_state.is_processing());
 
                     if needs_debounce {
                         if debounce_target == Some(new_state) {
@@ -1827,13 +1829,16 @@ impl BlockClassifier {
             return ScreenTextSource::Assistant;
         }
 
-        // UI elements — status bar, shortcuts, permission toggles
+        // UI elements — status bar, shortcuts, permission toggles, system notices
         if trimmed.contains("ctrl+")
             || trimmed.contains("Ctrl+")
             || trimmed.contains("shift+tab")
             || trimmed.contains("IDE disconnected")
             || trimmed.starts_with("⏵⏵")
             || trimmed.starts_with("✢")
+            // Claude Code system notices (npm migration, auto-update, etc.)
+            || trimmed.contains("switched from npm to native installer")
+            || (trimmed.starts_with("Pasting") && trimmed.len() < 20)
         {
             return ScreenTextSource::Ui;
         }
