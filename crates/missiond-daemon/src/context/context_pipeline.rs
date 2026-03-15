@@ -794,7 +794,9 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
                     .map(|t| (now - t.with_timezone(&chrono::Utc)).num_hours() as f64 / 24.0)
                     .unwrap_or(0.0);
                 let decay = embedding::temporal_decay(&entry.category, age_days);
-                scored_entries.push((entry, rrf * decay));
+                // Confidence weighting: high-confidence entries rank higher,
+                // low-confidence entries are suppressed (feedback loop integration)
+                scored_entries.push((entry.clone(), rrf * decay * entry.confidence));
             }
         }
         scored_entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
