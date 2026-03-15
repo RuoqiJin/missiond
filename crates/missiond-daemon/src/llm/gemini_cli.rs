@@ -94,21 +94,71 @@ impl GeminiCli {
         info!(model, prompt_len = prompt.len(), idle_timeout_secs = idle_timeout.as_secs(),
               "Gemini CLI: calling (stream-json mode)");
 
-        let mut child = tokio::process::Command::new(&self.binary)
-            .args(["-p", &prompt, "-m", model, "-o", "stream-json", "--yolo"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| anyhow!("Failed to spawn gemini CLI '{}': {}", self.binary, e))?;
+        let auth_config = resolve_gemini_auth_config();
+        info!(mode = %auth_config.mode, "Gemini CLI: using {} mode", auth_config.mode);
 
+        let mut child = self.spawn_cli(&prompt, model, &auth_config)?;
+        let events = self.stream_events(&mut child, idle_timeout, &progress_tx).await?;
+
+        // Wait for process to fully exit
+        let status = child.wait().await
+            .map_err(|e| anyhow!("Gemini CLI process error: {}", e))?;
+        if !status.success() {
+            let stderr_msg = read_stderr(&mut child).await;
+
+            // OAuth expired detection: auto-fallback to apikey and retry once
+            if auth_config.mode == "google" && is_auth_error(&stderr_msg) {
+                warn!("Gemini CLI: OAuth auth failed, attempting fallback to API key mode");
+                let fallback = resolve_apikey_config();
+                if let Some(ref fallback_config) = fallback {
+                    // Sync settings.json to apikey mode
+                    sync_settings_json("gemini-api-key");
+                    if let Ok(mut retry_child) = self.spawn_cli(&prompt, model, fallback_config) {
+                        let retry_result = self.stream_events(&mut retry_child, idle_timeout, &progress_tx).await;
+                        let retry_status = retry_child.wait().await;
+                        if let (Ok(events), Ok(s)) = (&retry_result, &retry_status) {
+                            if s.success() {
+                                info!("Gemini CLI: fallback to API key succeeded");
+                                return parse_stream_events(events, model);
+                            }
+                        }
+                        let _ = retry_child.kill().await;
+                    }
+                }
+                return Err(anyhow!("Gemini CLI: OAuth expired, API key fallback also failed. Run `gemini` to re-authenticate. stderr: {}", stderr_msg));
+            }
+
+            return Err(anyhow!("Gemini CLI exited with {}: {}", status, stderr_msg));
+        }
+
+        parse_stream_events(&events, model)
+    }
+
+    fn spawn_cli(&self, prompt: &str, model: &str, auth: &GeminiAuthConfig) -> Result<tokio::process::Child> {
+        let mut cmd = tokio::process::Command::new(&self.binary);
+        cmd.args(["-p", prompt, "-m", model, "-o", "stream-json", "--yolo"])
+            .stdin(std::process::Stdio::null())  // Prevent interactive prompts from hanging
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        if let Some(ref key) = auth.api_key {
+            cmd.env("GEMINI_API_KEY", key);
+        }
+
+        cmd.spawn()
+            .map_err(|e| anyhow!("Failed to spawn gemini CLI '{}': {}", self.binary, e))
+    }
+
+    /// Stream NDJSON events from a running CLI process.
+    async fn stream_events(
+        &self,
+        child: &mut tokio::process::Child,
+        idle_timeout: Duration,
+        progress_tx: &Option<mpsc::UnboundedSender<GeminiCliProgress>>,
+    ) -> Result<Vec<Value>> {
         let stdout = child.stdout.take()
             .ok_or_else(|| anyhow!("Failed to capture stdout"))?;
         let mut lines = BufReader::new(stdout).lines();
-
-        // Collect NDJSON events with idle timeout.
-        // Gemini CLI is agentic — it may call tools (file reads, code search) that take
-        // much longer than text generation. We use an extended timeout when waiting for
-        // tool_result after seeing a tool_use event.
         let mut events: Vec<Value> = Vec::new();
         let absolute_deadline = tokio::time::Instant::now() + ABSOLUTE_TIMEOUT;
         let mut awaiting_tool_result = false;
@@ -131,8 +181,6 @@ impl GeminiCli {
                                 let event_type = event.get("type")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("unknown");
-
-                                // Track agentic tool execution state + emit progress
                                 match event_type {
                                     "tool_use" => {
                                         awaiting_tool_result = true;
@@ -150,10 +198,9 @@ impl GeminiCli {
                                     }
                                     _ => {}
                                 }
-
                                 if event_type == "result" || event_type == "error" {
                                     events.push(event);
-                                    return Ok(()); // Terminal event
+                                    return Ok(());
                                 }
                                 events.push(event);
                             }
@@ -163,7 +210,7 @@ impl GeminiCli {
                             }
                         }
                     }
-                    Ok(Ok(None)) => return Ok(()),  // EOF — process finished
+                    Ok(Ok(None)) => return Ok(()),
                     Ok(Err(e)) => return Err(format!("IO error: {}", e)),
                     Err(_) => {
                         let mode = if awaiting_tool_result { "tool_exec" } else { "idle" };
@@ -173,7 +220,6 @@ impl GeminiCli {
             }
         }.await;
 
-        // Always try to clean up the child process
         if let Err(ref reason) = stream_result {
             warn!(reason, "Gemini CLI: killing process");
             let _ = child.kill().await;
@@ -181,22 +227,7 @@ impl GeminiCli {
             return Err(anyhow!("Gemini CLI timed out: {}", reason));
         }
 
-        // Wait for process to fully exit
-        let status = child.wait().await
-            .map_err(|e| anyhow!("Gemini CLI process error: {}", e))?;
-        if !status.success() {
-            // Try to get stderr for error context
-            let stderr_msg = if let Some(mut stderr) = child.stderr.take() {
-                let mut buf = String::new();
-                let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut buf).await;
-                buf.chars().take(500).collect::<String>()
-            } else {
-                String::new()
-            };
-            return Err(anyhow!("Gemini CLI exited with {}: {}", status, stderr_msg));
-        }
-
-        parse_stream_events(&events, model)
+        Ok(events)
     }
 
     /// Convenience: single prompt string.
@@ -209,7 +240,7 @@ impl GeminiCli {
 }
 
 /// Default system instruction prepended to all Gemini CLI prompts.
-const DEFAULT_SYSTEM_INSTRUCTION: &str = "System: 不要修改任何代码。只分析和回答问题。";
+const DEFAULT_SYSTEM_INSTRUCTION: &str = "System: 不要修改任何代码。只调查分析和回答问题。";
 
 /// Convert OpenAI-style messages array to a single prompt string.
 fn messages_to_prompt(messages: &[Value]) -> String {
@@ -371,4 +402,95 @@ fn extract_tool_result_progress(event: &Value, tool_seq: u32) -> GeminiCliProgre
         result_preview,
         is_error,
     }
+}
+
+// ===== Auth config helpers =====
+
+/// Resolved auth configuration for a Gemini CLI subprocess.
+struct GeminiAuthConfig {
+    mode: String,       // "apikey" or "google"
+    api_key: Option<String>,
+}
+
+/// Read llm.yaml to get gemini_api_key and gemini_auth_mode.
+/// Then read ~/.gemini/settings.json as fallback for mode detection.
+fn resolve_gemini_auth_config() -> GeminiAuthConfig {
+    let llm_yaml = missiond_core::default_mission_home().join("llm.yaml");
+    let llm_config = std::fs::read_to_string(&llm_yaml).ok()
+        .and_then(|c| serde_yaml::from_str::<serde_yaml::Value>(&c).ok());
+
+    let api_key = llm_config.as_ref()
+        .and_then(|c| c.get("gemini_api_key").and_then(|v| v.as_str()).map(|s| s.to_string()));
+
+    // Mode: llm.yaml gemini_auth_mode > settings.json selectedType > default apikey
+    let mode = llm_config.as_ref()
+        .and_then(|c| c.get("gemini_auth_mode").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .and_then(|h| std::fs::read_to_string(h.join(".gemini/settings.json")).ok())
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v.pointer("/security/auth/selectedType").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                .map(|t| if t == "oauth-personal" { "google".to_string() } else { "apikey".to_string() })
+                .unwrap_or_else(|| "apikey".to_string())
+        });
+
+    GeminiAuthConfig {
+        api_key: if mode == "apikey" { api_key } else { None },
+        mode,
+    }
+}
+
+/// Build an apikey-only config for fallback.
+fn resolve_apikey_config() -> Option<GeminiAuthConfig> {
+    let llm_yaml = missiond_core::default_mission_home().join("llm.yaml");
+    let content = std::fs::read_to_string(&llm_yaml).ok()?;
+    let config: serde_yaml::Value = serde_yaml::from_str(&content).ok()?;
+    let key = config.get("gemini_api_key").and_then(|v| v.as_str())?.to_string();
+    Some(GeminiAuthConfig { mode: "apikey".to_string(), api_key: Some(key) })
+}
+
+/// Sync selectedType to ~/.gemini/settings.json.
+fn sync_settings_json(selected_type: &str) {
+    let path = match dirs::home_dir() {
+        Some(h) => h.join(".gemini/settings.json"),
+        None => return,
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let mut settings: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    if let Some(auth) = settings.pointer_mut("/security/auth") {
+        if let Some(obj) = auth.as_object_mut() {
+            obj.insert("selectedType".to_string(), serde_json::json!(selected_type));
+        }
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&settings) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+/// Read stderr from a child process (best effort).
+async fn read_stderr(child: &mut tokio::process::Child) -> String {
+    if let Some(mut stderr) = child.stderr.take() {
+        let mut buf = String::new();
+        let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut buf).await;
+        buf.chars().take(500).collect()
+    } else {
+        String::new()
+    }
+}
+
+/// Detect OAuth/auth-related errors in stderr output.
+fn is_auth_error(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("token expired")
+        || lower.contains("auth required")
+        || lower.contains("authentication")
+        || lower.contains("login")
+        || lower.contains("opening authentication page")
+        || lower.contains("do you want to continue")
 }

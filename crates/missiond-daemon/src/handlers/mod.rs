@@ -48,7 +48,7 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
             | "mission_skill_exec"
             => skill::handle(state, name, args).await,
         "mission_question" | "mission_decision_stats" | "mission_incident"
-            | "mission_llm_trace"
+            | "mission_llm_trace" | "mission_gemini_auth"
             => question::handle(state, name, args).await,
         "mission_router_chat" | "mission_router_chat_manage"
             => router_chat::handle(state, name, args).await,

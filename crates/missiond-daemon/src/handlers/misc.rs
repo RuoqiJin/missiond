@@ -431,6 +431,90 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
         }
 
+        // ===== Gemini Auth Mode Switch =====
+        // Single source of truth: llm.yaml gemini_auth_mode
+        // settings.json is synced as a side-effect for CLI compatibility
+        "mission_gemini_auth" => {
+            let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("status");
+            let llm_yaml_path = missiond_core::default_mission_home().join("llm.yaml");
+
+            // Read llm.yaml
+            let llm_content = tokio::fs::read_to_string(&llm_yaml_path).await
+                .map_err(|e| anyhow!("Failed to read llm.yaml: {}", e))?;
+            let llm_config: serde_yaml::Value = serde_yaml::from_str(&llm_content)
+                .map_err(|e| anyhow!("Failed to parse llm.yaml: {}", e))?;
+
+            let current_mode = llm_config.get("gemini_auth_mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("apikey");
+
+            if mode == "status" {
+                let key_preview = if current_mode == "apikey" {
+                    llm_config.get("gemini_api_key")
+                        .and_then(|k| k.as_str())
+                        .map(|k| format!("{}...{}", &k[..10.min(k.len())], &k[k.len().saturating_sub(4)..]))
+                } else {
+                    None
+                };
+                return Ok(ToolResult::json(&json!({
+                    "mode": current_mode,
+                    "key_preview": key_preview,
+                })));
+            }
+
+            if mode != "apikey" && mode != "google" {
+                return Ok(ToolResult::error(format!("Unknown mode: {}. Use: apikey, google, status", mode)));
+            }
+
+            if mode == current_mode {
+                return Ok(ToolResult::json(&json!({
+                    "status": "no_change",
+                    "mode": current_mode,
+                    "message": format!("Already in {} mode", current_mode),
+                })));
+            }
+
+            // Update llm.yaml (single source of truth)
+            let new_content = if llm_content.contains("gemini_auth_mode:") {
+                llm_content.replace(
+                    &format!("gemini_auth_mode: {}", current_mode),
+                    &format!("gemini_auth_mode: {}", mode),
+                )
+            } else {
+                // First time: append after provider line
+                llm_content.replace(
+                    "provider: gemini-cli",
+                    &format!("provider: gemini-cli\ngemini_auth_mode: {}", mode),
+                )
+            };
+            tokio::fs::write(&llm_yaml_path, &new_content).await
+                .map_err(|e| anyhow!("Failed to write llm.yaml: {}", e))?;
+
+            // Sync to settings.json (side-effect for CLI compatibility)
+            let selected_type = if mode == "apikey" { "gemini-api-key" } else { "oauth-personal" };
+            let settings_path = dirs::home_dir()
+                .map(|h| h.join(".gemini/settings.json"));
+            if let Some(ref path) = settings_path {
+                if let Ok(content) = tokio::fs::read_to_string(path).await {
+                    if let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(auth) = settings.pointer_mut("/security/auth") {
+                            auth.as_object_mut().map(|m| m.insert("selectedType".to_string(), json!(selected_type)));
+                        }
+                        if let Ok(json) = serde_json::to_string_pretty(&settings) {
+                            let _ = tokio::fs::write(path, json).await;
+                        }
+                    }
+                }
+            }
+
+            info!(from = current_mode, to = mode, "Gemini auth mode switched");
+            Ok(ToolResult::json(&json!({
+                "status": "switched",
+                "from": current_mode,
+                "to": mode,
+            })))
+        }
+
         // ===== Gemini Request Log =====
         "mission_gemini_trace" => {
             let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();

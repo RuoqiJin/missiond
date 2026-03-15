@@ -79,8 +79,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["gemini_trace", "gemini_stats", "gemini_watch", "jarvis_logs", "jarvis_trace"],
-                        "description": "gemini_trace=Gemini 调用日志, gemini_stats=统计, gemini_watch=可用性监测, jarvis_logs=Jarvis 日志, jarvis_trace=Jarvis trace"
+                        "enum": ["gemini_trace", "gemini_stats", "gemini_watch", "gemini_auth", "jarvis_logs", "jarvis_trace"],
+                        "description": "gemini_trace=调用日志, gemini_stats=统计, gemini_watch=可用性监测, gemini_auth=认证模式切换(apikey/google), jarvis_logs=Jarvis 日志, jarvis_trace=Jarvis trace"
                     },
                     "caller": {
                         "type": "string",
@@ -107,6 +107,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "trace_id": {
                         "type": "string",
                         "description": "Trace ID (action=jarvis_trace 时可选，不传返回最新)"
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["apikey", "google", "status"],
+                        "description": "认证模式 (action=gemini_auth): apikey=API Key, google=Google One AI Pro, status=查看当前(默认)"
                     }
                 },
                 "required": ["action"]
@@ -124,6 +129,22 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "type": "integer",
                         "description": "统计时间窗口（小时），默认 24",
                         "default": 24
+                    }
+                }
+            }),
+        ),
+
+        // ===== Gemini Auth (independent control-plane tool) =====
+        ToolDefinition::new(
+            "mission_gemini_auth",
+            "Gemini CLI 认证模式切换。一键切换 API Key / Google One AI Pro。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["apikey", "google", "status"],
+                        "description": "apikey=API Key 模式, google=Google One AI Pro (OAuth), status=查看当前(默认)"
                     }
                 }
             }),
