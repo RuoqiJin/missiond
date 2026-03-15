@@ -37,10 +37,16 @@ interface ToolActivity {
   output?: string;
 }
 
+interface ConfirmOption {
+  key: number | string;
+  label: string;
+  is_default?: boolean;
+}
+
 interface ConfirmAction {
   actionId: string;
   prompt: string;
-  info?: { type?: string; tool?: string; options?: string[] };
+  info?: { type?: string; tool?: string; options?: ConfirmOption[] };
 }
 
 // ─── SSE Parser ───
@@ -224,11 +230,41 @@ export function JarvisChat() {
       if (res.ok) {
         const data = await res.json();
         setConversations(data);
+        return data as Conversation[];
       }
     } catch { /* ignore */ }
+    return [] as Conversation[];
   }, []);
 
-  useEffect(() => { loadConversations(); }, [loadConversations]);
+  // Load conversation list on mount and auto-restore the most recent one
+  const initialLoadDone = useRef(false);
+  useEffect(() => {
+    if (initialLoadDone.current) return;
+    initialLoadDone.current = true;
+    loadConversations().then((convs) => {
+      if (convs.length > 0 && !activeConvId) {
+        // Auto-load the most recent conversation
+        const latest = convs[0];
+        fetch(`/api/jarvis/conversations?id=${latest.id}`)
+          .then((r) => r.json())
+          .then((data) => {
+            const msgs: ChatMessage[] = (data.messages || [])
+              .filter((m: { role: string }) => m.role === 'user' || m.role === 'assistant')
+              .map((m: { id: number; role: string; content: string; timestamp: string }) => ({
+                id: String(m.id),
+                role: m.role as 'user' | 'assistant',
+                content: m.content,
+                timestamp: new Date(m.timestamp).getTime(),
+              }));
+            if (msgs.length > 0) {
+              setMessages(msgs);
+              setActiveConvId(latest.id);
+            }
+          })
+          .catch(() => { /* ignore */ });
+      }
+    });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load a specific conversation's messages
   const loadConversation = useCallback(async (convId: string) => {
@@ -326,11 +362,11 @@ export function JarvisChat() {
     setTools([]);
     setError(null);
 
-    // Build OpenAI-compatible messages
-    const apiMessages = messages
+    // Build OpenAI-compatible messages (only last 20 turns to avoid huge payloads)
+    const allMsgs = messages
       .filter((m) => m.role !== 'system')
-      .concat(userMsg)
-      .map((m) => {
+      .concat(userMsg);
+    const apiMessages = allMsgs.slice(-40).map((m) => {
         if (m.images && m.images.length > 0) {
           return {
             role: m.role,
@@ -358,7 +394,7 @@ export function JarvisChat() {
           'Authorization': 'Bearer jarvis-ui',
           'X-Slot-Id': 'slot-jarvis',
         },
-        body: JSON.stringify({ messages: apiMessages }),
+        body: JSON.stringify({ messages: apiMessages, conversation_id: activeConvId }),
         signal: controller.signal,
       });
 
@@ -390,6 +426,16 @@ export function JarvisChat() {
 
         for (const evt of events) {
           if (evt.data === '[DONE]') continue;
+
+          if (evt.event === 'meta') {
+            try {
+              const meta = JSON.parse(evt.data);
+              if (meta.conversation_id) {
+                setActiveConvId(meta.conversation_id);
+              }
+            } catch { /* ignore */ }
+            continue;
+          }
 
           if (evt.event === 'status') {
             try {
@@ -477,20 +523,9 @@ export function JarvisChat() {
         }
       }
 
-      // Save conversation
+      // Refresh conversation list (messages are persisted by the backend)
       if (assistantContent) {
-        try {
-          await fetch('/api/jarvis/conversations', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              conversationId: activeConvId,
-              userMessage: text,
-              assistantMessage: assistantContent,
-            }),
-          });
-          loadConversations();
-        } catch { /* ignore save errors */ }
+        loadConversations();
       }
     } catch (err) {
       if ((err as Error).name === 'AbortError') {
@@ -672,42 +707,74 @@ export function JarvisChat() {
             </div>
           )}
 
-          {/* Confirm dialog */}
+          {/* Confirm dialog / AskUserQuestion */}
           {confirmAction && (
             <div className="flex justify-start">
               <div className="max-w-[85%] bg-amber-900/20 border border-amber-700/40 rounded-lg px-4 py-3">
-                <div className="flex items-center gap-2 mb-2">
-                  <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
-                  <span className="text-sm text-amber-300 font-medium">Permission Required</span>
-                </div>
-                <p className="text-xs text-neutral-300 mb-3">{confirmAction.prompt}</p>
-                {confirmAction.info?.tool && (
-                  <p className="text-[11px] text-neutral-500 mb-2 font-mono">Tool: {confirmAction.info.tool}</p>
+                {confirmAction.info?.options && confirmAction.info.options.length > 0 &&
+                 !confirmAction.info.options.some((o) => {
+                   const l = o.label.toLowerCase();
+                   return l.startsWith('yes') || l.startsWith('allow');
+                 }) ? (
+                  /* AskUserQuestion — render selectable option buttons */
+                  <>
+                    <p className="text-sm text-neutral-200 mb-3">{confirmAction.prompt}</p>
+                    <div className="flex flex-col gap-1.5">
+                      {confirmAction.info.options.map((opt, i) => (
+                        <button
+                          key={i}
+                          onClick={async () => {
+                            try {
+                              const optNum = typeof opt.key === 'number' ? opt.key : i + 1;
+                              await fetch(`/api/pty/confirm?slotId=slot-jarvis&option=${optNum}`, { method: 'POST' });
+                            } catch { /* ignore */ }
+                            setConfirmAction(null);
+                          }}
+                          className="w-full text-left px-3 py-2 text-xs bg-neutral-800/80 hover:bg-neutral-700 text-neutral-200 rounded-lg transition-colors border border-neutral-700/50 hover:border-neutral-600"
+                        >
+                          <span className="text-neutral-500 mr-2">{typeof opt.key === 'number' ? opt.key : i + 1}.</span>
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  /* Standard tool permission confirm — Allow/Deny */
+                  <>
+                    <div className="flex items-center gap-2 mb-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                      <span className="text-sm text-amber-300 font-medium">Permission Required</span>
+                    </div>
+                    <p className="text-xs text-neutral-300 mb-3">{confirmAction.prompt}</p>
+                    {confirmAction.info?.tool && (
+                      <p className="text-[11px] text-neutral-500 mb-2 font-mono">Tool: {confirmAction.info.tool}</p>
+                    )}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={async () => {
+                          try {
+                            await fetch(`/api/pty/confirm?slotId=slot-jarvis&decision=allow`, { method: 'POST' });
+                          } catch { /* ignore */ }
+                          setConfirmAction(null);
+                        }}
+                        className="px-3 py-1 text-xs bg-emerald-600/80 hover:bg-emerald-600 text-white rounded transition-colors"
+                      >
+                        Allow
+                      </button>
+                      <button
+                        onClick={async () => {
+                          try {
+                            await fetch(`/api/pty/confirm?slotId=slot-jarvis&decision=deny`, { method: 'POST' });
+                          } catch { /* ignore */ }
+                          setConfirmAction(null);
+                        }}
+                        className="px-3 py-1 text-xs bg-neutral-700/80 hover:bg-neutral-600 text-neutral-300 rounded transition-colors"
+                      >
+                        Deny
+                      </button>
+                    </div>
+                  </>
                 )}
-                <div className="flex gap-2">
-                  <button
-                    onClick={async () => {
-                      try {
-                        await fetch(`/api/pty/confirm?slotId=slot-jarvis&decision=allow`, { method: 'POST' });
-                      } catch { /* ignore */ }
-                      setConfirmAction(null);
-                    }}
-                    className="px-3 py-1 text-xs bg-emerald-600/80 hover:bg-emerald-600 text-white rounded transition-colors"
-                  >
-                    Allow
-                  </button>
-                  <button
-                    onClick={async () => {
-                      try {
-                        await fetch(`/api/pty/confirm?slotId=slot-jarvis&decision=deny`, { method: 'POST' });
-                      } catch { /* ignore */ }
-                      setConfirmAction(null);
-                    }}
-                    className="px-3 py-1 text-xs bg-neutral-700/80 hover:bg-neutral-600 text-neutral-300 rounded transition-colors"
-                  >
-                    Deny
-                  </button>
-                </div>
               </div>
             </div>
           )}

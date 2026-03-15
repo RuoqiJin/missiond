@@ -47,11 +47,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 task_id: Option<String>,
                 since: Option<String>,
                 until: Option<String>,
+                source: Option<String>,
             }
-            let Args { status, limit, conversation_type, task_id, since, until } =
-                serde_json::from_value(args).unwrap_or(Args { status: None, limit: None, conversation_type: None, task_id: None, since: None, until: None });
+            let Args { status, limit, conversation_type, task_id, since, until, source } =
+                serde_json::from_value(args).unwrap_or(Args { status: None, limit: None, conversation_type: None, task_id: None, since: None, until: None, source: None });
             let convs = state.mission.db()
-                .list_conversations(status.as_deref(), limit.unwrap_or(20), conversation_type.as_deref(), task_id.as_deref(), since.as_deref(), until.as_deref())
+                .list_conversations(status.as_deref(), limit.unwrap_or(20), conversation_type.as_deref(), task_id.as_deref(), since.as_deref(), until.as_deref(), source.as_deref())
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&convs))
         }
@@ -677,7 +678,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let db = state.mission.db();
 
             // 1. Conversations
-            let convs = db.list_conversations(None, 500, Some("all"), None, Some(&since), Some(&until))
+            let convs = db.list_conversations(None, 500, Some("all"), None, Some(&since), Some(&until), None)
                 .unwrap_or_default();
             let mut by_source: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
             let mut by_type: std::collections::HashMap<String, i64> = std::collections::HashMap::new();

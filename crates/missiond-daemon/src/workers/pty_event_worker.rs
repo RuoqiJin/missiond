@@ -335,9 +335,16 @@ async fn handle_confirm_required(
             true
         }
         (None, _) => {
-            // No tool identified — could be AskUserQuestion (not a tool confirmation)
+            // No tool identified — could be AskUserQuestion (not a tool confirmation).
+            // AskUserQuestion options have custom labels (not "Yes"/"Allow").
             let is_ask_user = tool_info.as_ref()
-                .map(|info| info.raw_prompt.contains("Enter to select"))
+                .map(|info| {
+                    !info.options.is_empty() &&
+                    !info.options.iter().any(|o| {
+                        let lower = o.to_lowercase();
+                        lower.starts_with("yes") || lower.starts_with("allow")
+                    })
+                })
                 .unwrap_or(false);
             if is_ask_user {
                 info!(slot_id = %slot_id, "AskUserQuestion detected, forwarding to user");

@@ -373,11 +373,15 @@ impl MissionDB {
 
     /// List conversations, optionally filtered by status, conversation_type, and task_id.
     /// conv_type: None = user+worker (default), Some("meta") = system, Some("system") = meta+worker, Some("all") = everything.
-    /// List conversations, optionally filtered by status, conversation_type, task_id, and time range.
+    /// List conversations, optionally filtered by status, conversation_type, task_id, source, and time range.
     /// conv_type: None = user+worker (default), Some("meta") = system, Some("system") = meta+worker, Some("all") = everything.
-    pub fn list_conversations(&self, status: Option<&str>, limit: i64, conv_type: Option<&str>, task_id: Option<&str>, since: Option<&str>, until: Option<&str>) -> DbResult<Vec<Conversation>> {
+    pub fn list_conversations(&self, status: Option<&str>, limit: i64, conv_type: Option<&str>, task_id: Option<&str>, since: Option<&str>, until: Option<&str>, source: Option<&str>) -> DbResult<Vec<Conversation>> {
         let conn = self.read_conn();
         let mut convs = Vec::new();
+        let source_clause = match source {
+            Some(s) => format!(" AND source = '{}'", s.replace('\'', "''")),
+            None => String::new(),
+        };
         let type_clause = match conv_type {
             Some("all") => String::new(),
             Some("meta") => " AND conversation_type = 'meta'".to_string(),
@@ -405,9 +409,9 @@ impl MissionDB {
         // Fast path: filter by task_id (returns all matching conversations)
         if let Some(tid) = task_id {
             let sql = format!(
-                "SELECT * FROM conversations WHERE task_id = ?1{}{} ORDER BY started_at ASC LIMIT ?2",
+                "SELECT * FROM conversations WHERE task_id = ?1{}{}{} ORDER BY started_at ASC LIMIT ?2",
                 if matches!(conv_type, Some("all")) { String::new() } else { type_clause.clone() },
-                time_clause
+                source_clause, time_clause
             );
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map(params![tid, limit], |row| Self::row_to_conversation(row))?;
@@ -423,8 +427,8 @@ impl MissionDB {
                 "1=1".to_string()
             };
             let sql = format!(
-                "SELECT * FROM conversations WHERE {}{}{} ORDER BY started_at DESC LIMIT ?1",
-                status_clause, type_clause, time_clause
+                "SELECT * FROM conversations WHERE {}{}{}{} ORDER BY started_at DESC LIMIT ?1",
+                status_clause, type_clause, source_clause, time_clause
             );
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map(params![limit], |row| Self::row_to_conversation(row))?;
@@ -434,8 +438,8 @@ impl MissionDB {
 
         if let Some(s) = status {
             let sql = format!(
-                "SELECT * FROM conversations WHERE status = ?1{} ORDER BY started_at DESC LIMIT ?2",
-                type_clause
+                "SELECT * FROM conversations WHERE status = ?1{}{} ORDER BY started_at DESC LIMIT ?2",
+                type_clause, source_clause
             );
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map(params![s, limit], |row| Self::row_to_conversation(row))?;
@@ -443,8 +447,8 @@ impl MissionDB {
         } else {
             {
                 let sql = format!(
-                    "SELECT * FROM conversations WHERE status = 'active'{} ORDER BY started_at DESC",
-                    type_clause
+                    "SELECT * FROM conversations WHERE status = 'active'{}{} ORDER BY started_at DESC",
+                    type_clause, source_clause
                 );
                 let mut stmt = conn.prepare(&sql)?;
                 let rows = stmt.query_map([], |row| Self::row_to_conversation(row))?;
@@ -453,8 +457,8 @@ impl MissionDB {
             let remaining = limit - convs.len() as i64;
             if remaining > 0 {
                 let sql = format!(
-                    "SELECT * FROM conversations WHERE status != 'active'{} ORDER BY started_at DESC LIMIT ?1",
-                    type_clause
+                    "SELECT * FROM conversations WHERE status != 'active'{}{} ORDER BY started_at DESC LIMIT ?1",
+                    type_clause, source_clause
                 );
                 let mut stmt = conn.prepare(&sql)?;
                 let rows = stmt.query_map(params![remaining], |row| Self::row_to_conversation(row))?;

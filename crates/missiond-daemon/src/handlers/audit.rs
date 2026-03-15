@@ -187,7 +187,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 .unwrap_or_default();
 
             // 2. Find all conversations linked to this task
-            let linked_convs = db.list_conversations(None, 100, Some("all"), Some(&task_id), None, None)
+            let linked_convs = db.list_conversations(None, 100, Some("all"), Some(&task_id), None, None, None)
                 .unwrap_or_default();
 
             // 3. Build export document
