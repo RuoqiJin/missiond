@@ -263,19 +263,32 @@ async fn explore_kb_duplicates(state: &AppState, assignee: &str) -> bool {
 /// Explore 4: Skill Synthesis — cluster high-confidence, high-access KB entries
 /// and generate Skill drafts that codify recurring patterns into reusable SOPs.
 async fn explore_skill_synthesis(state: &AppState, assignee: &str) -> bool {
+    let now = chrono::Utc::now().timestamp();
     let entries = match state.mission.db().kb_list(None) {
         Ok(e) => e,
         Err(_) => return false,
     };
 
-    // Find high-quality entries: confidence >= 0.9, access_count >= 5, type = rule or fact
+    // Find high-quality entries with composite trigger:
+    // confidence >= 0.85 AND confidence * ln(access_count + 1) >= 1.15
+    // High-weight categories (architecture/policy) only need cluster >= 3
     let candidates: Vec<_> = entries.iter()
-        .filter(|e| e.confidence >= 0.9 && e.access_count >= 5)
         .filter(|e| e.kb_type == "rule" || e.kb_type == "fact")
+        .filter(|e| {
+            e.confidence >= 0.85
+                && e.confidence * ((e.access_count as f64) + 1.0).ln() >= 1.15
+        })
+        // Time window: only recently active entries (accessed in last 30 days)
+        .filter(|e| {
+            e.last_accessed_at.as_ref()
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_days() <= 30)
+                .unwrap_or(false)
+        })
         .collect();
 
-    if candidates.len() < 5 {
-        return false; // Not enough mature entries to synthesize
+    if candidates.len() < 3 {
+        return false;
     }
 
     // Group by category prefix to find clusters
@@ -287,15 +300,29 @@ async fn explore_skill_synthesis(state: &AppState, assignee: &str) -> bool {
         );
     }
 
-    // Find the largest cluster with >= 5 entries (most promising for synthesis)
+    // Dynamic cluster size: architecture/policy need >= 3, others >= 5
     let best_cluster = clusters.iter()
-        .filter(|(_, entries)| entries.len() >= 5)
+        .filter(|(prefix, entries)| {
+            let min_size = match prefix.as_str() {
+                "architecture" | "policy" | "preference" => 3,
+                _ => 5,
+            };
+            entries.len() >= min_size
+        })
         .max_by_key(|(_, entries)| entries.len());
 
     let (cluster_name, cluster_entries) = match best_cluster {
         Some((name, entries)) => (name.clone(), entries.clone()),
         None => return false,
     };
+
+    // Reentry guard: skip clusters synthesized within last 7 days
+    let lock_key = format!("skill_synth_{}", cluster_name);
+    let last_synth = state.mission.db().daemon_state_get(&lock_key).unwrap_or(None).unwrap_or(0);
+    if now - last_synth < 7 * 86400 {
+        debug!(cluster = %cluster_name, days_ago = (now - last_synth) / 86400, "Skill synthesis: cluster recently synthesized, skipping");
+        return false;
+    }
 
     let entries_str = cluster_entries.iter().take(20).cloned().collect::<Vec<_>>().join("\n");
 
@@ -320,6 +347,9 @@ async fn explore_skill_synthesis(state: &AppState, assignee: &str) -> bool {
         If entries contradict each other, flag the conflict rather than arbitrarily picking one.",
         cluster_entries.len(), cluster_name, entries_str
     );
+
+    // Set reentry lock BEFORE creating task (cleared on failure by autopilot event listener)
+    let _ = state.mission.db().daemon_state_set(&lock_key, now);
 
     create_explore_task(state, &format!("Explore: Skill Synthesis — {}", cluster_name), &description, assignee).await
 }

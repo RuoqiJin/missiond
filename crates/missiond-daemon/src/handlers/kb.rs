@@ -243,10 +243,24 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             if conflicts.is_empty() {
                 Ok(ToolResult::json_pretty(&result))
             } else {
+                // Auto-downweight: if a conflicting entry has higher confidence,
+                // reduce the new entry's confidence to half of the highest conflicting entry.
+                // This ensures the new entry ranks below established knowledge in retrieval.
+                let max_conflict_conf = conflicts.iter()
+                    .filter_map(|c| c["confidence"].as_f64())
+                    .fold(0.0f64, f64::max);
+                if max_conflict_conf > result.entry.confidence {
+                    let reduced = (max_conflict_conf / 2.0).max(0.1);
+                    let _ = state.mission.db().kb_adjust_confidence(
+                        &result.entry.id,
+                        reduced - result.entry.confidence, // delta to reach target
+                    );
+                }
+
                 let mut output = serde_json::to_value(&result)?;
                 output["conflicts"] = serde_json::json!(conflicts);
                 output["conflictWarning"] = serde_json::json!(format!(
-                    "⚠️ 检测到 {} 条语义相似的已有条目，可能存在规则冲突。请检查是否需要合并或替换。",
+                    "⚠️ 检测到 {} 条语义相似的已有条目，可能存在规则冲突。新条目已自动降权。请用 mission_kb_update 合并或 mission_kb_forget 删除冲突方。",
                     conflicts.len()
                 ));
                 Ok(ToolResult::json_pretty(&output))
@@ -1663,9 +1677,24 @@ async fn detect_kb_conflicts(
         if id == &new_entry.id {
             continue; // skip self
         }
-        let sim = missiond_core::embedding::cosine_similarity(&new_vec, vec);
-        if sim >= CONFLICT_SIM_THRESHOLD {
-            // Fetch the conflicting entry for details
+        let cosine = missiond_core::embedding::cosine_similarity(&new_vec, vec);
+        // Hybrid conflict detection: pure cosine OR (moderate cosine + Jaccard overlap)
+        // Addresses semantic dilution for long vs short entries
+        let is_conflict = if cosine >= CONFLICT_SIM_THRESHOLD {
+            true
+        } else if cosine >= 0.6 {
+            // Fetch entry to compute Jaccard on summary text
+            if let Ok(Some(existing)) = state.mission.db().kb_get_by_id(id) {
+                let existing_prefix = existing.category.split(':').next().unwrap_or(&existing.category);
+                if existing_prefix == category_prefix {
+                    let jaccard = text_jaccard(&new_text, &format!("{} {}", existing.key, existing.summary));
+                    jaccard >= 0.5
+                } else { false }
+            } else { false }
+        } else {
+            false
+        };
+        if is_conflict {
             if let Ok(Some(existing)) = state.mission.db().kb_get_by_id(id) {
                 let existing_prefix = existing.category.split(':').next().unwrap_or(&existing.category);
                 if existing_prefix == category_prefix {
@@ -1675,7 +1704,7 @@ async fn detect_kb_conflicts(
                         "key": existing.key,
                         "summary": existing.summary,
                         "confidence": existing.confidence,
-                        "similarity": format!("{:.3}", sim),
+                        "similarity": format!("{:.3}", cosine),
                     }));
                 }
             }
@@ -1690,4 +1719,29 @@ async fn detect_kb_conflicts(
     });
     conflicts.truncate(5);
     conflicts
+}
+
+/// Lightweight Jaccard similarity on tokenized text (CJK unigrams + ASCII words).
+fn text_jaccard(a: &str, b: &str) -> f64 {
+    use std::collections::HashSet;
+    let tokenize = |text: &str| -> HashSet<String> {
+        let mut tokens = HashSet::new();
+        let mut word = String::new();
+        for ch in text.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                word.push(ch.to_ascii_lowercase());
+            } else {
+                if word.len() >= 2 { tokens.insert(word.clone()); }
+                word.clear();
+                if ch as u32 > 0x2E80 { tokens.insert(ch.to_string()); }
+            }
+        }
+        if word.len() >= 2 { tokens.insert(word); }
+        tokens
+    };
+    let ta = tokenize(a);
+    let tb = tokenize(b);
+    let intersection = ta.intersection(&tb).count();
+    let union = ta.union(&tb).count();
+    if union == 0 { 0.0 } else { intersection as f64 / union as f64 }
 }
