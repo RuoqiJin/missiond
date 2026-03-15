@@ -695,19 +695,26 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                 }
 
                 // Positive confidence feedback: reinforce cited KB entries on task success
+                // Self-supervision: entries below 0.8 (likely penalized by prior attribution)
+                // get a higher boost (+0.05) to recover faster from misattribution
                 {
                     let cited = state.task_cited_kbs.lock().unwrap().remove(&task.id);
                     if let Some(kb_ids) = cited {
                         let count = kb_ids.len();
                         for kb_id in &kb_ids {
-                            match state.mission.db().kb_adjust_confidence(kb_id, 0.03) {
-                                Ok(Some(new_conf)) => debug!(kb_id = %kb_id, new_conf, "KB confidence +0.03 (task success)"),
+                            // Check current confidence to determine boost amount
+                            let delta = state.mission.db().kb_get_by_id(kb_id)
+                                .ok().flatten()
+                                .map(|e| if e.confidence < 0.8 { 0.05 } else { 0.03 })
+                                .unwrap_or(0.03);
+                            match state.mission.db().kb_adjust_confidence(kb_id, delta) {
+                                Ok(Some(new_conf)) => debug!(kb_id = %kb_id, delta, new_conf, "KB confidence boost (task success)"),
                                 Ok(None) => debug!(kb_id = %kb_id, "KB entry not found for confidence adjustment"),
                                 Err(e) => warn!(kb_id = %kb_id, error = %e, "Failed to adjust KB confidence"),
                             }
                         }
                         if count > 0 {
-                            info!(task_id = %task.id, kb_count = count, "KB feedback: +0.03 confidence for {} cited entries", count);
+                            info!(task_id = %task.id, kb_count = count, "KB feedback: boosted confidence for {} cited entries", count);
                         }
                     }
                 }
@@ -873,10 +880,13 @@ async fn apply_attributed_penalty(
 
     if kb_context.is_empty() { return; }
 
-    let error_preview = if error_msg.len() > 500 {
-        let mut end = 500;
-        while end > 0 && !error_msg.is_char_boundary(end) { end -= 1; }
-        format!("{}...", &error_msg[..end])
+    // Log dehydration: head+tail strategy to capture both error class and crash point
+    let error_preview = if error_msg.len() > 300 {
+        let mut head_end = 150;
+        while head_end > 0 && !error_msg.is_char_boundary(head_end) { head_end -= 1; }
+        let mut tail_start = error_msg.len().saturating_sub(150);
+        while tail_start < error_msg.len() && !error_msg.is_char_boundary(tail_start) { tail_start += 1; }
+        format!("{}\n...(truncated {} chars)...\n{}", &error_msg[..head_end], error_msg.len() - head_end - (error_msg.len() - tail_start), &error_msg[tail_start..])
     } else {
         error_msg.to_string()
     };
