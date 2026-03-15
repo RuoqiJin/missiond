@@ -1428,15 +1428,17 @@ impl PTYWebSocketServer {
         let start_time = std::time::Instant::now();
         let heartbeat_interval = tokio::time::Duration::from_secs(15);
         let mut tool_seq: u32 = 0;
-        let mut streamed_text = false;
-        let mut accumulated_response = String::new();
         let mut seen_uuids = std::collections::HashSet::<String>::new();
         let mut last_event_time = std::time::Instant::now();
         let mut last_status_phase = String::new();
         let mut last_status_sent = std::time::Instant::now() - std::time::Duration::from_secs(1);
         let status_throttle = std::time::Duration::from_millis(500);
+        // Buffer: each new assistant message REPLACES the buffer (not appends).
+        // A turn produces multiple assistant messages (intermediate tool-calling ones + final response).
+        // Only the last one is the actual user-facing answer.
+        let mut last_assistant_text: Option<String> = None;
 
-        // Helper closure: extract and emit assistant content from JSONL messages
+        // Helper: extract text from JSONL messages, buffering the latest assistant text
         macro_rules! process_jsonl_messages {
             ($messages:expr) => {
                 for msg in $messages {
@@ -1449,28 +1451,28 @@ impl PTYWebSocketServer {
                         }
                         serde_json::Value::Array(blocks) => {
                             let mut texts = Vec::new();
+                            let mut has_tool_use = false;
                             for block in blocks {
-                                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                    if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
-                                        if !t.is_empty() { texts.push(t.to_string()); }
+                                match block.get("type").and_then(|t| t.as_str()) {
+                                    Some("text") => {
+                                        if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                                            if !t.is_empty() { texts.push(t.to_string()); }
+                                        }
                                     }
+                                    Some("tool_use") => { has_tool_use = true; }
+                                    _ => {}
                                 }
                             }
-                            if texts.is_empty() { None } else { Some(texts.join("\n")) }
+                            // Skip intermediate messages that are just "let me search..." + tool calls
+                            if has_tool_use { None }
+                            else if texts.is_empty() { None }
+                            else { Some(texts.join("\n")) }
                         }
                         _ => None,
                     };
                     if let Some(text) = text {
-                        streamed_text = true;
-                        accumulated_response.push_str(&text);
-                        let chunk = serde_json::json!({
-                            "id": &chat_id,
-                            "object": "chat.completion.chunk",
-                            "model": "jarvis-missiond",
-                            "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": serde_json::Value::Null}]
-                        });
-                        let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
-                        let _ = stream.flush().await;
+                        // Replace (not append) — the final assistant message wins
+                        last_assistant_text = Some(text);
                     }
                 }
             };
@@ -1630,16 +1632,16 @@ impl PTYWebSocketServer {
             }
         }
 
-        // ── send() result: trace, persist, fallback, close ──
+        // ── send() result: emit buffered response, persist, close ──
         match send_handle.await {
             Ok(Ok(result)) => {
                 let duration_ms = start_time.elapsed().as_millis() as u64;
 
-                // Use JSONL accumulated response (clean) or fall back to PTY response
-                let final_response = if !accumulated_response.is_empty() {
-                    accumulated_response.clone()
+                // Use the last JSONL assistant message (the final answer), or PTY fallback
+                let final_response = if let Some(ref text) = last_assistant_text {
+                    text.clone()
                 } else {
-                    // No JSONL content captured — use PTY response with cleaning as fallback
+                    // No JSONL content — use PTY response with cleaning as fallback
                     clean_jarvis_response(&result.response, "")
                 };
                 trace_store.complete_trace(&chat_id, &final_response, duration_ms).await;
@@ -1661,18 +1663,15 @@ impl PTYWebSocketServer {
                     }
                 }
 
-                // Fallback: if JSONL watcher didn't deliver text, send PTY response
-                if !streamed_text && !result.response.is_empty() {
-                    let fallback = clean_jarvis_response(&result.response, "");
-                    if !fallback.is_empty() {
-                        let chunk = serde_json::json!({
-                            "id": &chat_id,
-                            "object": "chat.completion.chunk",
-                            "model": "jarvis-missiond",
-                            "choices": [{"index": 0, "delta": {"content": fallback}, "finish_reason": serde_json::Value::Null}]
-                        });
-                        let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
-                    }
+                // Emit the final response as a single SSE chunk
+                if !final_response.is_empty() {
+                    let chunk = serde_json::json!({
+                        "id": &chat_id,
+                        "object": "chat.completion.chunk",
+                        "model": "jarvis-missiond",
+                        "choices": [{"index": 0, "delta": {"content": final_response}, "finish_reason": serde_json::Value::Null}]
+                    });
+                    let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
                 }
 
                 let stop = serde_json::json!({
