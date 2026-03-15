@@ -18,6 +18,35 @@ use crate::supervisor::schedule_supervisor_patrol;
 use crate::flow_engine::{execute_flow_task, ensure_autopilot_pty};
 
 // @beacon: orchestration
+
+/// Notify Jarvis conversation when an async task fails.
+/// Extracts conversation_id from task metadata, writes error message, and emits event.
+fn notify_jarvis_failure(state: &AppState, task: &missiond_core::types::BoardTask, reason: &str) {
+    if task.category != "jarvis" { return; }
+    if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&task.description) {
+        if let Some(conv_id) = meta.get("conversation_id").and_then(|v| v.as_str()) {
+            if !conv_id.is_empty() {
+                let error_msg = format!("❌ 后台任务执行失败：{}", reason);
+                let _ = state.mission.db().router_chat_append_messages(conv_id, &[
+                    ("assistant".to_string(), error_msg),
+                ]);
+                state.event_bus.publish_traced(
+                    DaemonEvent::JarvisTaskCompleted {
+                        conversation_id: conv_id.to_string(),
+                        task_id: task.id.clone(),
+                    },
+                    TraceContext {
+                        trace_id: Some(conv_id.to_string()),
+                        summary: Some(format!("jarvis: task {} failed", &task.id[..8.min(task.id.len())])),
+                        ..Default::default()
+                    },
+                );
+                warn!(task_id = %task.id, conv_id = %conv_id, "Jarvis async: failure notification sent");
+            }
+        }
+    }
+}
+
 pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     let tick_start = std::time::Instant::now();
 
@@ -211,10 +240,45 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
     // Slot-level exclusivity: only dispatch ONE task per slot per tick
     let mut dispatched_slots: HashSet<String> = HashSet::new();
 
+    // Excluded roles: these slots have dedicated purposes, not for ad-hoc tasks
+    const EXCLUDED_ROLES: &[&str] = &["jarvis", "memory", "supervisor", "deploy", "operator", "decision", "secret"];
+
     for task in tasks {
+        // Dynamic slot assignment: if assignee is None, find an idle coder slot
         let slot_id = match &task.assignee {
             Some(id) => id.clone(),
-            None => continue,
+            None => {
+                let mut candidate: Option<String> = None;
+                for slot in state.mission.list_slots() {
+                    let role = slot.config.role.as_str();
+                    if EXCLUDED_ROLES.contains(&role) { continue; }
+                    if dispatched_slots.contains(&slot.config.id) { continue; }
+                    if let Some(info) = state.pty.get_status(&slot.config.id).await {
+                        if info.state == SessionState::Idle {
+                            candidate = Some(slot.config.id.clone());
+                            break;
+                        }
+                    }
+                }
+                match candidate {
+                    Some(id) => {
+                        info!(task_id = %task.id, slot_id = %id, "Autopilot: dynamically assigned idle coder slot");
+                        // Persist assignment so future ticks don't re-scan
+                        let _ = state.mission.db().update_board_task(
+                            &task.id,
+                            &missiond_core::types::UpdateBoardTaskInput {
+                                assignee: Some(id.clone()),
+                                ..Default::default()
+                            },
+                        );
+                        id
+                    }
+                    None => {
+                        debug!(task_id = %task.id, "Autopilot: no idle coder slot available, deferring");
+                        continue;
+                    }
+                }
+            }
         };
 
         // Skip if this slot already received a task in this tick
@@ -507,6 +571,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                             },
                             TraceContext { trace_id: Some(task.id.clone()), summary: Some(format!("board: {} → failed", task.title)), ..Default::default() },
                         );
+                        notify_jarvis_failure(state, &task, "OAuth token 过期，工位认证失败");
                     } else {
                         let _ = state.mission.db().increment_board_task_retry(&task.id, new_retry);
                     }
@@ -730,6 +795,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                             TraceContext { trace_id: Some(task.id.clone()), summary: Some(format!("board: {} → failed", task.title)), ..Default::default() },
                         );
                         warn!(task_id = %task.id, retries = new_retry, "Autopilot: task failed after max retries");
+                        notify_jarvis_failure(state, &task, &err_msg);
                     } else {
                         // Back to open for retry, increment retry_count
                         let _ = state.mission.db().increment_board_task_retry(&task.id, new_retry);

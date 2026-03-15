@@ -464,7 +464,8 @@ impl MissionDB {
     }
 
     /// List board tasks eligible for autopilot execution
-    /// (auto_execute=true, status=open, due_date <= today local, has assignee)
+    /// (auto_execute=true, status=open, due_date <= today local)
+    /// Tasks with assignee=NULL are also returned — autopilot dynamically assigns a slot.
     pub fn list_autopilot_tasks(&self) -> DbResult<Vec<BoardTask>> {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let conn = self.read_conn();
@@ -472,9 +473,10 @@ impl MissionDB {
             "SELECT * FROM board_tasks
              WHERE auto_execute = 1
                AND status = 'open'
-               AND assignee IS NOT NULL
                AND (due_date IS NULL OR due_date <= ?1)
-             ORDER BY order_idx ASC"
+             ORDER BY
+               CASE WHEN assignee IS NOT NULL THEN 0 ELSE 1 END,
+               order_idx ASC"
         )?;
         let rows = stmt.query_map(params![today], |row| Self::row_to_board_task(row))?;
         let mut tasks = Vec::new();

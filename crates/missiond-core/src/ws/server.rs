@@ -1011,7 +1011,7 @@ impl PTYWebSocketServer {
                     server: None,
                     due_date: None,
                     parent_id: None,
-                    assignee: Some("slot-worker-1".to_string()),
+                    assignee: None, // Dynamic: autopilot picks idle coder slot
                     auto_execute: Some(true),
                     prompt_template: Some(user_message.clone()),
                     hidden: Some(true),
