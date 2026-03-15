@@ -35,7 +35,7 @@ use tracing::{debug, error, info, warn};
 pub struct ContextEnrichResult {
     /// Pre-assembled context string for injection (empty = no context needed).
     pub assembled: String,
-    /// Classified intent from context pipeline (e.g. "bypass:chat", "code:router", "general:fallback").
+    /// Classified intent from context pipeline (e.g. "chat:rules", "code:router", "general:fallback", "async:deploy").
     pub intent: Option<String>,
 }
 
@@ -111,12 +111,11 @@ fn clean_jarvis_response(raw: &str, boundary_id: &str) -> String {
         &raw[pos + marker.len()..]
     } else {
         // Fallback: boundary not found (PTY buffer overflow or truncation).
-        // Try stripping from last ⏺ block as best-effort.
         tracing::warn!(boundary_id, "Boundary marker not found in PTY output, using fallback");
         raw
     };
 
-    // 2. Strip Claude Code TUI markers and status bar noise
+    // 2. Strip Claude Code TUI markers, tool output remnants, and status bar noise
     let cleaned: String = text
         .lines()
         .filter(|line| {
@@ -128,6 +127,10 @@ fn clean_jarvis_response(raw: &str, boundary_id: &str) -> String {
             if trimmed.contains("npm i -g @anthropic-ai") { return false; }
             if trimmed.starts_with("▸▸") || trimmed.starts_with(">>") { return false; }
             if trimmed.starts_with("✕ ") || trimmed.starts_with("✗ ") { return false; }
+            // Drop tool output border lines (safety net for block classifier)
+            if trimmed.starts_with('⎿') || trimmed.starts_with('│') { return false; }
+            // Drop tool result file path references
+            if trimmed.contains("tool-results/") { return false; }
             true
         })
         .map(|line| {
@@ -980,14 +983,16 @@ impl PTYWebSocketServer {
             }
         };
 
-        // ── Async dispatch for non-chat intents ──
-        // Create a Board Task and return immediately. Autopilot dispatches to a worker
-        // slot; on completion, the result is appended to the Jarvis conversation.
-        let is_chat_intent = enrich_intent.as_deref()
-            .map(|i| i.starts_with("bypass:chat"))
+        // ── Async dispatch (opt-in only) ──
+        // Default: synchronous response (normal Claude Code experience).
+        // Only dispatch async when intent is explicitly marked "async:" (e.g. long-running
+        // deploy/build operations). This gives the user a conversational Jarvis instead of
+        // one-line ack stubs.
+        let needs_async_dispatch = enrich_intent.as_deref()
+            .map(|i| i.starts_with("async:"))
             .unwrap_or(false);
 
-        if !is_chat_intent && !proxy_mode {
+        if needs_async_dispatch && !proxy_mode {
             if let Some(ref db) = db {
                 // Build Board Task metadata
                 let conv_id_str = jarvis_conv_id.as_deref().unwrap_or("");
@@ -1003,7 +1008,7 @@ impl PTYWebSocketServer {
                 };
 
                 let task_input = crate::types::CreateBoardTaskInput {
-                    title: task_title,
+                    title: task_title.clone(),
                     description: Some(meta.to_string()),
                     priority: None,
                     category: Some("jarvis".to_string()),
@@ -1022,40 +1027,337 @@ impl PTYWebSocketServer {
 
                 match db.create_board_task(&task_input) {
                     Ok(task) => {
-                        let task_short_id = &task.id[..8.min(task.id.len())];
-                        let ack_text = format!("好的，已安排后台处理 (#{})。完成后会自动回复。", task_short_id);
-                        info!(?addr, slot_id, task_id = %task.id, intent = ?enrich_intent, "Jarvis async → Board Task created");
+                        let task_id = task.id.clone();
+                        let task_short_id = &task_id[..8.min(task_id.len())];
+                        info!(?addr, slot_id, task_id = %task_id, intent = ?enrich_intent, "Jarvis async → Board Task created, SSE bridge active");
 
-                        // Save exchange: user message + ack response (proper pair)
+                        // Save user message only (autopilot saves assistant response on completion)
                         if let Some(ref cid) = jarvis_conv_id {
                             if !raw_user_text.is_empty() {
-                                let _ = db.jarvis_save_exchange(cid, &raw_user_text, &ack_text);
+                                let _ = db.router_chat_append_messages(cid, &[
+                                    ("user".to_string(), raw_user_text.clone()),
+                                ]);
                                 if conversation_id.is_none() {
-                                    let _ = db.jarvis_update_title(cid, &task_input.title);
+                                    let _ = db.jarvis_update_title(cid, &task_title);
                                 }
                             }
                         }
 
-                        // Stream ack via SSE
-                        let ack_chunk = serde_json::json!({
-                            "id": &chat_id,
-                            "object": "chat.completion.chunk",
-                            "model": "jarvis-missiond",
-                            "choices": [{
-                                "index": 0,
-                                "delta": { "content": &ack_text },
-                                "finish_reason": serde_json::Value::Null,
-                            }]
-                        });
-                        let _ = stream.write_all(format!("data: {}\n\n", ack_chunk).as_bytes()).await;
-
-                        // Send async_dispatch marker with Board Task ID
+                        // Send async_dispatch marker (frontend tracks pending task)
                         let dispatch_event = serde_json::json!({
                             "conversation_id": conv_id_str,
-                            "task_id": task.id,
+                            "task_id": &task_id,
                         });
                         let _ = stream.write_all(format!("event: async_dispatch\ndata: {}\n\n", dispatch_event).as_bytes()).await;
 
+                        // Send status: waiting for dispatch
+                        let status_evt = serde_json::json!({"phase": "dispatching", "text": format!("等待调度 #{}...", task_short_id)});
+                        let _ = stream.write_all(format!("event: status\ndata: {}\n\n", status_evt).as_bytes()).await;
+                        let _ = stream.flush().await;
+
+                        let bridge_start = std::time::Instant::now();
+
+                        // ── Phase 1: Wait for task to be claimed by a slot ──
+                        let dispatch_timeout = tokio::time::Duration::from_secs(120);
+                        let poll_interval = tokio::time::Duration::from_secs(1);
+                        let mut target_slot: Option<String> = None;
+                        let mut task_already_done = false;
+
+                        loop {
+                            if bridge_start.elapsed() > dispatch_timeout {
+                                let err_msg = "任务调度超时，120秒内未被分配到工位";
+                                warn!(?addr, task_id = %task_id, err_msg);
+                                let err = serde_json::json!({"error": {"message": err_msg}});
+                                let _ = stream.write_all(format!("data: {}\n\n", err).as_bytes()).await;
+                                let _ = stream.write_all(b"data: [DONE]\n\n").await;
+                                let _ = stream.flush().await;
+                                trace_store.error_trace(&chat_id, err_msg, None).await;
+                                stream.shutdown().await?;
+                                return Ok(());
+                            }
+
+                            tokio::time::sleep(poll_interval).await;
+
+                            // Check task status in DB
+                            if let Ok(Some(t)) = db.get_board_task(&task_id) {
+                                match t.status {
+                                    crate::types::BoardTaskStatus::Running => {
+                                        if let Some(ref executor) = t.claim_executor_id {
+                                            target_slot = Some(executor.clone());
+                                            break;
+                                        }
+                                    }
+                                    crate::types::BoardTaskStatus::Done
+                                    | crate::types::BoardTaskStatus::Failed
+                                    | crate::types::BoardTaskStatus::Blocked => {
+                                        // Task completed/failed before we could subscribe
+                                        task_already_done = true;
+                                        break;
+                                    }
+                                    _ => {} // Still open, keep waiting
+                                }
+                            }
+
+                            // Heartbeat to keep SSE alive
+                            let _ = stream.write_all(b":\n\n").await;
+                            let _ = stream.flush().await;
+                        }
+
+                        // ── Phase 2: Subscribe to executing slot's PTY events ──
+                        let mut streamed_response = String::new();
+
+                        if let Some(ref exec_slot) = target_slot {
+                            let status_evt = serde_json::json!({"phase": "thinking", "text": format!("已分配到 {}", exec_slot)});
+                            let _ = stream.write_all(format!("event: status\ndata: {}\n\n", status_evt).as_bytes()).await;
+                            let _ = stream.flush().await;
+
+                            match pty_manager.subscribe_session(exec_slot).await {
+                                Ok(mut rx) => {
+                                    // Check current slot state: if already past echo phase, enable text forwarding
+                                    let mut past_first_thinking = false;
+                                    if let Some(current_status) = pty_manager.get_status(exec_slot).await {
+                                        match current_status.state {
+                                            SessionState::Thinking | SessionState::Responding | SessionState::ToolRunning => {
+                                                past_first_thinking = true;
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+
+                                    let mut tool_seq: u32 = 0;
+                                    let mut had_activity = false;
+                                    let mut last_status_phase = String::new();
+                                    let mut last_status_sent = std::time::Instant::now() - std::time::Duration::from_secs(1);
+                                    let status_throttle = std::time::Duration::from_millis(500);
+                                    let heartbeat_interval = tokio::time::Duration::from_secs(15);
+                                    let bridge_timeout = tokio::time::Duration::from_secs(600); // 10 min max
+                                    let mut last_event_time = std::time::Instant::now();
+
+                                    loop {
+                                        if bridge_start.elapsed() > bridge_timeout {
+                                            warn!(task_id = %task_id, "SSE bridge timeout (10 min)");
+                                            break;
+                                        }
+
+                                        let recv_timeout = heartbeat_interval.saturating_sub(last_event_time.elapsed());
+                                        match tokio::time::timeout(recv_timeout, rx.recv()).await {
+                                            Ok(Ok(event)) => {
+                                                last_event_time = std::time::Instant::now();
+                                                match event {
+                                                    SessionEvent::StatusUpdate(ref status) => {
+                                                        let phase = format!("{}", status.phase);
+                                                        let phase_changed = phase != last_status_phase;
+                                                        let throttle_elapsed = last_status_sent.elapsed() >= status_throttle;
+                                                        if phase_changed || throttle_elapsed {
+                                                            last_status_phase = phase.clone();
+                                                            last_status_sent = std::time::Instant::now();
+                                                            let evt = serde_json::json!({
+                                                                "phase": phase,
+                                                                "text": status.status_text,
+                                                            });
+                                                            let sse = format!("event: status\ndata: {}\n\n", evt);
+                                                            let _ = stream.write_all(sse.as_bytes()).await;
+                                                            let _ = stream.flush().await;
+                                                        }
+                                                    }
+                                                    SessionEvent::ToolOutput(ref tool_output) => {
+                                                        had_activity = true;
+                                                        use crate::semantic::ToolStatus;
+                                                        match tool_output.status {
+                                                            ToolStatus::Running => {
+                                                                tool_seq += 1;
+                                                                let id = format!("t{}", tool_seq);
+                                                                let params_json = serde_json::json!(tool_output.params);
+                                                                let evt = serde_json::json!({
+                                                                    "id": id,
+                                                                    "tool": tool_output.tool_name,
+                                                                    "params": params_json,
+                                                                });
+                                                                let sse = format!("event: tool_start\ndata: {}\n\n", evt);
+                                                                let _ = stream.write_all(sse.as_bytes()).await;
+                                                                let _ = stream.flush().await;
+                                                            }
+                                                            ToolStatus::Completed => {
+                                                                let id = format!("t{}", tool_seq);
+                                                                let output = tool_output.output.as_deref().map(|o| {
+                                                                    if o.len() > 4096 {
+                                                                        format!("{}...\n[truncated, {} bytes total]", &o[..4096], o.len())
+                                                                    } else {
+                                                                        o.to_string()
+                                                                    }
+                                                                });
+                                                                let evt = serde_json::json!({
+                                                                    "id": id,
+                                                                    "tool": tool_output.tool_name,
+                                                                    "duration_ms": tool_output.duration_ms,
+                                                                    "output": output,
+                                                                });
+                                                                let sse = format!("event: tool_end\ndata: {}\n\n", evt);
+                                                                let _ = stream.write_all(sse.as_bytes()).await;
+                                                                let _ = stream.flush().await;
+                                                            }
+                                                        }
+                                                    }
+                                                    SessionEvent::StateChange { new_state, .. } => {
+                                                        match new_state {
+                                                            SessionState::Thinking => {
+                                                                if !past_first_thinking {
+                                                                    past_first_thinking = true;
+                                                                    debug!(task_id = %task_id, "SSE bridge: past first thinking, text forwarding enabled");
+                                                                }
+                                                                let evt = serde_json::json!({"phase": "thinking", "text": "Thinking..."});
+                                                                let sse = format!("event: status\ndata: {}\n\n", evt);
+                                                                let _ = stream.write_all(sse.as_bytes()).await;
+                                                                let _ = stream.flush().await;
+                                                            }
+                                                            SessionState::ToolRunning => {
+                                                                let evt = serde_json::json!({"phase": "tool_running", "text": ""});
+                                                                let sse = format!("event: status\ndata: {}\n\n", evt);
+                                                                let _ = stream.write_all(sse.as_bytes()).await;
+                                                                let _ = stream.flush().await;
+                                                            }
+                                                            SessionState::Idle => {
+                                                                // Slot returned to idle — task likely done
+                                                                if had_activity {
+                                                                    debug!(task_id = %task_id, "SSE bridge: slot returned to idle after activity");
+                                                                    break;
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                    }
+                                                    SessionEvent::TextOutput(ref text_event) => {
+                                                        use crate::TextOutputEvent;
+                                                        match text_event {
+                                                            TextOutputEvent::Stream { content, .. } => {
+                                                                if past_first_thinking && !content.is_empty() {
+                                                                    had_activity = true;
+                                                                    streamed_response.push_str(content);
+                                                                    let chunk = serde_json::json!({
+                                                                        "id": &chat_id,
+                                                                        "object": "chat.completion.chunk",
+                                                                        "model": "jarvis-missiond",
+                                                                        "choices": [{
+                                                                            "index": 0,
+                                                                            "delta": { "content": content },
+                                                                            "finish_reason": serde_json::Value::Null,
+                                                                        }]
+                                                                    });
+                                                                    let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
+                                                                    let _ = stream.flush().await;
+                                                                }
+                                                            }
+                                                            TextOutputEvent::Complete { .. } => {}
+                                                        }
+                                                    }
+                                                    SessionEvent::ConfirmRequired { ref prompt, ref info } => {
+                                                        let evt = serde_json::json!({
+                                                            "action_id": format!("confirm-{}", tool_seq),
+                                                            "prompt": prompt,
+                                                            "target_slot": exec_slot,
+                                                            "info": info.as_ref().map(|i| {
+                                                                let structured_options: Vec<serde_json::Value> = i.options.iter()
+                                                                    .enumerate()
+                                                                    .map(|(idx, label)| serde_json::json!({
+                                                                        "key": idx + 1,
+                                                                        "label": label,
+                                                                        "is_default": idx == 0,
+                                                                    }))
+                                                                    .collect();
+                                                                serde_json::json!({
+                                                                    "type": i.confirm_type,
+                                                                    "tool": i.tool.as_ref().map(|t| &t.name),
+                                                                    "options": structured_options,
+                                                                })
+                                                            }),
+                                                        });
+                                                        let sse = format!("event: confirm_required\ndata: {}\n\n", evt);
+                                                        let _ = stream.write_all(sse.as_bytes()).await;
+                                                        let _ = stream.flush().await;
+                                                    }
+                                                    SessionEvent::Exit(code) => {
+                                                        warn!(task_id = %task_id, code, "SSE bridge: PTY exited");
+                                                        break;
+                                                    }
+                                                    _ => {} // Ignore Data, ScreenText, TitleChange
+                                                }
+                                            }
+                                            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                                                warn!(task_id = %task_id, lagged = n, "SSE bridge broadcast lagged");
+                                            }
+                                            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                                                break;
+                                            }
+                                            Err(_) => {
+                                                // Heartbeat + DB failsafe check
+                                                let _ = stream.write_all(b":\n\n").await;
+                                                let _ = stream.flush().await;
+                                                last_event_time = std::time::Instant::now();
+                                                if let Ok(Some(t)) = db.get_board_task(&task_id) {
+                                                    match t.status {
+                                                        crate::types::BoardTaskStatus::Done
+                                                        | crate::types::BoardTaskStatus::Failed => {
+                                                            debug!(task_id = %task_id, status = ?t.status, "SSE bridge: task completed (DB failsafe)");
+                                                            break;
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(task_id = %task_id, slot = %exec_slot, error = %e, "SSE bridge: failed to subscribe to slot PTY");
+                                }
+                            }
+                        }
+
+                        // ── Phase 3: Wait for DB write + close SSE ──
+                        // After slot goes idle, autopilot needs time to save the response to DB.
+                        // Wait briefly then verify task is done before closing SSE.
+                        if !task_already_done {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+                        }
+
+                        let duration_ms = bridge_start.elapsed().as_millis() as u64;
+
+                        // Fallback: if text wasn't streamed via PTY events, fetch from DB
+                        if streamed_response.is_empty() {
+                            if let Some(ref cid) = jarvis_conv_id {
+                                // Retry a few times in case autopilot hasn't saved yet
+                                for attempt in 0..3 {
+                                    if attempt > 0 {
+                                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                                    }
+                                    if let Ok(msgs) = db.router_chat_load_history(cid) {
+                                        // Find last assistant message
+                                        if let Some(last_asst) = msgs.iter().rev().find(|m| {
+                                            m.get("role").and_then(|v| v.as_str()) == Some("assistant")
+                                        }) {
+                                            if let Some(content) = last_asst.get("content").and_then(|v| v.as_str()) {
+                                                if !content.is_empty() {
+                                                    let chunk = serde_json::json!({
+                                                        "id": &chat_id,
+                                                        "object": "chat.completion.chunk",
+                                                        "model": "jarvis-missiond",
+                                                        "choices": [{
+                                                            "index": 0,
+                                                            "delta": { "content": content },
+                                                            "finish_reason": serde_json::Value::Null,
+                                                        }]
+                                                    });
+                                                    let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Close SSE stream
                         let stop = serde_json::json!({
                             "id": &chat_id,
                             "object": "chat.completion.chunk",
@@ -1066,7 +1368,8 @@ impl PTYWebSocketServer {
                         let _ = stream.write_all(b"data: [DONE]\n\n").await;
                         let _ = stream.flush().await;
 
-                        trace_store.complete_trace(&chat_id, &ack_text, 0).await;
+                        trace_store.complete_trace(&chat_id, "[async SSE bridge]", duration_ms).await;
+                        info!(?addr, slot_id, task_id = %task_id, duration_ms, "Jarvis SSE bridge completed");
                         stream.shutdown().await?;
                         return Ok(());
                     }

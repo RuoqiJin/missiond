@@ -86,7 +86,7 @@ function cleanAssistantContent(content: string): string {
   // 3. Strip <system-reminder>...</system-reminder> blocks
   text = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '');
 
-  // 4. Strip Claude Code TUI markers
+  // 4. Strip Claude Code TUI markers and tool output remnants
   text = text
     .split('\n')
     .filter((line) => {
@@ -95,6 +95,10 @@ function cleanAssistantContent(content: string): string {
       if (trimmed.startsWith('✕ ') || trimmed.startsWith('✗ ')) return false;
       if (trimmed.includes('Auto-update failed')) return false;
       if (trimmed.includes('bypass permissions on')) return false;
+      // Safety net: strip tool output border lines that leaked through
+      if (trimmed.startsWith('⎿') || trimmed.startsWith('│')) return false;
+      // Strip tool result file path references
+      if (trimmed.includes('tool-results/')) return false;
       return true;
     })
     .map((line) => {

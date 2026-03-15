@@ -883,6 +883,9 @@ impl PTYSession {
         // a new ToolOutput(Running), flooding the Jarvis SSE stream.
         let mut last_tool_name: Option<String> = None;
         let mut last_tool_status: Option<ToolStatus> = None;
+        // Block-scoped context classifier: tracks whether we're inside a tool
+        // output block or assistant text block, so Unknown lines inherit context.
+        let mut block_classifier = BlockClassifier::new();
         while running.load(Ordering::SeqCst) {
             check_interval.tick().await;
             heartbeat_tick += 1;
@@ -1018,9 +1021,10 @@ impl PTYSession {
             // Process stable ops for text streaming BEFORE state transitions,
             // so text_assembler is populated when Complete fires.
             if !delta.stable_ops.is_empty() && current_state.is_processing() {
-                // Diagnostic: log all stable_ops during processing
+                let turn_id = *current_turn_id.read().await;
                 for op in &delta.stable_ops {
-                    let source = classify_stable_op(op);
+                    // Use stateful block classifier: Unknown lines inherit current block
+                    let source = block_classifier.classify(op);
                     let text_preview: String = op.text().chars().take(60).collect();
                     debug!(
                         slot = %slot_id,
@@ -1030,14 +1034,9 @@ impl PTYSession {
                         text = %text_preview,
                         "stable_op during processing"
                     );
-                }
-                let turn_id = *current_turn_id.read().await;
-                if let Some(turn_id) = turn_id {
-                    for op in &delta.stable_ops {
-                        let source = classify_stable_op(op);
-                        // Unknown source during active turn is treated as assistant text
-                        // Claude Code output after tool use often lacks ⏺ prefix
-                        if matches!(source, ScreenTextSource::Assistant | ScreenTextSource::Unknown) {
+                    // Only accumulate Assistant text (not Tool/Unknown/UI)
+                    if source == ScreenTextSource::Assistant {
+                        if let Some(turn_id) = turn_id {
                             let chunk = text_assembler.lock().await.apply(op);
                             if !chunk.is_empty() {
                                 let seq = {
@@ -1140,6 +1139,7 @@ impl PTYSession {
                         *current_turn_id.write().await = Some(new_turn_id);
                         *stream_seq.write().await = 0;
                         text_assembler.lock().await.reset();
+                        block_classifier.reset();
                         line_source_by_y.write().await.clear();
                         assistant_block_active.store(false, Ordering::SeqCst);
                         debug!(slot = %slot_id, turn_id = new_turn_id, "Begin turn");
@@ -1151,8 +1151,8 @@ impl PTYSession {
                         // on this same frame as the state transition.
                         if !delta.stable_ops.is_empty() {
                             for op in &delta.stable_ops {
-                                let source = classify_stable_op(op);
-                                if matches!(source, ScreenTextSource::Assistant | ScreenTextSource::Unknown) {
+                                let source = block_classifier.classify(op);
+                                if source == ScreenTextSource::Assistant {
                                     let chunk = text_assembler.lock().await.apply(op);
                                     if !chunk.is_empty() {
                                         let seq = {
@@ -1198,6 +1198,7 @@ impl PTYSession {
                         *current_turn_id.write().await = None;
                         *stream_seq.write().await = 0;
                         text_assembler.lock().await.reset();
+                        block_classifier.reset();
                         line_source_by_y.write().await.clear();
                         assistant_block_active.store(false, Ordering::SeqCst);
                     }
@@ -1767,47 +1768,89 @@ fn convert_semantic_confirm_info(info: &SemanticConfirmInfo) -> ConfirmInfo {
 }
 
 /// Classify stable op source
-fn classify_stable_op(op: &StableTextOp) -> ScreenTextSource {
-    let text = op.text();
-    let trimmed = text.trim_start();
+/// Block-Scoped Context Classifier: stateful classifier that tracks which
+/// content block (Assistant text vs Tool output) we're currently inside.
+/// Unknown lines inherit the current block state instead of leaking into
+/// assistant text.
+struct BlockClassifier {
+    /// Current block context — Unknown lines inherit this classification
+    current_block: ScreenTextSource,
+}
 
-    // Prompt line = user input
-    if trimmed.starts_with('>') || trimmed.starts_with('❯') {
-        return ScreenTextSource::User;
+impl BlockClassifier {
+    fn new() -> Self {
+        Self {
+            current_block: ScreenTextSource::Assistant,
+        }
     }
 
-    // Tool output markers
-    if trimmed.starts_with('⎿') || trimmed.starts_with('│') {
-        return ScreenTextSource::Tool;
+    /// Reset classifier state (call at turn boundaries)
+    fn reset(&mut self) {
+        self.current_block = ScreenTextSource::Assistant;
     }
 
-    // Tool call header
-    if trimmed.starts_with('⏺') {
-        // Check if it's a tool call (has parameters) or assistant text
-        if trimmed.contains('(') && !trimmed.contains("completed") {
+    /// Classify a stable text op with block-scoped context awareness.
+    /// Strong markers trigger block transitions; weak/unknown lines inherit
+    /// the current block state.
+    fn classify(&mut self, op: &StableTextOp) -> ScreenTextSource {
+        let text = op.text();
+        let trimmed = text.trim_start();
+
+        // Empty lines keep current block
+        if trimmed.is_empty() {
+            return self.current_block;
+        }
+
+        // ── Strong markers: trigger block transitions ──
+
+        // Prompt line = user input
+        if trimmed.starts_with('>') || trimmed.starts_with('❯') {
+            self.current_block = ScreenTextSource::User;
+            return ScreenTextSource::User;
+        }
+
+        // Tool output border markers (always Tool, regardless of block)
+        if trimmed.starts_with('⎿') || trimmed.starts_with('│') {
+            self.current_block = ScreenTextSource::Tool;
             return ScreenTextSource::Tool;
         }
-        return ScreenTextSource::Assistant;
-    }
 
-    // UI elements — status bar, shortcuts, permission toggles
-    if trimmed.contains("ctrl+")
-        || trimmed.contains("Ctrl+")
-        || trimmed.contains("shift+tab")
-        || trimmed.contains("IDE disconnected")
-        || trimmed.starts_with("⏵⏵")
-        || trimmed.starts_with("✢")
-    {
-        return ScreenTextSource::Ui;
-    }
+        // ⏺ marker — the key block boundary signal
+        if trimmed.starts_with('⏺') || trimmed.starts_with('●') {
+            if trimmed.contains('(') && !trimmed.contains("completed") {
+                // Tool call header: ⏺ Read(path) or ⏺ missiond - kb_search (MCP)
+                self.current_block = ScreenTextSource::Tool;
+                return ScreenTextSource::Tool;
+            }
+            // Assistant text block: ⏺ followed by prose
+            self.current_block = ScreenTextSource::Assistant;
+            return ScreenTextSource::Assistant;
+        }
 
-    // Box drawing = UI
-    if trimmed
-        .chars()
-        .any(|c| matches!(c, '╭' | '╮' | '╯' | '╰' | '┌' | '┐' | '└' | '┘' | '─' | '━' | '═'))
-    {
-        return ScreenTextSource::Ui;
-    }
+        // UI elements — status bar, shortcuts, permission toggles
+        if trimmed.contains("ctrl+")
+            || trimmed.contains("Ctrl+")
+            || trimmed.contains("shift+tab")
+            || trimmed.contains("IDE disconnected")
+            || trimmed.starts_with("⏵⏵")
+            || trimmed.starts_with("✢")
+        {
+            return ScreenTextSource::Ui;
+        }
 
-    ScreenTextSource::Unknown
+        // Box drawing = UI
+        if trimmed
+            .chars()
+            .any(|c| matches!(c, '╭' | '╮' | '╯' | '╰' | '┌' | '┐' | '└' | '┘' | '─' | '━' | '═'))
+        {
+            return ScreenTextSource::Ui;
+        }
+
+        // ── No strong marker: inherit current block state ──
+        // This is the key insight: lines without prefixes (JSON fragments,
+        // file paths, data rows) belong to whatever block we're currently in.
+        // If we're InTool, they're tool output. If InAssistant, they're text.
+        self.current_block
+    }
 }
+
