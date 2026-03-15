@@ -746,6 +746,16 @@ impl PTYWebSocketServer {
         let conversation_id = req.get("conversation_id").and_then(|v| v.as_str()).map(|s| s.to_string());
 
         let messages = req.get("messages").and_then(|m| m.as_array());
+
+        // Extract raw user text for DB persistence (before system prompt wrapping)
+        let raw_user_text: String = messages.as_ref().and_then(|msgs| {
+            msgs.iter().rev()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                .and_then(|m| match m.get("content") {
+                    Some(serde_json::Value::String(s)) => Some(s.clone()),
+                    _ => None,
+                })
+        }).unwrap_or_default();
         if messages.is_none() || messages.unwrap().is_empty() {
             let err = serde_json::json!({"error": {"message": "messages array is required"}});
             Self::send_http_error(&mut stream, 400, "Bad Request", &err.to_string()).await?;
@@ -1167,19 +1177,22 @@ impl PTYWebSocketServer {
                 let duration_ms = start_time.elapsed().as_millis() as u64;
                 trace_store.complete_trace(&chat_id, &result.response, duration_ms).await;
 
-                // Persist conversation to DB
+                // Persist conversation to DB (save raw user text, not enriched prompt)
                 if let (Some(ref db), Some(ref cid)) = (&db, &jarvis_conv_id) {
                     let clean_response = clean_jarvis_response(&result.response, &boundary_id);
-                    if let Err(e) = db.jarvis_save_exchange(cid, &user_message, &clean_response) {
-                        warn!(error = %e, conv_id = %cid, "Failed to save jarvis exchange");
-                    } else {
-                        // Set title from first user message if this is a new conversation
-                        let title = if user_message.len() > 80 {
-                            format!("{}...", &user_message[..77])
-                        } else {
-                            user_message.clone()
-                        };
-                        let _ = db.jarvis_update_title(cid, &title);
+                    if !raw_user_text.is_empty() {
+                        if let Err(e) = db.jarvis_save_exchange(cid, &raw_user_text, &clean_response) {
+                            warn!(error = %e, conv_id = %cid, "Failed to save jarvis exchange");
+                        } else if conversation_id.is_none() {
+                            // Set title from first user message only for new conversations
+                            let title = if raw_user_text.chars().count() > 80 {
+                                let truncated: String = raw_user_text.chars().take(77).collect();
+                                format!("{}...", truncated)
+                            } else {
+                                raw_user_text.clone()
+                            };
+                            let _ = db.jarvis_update_title(cid, &title);
+                        }
                     }
                 }
 

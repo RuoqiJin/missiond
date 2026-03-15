@@ -31,7 +31,7 @@ export async function GET(req: NextRequest) {
     try {
       const result = await callTool('mission_conversation_get', {
         sessionId: id,
-        includeMessages: true,
+        tail: 200,
       }) as { messages?: ConversationMessage[] };
       return NextResponse.json({
         messages: result?.messages || [],
@@ -41,11 +41,12 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // List recent jarvis conversations
+  // List recent jarvis conversations (filtered by source=jarvis_ui)
   try {
     const result = await callTool('mission_conversation_list', {
       source: 'jarvis_ui',
       limit: 50,
+      conversationType: 'all',
     }) as ConversationListItem[];
 
     const convs = (result || []).map((c) => ({
@@ -58,34 +59,5 @@ export async function GET(req: NextRequest) {
   } catch {
     // Fallback: return empty list if tool not available
     return NextResponse.json([]);
-  }
-}
-
-// POST — save a conversation exchange (user + assistant messages)
-export async function POST(req: NextRequest) {
-  try {
-    const body = await req.json();
-    const { conversationId, userMessage, assistantMessage } = body;
-
-    // Use router_chat append or create a new conversation record
-    // For now, we store via conversation_messages through the conversation tool
-    if (!userMessage && !assistantMessage) {
-      return NextResponse.json({ error: 'No messages to save' }, { status: 400 });
-    }
-
-    // Create or get conversation
-    let convId = conversationId;
-    if (!convId) {
-      // Generate a conversation ID
-      convId = `jarvis-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    }
-
-    // For now, we'll rely on the PTY session's built-in conversation tracking
-    // The /v1/chat/completions endpoint already logs to JarvisTraceStore
-    // Future: implement direct DB persistence for jarvis_ui conversations
-
-    return NextResponse.json({ conversationId: convId, ok: true });
-  } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
   }
 }
