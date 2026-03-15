@@ -829,22 +829,23 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
         {
             let cache = state.kb_cooccurrence_cache.read().await;
             let existing_ids: HashSet<String> = scored_entries.iter().map(|(e, _)| e.id.clone()).collect();
-            let mut preloaded = 0usize;
+            let mut to_add: Vec<(KnowledgeEntry, f64)> = Vec::new();
             for (e, _) in scored_entries.iter() {
-                if preloaded >= 2 { break; }
+                if to_add.len() >= 2 { break; }
                 if let Some(co_ids) = cache.get(&e.id) {
                     for co_id in co_ids {
-                        if preloaded >= 2 { break; }
+                        if to_add.len() >= 2 { break; }
                         if !existing_ids.contains(co_id) {
                             if let Ok(Some(co_entry)) = db.kb_get_by_id(co_id) {
                                 if co_entry.scope_task_id.is_none() {
-                                    preloaded += 1;
+                                    to_add.push((co_entry, 0.0));
                                 }
                             }
                         }
                     }
                 }
             }
+            scored_entries.extend(to_add);
         }
 
         scored_entries.into_iter().map(|(e, _)| KbHint {
