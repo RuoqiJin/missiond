@@ -54,6 +54,7 @@ use crate::semantic::{
     ClaudeCodeStatus, ClaudeCodeToolOutput, ClaudeCodeTitle,
     ConfirmInfo as SemanticConfirmInfo,
     State as SemanticState,
+    ToolStatus,
 };
 
 // ========== Types ==========
@@ -876,6 +877,12 @@ impl PTYSession {
         let mut heartbeat_tick: u64 = 0;
         let mut starting_since: Option<std::time::Instant> = Some(std::time::Instant::now());
         let mut starting_warned = false;
+
+        // ToolOutput deduplication: only emit when tool name or status changes.
+        // Without this, every 100ms tick where a tool header is visible emits
+        // a new ToolOutput(Running), flooding the Jarvis SSE stream.
+        let mut last_tool_name: Option<String> = None;
+        let mut last_tool_status: Option<ToolStatus> = None;
         while running.load(Ordering::SeqCst) {
             check_interval.tick().await;
             heartbeat_tick += 1;
@@ -1310,11 +1317,23 @@ impl PTYSession {
                 }
             }
 
-            // Emit ToolOutput event if tool output is detected
+            // Emit ToolOutput event if tool output is detected (with deduplication)
             if hints.has_tool_output {
                 if let Some(result) = tool_parser.parse(&context) {
-                    let _ = event_tx.send(SessionEvent::ToolOutput(result.data));
+                    let name = &result.data.tool_name;
+                    let status = result.data.status;
+                    let is_duplicate = last_tool_name.as_deref() == Some(name)
+                        && last_tool_status == Some(status);
+                    if !is_duplicate {
+                        last_tool_name = Some(name.clone());
+                        last_tool_status = Some(status);
+                        let _ = event_tx.send(SessionEvent::ToolOutput(result.data));
+                    }
                 }
+            } else {
+                // Tool header disappeared from screen — reset dedup state
+                last_tool_name = None;
+                last_tool_status = None;
             }
 
         }
