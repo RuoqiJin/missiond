@@ -435,6 +435,7 @@ async fn main() -> Result<()> {
             }
         })),
         slot_fail_counts: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        task_cited_kbs: Arc::new(std::sync::Mutex::new(HashMap::new())),
         pending_compact_restart: Arc::new(std::sync::Mutex::new(HashSet::new())),
         slot_current_model: Arc::new(std::sync::Mutex::new(HashMap::new())),
         screenshot_broker: Arc::clone(&screenshot_broker),

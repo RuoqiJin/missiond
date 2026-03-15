@@ -1100,6 +1100,25 @@ impl MissionDB {
     }
 
 
+    /// Atomically adjust confidence for a KB entry by ID.
+    /// Clamps result to [0.1, 1.0]. Returns the new confidence value.
+    /// Used by the negative/positive feedback loop after task completion.
+    pub fn kb_adjust_confidence(&self, id: &str, delta: f64) -> DbResult<Option<f64>> {
+        let conn = self.conn();
+        // Atomic: compute new value in SQL, clamp to [0.1, 1.0]
+        conn.execute(
+            "UPDATE knowledge SET confidence = MAX(0.1, MIN(1.0, confidence + ?1)), updated_at = ?2 WHERE id = ?3",
+            params![delta, chrono::Utc::now().to_rfc3339(), id],
+        )?;
+        // Read back the new value
+        let new_conf: Option<f64> = conn.query_row(
+            "SELECT confidence FROM knowledge WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        ).optional()?;
+        Ok(new_conf)
+    }
+
     /// List KB entries with confidence below threshold (for idle exploration).
     pub fn kb_list_low_confidence(&self, threshold: f64, limit: usize) -> DbResult<Vec<KnowledgeEntry>> {
         let conn = self.read_conn();
