@@ -1598,6 +1598,13 @@ async fn handle_kb_compact(state: &AppState, args: serde_json::Value) -> Result<
             .map(|t| (now - t.with_timezone(&chrono::Utc)).num_days())
             .unwrap_or(0);
 
+        // Exempt categories: architecture:summary, policy:decision, preference — never auto-compact
+        let exempt = e.category.starts_with("architecture:summary")
+            || e.category.starts_with("policy:decision")
+            || e.category.starts_with("preference")
+            || e.category == "infra";
+        if exempt { continue; }
+
         // Rule 1: Low confidence (< 0.3) — feedback loop has deprioritized
         if e.confidence < 0.3 {
             candidates.push((e.key.clone(), e.category.clone(), e.summary.clone(), e.confidence, "low_confidence"));
@@ -1611,6 +1618,26 @@ async fn handle_kb_compact(state: &AppState, args: serde_json::Value) -> Result<
         // Rule 3: memory:ops older than 7 days
         if e.category.starts_with("memory:ops") && age_days > 7 {
             candidates.push((e.key.clone(), e.category.clone(), e.summary.clone(), e.confidence, "stale_ops"));
+            continue;
+        }
+        // Rule 4: memory:debug older than 30 days
+        if e.category.starts_with("memory:debug") && age_days > 30 {
+            candidates.push((e.key.clone(), e.category.clone(), e.summary.clone(), e.confidence, "stale_debug"));
+            continue;
+        }
+        // Rule 5: memory:bugfix older than 30 days with no retrieval
+        if e.category.starts_with("memory:bugfix") && e.access_count == 0 && age_days > 30 {
+            candidates.push((e.key.clone(), e.category.clone(), e.summary.clone(), e.confidence, "stale_bugfix"));
+            continue;
+        }
+        // Rule 6: Low-value facts — confidence < 0.5 and never accessed
+        if e.kb_type == "fact" && e.confidence < 0.5 && e.access_count == 0 {
+            candidates.push((e.key.clone(), e.category.clone(), e.summary.clone(), e.confidence, "low_value_fact"));
+            continue;
+        }
+        // Rule 7: Expired scratchpad — Working Memory entries older than 7 days
+        if e.scope_task_id.is_some() && age_days > 7 {
+            candidates.push((e.key.clone(), e.category.clone(), e.summary.clone(), e.confidence, "expired_scratchpad"));
             continue;
         }
     }

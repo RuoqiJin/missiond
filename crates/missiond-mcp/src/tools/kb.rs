@@ -168,8 +168,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["gc", "analyze", "discover", "queue_status", "execute_plan"],
-                        "description": "运维动作: gc=治理, analyze=AI分析, discover=主机探测, queue_status=队列状态, execute_plan=执行计划"
+                        "enum": ["gc", "analyze", "discover", "queue_status", "execute_plan", "compact"],
+                        "description": "运维动作: gc=治理, analyze=AI分析, discover=主机探测, queue_status=队列状态, execute_plan=执行计划, compact=规则化清理低质量条目"
                     },
                     // --- gc params ---
                     "gc_action": {
@@ -242,6 +242,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "status": {
                         "type": "string",
                         "description": "[queue_status] 按状态过滤: pending, running, done, skipped, failed"
+                    },
+                    // --- compact params ---
+                    "dryRun": {
+                        "type": "boolean",
+                        "description": "[compact] 预览模式(默认 true)。false=执行真实删除"
                     }
                 },
                 "required": ["action"]

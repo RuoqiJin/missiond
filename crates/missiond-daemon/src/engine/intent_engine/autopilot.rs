@@ -494,6 +494,14 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
             cache.insert(task.id.clone(), cited_kb_ids.clone());
         }
 
+        // Prompt snapshot: save full context for Skill auto-verification replay
+        let _ = state.mission.db().save_prompt_snapshot(
+            &task.id,
+            &full_prompt,
+            &cited_kb_ids,
+            &task.category,
+        );
+
         // Emit dispatch event for timeline visibility
         {
             let preview = if full_prompt.len() > 200 {
@@ -686,6 +694,8 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                             TraceContext { trace_id: Some(task.id.clone()), summary: Some(format!("board: {} → done", task.title)), ..Default::default() },
                         );
                         info!(task_id = %task.id, duration_ms = res.duration_ms, "Autopilot: task completed");
+                        // Record outcome for Skill auto-verification replay
+                        let _ = state.mission.db().update_prompt_snapshot_outcome(&task.id, "success");
                     }
                 }
                 // Reset slot failure count on success
@@ -715,6 +725,29 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                         }
                         if count > 0 {
                             info!(task_id = %task.id, kb_count = count, "KB feedback: boosted confidence for {} cited entries", count);
+                        }
+                    }
+                }
+
+                // Working Memory graduation: promote worthy scratchpad entries to global KB
+                {
+                    let scratchpad = state.mission.db().kb_list_by_scope(&task.id);
+                    if let Ok(entries) = scratchpad {
+                        let mut graduated = 0u32;
+                        let mut expired = 0u32;
+                        for entry in &entries {
+                            if entry.confidence >= 0.7 && entry.access_count > 0 {
+                                // Graduate: clear scope to make it global
+                                let _ = state.mission.db().kb_clear_scope(&entry.id);
+                                graduated += 1;
+                            } else {
+                                // Expire: remove low-value scratchpad entries
+                                let _ = state.mission.db().kb_forget(&entry.key);
+                                expired += 1;
+                            }
+                        }
+                        if graduated + expired > 0 {
+                            info!(task_id = %task.id, graduated, expired, "Working memory: graduated {} entries, expired {}", graduated, expired);
                         }
                     }
                 }
@@ -824,6 +857,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                             TraceContext { trace_id: Some(task.id.clone()), summary: Some(format!("board: {} → failed", task.title)), ..Default::default() },
                         );
                         warn!(task_id = %task.id, retries = new_retry, "Autopilot: task failed after max retries");
+                        let _ = state.mission.db().update_prompt_snapshot_outcome(&task.id, "failed");
                         notify_jarvis_failure(state, &task, &err_msg);
 
                         // Negative confidence feedback with LLM attribution
@@ -880,13 +914,31 @@ async fn apply_attributed_penalty(
 
     if kb_context.is_empty() { return; }
 
-    // Log dehydration: head+tail strategy to capture both error class and crash point
-    let error_preview = if error_msg.len() > 300 {
-        let mut head_end = 150;
-        while head_end > 0 && !error_msg.is_char_boundary(head_end) { head_end -= 1; }
-        let mut tail_start = error_msg.len().saturating_sub(150);
-        while tail_start < error_msg.len() && !error_msg.is_char_boundary(tail_start) { tail_start += 1; }
-        format!("{}\n...(truncated {} chars)...\n{}", &error_msg[..head_end], error_msg.len() - head_end - (error_msg.len() - tail_start), &error_msg[tail_start..])
+    // Log dehydration: semantic summary for long errors, preserving causal chain.
+    // Falls back to head+tail if MiniMax unavailable.
+    let error_preview = if error_msg.len() > 500 {
+        // Try semantic summary via MiniMax
+        let summary = if let Some(minimax) = state.minimax.as_ref() {
+            use crate::minimax_client::ChatMessage;
+            let summarize_prompt = format!(
+                "以下是任务失败日志（{}字符）。提取关键因果链：错误类型、触发条件、失败点。≤400字，保留原始错误消息和关键状态变化。\n\n{}",
+                error_msg.len(), error_msg
+            );
+            let msgs = vec![ChatMessage { role: "user".to_string(), content: summarize_prompt }];
+            match minimax.call_briefing(msgs, Some(512), Some(format!("log-dehydrate-{}", task_id))).await {
+                Ok(resp) if !resp.trim().is_empty() => Some(resp),
+                _ => None,
+            }
+        } else { None };
+
+        summary.unwrap_or_else(|| {
+            // Fallback: head+tail
+            let mut head_end = 200;
+            while head_end > 0 && !error_msg.is_char_boundary(head_end) { head_end -= 1; }
+            let mut tail_start = error_msg.len().saturating_sub(200);
+            while tail_start < error_msg.len() && !error_msg.is_char_boundary(tail_start) { tail_start += 1; }
+            format!("{}\n...(truncated)...\n{}", &error_msg[..head_end], &error_msg[tail_start..])
+        })
     } else {
         error_msg.to_string()
     };

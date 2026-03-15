@@ -376,6 +376,13 @@ impl MissionDB {
                      UPDATE knowledge SET kb_type = 'state' WHERE category LIKE 'memory:ops%' OR category LIKE 'memory:debug%' OR category LIKE 'memory:bugfix%' OR category = 'ops';"
                 )?;
             }
+            // Working Memory scope: NULL=global (default), task_id=scratchpad for that task
+            if !kb_columns.iter().any(|c| c == "scope_task_id") {
+                conn.execute_batch(
+                    "ALTER TABLE knowledge ADD COLUMN scope_task_id TEXT;
+                     CREATE INDEX IF NOT EXISTS idx_kb_scope ON knowledge(scope_task_id);"
+                )?;
+            }
         }
 
         // Add memory_forwarded_at to conversations if missing
@@ -909,6 +916,19 @@ impl MissionDB {
             );
             CREATE INDEX IF NOT EXISTS idx_incidents_created ON incidents(created_at);
             CREATE INDEX IF NOT EXISTS idx_incidents_dedupe ON incidents(dedupe_key, created_at);"
+        )?;
+
+        // Prompt snapshots for Skill auto-verification replay
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS prompt_snapshots (
+                task_id TEXT PRIMARY KEY,
+                prompt TEXT NOT NULL,
+                cited_kb_ids TEXT NOT NULL DEFAULT '[]',
+                category TEXT NOT NULL DEFAULT 'other',
+                task_outcome TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_prompt_snap_cat ON prompt_snapshots(category);"
         )?;
 
         // Unified Embedding upgrade: add embedding_provider to KB + clear stale 512d vectors

@@ -68,6 +68,7 @@ impl MissionDB {
                     linked_task_id: None,
                     kb_type: Self::infer_kb_type(&input.category).to_string(),
                     context_snippet: None,
+                    scope_task_id: None,
                 },
                 action: "rejected".into(),
                 merged_key: None,
@@ -186,6 +187,7 @@ impl MissionDB {
             linked_task_id: None,
             kb_type: kb_type.to_string(),
             context_snippet: None,
+            scope_task_id: None,
         };
 
         Self::kb_sync_fts_with_conn(&conn, &entry)?;
@@ -844,6 +846,66 @@ impl MissionDB {
         Ok(deleted)
     }
 
+    /// List KB entries scoped to a specific task (Working Memory scratchpad).
+    pub fn kb_list_by_scope(&self, task_id: &str) -> DbResult<Vec<KnowledgeEntry>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM knowledge WHERE scope_task_id = ?1"
+        )?;
+        let entries = stmt.query_map(params![task_id], Self::row_to_knowledge_entry)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(entries)
+    }
+
+    /// Graduate a scratchpad entry to global KB by clearing its scope.
+    pub fn kb_clear_scope(&self, id: &str) -> DbResult<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE knowledge SET scope_task_id = NULL, updated_at = ?1 WHERE id = ?2",
+            params![chrono::Utc::now().to_rfc3339(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Save a prompt snapshot for Skill auto-verification replay.
+    pub fn save_prompt_snapshot(
+        &self, task_id: &str, prompt: &str, cited_kb_ids: &[String], category: &str,
+    ) -> DbResult<()> {
+        let conn = self.conn();
+        let kb_ids_json = serde_json::to_string(cited_kb_ids).unwrap_or_else(|_| "[]".to_string());
+        conn.execute(
+            "INSERT OR REPLACE INTO prompt_snapshots (task_id, prompt, cited_kb_ids, category, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![task_id, prompt, kb_ids_json, category, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Record task outcome for a prompt snapshot (used by Skill auto-verification).
+    pub fn update_prompt_snapshot_outcome(&self, task_id: &str, outcome: &str) -> DbResult<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE prompt_snapshots SET task_outcome = ?1 WHERE task_id = ?2",
+            params![outcome, task_id],
+        )?;
+        Ok(())
+    }
+
+    /// List prompt snapshots by category for Skill verification replay.
+    pub fn list_prompt_snapshots(&self, category: &str, limit: usize) -> DbResult<Vec<(String, String, String)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT task_id, prompt, task_outcome FROM prompt_snapshots
+             WHERE category = ?1 AND task_outcome IS NOT NULL
+             ORDER BY created_at DESC LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(params![category, limit as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?.filter_map(|r| r.ok()).collect();
+        Ok(rows)
+    }
+
     /// Sync FTS index for a knowledge entry (uses existing connection)
     fn kb_sync_fts_with_conn(conn: &Connection, entry: &KnowledgeEntry) -> DbResult<()> {
         let rowid: i64 = conn.query_row(
@@ -1310,6 +1372,7 @@ impl MissionDB {
             linked_task_id: row.get("linked_task_id").unwrap_or(None),
             kb_type,
             context_snippet: None,
+            scope_task_id: row.get("scope_task_id").unwrap_or(None),
         })
     }
 
