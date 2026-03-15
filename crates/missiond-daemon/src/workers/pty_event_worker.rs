@@ -335,8 +335,17 @@ async fn handle_confirm_required(
             true
         }
         (None, _) => {
-            warn!(slot_id = %slot_id, "Auto-confirming with no tool info");
-            true
+            // No tool identified — could be AskUserQuestion (not a tool confirmation)
+            let is_ask_user = tool_info.as_ref()
+                .map(|info| info.raw_prompt.contains("Enter to select"))
+                .unwrap_or(false);
+            if is_ask_user {
+                info!(slot_id = %slot_id, "AskUserQuestion detected, forwarding to user");
+                false
+            } else {
+                warn!(slot_id = %slot_id, "Auto-confirming with no tool info");
+                true
+            }
         }
     };
 

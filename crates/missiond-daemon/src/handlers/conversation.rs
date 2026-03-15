@@ -473,6 +473,41 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             })))
         }
 
+        "mission_habit_scan" => {
+            let db = state.mission.db();
+            let unscanned = db.count_unscanned_conversations().unwrap_or(0);
+
+            let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("status");
+            match action {
+                "trigger" => {
+                    if unscanned == 0 {
+                        return Ok(ToolResult::json(&serde_json::json!({
+                            "status": "nothing_to_do",
+                            "unscanned": 0,
+                        })));
+                    }
+                    // Reset cadence to allow immediate run
+                    let _ = db.daemon_state_set("last_habit_scan_at", 0);
+                    Ok(ToolResult::json(&serde_json::json!({
+                        "status": "triggered",
+                        "unscanned": unscanned,
+                        "message": "Habit scan will run on next learning tick (within 60s)",
+                    })))
+                }
+                _ => {
+                    // Status: show scan progress
+                    let total = db.count_scannable_conversations().unwrap_or(0);
+                    let scanned = total - unscanned;
+                    Ok(ToolResult::json(&serde_json::json!({
+                        "total": total,
+                        "scanned": scanned,
+                        "unscanned": unscanned,
+                        "progress": if total > 0 { format!("{:.1}%", scanned as f64 / total as f64 * 100.0) } else { "N/A".to_string() },
+                    })))
+                }
+            }
+        }
+
         "mission_embedding_stats" => {
             let db = state.mission.db();
             let mut stats = db.embedding_stats()

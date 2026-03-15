@@ -954,6 +954,7 @@ impl PTYWebSocketServer {
         let start_time = std::time::Instant::now();
         let heartbeat_interval = tokio::time::Duration::from_secs(15);
         let mut tool_seq: u32 = 0;
+        let mut streamed_text = false; // Track if text was streamed via TextOutput::Stream
         let mut last_event_time = std::time::Instant::now();
         let mut last_status_phase = String::new();
         let mut last_status_sent = std::time::Instant::now() - std::time::Duration::from_secs(1); // Allow first status immediately
@@ -994,13 +995,12 @@ impl PTYWebSocketServer {
                                 ToolStatus::Running => {
                                     tool_seq += 1;
                                     let id = format!("t{}", tool_seq);
-                                    let param_summary = tool_output.params.values().next()
-                                        .and_then(|v| v.as_str().map(|s| s.to_string()))
-                                        .unwrap_or_default();
+                                    // Send full params as JSON object (not just first param summary)
+                                    let params_json = serde_json::json!(tool_output.params);
                                     let evt = serde_json::json!({
                                         "id": id,
                                         "tool": tool_output.tool_name,
-                                        "params": param_summary,
+                                        "params": params_json,
                                     });
                                     let sse = format!("event: tool_start\ndata: {}\n\n", evt);
                                     let _ = stream.write_all(sse.as_bytes()).await;
@@ -1008,10 +1008,19 @@ impl PTYWebSocketServer {
                                 }
                                 ToolStatus::Completed => {
                                     let id = format!("t{}", tool_seq);
+                                    // Include truncated output for visibility
+                                    let output = tool_output.output.as_deref().map(|o| {
+                                        if o.len() > 4096 {
+                                            format!("{}...\n[truncated, {} bytes total]", &o[..4096], o.len())
+                                        } else {
+                                            o.to_string()
+                                        }
+                                    });
                                     let evt = serde_json::json!({
                                         "id": id,
                                         "tool": tool_output.tool_name,
                                         "duration_ms": tool_output.duration_ms,
+                                        "output": output,
                                     });
                                     let sse = format!("event: tool_end\ndata: {}\n\n", evt);
                                     let _ = stream.write_all(sse.as_bytes()).await;
@@ -1046,7 +1055,47 @@ impl PTYWebSocketServer {
                             let _ = stream.shutdown().await;
                             return Ok(());
                         }
-                        _ => {} // Ignore Data, ScreenText, TitleChange, TextOutput::Stream/Complete
+                        SessionEvent::TextOutput(text_event) => {
+                            use crate::TextOutputEvent;
+                            match text_event {
+                                TextOutputEvent::Stream { content, .. } => {
+                                    if !content.is_empty() {
+                                        streamed_text = true;
+                                        // Forward as standard OpenAI delta chunk for real-time streaming
+                                        let chunk = serde_json::json!({
+                                            "id": &chat_id,
+                                            "object": "chat.completion.chunk",
+                                            "model": "jarvis-missiond",
+                                            "choices": [{
+                                                "index": 0,
+                                                "delta": { "content": content },
+                                                "finish_reason": serde_json::Value::Null,
+                                            }]
+                                        });
+                                        let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
+                                        let _ = stream.flush().await;
+                                    }
+                                }
+                                TextOutputEvent::Complete { .. } => {
+                                    // Final text handled by send() result below
+                                }
+                            }
+                        }
+                        SessionEvent::ConfirmRequired { prompt, info } => {
+                            let evt = serde_json::json!({
+                                "action_id": format!("confirm-{}", tool_seq),
+                                "prompt": prompt,
+                                "info": info.as_ref().map(|i| serde_json::json!({
+                                    "type": i.confirm_type,
+                                    "tool": i.tool.as_ref().map(|t| &t.name),
+                                    "options": i.options,
+                                })),
+                            });
+                            let sse = format!("event: confirm_required\ndata: {}\n\n", evt);
+                            let _ = stream.write_all(sse.as_bytes()).await;
+                            let _ = stream.flush().await;
+                        }
+                        _ => {} // Ignore Data, ScreenText, TitleChange
                     }
                 }
                 Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
@@ -1064,13 +1113,16 @@ impl PTYWebSocketServer {
             }
         }
 
-        // send() has completed — get the result and emit final response
+        // send() has completed — emit stop marker
+        // Text content is streamed via TextOutput::Stream events above.
+        // Fallback: if no stream events fired, send the full response as a single chunk.
         match send_handle.await {
             Ok(Ok(result)) => {
                 let duration_ms = start_time.elapsed().as_millis() as u64;
                 trace_store.complete_trace(&chat_id, &result.response, duration_ms).await;
 
-                if !result.response.is_empty() {
+                // Fallback: if TextOutput::Stream didn't fire, send full response
+                if !streamed_text && !result.response.is_empty() {
                     let cleaned = clean_jarvis_response(&result.response, &boundary_id);
                     let chunk = serde_json::json!({
                         "id": &chat_id,
@@ -1084,6 +1136,7 @@ impl PTYWebSocketServer {
                     });
                     let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
                 }
+
                 let stop = serde_json::json!({
                     "id": &chat_id,
                     "object": "chat.completion.chunk",

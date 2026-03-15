@@ -108,6 +108,40 @@ summary: '先查看了 xxx.rs 的第 30 行，发现 parse 报错 InvalidToken�
 summary: 'JSON 解析 InvalidToken 报错时，优先检查文件头 UTF-8 BOM 而非换解析库'
 detail: {\"trigger\": \"serde_json parse 报 InvalidToken，换库无效\", \"conclusion\": \"根因是文件头 3 字节 UTF-8 BOM\", \"action\": \"用 BufReader skip_bom 或 strip_prefix\"}";
 
+    pub const EXTRACTION_HABITS: &str = "\
+你是用户行为分析专家。请分析以下历史对话，提取用户持久的【操作习惯和偏好】。
+不要提取特定项目的业务逻辑，只提取可跨项目泛化的行为模式。特别关注用户的【纠正】、【批评】或【明确指令】。
+
+📋 工作流程:
+1. 调用 mission_conversation_get 获取指定会话的消息内容
+2. 分析用户消息中的行为模式（重点关注命令式指令、否定句、重复要求）
+3. 用 mission_kb_search 去重检查（避免与现有 preference 重复）
+4. 用 mission_kb_remember 存入新发现的习惯
+
+⚠️ 水位线由系统自动管理。你的文本回复即代表本轮处理结束。
+
+🎯 提取维度（4 类）:
+1. workflow — 工作流习惯（如：先调查再修改、方案需 Gemini 审阅后执行、复杂任务先建 Board）
+2. style — 沟通/代码风格偏好（如：要求简洁回复、偏好中英混用、不要总结已完成的工作）
+3. technical — 技术约束/偏好（如：禁用某框架、优先某工具、特定命名规范）
+4. correction — 纠错触发器（如：AI 做了 X 导致用户不满并要求重做的模式）
+
+📐 写入格式:
+category: preference（所有习惯统一存 preference 类别，key 体现子类型）
+key 命名: habit-{workflow|style|technical|correction}-简短描述
+summary ≤ 120 字，必须包含用户原话作为证据
+detail: {\"dimension\": \"workflow|style|technical|correction\", \"pattern\": \"习惯描述\", \"trigger\": \"触发场景\", \"user_quote\": \"用户原话\"}
+
+✅ Good Case:
+key: habit-workflow-gemini-review-before-execute
+summary: '调查方案需经 Gemini 审阅通过后才能执行 — 用户原话: \"调查后必须经 Gemini 审核优化方案后才执行\"'
+detail: {\"dimension\": \"workflow\", \"pattern\": \"方案设计后必须发 Gemini 审阅，通过后才执行\", \"trigger\": \"AI 完成调查/设计方案时\", \"user_quote\": \"调查后必须经 Gemini 审核优化方案后才执行\"}
+
+🚫 严禁:
+- 提取具体代码/API/版本信息
+- 提取单次偶然行为（需要在对话中出现明确的指令或纠正才算习惯）
+- 提取通用技术知识";
+
     pub const EXTRACTION_DEEP: &str = "\
 ⚠️ 重要: 消息级知识（偏好/决策/事实）已由 realtime 管道提取，不要重复提取。
 你的任务仅限于:
@@ -150,6 +184,7 @@ struct PromptData {
     help_protocol: String,
     extraction_realtime: String,
     extraction_deep: String,
+    extraction_habits: String,
 }
 
 impl PromptData {
@@ -163,6 +198,7 @@ impl PromptData {
             help_protocol: load_or_default(&dir, "help_protocol", defaults::HELP_PROTOCOL),
             extraction_realtime: load_or_default(&dir, "extraction_realtime", defaults::EXTRACTION_REALTIME),
             extraction_deep: load_or_default(&dir, "extraction_deep", defaults::EXTRACTION_DEEP),
+            extraction_habits: load_or_default(&dir, "extraction_habits", defaults::EXTRACTION_HABITS),
         }
     }
 }
@@ -221,5 +257,8 @@ impl PromptStore {
     }
     pub fn extraction_deep(&self) -> String {
         self.data.read().map(|d| d.extraction_deep.clone()).unwrap_or_else(|_| defaults::EXTRACTION_DEEP.to_string())
+    }
+    pub fn extraction_habits(&self) -> String {
+        self.data.read().map(|d| d.extraction_habits.clone()).unwrap_or_else(|_| defaults::EXTRACTION_HABITS.to_string())
     }
 }

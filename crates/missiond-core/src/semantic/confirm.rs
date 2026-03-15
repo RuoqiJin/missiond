@@ -16,6 +16,10 @@ use super::types::{
 static OPTION_CONFIRM_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?mi)^[\s❯>]*1\.\s*(Yes|Allow)").unwrap());
 
+/// General numbered option list (AskUserQuestion): "❯ 1. <any text>"
+static ASK_USER_OPTION_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?mi)^[\s❯>]*1\.\s+\S").unwrap());
+
 static YES_NO_CONFIRM_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\[Y/n\]|\(yes/no\)|Allow\?|Do you want to proceed").unwrap());
 
@@ -75,9 +79,11 @@ impl ClaudeCodeConfirmParser {
         }
     }
 
-    /// Check for options-style confirmation
+    /// Check for options-style confirmation (tool confirm or AskUserQuestion)
     fn is_option_confirm(&self, text: &str) -> bool {
-        OPTION_CONFIRM_PATTERN.is_match(text) && text.contains("Esc to cancel")
+        let has_standard = OPTION_CONFIRM_PATTERN.is_match(text);
+        let has_ask_user = ASK_USER_OPTION_PATTERN.is_match(text) && text.contains("Enter to select");
+        (has_standard || has_ask_user) && text.contains("Esc to cancel")
     }
 
     /// Check for Y/n style confirmation

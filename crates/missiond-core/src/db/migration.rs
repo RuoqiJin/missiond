@@ -1262,6 +1262,22 @@ impl MissionDB {
             }
         }
 
+        // Historical habit scan watermark — tracks which conversations have been
+        // scanned for user operation habits (workflow patterns, style, corrections).
+        {
+            let cols: Vec<String> = conn
+                .prepare("PRAGMA table_info(conversations)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !cols.iter().any(|c| c == "habit_scanned_at") {
+                conn.execute_batch(
+                    "ALTER TABLE conversations ADD COLUMN habit_scanned_at TEXT;"
+                )?;
+                tracing::info!("Migration: added habit_scanned_at to conversations");
+            }
+        }
+
         Ok(())
     }
 }

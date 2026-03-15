@@ -8,6 +8,7 @@ pub mod extraction;
 pub mod decision_harvest;
 pub mod timeline_analyst;
 pub mod idle_explorer;
+pub mod historical_scanner;
 
 use tracing::info;
 use crate::state::AppState;
@@ -51,4 +52,7 @@ pub(crate) async fn learning_tick(state: &AppState) {
 
     // L5: Idle Exploration (2h cadence, only when system has spare capacity)
     idle_explorer::check_idle_exploration(state).await;
+
+    // L6: Historical Habit Scan (4h cadence, lowest priority, only when idle)
+    historical_scanner::check_historical_scan(state).await;
 }
