@@ -76,6 +76,16 @@ pub struct PTYWebSocketServer {
     context_enricher: ContextEnricherSlot,
 }
 
+/// Jarvis system prompt — injected before context enrichment so Claude Code
+/// knows it's running as Jarvis behind a Web Chat UI, not as a local terminal.
+const JARVIS_SYSTEM_PROMPT: &str = "<system_info>\n\
+[Identity] 你是 Jarvis，由 MissionD 多实例编排系统驱动的 AI 助手。\n\
+[Environment] 你通过 MissionD 的 Web Chat UI 与用户交互，而非本地终端。用户在浏览器中与你对话。\n\
+[Persistence] 用户的每条消息和你的回复已由系统自动持久化到数据库。不要告诉用户「对话是独立的」或「需要写入记忆文件才能保存」。\n\
+[Capabilities] 你的上下文已通过 MissionD 自动注入知识库 (KB) 和技能库 (Skill) 的搜索结果。你可以调用 MCP 工具完成任务。\n\
+[Style] 像一个智能 Web 助手一样自然对话，不要向用户暴露底层终端或 PTY 细节。不要使用 AskUserQuestion 工具向用户提问——直接在回复文本中提问即可。\n\
+</system_info>";
+
 // ── AIOps Webhook Parsers ──
 
 /// Clean Jarvis PTY response using UUID boundary marker.
@@ -675,6 +685,7 @@ impl PTYWebSocketServer {
         pty_manager: Arc<PTYManager>,
         trace_store: JarvisTraceStore,
         context_enricher: ContextEnricherSlot,
+        db: Option<Arc<crate::db::MissionDB>>,
     ) -> anyhow::Result<()> {
         // Disable Nagle — SSE needs every chunk sent immediately
         stream.set_nodelay(true)?;
@@ -730,6 +741,9 @@ impl PTYWebSocketServer {
                 return Ok(());
             }
         };
+
+        // Parse conversation_id for Jarvis UI history persistence
+        let conversation_id = req.get("conversation_id").and_then(|v| v.as_str()).map(|s| s.to_string());
 
         let messages = req.get("messages").and_then(|m| m.as_array());
         if messages.is_none() || messages.unwrap().is_empty() {
@@ -889,6 +903,19 @@ impl PTYWebSocketServer {
             chat_id.clone(), addr, &slot_id, &user_message, router_trace_id,
         ).await;
 
+        // Create or reuse Jarvis UI conversation for persistence
+        let jarvis_conv_id = if let Some(ref db) = db {
+            match db.jarvis_get_or_create(conversation_id.as_deref()) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    warn!(error = %e, "Failed to create jarvis conversation");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Write SSE response headers immediately — flush for curl to see
         let sse_headers = "HTTP/1.1 200 OK\r\n\
             Content-Type: text/event-stream\r\n\
@@ -898,6 +925,14 @@ impl PTYWebSocketServer {
             \r\n";
         stream.write_all(sse_headers.as_bytes()).await?;
         stream.flush().await?;
+
+        // Send conversation_id as first SSE event so frontend can track it
+        if let Some(ref cid) = jarvis_conv_id {
+            let meta_evt = serde_json::json!({"conversation_id": cid});
+            let sse = format!("event: meta\ndata: {}\n\n", meta_evt);
+            let _ = stream.write_all(sse.as_bytes()).await;
+            let _ = stream.flush().await;
+        }
 
         // Context enrichment: inject KB/Skill/Code context before sending to PTY
         // Disabled when MISSIOND_DISABLE_CONTEXT_ENRICHMENT=1 (e.g. VDS transparent API proxy mode)
@@ -913,13 +948,13 @@ impl PTYWebSocketServer {
                 drop(enricher_guard); // release lock before async call
                 let ctx = enricher(user_message.clone()).await;
                 if ctx.is_empty() {
-                    format!("{}\n<<<BOUNDARY_{}>>>", user_message, boundary_id)
+                    format!("{}\n\n{}\n<<<BOUNDARY_{}>>>", JARVIS_SYSTEM_PROMPT, user_message, boundary_id)
                 } else {
                     debug!(slot_id, ctx_len = ctx.len(), "Jarvis: context enrichment injected");
-                    format!("{}\n\n{}\n<<<BOUNDARY_{}>>>", ctx, user_message, boundary_id)
+                    format!("{}\n\n{}\n\n{}\n<<<BOUNDARY_{}>>>", JARVIS_SYSTEM_PROMPT, ctx, user_message, boundary_id)
                 }
             } else {
-                format!("{}\n<<<BOUNDARY_{}>>>", user_message, boundary_id)
+                format!("{}\n\n{}\n<<<BOUNDARY_{}>>>", JARVIS_SYSTEM_PROMPT, user_message, boundary_id)
             }
         };
 
@@ -1085,11 +1120,22 @@ impl PTYWebSocketServer {
                             let evt = serde_json::json!({
                                 "action_id": format!("confirm-{}", tool_seq),
                                 "prompt": prompt,
-                                "info": info.as_ref().map(|i| serde_json::json!({
-                                    "type": i.confirm_type,
-                                    "tool": i.tool.as_ref().map(|t| &t.name),
-                                    "options": i.options,
-                                })),
+                                "info": info.as_ref().map(|i| {
+                                    // Convert option labels to structured objects for frontend
+                                    let structured_options: Vec<serde_json::Value> = i.options.iter()
+                                        .enumerate()
+                                        .map(|(idx, label)| serde_json::json!({
+                                            "key": idx + 1,
+                                            "label": label,
+                                            "is_default": idx == 0,
+                                        }))
+                                        .collect();
+                                    serde_json::json!({
+                                        "type": i.confirm_type,
+                                        "tool": i.tool.as_ref().map(|t| &t.name),
+                                        "options": structured_options,
+                                    })
+                                }),
                             });
                             let sse = format!("event: confirm_required\ndata: {}\n\n", evt);
                             let _ = stream.write_all(sse.as_bytes()).await;
@@ -1120,6 +1166,22 @@ impl PTYWebSocketServer {
             Ok(Ok(result)) => {
                 let duration_ms = start_time.elapsed().as_millis() as u64;
                 trace_store.complete_trace(&chat_id, &result.response, duration_ms).await;
+
+                // Persist conversation to DB
+                if let (Some(ref db), Some(ref cid)) = (&db, &jarvis_conv_id) {
+                    let clean_response = clean_jarvis_response(&result.response, &boundary_id);
+                    if let Err(e) = db.jarvis_save_exchange(cid, &user_message, &clean_response) {
+                        warn!(error = %e, conv_id = %cid, "Failed to save jarvis exchange");
+                    } else {
+                        // Set title from first user message if this is a new conversation
+                        let title = if user_message.len() > 80 {
+                            format!("{}...", &user_message[..77])
+                        } else {
+                            user_message.clone()
+                        };
+                        let _ = db.jarvis_update_title(cid, &title);
+                    }
+                }
 
                 // Fallback: if TextOutput::Stream didn't fire, send full response
                 if !streamed_text && !result.response.is_empty() {
@@ -1198,7 +1260,7 @@ impl PTYWebSocketServer {
             // Chat completions SSE endpoint
             if request_line.starts_with("POST /v1/chat/completions") {
                 return match pty_manager {
-                    Some(pm) => Self::handle_chat_completions(stream, addr, pm, jarvis_trace, context_enricher).await,
+                    Some(pm) => Self::handle_chat_completions(stream, addr, pm, jarvis_trace, context_enricher, db).await,
                     None => {
                         let mut s = stream;
                         let err = serde_json::json!({"error": {"message": "PTY manager not available"}});

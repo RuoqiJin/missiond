@@ -67,6 +67,58 @@ impl MissionDB {
         Ok(())
     }
 
+    // ============ Jarvis UI Sessions ============
+
+    /// Find or create a jarvis_ui conversation. If conversation_id is provided, reuse it.
+    pub fn jarvis_get_or_create(&self, conversation_id: Option<&str>) -> DbResult<String> {
+        let conn = self.conn();
+
+        // Reuse existing conversation if ID provided
+        if let Some(id) = conversation_id {
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM conversations WHERE id = ?1 AND source = 'jarvis_ui')",
+                params![id],
+                |row| row.get(0),
+            )?;
+            if exists {
+                return Ok(id.to_string());
+            }
+        }
+
+        // Create new
+        let id = format!("jarvis-{}", uuid::Uuid::new_v4().simple());
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO conversations (id, source, model, chat_type, message_count, started_at, status, conversation_type)
+             VALUES (?1, 'jarvis_ui', 'claude-code', 'jarvis', 0, ?2, 'active', 'user')",
+            params![id, now],
+        )?;
+        Ok(id)
+    }
+
+    /// Save user+assistant message pair to a jarvis conversation
+    pub fn jarvis_save_exchange(
+        &self,
+        conv_id: &str,
+        user_message: &str,
+        assistant_message: &str,
+    ) -> DbResult<()> {
+        self.router_chat_append_messages(conv_id, &[
+            ("user".to_string(), user_message.to_string()),
+            ("assistant".to_string(), assistant_message.to_string()),
+        ])
+    }
+
+    /// Update jarvis conversation title (first user message as title)
+    pub fn jarvis_update_title(&self, conv_id: &str, title: &str) -> DbResult<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE conversations SET session_timeline = ?2 WHERE id = ?1",
+            params![conv_id, title],
+        )?;
+        Ok(())
+    }
+
     /// List all router_chat conversations with message size stats
     pub fn router_chat_list(&self, limit: i64) -> DbResult<Vec<serde_json::Value>> {
         let conn = self.read_conn();
