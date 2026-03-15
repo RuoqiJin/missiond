@@ -166,6 +166,9 @@ pub(crate) enum DaemonEvent {
         prompt_chars: usize,
         /// Truncated preview of the dispatched prompt.
         preview: String,
+        /// KB entry IDs cited in the context injection (for causality tracking).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        cited_kb_ids: Vec<String>,
     },
 
     // ===== Conversation Activity =====
@@ -499,8 +502,8 @@ impl DaemonEvent {
                 json!({ "category": category, "priority": priority, "title": title }),
             Self::GitCommitDetected { repo, hash, short_hash, author, message, committed_at } =>
                 json!({ "repo": repo, "hash": hash, "short_hash": short_hash, "author": author, "message": message, "committed_at": committed_at }),
-            Self::SlotTaskDispatched { slot_id, task_id, purpose, prompt_chars, preview } =>
-                json!({ "slot_id": slot_id, "task_id": task_id, "purpose": purpose, "prompt_chars": prompt_chars, "preview": preview }),
+            Self::SlotTaskDispatched { slot_id, task_id, purpose, prompt_chars, preview, cited_kb_ids } =>
+                json!({ "slot_id": slot_id, "task_id": task_id, "purpose": purpose, "prompt_chars": prompt_chars, "preview": preview, "cited_kb_ids": cited_kb_ids }),
             Self::ConversationMessageLogged { message_id, session_id, parent_session_id, slot_id, role, content_chars, preview } =>
                 json!({ "message_id": message_id, "session_id": session_id, "parent_session_id": parent_session_id, "slot_id": slot_id, "role": role, "content_chars": content_chars, "preview": preview }),
             Self::CodexRequestStarted {

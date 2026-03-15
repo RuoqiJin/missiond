@@ -348,7 +348,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
         };
 
         // Unified context injection via Context Prefetch Pipeline
-        let full_prompt = {
+        let (full_prompt, cited_kb_ids) = {
             let req = crate::context_pipeline::PrefetchRequest {
                 query: task.title.clone(),
                 source: crate::context_pipeline::PrefetchSource::Autopilot {
@@ -357,10 +357,11 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                 token_budget: 4000,
             };
             let result = crate::context_pipeline::execute(state, &req).await;
+            let cited = result.cited_kb_ids.clone();
             if result.assembled.is_empty() {
-                prompt
+                (prompt, cited)
             } else {
-                format!("{}\n\n{}", result.assembled, prompt)
+                (format!("{}\n\n{}", result.assembled, prompt), cited)
             }
         };
 
@@ -500,6 +501,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                 purpose: "board_auto_execute".to_string(),
                 prompt_chars: full_prompt.len(),
                 preview,
+                cited_kb_ids,
             });
         }
 

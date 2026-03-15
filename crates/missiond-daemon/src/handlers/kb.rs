@@ -28,6 +28,37 @@ fn check_content_quality(summary: &str, detail: &Option<Value>, category: Option
         ));
     }
 
+    // Rule 1b: empty or near-empty summary
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        return Some("REJECTED: summary 为空。".to_string());
+    }
+    if trimmed.chars().count() < 5 {
+        return Some(format!(
+            "REJECTED: summary 过短（{}字）。至少需要 5 个字符才能构成有意义的知识。",
+            trimmed.chars().count()
+        ));
+    }
+
+    // Rule 1c: test/probe entries
+    let lower = summary.to_lowercase();
+    let garbage_patterns = ["test write", "test kb write", "probe", "test entry"];
+    for pattern in &garbage_patterns {
+        if lower == *pattern || lower.starts_with(&format!("{} ", pattern)) {
+            return Some(format!(
+                "REJECTED: summary 疑似测试条目（'{}'）。测试数据不应写入知识库。",
+                summary
+            ));
+        }
+    }
+
+    // Rule 1d: batch log entries (e.g., "realtime-extract 批次 batch-20260315-...")
+    if lower.contains("batch-") && (lower.contains("处理完成") || lower.contains("批次")) {
+        return Some(
+            "REJECTED: summary 是批次处理日志，不是知识。操作日志不应存入 KB。".to_string()
+        );
+    }
+
     // Rule 2: summary contains stack trace / log indicators
     let stack_patterns = ["at node_modules/", "Caused by:", "stack trace", "panic at", "RUST_BACKTRACE",
                           "Error:", "    at ", "线程", "thread '"];

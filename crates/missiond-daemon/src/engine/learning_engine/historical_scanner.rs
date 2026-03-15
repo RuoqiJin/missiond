@@ -115,6 +115,7 @@ pub(crate) async fn check_historical_scan(state: &AppState) {
         purpose: "habit_scan".to_string(),
         prompt_chars: prompt.len(),
         preview: format!("Habit scan: {} sessions ({} remaining)", batch_size, unscanned),
+        cited_kb_ids: vec![],
     });
 
     let pty = Arc::clone(&state.pty);

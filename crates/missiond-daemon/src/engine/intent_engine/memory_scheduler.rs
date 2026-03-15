@@ -158,6 +158,7 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
                         purpose: "submit".to_string(),
                         prompt_chars: task.prompt.len(),
                         preview,
+                        cited_kb_ids: vec![],
                     },
                 );
                 info!(task_id = %task.id, slot_id = %slot_id, role = %task.role, "Autopilot: dispatched queued submit task");

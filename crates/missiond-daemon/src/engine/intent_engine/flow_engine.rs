@@ -261,6 +261,7 @@ pub(crate) async fn execute_flow_task(state: &AppState, task: &missiond_core::ty
                     purpose: format!("flow_{}", phase_str),
                     prompt_chars: prompt.len(),
                     preview,
+                    cited_kb_ids: vec![],
                 });
             }
 

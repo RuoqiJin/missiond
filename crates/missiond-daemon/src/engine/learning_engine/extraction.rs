@@ -50,6 +50,7 @@ fn emit_dispatch_event(event_bus: &EventBus, slot_id: &str, purpose: &str, promp
         purpose: purpose.to_string(),
         prompt_chars: prompt.len(),
         preview,
+        cited_kb_ids: vec![],
     });
 }
 

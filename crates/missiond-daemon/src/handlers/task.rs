@@ -144,6 +144,7 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
                     purpose: "submit".to_string(),
                     prompt_chars: prompt.len(),
                     preview,
+                    cited_kb_ids: vec![],
                 },
             );
             dispatched_to = Some(candidate_id.to_string());
@@ -227,6 +228,7 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
                         purpose: "submit".to_string(),
                         prompt_chars: prompt.len(),
                         preview,
+                        cited_kb_ids: vec![],
                     },
                 );
                 dispatched_to = Some(candidate_id.to_string());
