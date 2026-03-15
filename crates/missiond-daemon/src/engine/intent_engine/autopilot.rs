@@ -819,21 +819,19 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                         warn!(task_id = %task.id, retries = new_retry, "Autopilot: task failed after max retries");
                         notify_jarvis_failure(state, &task, &err_msg);
 
-                        // Negative confidence feedback: mild penalty for cited KB entries on permanent failure
-                        // Only applied when task exhausts all retries (not on individual retry)
+                        // Negative confidence feedback with LLM attribution
+                        // Asks MiniMax which cited KB entries actually caused the failure
                         {
                             let cited = state.task_cited_kbs.lock().unwrap().remove(&task.id);
                             if let Some(kb_ids) = cited {
-                                let count = kb_ids.len();
-                                for kb_id in &kb_ids {
-                                    match state.mission.db().kb_adjust_confidence(kb_id, -0.02) {
-                                        Ok(Some(new_conf)) => debug!(kb_id = %kb_id, new_conf, "KB confidence -0.02 (task failed)"),
-                                        Ok(None) => debug!(kb_id = %kb_id, "KB entry not found for confidence adjustment"),
-                                        Err(e) => warn!(kb_id = %kb_id, error = %e, "Failed to adjust KB confidence"),
-                                    }
-                                }
-                                if count > 0 {
-                                    info!(task_id = %task.id, kb_count = count, "KB feedback: -0.02 confidence for {} cited entries", count);
+                                if !kb_ids.is_empty() {
+                                    let state2 = state.clone();
+                                    let task_id2 = task.id.clone();
+                                    let err_msg2 = err_msg.clone();
+                                    let task_title2 = task.title.clone();
+                                    tokio::spawn(async move {
+                                        apply_attributed_penalty(&state2, &task_id2, &task_title2, &err_msg2, &kb_ids).await;
+                                    });
                                 }
                             }
                         }
@@ -848,4 +846,126 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// LLM-attributed confidence penalty: ask MiniMax which cited KB entries
+/// actually contributed to the task failure, then apply differentiated penalties.
+/// Falls back to blanket -0.02 if MiniMax is unavailable or returns invalid JSON.
+async fn apply_attributed_penalty(
+    state: &AppState,
+    task_id: &str,
+    task_title: &str,
+    error_msg: &str,
+    kb_ids: &[String],
+) {
+    use crate::minimax_client::ChatMessage;
+
+    // Build KB summaries for context
+    let mut kb_context = String::new();
+    for kb_id in kb_ids {
+        if let Ok(Some(entry)) = state.mission.db().kb_get_by_id(kb_id) {
+            kb_context.push_str(&format!(
+                "- [{}] category={}, key={}, summary={}\n",
+                &kb_id[..8.min(kb_id.len())], entry.category, entry.key, entry.summary
+            ));
+        }
+    }
+
+    if kb_context.is_empty() { return; }
+
+    let error_preview = if error_msg.len() > 500 {
+        let mut end = 500;
+        while end > 0 && !error_msg.is_char_boundary(end) { end -= 1; }
+        format!("{}...", &error_msg[..end])
+    } else {
+        error_msg.to_string()
+    };
+
+    let prompt = format!(
+        r#"你是 KB 信用分配分析师。一个任务执行失败，系统在执行时引用了以下知识库条目。请判断每条 KB 对失败的责任。
+
+## 任务
+标题: {task_title}
+错误: {error_preview}
+
+## 引用的 KB 条目
+{kb_context}
+## 输出要求
+严格返回 JSON 数组，每个元素: {{"id": "KB前缀", "verdict": "innocent|contributed|caused"}}
+- innocent: 该条目与失败无关（如网络超时、外部服务不可用）
+- contributed: 该条目部分误导了执行方向
+- caused: 该条目直接导致了错误决策
+
+大多数情况下，失败是外部因素（网络/服务/权限），KB 应判 innocent。只有当 KB 内容明确错误或过时才判 contributed/caused。
+只输出 JSON 数组，不要解释。"#
+    );
+
+    // Try MiniMax attribution
+    let attribution = if let Some(minimax) = state.minimax.as_ref() {
+        let messages = vec![ChatMessage { role: "user".to_string(), content: prompt }];
+        match minimax.call_briefing(messages, Some(512), Some(format!("kb-attr-{}", task_id))).await {
+            Ok(resp) => parse_attribution(&resp, kb_ids),
+            Err(e) => {
+                debug!(task_id, error = %e, "KB attribution: MiniMax call failed, falling back to blanket penalty");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let db = state.mission.db();
+    match attribution {
+        Some(verdicts) => {
+            let mut stats = (0u32, 0u32, 0u32); // innocent, contributed, caused
+            for (kb_id, verdict) in &verdicts {
+                let delta = match verdict.as_str() {
+                    "caused" => { stats.2 += 1; -0.15 },
+                    "contributed" => { stats.1 += 1; -0.05 },
+                    _ => { stats.0 += 1; 0.0 }, // innocent — no penalty
+                };
+                if delta != 0.0 {
+                    match db.kb_adjust_confidence(kb_id, delta) {
+                        Ok(Some(new_conf)) => debug!(kb_id = %kb_id, delta, new_conf, "KB attributed penalty"),
+                        Ok(None) => {}
+                        Err(e) => warn!(kb_id = %kb_id, error = %e, "Failed to adjust KB confidence"),
+                    }
+                }
+            }
+            info!(task_id, innocent = stats.0, contributed = stats.1, caused = stats.2,
+                "KB attribution: differentiated penalties applied");
+        }
+        None => {
+            // Fallback: blanket -0.02
+            for kb_id in kb_ids {
+                let _ = db.kb_adjust_confidence(kb_id, -0.02);
+            }
+            info!(task_id, kb_count = kb_ids.len(), "KB feedback: fallback -0.02 for all cited entries");
+        }
+    }
+}
+
+/// Parse MiniMax attribution response into (kb_id, verdict) pairs.
+fn parse_attribution(response: &str, kb_ids: &[String]) -> Option<Vec<(String, String)>> {
+    // Strip markdown fences if present
+    let json_str = response.trim()
+        .trim_start_matches("```json").trim_start_matches("```")
+        .trim_end_matches("```").trim();
+
+    let arr: Vec<serde_json::Value> = serde_json::from_str(json_str).ok()?;
+    let mut result = Vec::new();
+
+    for item in &arr {
+        let id_prefix = item.get("id").and_then(|v| v.as_str())?;
+        let verdict = item.get("verdict").and_then(|v| v.as_str())?;
+        if !["innocent", "contributed", "caused"].contains(&verdict) {
+            return None; // Invalid verdict → discard entire response
+        }
+        // Match prefix back to full KB ID
+        if let Some(full_id) = kb_ids.iter().find(|id| id.starts_with(id_prefix)) {
+            result.push((full_id.clone(), verdict.to_string()));
+        }
+    }
+
+    if result.is_empty() { None } else { Some(result) }
 }
