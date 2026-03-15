@@ -263,14 +263,8 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                 match candidate {
                     Some(id) => {
                         info!(task_id = %task.id, slot_id = %id, "Autopilot: dynamically assigned idle coder slot");
-                        // Persist assignment so future ticks don't re-scan
-                        let _ = state.mission.db().update_board_task(
-                            &task.id,
-                            &missiond_core::types::UpdateBoardTaskInput {
-                                assignee: Some(id.clone()),
-                                ..Default::default()
-                            },
-                        );
+                        // Don't persist assignee yet — avoid Task Pinning Bug.
+                        // If claim/pty fails, task stays unassigned for next tick to re-route.
                         id
                     }
                     None => {
@@ -320,6 +314,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                             author: Some("autopilot".to_string()),
                         },
                     );
+                    notify_jarvis_failure(state, &task, &format!("前置任务失败，本任务已阻塞：{}", reason));
                     continue;
                 }
                 Err(e) => {
@@ -630,6 +625,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                         created_at: chrono::Utc::now().to_rfc3339(),
                     };
                     let _ = state.incident_tx.try_send(incident);
+                    notify_jarvis_failure(state, &task, "API 配额耗尽，系统已全局暂停");
                     // Stop processing remaining tasks — quota is gone
                     break;
                 }
