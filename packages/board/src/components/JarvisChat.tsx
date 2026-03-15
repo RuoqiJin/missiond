@@ -272,12 +272,14 @@ export function JarvisChat() {
       const res = await fetch(`/api/jarvis/conversations?id=${convId}`);
       if (res.ok) {
         const data = await res.json();
-        const msgs: ChatMessage[] = (data.messages || []).map((m: { id: number; role: string; content: string; timestamp: string }) => ({
-          id: String(m.id),
-          role: m.role as 'user' | 'assistant',
-          content: m.content,
-          timestamp: new Date(m.timestamp).getTime(),
-        }));
+        const msgs: ChatMessage[] = (data.messages || [])
+          .filter((m: { role: string }) => m.role === 'user' || m.role === 'assistant')
+          .map((m: { id: number; role: string; content: string; timestamp: string }) => ({
+            id: String(m.id),
+            role: m.role as 'user' | 'assistant',
+            content: m.content,
+            timestamp: new Date(m.timestamp).getTime(),
+          }));
         setMessages(msgs);
         setActiveConvId(convId);
         setSidebarOpen(false);
