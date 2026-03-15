@@ -341,6 +341,7 @@ pub(crate) struct SkillHint {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct KbHint {
+    pub id: String,
     pub category: String,
     pub key: String,
     pub summary: String,
@@ -364,6 +365,8 @@ pub(crate) struct PrefetchResult {
     pub assembled: String,
     /// Classified intent of the query.
     pub intent: Option<String>,
+    /// KB entry IDs cited in this context (for causality tracking).
+    pub cited_kb_ids: Vec<String>,
 }
 
 /// Execute the Context Prefetch Pipeline (v2).
@@ -437,6 +440,7 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
             "Context prefetch complete (DevOps bypass)"
         );
 
+        let cited_kb_ids = kb_entries.iter().map(|e| e.id.clone()).collect();
         return PrefetchResult {
             skills,
             kb_entries,
@@ -444,6 +448,7 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
             task_updates,
             assembled,
             intent: Some("code:devops_heuristic".to_string()),
+            cited_kb_ids,
         };
     }
 
@@ -580,6 +585,7 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
         "Context prefetch complete"
     );
 
+    let cited_kb_ids = kb_entries.iter().map(|e| e.id.clone()).collect();
     PrefetchResult {
         skills,
         kb_entries,
@@ -587,6 +593,7 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
         task_updates,
         assembled,
         intent: Some(format!("{}:{}", intent_str, routed_by)),
+        cited_kb_ids,
     }
 }
 
@@ -794,6 +801,7 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
         scored_entries.truncate(top_k);
 
         scored_entries.into_iter().map(|(e, _)| KbHint {
+            id: e.id,
             category: e.category,
             key: e.key,
             summary: e.summary,
@@ -910,7 +918,7 @@ fn assemble_budgeted(
         let mut kb_tokens = estimate_tokens(header);
 
         for e in kb_entries {
-            let line = format!("- [{}] {}: {}\n", e.category, e.key, e.summary);
+            let line = format!("- [{}] {}: {} [KB:{}]\n", e.category, e.key, e.summary, &e.id[..8.min(e.id.len())]);
             let line_tokens = estimate_tokens(&line);
             if used_tokens + kb_tokens + line_tokens > token_budget {
                 break; // truncate remaining KB entries
@@ -950,6 +958,7 @@ impl PrefetchResult {
             task_updates: vec![],
             assembled: String::new(),
             intent: None,
+            cited_kb_ids: vec![],
         }
     }
 }

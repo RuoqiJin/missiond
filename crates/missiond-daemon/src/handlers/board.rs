@@ -509,6 +509,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                             purpose: "decompose".to_string(),
                             prompt_chars: decompose_prompt.len(),
                             preview,
+                            cited_kb_ids: vec![],
                         });
                     }
                 }
