@@ -14,7 +14,7 @@
 //! via EventBus for persistent logging. Caller identity flows through `task_local!`.
 
 use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -240,12 +240,39 @@ impl GeminiClient {
                 let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<GeminiCliProgress>();
 
                 // Spawn forwarder: converts GeminiCliProgress → DaemonEvent::CliToolActivity
+                // Also collects tool calls for inclusion in the response.
                 let fwd_request_id = request_id_clone;
                 let fwd_span_id = span_id_clone;
                 let fwd_session_id = session_id_clone;
                 let fwd_event_tx = event_tx_clone;
+                let collected_tools: Arc<StdMutex<Vec<serde_json::Value>>> =
+                    Arc::new(StdMutex::new(Vec::new()));
+                let collected_tools_clone = collected_tools.clone();
                 let forwarder = tokio::spawn(async move {
                     while let Some(prog) = progress_rx.recv().await {
+                        // Collect tool call info for response
+                        {
+                            let mut entry = serde_json::json!({
+                                "seq": prog.tool_seq,
+                                "activity": prog.activity,
+                            });
+                            if let Some(ref name) = prog.tool_name {
+                                entry["tool_name"] = serde_json::json!(name);
+                            }
+                            if let Some(ref input) = prog.input_preview {
+                                entry["input_preview"] = serde_json::json!(input);
+                            }
+                            if let Some(ref result) = prog.result_preview {
+                                entry["result_preview"] = serde_json::json!(result);
+                            }
+                            if prog.is_error {
+                                entry["is_error"] = serde_json::json!(true);
+                            }
+                            if let Ok(mut vec) = collected_tools_clone.lock() {
+                                vec.push(entry);
+                            }
+                        }
+
                         let event = DaemonEvent::CliToolActivity {
                             engine: missiond_core::CliEngine::Gemini,
                             request_id: fwd_request_id.clone(),
@@ -277,10 +304,19 @@ impl GeminiClient {
                 let _ = forwarder.await;
                 let resp = resp?;
 
-                Ok(serde_json::json!({
+                // Extract collected tool calls from forwarder
+                let tool_calls = collected_tools.lock()
+                    .map(|v| v.clone())
+                    .unwrap_or_default();
+
+                let mut result = serde_json::json!({
                     "choices": [{"message": {"content": resp.content}, "finish_reason": "stop"}],
                     "model": resp.model,
-                }))
+                });
+                if !tool_calls.is_empty() {
+                    result["tool_calls"] = serde_json::json!(tool_calls);
+                }
+                Ok(result)
             } else {
                 let resp = http_client.post(url)
                     .header("Content-Type", "application/json")

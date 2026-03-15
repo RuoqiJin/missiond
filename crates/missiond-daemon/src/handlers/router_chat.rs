@@ -324,7 +324,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             };
 
             // --- Send to LLM: multimodal direct API or normal Router/CLI ---
-            let (content, finish_reason_owned, usage, resp_model_owned);
+            let (content, finish_reason_owned, usage, resp_model_owned, tool_calls_owned);
 
             if multimodal_use_direct_api && !multimodal_files.is_empty() {
                 // Multimodal path: call Gemini generateContent API directly with file parts.
@@ -359,6 +359,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 finish_reason_owned = "stop".to_string();
                 usage = None::<Value>;
                 resp_model_owned = model.clone();
+                tool_calls_owned = None;
             } else {
                 // Normal path: Router API or Gemini CLI
                 let (base_url, jwt) = resolve_llm_credentials().await?;
@@ -398,6 +399,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     .and_then(|v| v.as_str())
                     .unwrap_or(&model)
                     .to_string();
+                // Extract tool calls from CLI response (if any)
+                tool_calls_owned = result.get("tool_calls").cloned();
             };
 
             let finish_reason = finish_reason_owned.as_str();
@@ -416,6 +419,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 "response": content,
                 "usage": usage,
             });
+            if let Some(tc) = tool_calls_owned {
+                resp["tool_calls"] = tc;
+            }
             if finish_reason == "length" || finish_reason == "max_tokens" {
                 resp["warning"] = serde_json::json!("⚠️ 输出被截断：LLM 达到 max_tokens 限制，返回内容不完整。可增大 max_tokens 参数重试。");
                 resp["finish_reason"] = serde_json::json!(finish_reason);
