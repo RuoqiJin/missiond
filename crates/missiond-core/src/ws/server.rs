@@ -125,6 +125,9 @@ fn clean_jarvis_response(raw: &str, boundary_id: &str) -> String {
             if trimmed.contains("bypass permissions on") { return false; }
             if trimmed.contains("Try claude doctor") { return false; }
             if trimmed.contains("npm i -g @anthropic-ai") { return false; }
+            if trimmed.contains("switched from npm to native installer") { return false; }
+            if trimmed.contains("claude install") && trimmed.contains("docs.anthro") { return false; }
+            if trimmed.starts_with("Pasting") && trimmed.len() < 20 { return false; }
             if trimmed.starts_with("▸▸") || trimmed.starts_with(">>") { return false; }
             if trimmed.starts_with("✕ ") || trimmed.starts_with("✗ ") { return false; }
             // Drop tool output border lines (safety net for block classifier)
