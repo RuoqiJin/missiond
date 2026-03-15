@@ -452,7 +452,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 let key_preview = if current_mode == "apikey" {
                     llm_config.get("gemini_api_key")
                         .and_then(|k| k.as_str())
-                        .map(|k| format!("{}...{}", &k[..10.min(k.len())], &k[k.len().saturating_sub(4)..]))
+                        .map(|k| {
+                            if k.len() <= 12 { "***".to_string() }
+                            else { format!("{}...{}", &k[..6], &k[k.len() - 4..]) }
+                        })
                 } else {
                     None
                 };
@@ -489,6 +492,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             };
             tokio::fs::write(&llm_yaml_path, &new_content).await
                 .map_err(|e| anyhow!("Failed to write llm.yaml: {}", e))?;
+            // Ensure restrictive permissions (contains API key)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&llm_yaml_path, std::fs::Permissions::from_mode(0o600));
+            }
 
             // Sync to settings.json (side-effect for CLI compatibility)
             let selected_type = if mode == "apikey" { "gemini-api-key" } else { "oauth-personal" };

@@ -77,6 +77,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 }
                 crate::handlers::misc::handle(state, "mission_gemini_watch", args).await
             }
+            // TODO: DEPRECATED — use independent mission_gemini_auth tool instead.
+            // Kept for Claude Code MCP client compatibility (doesn't auto-discover new tool names).
             "gemini_auth" => crate::handlers::misc::handle(state, "mission_gemini_auth", args).await,
             "jarvis_logs" => crate::handlers::misc::handle(state, "mission_jarvis_logs", args).await,
             "jarvis_trace" => crate::handlers::misc::handle(state, "mission_jarvis_trace", args).await,
