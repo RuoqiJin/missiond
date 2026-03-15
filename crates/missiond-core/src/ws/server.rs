@@ -702,6 +702,7 @@ impl PTYWebSocketServer {
         trace_store: JarvisTraceStore,
         context_enricher: ContextEnricherSlot,
         db: Option<Arc<crate::db::MissionDB>>,
+        cc_tasks_watcher: Option<Arc<Mutex<CCTasksWatcher>>>,
     ) -> anyhow::Result<()> {
         // Disable Nagle — SSE needs every chunk sent immediately
         stream.set_nodelay(true)?;
@@ -859,7 +860,6 @@ impl PTYWebSocketServer {
             })
             .unwrap_or_else(|| "slot-jarvis".to_string());
         let chat_id = format!("chatcmpl-{}-{}", &slot_id, chrono::Utc::now().timestamp_millis());
-        let boundary_id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
 
         // Extract Router's trace_id from X-Trace-Id header
         let router_trace_id = headers
@@ -966,7 +966,7 @@ impl PTYWebSocketServer {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         let (enriched_message, enrich_intent) = if context_enrichment_disabled {
-            (format!("{}\n<<<BOUNDARY_{}>>>", user_message, boundary_id), None)
+            (user_message.clone(), None)
         } else {
             let enricher_guard = context_enricher.read().await;
             if let Some(ref enricher) = *enricher_guard {
@@ -975,14 +975,14 @@ impl PTYWebSocketServer {
                 let enrich_result = enricher(user_message.clone()).await;
                 let intent = enrich_result.intent.clone();
                 let msg = if enrich_result.assembled.is_empty() {
-                    format!("{}\n\n{}\n<<<BOUNDARY_{}>>>", JARVIS_SYSTEM_PROMPT, user_message, boundary_id)
+                    format!("{}\n\n{}", JARVIS_SYSTEM_PROMPT, user_message)
                 } else {
                     debug!(slot_id, ctx_len = enrich_result.assembled.len(), "Jarvis: context enrichment injected");
-                    format!("{}\n\n{}\n\n{}\n<<<BOUNDARY_{}>>>", JARVIS_SYSTEM_PROMPT, enrich_result.assembled, user_message, boundary_id)
+                    format!("{}\n\n{}\n\n{}", JARVIS_SYSTEM_PROMPT, enrich_result.assembled, user_message)
                 };
                 (msg, intent)
             } else {
-                (format!("{}\n\n{}\n<<<BOUNDARY_{}>>>", JARVIS_SYSTEM_PROMPT, user_message, boundary_id), None)
+                (format!("{}\n\n{}", JARVIS_SYSTEM_PROMPT, user_message), None)
             }
         };
 
@@ -1385,12 +1385,10 @@ impl PTYWebSocketServer {
         }
 
         // ── Synchronous path (chat intents / proxy mode / Board Task fallback) ──
-        // Dual-track streaming:
-        // 1. Subscribe to session events → forward status/tool events as SSE (activity view)
-        // 2. Use blocking send() → get clean final response (handles turn management correctly)
-        //
-        // send_fire_and_forget causes spurious Complete events from paste notification.
-        // send() properly waits for the real Complete, so we use it for the response.
+        // Dual-source streaming:
+        // 1. PTY events → status/tool/confirm/exit events as SSE (activity view)
+        // 2. JSONL watcher → structured assistant messages as SSE data chunks (content)
+        // PTY send() manages turn lifecycle (paste message, detect completion).
         let mut rx = match pty_manager.subscribe_session(&slot_id).await {
             Ok(rx) => rx,
             Err(e) => {
@@ -1403,7 +1401,21 @@ impl PTYWebSocketServer {
             }
         };
 
-        // Spawn blocking send() in a background task — it returns the final clean response.
+        // Subscribe to JSONL watcher for structured message content
+        let target_session_id: Option<String> = db.as_ref()
+            .and_then(|db| db.get_slot_session(&slot_id).ok().flatten());
+        let mut jsonl_rx: Option<broadcast::Receiver<WatcherEvent>> = match (&cc_tasks_watcher, &target_session_id) {
+            (Some(watcher), Some(_)) => {
+                let w = watcher.lock().await;
+                Some(w.subscribe())
+            }
+            _ => None,
+        };
+        if target_session_id.is_some() {
+            debug!(slot_id, session_id = ?target_session_id, "JSONL watcher subscribed for chat content");
+        }
+
+        // Spawn blocking send() in a background task — it manages turn lifecycle.
         let pty_for_send = Arc::clone(&pty_manager);
         let send_msg = enriched_message.clone();
         let send_slot = slot_id.to_string();
@@ -1416,14 +1428,53 @@ impl PTYWebSocketServer {
         let start_time = std::time::Instant::now();
         let heartbeat_interval = tokio::time::Duration::from_secs(15);
         let mut tool_seq: u32 = 0;
-        let mut streamed_text = false; // Track if text was streamed via TextOutput::Stream
-        let mut stream_buffer = String::new(); // Buffer text until boundary marker is found
-        let mut boundary_found = false; // Whether we've passed the boundary marker
-        let boundary_marker = format!("<<<BOUNDARY_{}>>>", boundary_id);
+        let mut streamed_text = false;
+        let mut accumulated_response = String::new();
+        let mut seen_uuids = std::collections::HashSet::<String>::new();
         let mut last_event_time = std::time::Instant::now();
         let mut last_status_phase = String::new();
-        let mut last_status_sent = std::time::Instant::now() - std::time::Duration::from_secs(1); // Allow first status immediately
+        let mut last_status_sent = std::time::Instant::now() - std::time::Duration::from_secs(1);
         let status_throttle = std::time::Duration::from_millis(500);
+
+        // Helper closure: extract and emit assistant content from JSONL messages
+        macro_rules! process_jsonl_messages {
+            ($messages:expr) => {
+                for msg in $messages {
+                    if !seen_uuids.insert(msg.uuid.clone()) { continue; }
+                    if msg.message.role != "assistant" { continue; }
+                    // Extract text from content (string or array of blocks)
+                    let text = match &msg.message.content {
+                        serde_json::Value::String(s) => {
+                            if s.is_empty() { None } else { Some(s.clone()) }
+                        }
+                        serde_json::Value::Array(blocks) => {
+                            let mut texts = Vec::new();
+                            for block in blocks {
+                                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                    if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                                        if !t.is_empty() { texts.push(t.to_string()); }
+                                    }
+                                }
+                            }
+                            if texts.is_empty() { None } else { Some(texts.join("\n")) }
+                        }
+                        _ => None,
+                    };
+                    if let Some(text) = text {
+                        streamed_text = true;
+                        accumulated_response.push_str(&text);
+                        let chunk = serde_json::json!({
+                            "id": &chat_id,
+                            "object": "chat.completion.chunk",
+                            "model": "jarvis-missiond",
+                            "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": serde_json::Value::Null}]
+                        });
+                        let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
+                        let _ = stream.flush().await;
+                    }
+                }
+            };
+        }
 
         loop {
             // Check if send() has completed
@@ -1431,40 +1482,34 @@ impl PTYWebSocketServer {
                 break;
             }
 
-            // Poll for events with heartbeat timeout
             let recv_timeout = heartbeat_interval.saturating_sub(last_event_time.elapsed());
-            match tokio::time::timeout(recv_timeout, rx.recv()).await {
-                Ok(Ok(event)) => {
+            tokio::select! {
+                // PTY events: status, tools, confirm, exit (text content from JSONL watcher)
+                pty_event = rx.recv() => {
                     last_event_time = std::time::Instant::now();
-                    match event {
-                        SessionEvent::StatusUpdate(status) => {
+                    match pty_event {
+                        Ok(SessionEvent::StatusUpdate(status)) => {
                             let phase = format!("{}", status.phase);
                             let phase_changed = phase != last_status_phase;
                             let throttle_elapsed = last_status_sent.elapsed() >= status_throttle;
-                            // Send immediately on phase change, or throttle within same phase
                             if phase_changed || throttle_elapsed {
                                 last_status_phase = phase.clone();
                                 last_status_sent = std::time::Instant::now();
-                                let evt = serde_json::json!({
-                                    "phase": phase,
-                                    "text": status.status_text,
-                                });
+                                let evt = serde_json::json!({"phase": phase, "text": status.status_text});
                                 let sse = format!("event: status\ndata: {}\n\n", evt);
                                 let _ = stream.write_all(sse.as_bytes()).await;
                                 let _ = stream.flush().await;
                             }
                         }
-                        SessionEvent::ToolOutput(tool_output) => {
+                        Ok(SessionEvent::ToolOutput(tool_output)) => {
                             use crate::semantic::ToolStatus;
                             match tool_output.status {
                                 ToolStatus::Running => {
                                     tool_seq += 1;
                                     let id = format!("t{}", tool_seq);
-                                    let params_json = serde_json::json!(tool_output.params);
                                     let evt = serde_json::json!({
-                                        "id": id,
-                                        "tool": tool_output.tool_name,
-                                        "params": params_json,
+                                        "id": id, "tool": tool_output.tool_name,
+                                        "params": serde_json::json!(tool_output.params),
                                     });
                                     let sse = format!("event: tool_start\ndata: {}\n\n", evt);
                                     let _ = stream.write_all(sse.as_bytes()).await;
@@ -1475,15 +1520,11 @@ impl PTYWebSocketServer {
                                     let output = tool_output.output.as_deref().map(|o| {
                                         if o.len() > 4096 {
                                             format!("{}...\n[truncated, {} bytes total]", &o[..4096], o.len())
-                                        } else {
-                                            o.to_string()
-                                        }
+                                        } else { o.to_string() }
                                     });
                                     let evt = serde_json::json!({
-                                        "id": id,
-                                        "tool": tool_output.tool_name,
-                                        "duration_ms": tool_output.duration_ms,
-                                        "output": output,
+                                        "id": id, "tool": tool_output.tool_name,
+                                        "duration_ms": tool_output.duration_ms, "output": output,
                                     });
                                     let sse = format!("event: tool_end\ndata: {}\n\n", evt);
                                     let _ = stream.write_all(sse.as_bytes()).await;
@@ -1491,7 +1532,7 @@ impl PTYWebSocketServer {
                                 }
                             }
                         }
-                        SessionEvent::StateChange { new_state, .. } => {
+                        Ok(SessionEvent::StateChange { new_state, .. }) => {
                             match new_state {
                                 SessionState::Thinking => {
                                     let evt = serde_json::json!({"phase": "thinking", "text": "Thinking..."});
@@ -1508,7 +1549,7 @@ impl PTYWebSocketServer {
                                 _ => {}
                             }
                         }
-                        SessionEvent::Exit(code) => {
+                        Ok(SessionEvent::Exit(code)) => {
                             let err_msg = format!("PTY session exited with code {}", code);
                             trace_store.error_trace(&chat_id, &err_msg, None).await;
                             let err = serde_json::json!({"error": {"message": err_msg}});
@@ -1518,73 +1559,15 @@ impl PTYWebSocketServer {
                             let _ = stream.shutdown().await;
                             return Ok(());
                         }
-                        SessionEvent::TextOutput(text_event) => {
-                            use crate::TextOutputEvent;
-                            match text_event {
-                                TextOutputEvent::Stream { content, .. } => {
-                                    if !content.is_empty() {
-                                        if !boundary_found {
-                                            // Buffer until we find the boundary marker
-                                            stream_buffer.push_str(&content);
-                                            if let Some(pos) = stream_buffer.find(&boundary_marker) {
-                                                boundary_found = true;
-                                                let after = stream_buffer[pos + boundary_marker.len()..].to_string();
-                                                stream_buffer.clear();
-                                                if !after.trim().is_empty() {
-                                                    streamed_text = true;
-                                                    let cleaned = clean_jarvis_response(&after, &boundary_id);
-                                                    if !cleaned.is_empty() {
-                                                        let chunk = serde_json::json!({
-                                                            "id": &chat_id,
-                                                            "object": "chat.completion.chunk",
-                                                            "model": "jarvis-missiond",
-                                                            "choices": [{
-                                                                "index": 0,
-                                                                "delta": { "content": cleaned },
-                                                                "finish_reason": serde_json::Value::Null,
-                                                            }]
-                                                        });
-                                                        let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
-                                                        let _ = stream.flush().await;
-                                                    }
-                                                }
-                                            }
-                                            // Don't forward pre-boundary content
-                                        } else {
-                                            streamed_text = true;
-                                            // Post-boundary: forward content directly
-                                            let chunk = serde_json::json!({
-                                                "id": &chat_id,
-                                                "object": "chat.completion.chunk",
-                                                "model": "jarvis-missiond",
-                                                "choices": [{
-                                                    "index": 0,
-                                                    "delta": { "content": content },
-                                                    "finish_reason": serde_json::Value::Null,
-                                                }]
-                                            });
-                                            let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
-                                            let _ = stream.flush().await;
-                                        }
-                                    }
-                                }
-                                TextOutputEvent::Complete { .. } => {
-                                    // Final text handled by send() result below
-                                }
-                            }
-                        }
-                        SessionEvent::ConfirmRequired { prompt, info } => {
+                        Ok(SessionEvent::ConfirmRequired { prompt, info }) => {
                             let evt = serde_json::json!({
                                 "action_id": format!("confirm-{}", tool_seq),
                                 "prompt": prompt,
                                 "info": info.as_ref().map(|i| {
-                                    // Convert option labels to structured objects for frontend
                                     let structured_options: Vec<serde_json::Value> = i.options.iter()
                                         .enumerate()
                                         .map(|(idx, label)| serde_json::json!({
-                                            "key": idx + 1,
-                                            "label": label,
-                                            "is_default": idx == 0,
+                                            "key": idx + 1, "label": label, "is_default": idx == 0,
                                         }))
                                         .collect();
                                     serde_json::json!({
@@ -1598,17 +1581,31 @@ impl PTYWebSocketServer {
                             let _ = stream.write_all(sse.as_bytes()).await;
                             let _ = stream.flush().await;
                         }
-                        _ => {} // Ignore Data, ScreenText, TitleChange
+                        Ok(SessionEvent::TextOutput(_)) => {} // Ignored: content comes from JSONL watcher
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!(slot_id, lagged = n, "PTY broadcast lagged");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
-                Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
-                    warn!(slot_id, lagged = n, "Broadcast lagged, continuing");
+
+                // JSONL watcher: structured assistant messages from .jsonl file
+                jsonl_event = async {
+                    match jsonl_rx.as_mut() {
+                        Some(jrx) => jrx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Ok(WatcherEvent::NewMessages { session_id, messages, .. }) = jsonl_event {
+                        if target_session_id.as_deref() == Some(session_id.as_str()) {
+                            process_jsonl_messages!(messages);
+                        }
+                    }
                 }
-                Ok(Err(broadcast::error::RecvError::Closed)) => {
-                    break;
-                }
-                Err(_) => {
-                    // Heartbeat — send SSE comment to keep connection alive
+
+                // Heartbeat timeout
+                _ = tokio::time::sleep(recv_timeout) => {
                     let _ = stream.write_all(b":\n\n").await;
                     let _ = stream.flush().await;
                     last_event_time = std::time::Instant::now();
@@ -1616,22 +1613,43 @@ impl PTYWebSocketServer {
             }
         }
 
-        // send() has completed — emit stop marker
-        // Text content is streamed via TextOutput::Stream events above.
-        // Fallback: if no stream events fired, send the full response as a single chunk.
+        // ── Drain: after send() completes, catch final JSONL messages (500ms window) ──
+        if let Some(ref mut jrx) = jsonl_rx {
+            let drain_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
+            loop {
+                match tokio::time::timeout_at(drain_deadline, jrx.recv()).await {
+                    Ok(Ok(WatcherEvent::NewMessages { session_id, messages, .. })) => {
+                        if target_session_id.as_deref() == Some(session_id.as_str()) {
+                            process_jsonl_messages!(messages);
+                        }
+                    }
+                    Ok(Ok(_)) => {} // other watcher events
+                    Ok(Err(_)) => {} // lagged/closed
+                    Err(_) => break, // drain timeout reached
+                }
+            }
+        }
+
+        // ── send() result: trace, persist, fallback, close ──
         match send_handle.await {
             Ok(Ok(result)) => {
                 let duration_ms = start_time.elapsed().as_millis() as u64;
-                trace_store.complete_trace(&chat_id, &result.response, duration_ms).await;
 
-                // Persist conversation to DB (save raw user text, not enriched prompt)
+                // Use JSONL accumulated response (clean) or fall back to PTY response
+                let final_response = if !accumulated_response.is_empty() {
+                    accumulated_response.clone()
+                } else {
+                    // No JSONL content captured — use PTY response with cleaning as fallback
+                    clean_jarvis_response(&result.response, "")
+                };
+                trace_store.complete_trace(&chat_id, &final_response, duration_ms).await;
+
+                // Persist conversation to DB
                 if let (Some(ref db), Some(ref cid)) = (&db, &jarvis_conv_id) {
-                    let clean_response = clean_jarvis_response(&result.response, &boundary_id);
                     if !raw_user_text.is_empty() {
-                        if let Err(e) = db.jarvis_save_exchange(cid, &raw_user_text, &clean_response) {
+                        if let Err(e) = db.jarvis_save_exchange(cid, &raw_user_text, &final_response) {
                             warn!(error = %e, conv_id = %cid, "Failed to save jarvis exchange");
                         } else if conversation_id.is_none() {
-                            // Set title from first user message only for new conversations
                             let title = if raw_user_text.chars().count() > 80 {
                                 let truncated: String = raw_user_text.chars().take(77).collect();
                                 format!("{}...", truncated)
@@ -1643,35 +1661,29 @@ impl PTYWebSocketServer {
                     }
                 }
 
-                // Fallback: if TextOutput::Stream didn't fire, send full response
+                // Fallback: if JSONL watcher didn't deliver text, send PTY response
                 if !streamed_text && !result.response.is_empty() {
-                    let cleaned = clean_jarvis_response(&result.response, &boundary_id);
-                    let chunk = serde_json::json!({
-                        "id": &chat_id,
-                        "object": "chat.completion.chunk",
-                        "model": "jarvis-missiond",
-                        "choices": [{
-                            "index": 0,
-                            "delta": { "content": cleaned },
-                            "finish_reason": serde_json::Value::Null,
-                        }]
-                    });
-                    let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
+                    let fallback = clean_jarvis_response(&result.response, "");
+                    if !fallback.is_empty() {
+                        let chunk = serde_json::json!({
+                            "id": &chat_id,
+                            "object": "chat.completion.chunk",
+                            "model": "jarvis-missiond",
+                            "choices": [{"index": 0, "delta": {"content": fallback}, "finish_reason": serde_json::Value::Null}]
+                        });
+                        let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
+                    }
                 }
 
                 let stop = serde_json::json!({
                     "id": &chat_id,
                     "object": "chat.completion.chunk",
                     "model": "jarvis-missiond",
-                    "choices": [{
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "stop",
-                    }]
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
                 });
                 let _ = stream.write_all(format!("data: {}\n\n", stop).as_bytes()).await;
                 let _ = stream.write_all(b"data: [DONE]\n\n").await;
-                info!(?addr, slot_id, response_len = result.response.len(), duration_ms, trace_id = %chat_id, "Chat completions done (streaming)");
+                info!(?addr, slot_id, response_len = final_response.len(), duration_ms, trace_id = %chat_id, "Chat completions done (JSONL+PTY)");
             }
             Ok(Err(e)) => {
                 trace_store.error_trace(&chat_id, &e.to_string(), None).await;
@@ -1720,7 +1732,7 @@ impl PTYWebSocketServer {
             // Chat completions SSE endpoint
             if request_line.starts_with("POST /v1/chat/completions") {
                 return match pty_manager {
-                    Some(pm) => Self::handle_chat_completions(stream, addr, pm, jarvis_trace, context_enricher, db).await,
+                    Some(pm) => Self::handle_chat_completions(stream, addr, pm, jarvis_trace, context_enricher, db, cc_tasks_watcher).await,
                     None => {
                         let mut s = stream;
                         let err = serde_json::json!({"error": {"message": "PTY manager not available"}});

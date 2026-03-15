@@ -112,7 +112,7 @@ pub async fn extract_last_assistant_text(file_path: &Path) -> Option<String> {
 
 /// Extract text from Claude message content value.
 /// Content can be a plain string or an array of content blocks.
-fn extract_text_from_content(content: &serde_json::Value) -> Option<String> {
+pub fn extract_text_from_content(content: &serde_json::Value) -> Option<String> {
     match content {
         serde_json::Value::String(s) => Some(s.clone()),
         serde_json::Value::Array(blocks) => {
