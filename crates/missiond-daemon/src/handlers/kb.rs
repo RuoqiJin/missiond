@@ -232,7 +232,25 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             // Trigger async embedding update via Worker (avoids block_in_place in MCP handler)
             let _ = state.embedding_tx.try_send(EmbeddingTask::ProcessKBEntry(result.entry.id.clone()));
-            Ok(ToolResult::json_pretty(&result))
+
+            // Conflict detection: for new entries, check semantic similarity against existing KB
+            let conflicts = if result.action == "created" {
+                detect_kb_conflicts(state, &result.entry).await
+            } else {
+                vec![]
+            };
+
+            if conflicts.is_empty() {
+                Ok(ToolResult::json_pretty(&result))
+            } else {
+                let mut output = serde_json::to_value(&result)?;
+                output["conflicts"] = serde_json::json!(conflicts);
+                output["conflictWarning"] = serde_json::json!(format!(
+                    "⚠️ 检测到 {} 条语义相似的已有条目，可能存在规则冲突。请检查是否需要合并或替换。",
+                    conflicts.len()
+                ));
+                Ok(ToolResult::json_pretty(&output))
+            }
         }
         "mission_kb_forget" => {
             let KBKeyArgs { key } = serde_json::from_value(args)?;
@@ -1614,4 +1632,62 @@ async fn handle_kb_compact(state: &AppState, args: serde_json::Value) -> Result<
             "total": total
         })))
     }
+}
+
+/// Detect semantically similar entries that may conflict with a newly created KB entry.
+/// Uses embedding cosine similarity within the same category prefix.
+async fn detect_kb_conflicts(
+    state: &AppState,
+    new_entry: &missiond_core::types::KnowledgeEntry,
+) -> Vec<serde_json::Value> {
+    const CONFLICT_SIM_THRESHOLD: f32 = 0.82;
+
+    let svc = match state.embedding_service.as_ref() {
+        Some(s) => s,
+        None => return vec![],
+    };
+
+    // Embed the new entry's summary
+    let new_text = format!("{} {}", new_entry.key, new_entry.summary);
+    let new_vec = match svc.embed(&new_text) {
+        Some(v) => v,
+        None => return vec![],
+    };
+
+    // Compare against cached KB embeddings
+    let cache = state.kb_search_cache.read().await;
+    let category_prefix = new_entry.category.split(':').next().unwrap_or(&new_entry.category);
+
+    let mut conflicts = Vec::new();
+    for (id, vec) in cache.iter() {
+        if id == &new_entry.id {
+            continue; // skip self
+        }
+        let sim = missiond_core::embedding::cosine_similarity(&new_vec, vec);
+        if sim >= CONFLICT_SIM_THRESHOLD {
+            // Fetch the conflicting entry for details
+            if let Ok(Some(existing)) = state.mission.db().kb_get_by_id(id) {
+                let existing_prefix = existing.category.split(':').next().unwrap_or(&existing.category);
+                if existing_prefix == category_prefix {
+                    conflicts.push(serde_json::json!({
+                        "id": existing.id,
+                        "category": existing.category,
+                        "key": existing.key,
+                        "summary": existing.summary,
+                        "confidence": existing.confidence,
+                        "similarity": format!("{:.3}", sim),
+                    }));
+                }
+            }
+        }
+    }
+
+    // Sort by similarity descending, limit to top 5
+    conflicts.sort_by(|a, b| {
+        let sa = a["similarity"].as_str().unwrap_or("0");
+        let sb = b["similarity"].as_str().unwrap_or("0");
+        sb.partial_cmp(sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    conflicts.truncate(5);
+    conflicts
 }
