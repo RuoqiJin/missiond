@@ -66,6 +66,7 @@ impl MissionDB {
                     updated_at: now.clone(),
                     last_accessed_at: None,
                     linked_task_id: None,
+                    kb_type: Self::infer_kb_type(&input.category).to_string(),
                     context_snippet: None,
                 },
                 action: "rejected".into(),
@@ -163,10 +164,11 @@ impl MissionDB {
 
         // 3. Insert new
         let id = uuid::Uuid::new_v4().to_string();
+        let kb_type = Self::infer_kb_type(&input.category);
         conn.execute(
-            "INSERT INTO knowledge (id, category, key, summary, detail, source, confidence, access_count, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9)",
-            params![id, input.category, input.key, input.summary, detail_str, source, confidence, now, now],
+            "INSERT INTO knowledge (id, category, key, summary, detail, source, confidence, access_count, created_at, updated_at, kb_type)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10)",
+            params![id, input.category, input.key, input.summary, detail_str, source, confidence, now, now, kb_type],
         )?;
 
         let entry = KnowledgeEntry {
@@ -182,6 +184,7 @@ impl MissionDB {
             updated_at: now,
             last_accessed_at: None,
             linked_task_id: None,
+            kb_type: kb_type.to_string(),
             context_snippet: None,
         };
 
@@ -1290,6 +1293,7 @@ impl MissionDB {
     pub(crate) fn row_to_knowledge_entry(row: &rusqlite::Row) -> rusqlite::Result<KnowledgeEntry> {
         let detail_str: Option<String> = row.get("detail")?;
         let detail = detail_str.and_then(|s| serde_json::from_str(&s).ok());
+        let kb_type: String = row.get("kb_type").unwrap_or_else(|_| "fact".to_string());
 
         Ok(KnowledgeEntry {
             id: row.get("id")?,
@@ -1304,8 +1308,25 @@ impl MissionDB {
             updated_at: row.get("updated_at")?,
             last_accessed_at: row.get("last_accessed_at")?,
             linked_task_id: row.get("linked_task_id").unwrap_or(None),
+            kb_type,
             context_snippet: None,
         })
+    }
+
+    /// Infer KB type from category prefix.
+    /// rule: policy/preference/system_rule → always-apply directives
+    /// fact: memory/architecture/frontend_standard → contextual knowledge
+    /// goal: feature/project/design_spec → aspirational targets
+    /// state: ops/debug/bugfix → current/transient status
+    pub fn infer_kb_type(category: &str) -> &'static str {
+        let prefix = category.split(':').next().unwrap_or(category);
+        match prefix {
+            "policy" | "preference" | "system_rule" | "decision" => "rule",
+            "feature" | "feature_request" | "project" | "project-requirement" | "design_spec" => "goal",
+            "memory" if category.contains("ops") || category.contains("debug") || category.contains("bugfix") => "state",
+            "ops" => "state",
+            _ => "fact", // memory:architecture, architecture, frontend_standard, etc.
+        }
     }
 }
 
