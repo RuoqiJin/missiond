@@ -10,6 +10,25 @@ use crate::state::EmbeddingTask;
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
+        // ===== Unified entry point: mission_conversation_query =====
+        // Routes action param → legacy individual handlers
+        "mission_conversation_query" => {
+            let action = args.get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("list");
+            let mapped_name = match action {
+                "list" => "mission_conversation_list",
+                "get" => "mission_conversation_get",
+                "search" => "mission_conversation_search",
+                "message_search" => "mission_message_search",
+                "context" => "mission_context_around",
+                "events" => "mission_conversation_events",
+                other => return Err(anyhow!("Unknown conversation action: {other}")),
+            };
+            // Forward with same args (action field is harmlessly ignored by sub-handlers)
+            Box::pin(handle(state, mapped_name, args)).await
+        }
+
         // ===== Token Stats =====
         "mission_token_stats" => {
             #[derive(Deserialize)]

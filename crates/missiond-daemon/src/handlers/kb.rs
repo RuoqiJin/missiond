@@ -143,6 +143,40 @@ struct KBGCArgs {
 
 // @beacon: knowledge
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    // Merged tool dispatch: map unified tool names to legacy handler names
+    let (name, args) = match name {
+        "mission_kb_query" => {
+            let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("search");
+            let legacy = match action {
+                "get" => "mission_kb_get",
+                "list" => "mission_kb_list",
+                _ => "mission_kb_search",
+            };
+            (legacy, args)
+        }
+        "mission_kb_mutate" => {
+            let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("forget");
+            let legacy = match action {
+                "update" => "mission_kb_update",
+                "import" => "mission_kb_import",
+                "forget" if args.get("keys").is_some() => "mission_kb_batch_forget",
+                _ => "mission_kb_forget",
+            };
+            (legacy, args)
+        }
+        "mission_kb_ops" => {
+            let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("gc");
+            let legacy = match action {
+                "analyze" => "mission_kb_analyze",
+                "discover" => "mission_kb_discover",
+                "queue_status" => "mission_kb_queue_status",
+                "execute_plan" => "mission_kb_execute_plan",
+                _ => "mission_kb_gc",
+            };
+            (legacy, args)
+        }
+        other => (other, args),
+    };
     match name {
         // ===== Knowledge Base (Jarvis Memory) =====
         "mission_kb_remember" => {
