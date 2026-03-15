@@ -30,11 +30,20 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::{accept_hdr_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
+/// Result of context enrichment, includes assembled context and intent classification.
+#[derive(Debug, Clone, Default)]
+pub struct ContextEnrichResult {
+    /// Pre-assembled context string for injection (empty = no context needed).
+    pub assembled: String,
+    /// Classified intent from context pipeline (e.g. "bypass:chat", "code:router", "general:fallback").
+    pub intent: Option<String>,
+}
+
 /// Callback type for context enrichment before sending to PTY.
 /// Implemented by daemon to inject KB/Skill/Code context into Jarvis messages.
-/// Takes user query, returns enriched context string (empty = no context).
+/// Takes user query, returns enrichment result with context and intent.
 pub type ContextEnricherFn = Arc<
-    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ContextEnrichResult> + Send>>
         + Send
         + Sync,
 >;
@@ -82,8 +91,9 @@ const JARVIS_SYSTEM_PROMPT: &str = "<system_info>\n\
 [Identity] 你是 Jarvis，由 MissionD 多实例编排系统驱动的 AI 助手。\n\
 [Environment] 你通过 MissionD 的 Web Chat UI 与用户交互，而非本地终端。用户在浏览器中与你对话。\n\
 [Persistence] 用户的每条消息和你的回复已由系统自动持久化到数据库。不要告诉用户「对话是独立的」或「需要写入记忆文件才能保存」。\n\
-[Capabilities] 你的上下文已通过 MissionD 自动注入知识库 (KB) 和技能库 (Skill) 的搜索结果。你可以调用 MCP 工具完成任务。\n\
+[Capabilities] 你拥有完整的 MCP 工具集（MissionD 47 个 + xjp-mcp 平台工具）。当你不确定该用哪个工具时，务必先阅读你的操作手册：~/.claude/skills/jarvis-manual/SKILL.md\n\
 [Style] 像一个智能 Web 助手一样自然对话，不要向用户暴露底层终端或 PTY 细节。不要使用 AskUserQuestion 工具向用户提问——直接在回复文本中提问即可。\n\
+[CRITICAL] 禁止运行 pgrep、ps、kill 等进程诊断命令。MCP 工具由系统管理，你不需要检查进程状态。直接调用 MCP 工具即可，不要验证服务是否运行。\n\
 </system_info>";
 
 // ── AIOps Webhook Parsers ──
@@ -686,6 +696,7 @@ impl PTYWebSocketServer {
         trace_store: JarvisTraceStore,
         context_enricher: ContextEnricherSlot,
         db: Option<Arc<crate::db::MissionDB>>,
+        frontend_events_tx: Option<broadcast::Sender<String>>,
     ) -> anyhow::Result<()> {
         // Disable Nagle — SSE needs every chunk sent immediately
         stream.set_nodelay(true)?;
@@ -949,25 +960,236 @@ impl PTYWebSocketServer {
         let context_enrichment_disabled = std::env::var("MISSIOND_DISABLE_CONTEXT_ENRICHMENT")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        let enriched_message = if context_enrichment_disabled {
-            format!("{}\n<<<BOUNDARY_{}>>>", user_message, boundary_id)
+        let (enriched_message, enrich_intent) = if context_enrichment_disabled {
+            (format!("{}\n<<<BOUNDARY_{}>>>", user_message, boundary_id), None)
         } else {
             let enricher_guard = context_enricher.read().await;
             if let Some(ref enricher) = *enricher_guard {
                 let enricher = Arc::clone(enricher);
                 drop(enricher_guard); // release lock before async call
-                let ctx = enricher(user_message.clone()).await;
-                if ctx.is_empty() {
+                let enrich_result = enricher(user_message.clone()).await;
+                let intent = enrich_result.intent.clone();
+                let msg = if enrich_result.assembled.is_empty() {
                     format!("{}\n\n{}\n<<<BOUNDARY_{}>>>", JARVIS_SYSTEM_PROMPT, user_message, boundary_id)
                 } else {
-                    debug!(slot_id, ctx_len = ctx.len(), "Jarvis: context enrichment injected");
-                    format!("{}\n\n{}\n\n{}\n<<<BOUNDARY_{}>>>", JARVIS_SYSTEM_PROMPT, ctx, user_message, boundary_id)
-                }
+                    debug!(slot_id, ctx_len = enrich_result.assembled.len(), "Jarvis: context enrichment injected");
+                    format!("{}\n\n{}\n\n{}\n<<<BOUNDARY_{}>>>", JARVIS_SYSTEM_PROMPT, enrich_result.assembled, user_message, boundary_id)
+                };
+                (msg, intent)
             } else {
-                format!("{}\n\n{}\n<<<BOUNDARY_{}>>>", JARVIS_SYSTEM_PROMPT, user_message, boundary_id)
+                (format!("{}\n\n{}\n<<<BOUNDARY_{}>>>", JARVIS_SYSTEM_PROMPT, user_message, boundary_id), None)
             }
         };
 
+        // ── Async dispatch for non-chat intents ──
+        // If the intent classifier says this is NOT a simple chat (greeting/thanks),
+        // dispatch to the slot asynchronously and return immediately.
+        // The result will be pushed to the frontend via WebSocket event.
+        let is_chat_intent = enrich_intent.as_deref()
+            .map(|i| i.starts_with("bypass:chat"))
+            .unwrap_or(false);
+
+        if !is_chat_intent && !proxy_mode {
+            if let Some(ref events_tx) = frontend_events_tx {
+                info!(?addr, slot_id, intent = ?enrich_intent, trace_id = %chat_id, "Async dispatch (non-blocking)");
+
+                // Save user message immediately
+                if let (Some(ref db), Some(ref cid)) = (&db, &jarvis_conv_id) {
+                    if !raw_user_text.is_empty() {
+                        let _ = db.jarvis_save_exchange(cid, &raw_user_text, "");
+                        if conversation_id.is_none() {
+                            let title = if raw_user_text.chars().count() > 80 {
+                                let truncated: String = raw_user_text.chars().take(77).collect();
+                                format!("{}...", truncated)
+                            } else {
+                                raw_user_text.clone()
+                            };
+                            let _ = db.jarvis_update_title(cid, &title);
+                        }
+                    }
+                }
+
+                // Send meta event (conversation_id) immediately so frontend can track
+                // (already sent above at line 948)
+
+                // Send immediate ack response via SSE
+                let ack_text = "正在处理，请稍候...";
+                let ack_chunk = serde_json::json!({
+                    "id": &chat_id,
+                    "object": "chat.completion.chunk",
+                    "model": "jarvis-missiond",
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "content": ack_text },
+                        "finish_reason": serde_json::Value::Null,
+                    }]
+                });
+                let _ = stream.write_all(format!("data: {}\n\n", ack_chunk).as_bytes()).await;
+
+                // Send async_dispatch marker so frontend knows to expect WS result
+                let dispatch_event = serde_json::json!({
+                    "conversation_id": jarvis_conv_id.as_deref().unwrap_or(""),
+                    "task_id": &chat_id,
+                });
+                let _ = stream.write_all(format!("event: async_dispatch\ndata: {}\n\n", dispatch_event).as_bytes()).await;
+
+                let stop = serde_json::json!({
+                    "id": &chat_id,
+                    "object": "chat.completion.chunk",
+                    "model": "jarvis-missiond",
+                    "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }]
+                });
+                let _ = stream.write_all(format!("data: {}\n\n", stop).as_bytes()).await;
+                let _ = stream.write_all(b"data: [DONE]\n\n").await;
+                let _ = stream.flush().await;
+
+                // Spawn background task: send to slot, collect response, push via WS
+                let pty_bg = Arc::clone(&pty_manager);
+                let events_tx_bg = events_tx.clone();
+                let trace_bg = trace_store.clone();
+                let chat_id_bg = chat_id.clone();
+                let slot_id_bg = slot_id.clone();
+                let send_msg_bg = enriched_message.clone();
+                let boundary_id_bg = boundary_id.clone();
+                let db_bg = db.clone();
+                let conv_id_bg = jarvis_conv_id.clone();
+                let raw_user_bg = raw_user_text.clone();
+
+                tokio::spawn(async move {
+                    let start = std::time::Instant::now();
+
+                    // Subscribe to session events for activity forwarding via WS
+                    let mut rx = pty_bg.subscribe_session(&slot_id_bg).await.ok();
+                    let timeout_ms = 300_000u64; // 5 min
+
+                    // Forward tool events via WS while slot is working
+                    let pty_for_send = Arc::clone(&pty_bg);
+                    let send_msg = send_msg_bg.clone();
+                    let send_slot = slot_id_bg.clone();
+                    let send_handle = tokio::spawn(async move {
+                        pty_for_send.send(&send_slot, &send_msg, timeout_ms).await
+                    });
+
+                    // Forward activity events via WS
+                    if let Some(ref mut rx) = rx {
+                        let events_tx_fwd = events_tx_bg.clone();
+                        let task_id = chat_id_bg.clone();
+                        let conv_id = conv_id_bg.clone();
+                        loop {
+                            if send_handle.is_finished() { break; }
+                            match tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
+                                Ok(Ok(event)) => {
+                                    let activity_json = match event {
+                                        SessionEvent::StatusUpdate(status) => {
+                                            Some(serde_json::json!({
+                                                "type": "jarvis_activity",
+                                                "task_id": task_id,
+                                                "conversation_id": conv_id,
+                                                "activity": "status",
+                                                "phase": format!("{}", status.phase),
+                                                "text": status.status_text,
+                                            }))
+                                        }
+                                        SessionEvent::ToolOutput(tool) => {
+                                            use crate::semantic::ToolStatus;
+                                            let activity_type = match tool.status {
+                                                ToolStatus::Running => "tool_start",
+                                                ToolStatus::Completed => "tool_end",
+                                            };
+                                            Some(serde_json::json!({
+                                                "type": "jarvis_activity",
+                                                "task_id": task_id,
+                                                "conversation_id": conv_id,
+                                                "activity": activity_type,
+                                                "tool": tool.tool_name,
+                                                "params": serde_json::json!(tool.params),
+                                                "output": tool.output.as_deref().map(|o| {
+                                                    if o.len() > 4096 { format!("{}...[truncated]", &o[..4096]) }
+                                                    else { o.to_string() }
+                                                }),
+                                                "duration_ms": tool.duration_ms,
+                                            }))
+                                        }
+                                        SessionEvent::StateChange { new_state, .. } => {
+                                            Some(serde_json::json!({
+                                                "type": "jarvis_activity",
+                                                "task_id": task_id,
+                                                "conversation_id": conv_id,
+                                                "activity": "state",
+                                                "state": format!("{:?}", new_state),
+                                            }))
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(json) = activity_json {
+                                        let _ = events_tx_fwd.send(json.to_string());
+                                    }
+                                }
+                                Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                                Ok(Err(broadcast::error::RecvError::Closed)) => break,
+                                Err(_) => continue, // timeout, check send_handle
+                            }
+                        }
+                    }
+
+                    // Collect final result
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    match send_handle.await {
+                        Ok(Ok(result)) => {
+                            let clean = clean_jarvis_response(&result.response, &boundary_id_bg);
+                            trace_bg.complete_trace(&chat_id_bg, &result.response, duration_ms).await;
+
+                            // Update DB with actual response
+                            if let (Some(ref db), Some(ref cid)) = (&db_bg, &conv_id_bg) {
+                                if !raw_user_bg.is_empty() {
+                                    // Delete the placeholder exchange, save with real response
+                                    let _ = db.jarvis_save_exchange(cid, &raw_user_bg, &clean);
+                                }
+                            }
+
+                            // Push result to frontend via WS
+                            let result_event = serde_json::json!({
+                                "type": "jarvis_async_result",
+                                "task_id": chat_id_bg,
+                                "conversation_id": conv_id_bg,
+                                "content": clean,
+                                "duration_ms": duration_ms,
+                            });
+                            let _ = events_tx_bg.send(result_event.to_string());
+                            info!(task_id = %chat_id_bg, duration_ms, "Async Jarvis task completed");
+                        }
+                        Ok(Err(e)) => {
+                            trace_bg.error_trace(&chat_id_bg, &e.to_string(), None).await;
+                            let err_event = serde_json::json!({
+                                "type": "jarvis_async_result",
+                                "task_id": chat_id_bg,
+                                "conversation_id": conv_id_bg,
+                                "content": format!("任务执行失败: {}", e),
+                                "error": true,
+                            });
+                            let _ = events_tx_bg.send(err_event.to_string());
+                            warn!(task_id = %chat_id_bg, error = %e, "Async Jarvis task failed");
+                        }
+                        Err(e) => {
+                            let err_event = serde_json::json!({
+                                "type": "jarvis_async_result",
+                                "task_id": chat_id_bg,
+                                "conversation_id": conv_id_bg,
+                                "content": format!("内部错误: {}", e),
+                                "error": true,
+                            });
+                            let _ = events_tx_bg.send(err_event.to_string());
+                        }
+                    }
+                });
+
+                // Close SSE connection immediately
+                stream.shutdown().await?;
+                return Ok(());
+            }
+        }
+
+        // ── Synchronous path (chat intents / proxy mode / no frontend_events_tx) ──
         // Dual-track streaming:
         // 1. Subscribe to session events → forward status/tool events as SSE (activity view)
         // 2. Use blocking send() → get clean final response (handles turn management correctly)
@@ -1000,6 +1222,9 @@ impl PTYWebSocketServer {
         let heartbeat_interval = tokio::time::Duration::from_secs(15);
         let mut tool_seq: u32 = 0;
         let mut streamed_text = false; // Track if text was streamed via TextOutput::Stream
+        let mut stream_buffer = String::new(); // Buffer text until boundary marker is found
+        let mut boundary_found = false; // Whether we've passed the boundary marker
+        let boundary_marker = format!("<<<BOUNDARY_{}>>>", boundary_id);
         let mut last_event_time = std::time::Instant::now();
         let mut last_status_phase = String::new();
         let mut last_status_sent = std::time::Instant::now() - std::time::Duration::from_secs(1); // Allow first status immediately
@@ -1040,7 +1265,6 @@ impl PTYWebSocketServer {
                                 ToolStatus::Running => {
                                     tool_seq += 1;
                                     let id = format!("t{}", tool_seq);
-                                    // Send full params as JSON object (not just first param summary)
                                     let params_json = serde_json::json!(tool_output.params);
                                     let evt = serde_json::json!({
                                         "id": id,
@@ -1053,7 +1277,6 @@ impl PTYWebSocketServer {
                                 }
                                 ToolStatus::Completed => {
                                     let id = format!("t{}", tool_seq);
-                                    // Include truncated output for visibility
                                     let output = tool_output.output.as_deref().map(|o| {
                                         if o.len() > 4096 {
                                             format!("{}...\n[truncated, {} bytes total]", &o[..4096], o.len())
@@ -1105,20 +1328,49 @@ impl PTYWebSocketServer {
                             match text_event {
                                 TextOutputEvent::Stream { content, .. } => {
                                     if !content.is_empty() {
-                                        streamed_text = true;
-                                        // Forward as standard OpenAI delta chunk for real-time streaming
-                                        let chunk = serde_json::json!({
-                                            "id": &chat_id,
-                                            "object": "chat.completion.chunk",
-                                            "model": "jarvis-missiond",
-                                            "choices": [{
-                                                "index": 0,
-                                                "delta": { "content": content },
-                                                "finish_reason": serde_json::Value::Null,
-                                            }]
-                                        });
-                                        let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
-                                        let _ = stream.flush().await;
+                                        if !boundary_found {
+                                            // Buffer until we find the boundary marker
+                                            stream_buffer.push_str(&content);
+                                            if let Some(pos) = stream_buffer.find(&boundary_marker) {
+                                                boundary_found = true;
+                                                let after = stream_buffer[pos + boundary_marker.len()..].to_string();
+                                                stream_buffer.clear();
+                                                if !after.trim().is_empty() {
+                                                    streamed_text = true;
+                                                    let cleaned = clean_jarvis_response(&after, &boundary_id);
+                                                    if !cleaned.is_empty() {
+                                                        let chunk = serde_json::json!({
+                                                            "id": &chat_id,
+                                                            "object": "chat.completion.chunk",
+                                                            "model": "jarvis-missiond",
+                                                            "choices": [{
+                                                                "index": 0,
+                                                                "delta": { "content": cleaned },
+                                                                "finish_reason": serde_json::Value::Null,
+                                                            }]
+                                                        });
+                                                        let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
+                                                        let _ = stream.flush().await;
+                                                    }
+                                                }
+                                            }
+                                            // Don't forward pre-boundary content
+                                        } else {
+                                            streamed_text = true;
+                                            // Post-boundary: forward content directly
+                                            let chunk = serde_json::json!({
+                                                "id": &chat_id,
+                                                "object": "chat.completion.chunk",
+                                                "model": "jarvis-missiond",
+                                                "choices": [{
+                                                    "index": 0,
+                                                    "delta": { "content": content },
+                                                    "finish_reason": serde_json::Value::Null,
+                                                }]
+                                            });
+                                            let _ = stream.write_all(format!("data: {}\n\n", chunk).as_bytes()).await;
+                                            let _ = stream.flush().await;
+                                        }
                                     }
                                 }
                                 TextOutputEvent::Complete { .. } => {
@@ -1273,7 +1525,7 @@ impl PTYWebSocketServer {
             // Chat completions SSE endpoint
             if request_line.starts_with("POST /v1/chat/completions") {
                 return match pty_manager {
-                    Some(pm) => Self::handle_chat_completions(stream, addr, pm, jarvis_trace, context_enricher, db).await,
+                    Some(pm) => Self::handle_chat_completions(stream, addr, pm, jarvis_trace, context_enricher, db, frontend_events_tx).await,
                     None => {
                         let mut s = stream;
                         let err = serde_json::json!({"error": {"message": "PTY manager not available"}});

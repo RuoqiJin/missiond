@@ -136,6 +136,14 @@ function handleEvent(
       }
       break;
 
+    // ── Jarvis async dispatch events ──
+    case 'jarvis_async_result':
+    case 'jarvis_activity':
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('jarvis-ws-event', { detail: event }));
+      }
+      break;
+
     // ── Conversation messages — high-frequency, use longer debounce ──
     case 'user_message':
     case 'assistant_message':

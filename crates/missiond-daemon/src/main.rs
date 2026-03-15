@@ -534,7 +534,10 @@ async fn main() -> Result<()> {
                     token_budget: 4000,
                 };
                 let result = context_pipeline::execute(&s, &req).await;
-                result.assembled
+                missiond_core::ContextEnrichResult {
+                    assembled: result.assembled,
+                    intent: result.intent,
+                }
             })
         });
         *context_enricher_slot.write().await = Some(enricher);
