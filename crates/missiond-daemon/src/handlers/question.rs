@@ -77,10 +77,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 }
                 crate::handlers::misc::handle(state, "mission_gemini_watch", args).await
             }
+            "gemini_auth" => crate::handlers::misc::handle(state, "mission_gemini_auth", args).await,
             "jarvis_logs" => crate::handlers::misc::handle(state, "mission_jarvis_logs", args).await,
             "jarvis_trace" => crate::handlers::misc::handle(state, "mission_jarvis_trace", args).await,
             _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
         };
+    }
+    if name == "mission_gemini_auth" {
+        return crate::handlers::misc::handle(state, "mission_gemini_auth", args).await;
     }
     if name == "mission_incident" {
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
