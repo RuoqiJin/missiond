@@ -488,6 +488,12 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
             full_prompt, task.id, task.id, task.id
         );
 
+        // Cache cited KB IDs for confidence feedback loop after task completion
+        if !cited_kb_ids.is_empty() {
+            let mut cache = state.task_cited_kbs.lock().unwrap();
+            cache.insert(task.id.clone(), cited_kb_ids.clone());
+        }
+
         // Emit dispatch event for timeline visibility
         {
             let preview = if full_prompt.len() > 200 {
@@ -688,6 +694,24 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                     fail_map.remove(&slot_id);
                 }
 
+                // Positive confidence feedback: reinforce cited KB entries on task success
+                {
+                    let cited = state.task_cited_kbs.lock().unwrap().remove(&task.id);
+                    if let Some(kb_ids) = cited {
+                        let count = kb_ids.len();
+                        for kb_id in &kb_ids {
+                            match state.mission.db().kb_adjust_confidence(kb_id, 0.03) {
+                                Ok(Some(new_conf)) => debug!(kb_id = %kb_id, new_conf, "KB confidence +0.03 (task success)"),
+                                Ok(None) => debug!(kb_id = %kb_id, "KB entry not found for confidence adjustment"),
+                                Err(e) => warn!(kb_id = %kb_id, error = %e, "Failed to adjust KB confidence"),
+                            }
+                        }
+                        if count > 0 {
+                            info!(task_id = %task.id, kb_count = count, "KB feedback: +0.03 confidence for {} cited entries", count);
+                        }
+                    }
+                }
+
                 // Jarvis task post-completion: append result to conversation
                 if task.category == "jarvis" {
                     if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&task.description) {
@@ -794,6 +818,25 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                         );
                         warn!(task_id = %task.id, retries = new_retry, "Autopilot: task failed after max retries");
                         notify_jarvis_failure(state, &task, &err_msg);
+
+                        // Negative confidence feedback: mild penalty for cited KB entries on permanent failure
+                        // Only applied when task exhausts all retries (not on individual retry)
+                        {
+                            let cited = state.task_cited_kbs.lock().unwrap().remove(&task.id);
+                            if let Some(kb_ids) = cited {
+                                let count = kb_ids.len();
+                                for kb_id in &kb_ids {
+                                    match state.mission.db().kb_adjust_confidence(kb_id, -0.02) {
+                                        Ok(Some(new_conf)) => debug!(kb_id = %kb_id, new_conf, "KB confidence -0.02 (task failed)"),
+                                        Ok(None) => debug!(kb_id = %kb_id, "KB entry not found for confidence adjustment"),
+                                        Err(e) => warn!(kb_id = %kb_id, error = %e, "Failed to adjust KB confidence"),
+                                    }
+                                }
+                                if count > 0 {
+                                    info!(task_id = %task.id, kb_count = count, "KB feedback: -0.02 confidence for {} cited entries", count);
+                                }
+                            }
+                        }
                     } else {
                         // Back to open for retry, increment retry_count
                         let _ = state.mission.db().increment_board_task_retry(&task.id, new_retry);

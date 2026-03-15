@@ -195,6 +195,9 @@ pub(crate) struct AppState {
     pub(crate) gemini_watch_attempts: Arc<std::sync::atomic::AtomicU32>,
     /// Gemini watch: start timestamp (epoch secs). 0 = not running.
     pub(crate) gemini_watch_started_at: Arc<std::sync::atomic::AtomicI64>,
+    /// Cache: task_id → cited KB entry IDs at dispatch time.
+    /// Used by the feedback loop to adjust confidence on task success/failure.
+    pub(crate) task_cited_kbs: Arc<std::sync::Mutex<HashMap<String, Vec<String>>>>,
     /// Slots pending graceful restart due to low context (detected "until auto-compact").
     /// Restart is deferred until the slot becomes Idle to avoid interrupting tasks.
     pub(crate) pending_compact_restart: Arc<std::sync::Mutex<HashSet<String>>>,
