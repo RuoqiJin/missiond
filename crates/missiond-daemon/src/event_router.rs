@@ -447,6 +447,12 @@ fn spawn_kb_consolidation_consumer(state: &AppState, timeline_tx: &broadcast::Se
             tokio::select! {
                 biased;
                 _ = shutdown.changed() => {
+                    // Gemini audit: flush accumulated count on shutdown
+                    if count > 0 {
+                        tracing::info!(count, "kb_consolidation_consumer: shutdown flush");
+                        let sc = s.clone();
+                        tokio::spawn(async move { check_kb_consolidation(&sc).await; });
+                    }
                     tracing::info!("kb_consolidation_consumer: shutdown");
                     return;
                 }

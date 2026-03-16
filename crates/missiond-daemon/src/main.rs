@@ -24,7 +24,7 @@ mod supervisor;
 mod slot_dispatch;
 
 // ── Re-exports for backward-compatible `use crate::xxx` paths ──
-use llm::{gemini_client, gemini_cli, minimax_client, minimax_gateway, codex_cli, llm_gateway, prompts};
+use llm::{gemini_client, gemini_cli, minimax_client, minimax_gateway, sonnet_gateway, codex_cli, llm_gateway, prompts};
 use workers::{embedding_worker, vision_worker, step_narrator, translation_worker, briefing_worker, code_prefetch, experience_harvester, ast_sync_worker};
 use engine::{autopilot, decision_engine, decision_harvest, flow_engine, extraction, memory_scheduler};
 use context::{slot_env, context_pipeline, claude_md_sync, topology_map, context_budget};
@@ -525,6 +525,12 @@ async fn main() -> Result<()> {
                 warn!("MinimaxGateway: API key not found, gateway disabled");
                 None
             }
+        },
+        sonnet: {
+            let (handle, gateway) = sonnet_gateway::create_sonnet_gateway(event_bus_instance.sender());
+            info!("SonnetGateway initialized");
+            tokio::spawn(gateway.run());
+            Some(handle)
         },
         xjp_mcp: Arc::new(McpProcessClient::new(
             default_mission_home().join("xjp-mcp-config.json"),
@@ -1097,12 +1103,7 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     );
 
-    // Retrospective worker — automatic session performance analysis
-    workers::spawn_worker(
-        workers::retro_worker::RetroWorker,
-        Arc::new(state.clone()),
-        shutdown_rx.clone(),
-    );
+    // Phase 3d: RetroWorker removed — retro analysis now event-driven via session_reflection_consumer
 
     // Architecture maintenance worker — auto-updates YAML manifests on structural code changes
     workers::spawn_worker(
@@ -1113,14 +1114,7 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     );
 
-    // Strategy analyst worker — discovers user preferences and patterns from conversation logs
-    workers::spawn_worker(
-        workers::strategy_worker::StrategyWorker {
-            timeline_rx: timeline_broadcast_tx.subscribe(),
-        },
-        Arc::new(state.clone()),
-        shutdown_rx.clone(),
-    );
+    // Phase 3d: StrategyWorker removed — strategy analysis now event-driven via session_reflection_consumer
 
     info!("All event handlers started (isolated tasks)");
 
