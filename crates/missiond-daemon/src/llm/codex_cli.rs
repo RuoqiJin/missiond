@@ -12,23 +12,34 @@
 //! - `item.completed`: response text in `item.text`
 //! - `turn.completed`: inference done, contains `usage`
 //!
+//! Rate limiting: governor (20 RPM) + semaphore (2 concurrent).
 //! Instrumentation: every request emits CliRequestStarted/Completed
 //! events via EventBus for timeline tracking.
 
+use std::num::NonZeroU32;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
+use governor::{Quota, RateLimiter, clock::DefaultClock, state::{InMemoryState, NotKeyed}};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tracing::{info, warn};
 
 use crate::event_bus::{DaemonEvent, TimelineEntry};
 use crate::gemini_client::current_parent_span_id;
 
+type GovernorLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
+
 /// Absolute safety cap: kill process no matter what after this duration.
 const ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(300); // 5 min
+
+/// RPM limit for Codex CLI calls.
+const CODEX_RPM: u32 = 20;
+/// Max concurrent Codex CLI subprocesses.
+const CODEX_MAX_CONCURRENT: usize = 2;
 
 /// Check if Codex is disabled via persistent flag file.
 /// Flag file: `$MISSIOND_HOME/codex_disabled` (or `~/.xjp-mission/codex_disabled`).
@@ -68,13 +79,18 @@ pub(crate) fn set_codex_disabled(disabled: bool) {
     }
 }
 
-/// Codex CLI subprocess wrapper with timeline instrumentation.
+/// Codex CLI subprocess wrapper with rate limiting and timeline instrumentation.
+///
+/// Rate limiting: governor (20 RPM) + semaphore (2 concurrent).
+/// Clone shares the same limiter/semaphore via Arc.
 #[derive(Clone)]
 pub(crate) struct CodexCli {
     binary: String,
     default_model: String,
     idle_timeout: Duration,
     event_tx: mpsc::UnboundedSender<TimelineEntry>,
+    rate_limiter: Arc<GovernorLimiter>,
+    semaphore: Arc<Semaphore>,
 }
 
 /// Response from a Codex CLI invocation.
@@ -86,6 +102,36 @@ pub(crate) struct CodexCliResponse {
     pub output_tokens: u64,
 }
 
+/// Drop guard: guarantees every Started event gets a matching Completed event,
+/// even on early-return errors or future cancellation.
+struct RequestGuard<'a> {
+    cli: &'a CodexCli,
+    request_id: String,
+    caller: String,
+    model: String,
+    prompt_chars: usize,
+    image_hash: Option<String>,
+    span_id: String,
+    queue_wait_ms: u64,
+    api_start: Instant,
+    completed: bool,
+}
+
+impl Drop for RequestGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            let err: Result<CodexCliResponse> = Err(anyhow!("request cancelled (future dropped)"));
+            self.cli.emit_completed(
+                &self.request_id, &self.caller, &self.model,
+                self.prompt_chars, &err,
+                self.api_start.elapsed().as_millis() as u64,
+                self.queue_wait_ms,
+                self.image_hash.as_deref(), &self.span_id,
+            );
+        }
+    }
+}
+
 impl CodexCli {
     pub fn new(
         binary: String,
@@ -93,14 +139,23 @@ impl CodexCli {
         idle_timeout: Duration,
         event_tx: mpsc::UnboundedSender<TimelineEntry>,
     ) -> Self {
-        Self { binary, default_model, idle_timeout, event_tx }
+        let quota = Quota::per_minute(NonZeroU32::new(CODEX_RPM).unwrap());
+        info!(rpm = CODEX_RPM, concurrency = CODEX_MAX_CONCURRENT, "Codex CLI: rate limiter initialized");
+        Self {
+            binary,
+            default_model,
+            idle_timeout,
+            event_tx,
+            rate_limiter: Arc::new(RateLimiter::direct(quota)),
+            semaphore: Arc::new(Semaphore::new(CODEX_MAX_CONCURRENT)),
+        }
     }
 
     /// Call Codex CLI with optional image file for vision tasks.
     ///
     /// Uses `codex exec --json --ephemeral --skip-git-repo-check` for headless operation.
     /// Image is passed via `-i <path>` flag (native vision support).
-    /// Emits CliRequestStarted/Completed events for timeline tracking.
+    /// Rate limited: semaphore (concurrency) → governor (RPM) → exec.
     pub async fn call(
         &self,
         prompt: &str,
@@ -126,16 +181,41 @@ impl CodexCli {
             return Err(anyhow!("Empty prompt"));
         }
 
-        // Emit started event
-        self.emit_started(&request_id, caller, model, prompt, has_image, image_hash, &span_id);
+        // 1. Rate limiting: semaphore (concurrency) → governor (RPM)
+        let queue_start = Instant::now();
+        let _permit = self.semaphore.clone().acquire_owned().await
+            .map_err(|_| anyhow!("Codex semaphore closed"))?;
+        self.rate_limiter.until_ready().await;
+        let queue_wait = queue_start.elapsed();
+        let queue_wait_ms = queue_wait.as_millis() as u64;
+
+        // 2. Emit started event AFTER acquiring permit (queue wait excluded from API time)
+        self.emit_started(&request_id, caller, model, prompt, has_image, image_hash, &span_id, queue_wait_ms);
 
         let api_start = Instant::now();
 
+        // 3. Drop guard: guarantees Completed event on any exit path
+        let guard = RequestGuard {
+            cli: self,
+            request_id: request_id.clone(),
+            caller: caller.to_string(),
+            model: model.to_string(),
+            prompt_chars: prompt.len(),
+            image_hash: image_hash.map(|s| s.to_string()),
+            span_id: span_id.clone(),
+            queue_wait_ms,
+            api_start,
+            completed: false,
+        };
+
+        // 4. Execute
         let result = self.exec_cli(prompt, model, image_path, idle_timeout).await;
         let duration_ms = api_start.elapsed().as_millis() as u64;
 
-        // Emit completed event
-        self.emit_completed(&request_id, caller, model, prompt.len(), &result, duration_ms, image_hash, &span_id);
+        // 5. Normal completion — disarm guard
+        let mut guard = guard;
+        guard.completed = true;
+        self.emit_completed(&request_id, caller, model, prompt.len(), &result, duration_ms, queue_wait_ms, image_hash, &span_id);
 
         result
     }
@@ -225,7 +305,7 @@ impl CodexCli {
         parse_codex_events(&events, model)
     }
 
-    fn emit_started(&self, request_id: &str, caller: &str, model: &str, prompt: &str, has_image: bool, image_hash: Option<&str>, span_id: &str) {
+    fn emit_started(&self, request_id: &str, caller: &str, model: &str, prompt: &str, has_image: bool, image_hash: Option<&str>, span_id: &str, queue_wait_ms: u64) {
         let parent = current_parent_span_id();
         let event = DaemonEvent::CliRequestStarted {
             engine: missiond_core::CliEngine::Codex,
@@ -238,6 +318,7 @@ impl CodexCli {
             extra: serde_json::json!({
                 "has_image": has_image,
                 "image_hash": image_hash,
+                "queue_wait_ms": queue_wait_ms,
             }),
         };
         let entry = TimelineEntry {
@@ -245,7 +326,7 @@ impl CodexCli {
             trace_id: Some("codex".to_string()),
             span_id: span_id.to_string(),
             parent_span_id: parent,
-            summary: Some(format!("{} → {} ({}ch{})", caller, model, prompt.len(), if has_image { " +img" } else { "" })),
+            summary: Some(format!("{} → {} ({}ch{}, q:{}ms)", caller, model, prompt.len(), if has_image { " +img" } else { "" }, queue_wait_ms)),
         };
         let _ = self.event_tx.send(entry);
     }
@@ -258,6 +339,7 @@ impl CodexCli {
         prompt_chars: usize,
         result: &Result<CodexCliResponse>,
         duration_ms: u64,
+        queue_wait_ms: u64,
         image_hash: Option<&str>,
         span_id: &str,
     ) {
@@ -272,13 +354,15 @@ impl CodexCli {
             ),
             Err(e) => {
                 let msg = e.to_string();
-                let s = if msg.contains("timed out") { "timeout" } else { "error" };
+                let s = if msg.contains("timed out") { "timeout" }
+                    else if msg.contains("cancelled") { "cancelled" }
+                    else { "error" };
                 (s.to_string(), 0, Some(msg), None, 0, 0)
             }
         };
 
         info!(request_id, caller, model, prompt_chars, response_chars,
-              duration_ms, status = %status, "codex_request");
+              duration_ms, queue_wait_ms, status = %status, "codex_request");
 
         let event = DaemonEvent::CliRequestCompleted {
             engine: missiond_core::CliEngine::Codex,
@@ -296,6 +380,7 @@ impl CodexCli {
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "image_hash": image_hash,
+                "queue_wait_ms": queue_wait_ms,
             }),
         };
         let parent = current_parent_span_id();
@@ -304,7 +389,7 @@ impl CodexCli {
             trace_id: Some("codex".to_string()),
             span_id: span_id.to_string(),
             parent_span_id: parent,
-            summary: Some(format!("{} → {} ({}ms)", caller, model, duration_ms)),
+            summary: Some(format!("{} → {} ({}ms, q:{}ms)", caller, model, duration_ms, queue_wait_ms)),
         };
         let _ = self.event_tx.send(entry);
     }
