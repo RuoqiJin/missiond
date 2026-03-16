@@ -4,16 +4,18 @@
 //! a new God Module. Each consumer runs in its own tokio task and filters
 //! relevant DaemonEvent variants.
 //!
-//! Phase 3 PR1: Trailing-edge debounce — events are absorbed during the
-//! debounce window, and the handler fires once when the window expires.
+//! Architecture:
+//! - Trailing-edge debounce: events absorbed during window, handler fires once at expiry
+//! - Sweeper reconciliation: 30min + startup scan catches events lost to Lagged/restart
+//! - Graceful shutdown: consumers flush pending work on SIGTERM via watch channel
 //!
-//! Phase 6: Consumers now subscribe to broadcast<TimelineEvent> instead of
-//! broadcast<DaemonEvent>. The inner DaemonEvent is accessed via .event field.
+//! Consumers subscribe to broadcast<TimelineEvent>, access inner DaemonEvent via .event field.
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::watch;
 
 use crate::event_bus::{DaemonEvent, TimelineEvent};
 use crate::experience_harvester;
@@ -44,22 +46,27 @@ fn lagged_backoff(consecutive_lags: u32) -> Duration {
 
 // @beacon: eventbus
 /// Start all event-driven consumer tasks. Call once during daemon startup.
-pub(crate) fn start_event_consumers(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>) {
-    spawn_extraction_consumer(state, timeline_tx);
-    spawn_submit_consumer(state, timeline_tx);
-    spawn_decision_consumer(state, timeline_tx);
-    spawn_harvest_consumer(state, timeline_tx);
-    // Phase 3: Reflection consumers (Shadow Mode — log-only, no action)
-    spawn_realtime_extraction_consumer(state, timeline_tx);
-    spawn_session_reflection_consumer(state, timeline_tx);
-    spawn_kb_consolidation_consumer(state, timeline_tx);
+pub(crate) fn start_event_consumers(
+    state: &AppState,
+    timeline_tx: &broadcast::Sender<TimelineEvent>,
+    shutdown_rx: watch::Receiver<bool>,
+) {
+    spawn_extraction_consumer(state, timeline_tx, shutdown_rx.clone());
+    spawn_submit_consumer(state, timeline_tx, shutdown_rx.clone());
+    spawn_decision_consumer(state, timeline_tx, shutdown_rx.clone());
+    spawn_harvest_consumer(state, timeline_tx, shutdown_rx.clone());
+    spawn_realtime_extraction_consumer(state, timeline_tx, shutdown_rx.clone());
+    spawn_session_reflection_consumer(state, timeline_tx, shutdown_rx.clone());
+    spawn_kb_consolidation_consumer(state, timeline_tx, shutdown_rx);
+    spawn_sweeper(state);
 }
 
 /// Extraction lane: SlotBecameIdle → schedule_memory_tasks.
 /// Trailing-edge debounce: 500ms window, fires after window expires.
-fn spawn_extraction_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>) {
+fn spawn_extraction_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>, shutdown_rx: watch::Receiver<bool>) {
     let s = state.clone();
     let mut rx = timeline_tx.subscribe();
+    let mut shutdown = shutdown_rx;
     tokio::spawn(async move {
         let mut pending = false;
         let mut consecutive_lags: u32 = 0;
@@ -89,30 +96,38 @@ fn spawn_extraction_consumer(state: &AppState, timeline_tx: &broadcast::Sender<T
                     schedule_memory_tasks(&s).await;
                 }
                 pending = false;
+                if *shutdown.borrow() { return; }
             } else {
-                match rx.recv().await {
-                    Ok(te) => match &te.event {
-                        DaemonEvent::SlotBecameIdle { ref slot_id }
-                            if slot_id == MEMORY_SLOT_ID || slot_id == MEMORY_SLOW_SLOT_ID =>
-                        {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.changed() => {
+                        tracing::info!("extraction_consumer: shutdown");
+                        return;
+                    }
+                    result = rx.recv() => match result {
+                        Ok(te) => match &te.event {
+                            DaemonEvent::SlotBecameIdle { ref slot_id }
+                                if slot_id == MEMORY_SLOT_ID || slot_id == MEMORY_SLOW_SLOT_ID =>
+                            {
+                                if !s.memory_paused.load(Ordering::Relaxed) {
+                                    pending = true;
+                                }
+                            }
+                            _ => {}
+                        },
+                        Err(RecvError::Lagged(n)) => {
+                            consecutive_lags += 1;
+                            let backoff = lagged_backoff(consecutive_lags);
+                            tracing::warn!(skipped = n, backoff_ms = backoff.as_millis() as u64, consecutive = consecutive_lags, "Extraction consumer lagged");
+                            s.stats.events_lagged_extraction.fetch_add(1, Ordering::Relaxed);
+                            s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
+                            tokio::time::sleep(backoff).await;
                             if !s.memory_paused.load(Ordering::Relaxed) {
-                                pending = true;
+                                schedule_memory_tasks(&s).await;
                             }
                         }
-                        _ => {}
-                    },
-                    Err(RecvError::Lagged(n)) => {
-                        consecutive_lags += 1;
-                        let backoff = lagged_backoff(consecutive_lags);
-                        tracing::warn!(skipped = n, backoff_ms = backoff.as_millis() as u64, consecutive = consecutive_lags, "Extraction consumer lagged");
-                        s.stats.events_lagged_extraction.fetch_add(1, Ordering::Relaxed);
-                        s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
-                        tokio::time::sleep(backoff).await;
-                        if !s.memory_paused.load(Ordering::Relaxed) {
-                            schedule_memory_tasks(&s).await;
-                        }
+                        Err(RecvError::Closed) => return,
                     }
-                    Err(RecvError::Closed) => break,
                 }
             }
         }
@@ -121,9 +136,10 @@ fn spawn_extraction_consumer(state: &AppState, timeline_tx: &broadcast::Sender<T
 
 /// Submit dispatcher: TaskCreated/TaskCompleted → dispatch.
 /// Trailing-edge debounce: 100ms window.
-fn spawn_submit_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>) {
+fn spawn_submit_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>, shutdown_rx: watch::Receiver<bool>) {
     let s = state.clone();
     let mut rx = timeline_tx.subscribe();
+    let mut shutdown = shutdown_rx;
     tokio::spawn(async move {
         let mut pending = false;
         let mut consecutive_lags: u32 = 0;
@@ -151,25 +167,33 @@ fn spawn_submit_consumer(state: &AppState, timeline_tx: &broadcast::Sender<Timel
                     schedule_memory_tasks(&s).await;
                 }
                 pending = false;
+                if *shutdown.borrow() { return; }
             } else {
-                match rx.recv().await {
-                    Ok(te) => match &te.event {
-                        DaemonEvent::TaskCreated { .. }
-                        | DaemonEvent::TaskCompleted { .. } => {
-                            pending = true;
-                        }
-                        _ => {}
-                    },
-                    Err(RecvError::Lagged(n)) => {
-                        consecutive_lags += 1;
-                        let backoff = lagged_backoff(consecutive_lags);
-                        tracing::warn!(skipped = n, backoff_ms = backoff.as_millis() as u64, consecutive = consecutive_lags, "Submit consumer lagged");
-                        s.stats.events_lagged_submit.fetch_add(1, Ordering::Relaxed);
-                        s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
-                        tokio::time::sleep(backoff).await;
-                        dispatch_queued_submit_tasks(&s).await;
+                tokio::select! {
+                    biased;
+                    _ = shutdown.changed() => {
+                        tracing::info!("submit_consumer: shutdown");
+                        return;
                     }
-                    Err(RecvError::Closed) => break,
+                    result = rx.recv() => match result {
+                        Ok(te) => match &te.event {
+                            DaemonEvent::TaskCreated { .. }
+                            | DaemonEvent::TaskCompleted { .. } => {
+                                pending = true;
+                            }
+                            _ => {}
+                        },
+                        Err(RecvError::Lagged(n)) => {
+                            consecutive_lags += 1;
+                            let backoff = lagged_backoff(consecutive_lags);
+                            tracing::warn!(skipped = n, backoff_ms = backoff.as_millis() as u64, consecutive = consecutive_lags, "Submit consumer lagged");
+                            s.stats.events_lagged_submit.fetch_add(1, Ordering::Relaxed);
+                            s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
+                            tokio::time::sleep(backoff).await;
+                            dispatch_queued_submit_tasks(&s).await;
+                        }
+                        Err(RecvError::Closed) => return,
+                    }
                 }
             }
         }
@@ -178,9 +202,10 @@ fn spawn_submit_consumer(state: &AppState, timeline_tx: &broadcast::Sender<Timel
 
 /// Decision engine: QuestionCreated → process.
 /// Trailing-edge debounce: 100ms window.
-fn spawn_decision_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>) {
+fn spawn_decision_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>, shutdown_rx: watch::Receiver<bool>) {
     let s = state.clone();
     let mut rx = timeline_tx.subscribe();
+    let mut shutdown = shutdown_rx;
     tokio::spawn(async move {
         let mut pending = false;
         let mut consecutive_lags: u32 = 0;
@@ -202,24 +227,32 @@ fn spawn_decision_consumer(state: &AppState, timeline_tx: &broadcast::Sender<Tim
                 s.stats.events_consumed_decision.fetch_add(1, Ordering::Relaxed);
                 process_pending_master_questions(&s).await;
                 pending = false;
+                if *shutdown.borrow() { return; }
             } else {
-                match rx.recv().await {
-                    Ok(te) => match &te.event {
-                        DaemonEvent::QuestionCreated { .. } => {
-                            pending = true;
-                        }
-                        _ => {}
-                    },
-                    Err(RecvError::Lagged(n)) => {
-                        consecutive_lags += 1;
-                        let backoff = lagged_backoff(consecutive_lags);
-                        tracing::warn!(skipped = n, backoff_ms = backoff.as_millis() as u64, consecutive = consecutive_lags, "Decision consumer lagged");
-                        s.stats.events_lagged_decision.fetch_add(1, Ordering::Relaxed);
-                        s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
-                        tokio::time::sleep(backoff).await;
-                        process_pending_master_questions(&s).await;
+                tokio::select! {
+                    biased;
+                    _ = shutdown.changed() => {
+                        tracing::info!("decision_consumer: shutdown");
+                        return;
                     }
-                    Err(RecvError::Closed) => break,
+                    result = rx.recv() => match result {
+                        Ok(te) => match &te.event {
+                            DaemonEvent::QuestionCreated { .. } => {
+                                pending = true;
+                            }
+                            _ => {}
+                        },
+                        Err(RecvError::Lagged(n)) => {
+                            consecutive_lags += 1;
+                            let backoff = lagged_backoff(consecutive_lags);
+                            tracing::warn!(skipped = n, backoff_ms = backoff.as_millis() as u64, consecutive = consecutive_lags, "Decision consumer lagged");
+                            s.stats.events_lagged_decision.fetch_add(1, Ordering::Relaxed);
+                            s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
+                            tokio::time::sleep(backoff).await;
+                            process_pending_master_questions(&s).await;
+                        }
+                        Err(RecvError::Closed) => return,
+                    }
                 }
             }
         }
@@ -227,41 +260,48 @@ fn spawn_decision_consumer(state: &AppState, timeline_tx: &broadcast::Sender<Tim
 }
 
 /// Experience Harvest: NarrationSessionCompleted → harvest_session.
-/// No debounce needed — fires once per session completion, already infrequent.
-fn spawn_harvest_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>) {
+/// No debounce — fires once per session completion, already infrequent.
+fn spawn_harvest_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>, shutdown_rx: watch::Receiver<bool>) {
     let s = state.clone();
     let mut rx = timeline_tx.subscribe();
+    let mut shutdown = shutdown_rx;
     tokio::spawn(async move {
         loop {
-            match rx.recv().await {
-                Ok(te) => {
-                    if let DaemonEvent::NarrationSessionCompleted { session_id, .. } = &te.event {
-                        let mc = std::sync::Arc::clone(&s.mission);
-                        let sid = session_id.clone();
-                        // Run in blocking context since it does DB queries
-                        let _ = tokio::task::spawn_blocking(move || {
-                            experience_harvester::harvest_session(mc.db(), &sid);
-                        }).await;
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => {
+                    tracing::info!("harvest_consumer: shutdown");
+                    return;
+                }
+                result = rx.recv() => match result {
+                    Ok(te) => {
+                        if let DaemonEvent::NarrationSessionCompleted { session_id, .. } = &te.event {
+                            let mc = std::sync::Arc::clone(&s.mission);
+                            let sid = session_id.clone();
+                            // Run in blocking context since it does DB queries
+                            let _ = tokio::task::spawn_blocking(move || {
+                                experience_harvester::harvest_session(mc.db(), &sid);
+                            }).await;
+                        }
                     }
+                    Err(RecvError::Lagged(n)) => {
+                        tracing::debug!(skipped = n, "Harvest consumer lagged (non-critical)");
+                    }
+                    Err(RecvError::Closed) => return,
                 }
-                Err(RecvError::Lagged(n)) => {
-                    tracing::debug!(skipped = n, "Harvest consumer lagged (non-critical)");
-                }
-                Err(RecvError::Closed) => break,
             }
         }
     });
 }
 
-// ===== Phase 3c: Reflection consumers (LIVE) =====
-// Activated from Shadow Mode. Each consumer calls the real handler
-// function. Old polling paths (autopilot/strategy/retro) removed.
+// ===== Reflection consumers — event-driven dispatch =====
 
 /// Realtime extraction: ConversationMessageLogged → check_realtime_extraction().
-/// Phase 3c LIVE: trailing-edge debounce 3s, then dispatches real extraction.
-fn spawn_realtime_extraction_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>) {
+/// Trailing-edge debounce: 3s window, then dispatches extraction.
+fn spawn_realtime_extraction_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>, shutdown_rx: watch::Receiver<bool>) {
     let s = state.clone();
     let mut rx = timeline_tx.subscribe();
+    let mut shutdown = shutdown_rx;
     tokio::spawn(async move {
         let mut pending_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
         loop {
@@ -288,20 +328,31 @@ fn spawn_realtime_extraction_consumer(state: &AppState, timeline_tx: &broadcast:
                 let sc = s.clone();
                 tokio::spawn(async move { check_realtime_extraction(&sc).await; });
                 pending_sessions.clear();
+                if *shutdown.borrow() {
+                    tracing::info!("realtime_extraction_consumer: shutdown after flush");
+                    return;
+                }
             } else {
-                match rx.recv().await {
-                    Ok(te) => {
-                        if let DaemonEvent::ConversationMessageLogged { ref session_id, ref slot_id, .. } = te.event {
-                            if slot_id.is_some() && !s.memory_paused.load(Ordering::Relaxed) {
-                                pending_sessions.insert(session_id.clone());
+                tokio::select! {
+                    biased;
+                    _ = shutdown.changed() => {
+                        tracing::info!("realtime_extraction_consumer: shutdown");
+                        return;
+                    }
+                    result = rx.recv() => match result {
+                        Ok(te) => {
+                            if let DaemonEvent::ConversationMessageLogged { ref session_id, ref slot_id, .. } = te.event {
+                                if slot_id.is_some() && !s.memory_paused.load(Ordering::Relaxed) {
+                                    pending_sessions.insert(session_id.clone());
+                                }
                             }
                         }
+                        Err(RecvError::Lagged(n)) => {
+                            tracing::warn!(skipped = n, "Realtime extraction consumer lagged");
+                            s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
+                        }
+                        Err(RecvError::Closed) => return,
                     }
-                    Err(RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "Realtime extraction consumer lagged");
-                        s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
-                    }
-                    Err(RecvError::Closed) => break,
                 }
             }
         }
@@ -309,11 +360,11 @@ fn spawn_realtime_extraction_consumer(state: &AppState, timeline_tx: &broadcast:
 }
 
 /// Session reflection: SessionCompleted → deep analysis + retrospective.
-/// Phase 3c LIVE: trailing-edge debounce 5s, then dispatches real analysis.
-/// Replaces Strategy Worker 300s poll + Retro Worker 3600s poll.
-fn spawn_session_reflection_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>) {
+/// Trailing-edge debounce: 5s window. Replaces Strategy Worker + Retro Worker polling.
+fn spawn_session_reflection_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>, shutdown_rx: watch::Receiver<bool>) {
     let s = state.clone();
     let mut rx = timeline_tx.subscribe();
+    let mut shutdown = shutdown_rx;
     tokio::spawn(async move {
         let mut pending_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
         loop {
@@ -352,20 +403,31 @@ fn spawn_session_reflection_consumer(state: &AppState, timeline_tx: &broadcast::
                     }
                 });
                 pending_sessions.clear();
+                if *shutdown.borrow() {
+                    tracing::info!("session_reflection_consumer: shutdown after flush");
+                    return;
+                }
             } else {
-                match rx.recv().await {
-                    Ok(te) => {
-                        if let DaemonEvent::SessionCompleted { ref session_id, ref status, .. } = te.event {
-                            if matches!(status, crate::event_bus::SessionEndStatus::Success) {
-                                pending_sessions.insert(session_id.clone());
+                tokio::select! {
+                    biased;
+                    _ = shutdown.changed() => {
+                        tracing::info!("session_reflection_consumer: shutdown");
+                        return;
+                    }
+                    result = rx.recv() => match result {
+                        Ok(te) => {
+                            if let DaemonEvent::SessionCompleted { ref session_id, ref status, .. } = te.event {
+                                if matches!(status, crate::event_bus::SessionEndStatus::Success) {
+                                    pending_sessions.insert(session_id.clone());
+                                }
                             }
                         }
+                        Err(RecvError::Lagged(n)) => {
+                            tracing::warn!(skipped = n, "Session reflection consumer lagged");
+                            s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
+                        }
+                        Err(RecvError::Closed) => return,
                     }
-                    Err(RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "Session reflection consumer lagged");
-                        s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
-                    }
-                    Err(RecvError::Closed) => break,
                 }
             }
         }
@@ -373,40 +435,88 @@ fn spawn_session_reflection_consumer(state: &AppState, timeline_tx: &broadcast::
 }
 
 /// KB consolidation: DeepAnalysisCompleted → accumulate N → trigger consolidation.
-/// Phase 3c LIVE: counter accumulation, fires check_kb_consolidation at threshold.
-/// Replaces 24h timer check in autopilot.
-fn spawn_kb_consolidation_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>) {
+/// Counter accumulation, fires check_kb_consolidation at threshold.
+fn spawn_kb_consolidation_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>, shutdown_rx: watch::Receiver<bool>) {
     let s = state.clone();
     let mut rx = timeline_tx.subscribe();
+    let mut shutdown = shutdown_rx;
     let threshold: u32 = 5; // Trigger consolidation after 5 deep analyses
     tokio::spawn(async move {
         let mut count: u32 = 0;
         loop {
-            match rx.recv().await {
-                Ok(te) => {
-                    if let DaemonEvent::DeepAnalysisCompleted { ref session_id, .. } = te.event {
-                        count += 1;
-                        tracing::debug!(session_id = %session_id, count, "kb_consolidation: deep analysis completed ({}/{})", count, threshold);
-                        if count >= threshold {
-                            tracing::info!(count, "kb_consolidation: threshold reached, dispatching");
-                            let sc = s.clone();
-                            tokio::spawn(async move { check_kb_consolidation(&sc).await; });
-                            count = 0;
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => {
+                    tracing::info!("kb_consolidation_consumer: shutdown");
+                    return;
+                }
+                result = rx.recv() => match result {
+                    Ok(te) => {
+                        if let DaemonEvent::DeepAnalysisCompleted { ref session_id, .. } = te.event {
+                            count += 1;
+                            tracing::debug!(session_id = %session_id, count, "kb_consolidation: deep analysis completed ({}/{})", count, threshold);
+                            if count >= threshold {
+                                tracing::info!(count, "kb_consolidation: threshold reached, dispatching");
+                                let sc = s.clone();
+                                tokio::spawn(async move { check_kb_consolidation(&sc).await; });
+                                count = 0;
+                            }
                         }
                     }
+                    Err(RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "KB consolidation consumer lagged, defensive trigger");
+                        s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
+                        // Gemini ARB: Lagged may have lost DeepAnalysisCompleted — defensive check
+                        let sc = s.clone();
+                        tokio::spawn(async move { check_kb_consolidation(&sc).await; });
+                        count = 0;
+                    }
+                    Err(RecvError::Closed) => return,
                 }
-                Err(RecvError::Lagged(n)) => {
-                    tracing::warn!(skipped = n, "KB consolidation consumer lagged, defensive trigger");
-                    s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
-                    // Gemini ARB: Lagged may have lost DeepAnalysisCompleted events — defensive check
-                    let sc = s.clone();
-                    tokio::spawn(async move { check_kb_consolidation(&sc).await; });
-                    count = 0;
-                }
-                Err(RecvError::Closed) => break,
             }
         }
     });
+}
+
+// ===== Sweeper reconciliation =====
+
+/// Sweeper: 30min periodic + startup scan.
+/// Catches sessions missed by event consumers (Lagged, restart, debounce loss).
+fn spawn_sweeper(state: &AppState) {
+    let s = state.clone();
+    tokio::spawn(async move {
+        // Startup: immediate scan
+        reconciliation_sweep(&s).await;
+
+        let mut interval = tokio::time::interval(Duration::from_secs(1800)); // 30min
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            reconciliation_sweep(&s).await;
+        }
+    });
+}
+
+/// Full reconciliation sweep: covers all event-driven pipelines.
+async fn reconciliation_sweep(state: &AppState) {
+    tracing::info!("Sweeper: starting reconciliation sweep");
+
+    // Gemini ARB: realtime extraction (ConversationMessageLogged easily Lagged)
+    check_realtime_extraction(state).await;
+
+    // Strategy + deep analysis: pending sessions
+    strategy_worker::run_pending_analysis(state).await;
+    check_deep_analysis(state).await;
+
+    // Retro: sessions needing retrospective
+    if let Err(e) = retro_worker::process_pending(state).await {
+        tracing::warn!(error = %e, "Sweeper: retro reconciliation failed");
+    }
+
+    // KB consolidation: check if overdue
+    check_kb_consolidation(state).await;
+
+    tracing::info!("Sweeper: reconciliation sweep complete");
 }
 
 #[cfg(test)]
