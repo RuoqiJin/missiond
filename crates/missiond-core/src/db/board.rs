@@ -710,6 +710,13 @@ impl MissionDB {
 
     /// Search board tasks with filters, returning compact results
     pub fn search_board_tasks(&self, input: &crate::types::BoardSearchInput) -> DbResult<crate::types::BoardSearchResult> {
+        // Resolve short parent_id before acquiring read conn
+        let resolved_parent_id = if let Some(ref pid) = input.parent_id {
+            self.resolve_board_task_id(pid)?
+        } else {
+            None
+        };
+
         let conn = self.read_conn();
         let limit = input.limit.unwrap_or(50);
 
@@ -722,9 +729,20 @@ impl MissionDB {
         }
 
         if let Some(ref q) = input.query {
-            let param_idx = params.len() + 1;
-            conditions.push(format!("(title LIKE ?{} OR description LIKE ?{})", param_idx, param_idx));
-            params.push(Box::new(format!("%{}%", q)));
+            // Split query into words, each word matches independently (AND logic)
+            // This enables multi-keyword search: "Phase Darwin" matches title containing both
+            let words: Vec<&str> = q.split_whitespace().filter(|w| !w.is_empty()).collect();
+            if !words.is_empty() {
+                let mut word_conditions = Vec::new();
+                for word in &words {
+                    let param_idx = params.len() + 1;
+                    word_conditions.push(format!(
+                        "(title LIKE ?{p} OR description LIKE ?{p})", p = param_idx
+                    ));
+                    params.push(Box::new(format!("%{}%", word)));
+                }
+                conditions.push(format!("({})", word_conditions.join(" AND ")));
+            }
         }
         if let Some(ref project) = input.project {
             let param_idx = params.len() + 1;
@@ -741,7 +759,12 @@ impl MissionDB {
             conditions.push(format!("status = ?{}", param_idx));
             params.push(Box::new(status.clone()));
         }
-        if let Some(ref parent_id) = input.parent_id {
+        if let Some(ref full_pid) = resolved_parent_id {
+            let param_idx = params.len() + 1;
+            conditions.push(format!("parent_id = ?{}", param_idx));
+            params.push(Box::new(full_pid.clone()));
+        } else if let Some(ref parent_id) = input.parent_id {
+            // Fallback: resolve failed (no match), use original value
             let param_idx = params.len() + 1;
             conditions.push(format!("parent_id = ?{}", param_idx));
             params.push(Box::new(parent_id.clone()));
