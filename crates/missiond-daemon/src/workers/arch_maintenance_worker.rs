@@ -378,11 +378,19 @@ async fn process_commit(state: &AppState, repo: &str, hash: &str) -> Result<bool
         "max_tokens": 16384,
     });
 
+    // Use extended timeout (600s) — YAML manifests are ~8KB, Gemini needs time to
+    // generate the full output. Default 120s idle timeout causes frequent timeouts.
     let result = REQUEST_CALLER
         .scope("arch_maintenance".to_string(), async {
             state
                 .gemini
-                .send(&state.http_client, &url, &jwt, &body)
+                .send_with_timeout(
+                    &state.http_client,
+                    &url,
+                    &jwt,
+                    &body,
+                    Some(Duration::from_secs(600)),
+                )
                 .await
         })
         .await?;
