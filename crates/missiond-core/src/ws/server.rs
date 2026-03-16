@@ -69,6 +69,8 @@ pub struct WSServerOptions {
     pub db: Option<Arc<crate::db::MissionDB>>,
     /// Context enricher for Jarvis chat completions (late-bound by daemon)
     pub context_enricher: ContextEnricherSlot,
+    /// Number of native MCP tools (injected into Jarvis system prompt)
+    pub tool_count: usize,
 }
 
 /// PTY WebSocket Server
@@ -83,18 +85,25 @@ pub struct PTYWebSocketServer {
     frontend_events_tx: Option<broadcast::Sender<String>>,
     db: Option<Arc<crate::db::MissionDB>>,
     context_enricher: ContextEnricherSlot,
+    tool_count: usize,
 }
 
 /// Jarvis system prompt — injected before context enrichment so Claude Code
 /// knows it's running as Jarvis behind a Web Chat UI, not as a local terminal.
-const JARVIS_SYSTEM_PROMPT: &str = "<system_info>\n\
+/// Tool count is dynamically injected at runtime via `jarvis_system_prompt()`.
+fn jarvis_system_prompt(tool_count: usize) -> String {
+    format!(
+        "<system_info>\n\
 [Identity] 你是 Jarvis，由 MissionD 多实例编排系统驱动的 AI 助手。\n\
 [Environment] 你通过 MissionD 的 Web Chat UI 与用户交互，而非本地终端。用户在浏览器中与你对话。\n\
 [Persistence] 用户的每条消息和你的回复已由系统自动持久化到数据库。不要告诉用户「对话是独立的」或「需要写入记忆文件才能保存」。\n\
-[Capabilities] 你拥有完整的 MCP 工具集（MissionD 47 个 + xjp-mcp 平台工具）。当你不确定该用哪个工具时，务必先阅读你的操作手册：~/.claude/skills/jarvis-manual/SKILL.md\n\
+[Capabilities] 你拥有完整的 MCP 工具集（MissionD {} 个 + xjp-mcp 平台工具）。当你不确定该用哪个工具时，务必先阅读你的操作手册：~/.claude/skills/jarvis-manual/SKILL.md\n\
 [Style] 像一个智能 Web 助手一样自然对话，不要向用户暴露底层终端或 PTY 细节。不要使用 AskUserQuestion 工具向用户提问——直接在回复文本中提问即可。\n\
 [CRITICAL] 禁止运行 pgrep、ps、kill 等进程诊断命令。MCP 工具由系统管理，你不需要检查进程状态。直接调用 MCP 工具即可，不要验证服务是否运行。\n\
-</system_info>";
+</system_info>",
+        tool_count
+    )
+}
 
 // ── AIOps Webhook Parsers ──
 
@@ -335,6 +344,7 @@ impl PTYWebSocketServer {
             frontend_events_tx: options.frontend_events_tx,
             db: options.db,
             context_enricher: Arc::clone(&options.context_enricher),
+            tool_count: options.tool_count,
         }
     }
 
@@ -368,6 +378,7 @@ impl PTYWebSocketServer {
         let frontend_events_tx = self.frontend_events_tx.clone();
         let db = self.db.clone();
         let context_enricher = self.context_enricher.clone();
+        let tool_count = self.tool_count;
 
         tokio::spawn(async move {
             let mut shutdown_rx = shutdown_tx.subscribe();
@@ -384,8 +395,9 @@ impl PTYWebSocketServer {
                                 let frontend_events_tx = frontend_events_tx.clone();
                                 let db = db.clone();
                                 let context_enricher = context_enricher.clone();
+                                let tool_count = tool_count;
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, frontend_events_tx, db, context_enricher).await {
+                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, frontend_events_tx, db, context_enricher, tool_count).await {
                                         error!(?e, ?addr, "WebSocket connection error");
                                     }
                                 });
@@ -703,6 +715,7 @@ impl PTYWebSocketServer {
         context_enricher: ContextEnricherSlot,
         db: Option<Arc<crate::db::MissionDB>>,
         cc_tasks_watcher: Option<Arc<Mutex<CCTasksWatcher>>>,
+        tool_count: usize,
     ) -> anyhow::Result<()> {
         // Disable Nagle — SSE needs every chunk sent immediately
         stream.set_nodelay(true)?;
@@ -974,15 +987,16 @@ impl PTYWebSocketServer {
                 drop(enricher_guard); // release lock before async call
                 let enrich_result = enricher(user_message.clone()).await;
                 let intent = enrich_result.intent.clone();
+                let sys_prompt = jarvis_system_prompt(tool_count);
                 let msg = if enrich_result.assembled.is_empty() {
-                    format!("{}\n\n{}", JARVIS_SYSTEM_PROMPT, user_message)
+                    format!("{}\n\n{}", sys_prompt, user_message)
                 } else {
                     debug!(slot_id, ctx_len = enrich_result.assembled.len(), "Jarvis: context enrichment injected");
-                    format!("{}\n\n{}\n\n{}", JARVIS_SYSTEM_PROMPT, enrich_result.assembled, user_message)
+                    format!("{}\n\n{}\n\n{}", sys_prompt, enrich_result.assembled, user_message)
                 };
                 (msg, intent)
             } else {
-                (format!("{}\n\n{}", JARVIS_SYSTEM_PROMPT, user_message), None)
+                (format!("{}\n\n{}", jarvis_system_prompt(tool_count), user_message), None)
             }
         };
 
@@ -1505,6 +1519,14 @@ impl PTYWebSocketServer {
                         }
                         Ok(SessionEvent::ToolOutput(tool_output)) => {
                             use crate::semantic::ToolStatus;
+                            // TODO: Migrate to JSONL tool activity layer (Option D) — see Board 151a1373
+                            // Filter out meta-orchestration tools that flood the SSE stream.
+                            // These generate dozens of repeated events when Claude Code uses Agent subprocesses.
+                            const META_TOOLS: &[&str] = &["Agent", "Skill", "Explore"];
+                            if META_TOOLS.iter().any(|t| tool_output.tool_name.eq_ignore_ascii_case(t)) {
+                                // silently skip — meta-tool activity not useful in chat UI
+                                continue;
+                            }
                             match tool_output.status {
                                 ToolStatus::Running => {
                                     tool_seq += 1;
@@ -1714,6 +1736,7 @@ impl PTYWebSocketServer {
         frontend_events_tx: Option<broadcast::Sender<String>>,
         db: Option<Arc<crate::db::MissionDB>>,
         context_enricher: ContextEnricherSlot,
+        tool_count: usize,
     ) -> anyhow::Result<()> {
         // Peek at first bytes to detect non-WebSocket HTTP requests
         let mut peek_buf = [0u8; 512];
@@ -1731,7 +1754,7 @@ impl PTYWebSocketServer {
             // Chat completions SSE endpoint
             if request_line.starts_with("POST /v1/chat/completions") {
                 return match pty_manager {
-                    Some(pm) => Self::handle_chat_completions(stream, addr, pm, jarvis_trace, context_enricher, db, cc_tasks_watcher).await,
+                    Some(pm) => Self::handle_chat_completions(stream, addr, pm, jarvis_trace, context_enricher, db, cc_tasks_watcher, tool_count).await,
                     None => {
                         let mut s = stream;
                         let err = serde_json::json!({"error": {"message": "PTY manager not available"}});

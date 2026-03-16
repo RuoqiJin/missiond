@@ -203,6 +203,8 @@ pub(crate) struct AppState {
     /// Slots pending graceful restart due to low context (detected "until auto-compact").
     /// Restart is deferred until the slot becomes Idle to avoid interrupting tasks.
     pub(crate) pending_compact_restart: Arc<std::sync::Mutex<HashSet<String>>>,
+    /// Per-file async lock for sys_config patch operations (prevents TOCTOU races).
+    pub(crate) config_file_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 /// Event-driven embedding tasks — the Worker sleeps until triggered.

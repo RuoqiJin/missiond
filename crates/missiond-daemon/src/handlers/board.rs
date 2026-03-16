@@ -153,7 +153,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json_pretty(&summary))
                 }
-                _ => Ok(ToolResult::error(format!("Unknown board_query action: {action}. Use: list, get, search, summary"))),
+                "clear_done" => {
+                    let deleted = state.mission.db()
+                        .clear_done_board_tasks()
+                        .map_err(|e| anyhow!("DB error: {}", e))?;
+                    Ok(ToolResult::text(format!("Cleared {} completed tasks", deleted)))
+                }
+                _ => Ok(ToolResult::error(format!("Unknown board_query action: {action}. Use: list, get, search, summary, clear_done"))),
             }
         }
         "mission_board_create" => {

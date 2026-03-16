@@ -6,15 +6,15 @@ pub fn definitions() -> Vec<ToolDefinition> {
         // ===== Consolidated Query Tool =====
         ToolDefinition::new(
             "mission_board_query",
-            "任务板统一查询。通过 action 区分操作：list(树形列表), get(详情), search(搜索), summary(摘要统计)。\
+            "任务板统一查询。通过 action 区分操作：list(树形列表), get(详情), search(搜索), summary(摘要统计), clear_done(批量清除已完成)。\
              不传 action 时默认 list。search 返回精简格式，优先使用。",
             json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["list", "get", "search", "summary"],
-                        "description": "查询类型: list(树形列表), get(详情+notes), search(精简搜索), summary(统计)。默认 list"
+                        "enum": ["list", "get", "search", "summary", "clear_done"],
+                        "description": "查询类型: list(树形列表), get(详情+notes), search(精简搜索), summary(统计), clear_done(批量删除已完成任务)。默认 list"
                     },
                     "status": {
                         "type": "string",

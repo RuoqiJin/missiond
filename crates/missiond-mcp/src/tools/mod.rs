@@ -112,6 +112,7 @@ mod power;
 mod timeline;
 mod minimax;
 mod worker;
+mod system;
 
 /// Generate all tool definitions
 pub fn all_tools() -> Vec<ToolDefinition> {
@@ -135,6 +136,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
     tools.extend(timeline::definitions());
     tools.extend(minimax::definitions());
     tools.extend(worker::definitions());
+    tools.extend(system::definitions());
     tools
 }
 

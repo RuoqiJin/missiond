@@ -112,6 +112,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let idle_timeout = params.get("idle_timeout")
                 .and_then(|v| v.as_u64())
                 .map(|secs| Duration::from_secs(secs));
+            let channel = params.get("channel")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             let task_id = params.get("task_id").and_then(|v| v.as_str()).map(|s| s.to_string());
 
             // If task_id provided, load conversation history and prepend
@@ -365,6 +368,11 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 let (base_url, jwt) = resolve_llm_credentials().await?;
 
                 let url = format!("{}/v1/chat/completions", base_url);
+                // HTTP mode: channel parameter is not supported
+                if channel.is_some() && !state.gemini.is_cli_mode() {
+                    return Err(anyhow!("'channel' 参数仅在 CLI 模式下生效，当前为 HTTP Router 模式"));
+                }
+
                 let mut body = serde_json::json!({
                     "model": model,
                     "messages": messages,
@@ -372,6 +380,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 });
                 if search_enabled {
                     body["tools"] = serde_json::json!([{"type": "google_search"}]);
+                }
+                // Inject channel into body for GeminiClient CLI branch to extract
+                if let Some(ref ch) = channel {
+                    body["_channel"] = serde_json::json!(ch);
                 }
 
                 let total_chars: usize = messages.iter()
