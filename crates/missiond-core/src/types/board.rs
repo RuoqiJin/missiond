@@ -1,5 +1,47 @@
 use serde::{Deserialize, Serialize};
 
+// ============ Board Task ID (NewType — Gemini ARB approved) ============
+
+/// A verified, full-length UUID for board tasks.
+/// Only constructible via `TaskId::from_trusted()` (DB reads) or `MissionDB::resolve_task_id()` (user input).
+/// Prevents short IDs from leaking into the persistence layer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TaskId(String);
+
+impl TaskId {
+    /// Construct from a trusted source (DB row, internally generated UUID).
+    /// Caller guarantees this is a valid, full-length UUID.
+    pub fn from_trusted(id: String) -> Self { Self(id) }
+
+    /// Generate a new random TaskId (UUID v4).
+    pub fn new() -> Self { Self(uuid::Uuid::new_v4().to_string()) }
+
+    pub fn as_str(&self) -> &str { &self.0 }
+}
+
+impl std::fmt::Display for TaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl AsRef<str> for TaskId {
+    fn as_ref(&self) -> &str { &self.0 }
+}
+
+impl rusqlite::ToSql for TaskId {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        self.0.to_sql()
+    }
+}
+
+impl rusqlite::types::FromSql for TaskId {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        String::column_result(value).map(TaskId)
+    }
+}
+
 // ============ Board Task (Personal Task Board) ============
 
 /// Board task status
@@ -158,7 +200,7 @@ pub struct FlowContext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BoardTask {
-    pub id: String,
+    pub id: TaskId,
     pub title: String,
     pub description: String,
     pub status: BoardTaskStatus,
@@ -171,7 +213,7 @@ pub struct BoardTask {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub due_date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_id: Option<String>,
+    pub parent_id: Option<TaskId>,
     /// Assigned PTY slot ID (e.g., "slot-coder-1") for autopilot execution
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
@@ -213,7 +255,7 @@ pub struct BoardTask {
     pub flow_template: Option<String>,
     /// DAG dependency: IDs of tasks that must be done before this task can execute
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub depends_on: Vec<String>,
+    pub depends_on: Vec<TaskId>,
     /// Lease expiration for running tasks (heartbeat mechanism).
     /// Tasks running past this time are considered stale and recoverable.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -243,12 +285,12 @@ fn default_max_retries() -> i64 { 2 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactBoardTask {
-    pub id: String,
+    pub id: TaskId,
     pub title: String,
     pub status: BoardTaskStatus,
     pub priority: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_id: Option<String>,
+    pub parent_id: Option<TaskId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -336,7 +378,7 @@ pub struct CreateBoardTaskInput {
     /// Engineering flow: template name (e.g. "engineering"). Sets initial phase to "investigate".
     #[serde(default, rename = "flowTemplate")]
     pub flow_template: Option<String>,
-    /// DAG dependency: IDs of tasks that must complete before this task
+    /// DAG dependency: IDs of tasks that must complete before this task (raw, resolved on write)
     #[serde(default, rename = "dependsOn")]
     pub depends_on: Option<Vec<String>>,
     /// Alert fingerprint for AIOps deduplication (set internally, not from MCP)
@@ -397,7 +439,7 @@ pub struct UpdateBoardTaskInput {
     /// Engineering flow: template name
     #[serde(default)]
     pub flow_template: Option<String>,
-    /// DAG dependency: IDs of tasks that must complete before this task
+    /// DAG dependency: IDs of tasks that must complete before this task (raw, resolved on write)
     #[serde(default, rename = "dependsOn")]
     pub depends_on: Option<Vec<String>>,
 }

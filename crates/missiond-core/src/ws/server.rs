@@ -1047,7 +1047,7 @@ impl PTYWebSocketServer {
                 match db.create_board_task(&task_input) {
                     Ok(task) => {
                         let task_id = task.id.clone();
-                        let task_short_id = &task_id[..8.min(task_id.len())];
+                        let task_short_id = &task_id.as_str()[..8.min(task_id.as_str().len())];
                         info!(?addr, slot_id, task_id = %task_id, intent = ?enrich_intent, "Jarvis async → Board Task created, SSE bridge active");
 
                         // Save user message only (autopilot saves assistant response on completion)
@@ -1098,7 +1098,7 @@ impl PTYWebSocketServer {
                             tokio::time::sleep(poll_interval).await;
 
                             // Check task status in DB
-                            if let Ok(Some(t)) = db.get_board_task(&task_id) {
+                            if let Ok(Some(t)) = db.get_board_task(task_id.as_str()) {
                                 match t.status {
                                     crate::types::BoardTaskStatus::Running => {
                                         if let Some(ref executor) = t.claim_executor_id {
@@ -1312,7 +1312,7 @@ impl PTYWebSocketServer {
                                                 let _ = stream.write_all(b":\n\n").await;
                                                 let _ = stream.flush().await;
                                                 last_event_time = std::time::Instant::now();
-                                                if let Ok(Some(t)) = db.get_board_task(&task_id) {
+                                                if let Ok(Some(t)) = db.get_board_task(task_id.as_str()) {
                                                     match t.status {
                                                         crate::types::BoardTaskStatus::Done
                                                         | crate::types::BoardTaskStatus::Failed => {

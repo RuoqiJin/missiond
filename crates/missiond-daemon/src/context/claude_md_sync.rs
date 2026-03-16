@@ -72,7 +72,7 @@ pub(crate) fn sync_claude_md(state: &AppState) {
                 .unwrap_or_default();
             managed.push_str(&format!(
                 "- [{}] {} (running{})\n",
-                &t.id[..8.min(t.id.len())],
+                &t.id.as_str()[..8.min(t.id.as_str().len())],
                 t.title,
                 age,
             ));

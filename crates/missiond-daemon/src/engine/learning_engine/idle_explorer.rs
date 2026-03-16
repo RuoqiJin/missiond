@@ -386,7 +386,7 @@ async fn create_explore_task(
         Ok(task) => {
             state.event_bus.publish(
                 crate::event_bus::DaemonEvent::BoardTaskStatusChanged {
-                    task_id: task.id.clone(),
+                    task_id: task.id.to_string(),
                     old_status: String::new(),
                     new_status: "open".to_string(),
                 },

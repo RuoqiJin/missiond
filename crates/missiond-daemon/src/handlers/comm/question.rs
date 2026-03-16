@@ -109,7 +109,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let inferred_task_id = if args.task_id.is_none() {
                 match state.mission.db().list_running_autopilot_tasks() {
                     Ok(running) if running.len() == 1 => {
-                        let tid = running[0].id.clone();
+                        let tid = running[0].id.to_string();
                         let sid = running[0].claim_executor_id.clone();
                         info!(inferred_task_id = %tid, "question_create: auto-injected task_id from running autopilot task");
                         Some((Some(tid), sid))

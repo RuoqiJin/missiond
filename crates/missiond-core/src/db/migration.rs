@@ -1419,6 +1419,47 @@ impl MissionDB {
             }
         }
 
+        // Phase 6: TaskId integrity — backfill short parent_ids → full UUIDs.
+        // Short IDs (< 36 chars) stored as parent_id are resolved to the full UUID
+        // of the matching board_task. Orphans (no match) are NULLed out.
+        {
+            let mut stmt = conn.prepare(
+                "SELECT id, parent_id FROM board_tasks WHERE parent_id IS NOT NULL AND LENGTH(parent_id) < 36"
+            )?;
+            let short_parents: Vec<(String, String)> = stmt
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !short_parents.is_empty() {
+                let mut fixed = 0usize;
+                let mut orphaned = 0usize;
+                for (task_id, short_pid) in &short_parents {
+                    // Prefix match: find unique full UUID matching the short ID
+                    let prefix = format!("{}%", short_pid);
+                    let mut match_stmt = conn.prepare("SELECT id FROM board_tasks WHERE id LIKE ?1")?;
+                    let matches: Vec<String> = match_stmt
+                        .query_map(rusqlite::params![prefix], |row| row.get(0))?
+                        .filter_map(|r| r.ok())
+                        .collect();
+                    if matches.len() == 1 {
+                        conn.execute(
+                            "UPDATE board_tasks SET parent_id = ?1 WHERE id = ?2",
+                            rusqlite::params![matches[0], task_id],
+                        )?;
+                        fixed += 1;
+                    } else {
+                        // No unique match → orphan, NULL out to prevent FK violation
+                        conn.execute(
+                            "UPDATE board_tasks SET parent_id = NULL WHERE id = ?1",
+                            rusqlite::params![task_id],
+                        )?;
+                        orphaned += 1;
+                    }
+                }
+                tracing::info!(fixed, orphaned, "Migration: resolved short parent_ids in board_tasks");
+            }
+        }
+
         Ok(())
     }
 }
