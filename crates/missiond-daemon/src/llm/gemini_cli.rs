@@ -136,10 +136,20 @@ impl GeminiCli {
         cmd.args(["-p", prompt, "-m", model, "-o", "stream-json", "--yolo"])
             .stdin(std::process::Stdio::null())  // Prevent interactive prompts from hanging
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);  // Cancel safety: kill orphan process when future is dropped
 
         if let Some(ref key) = auth.api_key {
             cmd.env("GEMINI_API_KEY", key);
+        }
+
+        // Per-subprocess auth override via GEMINI_CLI_HOME:
+        // Gemini CLI reads settings from $GEMINI_CLI_HOME/.gemini/settings.json.
+        // When google mode is requested but global settings.json says "gemini-api-key",
+        // we point CLI to a shadow home dir with selectedType="oauth-personal".
+        if auth.mode == "google" {
+            let google_home = ensure_google_auth_home()?;
+            cmd.env("GEMINI_CLI_HOME", google_home);
         }
 
         cmd.spawn()
@@ -503,6 +513,60 @@ fn sync_settings_json(selected_type: &str) {
     if let Ok(json) = serde_json::to_string_pretty(&settings) {
         let _ = std::fs::write(&path, json);
     }
+}
+
+/// Create/maintain a shadow home directory for Google OAuth Gemini CLI calls.
+///
+/// Gemini CLI resolves config via `GEMINI_CLI_HOME` env var → `$HOME/.gemini/`.
+/// When our global settings.json has `selectedType: "gemini-api-key"`, spawning
+/// with `_channel: "google"` fails (exit 41) because CLI tries API key auth.
+///
+/// Solution: maintain `~/.xjp-mission/gemini-google-home/.gemini/` with:
+/// - `settings.json` with `selectedType: "oauth-personal"` (LOGIN_WITH_GOOGLE)
+/// - Symlinks to real OAuth credential files from `~/.gemini/`
+fn ensure_google_auth_home() -> Result<String> {
+    let mission_home = missiond_core::default_mission_home();
+    let google_home = mission_home.join("gemini-google-home");
+    let shadow_gemini_dir = google_home.join(".gemini");
+
+    std::fs::create_dir_all(&shadow_gemini_dir)
+        .map_err(|e| anyhow!("Failed to create google auth home: {}", e))?;
+
+    let real_gemini_dir = dirs::home_dir()
+        .ok_or_else(|| anyhow!("Cannot resolve home directory"))?
+        .join(".gemini");
+
+    // Write settings.json with google OAuth auth type
+    let settings_path = shadow_gemini_dir.join("settings.json");
+    let real_settings = std::fs::read_to_string(real_gemini_dir.join("settings.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+
+    let mut settings = real_settings.unwrap_or_else(|| serde_json::json!({}));
+    // Ensure nested path exists, then set auth to google OAuth (LOGIN_WITH_GOOGLE)
+    if !settings.get("security").is_some() {
+        settings["security"] = serde_json::json!({});
+    }
+    if !settings["security"].get("auth").is_some() {
+        settings["security"]["auth"] = serde_json::json!({});
+    }
+    settings["security"]["auth"]["selectedType"] = serde_json::json!("oauth-personal");
+
+    std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)
+        .map_err(|e| anyhow!("Failed to write shadow settings.json: {}", e))?;
+
+    // Symlink OAuth credential files (idempotent)
+    for file in &["oauth_creds.json", "google_accounts.json", "google_account_id"] {
+        let src = real_gemini_dir.join(file);
+        let dst = shadow_gemini_dir.join(file);
+        if src.exists() && !dst.exists() {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&src, &dst)
+                .map_err(|e| anyhow!("Failed to symlink {}: {}", file, e))?;
+        }
+    }
+
+    Ok(google_home.to_string_lossy().to_string())
 }
 
 /// Read stderr from a child process (best effort).
