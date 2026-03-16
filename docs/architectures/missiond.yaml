@@ -197,6 +197,10 @@ anti_patterns:
     why: "状态（如 Idle→Thinking）必须由事件驱动（EventBus），强行修改会导致 PTY 输出解析与实际状态脱节"
   - do: "对超长工具输出进行盲目的位置截断（如直接取前后两千字）"
     why: "会丢失中间的错误堆栈信号，必须使用语义感知截断保留带错误信号的行及其上下文"
+  - do: "手动调用 slot_dispatch.release() 来释放插槽"
+    why: "必须使用 SlotAcquireGuard 实现 RAII 自动释放，防止错误提早返回或 panic 导致插槽锁泄露和死锁"
+  - do: "将未知的 task intent 静默降级为默认角色（如 coder）"
+    why: "必须严格使用白名单校验并 fail-fast，否则会导致安全策略和资源隔离（如 ops 角色限制）被绕过"
 
 # ── 错误处理策略（每层的 Error 职责）──
 error_handling:
@@ -269,3 +273,18 @@ design_rationale:
   darwinian_knowledge_gc:
     decision: "知识库采用基于效用分数(utility_score)的达尔文回收机制，弃用硬编码过期时间"
     why: "确保经常被访问的高价值记忆（即使是很久前记录的）能永久存活，而迅速淘汰从未被命中的低质量/噪音记忆，提升检索信噪比并控制数据库体积"
+  raii_slot_locking:
+    decision: "使用 RAII 机制 (SlotAcquireGuard) 管理 Slot 并发分发锁"
+    why: "消除并发分发任务时的 TOCTOU (Time-of-check to time-of-use) 竞争，并确保任何异常下锁均被释放"
+  strict_intent_whitelist:
+    decision: "对 Task Delegate 工具的 Intent 实施强制白名单拦截 (fail-fast)"
+    why: "修补意图逃逸漏洞，防止静默降级导致安全策略或自动扩容配额被越权利用"
+  defense_in_depth_truncation:
+    decision: "在业务层和 DB 存储层实施双层上下文长度截断防御"
+    why: "业务层限制 KB/Skill 注入长度防 LLM Context 爆炸，DB 层 50KB 截断兜底防止异常输入撑爆数据库"
+  fatal_slot_namespace_guard:
+    decision: "系统启动时强制校验静态 Slot ID 命名空间，若占用 slot-dyn- 前缀则致命退出"
+    why: "防止静态配置与系统自动分配的动态插槽 ID 产生冲突，破坏孤儿进程回收与生命周期管理"
+  startup_reconciliation:
+    decision: "Daemon 启动时自动恢复并唤醒 stale running 的 board_tasks"
+    why: "修复进程崩溃导致的内存调度信号丢失问题，避免长时间的 Watchdog 兜底延迟"
