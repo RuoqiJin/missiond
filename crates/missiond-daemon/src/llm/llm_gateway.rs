@@ -68,8 +68,8 @@ pub(crate) async fn call_gemini_for_flow(state: &AppState, task_id: &str, prompt
 }
 
 /// Stateless Sonnet call via Router API (cpapi-claude-sonnet endpoint).
-/// No conversation history — fire-and-forget for background tasks like topic extraction.
-/// Shares GeminiClient's HTTP client + governor rate limiter.
+/// Direct HTTP POST — bypasses GeminiClient to avoid CLI mode hijacking.
+/// Retries on 429 with exponential backoff (max 3 attempts).
 pub(crate) async fn call_sonnet_stateless(
     state: &AppState,
     system: &str,
@@ -89,24 +89,51 @@ pub(crate) async fn call_sonnet_stateless(
         "max_tokens": max_tokens,
     });
 
-    info!(caller, model, user_len = user_msg.len(), "LLM Gateway: calling Sonnet");
+    info!(caller, model, user_len = user_msg.len(), "LLM Gateway: calling Sonnet (direct HTTP)");
 
-    let result = REQUEST_CALLER.scope(caller.to_string(), async {
-        state.gemini.send(&state.http_client, &url, &jwt, &body).await
-    }).await?;
+    let mut last_err = None;
+    for attempt in 0..3u32 {
+        let resp = state.http_client
+            .post(&url)
+            .bearer_auth(&jwt)
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(60))
+            .send()
+            .await;
 
-    let content = result
-        .pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    if content.is_empty() {
-        return Err(anyhow!("Sonnet returned empty response"));
+        match resp {
+            Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                let wait = std::time::Duration::from_secs(2u64.pow(attempt) * 5);
+                warn!(caller, attempt, "Sonnet 429, backing off {:?}", wait);
+                tokio::time::sleep(wait).await;
+                last_err = Some(anyhow!("429 Too Many Requests"));
+                continue;
+            }
+            Ok(r) if r.status().is_success() => {
+                let result: serde_json::Value = r.json().await
+                    .map_err(|e| anyhow!("Sonnet response parse error: {}", e))?;
+                let content = result
+                    .pointer("/choices/0/message/content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if content.is_empty() {
+                    return Err(anyhow!("Sonnet returned empty content"));
+                }
+                info!(caller, response_len = content.len(), "LLM Gateway: Sonnet OK");
+                return Ok(content);
+            }
+            Ok(r) => {
+                let status = r.status();
+                let body_text = r.text().await.unwrap_or_default();
+                return Err(anyhow!("Sonnet HTTP {}: {}", status, &body_text[..body_text.len().min(200)]));
+            }
+            Err(e) => {
+                return Err(anyhow!("Sonnet request failed: {}", e));
+            }
+        }
     }
-
-    info!(caller, response_len = content.len(), "LLM Gateway: Sonnet OK");
-    Ok(content)
+    Err(last_err.unwrap_or_else(|| anyhow!("Sonnet call exhausted retries")))
 }
 
 /// Dynamic LLM model selector based on task characteristics and slot role.
