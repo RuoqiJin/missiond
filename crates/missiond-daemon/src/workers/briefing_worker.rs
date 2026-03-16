@@ -231,10 +231,7 @@ impl super::BackgroundWorker for BriefingWorker {
         tokio::time::sleep(Duration::from_secs(30)).await;
 
         loop {
-            // Phase 3c: pure event-driven — only wake on notify
-            notify.notified().await;
-            debug!("Briefing worker: woken by event");
-
+            // Gemini ARB: check DB first — historical backlog may exist after restart
             let pending = match state.mission.db().find_timeline_needing_briefing(MIN_CONTENT_CHARS, BATCH_SIZE) {
                 Ok(p) => p,
                 Err(e) => {
@@ -245,6 +242,8 @@ impl super::BackgroundWorker for BriefingWorker {
             };
 
             if pending.is_empty() {
+                // No backlog — wait for next event notification
+                notify.notified().await;
                 continue;
             }
 

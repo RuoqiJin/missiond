@@ -21,7 +21,7 @@ use crate::state::{AppState, MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 use crate::memory_scheduler::{schedule_memory_tasks, dispatch_queued_submit_tasks};
 use crate::decision_engine::process_pending_master_questions;
 use crate::extraction::{check_realtime_extraction, check_deep_analysis, check_kb_consolidation};
-use crate::workers::retro_worker;
+use crate::workers::{retro_worker, strategy_worker};
 
 /// Exponential backoff for Lagged recovery: 100ms → 200ms → … → 2000ms cap.
 /// Adds ±25% jitter to avoid thundering herd.
@@ -283,9 +283,10 @@ fn spawn_realtime_extraction_consumer(state: &AppState, timeline_tx: &broadcast:
                         Err(_) => break,
                     }
                 }
-                // Phase 3c: real dispatch (replaces autopilot 60s polling)
+                // Gemini ARB: tokio::spawn to avoid blocking broadcast receiver
                 tracing::debug!(sessions = pending_sessions.len(), "realtime_extraction: debounce fired");
-                check_realtime_extraction(&s).await;
+                let sc = s.clone();
+                tokio::spawn(async move { check_realtime_extraction(&sc).await; });
                 pending_sessions.clear();
             } else {
                 match rx.recv().await {
@@ -334,13 +335,22 @@ fn spawn_session_reflection_consumer(state: &AppState, timeline_tx: &broadcast::
                         Err(_) => break,
                     }
                 }
-                // Phase 3c: real dispatch (replaces strategy 300s + retro 3600s polls)
-                tracing::info!(sessions = pending_sessions.len(), "session_reflection: debounce fired, dispatching analysis");
-                check_deep_analysis(&s).await;
-                // Retro analysis (L1 quantitative + L2 MiniMax triage)
-                if let Err(e) = retro_worker::process_pending(&s).await {
-                    tracing::warn!(error = %e, "session_reflection: retro analysis failed");
+                // Gemini ARB: check pause guards + tokio::spawn to avoid blocking receiver
+                if s.memory_paused.load(Ordering::Relaxed) || s.global_paused.load(Ordering::Relaxed) {
+                    tracing::debug!("session_reflection: paused, skipping dispatch");
+                    pending_sessions.clear();
+                    continue;
                 }
+                tracing::info!(sessions = pending_sessions.len(), "session_reflection: debounce fired, dispatching analysis");
+                let sc = s.clone();
+                tokio::spawn(async move {
+                    // Gemini ARB: unified trigger — strategy + deep analysis + retro
+                    strategy_worker::run_pending_analysis(&sc).await;
+                    check_deep_analysis(&sc).await;
+                    if let Err(e) = retro_worker::process_pending(&sc).await {
+                        tracing::warn!(error = %e, "session_reflection: retro analysis failed");
+                    }
+                });
                 pending_sessions.clear();
             } else {
                 match rx.recv().await {
@@ -379,14 +389,19 @@ fn spawn_kb_consolidation_consumer(state: &AppState, timeline_tx: &broadcast::Se
                         tracing::debug!(session_id = %session_id, count, "kb_consolidation: deep analysis completed ({}/{})", count, threshold);
                         if count >= threshold {
                             tracing::info!(count, "kb_consolidation: threshold reached, dispatching");
-                            check_kb_consolidation(&s).await;
+                            let sc = s.clone();
+                            tokio::spawn(async move { check_kb_consolidation(&sc).await; });
                             count = 0;
                         }
                     }
                 }
                 Err(RecvError::Lagged(n)) => {
-                    tracing::warn!(skipped = n, "KB consolidation consumer lagged");
+                    tracing::warn!(skipped = n, "KB consolidation consumer lagged, defensive trigger");
                     s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
+                    // Gemini ARB: Lagged may have lost DeepAnalysisCompleted events — defensive check
+                    let sc = s.clone();
+                    tokio::spawn(async move { check_kb_consolidation(&sc).await; });
+                    count = 0;
                 }
                 Err(RecvError::Closed) => break,
             }

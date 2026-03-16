@@ -48,30 +48,12 @@ pub(crate) struct StrategyWorker {
 impl BackgroundWorker for StrategyWorker {
     fn name(&self) -> &'static str { "strategy_analyst" }
 
-    async fn run(self, state: Arc<AppState>, mut ctx: WorkerContext) {
-        let mut rx = self.timeline_rx;
-
-        info!("Strategy analyst worker started (delay {}s)", STARTUP_DELAY_SECS);
-        tokio::time::sleep(Duration::from_secs(STARTUP_DELAY_SECS)).await;
-
-        // Phase 3c: event-driven only (300s poll removed — session_reflection_consumer handles scheduling)
-        loop {
-            ctx.wait_if_paused().await;
-
-            match rx.recv().await {
-                Ok(te) => match &te.event {
-                    DaemonEvent::SlotBecameIdle { .. } => {
-                        // Slot finished work — check for unanalyzed sessions
-                        run_pending_analysis(&state, &mut ctx).await;
-                    }
-                    _ => {}
-                },
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(skipped = n, "strategy_analyst lagged");
-                }
-                Err(_) => break,
-            }
-        }
+    async fn run(self, _state: Arc<AppState>, _ctx: WorkerContext) {
+        // Gemini ARB: event loop disabled — analysis now triggered by
+        // session_reflection_consumer via run_pending_analysis().
+        // Worker kept alive for WorkerRegistry registration (Phase 3d: remove entirely).
+        info!("Strategy analyst worker: event loop disabled (Gemini ARB — session_reflection_consumer handles trigger)");
+        std::future::pending::<()>().await;
     }
 }
 
@@ -83,7 +65,8 @@ const CHUNK_OVERLAP: i64 = 30;
 const CHUNK_THRESHOLD: i64 = 800;
 
 /// Find and analyze all pending sessions.
-async fn run_pending_analysis(state: &AppState, ctx: &mut WorkerContext) {
+/// Called by session_reflection_consumer on SessionCompleted events.
+pub(crate) async fn run_pending_analysis(state: &AppState) {
     let db = state.mission.db();
 
     // Use existing deep analysis infrastructure to find pending sessions
@@ -141,12 +124,12 @@ async fn run_pending_analysis(state: &AppState, ctx: &mut WorkerContext) {
                         kb_entries_created: 0, // exact count not tracked here; consumer uses as trigger
                     });
                 }
-                ctx.record_success();
+                // (WorkerContext stats removed — consumer-driven now)
             }
             Err(e) => {
                 warn!(error = %e, session = %session_id, "strategy_analyst: analysis failed");
                 let _ = db.mark_analysis_failed(session_id);
-                ctx.record_failure();
+                // (WorkerContext stats removed — consumer-driven now)
             }
         }
     }
