@@ -1,3 +1,5 @@
+// Background workers — each implements BackgroundWorker trait.
+// Spawned via spawn_worker() in main.rs with unified lifecycle management.
 pub mod embedding_worker;
 pub mod vision_worker;
 pub mod step_narrator;
