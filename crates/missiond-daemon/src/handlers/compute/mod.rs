@@ -5,4 +5,5 @@ pub(crate) mod minimax;
 pub(crate) mod process;
 pub(crate) mod pty;
 pub(crate) mod task;
+pub(crate) mod task_delegate;
 pub(crate) mod worker;

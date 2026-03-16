@@ -3,53 +3,24 @@
 //! Parses Claude Code tool confirmation dialogs.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+use super::patterns::CompiledPatterns;
 use super::types::{
     ConfirmAction, ConfirmInfo, ConfirmKey, ConfirmOption, ConfirmParser, ConfirmResponse,
     ConfirmType, ParserContext, ParserMeta, ToolInfo,
 };
 
-/// Regex patterns for confirm parsing
-static OPTION_CONFIRM_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?mi)^[\s❯>]*1\.\s*(Yes|Allow)").unwrap());
-
-/// General numbered option list (AskUserQuestion): "❯ 1. <any text>"
-static ASK_USER_OPTION_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?mi)^[\s❯>]*1\.\s+\S").unwrap());
-
-static YES_NO_CONFIRM_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\[Y/n\]|\(yes/no\)|Allow\?|Do you want to proceed").unwrap());
-
-/// Tool info pattern: server - tool_name(params) or server - tool_name(params) (MCP)
-static TOOL_INFO_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(\S+)\s*-\s*(\w+)\s*\(([^)]*)\)(?:\s*\(MCP\))?").unwrap());
-
-/// Parameter pattern: key: "value" or key: value
+/// Internal: parameter pattern (not CLI surface, stable)
 static PARAM_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(\w+):\s*("[^"]*"|[^,)]+)"#).unwrap());
 
-/// Option line pattern: number. label (with optional leading ❯ or > and spaces)
-static OPTION_LINE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[\s❯>]*(\d+)\.\s*(.+)$").unwrap());
-
-/// Y/n prompt cleanup pattern
+/// Internal: Y/n prompt cleanup pattern (not CLI surface, stable)
 static YN_CLEANUP_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\s*\[Y/n\].*|\s*\(yes/no\).*").unwrap());
-
-/// Skill confirmation pattern: Use skill "skill-name"
-static SKILL_CONFIRM_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"(?i)Use skill "([^"]+)""#).unwrap());
-
-/// Built-in tool type line pattern: "Read file", "Bash command", "Edit file", "Write file", etc.
-static BUILTIN_TOOL_TYPE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?m)^\s*(Read|Write|Edit|MultiEdit|Bash|NotebookEdit)\s+(file|command|files?)?\s*$").unwrap());
-
-/// Built-in tool call pattern: Read(path), Search(pattern: ...), Glob(pattern: ...), etc.
-static BUILTIN_TOOL_CALL_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?m)(Read|Write|Edit|Bash|Grep|Glob|Search|LSP|Agent|NotebookEdit)\s*\(").unwrap());
 
 /// Claude Code confirm parser
 ///
@@ -58,6 +29,7 @@ static BUILTIN_TOOL_CALL_PATTERN: Lazy<Regex> =
 /// - Y/n style: [Y/n] or (yes/no) prompts
 pub struct ClaudeCodeConfirmParser {
     meta: ParserMeta,
+    patterns: Arc<CompiledPatterns>,
 }
 
 impl Default for ClaudeCodeConfirmParser {
@@ -67,8 +39,8 @@ impl Default for ClaudeCodeConfirmParser {
 }
 
 impl ClaudeCodeConfirmParser {
-    /// Create a new Claude Code confirm parser
-    pub fn new() -> Self {
+    /// Create with external patterns
+    pub fn with_patterns(patterns: Arc<CompiledPatterns>) -> Self {
         Self {
             meta: ParserMeta {
                 name: "claude-code-confirm".to_string(),
@@ -76,19 +48,40 @@ impl ClaudeCodeConfirmParser {
                 priority: 100,
                 version: "1.0.0".to_string(),
             },
+            patterns,
         }
+    }
+
+    /// Create with default embedded patterns
+    pub fn new() -> Self {
+        let patterns = Arc::new(
+            super::patterns::default_compiled(crate::types::CliEngine::ClaudeCode)
+                .expect("embedded claude-code patterns must parse"),
+        );
+        Self::with_patterns(patterns)
     }
 
     /// Check for options-style confirmation (tool confirm or AskUserQuestion)
     fn is_option_confirm(&self, text: &str) -> bool {
-        let has_standard = OPTION_CONFIRM_PATTERN.is_match(text);
-        let has_ask_user = ASK_USER_OPTION_PATTERN.is_match(text) && text.contains("Enter to select");
-        (has_standard || has_ask_user) && text.contains("Esc to cancel")
+        let has_standard = self
+            .patterns
+            .regex("confirm.option_trigger")
+            .map_or(false, |re| re.is_match(text));
+        let ask_user_marker = self.patterns.ask_user_marker().unwrap_or("Enter to select");
+        let has_ask_user = self
+            .patterns
+            .regex("confirm.ask_user_trigger")
+            .map_or(false, |re| re.is_match(text))
+            && text.contains(ask_user_marker);
+        let cancel_marker = self.patterns.cancel_marker().unwrap_or("Esc to cancel");
+        (has_standard || has_ask_user) && text.contains(cancel_marker)
     }
 
     /// Check for Y/n style confirmation
     fn is_yes_no_confirm(&self, text: &str) -> bool {
-        YES_NO_CONFIRM_PATTERN.is_match(text)
+        self.patterns
+            .regex("confirm.yes_no")
+            .map_or(false, |re| re.is_match(text))
     }
 
     /// Parse tool info from confirmation text
@@ -99,7 +92,8 @@ impl ClaudeCodeConfirmParser {
     /// - `Use skill "skill-name"`
     fn parse_tool_info(&self, text: &str) -> Option<ToolInfo> {
         // Try standard MCP tool format first
-        if let Some(caps) = TOOL_INFO_PATTERN.captures(text) {
+        let tool_info_re = self.patterns.regex("confirm.tool_info");
+        if let Some(caps) = tool_info_re.and_then(|re| re.captures(text)) {
             let mcp_server = caps.get(1)?.as_str().to_string();
             let name = caps.get(2)?.as_str().to_string();
             let params_str = caps.get(3)?.as_str();
@@ -128,7 +122,8 @@ impl ClaudeCodeConfirmParser {
         }
 
         // Try Skill confirmation format: Use skill "skill-name"
-        if let Some(caps) = SKILL_CONFIRM_PATTERN.captures(text) {
+        let skill_re = self.patterns.regex("confirm.skill_confirm");
+        if let Some(caps) = skill_re.and_then(|re| re.captures(text)) {
             let skill_name = caps.get(1)?.as_str().to_string();
             return Some(ToolInfo {
                 name: format!("Skill({})", skill_name),
@@ -138,7 +133,8 @@ impl ClaudeCodeConfirmParser {
         }
 
         // Try built-in tool type line: "Read file", "Bash command", etc.
-        if let Some(caps) = BUILTIN_TOOL_TYPE_PATTERN.captures(text) {
+        let builtin_type_re = self.patterns.regex("confirm.builtin_type");
+        if let Some(caps) = builtin_type_re.and_then(|re| re.captures(text)) {
             let tool_name = caps.get(1)?.as_str().to_string();
             return Some(ToolInfo {
                 name: tool_name,
@@ -148,7 +144,8 @@ impl ClaudeCodeConfirmParser {
         }
 
         // Try built-in tool call pattern: Read(...), Search(...), Glob(...), etc.
-        if let Some(caps) = BUILTIN_TOOL_CALL_PATTERN.captures(text) {
+        let builtin_call_re = self.patterns.regex("confirm.builtin_call");
+        if let Some(caps) = builtin_call_re.and_then(|re| re.captures(text)) {
             let tool_name = caps.get(1)?.as_str().to_string();
             // Normalize Search → Grep
             let tool_name = if tool_name == "Search" { "Grep".to_string() } else { tool_name };
@@ -164,10 +161,11 @@ impl ClaudeCodeConfirmParser {
 
     /// Parse options from text
     fn parse_options(&self, text: &str) -> Option<Vec<ConfirmOption>> {
+        let option_line_re = self.patterns.regex("confirm.option_line")?;
         let mut options = Vec::new();
 
         for line in text.lines() {
-            if let Some(caps) = OPTION_LINE_PATTERN.captures(line) {
+            if let Some(caps) = option_line_re.captures(line) {
                 if let (Some(num_match), Some(label_match)) = (caps.get(1), caps.get(2)) {
                     if let Ok(num) = num_match.as_str().parse::<u32>() {
                         options.push(ConfirmOption {
@@ -189,16 +187,18 @@ impl ClaudeCodeConfirmParser {
 
     /// Extract the main prompt/question
     fn extract_prompt(&self, text: &str) -> String {
+        let option_line_re = self.patterns.regex("confirm.option_line");
+        let yes_no_re = self.patterns.regex("confirm.yes_no");
         let mut prompt_lines = Vec::new();
 
         for line in text.lines() {
             // Stop at options
-            if OPTION_LINE_PATTERN.is_match(line) {
+            if option_line_re.map_or(false, |re| re.is_match(line)) {
                 break;
             }
 
             // Handle Y/n type prompts - extract text before the prompt indicator
-            if YES_NO_CONFIRM_PATTERN.is_match(line) {
+            if yes_no_re.map_or(false, |re| re.is_match(line)) {
                 let cleaned = YN_CLEANUP_PATTERN.replace(line, "");
                 let trimmed = cleaned.trim();
                 if !trimmed.is_empty() {

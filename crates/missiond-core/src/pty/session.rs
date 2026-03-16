@@ -50,11 +50,12 @@ use crate::semantic::{
     ClaudeCodeConfirmParser, ClaudeCodeStateParser, ClaudeCodeStatusParser,
     ClaudeCodeToolOutputParser, GeminiCliStateParser,
     ConfirmParser, ParserContext, StateParser, StatusParser, ToolOutputParser,
-    default_registry,
+    default_compiled, registry_from,
     ClaudeCodeStatus, ClaudeCodeToolOutput, ClaudeCodeTitle,
     ConfirmInfo as SemanticConfirmInfo,
     State as SemanticState,
     ToolStatus,
+    maybe_reload_global_patterns,
 };
 
 // ========== Types ==========
@@ -839,25 +840,37 @@ impl PTYSession {
     ) {
         let mut check_interval = interval(Duration::from_millis(100));
 
-        // Create parsers based on engine type (stateless, can be reused)
+        // Create parsers based on engine type, sharing one Arc<CompiledPatterns> snapshot.
+        // Patterns are loaded from external YAML with periodic hot-reload.
         use crate::types::CliEngine;
+
+        // Get initial compiled patterns for this engine
+        let compiled_patterns = Arc::new(
+            default_compiled(engine).unwrap_or_else(|| {
+                warn!(slot = %slot_id, ?engine, "No compiled patterns for engine, using ClaudeCode fallback");
+                default_compiled(CliEngine::ClaudeCode).expect("embedded claude-code patterns must parse")
+            }),
+        );
+
         let state_parser: Box<dyn StateParser + Send + Sync> = match engine {
-            CliEngine::ClaudeCode => Box::new(ClaudeCodeStateParser::new()),
-            CliEngine::Gemini => Box::new(GeminiCliStateParser::new()),
+            CliEngine::ClaudeCode => Box::new(ClaudeCodeStateParser::with_patterns(compiled_patterns.clone())),
+            CliEngine::Gemini => Box::new(GeminiCliStateParser::with_patterns(compiled_patterns.clone())),
             CliEngine::Codex => {
                 // TODO: implement CodexCliStateParser
-                // For now, use Claude parser as fallback
-                Box::new(ClaudeCodeStateParser::new())
+                Box::new(ClaudeCodeStateParser::with_patterns(compiled_patterns.clone()))
             }
         };
         let confirm_parser: Option<Box<dyn ConfirmParser + Send + Sync>> = match engine {
-            CliEngine::ClaudeCode => Some(Box::new(ClaudeCodeConfirmParser::new())),
-            // Gemini --yolo / Codex: no confirmation dialogs
+            CliEngine::ClaudeCode => Some(Box::new(ClaudeCodeConfirmParser::with_patterns(compiled_patterns.clone()))),
             CliEngine::Gemini | CliEngine::Codex => None,
         };
-        let status_parser = ClaudeCodeStatusParser::new();
-        let tool_parser = ClaudeCodeToolOutputParser::new();
-        let fingerprint_registry = default_registry();
+        let status_parser = ClaudeCodeStatusParser::with_patterns(compiled_patterns.clone());
+        let tool_parser = ClaudeCodeToolOutputParser::with_patterns(compiled_patterns.clone());
+        let fingerprint_registry = registry_from(&compiled_patterns);
+
+        // Hot-reload counter: check every 100 ticks (10 seconds at 100ms interval)
+        let mut reload_tick: u64 = 0;
+        const RELOAD_INTERVAL: u64 = 100;
 
         // Counter for consecutive empty-screen detections while in a processing state.
         // When screen is empty, detect_state returns None and state gets stuck.
@@ -889,6 +902,17 @@ impl PTYSession {
         while running.load(Ordering::SeqCst) {
             check_interval.tick().await;
             heartbeat_tick += 1;
+            reload_tick += 1;
+
+            // Periodic hot-reload check for pattern files (every 10s)
+            if reload_tick >= RELOAD_INTERVAL {
+                reload_tick = 0;
+                if maybe_reload_global_patterns() {
+                    info!(slot = %slot_id, "PTY patterns hot-reloaded from disk");
+                    // Note: current session parsers keep their Arc<CompiledPatterns> snapshot.
+                    // New sessions will pick up the reloaded patterns.
+                }
+            }
 
             // Extract frame delta
             let delta = {
