@@ -803,9 +803,11 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
                     .map(|t| (now - t.with_timezone(&chrono::Utc)).num_hours() as f64 / 24.0)
                     .unwrap_or(0.0);
                 let decay = embedding::temporal_decay(&entry.category, age_days);
-                // Confidence weighting: high-confidence entries rank higher,
-                // low-confidence entries are suppressed (feedback loop integration)
-                scored_entries.push((entry.clone(), rrf * decay * entry.confidence));
+                // Hybrid scoring: MAX(temporal_decay, utility_score)
+                // New entries get early exposure via temporal_decay (fresh = 1.0),
+                // proven entries survive via utility_score even after freshness fades.
+                let relevance = decay.max(entry.utility_score);
+                scored_entries.push((entry.clone(), rrf * relevance * entry.confidence));
             }
         }
         scored_entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));

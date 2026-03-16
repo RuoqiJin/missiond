@@ -33,7 +33,13 @@ pub struct KnowledgeEntry {
     /// Scratchpad entries only visible to their owning task, not global retrieval.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_task_id: Option<String>,
+    /// Darwinian utility score [0.0, 1.0]. Rises on hits, decays over time.
+    /// Drives dynamic GC: low-utility entries get pruned regardless of age.
+    #[serde(default = "default_utility_score")]
+    pub utility_score: f64,
 }
+
+fn default_utility_score() -> f64 { 0.5 }
 
 fn default_kb_type() -> String { "fact".to_string() }
 
