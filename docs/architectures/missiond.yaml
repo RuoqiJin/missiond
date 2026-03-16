@@ -224,7 +224,7 @@ error_handling:
 # ── 领域词汇表 ──
 glossary:
   slot: "一个 Claude Code 实例的运行位（含 PTY + 配置 + 状态）"
-  dynamic_slot: "动态运行位，支持持久化、系统重启后的恢复与超时自动销毁"
+  dynamic_slot: "动态运行位，支持超时自动销毁（系统重启时采取 clean slate 策略全部回收）"
   task: "分配给 slot 执行的具体工作单元"
   job_store: "全局状态(AppState)中管理异步作业/任务的内存存储映射"
   KB/知识库: "SQLite 中的长期记忆存储（KnowledgeEntry 表）"
@@ -262,8 +262,8 @@ design_rationale:
     decision: "daemon ↔ MCP 用 Unix socket IPC 而非 HTTP"
     why: "同机通信，IPC 延迟 < 1ms，HTTP 有序列化/连接开销；且 MCP 协议本身是 stdio JSON-RPC"
   dynamic_slot_recovery:
-    decision: "Daemon启动时自动恢复活跃的 dynamic slots 并清理过期 slots"
-    why: "保证动态分配的临时运行位在系统重启/崩溃后能够继续提供服务，同时避免幽灵进程泄露资源"
+    decision: "Daemon启动时强制终止所有活跃的 dynamic slots (clean slate)，放弃状态恢复"
+    why: "底层 PTY 孤儿进程会被系统级强制清理，强行在 DB 和内存中恢复 active 状态会导致与物理进程脱节的僵尸 slot"
   chunked_strategy_analysis:
     decision: "对于超长已完成会话的战略分析采用按字节预算分块处理，通过 KB 中的 strategic-state 传递分析状态"
     why: "避免 LLM 上下文超限和状态坍塌，同时复用既有水位线（watermark）实现断点续传"
