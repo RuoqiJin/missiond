@@ -229,6 +229,7 @@ async fn analyze_session_chunked(
             "model": "gemini-3.1-pro",
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 16384,
+            "_channel": "google",
         });
 
         let result = REQUEST_CALLER
@@ -615,6 +616,7 @@ async fn analyze_session_stateless(
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 16384,
+        "_channel": "google",
     });
 
     let result = REQUEST_CALLER
