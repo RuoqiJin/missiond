@@ -69,8 +69,8 @@ async fn translate_message(
 ) -> Result<()> {
     let content_chars = content.len();
 
-    let minimax = state.minimax.as_ref()
-        .ok_or_else(|| anyhow::anyhow!("MiniMax gateway not available"))?;
+    let sonnet = state.sonnet.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Sonnet gateway not available"))?;
 
     // Single span_id for the entire translation lifecycle (Started + Completed/Failed)
     let translation_span_id = uuid::Uuid::new_v4().to_string();
@@ -107,8 +107,8 @@ async fn translate_message(
 
     // Use higher max_tokens for translation (output ~ input length)
     let max_tokens = ((content_chars / 2) as u32 + 500).min(8192);
-    // Pass trace context to MiniMax Gateway for WorkerLlmCall linking
-    let result = minimax.call_translation(
+    // Pass trace context to SonnetGateway for WorkerLlmCall linking
+    let result = sonnet.call_translation(
         messages,
         Some(max_tokens),
         None,

@@ -1,33 +1,32 @@
-//! MinimaxGateway — centralized Actor for all MiniMax API calls.
+//! SonnetGateway — centralized Actor for all Claude Sonnet API calls.
 //!
-//! All workers (Briefing, Translation, Embedding) and MCP tools route
-//! through this gateway for unified rate limiting, priority scheduling,
-//! and quota tracking.
+//! Replaces MinimaxGateway: same priority-based actor model, different backend.
+//! Routes through xjp-router's cpapi-claude-sonnet endpoint.
 //!
 //! Architecture:
 //! - 4 priority channels (interactive > embedding > translation > briefing)
 //! - `tokio::select! { biased; }` ensures strict priority ordering
-//! - Sliding-window quota tracker (300 requests / 5 hours)
+//! - Independent rate limiter (30 RPM, separate from Gemini governor)
 //! - Semaphore-based concurrency limit (max 3 in-flight)
-//! - Automatic EventBus emission for every call (zero boilerplate for workers)
+//! - Automatic EventBus emission for every call
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use tokio::sync::{mpsc, oneshot, RwLock, Semaphore};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::event_bus::TimelineEntry;
-use crate::minimax_client::{ChatMessage, MiniMaxClient};
+use crate::minimax_client::ChatMessage;
+use crate::minimax_gateway::{GatewayRequest, Priority, QuotaTracker};
 
 // ── Constants ──────────────────────────────────────────────────────
 
-/// MiniMax Coding Plan quota: 300 prompts per 5 hours.
-const QUOTA_MAX: usize = 300;
-const QUOTA_WINDOW: Duration = Duration::from_secs(5 * 3600);
+/// Sonnet rate limit: 30 RPM (independent from Gemini's 30 RPM).
+const QUOTA_MAX: usize = 1800;
+const QUOTA_WINDOW: Duration = Duration::from_secs(3600);
 
 /// Max concurrent in-flight API requests.
 const MAX_CONCURRENCY: usize = 3;
@@ -35,107 +34,27 @@ const MAX_CONCURRENCY: usize = 3;
 /// Channel capacity per priority level.
 const CHANNEL_CAPACITY: usize = 64;
 
-/// Minimum inter-request delay to avoid burst (shared across all callers).
-const MIN_INTER_REQUEST_MS: u64 = 500;
+/// Minimum inter-request delay (burst prevention).
+const MIN_INTER_REQUEST_MS: u64 = 300;
 
-/// Quota reservation: when remaining quota drops below this threshold,
-/// only P0 (interactive) and P1 (embedding) requests are allowed through.
-/// Prevents low-priority workers from starving interactive requests.
-const QUOTA_RESERVE_THRESHOLD: usize = 50;
+/// Quota reservation threshold for low-priority requests.
+const QUOTA_RESERVE_THRESHOLD: usize = 200;
 
-// ── Request / Response ─────────────────────────────────────────────
+/// Sonnet model name on xjp-router.
+const SONNET_MODEL: &str = "cpapi-claude-sonnet";
 
-/// Priority level for quota reservation.
-/// P0-P1 are protected (always allowed), P2-P3 are throttled when quota is low.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Priority {
-    Interactive = 0,
-    Embedding = 1,
-    Translation = 2,
-    Briefing = 3,
-}
-
-impl Priority {
-    /// Whether this priority is protected from quota reservation.
-    pub(crate) fn is_protected(self) -> bool {
-        matches!(self, Priority::Interactive | Priority::Embedding)
-    }
-}
-
-/// A request routed through the gateway.
-pub(crate) struct GatewayRequest {
-    pub messages: Vec<ChatMessage>,
-    pub max_tokens: Option<u32>,
-    pub caller: &'static str,
-    pub priority: Priority,
-    pub task_id: Option<String>,
-    /// Causal trace ID (for cross-lane linking in Cognitive Timeline).
-    pub trace_id: Option<String>,
-    /// Parent span ID (links WorkerLlmCall back to caller's span).
-    pub parent_span_id: Option<String>,
-    pub reply_tx: oneshot::Sender<Result<String>>,
-}
-
-// ── QuotaTracker ───────────────────────────────────────────────────
-
-/// Sliding-window quota tracker (300 req / 5h).
-#[derive(Debug)]
-pub(crate) struct QuotaTracker {
-    history: VecDeque<Instant>,
-    max_quota: usize,
-    window: Duration,
-}
-
-impl QuotaTracker {
-    pub fn new(max_quota: usize, window: Duration) -> Self {
-        Self {
-            history: VecDeque::new(),
-            max_quota,
-            window,
-        }
-    }
-
-    /// Purge expired entries and return current usage count.
-    pub fn used(&mut self) -> usize {
-        let now = Instant::now();
-        while let Some(&t) = self.history.front() {
-            if now.duration_since(t) > self.window {
-                self.history.pop_front();
-            } else {
-                break;
-            }
-        }
-        self.history.len()
-    }
-
-    /// Record a new request. Returns false if quota exceeded.
-    pub fn try_record(&mut self) -> bool {
-        let used = self.used();
-        if used >= self.max_quota {
-            return false;
-        }
-        self.history.push_back(Instant::now());
-        true
-    }
-
-    pub fn remaining(&mut self) -> usize {
-        self.max_quota.saturating_sub(self.used())
-    }
-}
-
-// ── MinimaxHandle (Clone, given to workers) ────────────────────────
+// ── SonnetHandle (Clone, given to workers) ──────────────────────────
 
 /// Lightweight handle cloned into AppState for all workers to use.
 #[derive(Clone)]
-pub(crate) struct MinimaxHandle {
+pub(crate) struct SonnetHandle {
     tx_interactive: mpsc::Sender<GatewayRequest>,
     tx_embedding: mpsc::Sender<GatewayRequest>,
     tx_translation: mpsc::Sender<GatewayRequest>,
     tx_briefing: mpsc::Sender<GatewayRequest>,
-    pub quota: Arc<RwLock<QuotaTracker>>,
 }
 
-impl MinimaxHandle {
+impl SonnetHandle {
     /// Send a request at the given priority. Returns the LLM response content.
     async fn send(
         tx: &mpsc::Sender<GatewayRequest>,
@@ -158,8 +77,8 @@ impl MinimaxHandle {
             parent_span_id,
             reply_tx,
         };
-        tx.send(req).await.map_err(|_| anyhow!("MinimaxGateway channel closed"))?;
-        reply_rx.await.map_err(|_| anyhow!("MinimaxGateway dropped response"))?
+        tx.send(req).await.map_err(|_| anyhow!("SonnetGateway channel closed"))?;
+        reply_rx.await.map_err(|_| anyhow!("SonnetGateway dropped response"))?
     }
 
     /// P0: Interactive / MCP calls (highest priority).
@@ -205,41 +124,104 @@ impl MinimaxHandle {
     }
 }
 
+// ── Sonnet HTTP Backend ─────────────────────────────────────────────
+
+/// HTTP client for xjp-router's cpapi-claude-sonnet endpoint.
+struct SonnetBackend {
+    http: reqwest::Client,
+}
+
+impl SonnetBackend {
+    fn new() -> Self {
+        Self {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(60))
+                .build()
+                .expect("Failed to create HTTP client"),
+        }
+    }
+
+    async fn call(&self, messages: &[ChatMessage], max_tokens: Option<u32>) -> Result<String> {
+        let (base_url, jwt) = crate::embedding_worker::resolve_llm_credentials().await?;
+        let url = format!("{}/v1/chat/completions", base_url);
+
+        let openai_messages: Vec<serde_json::Value> = messages.iter().map(|m| {
+            serde_json::json!({"role": m.role, "content": m.content})
+        }).collect();
+
+        let body = serde_json::json!({
+            "model": SONNET_MODEL,
+            "messages": openai_messages,
+            "max_tokens": max_tokens.unwrap_or(1024),
+        });
+
+        let resp = self.http
+            .post(&url)
+            .bearer_auth(&jwt)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Sonnet HTTP error: {}", e))?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(anyhow!("Sonnet 429: rate limited by router"));
+        }
+        if !status.is_success() {
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Sonnet HTTP {}: {}", status, &body_text[..body_text.len().min(200)]));
+        }
+
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| anyhow!("Sonnet response parse error: {}", e))?;
+
+        let content = json
+            .pointer("/choices/0/message/content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if content.is_empty() {
+            return Err(anyhow!("Sonnet returned empty response"));
+        }
+
+        Ok(content)
+    }
+}
+
 // ── Gateway Actor ──────────────────────────────────────────────────
 
 /// The gateway actor — runs as an independent tokio task.
-pub(crate) struct MinimaxGateway {
+pub(crate) struct SonnetGateway {
     rx_interactive: mpsc::Receiver<GatewayRequest>,
     rx_embedding: mpsc::Receiver<GatewayRequest>,
     rx_translation: mpsc::Receiver<GatewayRequest>,
     rx_briefing: mpsc::Receiver<GatewayRequest>,
-    client: MiniMaxClient,
-    quota: Arc<RwLock<QuotaTracker>>,
+    backend: SonnetBackend,
+    quota: Arc<tokio::sync::RwLock<QuotaTracker>>,
     concurrency: Arc<Semaphore>,
     event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>,
 }
 
-impl MinimaxGateway {
+impl SonnetGateway {
     /// Main loop: biased select ensures strict priority ordering.
     pub async fn run(mut self) {
-        info!("MinimaxGateway started (quota: {}/{:?}, concurrency: {})",
+        info!("SonnetGateway started (quota: {}/{:?}, concurrency: {})",
             QUOTA_MAX, QUOTA_WINDOW, MAX_CONCURRENCY);
 
         let mut last_request_at = Instant::now() - Duration::from_secs(10);
 
         loop {
-            // 1. Acquire concurrency permit FIRST (prevents priority inversion:
-            //    without this, a low-priority request could hold the loop while
-            //    high-priority requests queue up behind it during quota/delay waits)
+            // 1. Acquire concurrency permit FIRST (prevents priority inversion)
             let permit = match self.concurrency.clone().acquire_owned().await {
                 Ok(p) => p,
                 Err(_) => {
-                    info!("MinimaxGateway: semaphore closed, shutting down");
+                    info!("SonnetGateway: semaphore closed, shutting down");
                     break;
                 }
             };
 
-            // 2. Biased priority select (permit already held → no inversion)
+            // 2. Biased priority select
             let req = tokio::select! {
                 biased;
                 Some(r) = self.rx_interactive.recv() => r,
@@ -247,7 +229,7 @@ impl MinimaxGateway {
                 Some(r) = self.rx_translation.recv() => r,
                 Some(r) = self.rx_briefing.recv() => r,
                 else => {
-                    info!("MinimaxGateway: all senders dropped, shutting down");
+                    info!("SonnetGateway: all senders dropped, shutting down");
                     break;
                 }
             };
@@ -255,20 +237,18 @@ impl MinimaxGateway {
             let queue_wait_start = Instant::now();
 
             // 3. Quota check with reservation protection
-            // Low-priority (P2+P3) requests are rejected when quota is low,
-            // preserving remaining quota for interactive/embedding use.
             let mut quota_rejected = false;
             loop {
                 let mut q = self.quota.write().await;
                 let remaining = q.remaining();
 
-                // Reservation gate: reject low-priority when quota is scarce
                 if !req.priority.is_protected() && remaining <= QUOTA_RESERVE_THRESHOLD {
                     drop(q);
                     warn!(
                         caller = req.caller,
                         remaining,
-                        "MinimaxGateway: quota reserved for high-priority, rejecting"
+                        priority = ?req.priority,
+                        "SonnetGateway: quota reserved for high-priority, rejecting"
                     );
                     quota_rejected = true;
                     break;
@@ -280,10 +260,8 @@ impl MinimaxGateway {
                 }
 
                 drop(q);
-
-                // Protected requests wait; low-priority already rejected above
-                warn!(caller = req.caller, "MinimaxGateway: quota exhausted (300/5h), throttling 60s");
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                warn!(caller = req.caller, "SonnetGateway: quota exhausted, throttling 30s");
+                tokio::time::sleep(Duration::from_secs(30)).await;
             }
 
             if quota_rejected {
@@ -305,13 +283,14 @@ impl MinimaxGateway {
             let queue_wait_ms = queue_wait_start.elapsed().as_millis() as u64;
 
             // 5. Execute request (spawned for concurrency)
-            let client = self.client.clone();
+            let backend = self.backend.http.clone();
             let event_tx = self.event_tx.clone();
             tokio::spawn(async move {
                 let api_start = std::time::Instant::now();
                 let prompt_chars: usize = req.messages.iter().map(|m| m.content.len()).sum();
 
-                let result = client.chat(&req.messages, req.max_tokens).await;
+                let backend = SonnetBackend { http: backend };
+                let result = backend.call(&req.messages, req.max_tokens).await;
 
                 let duration_ms = api_start.elapsed().as_millis() as u64;
                 let (status, response_chars) = match &result {
@@ -322,18 +301,19 @@ impl MinimaxGateway {
                 debug!(
                     caller = req.caller,
                     task_id = req.task_id.as_deref().unwrap_or("-"),
+                    priority = ?req.priority,
                     prompt_chars,
                     response_chars,
                     duration_ms,
                     queue_wait_ms,
                     status,
-                    "minimax_gateway_call"
+                    "sonnet_gateway_call"
                 );
 
                 // Emit timeline event
                 let summary = format!(
-                    "MiniMax {} → {}ch ({}ms, q:{}ms)",
-                    req.caller, response_chars, duration_ms, queue_wait_ms
+                    "Sonnet {:?}/{} → {}ch ({}ms, q:{}ms)",
+                    req.priority, req.caller, response_chars, duration_ms, queue_wait_ms
                 );
                 let event = crate::event_bus::DaemonEvent::WorkerLlmCall {
                     caller: req.caller.to_string(),
@@ -344,8 +324,6 @@ impl MinimaxGateway {
                     duration_ms,
                     queue_wait_ms,
                 };
-                // Use explicit trace context if provided (e.g. translation → thinking_message link),
-                // otherwise fall back to task_id as trace_id for backward compat.
                 let entry_trace_id = req.trace_id.or(req.task_id);
                 let entry = TimelineEntry {
                     event,
@@ -366,39 +344,37 @@ impl MinimaxGateway {
 
 // ── Initialization ─────────────────────────────────────────────────
 
-/// Create the gateway and its handle. Call once at startup.
-/// Returns (handle_for_AppState, gateway_actor_to_spawn).
-pub(crate) fn create_minimax_gateway(
+/// Create the Sonnet gateway and its handle. Call once at startup.
+/// Always succeeds (credentials resolved lazily per-request).
+pub(crate) fn create_sonnet_gateway(
     event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>,
-) -> Option<(MinimaxHandle, MinimaxGateway)> {
-    let api_key = crate::minimax_client::load_api_key()?;
-    let client = MiniMaxClient::new(api_key);
+) -> (SonnetHandle, SonnetGateway) {
+    let backend = SonnetBackend::new();
 
     let (tx_interactive, rx_interactive) = mpsc::channel(CHANNEL_CAPACITY);
     let (tx_embedding, rx_embedding) = mpsc::channel(CHANNEL_CAPACITY);
     let (tx_translation, rx_translation) = mpsc::channel(CHANNEL_CAPACITY);
     let (tx_briefing, rx_briefing) = mpsc::channel(CHANNEL_CAPACITY);
 
-    let quota = Arc::new(RwLock::new(QuotaTracker::new(QUOTA_MAX, QUOTA_WINDOW)));
+    let quota = Arc::new(tokio::sync::RwLock::new(QuotaTracker::new(QUOTA_MAX, QUOTA_WINDOW)));
 
-    let handle = MinimaxHandle {
+    let handle = SonnetHandle {
         tx_interactive,
         tx_embedding,
         tx_translation,
         tx_briefing,
-        quota: quota.clone(),
     };
 
-    let gateway = MinimaxGateway {
+    let gateway = SonnetGateway {
         rx_interactive,
         rx_embedding,
         rx_translation,
         rx_briefing,
-        client,
+        backend,
         quota,
         concurrency: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
         event_tx,
     };
 
-    Some((handle, gateway))
+    (handle, gateway)
 }

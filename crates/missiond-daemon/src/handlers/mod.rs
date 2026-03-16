@@ -93,7 +93,7 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         "mission_code_search" => kb::handle(state, name, args).await,
         n if n.starts_with("mission_beacon_") => kb::handle(state, n, args).await,
         n if n.starts_with("mission_board_") => board::handle(state, n, args).await,
-        n if n.starts_with("mission_minimax_") => minimax::handle(state, n, args).await,
+        n if n.starts_with("mission_minimax_") || n.starts_with("mission_sonnet_") => minimax::handle(state, n, args).await,
         n if n.starts_with("mission_conversation_") || n == "mission_agent_trajectory"
             || n == "mission_trigger_backfill" || n == "mission_embedding_stats"
             || n == "mission_habit_scan" || n == "mission_token_stats"

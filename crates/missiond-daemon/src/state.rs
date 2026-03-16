@@ -12,6 +12,7 @@ use crate::event_bus::EventBus;
 use crate::gemini_client::GeminiClient;
 use crate::mcp_client::McpProcessClient;
 use crate::minimax_gateway::MinimaxHandle;
+use crate::sonnet_gateway::SonnetHandle;
 use crate::prompts::PromptStore;
 use crate::slot_dispatch::SlotDispatchGuard;
 use crate::workers::WorkerRegistry;
@@ -152,6 +153,8 @@ pub(crate) struct AppState {
     pub(crate) gemini: GeminiClient,
     /// MiniMax Gateway handle — unified rate-limited access for all workers.
     pub(crate) minimax: Option<MinimaxHandle>,
+    /// Sonnet Gateway handle — priority-based actor for all Sonnet API calls.
+    pub(crate) sonnet: Option<SonnetHandle>,
     /// Persistent xjp-mcp client (lazy-initialized, auto-reconnect on crash).
     pub(crate) xjp_mcp: Arc<McpProcessClient>,
     /// Flow engine reentry guard: task IDs currently being processed.

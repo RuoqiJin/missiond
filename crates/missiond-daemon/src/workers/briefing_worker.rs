@@ -8,7 +8,7 @@
 //! - Polling: fallback 120s sweep for missed/backfill entries.
 //! - DB as reliable queue: entries with `summary == preview` are pending.
 //!
-//! Rate limiting delegated to MinimaxGateway (P3: briefing priority).
+//! Rate limiting delegated to SonnetGateway (P3: briefing priority).
 //! Thinking messages use static rules (no LLM) to save quota.
 
 use std::sync::Arc;
@@ -138,17 +138,17 @@ async fn process_entry(
         _ => 100,
     };
 
-    let minimax = state.minimax.as_ref()
-        .ok_or_else(|| anyhow::anyhow!("MiniMax gateway not available"))?;
+    let sonnet = state.sonnet.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Sonnet gateway not available"))?;
 
     let messages = vec![ChatMessage {
         role: "user".to_string(),
         content: prompt,
     }];
-    let summary = minimax.call_briefing(messages, Some(300), None).await?;
+    let summary = sonnet.call_briefing(messages, Some(300), None).await?;
 
     if summary.is_empty() {
-        warn!(seq, "Briefing: empty summary from MiniMax");
+        warn!(seq, "Briefing: empty summary from Sonnet");
         return Ok(ProcessResult::Skipped);
     }
 
@@ -157,7 +157,7 @@ async fn process_entry(
 
     db.update_timeline_summary(seq, &summary)?;
     state.event_bus.publish(DaemonEvent::BriefingSummaryGenerated {
-        target_seq: seq, summary: summary.clone(), method: "minimax".into(),
+        target_seq: seq, summary: summary.clone(), method: "sonnet".into(),
     });
     info!(seq, chars = summary.len(), event_type, "Briefing: summary updated");
 

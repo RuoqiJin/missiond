@@ -108,14 +108,14 @@ impl GeminiCli {
         info!(mode = %auth_config.mode, override = is_override, "Gemini CLI: using {} mode", auth_config.mode);
 
         let mut child = self.spawn_cli(&prompt, model, &auth_config)?;
-        let events = self.stream_events(&mut child, idle_timeout, &progress_tx).await?;
+        let (events, drained_stderr) = self.stream_events(&mut child, idle_timeout, &progress_tx).await?;
 
         // Wait for process to fully exit
         let status = child.wait().await
             .map_err(|e| anyhow!("Gemini CLI process error: {}", e))?;
         if !status.success() {
             let exit_code = status.code();
-            let stderr_msg = read_stderr(&mut child).await;
+            let stderr_msg: String = drained_stderr.chars().take(500).collect();
 
             // Fail fast on auth errors — no silent fallback
             if auth_config.mode == "google" && is_auth_error(exit_code, &stderr_msg) {
@@ -157,14 +157,28 @@ impl GeminiCli {
     }
 
     /// Stream NDJSON events from a running CLI process.
+    /// Returns (events, drained_stderr) — stderr is concurrently drained to prevent pipe deadlock.
     async fn stream_events(
         &self,
         child: &mut tokio::process::Child,
         idle_timeout: Duration,
         progress_tx: &Option<mpsc::UnboundedSender<GeminiCliProgress>>,
-    ) -> Result<Vec<Value>> {
+    ) -> Result<(Vec<Value>, String)> {
         let stdout = child.stdout.take()
             .ok_or_else(|| anyhow!("Failed to capture stdout"))?;
+
+        // P0 fix: concurrently drain stderr to prevent 64KB pipe buffer deadlock.
+        // Without this, if Gemini CLI writes >64KB to stderr while we only read stdout,
+        // the OS pipe buffer fills up and the subprocess blocks forever.
+        let stderr = child.stderr.take();
+        let stderr_handle = tokio::spawn(async move {
+            let mut buf = String::new();
+            if let Some(mut stderr) = stderr {
+                let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut buf).await;
+            }
+            buf
+        });
+
         let mut lines = BufReader::new(stdout).lines();
         let mut events: Vec<Value> = Vec::new();
         let absolute_deadline = tokio::time::Instant::now() + ABSOLUTE_TIMEOUT;
@@ -227,14 +241,18 @@ impl GeminiCli {
             }
         }.await;
 
+        // Collect drained stderr (best-effort, don't fail on join error)
+        let drained_stderr = stderr_handle.await.unwrap_or_default();
+
         if let Err(ref reason) = stream_result {
-            warn!(reason, "Gemini CLI: killing process");
+            warn!(reason, stderr_len = drained_stderr.len(), "Gemini CLI: killing process");
             let _ = child.kill().await;
             let _ = child.wait().await;
-            return Err(anyhow!("Gemini CLI timed out: {}", reason));
+            let stderr_preview: String = drained_stderr.chars().take(500).collect();
+            return Err(anyhow!("Gemini CLI timed out: {}. stderr: {}", reason, stderr_preview));
         }
 
-        Ok(events)
+        Ok((events, drained_stderr))
     }
 
     /// Convenience: single prompt string.
@@ -442,24 +460,9 @@ fn resolve_gemini_auth_config() -> GeminiAuthConfig {
                 .unwrap_or_else(|| "apikey".to_string())
         });
 
-    // Split-brain detection: ensure settings.json matches llm.yaml
-    if let Some(home) = dirs::home_dir() {
-        let settings_path = home.join(".gemini/settings.json");
-        if let Ok(content) = std::fs::read_to_string(&settings_path) {
-            if let Ok(settings) = serde_json::from_str::<serde_json::Value>(&content) {
-                let settings_type = settings.pointer("/security/auth/selectedType")
-                    .and_then(|t| t.as_str()).unwrap_or("");
-                let expected_type = if mode == "apikey" { "gemini-api-key" } else { "oauth-personal" };
-                if !settings_type.is_empty() && settings_type != expected_type {
-                    warn!(
-                        llm_yaml_mode = %mode, settings_json_type = %settings_type,
-                        "Gemini auth split-brain detected, syncing settings.json to match llm.yaml"
-                    );
-                    sync_settings_json(expected_type);
-                }
-            }
-        }
-    }
+    // Note: No longer mutating global ~/.gemini/settings.json (P1 audit fix).
+    // Per-subprocess auth is handled via GEMINI_CLI_HOME shadow home directory,
+    // so split-brain between llm.yaml and settings.json is harmless.
 
     if mode == "apikey" {
         if let Some(ref key) = api_key {
@@ -474,11 +477,15 @@ fn resolve_gemini_auth_config() -> GeminiAuthConfig {
 }
 
 /// Mask API key for logging: show first 6 and last 4 chars.
+/// Uses char-based iteration to avoid panic on non-ASCII keys.
 fn mask_api_key(key: &str) -> String {
-    if key.len() <= 12 {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= 12 {
         "***".to_string()
     } else {
-        format!("{}...{}", &key[..6], &key[key.len() - 4..])
+        let prefix: String = chars[..6].iter().collect();
+        let suffix: String = chars[chars.len() - 4..].iter().collect();
+        format!("{}...{}", prefix, suffix)
     }
 }
 
@@ -491,30 +498,6 @@ fn resolve_apikey_config() -> Option<GeminiAuthConfig> {
     Some(GeminiAuthConfig { mode: "apikey".to_string(), api_key: Some(key) })
 }
 
-/// Sync selectedType to ~/.gemini/settings.json.
-fn sync_settings_json(selected_type: &str) {
-    let path = match dirs::home_dir() {
-        Some(h) => h.join(".gemini/settings.json"),
-        None => return,
-    };
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let mut settings: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-    if let Some(auth) = settings.pointer_mut("/security/auth") {
-        if let Some(obj) = auth.as_object_mut() {
-            obj.insert("selectedType".to_string(), serde_json::json!(selected_type));
-        }
-    }
-    if let Ok(json) = serde_json::to_string_pretty(&settings) {
-        let _ = std::fs::write(&path, json);
-    }
-}
-
 /// Create/maintain a shadow home directory for Google OAuth Gemini CLI calls.
 ///
 /// Gemini CLI resolves config via `GEMINI_CLI_HOME` env var → `$HOME/.gemini/`.
@@ -524,7 +507,22 @@ fn sync_settings_json(selected_type: &str) {
 /// Solution: maintain `~/.xjp-mission/gemini-google-home/.gemini/` with:
 /// - `settings.json` with `selectedType: "oauth-personal"` (LOGIN_WITH_GOOGLE)
 /// - Symlinks to real OAuth credential files from `~/.gemini/`
+///
+/// Uses OnceLock for one-time initialization — safe under concurrent calls.
 fn ensure_google_auth_home() -> Result<String> {
+    static GOOGLE_HOME: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+
+    let result = GOOGLE_HOME.get_or_init(|| {
+        init_google_auth_home().map_err(|e| e.to_string())
+    });
+
+    match result {
+        Ok(path) => Ok(path.clone()),
+        Err(e) => Err(anyhow!("{}", e)),
+    }
+}
+
+fn init_google_auth_home() -> Result<String> {
     let mission_home = missiond_core::default_mission_home();
     let google_home = mission_home.join("gemini-google-home");
     let shadow_gemini_dir = google_home.join(".gemini");
@@ -536,48 +534,42 @@ fn ensure_google_auth_home() -> Result<String> {
         .ok_or_else(|| anyhow!("Cannot resolve home directory"))?
         .join(".gemini");
 
-    // Write settings.json with google OAuth auth type
+    // Atomic write: write to temp file, then rename to avoid corruption from concurrent reads
     let settings_path = shadow_gemini_dir.join("settings.json");
+    let tmp_path = shadow_gemini_dir.join("settings.json.tmp");
     let real_settings = std::fs::read_to_string(real_gemini_dir.join("settings.json"))
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
 
     let mut settings = real_settings.unwrap_or_else(|| serde_json::json!({}));
-    // Ensure nested path exists, then set auth to google OAuth (LOGIN_WITH_GOOGLE)
-    if !settings.get("security").is_some() {
+    if settings.get("security").is_none() {
         settings["security"] = serde_json::json!({});
     }
-    if !settings["security"].get("auth").is_some() {
+    if settings["security"].get("auth").is_none() {
         settings["security"]["auth"] = serde_json::json!({});
     }
     settings["security"]["auth"]["selectedType"] = serde_json::json!("oauth-personal");
 
-    std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)
+    std::fs::write(&tmp_path, serde_json::to_string_pretty(&settings)?)
         .map_err(|e| anyhow!("Failed to write shadow settings.json: {}", e))?;
+    std::fs::rename(&tmp_path, &settings_path)
+        .map_err(|e| anyhow!("Failed to atomically place shadow settings.json: {}", e))?;
 
-    // Symlink OAuth credential files (idempotent)
+    // Symlink OAuth credential files — ignore AlreadyExists (TOCTOU safe)
     for file in &["oauth_creds.json", "google_accounts.json", "google_account_id"] {
         let src = real_gemini_dir.join(file);
         let dst = shadow_gemini_dir.join(file);
-        if src.exists() && !dst.exists() {
+        if src.exists() {
             #[cfg(unix)]
-            std::os::unix::fs::symlink(&src, &dst)
-                .map_err(|e| anyhow!("Failed to symlink {}: {}", file, e))?;
+            match std::os::unix::fs::symlink(&src, &dst) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(anyhow!("Failed to symlink {}: {}", file, e)),
+            }
         }
     }
 
     Ok(google_home.to_string_lossy().to_string())
-}
-
-/// Read stderr from a child process (best effort).
-async fn read_stderr(child: &mut tokio::process::Child) -> String {
-    if let Some(mut stderr) = child.stderr.take() {
-        let mut buf = String::new();
-        let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut buf).await;
-        buf.chars().take(500).collect()
-    } else {
-        String::new()
-    }
 }
 
 /// Detect OAuth/auth-related errors from exit code and stderr.

@@ -485,7 +485,7 @@ fn parse_and_validate_topics(raw: &str, max_topics: usize) -> Option<Vec<String>
     let topics: Vec<String> = match serde_json::from_str(json_str) {
         Ok(t) => t,
         Err(e) => {
-            debug!(error = %e, raw_len = json_str.len(), "Topic JSON parse failed");
+            warn!(error = %e, raw_preview = &json_str[..json_str.len().min(200)], "Topic JSON parse failed");
             return None;
         }
     };
@@ -545,7 +545,7 @@ async fn extract_conv_topics_llm(
                 info!(count = topics.len(), "Topic extraction OK (Sonnet)");
                 return Some(topics);
             }
-            warn!("Sonnet returned content but topic validation failed");
+            warn!(raw_preview = &content[..content.len().min(300)], "Sonnet returned content but topic validation failed");
             None
         }
         Err(e) => {

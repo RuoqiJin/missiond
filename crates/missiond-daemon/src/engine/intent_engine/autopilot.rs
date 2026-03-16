@@ -925,17 +925,17 @@ async fn apply_attributed_penalty(
     if kb_context.is_empty() { return; }
 
     // Log dehydration: semantic summary for long errors, preserving causal chain.
-    // Falls back to head+tail if MiniMax unavailable.
+    // Falls back to head+tail if Sonnet unavailable.
     let error_preview = if error_msg.len() > 500 {
-        // Try semantic summary via MiniMax
-        let summary = if let Some(minimax) = state.minimax.as_ref() {
+        // Try semantic summary via Sonnet
+        let summary = if let Some(sonnet) = state.sonnet.as_ref() {
             use crate::minimax_client::ChatMessage;
             let summarize_prompt = format!(
                 "以下是任务失败日志（{}字符）。提取关键因果链：错误类型、触发条件、失败点。≤400字，保留原始错误消息和关键状态变化。\n\n{}",
                 error_msg.len(), error_msg
             );
             let msgs = vec![ChatMessage { role: "user".to_string(), content: summarize_prompt }];
-            match minimax.call_briefing(msgs, Some(512), Some(format!("log-dehydrate-{}", task_id))).await {
+            match sonnet.call_briefing(msgs, Some(512), Some(format!("log-dehydrate-{}", task_id))).await {
                 Ok(resp) if !resp.trim().is_empty() => Some(resp),
                 _ => None,
             }
@@ -972,13 +972,13 @@ async fn apply_attributed_penalty(
 只输出 JSON 数组，不要解释。"#
     );
 
-    // Try MiniMax attribution
-    let attribution = if let Some(minimax) = state.minimax.as_ref() {
+    // Try Sonnet attribution
+    let attribution = if let Some(sonnet) = state.sonnet.as_ref() {
         let messages = vec![ChatMessage { role: "user".to_string(), content: prompt }];
-        match minimax.call_briefing(messages, Some(512), Some(format!("kb-attr-{}", task_id))).await {
+        match sonnet.call_briefing(messages, Some(512), Some(format!("kb-attr-{}", task_id))).await {
             Ok(resp) => parse_attribution(&resp, kb_ids),
             Err(e) => {
-                debug!(task_id, error = %e, "KB attribution: MiniMax call failed, falling back to blanket penalty");
+                debug!(task_id, error = %e, "KB attribution: Sonnet call failed, falling back to blanket penalty");
                 None
             }
         }
