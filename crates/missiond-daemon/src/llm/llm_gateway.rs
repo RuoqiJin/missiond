@@ -77,7 +77,7 @@ pub(crate) async fn call_sonnet_stateless(
     max_tokens: u32,
     caller: &str,
 ) -> Result<String> {
-    let (base_url, jwt) = resolve_llm_credentials().await?;
+    let (base_url, mut jwt) = resolve_llm_credentials().await?;
     let model = "cpapi-claude-sonnet";
     let url = format!("{}/v1/chat/completions", base_url);
     let body = serde_json::json!({
@@ -93,6 +93,11 @@ pub(crate) async fn call_sonnet_stateless(
 
     let mut last_err = None;
     for attempt in 0..3u32 {
+        // Refresh JWT on retries in case token expires during backoff
+        if attempt > 0 {
+            jwt = resolve_llm_credentials().await?.1;
+        }
+
         let resp = state.http_client
             .post(&url)
             .bearer_auth(&jwt)
@@ -102,11 +107,12 @@ pub(crate) async fn call_sonnet_stateless(
             .await;
 
         match resp {
-            Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+            Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                   || r.status().is_server_error() => {
                 let wait = std::time::Duration::from_secs(2u64.pow(attempt) * 5);
-                warn!(caller, attempt, "Sonnet 429, backing off {:?}", wait);
+                warn!(caller, attempt, status = %r.status(), "Sonnet retryable error, backing off {:?}", wait);
                 tokio::time::sleep(wait).await;
-                last_err = Some(anyhow!("429 Too Many Requests"));
+                last_err = Some(anyhow!("{} (attempt {})", r.status(), attempt));
                 continue;
             }
             Ok(r) if r.status().is_success() => {
@@ -126,7 +132,15 @@ pub(crate) async fn call_sonnet_stateless(
             Ok(r) => {
                 let status = r.status();
                 let body_text = r.text().await.unwrap_or_default();
-                return Err(anyhow!("Sonnet HTTP {}: {}", status, &body_text[..body_text.len().min(200)]));
+                let preview_end = body_text.char_indices().nth(200).map(|(i, _)| i).unwrap_or(body_text.len());
+                return Err(anyhow!("Sonnet HTTP {}: {}", status, &body_text[..preview_end]));
+            }
+            Err(e) if e.is_timeout() || e.is_connect() => {
+                let wait = std::time::Duration::from_secs(2u64.pow(attempt) * 5);
+                warn!(caller, attempt, error = %e, "Sonnet network error, backing off {:?}", wait);
+                tokio::time::sleep(wait).await;
+                last_err = Some(anyhow!("network: {} (attempt {})", e, attempt));
+                continue;
             }
             Err(e) => {
                 return Err(anyhow!("Sonnet request failed: {}", e));
