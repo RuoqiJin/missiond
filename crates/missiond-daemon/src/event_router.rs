@@ -20,6 +20,8 @@ use crate::experience_harvester;
 use crate::state::{AppState, MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 use crate::memory_scheduler::{schedule_memory_tasks, dispatch_queued_submit_tasks};
 use crate::decision_engine::process_pending_master_questions;
+use crate::extraction::{check_realtime_extraction, check_deep_analysis, check_kb_consolidation};
+use crate::workers::retro_worker;
 
 /// Exponential backoff for Lagged recovery: 100ms → 200ms → … → 2000ms cap.
 /// Adds ±25% jitter to avoid thundering herd.
@@ -251,14 +253,12 @@ fn spawn_harvest_consumer(state: &AppState, timeline_tx: &broadcast::Sender<Time
     });
 }
 
-// ===== Phase 3: Reflection consumers (Shadow Mode) =====
-// These consumers observe events and log what they would do.
-// Once validated (Shadow vs old-poll consistency ≥95%), they will
-// be switched to real execution and the old polling paths removed.
+// ===== Phase 3c: Reflection consumers (LIVE) =====
+// Activated from Shadow Mode. Each consumer calls the real handler
+// function. Old polling paths (autopilot/strategy/retro) removed.
 
-/// Realtime extraction: ConversationMessageLogged → schedule extraction.
-/// Shadow Mode: logs trigger, does NOT call schedule_realtime_extraction().
-/// Trailing-edge debounce: 3s window.
+/// Realtime extraction: ConversationMessageLogged → check_realtime_extraction().
+/// Phase 3c LIVE: trailing-edge debounce 3s, then dispatches real extraction.
 fn spawn_realtime_extraction_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>) {
     let s = state.clone();
     let mut rx = timeline_tx.subscribe();
@@ -271,7 +271,6 @@ fn spawn_realtime_extraction_consumer(state: &AppState, timeline_tx: &broadcast:
                     match tokio::time::timeout_at(deadline, rx.recv()).await {
                         Ok(Ok(te)) => {
                             if let DaemonEvent::ConversationMessageLogged { ref session_id, ref slot_id, .. } = te.event {
-                                // Only care about slot sessions (not master CLI)
                                 if slot_id.is_some() {
                                     pending_sessions.insert(session_id.clone());
                                 }
@@ -284,9 +283,9 @@ fn spawn_realtime_extraction_consumer(state: &AppState, timeline_tx: &broadcast:
                         Err(_) => break,
                     }
                 }
-                for sid in &pending_sessions {
-                    tracing::info!(session_id = %sid, "[Shadow] Would schedule realtime extraction");
-                }
+                // Phase 3c: real dispatch (replaces autopilot 60s polling)
+                tracing::debug!(sessions = pending_sessions.len(), "realtime_extraction: debounce fired");
+                check_realtime_extraction(&s).await;
                 pending_sessions.clear();
             } else {
                 match rx.recv().await {
@@ -298,7 +297,7 @@ fn spawn_realtime_extraction_consumer(state: &AppState, timeline_tx: &broadcast:
                         }
                     }
                     Err(RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "[Shadow] Realtime extraction consumer lagged");
+                        tracing::warn!(skipped = n, "Realtime extraction consumer lagged");
                         s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
                     }
                     Err(RecvError::Closed) => break,
@@ -309,8 +308,8 @@ fn spawn_realtime_extraction_consumer(state: &AppState, timeline_tx: &broadcast:
 }
 
 /// Session reflection: SessionCompleted → deep analysis + retrospective.
-/// Shadow Mode: logs trigger, does NOT dispatch.
-/// Trailing-edge debounce: 5s window (幂等 session_id 去重).
+/// Phase 3c LIVE: trailing-edge debounce 5s, then dispatches real analysis.
+/// Replaces Strategy Worker 300s poll + Retro Worker 3600s poll.
 fn spawn_session_reflection_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>) {
     let s = state.clone();
     let mut rx = timeline_tx.subscribe();
@@ -323,7 +322,6 @@ fn spawn_session_reflection_consumer(state: &AppState, timeline_tx: &broadcast::
                     match tokio::time::timeout_at(deadline, rx.recv()).await {
                         Ok(Ok(te)) => {
                             if let DaemonEvent::SessionCompleted { ref session_id, ref status, .. } = te.event {
-                                // Skip aborted/error sessions (Gemini ARB: don't waste on empty sessions)
                                 if matches!(status, crate::event_bus::SessionEndStatus::Success) {
                                     pending_sessions.insert(session_id.clone());
                                 }
@@ -336,8 +334,12 @@ fn spawn_session_reflection_consumer(state: &AppState, timeline_tx: &broadcast::
                         Err(_) => break,
                     }
                 }
-                for sid in &pending_sessions {
-                    tracing::info!(session_id = %sid, "[Shadow] Would schedule deep analysis + retrospective");
+                // Phase 3c: real dispatch (replaces strategy 300s + retro 3600s polls)
+                tracing::info!(sessions = pending_sessions.len(), "session_reflection: debounce fired, dispatching analysis");
+                check_deep_analysis(&s).await;
+                // Retro analysis (L1 quantitative + L2 MiniMax triage)
+                if let Err(e) = retro_worker::process_pending(&s).await {
+                    tracing::warn!(error = %e, "session_reflection: retro analysis failed");
                 }
                 pending_sessions.clear();
             } else {
@@ -350,7 +352,7 @@ fn spawn_session_reflection_consumer(state: &AppState, timeline_tx: &broadcast::
                         }
                     }
                     Err(RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "[Shadow] Session reflection consumer lagged");
+                        tracing::warn!(skipped = n, "Session reflection consumer lagged");
                         s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
                     }
                     Err(RecvError::Closed) => break,
@@ -361,8 +363,8 @@ fn spawn_session_reflection_consumer(state: &AppState, timeline_tx: &broadcast::
 }
 
 /// KB consolidation: DeepAnalysisCompleted → accumulate N → trigger consolidation.
-/// Shadow Mode: logs trigger, does NOT dispatch.
-/// No debounce — uses counter accumulation (fire at threshold).
+/// Phase 3c LIVE: counter accumulation, fires check_kb_consolidation at threshold.
+/// Replaces 24h timer check in autopilot.
 fn spawn_kb_consolidation_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>) {
     let s = state.clone();
     let mut rx = timeline_tx.subscribe();
@@ -374,15 +376,16 @@ fn spawn_kb_consolidation_consumer(state: &AppState, timeline_tx: &broadcast::Se
                 Ok(te) => {
                     if let DaemonEvent::DeepAnalysisCompleted { ref session_id, .. } = te.event {
                         count += 1;
-                        tracing::debug!(session_id = %session_id, count, "[Shadow] DeepAnalysis completed ({}/{})", count, threshold);
+                        tracing::debug!(session_id = %session_id, count, "kb_consolidation: deep analysis completed ({}/{})", count, threshold);
                         if count >= threshold {
-                            tracing::info!(count, "[Shadow] Would schedule KB consolidation (threshold reached)");
+                            tracing::info!(count, "kb_consolidation: threshold reached, dispatching");
+                            check_kb_consolidation(&s).await;
                             count = 0;
                         }
                     }
                 }
                 Err(RecvError::Lagged(n)) => {
-                    tracing::warn!(skipped = n, "[Shadow] KB consolidation consumer lagged");
+                    tracing::warn!(skipped = n, "KB consolidation consumer lagged");
                     s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
                 }
                 Err(RecvError::Closed) => break,

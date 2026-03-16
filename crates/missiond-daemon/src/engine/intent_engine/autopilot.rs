@@ -11,7 +11,7 @@ use missiond_core::SessionState;
 use crate::helpers::default_mission_home;
 use crate::supervisor::truncate_safe;
 use crate::supervisor::{is_auth_error, is_quota_exhausted};
-use crate::memory_scheduler::{dispatch_queued_submit_tasks, schedule_memory_tasks, reap_stale_submit_tasks};
+use crate::memory_scheduler::{dispatch_queued_submit_tasks, reap_stale_submit_tasks};
 use crate::claude_md_sync::sync_claude_md;
 use crate::engine::learning_engine;
 use crate::supervisor::schedule_supervisor_patrol;
@@ -101,8 +101,9 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
         check_slot_stuck(state, MEMORY_SLOT_ID, &state.memory_slot_busy_since, &state.extraction_state).await;
         check_slot_stuck(state, MEMORY_SLOW_SLOT_ID, &state.slow_slot_busy_since, &state.slow_extraction_state).await;
 
-        // Memory scheduler: realtime > deep > consolidation
-        schedule_memory_tasks(state).await;
+        // Phase 3c: schedule_memory_tasks removed — now event-driven via
+        // realtime_extraction_consumer, session_reflection_consumer,
+        // kb_consolidation_consumer in event_router.rs
     }
 
     // FTS dirty flag rebuild: after kb_forget sets dirty, rebuild here

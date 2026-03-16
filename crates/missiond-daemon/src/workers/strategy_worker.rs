@@ -32,7 +32,8 @@ const MAX_ANALYSIS_RETRIES: i32 = 3;
 const MAX_PROMPT_SIZE: usize = 1_500_000;
 /// Startup delay to let other systems stabilize.
 const STARTUP_DELAY_SECS: u64 = 120;
-/// Polling fallback interval (if no events trigger analysis).
+/// Polling fallback interval (Phase 3c: removed, event-driven only).
+#[allow(dead_code)]
 const POLL_INTERVAL_SECS: u64 = 300;
 
 static RE_ANSI: LazyLock<Regex> =
@@ -53,34 +54,22 @@ impl BackgroundWorker for StrategyWorker {
         info!("Strategy analyst worker started (delay {}s)", STARTUP_DELAY_SECS);
         tokio::time::sleep(Duration::from_secs(STARTUP_DELAY_SECS)).await;
 
-        // Hybrid: event-driven + polling fallback
-        let mut poll_interval = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECS));
-        poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
+        // Phase 3c: event-driven only (300s poll removed — session_reflection_consumer handles scheduling)
         loop {
             ctx.wait_if_paused().await;
 
-            tokio::select! {
-                biased;
-                result = rx.recv() => {
-                    match result {
-                        Ok(te) => match &te.event {
-                            DaemonEvent::SlotBecameIdle { .. } => {
-                                // Slot finished work — check for unanalyzed sessions
-                                run_pending_analysis(&state, &mut ctx).await;
-                            }
-                            _ => {}
-                        },
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            warn!(skipped = n, "strategy_analyst lagged");
-                        }
-                        Err(_) => break,
+            match rx.recv().await {
+                Ok(te) => match &te.event {
+                    DaemonEvent::SlotBecameIdle { .. } => {
+                        // Slot finished work — check for unanalyzed sessions
+                        run_pending_analysis(&state, &mut ctx).await;
                     }
+                    _ => {}
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(skipped = n, "strategy_analyst lagged");
                 }
-                _ = poll_interval.tick() => {
-                    // Fallback: periodic check for missed sessions
-                    run_pending_analysis(&state, &mut ctx).await;
-                }
+                Err(_) => break,
             }
         }
     }

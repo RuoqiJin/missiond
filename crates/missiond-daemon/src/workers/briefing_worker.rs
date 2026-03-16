@@ -28,6 +28,7 @@ const MIN_CONTENT_CHARS: usize = 300;
 const BATCH_SIZE: usize = 10;
 
 /// Poll interval when idle (no pending entries).
+#[allow(dead_code)]
 const IDLE_INTERVAL_SECS: u64 = 120;
 
 /// Result of processing a single entry.
@@ -223,27 +224,22 @@ impl super::BackgroundWorker for BriefingWorker {
     async fn run(self, state: Arc<AppState>, _ctx: super::WorkerContext) {
         let notify = Arc::clone(&state.briefing_notify);
 
-        info!("Briefing worker started (hybrid event+poll, rate: gateway-managed)");
+        // Phase 3c: event-driven only (120s poll removed)
+        info!("Briefing worker started (event-driven, rate: gateway-managed)");
 
         // Initial delay to let the daemon stabilize
         tokio::time::sleep(Duration::from_secs(30)).await;
 
         loop {
-            // Hybrid wait: wake on event OR timeout
-            tokio::select! {
-                _ = notify.notified() => {
-                    debug!("Briefing worker: woken by event");
-                }
-                _ = tokio::time::sleep(Duration::from_secs(IDLE_INTERVAL_SECS)) => {
-                    debug!("Briefing worker: poll sweep");
-                }
-            }
+            // Phase 3c: pure event-driven — only wake on notify
+            notify.notified().await;
+            debug!("Briefing worker: woken by event");
 
             let pending = match state.mission.db().find_timeline_needing_briefing(MIN_CONTENT_CHARS, BATCH_SIZE) {
                 Ok(p) => p,
                 Err(e) => {
                     warn!(error = %e, "Briefing worker: DB query failed");
-                    tokio::time::sleep(Duration::from_secs(IDLE_INTERVAL_SECS)).await;
+                    tokio::time::sleep(Duration::from_secs(30)).await;
                     continue;
                 }
             };
