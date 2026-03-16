@@ -218,6 +218,9 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
 
     dispatch_board_tasks(state).await?;
 
+    // Safety net: running tasks with no recent notes → Inbox reminder
+    check_stale_board_progress(state);
+
     // Record tick timing to DaemonStats
     let tick_ms = tick_start.elapsed().as_millis() as u64;
     state.stats.autopilot_ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1072,6 +1075,63 @@ async fn reap_expired_dynamic_slots(state: &AppState) {
     if let Ok(expiring) = state.mission.db().find_expiring_dynamic_slots(900) {
         for slot in &expiring {
             debug!(slot_id = %slot.id, expires_at = %slot.expires_at, "Dynamic slot expiring soon (15min warning)");
+        }
+    }
+}
+
+/// Safety net: running Board tasks with no recent progress notes → Inbox reminder.
+/// Runs every 5 ticks (~5 min). Deduplicates by checking existing unread inbox.
+fn check_stale_board_progress(state: &AppState) {
+    let tick = state.stats.autopilot_ticks.load(std::sync::atomic::Ordering::Relaxed);
+    if tick % 5 != 0 { return; }
+
+    let db = state.mission.db();
+    let running = db.list_board_tasks(Some("running"), false).unwrap_or_default();
+    if running.is_empty() { return; }
+
+    // Prefetch recent unread inbox for dedup
+    let recent_inbox = db.get_inbox_messages(true, 50).unwrap_or_default();
+
+    for task in &running {
+        // Skip autopilot-managed tasks (they have their own watchdog above)
+        if task.claim_executor_type.as_deref() == Some("pty_slot") { continue; }
+
+        // Check latest note time
+        let last_note_at = db.get_board_task_with_notes(&task.id)
+            .ok().flatten()
+            .and_then(|r| r.notes.last().and_then(|n|
+                chrono::DateTime::parse_from_rfc3339(&n.created_at).ok()
+                    .map(|t| t.with_timezone(&chrono::Utc))
+            ));
+
+        let task_start = chrono::DateTime::parse_from_rfc3339(&task.updated_at)
+            .ok()
+            .map(|t| t.with_timezone(&chrono::Utc));
+
+        let reference_time = last_note_at.or(task_start);
+        if let Some(ref_time) = reference_time {
+            let age_min = (chrono::Utc::now() - ref_time).num_minutes();
+            if age_min >= 30 {
+                // Dedup: skip if unread inbox already has a message about this task
+                let task_prefix = &task.id[..8.min(task.id.len())];
+                let already_notified = recent_inbox.iter()
+                    .any(|m| m.content.contains(task_prefix));
+                if already_notified { continue; }
+
+                let msg = missiond_core::types::InboxMessage {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    task_id: task.id.clone(),
+                    from_role: "system".to_string(),
+                    content: format!(
+                        "Board 任务 '[{}] {}' 已运行 {}min 无进展更新。如已完成请标 done。",
+                        task_prefix, task.title, age_min
+                    ),
+                    read: false,
+                    created_at: chrono::Utc::now().timestamp(),
+                };
+                let _ = db.insert_inbox_message(&msg);
+                debug!(task_id = %task.id, age_min, "Stale board task reminder sent to inbox");
+            }
         }
     }
 }

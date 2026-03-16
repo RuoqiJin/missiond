@@ -3,10 +3,29 @@ use serde::Deserialize;
 use serde_json::Value;
 use missiond_mcp::tools::ToolResult;
 
-use crate::state::AppState;
+use crate::state::{AppState, SessionTaskBinding};
 use crate::event_bus::{DaemonEvent, TraceContext};
 use crate::lenient;
 use crate::decision_harvest::harvest_decisions_for_task;
+use crate::llm::gemini_client::current_session_id;
+
+/// Record implicit session→task binding for auto-progress extraction.
+/// Called when Claude Code interacts with a Board task via MCP.
+fn record_session_task_binding(state: &AppState, task_id: &str, task_title: &str) {
+    if let Some(session_id) = current_session_id() {
+        if let Ok(mut map) = state.session_task_bindings.lock() {
+            let bindings = map.entry(session_id).or_default();
+            // Dedup: don't record same task twice in same session
+            if !bindings.iter().any(|b| b.task_id == task_id) {
+                bindings.push(SessionTaskBinding {
+                    task_id: task_id.to_string(),
+                    task_title: task_title.to_string(),
+                    bound_at: chrono::Utc::now().timestamp(),
+                });
+            }
+        }
+    }
+}
 
 /// Extracted board_get logic (used by query action="get")
 async fn board_get(state: &AppState, args: Value) -> Result<ToolResult> {
@@ -33,7 +52,10 @@ async fn board_get(state: &AppState, args: Value) -> Result<ToolResult> {
             .get_board_task_with_notes(&ids[0])
             .map_err(|e| anyhow!("DB error: {}", e))?;
         match task {
-            Some(t) => Ok(ToolResult::json_pretty(&t)),
+            Some(ref t) => {
+                record_session_task_binding(state, &t.task.id, &t.task.title);
+                Ok(ToolResult::json_pretty(&t))
+            }
             None => Ok(ToolResult::error("Task not found")),
         }
     }
@@ -258,6 +280,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 let task = state.mission.db().update_board_task(&id, &update).map_err(|e| anyhow!("DB error: {}", e))?;
                 match task {
                     Some(t) => {
+                        record_session_task_binding(state, &t.id, &t.title);
                         if let Some(old) = old_status { publish_board_status_changed(state, &t, &old); }
                         else { publish_board_update(state, &t); }
                         if is_marking_done {
@@ -303,11 +326,15 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .ok_or_else(|| anyhow!("taskId is required"))?;
             let executor_type = args.get("executorType").and_then(|v| v.as_str())
                 .unwrap_or("manual_session");
-            // Use explicit executorId or fall back to a generated session identifier
+            // Use explicit executorId, fall back to MCP session ID, then default
             let executor_id = args.get("executorId").and_then(|v| v.as_str())
-                .unwrap_or("claude-code-session");
+                .map(|s| s.to_string())
+                .or_else(|| current_session_id())
+                .unwrap_or_else(|| "claude-code-session".to_string());
+            let executor_id = executor_id.as_str();
             match state.mission.db().claim_board_task(task_id, executor_id, executor_type) {
                 Ok(Some(task)) => {
+                    record_session_task_binding(state, &task.id, &task.title);
                     state.event_bus.publish_traced(
                         DaemonEvent::BoardTaskClaimed {
                             task_id: task.id.clone(),
@@ -355,6 +382,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .db()
                 .add_board_task_note(&input)
                 .map_err(|e| anyhow!("DB error: {}", e))?;
+            // Refresh binding — session is actively updating this task
+            if let Ok(Some(task)) = state.mission.db().get_board_task(&task_id) {
+                record_session_task_binding(state, &task.id, &task.title);
+            }
             state.event_bus.publish_traced(
                 DaemonEvent::BoardTaskNoteAdded {
                     task_id: task_id.clone(),

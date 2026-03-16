@@ -466,6 +466,7 @@ async fn main() -> Result<()> {
         task_cited_kbs: Arc::new(std::sync::Mutex::new(HashMap::new())),
         kb_cooccurrence_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         pending_compact_restart: Arc::new(std::sync::Mutex::new(HashSet::new())),
+        session_task_bindings: Arc::new(std::sync::Mutex::new(HashMap::new())),
         config_file_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         job_store: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         slot_current_model: Arc::new(std::sync::Mutex::new(HashMap::new())),

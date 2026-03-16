@@ -300,6 +300,10 @@ pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
                             );
                             // Update associated kb_operation
                             let _ = state.mission.db().kb_ops_complete_by_task_id(&task.id, "done", Some(&result_text));
+                            // Board progress extraction: parse JSON output and write notes
+                            if task.prompt.starts_with("[board_progress]") {
+                                apply_board_progress_result(state, &result_text);
+                            }
                             info!(
                                 task_id = %task.id, slot_id = %slot_id,
                                 age_min = elapsed / 60000,
@@ -350,6 +354,10 @@ pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
         if let Ok(true) = state.mission.db().kb_ops_complete_by_task_id(&task.id, kb_status, Some(&result_msg)) {
             info!(task_id = %task.id, kb_status = kb_status, "KB operation updated via reaper");
         }
+        // Board progress extraction: parse JSON output and write notes (timeout path)
+        if new_status == missiond_core::types::TaskStatus::Done && task.prompt.starts_with("[board_progress]") {
+            apply_board_progress_result(state, &result_msg);
+        }
         warn!(
             task_id = %task.id,
             slot_id = ?task.slot_id,
@@ -357,5 +365,74 @@ pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
             age_min = elapsed / 60000,
             "Reaped stale submit task"
         );
+    }
+}
+
+/// Parse structured JSON from board_progress extraction task and write notes/status to DB.
+/// Worker outputs: { "task_progress": [{ task_id, summary, is_done, confidence }] }
+/// Daemon writes directly to DB — no MCP tool calls needed (Gemini ARB recommendation).
+fn apply_board_progress_result(state: &AppState, json_text: &str) {
+    #[derive(serde::Deserialize)]
+    struct ProgressOutput {
+        task_progress: Vec<TaskProgress>,
+    }
+    #[derive(serde::Deserialize)]
+    struct TaskProgress {
+        task_id: String,
+        summary: String,
+        #[serde(default)]
+        is_done: bool,
+        #[serde(default = "default_confidence")]
+        confidence: f64,
+    }
+    fn default_confidence() -> f64 { 0.5 }
+
+    // Extract JSON from response (may have surrounding text)
+    let json_str = if let (Some(start), Some(end)) = (json_text.find('{'), json_text.rfind('}')) {
+        &json_text[start..=end]
+    } else {
+        json_text
+    };
+
+    let output: ProgressOutput = match serde_json::from_str(json_str) {
+        Ok(o) => o,
+        Err(e) => {
+            warn!(error = %e, preview = %json_text.chars().take(200).collect::<String>(),
+                "Failed to parse board progress JSON");
+            return;
+        }
+    };
+
+    let db = state.mission.db();
+    for tp in &output.task_progress {
+        if tp.confidence < 0.5 { continue; }
+
+        // Write progress note
+        let _ = db.add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+            task_id: tp.task_id.clone(),
+            content: tp.summary.clone(),
+            note_type: Some("progress".to_string()),
+            author: Some("auto-extract".to_string()),
+        });
+        info!(task_id = %tp.task_id, is_done = tp.is_done, confidence = tp.confidence,
+            "Board progress note written (auto-extract)");
+
+        // Auto-mark done only with high confidence + CAS: verify task still Running
+        // Gemini ARB: prevents overwriting Cancelled/Blocked status set during extraction delay
+        if tp.is_done && tp.confidence >= 0.8 {
+            let still_running = db.get_board_task(&tp.task_id)
+                .ok().flatten()
+                .map(|t| t.status == missiond_core::types::BoardTaskStatus::Running)
+                .unwrap_or(false);
+            if still_running {
+                let _ = db.update_board_task(&tp.task_id, &missiond_core::types::UpdateBoardTaskInput {
+                    status: Some("done".to_string()),
+                    ..Default::default()
+                });
+                info!(task_id = %tp.task_id, confidence = tp.confidence, "Board task auto-marked done");
+            } else {
+                debug!(task_id = %tp.task_id, "Board task no longer running, skipping auto-done");
+            }
+        }
     }
 }

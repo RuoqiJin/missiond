@@ -92,6 +92,15 @@ pub(crate) struct CurrentToolInfo {
 }
 
 
+/// Implicit session→task binding: recorded when Claude Code queries/updates a Board task.
+/// Used by auto-progress extraction to determine which tasks a session was working on.
+#[derive(Debug, Clone)]
+pub(crate) struct SessionTaskBinding {
+    pub task_id: String,
+    pub task_title: String,
+    pub bound_at: i64,
+}
+
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) mission: Arc<MissionControl>,
@@ -203,6 +212,9 @@ pub(crate) struct AppState {
     /// Slots pending graceful restart due to low context (detected "until auto-compact").
     /// Restart is deferred until the slot becomes Idle to avoid interrupting tasks.
     pub(crate) pending_compact_restart: Arc<std::sync::Mutex<HashSet<String>>>,
+    /// Implicit session→task bindings: when Claude Code queries/updates a Board task,
+    /// auto-record which session is working on which tasks (for auto-progress extraction).
+    pub(crate) session_task_bindings: Arc<std::sync::Mutex<HashMap<String, Vec<SessionTaskBinding>>>>,
     /// Per-file async lock for sys_config patch operations (prevents TOCTOU races).
     pub(crate) config_file_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// In-memory async job store — tracks long-running operations.
