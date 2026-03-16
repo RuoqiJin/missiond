@@ -249,10 +249,28 @@ async fn main() -> Result<()> {
     })?);
     mission.start().await?;
 
+    // Phase 6.5: Validate static slot IDs don't use reserved 'slot-dyn-' prefix
+    for slot in mission.list_slots() {
+        if slot.config.id.starts_with("slot-dyn-") {
+            return Err(anyhow!(
+                "Static slot '{}' uses reserved 'slot-dyn-' prefix. \
+                 Dynamic slot IDs are system-managed. Please rename in slots.yaml.",
+                slot.config.id
+            ));
+        }
+    }
+
     // Startup: clean orphan slot_tasks from previous daemon instance
     match mission.db().cleanup_orphan_slot_tasks() {
         Ok(n) if n > 0 => info!(count = n, "Cleaned up orphan slot tasks from previous run"),
         Err(e) => warn!(error = %e, "Failed to cleanup orphan slot tasks"),
+        _ => {}
+    }
+
+    // Phase 6.4: Recover stale running board tasks from previous daemon crash
+    match mission.db().recover_stale_running_tasks(0) {
+        Ok(n) if n > 0 => info!(count = n, "Startup: recovered stale running board tasks"),
+        Err(e) => warn!(error = %e, "Failed to recover stale board tasks on startup"),
         _ => {}
     }
 

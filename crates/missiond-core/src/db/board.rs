@@ -47,6 +47,18 @@ impl MissionDB {
         let now = chrono::Utc::now().to_rfc3339();
         let id = uuid::Uuid::new_v4().to_string();
 
+        // Phase 6.6: Enforce description size limit (50KB) — DB-layer safety net
+        const MAX_DESC_LEN: usize = 50_000;
+        let description = match &input.description {
+            Some(d) if d.len() > MAX_DESC_LEN => {
+                tracing::warn!(len = d.len(), "Board task description exceeds 50KB, truncating");
+                let end = crate::embedding::char_boundary_at(d, MAX_DESC_LEN);
+                format!("{}...(truncated from {} bytes)", &d[..end], d.len())
+            }
+            Some(d) => d.clone(),
+            None => String::new(),
+        };
+
         // Get max order for siblings
         let conn = self.conn();
         let max_order: i64 = if let Some(ref pid) = input.parent_id {
@@ -69,7 +81,7 @@ impl MissionDB {
         let task = BoardTask {
             id,
             title: input.title.clone(),
-            description: input.description.clone().unwrap_or_default(),
+            description,
             status: BoardTaskStatus::Open,
             priority: input.priority.clone().unwrap_or_else(|| "medium".to_string()),
             category: input.category.clone().unwrap_or_else(|| "other".to_string()),

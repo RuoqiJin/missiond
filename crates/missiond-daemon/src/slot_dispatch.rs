@@ -58,6 +58,33 @@ impl SlotDispatchGuard {
     pub fn release(&self, slot_id: &str) {
         self.get_flag(slot_id).store(false, Ordering::SeqCst);
     }
+
+    /// Try to acquire and return an RAII guard that auto-releases on drop.
+    /// Returns None if the slot is already locked.
+    pub fn try_acquire_guard(&self, slot_id: &str) -> Option<SlotAcquireGuard<'_>> {
+        if self.try_acquire(slot_id) {
+            Some(SlotAcquireGuard { dispatch: self, slot_id: slot_id.to_string() })
+        } else {
+            None
+        }
+    }
+}
+
+/// RAII guard — automatically releases slot dispatch lock on Drop.
+/// Eliminates manual release() calls and prevents lock leaks on early return or panic.
+pub(crate) struct SlotAcquireGuard<'a> {
+    dispatch: &'a SlotDispatchGuard,
+    slot_id: String,
+}
+
+impl<'a> SlotAcquireGuard<'a> {
+    pub fn slot_id(&self) -> &str { &self.slot_id }
+}
+
+impl Drop for SlotAcquireGuard<'_> {
+    fn drop(&mut self) {
+        self.dispatch.release(&self.slot_id);
+    }
 }
 
 #[cfg(test)]
