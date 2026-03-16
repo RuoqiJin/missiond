@@ -232,6 +232,7 @@ impl CodexCli {
               "Codex CLI: calling");
 
         let mut cmd = tokio::process::Command::new(&self.binary);
+        cmd.kill_on_drop(true); // Cancel safety: kill orphan process when future is dropped
         cmd.args(["exec", "--json", "--ephemeral", "--skip-git-repo-check"]);
         cmd.args(["-m", model]);
         cmd.args(["-C", "/tmp"]);
@@ -294,7 +295,11 @@ impl CodexCli {
         if !status.success() {
             let stderr_msg = if let Some(mut stderr) = child.stderr.take() {
                 let mut buf = String::new();
-                let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut buf).await;
+                // Timeout prevents hang if child process inherited stderr pipe to a sub-daemon
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut buf),
+                ).await;
                 buf.chars().take(500).collect::<String>()
             } else {
                 String::new()
