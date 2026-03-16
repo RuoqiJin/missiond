@@ -250,6 +250,29 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 }
             }
 
+            // Phase 2: AST-KB linking — if detail contains symbol/file_hint, create graph link
+            if result.action == "created" || result.action == "updated" {
+                if let Some(ref detail) = result.entry.detail {
+                    let symbol = detail.get("symbol").and_then(|v| v.as_str());
+                    let file_hint = detail.get("file_hint").and_then(|v| v.as_str());
+                    if let Some(sym) = symbol {
+                        // Search AST for this symbol to get ast_node_id
+                        let ast_node_id = state.mission.db()
+                            .ast_find_related(sym, 1)
+                            .ok()
+                            .and_then(|hits| hits.into_iter().next().map(|h| h.id));
+                        let _ = state.mission.db().kb_add_ast_link(
+                            &result.entry.id,
+                            sym,
+                            file_hint,
+                            ast_node_id.as_deref(),
+                            "related_to",
+                            0.8,
+                        );
+                    }
+                }
+            }
+
             // Conflict detection: for new entries, check semantic similarity against existing KB
             let conflicts = if result.action == "created" {
                 detect_kb_conflicts(state, &result.entry).await
@@ -304,8 +327,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 if let Some(ref id) = entry_id {
                     let mut guard = state.embedding_cache.write().await;
                     guard.retain(|(eid, _)| eid != id);
-                    // Clean up knowledge graph edges
+                    // Clean up knowledge graph edges + AST links
                     let _ = state.mission.db().kb_delete_edges_for(id);
+                    let _ = state.mission.db().kb_delete_ast_links_for(id);
                 }
             }
             Ok(ToolResult::json(&serde_json::json!({

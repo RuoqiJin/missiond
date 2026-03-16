@@ -99,6 +99,8 @@ orchestrator 会自动检测并处理 MCP 连接问题，你只需上报即可�
 📐 写入格式强制要求:
 summary ≤ 120 字，必须是结论性陈述，禁止叙事体
 detail 必须遵循三段式: {\"trigger\": \"触发条件\", \"conclusion\": \"最终结论\", \"action\": \"应采取的动作\"}
+如果知识关联特定代码符号（函数/结构体/模块），可选添加: \"symbol\": \"符号名\", \"file_hint\": \"文件路径\"
+系统会自动将知识与 AST 代码节点建立图谱链接，提升代码上下文注入精度。
 
 ❌ Bad Case（系统会拒绝的写法）:
 summary: '先查看了 xxx.rs 的第 30 行，发现 parse 报错 InvalidToken，然后尝试改用 serde_json，但还是失败，最后发现是 UTF-8 BOM 导致...'

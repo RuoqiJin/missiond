@@ -723,6 +723,17 @@ async fn search_skills(state: &AppState, query: &str) -> Vec<SkillHint> {
         })
 }
 
+/// Category → daily decay factor for read-time utility computation.
+/// daily_factor = 0.5^(1/half_life_days). Non-decaying categories return 1.0.
+fn category_daily_factor(category: &str) -> f64 {
+    if category == "memory:debug" { return 0.9517; }  // 14d
+    if category == "memory:bugfix" { return 0.9772; }  // 30d
+    if category == "memory:ops" { return 0.9675; }     // 21d
+    if category == "memory:feature" { return 0.9923; } // 90d
+    if category.starts_with("memory") { return 0.9885; } // 60d
+    1.0 // non-decaying
+}
+
 async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
     let fut = async {
         let top_k = 10usize;
@@ -803,10 +814,12 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
                     .map(|t| (now - t.with_timezone(&chrono::Utc)).num_hours() as f64 / 24.0)
                     .unwrap_or(0.0);
                 let decay = embedding::temporal_decay(&entry.category, age_days);
-                // Hybrid scoring: MAX(temporal_decay, utility_score)
-                // New entries get early exposure via temporal_decay (fresh = 1.0),
-                // proven entries survive via utility_score even after freshness fades.
-                let relevance = decay.max(entry.utility_score);
+                // Hybrid scoring: weighted sum (Gemini ARB: MAX loses information)
+                // 0.3 * temporal_decay + 0.7 * effective_utility
+                // effective_utility = read-time decay of base utility_score
+                let daily_factor = category_daily_factor(&entry.category);
+                let effective_utility = entry.utility_score * daily_factor.powf(age_days);
+                let relevance = 0.3 * decay + 0.7 * effective_utility;
                 scored_entries.push((entry.clone(), rrf * relevance * entry.confidence));
             }
         }
