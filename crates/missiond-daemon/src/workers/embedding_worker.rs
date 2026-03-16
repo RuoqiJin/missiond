@@ -463,8 +463,13 @@ fn topic_extraction_prompt(max_topics: usize) -> String {
     )
 }
 
+/// Known LLM pollution tags (NOT generic XML — avoids false positives on <vector>, <div> etc.)
+static LLM_TAG_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"</?(?:invoke|think|thought|search|boltAction|minimax:tool_call|parameter)\b[^>]*>").unwrap()
+});
+
 /// Parse and validate topic strings from LLM response.
-/// Strips code fences, filters garbage (tool output leaks, XML tags, overlength).
+/// Strips code fences, filters garbage (tool output leaks, LLM tags, overlength).
 fn parse_and_validate_topics(raw: &str, max_topics: usize) -> Option<Vec<String>> {
     let json_str = raw.trim();
     let json_str = if json_str.starts_with("```") {
@@ -485,23 +490,19 @@ fn parse_and_validate_topics(raw: &str, max_topics: usize) -> Option<Vec<String>
         }
     };
 
-    // Regex for generic XML/HTML tags
-    let tag_re = regex::Regex::new(r"<[^>]{2,}>").unwrap();
-
     let valid: Vec<String> = topics.into_iter()
         .filter(|t| {
             let t = t.trim();
             let len = t.len();
             // Length guard: 10-200 chars
             if len < 10 || len > 200 { return false; }
-            // Content blacklist: tool output / XML / thinking leaks
+            // Content blacklist: tool output / thinking leaks
             if t.contains("[Tool:") || t.contains("[Tool：") { return false; }
-            if t.contains("<invoke") || t.contains("</think>") { return false; }
             if t.starts_with("[A]") || t.starts_with("[R]") || t.starts_with("[T]") { return false; }
             // Contains internal newlines → likely raw output paste
             if t.contains('\n') { return false; }
-            // Generic XML tag pollution
-            if tag_re.is_match(t) { return false; }
+            // Known LLM pollution tags only (narrow scope, avoids killing <vector>/<div> etc.)
+            if LLM_TAG_RE.is_match(t) { return false; }
             true
         })
         .map(|t| {
@@ -552,7 +553,13 @@ async fn extract_conv_topics_llm(
     }
 
     // Fallback: MiniMax M2.5
-    let handle = state.minimax.as_ref()?;
+    let handle = match state.minimax.as_ref() {
+        Some(h) => h,
+        None => {
+            warn!("MiniMax not configured, fallback aborted — no topic extraction possible");
+            return None;
+        }
+    };
     let messages = vec![
         ChatMessage { role: "system".into(), content: system_prompt },
         ChatMessage { role: "user".into(), content: conv_text.to_string() },
