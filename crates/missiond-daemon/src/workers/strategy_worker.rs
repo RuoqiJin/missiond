@@ -7,7 +7,7 @@
 //!
 //! Design doc: `docs/designs/arch-maintenance-and-strategic-analysis.md`
 
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -16,12 +16,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{debug, info, warn};
 
-use crate::event_bus::{DaemonEvent, TimelineEvent};
+use crate::event_bus::DaemonEvent;
 use crate::gemini_client::REQUEST_CALLER;
 use crate::embedding_worker::resolve_llm_credentials;
 use crate::state::AppState;
-
-use super::{BackgroundWorker, WorkerContext};
 
 /// Analysis version — bump to re-analyze all sessions with a new schema.
 const STRATEGY_ANALYSIS_VERSION: i32 = 1;
@@ -30,32 +28,10 @@ const MAX_ANALYSIS_RETRIES: i32 = 3;
 /// Maximum cleaned prompt size (bytes) before truncation.
 /// OS ARG_MAX is ~2MB on macOS; keep well under to avoid "Argument list too long".
 const MAX_PROMPT_SIZE: usize = 1_500_000;
-/// Startup delay to let other systems stabilize.
-const STARTUP_DELAY_SECS: u64 = 120;
-/// Polling fallback interval (Phase 3c: removed, event-driven only).
-#[allow(dead_code)]
-const POLL_INTERVAL_SECS: u64 = 300;
-
 static RE_ANSI: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap());
 static RE_BASE64: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"data:[a-zA-Z/]+;base64,[A-Za-z0-9+/=]{100,}").unwrap());
-
-pub(crate) struct StrategyWorker {
-    pub timeline_rx: tokio::sync::broadcast::Receiver<TimelineEvent>,
-}
-
-impl BackgroundWorker for StrategyWorker {
-    fn name(&self) -> &'static str { "strategy_analyst" }
-
-    async fn run(self, _state: Arc<AppState>, _ctx: WorkerContext) {
-        // Gemini ARB: event loop disabled — analysis now triggered by
-        // session_reflection_consumer via run_pending_analysis().
-        // Worker kept alive for WorkerRegistry registration (Phase 3d: remove entirely).
-        info!("Strategy analyst worker: event loop disabled (Gemini ARB — session_reflection_consumer handles trigger)");
-        std::future::pending::<()>().await;
-    }
-}
 
 /// Byte budget per chunk for dynamic chunking (~800KB cleaned text).
 const CHUNK_BYTE_BUDGET: usize = 800_000;

@@ -4,7 +4,6 @@
 //! L2: MiniMax M2.5 full-coverage triage — structured findings/severity.
 //! High-severity sessions get Board tasks for manual deep-dive.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::{info, warn, debug};
@@ -44,30 +43,11 @@ pub(crate) async fn backfill(state: &AppState, since: &str) -> anyhow::Result<(u
     Ok((analyzed, skipped))
 }
 
-/// Startup delay (legacy, kept for backfill reference).
-#[allow(dead_code)]
-const STARTUP_DELAY_SECS: u64 = 120;
-
 /// Rate limit between session analyses (seconds).
 const INTER_SESSION_DELAY_SECS: u64 = 10;
 
 /// MiniMax max tokens for retrospective analysis.
 const MINIMAX_MAX_TOKENS: u32 = 2000;
-
-pub(crate) struct RetroWorker;
-
-impl super::BackgroundWorker for RetroWorker {
-    fn name(&self) -> &'static str { "retro_worker" }
-
-    async fn run(self, _state: Arc<AppState>, _ctx: super::WorkerContext) {
-        // Phase 3c: polling disabled — retro analysis now triggered by
-        // session_reflection_consumer in event_router.rs via process_pending().
-        // Worker kept alive for BackgroundWorker trait registration (Phase 3d: remove entirely).
-        info!("Retro worker: polling disabled (Phase 3c event-driven migration)");
-        // Park forever — will be cleaned up in Phase 3d
-        std::future::pending::<()>().await;
-    }
-}
 
 pub(crate) async fn process_pending(state: &AppState) -> anyhow::Result<usize> {
     let db = state.mission.db();
