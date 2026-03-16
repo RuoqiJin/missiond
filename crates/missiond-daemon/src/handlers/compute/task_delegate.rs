@@ -4,6 +4,7 @@ use missiond_mcp::tools::{ToolResult, ToolError, error_codes};
 use missiond_core::types::CreateBoardTaskInput;
 use missiond_core::pty::SessionState;
 
+use crate::slot_dispatch::SlotAcquireGuard;
 use crate::state::AppState;
 
 /// Max timeout: 2 hours.
@@ -16,6 +17,14 @@ const MAX_DELEGATES_PER_MINUTE: usize = 5;
 /// Roles excluded from auto-selection (meta agents, Jarvis itself).
 const EXCLUDED_ROLES: &[&str] = &["jarvis", "memory", "supervisor", "decision"];
 
+/// Phase 6.2: Valid intent whitelist — reject unknown intents instead of silent fallback.
+const VALID_INTENTS: &[&str] = &["code", "ops", "research", "general"];
+
+/// Phase 6.3: Context injection size limits.
+const MAX_ENTRY_CHARS: usize = 500;     // Per KB/Skill entry
+const MAX_CONTEXT_CHARS: usize = 2000;  // Total context block
+const MAX_DESCRIPTION_CHARS: usize = 16000; // Final description
+
 pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result<ToolResult> {
     let objective = match args.get("objective").and_then(|v| v.as_str()) {
         Some(o) if !o.trim().is_empty() => o.trim(),
@@ -24,7 +33,16 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         )),
     };
 
-    let intent = args.get("intent").and_then(|v| v.as_str()).unwrap_or("general");
+    // Phase 6.2: Strict intent whitelist — fail-fast on unknown intent
+    let intent = match args.get("intent").and_then(|v| v.as_str()) {
+        Some(i) if VALID_INTENTS.contains(&i) => i,
+        Some(i) => return Ok(ToolResult::structured_error(
+            ToolError::new(error_codes::INVALID_PARAM,
+                &format!("Invalid intent '{}'. Valid: {:?}", i, VALID_INTENTS))
+        )),
+        None => "general",
+    };
+
     let priority = args.get("priority").and_then(|v| v.as_str()).unwrap_or("medium");
     let timeout_secs = args.get("timeout_secs")
         .and_then(|v| v.as_i64())
@@ -52,39 +70,47 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         _ => "coder",
     };
 
-    // 1. Find idle slot matching role
-    let slot_id = find_idle_slot(state, template).await;
+    // Phase 6.1: Find idle slot with RAII guard (atomic check+reserve)
+    let guard = find_and_reserve_slot(state, template).await;
+    let assignee = guard.as_ref().map(|g| g.slot_id().to_string()).unwrap_or_default();
 
     // 2. If no idle slot, try auto-provision dynamic slot
-    let (assignee, provisioned) = match slot_id {
-        Some(id) => (id, false),
-        None => {
-            // ops requires explicit approval — don't auto-provision
-            if intent == "ops" {
-                // Queue without assignee; autopilot will pick up when a slot frees
-                (String::new(), false)
-            } else {
-                match auto_provision_slot(state, template, objective, timeout_secs, cwd).await {
-                    Ok(id) => (id, true),
-                    Err(e) => {
-                        tracing::warn!("Auto-provision failed, queueing without assignee: {}", e);
-                        (String::new(), false)
-                    }
+    let (assignee, provisioned) = if !assignee.is_empty() {
+        (assignee, false)
+    } else {
+        // Phase 6.2: Guard uses template, not intent — prevents intent escape
+        if template == "ops" {
+            // Queue without assignee; autopilot will pick up when a slot frees
+            (String::new(), false)
+        } else {
+            match auto_provision_slot(state, template, objective, timeout_secs, cwd).await {
+                Ok(id) => (id, true),
+                Err(e) => {
+                    tracing::warn!("Auto-provision failed, queueing without assignee: {}", e);
+                    (String::new(), false)
                 }
             }
         }
     };
+    // guard is dropped here (if Some) → auto-releases slot dispatch lock
 
-    // 3. Build context from hints
+    // 3. Build context from hints (Phase 6.3: with size limits)
     let mut description = objective.to_string();
     if !context_hints.is_empty() {
-        // Pre-build context from KB/Skills
         let keywords = context_hints.join(" ");
         if let Ok(context) = build_context(state, &keywords).await {
             if !context.is_empty() {
                 description = format!("{}\n\n## 预加载上下文\n{}", objective, context);
             }
         }
+    }
+
+    // Phase 6.3: Enforce description size limit
+    if description.len() > MAX_DESCRIPTION_CHARS {
+        let original_len = description.len();
+        let end = crate::helpers::char_boundary_at(&description, MAX_DESCRIPTION_CHARS);
+        description = format!("{}...(truncated from {} bytes)", &description[..end], original_len);
+        tracing::warn!(original_len, "task_delegate: description truncated to {}B", MAX_DESCRIPTION_CHARS);
     }
 
     // 4. Create BoardTask
@@ -119,8 +145,9 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
     })))
 }
 
-/// Find an idle static or dynamic slot matching the template's role.
-async fn find_idle_slot(state: &AppState, template: &str) -> Option<String> {
+/// Phase 6.1: Find an idle slot and atomically reserve it via RAII guard.
+/// Returns a SlotAcquireGuard that auto-releases on drop.
+async fn find_and_reserve_slot<'a>(state: &'a AppState, template: &str) -> Option<SlotAcquireGuard<'a>> {
     let target_role = match template {
         "coder" | "researcher" => "coder",
         "ops" => "operator",
@@ -136,12 +163,17 @@ async fn find_idle_slot(state: &AppState, template: &str) -> Option<String> {
         if slot.config.role != target_role {
             continue;
         }
-        // Check if idle
-        if let Some(info) = state.pty.get_status(&slot.config.id).await {
+        // Atomically: acquire guard → check idle
+        let guard = match state.slot_dispatch.try_acquire_guard(&slot.config.id) {
+            Some(g) => g,
+            None => continue, // Another caller is dispatching to this slot
+        };
+        if let Some(info) = state.pty.get_status(guard.slot_id()).await {
             if info.state == SessionState::Idle {
-                return Some(slot.config.id.clone());
+                return Some(guard); // Guard held — caller responsible via RAII drop
             }
         }
+        // guard dropped here → auto-releases
     }
     None
 }
@@ -179,14 +211,8 @@ async fn auto_provision_slot(
     let result = super::compute_slot::handle(state, "mission_compute_slot", create_args).await?;
 
     // Parse the job_accepted response to get the slot info
-    // compute_slot create returns a job — we need to extract the slot_id from the job
-    // The slot_id is generated inside compute_slot, but we need it now.
-    // Instead of duplicating logic, let's parse the response.
     if let Some(missiond_mcp::tools::ToolContent::Text { text }) = result.content.first() {
         if let Ok(parsed) = serde_json::from_str::<Value>(text) {
-            // Job accepted — the slot_id is in the background task
-            // For now, we can't get it synchronously. Instead, queue without assignee
-            // and let autopilot pick it up once the slot spawns.
             if parsed.get("job_id").is_some() {
                 return Err(anyhow!("Slot spawning async (job_id: {}), task will be picked up by autopilot",
                     parsed["job_id"].as_str().unwrap_or("unknown")));
@@ -197,25 +223,48 @@ async fn auto_provision_slot(
     Err(anyhow!("Failed to parse compute_slot response"))
 }
 
-/// Build context from KB/Skills using keywords.
+/// Phase 6.3: Build context from KB/Skills with size limits.
 async fn build_context(state: &AppState, keywords: &str) -> Result<String> {
     let mut parts = Vec::new();
+    let mut total_len = 0;
 
     // Search KB (FTS5, take first 3)
     if let Ok(entries) = state.mission.db().kb_search(keywords, None) {
         for entry in entries.iter().take(3) {
-            parts.push(format!("- [KB:{}] {}", entry.key, entry.summary));
+            let summary = truncate_str(&entry.summary, MAX_ENTRY_CHARS);
+            let line = format!("- [KB:{}] {}", entry.key, summary);
+            total_len += line.len();
+            if total_len > MAX_CONTEXT_CHARS { break; }
+            parts.push(line);
         }
     }
 
     // Search Skills (take first 3)
-    let skill_results = state.skills.search(keywords);
-    for skill in skill_results.iter().take(3) {
-        let desc = skill.description.as_deref().unwrap_or("");
-        parts.push(format!("- [Skill:{}] {}", skill.name, desc));
+    if total_len < MAX_CONTEXT_CHARS {
+        let skill_results = state.skills.search(keywords);
+        for skill in skill_results.iter().take(3) {
+            let desc = skill.description.as_deref().unwrap_or("");
+            let desc = truncate_str(desc, MAX_ENTRY_CHARS);
+            let line = format!("- [Skill:{}] {}", skill.name, desc);
+            total_len += line.len();
+            if total_len > MAX_CONTEXT_CHARS { break; }
+            parts.push(line);
+        }
     }
 
     Ok(parts.join("\n"))
+}
+
+/// Truncate a string to max_chars, respecting char boundaries.
+fn truncate_str(s: &str, max_chars: usize) -> &str {
+    if s.len() <= max_chars {
+        return s;
+    }
+    let mut end = max_chars;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Truncate objective to 80 chars for title.
