@@ -73,7 +73,7 @@ crates:
         entry: src/llm/
         key_files: [gemini_cli.rs, gemini_client.rs, router_chat.rs]
       workers:
-        role: "后台任务（巡检、记忆提取、合并）"
+        role: "后台任务（巡检、记忆提取、合并、策略与偏好分析）"
         entry: src/workers/
       engine:
         role: "PTY 引擎封装"
@@ -167,6 +167,10 @@ data_flows:
     description: "混合搜索"
     flow: "查询 → FTS5 全文搜索 + 向量相似度 → RRF 排序融合 → top-k 结果"
 
+  strategy_analysis:
+    description: "用户偏好与模式分析流"
+    flow: "Timeline事件广播(timeline_rx) → StrategyWorker订阅 → 偏好发现与模式提取"
+
 # ── 关键不变量 ──
 invariants:
   - "一个 slot 同一时刻只处理一个任务"
@@ -214,14 +218,16 @@ error_handling:
 # ── 领域词汇表 ──
 glossary:
   slot: "一个 Claude Code 实例的运行位（含 PTY + 配置 + 状态）"
+  dynamic_slot: "动态运行位，支持持久化、系统重启后的恢复与超时自动销毁"
   task: "分配给 slot 执行的具体工作单元"
+  job_store: "全局状态(AppState)中管理异步作业/任务的内存存储映射"
   KB/知识库: "SQLite 中的长期记忆存储（KnowledgeEntry 表）"
   beacon: "代码库中的关键锚点，用于快速定位（文件+行号+摘要）"
   semantic_parsing: "从 PTY 终端原始输出提取结构化状态的过程"
   confirm/确认: "Claude Code 请求用户批准工具调用时的对话框"
   permission_policy: "自动批准/拒绝/等待人工确认的策略规则"
   handler: "daemon 中处理单个 MCP 工具调用的函数"
-  worker: "daemon 中的后台持续任务（巡检/提取/合并）"
+  worker: "daemon 中的后台持续任务（巡检/提取/合并/分析）"
   EventBus: "daemon 内部的异步事件发布-订阅通道"
   IPC: "daemon 与 MCP server 之间的 Unix socket 通信"
   hybrid_search: "FTS5 全文 + 向量相似度 + RRF 融合的搜索模式"
@@ -246,3 +252,6 @@ design_rationale:
   ipc_over_http:
     decision: "daemon ↔ MCP 用 Unix socket IPC 而非 HTTP"
     why: "同机通信，IPC 延迟 < 1ms，HTTP 有序列化/连接开销；且 MCP 协议本身是 stdio JSON-RPC"
+  dynamic_slot_recovery:
+    decision: "Daemon启动时自动恢复活跃的 dynamic slots 并清理过期 slots"
+    why: "保证动态分配的临时运行位在系统重启/崩溃后能够继续提供服务，同时避免幽灵进程泄露资源"
