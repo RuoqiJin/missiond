@@ -274,31 +274,20 @@ async fn main() -> Result<()> {
         _ => {}
     }
 
-    // Recover active dynamic slots from previous run — terminate expired, re-register active
-    match mission.db().find_expired_dynamic_slots() {
-        Ok(expired) => {
-            for s in &expired {
-                let _ = mission.db().terminate_dynamic_slot(&s.id, "daemon_restart_expired");
-            }
-            if !expired.is_empty() {
-                info!(count = expired.len(), "Terminated expired dynamic slots on startup");
-            }
-        }
-        Err(e) => warn!(error = %e, "Failed to check expired dynamic slots"),
-    }
-    // Re-register surviving active dynamic slots into SlotManager
+    // Phase 6.7: Terminate ALL active dynamic slots on daemon restart.
+    // Dynamic slots are ephemeral — their PTY processes will be killed by the
+    // orphan cleanup (pgrep MISSIOND_SLOT_ID) later in startup. Re-registering
+    // them creates zombie slots (DB active, process dead). Clean slate is safer.
     match mission.db().list_dynamic_slots(Some("active")) {
         Ok(active) => {
             for s in &active {
-                if let Ok(config) = serde_json::from_str::<missiond_core::types::SlotConfig>(&s.config) {
-                    mission.register_dynamic_slot(config);
-                }
+                let _ = mission.db().terminate_dynamic_slot(&s.id, "daemon_restart");
             }
             if !active.is_empty() {
-                info!(count = active.len(), "Recovered active dynamic slots from DB");
+                info!(count = active.len(), "Terminated active dynamic slots on startup (clean slate)");
             }
         }
-        Err(e) => warn!(error = %e, "Failed to recover dynamic slots"),
+        Err(e) => warn!(error = %e, "Failed to cleanup dynamic slots on startup"),
     }
 
     // PTY manager setup
