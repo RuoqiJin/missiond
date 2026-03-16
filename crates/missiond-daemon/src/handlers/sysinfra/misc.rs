@@ -691,6 +691,8 @@ async fn gemini_watch_loop(state: AppState) {
                 flow_template: None,
                 depends_on: None,
                 dedupe_key: None,
+                timeout_secs: None,
+                context_intent: None,
             };
             if let Err(e) = state.mission.db().create_board_task(&input) {
                 warn!("Gemini watch: failed to create board task: {}", e);

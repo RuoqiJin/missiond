@@ -222,6 +222,14 @@ pub struct BoardTask {
     /// Used to find existing open tasks and aggregate repeated alerts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dedupe_key: Option<String>,
+    /// Custom timeout for autopilot reaper (NULL = default 1800s).
+    /// Set by task_delegate based on user-specified timeout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<i64>,
+    /// Intent tag from task_delegate (code|ops|research|general).
+    /// Used by autopilot for context_build keyword enhancement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_intent: Option<String>,
     /// Number of notes attached to this task (populated by list queries)
     #[serde(default, skip_serializing_if = "is_zero")]
     pub notes_count: i64,
@@ -334,6 +342,12 @@ pub struct CreateBoardTaskInput {
     /// Alert fingerprint for AIOps deduplication (set internally, not from MCP)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedupe_key: Option<String>,
+    /// Custom timeout in seconds (overrides default 1800s reaper)
+    #[serde(default, rename = "timeoutSecs")]
+    pub timeout_secs: Option<i64>,
+    /// Intent tag: code|ops|research|general (for context enhancement)
+    #[serde(default, rename = "contextIntent")]
+    pub context_intent: Option<String>,
 }
 
 /// Partial update for a board task
