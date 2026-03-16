@@ -15,7 +15,7 @@ use missiond_core::cc_tasks::CCMessageLine;
 use crate::events_sync;
 use crate::infra::message_handler::handle_new_messages;
 use crate::infra::session_util::detect_compaction;
-use crate::state::{AppState, CurrentToolInfo, EmbeddingTask, SlotProgress};
+use crate::state::{AppState, CurrentToolInfo, EmbeddingTask, SlotProgress, MEMORY_SLOW_SLOT_ID};
 
 pub(crate) struct ConversationLoggerWorker {
     pub conv_logger_rx: broadcast::Receiver<WatcherEvent>,
@@ -78,6 +78,9 @@ async fn handle_new_messages_event(
             s.pty_session_uuids.write().await.insert(session_id.clone());
             compaction_task_id = old_task_id;
             is_pty = true;
+
+            // Inherit session→task bindings across compaction (Gemini P0: prevent binding chain break)
+            inherit_task_bindings(s, &old_uuid, &session_id);
 
             // Fix A: 补齐 compacted session 的向量/摘要
             // handle_session_inactive() 跳过 compacted session，此处显式补发
@@ -150,6 +153,8 @@ async fn handle_session_inactive(s: &AppState, session_id: &str) {
         info!(session = %session_id, "Conversation marked completed");
         build_session_timeline(s, session_id);
         let _ = s.embedding_tx.try_send(EmbeddingTask::ProcessSession(session_id.to_string()));
+        // Auto-progress extraction: if this session was working on a Board task, extract progress
+        submit_board_progress_extraction(s, session_id);
     }
 }
 
@@ -198,4 +203,126 @@ async fn reconcile(s: &AppState) {
     if reconciled > 0 {
         info!(reconciled, "Lag reconciliation complete");
     }
+}
+
+/// Inherit session→task bindings across context compaction.
+/// When Claude Code triggers auto-compact, the old session_id is replaced by a new one.
+/// Without this, the binding chain breaks and auto-progress extraction silently fails.
+fn inherit_task_bindings(s: &AppState, old_session_id: &str, new_session_id: &str) {
+    if let Ok(mut map) = s.session_task_bindings.lock() {
+        if let Some(bindings) = map.get(old_session_id).cloned() {
+            if !bindings.is_empty() {
+                let count = bindings.len();
+                let new_bindings = map.entry(new_session_id.to_string()).or_default();
+                for b in &bindings {
+                    if !new_bindings.iter().any(|nb| nb.task_id == b.task_id) {
+                        new_bindings.push(b.clone());
+                    }
+                }
+                info!(
+                    old = %old_session_id, new = %new_session_id, tasks = count,
+                    "Task bindings inherited across compaction"
+                );
+            }
+        }
+    }
+}
+
+/// Submit board progress extraction when a session ends with bound Board tasks.
+/// Daemon-side: pre-assembles a token-safe conversation summary, then dispatches
+/// a structured JSON extraction task to the slow memory worker.
+fn submit_board_progress_extraction(s: &AppState, session_id: &str) {
+    // 1. Remove bindings (session is ending)
+    let bindings = match s.session_task_bindings.lock() {
+        Ok(mut map) => map.remove(session_id).unwrap_or_default(),
+        Err(_) => return,
+    };
+    if bindings.is_empty() { return; }
+
+    // 2. Filter: only keep tasks still in Running status
+    let db = s.mission.db();
+    let active_bindings: Vec<_> = bindings.into_iter().filter(|b| {
+        db.get_board_task(&b.task_id)
+            .ok().flatten()
+            .map(|t| t.status == missiond_core::types::BoardTaskStatus::Running)
+            .unwrap_or(false)
+    }).collect();
+    if active_bindings.is_empty() { return; }
+
+    // 3. Check message volume (< 4 → skip, not enough signal)
+    // Gemini ARB: lowered from 10 to 4 — short efficient sessions still deserve progress extraction
+    let msgs = db.get_conversation_messages(session_id, None, 4)
+        .unwrap_or_default();
+    if msgs.len() < 4 { return; }
+
+    // 4. Build conversation summary (Rust-side, token-safe — Gemini P1)
+    let summary = build_conversation_summary_for_progress(s, session_id, 50);
+
+    // 5. Build prompt with task info
+    let task_list: Vec<String> = active_bindings.iter()
+        .map(|b| format!("- {} (ID: {})", b.task_title, b.task_id))
+        .collect();
+
+    let prompt = format!(
+        "[board_progress]\n{}\n\n关联任务:\n{}\n\n会话摘要:\n{}",
+        s.prompts.extraction_board_progress(),
+        task_list.join("\n"),
+        summary,
+    );
+
+    // 6. Submit as memory task (dispatched to slot-memory-slow by memory_scheduler via role matching)
+    match s.mission.submit("memory", &prompt) {
+        Ok(task_id) => {
+            // Pin to slow memory slot
+            let _ = s.mission.db().update_task(
+                &task_id,
+                &missiond_core::types::TaskUpdate {
+                    slot_id: Some(MEMORY_SLOW_SLOT_ID.to_string()),
+                    ..Default::default()
+                },
+            );
+            info!(
+                session = %session_id,
+                tasks = active_bindings.len(),
+                submit_task = %task_id,
+                "Board progress extraction submitted"
+            );
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to submit board progress extraction");
+        }
+    }
+}
+
+/// Rust-side conversation summary builder (token-safe).
+/// Extracts user + assistant messages, truncates long content, caps total at ~4000 tokens.
+/// Gemini ARB: tail-biased — recent messages are most important for is_done judgment.
+/// Strategy: build from tail, then reverse so output reads chronologically.
+fn build_conversation_summary_for_progress(s: &AppState, session_id: &str, max_messages: usize) -> String {
+    let messages = s.mission.db()
+        .get_conversation_messages(session_id, None, max_messages as i64)
+        .unwrap_or_default();
+
+    // Build from tail (most recent first) to ensure latest progress is preserved
+    let mut parts: Vec<String> = Vec::new();
+    let mut total_len = 0usize;
+    for msg in messages.iter().rev() {
+        if msg.role != "user" && msg.role != "assistant" { continue; }
+        let content = if msg.content.len() > 500 {
+            let mut end = 500;
+            while end > 0 && !msg.content.is_char_boundary(end) { end -= 1; }
+            format!("{}...[truncated]", &msg.content[..end])
+        } else {
+            msg.content.clone()
+        };
+        let line = format!("[{}] {}\n", msg.role, content);
+        total_len += line.len();
+        if total_len > 15000 { // ~4000 tokens hard cap
+            parts.push("[...earlier messages truncated]\n".to_string());
+            break;
+        }
+        parts.push(line);
+    }
+    parts.reverse(); // Restore chronological order
+    parts.join("")
 }

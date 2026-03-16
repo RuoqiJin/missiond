@@ -19,8 +19,11 @@ pub(crate) fn sync_claude_md(state: &AppState) {
         .flatten()
         .and_then(|e| e.detail);
 
+    // Running board tasks for Active Tasks anchor
+    let running_tasks = db.list_board_tasks(Some("running"), false).unwrap_or_default();
+
     // Nothing to sync
-    if preferences.is_empty() && hot_keys.is_empty() && strategic_state.is_none() {
+    if preferences.is_empty() && hot_keys.is_empty() && strategic_state.is_none() && running_tasks.is_empty() {
         return;
     }
 
@@ -31,6 +34,7 @@ pub(crate) fn sync_claude_md(state: &AppState) {
         for p in &preferences { p.summary.hash(&mut hasher); }
         for k in &hot_keys { k.hash(&mut hasher); }
         if let Some(ref s) = strategic_state { s.to_string().hash(&mut hasher); }
+        for t in &running_tasks { t.id.hash(&mut hasher); t.title.hash(&mut hasher); }
         hasher.finish()
     };
     let last_hash = state.claude_md_hash.load(std::sync::atomic::Ordering::Relaxed);
@@ -52,6 +56,26 @@ pub(crate) fn sync_claude_md(state: &AppState) {
         managed.push_str("\n## Preferences\n");
         for p in &preferences {
             managed.push_str(&format!("- {}\n", p.summary));
+        }
+    }
+
+    // Active running tasks — persistent background anchor (prevents role drift after context compaction)
+    if !running_tasks.is_empty() {
+        managed.push_str("\n## Active Tasks\n");
+        for t in running_tasks.iter().take(5) {
+            let age = chrono::DateTime::parse_from_rfc3339(&t.updated_at)
+                .map(|dt| {
+                    let mins = (chrono::Utc::now() - dt.with_timezone(&chrono::Utc)).num_minutes();
+                    if mins < 60 { format!(", {}min", mins) }
+                    else { format!(", {}h", mins / 60) }
+                })
+                .unwrap_or_default();
+            managed.push_str(&format!(
+                "- [{}] {} (running{})\n",
+                &t.id[..8.min(t.id.len())],
+                t.title,
+                age,
+            ));
         }
     }
 

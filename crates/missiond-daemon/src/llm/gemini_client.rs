@@ -41,7 +41,7 @@ tokio::task_local! {
 }
 
 /// Read session ID from task-local context (returns None if not set).
-fn current_session_id() -> Option<String> {
+pub(crate) fn current_session_id() -> Option<String> {
     REQUEST_SESSION_ID.try_with(|id| id.clone()).ok()
 }
 

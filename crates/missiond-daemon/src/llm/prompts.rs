@@ -173,6 +173,27 @@ detail 采用三段式: {\"trigger\": \"...\", \"conclusion\": \"...\", \"action
 ✅ Good Case:
 summary: 'deploy-agent OOM 排查：优先看 journalctl 内存趋势而非 systemctl 状态码'
 detail: {\"trigger\": \"deploy-agent 更新后服务异常\", \"conclusion\": \"根因是请求体未限流导致内存泄漏\", \"action\": \"加 body size limit + 内存监控告警\"}";
+
+pub const EXTRACTION_BOARD_PROGRESS: &str = "\
+你正在为 Board 任务提取进展报告。请分析以下会话摘要，输出严格 JSON。
+
+输出格式（严格 JSON，无 markdown）:
+{
+  \"task_progress\": [
+    {
+      \"task_id\": \"完整任务ID\",
+      \"summary\": \"<=300字进展摘要：本次完成了什么、涉及哪些文件/模块、未完成的部分\",
+      \"is_done\": false,
+      \"confidence\": 0.8
+    }
+  ]
+}
+
+规则:
+- is_done=true 仅当用户明确表示完成/验证通过时设置
+- confidence < 0.5 时跳过该任务（信息不足）
+- 宁可 is_done=false 也不要误标完成
+- summary 要具体：提到文件名、函数名、配置项等";
 }
 
 /// Runtime prompt data — loaded from files with const fallbacks.
@@ -185,6 +206,7 @@ struct PromptData {
     extraction_realtime: String,
     extraction_deep: String,
     extraction_habits: String,
+    extraction_board_progress: String,
 }
 
 impl PromptData {
@@ -199,6 +221,7 @@ impl PromptData {
             extraction_realtime: load_or_default(&dir, "extraction_realtime", defaults::EXTRACTION_REALTIME),
             extraction_deep: load_or_default(&dir, "extraction_deep", defaults::EXTRACTION_DEEP),
             extraction_habits: load_or_default(&dir, "extraction_habits", defaults::EXTRACTION_HABITS),
+            extraction_board_progress: load_or_default(&dir, "extraction_board_progress", defaults::EXTRACTION_BOARD_PROGRESS),
         }
     }
 }
@@ -260,5 +283,8 @@ impl PromptStore {
     }
     pub fn extraction_habits(&self) -> String {
         self.data.read().map(|d| d.extraction_habits.clone()).unwrap_or_else(|_| defaults::EXTRACTION_HABITS.to_string())
+    }
+    pub fn extraction_board_progress(&self) -> String {
+        self.data.read().map(|d| d.extraction_board_progress.clone()).unwrap_or_else(|_| defaults::EXTRACTION_BOARD_PROGRESS.to_string())
     }
 }
