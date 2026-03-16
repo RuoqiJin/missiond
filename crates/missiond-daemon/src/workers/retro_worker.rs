@@ -12,7 +12,8 @@ use tracing::{info, warn, debug};
 use crate::minimax_client::ChatMessage;
 use crate::state::AppState;
 
-/// Poll interval between checks (1 hour).
+/// Poll interval (legacy, kept for backfill reference).
+#[allow(dead_code)]
 const POLL_INTERVAL_SECS: u64 = 3600;
 
 /// Backfill: analyze ALL sessions since a given time (no threshold filtering).
@@ -43,7 +44,8 @@ pub(crate) async fn backfill(state: &AppState, since: &str) -> anyhow::Result<(u
     Ok((analyzed, skipped))
 }
 
-/// Startup delay to let the system stabilize.
+/// Startup delay (legacy, kept for backfill reference).
+#[allow(dead_code)]
 const STARTUP_DELAY_SECS: u64 = 120;
 
 /// Rate limit between session analyses (seconds).
@@ -57,34 +59,17 @@ pub(crate) struct RetroWorker;
 impl super::BackgroundWorker for RetroWorker {
     fn name(&self) -> &'static str { "retro_worker" }
 
-    async fn run(self, state: Arc<AppState>, mut ctx: super::WorkerContext) {
-        info!("Retro worker started (poll: {}s, startup delay: {}s)",
-              POLL_INTERVAL_SECS, STARTUP_DELAY_SECS);
-
-        tokio::time::sleep(Duration::from_secs(STARTUP_DELAY_SECS)).await;
-
-        loop {
-            ctx.wait_if_paused().await;
-
-            match process_pending(&state).await {
-                Ok(count) => {
-                    if count > 0 {
-                        info!(count, "Retro worker: analyzed sessions");
-                        ctx.record_success();
-                    }
-                }
-                Err(e) => {
-                    warn!(error = %e, "Retro worker: processing error");
-                    ctx.record_failure();
-                }
-            }
-
-            tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
-        }
+    async fn run(self, _state: Arc<AppState>, _ctx: super::WorkerContext) {
+        // Phase 3c: polling disabled — retro analysis now triggered by
+        // session_reflection_consumer in event_router.rs via process_pending().
+        // Worker kept alive for BackgroundWorker trait registration (Phase 3d: remove entirely).
+        info!("Retro worker: polling disabled (Phase 3c event-driven migration)");
+        // Park forever — will be cleaned up in Phase 3d
+        std::future::pending::<()>().await;
     }
 }
 
-async fn process_pending(state: &AppState) -> anyhow::Result<usize> {
+pub(crate) async fn process_pending(state: &AppState) -> anyhow::Result<usize> {
     let db = state.mission.db();
 
     let pending = db.get_sessions_needing_retrospective()
