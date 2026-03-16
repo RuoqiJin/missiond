@@ -256,6 +256,33 @@ async fn main() -> Result<()> {
         _ => {}
     }
 
+    // Recover active dynamic slots from previous run — terminate expired, re-register active
+    match mission.db().find_expired_dynamic_slots() {
+        Ok(expired) => {
+            for s in &expired {
+                let _ = mission.db().terminate_dynamic_slot(&s.id, "daemon_restart_expired");
+            }
+            if !expired.is_empty() {
+                info!(count = expired.len(), "Terminated expired dynamic slots on startup");
+            }
+        }
+        Err(e) => warn!(error = %e, "Failed to check expired dynamic slots"),
+    }
+    // Re-register surviving active dynamic slots into SlotManager
+    match mission.db().list_dynamic_slots(Some("active")) {
+        Ok(active) => {
+            for s in &active {
+                if let Ok(config) = serde_json::from_str::<missiond_core::types::SlotConfig>(&s.config) {
+                    mission.register_dynamic_slot(config);
+                }
+            }
+            if !active.is_empty() {
+                info!(count = active.len(), "Recovered active dynamic slots from DB");
+            }
+        }
+        Err(e) => warn!(error = %e, "Failed to recover dynamic slots"),
+    }
+
     // PTY manager setup
     let pty = Arc::new(PTYManager::new(logs_dir.clone()));
     pty.set_permission_policy(Arc::new(PermissionAdapter {
@@ -440,6 +467,7 @@ async fn main() -> Result<()> {
         kb_cooccurrence_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         pending_compact_restart: Arc::new(std::sync::Mutex::new(HashSet::new())),
         config_file_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        job_store: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         slot_current_model: Arc::new(std::sync::Mutex::new(HashMap::new())),
         screenshot_broker: Arc::clone(&screenshot_broker),
         jarvis_trace: ws_server.jarvis_trace_store().clone(),
@@ -1071,6 +1099,15 @@ async fn main() -> Result<()> {
     // Architecture maintenance worker — auto-updates YAML manifests on structural code changes
     workers::spawn_worker(
         workers::arch_maintenance_worker::ArchMaintenanceWorker {
+            timeline_rx: timeline_broadcast_tx.subscribe(),
+        },
+        Arc::new(state.clone()),
+        shutdown_rx.clone(),
+    );
+
+    // Strategy analyst worker — discovers user preferences and patterns from conversation logs
+    workers::spawn_worker(
+        workers::strategy_worker::StrategyWorker {
             timeline_rx: timeline_broadcast_tx.subscribe(),
         },
         Arc::new(state.clone()),
