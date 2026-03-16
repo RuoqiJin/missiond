@@ -18,6 +18,7 @@ pub mod ast;
 pub mod beacon;
 mod migration;
 mod timeline;
+mod dynamic_slot;
 mod narration;
 mod translation;
 

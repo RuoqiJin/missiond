@@ -64,6 +64,12 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
         _ => {}
     }
 
+    // Reap expired dynamic slots (TTL lifecycle)
+    reap_expired_dynamic_slots(state).await;
+
+    // GC completed jobs older than 30 minutes
+    gc_completed_jobs(state).await;
+
     let mut memory_paused = state.memory_paused.load(std::sync::atomic::Ordering::Relaxed);
     let global_paused = state.global_paused.load(std::sync::atomic::Ordering::Relaxed);
 
@@ -1030,4 +1036,67 @@ fn parse_attribution(response: &str, kb_ids: &[String]) -> Option<Vec<(String, S
     }
 
     if result.is_empty() { None } else { Some(result) }
+}
+
+/// Reap expired dynamic slots: SIGTERM → 30s grace → unregister.
+async fn reap_expired_dynamic_slots(state: &AppState) {
+    // Find expired active slots
+    let expired = match state.mission.db().find_expired_dynamic_slots() {
+        Ok(slots) => slots,
+        Err(e) => {
+            warn!(error = %e, "Failed to find expired dynamic slots");
+            return;
+        }
+    };
+
+    for slot in &expired {
+        info!(slot_id = %slot.id, template = %slot.template, "Reaping expired dynamic slot (TTL)");
+
+        // Kill PTY session (SIGTERM → grace period handled by PTYManager)
+        let _ = state.pty.kill(&slot.id).await;
+
+        // Mark terminated in DB
+        if let Err(e) = state.mission.db().terminate_dynamic_slot(&slot.id, "ttl_expired") {
+            warn!(slot_id = %slot.id, error = %e, "Failed to terminate dynamic slot in DB");
+        }
+
+        // Unregister from SlotManager
+        state.mission.unregister_dynamic_slot(&slot.id);
+    }
+
+    if !expired.is_empty() {
+        info!(count = expired.len(), "Reaped expired dynamic slots");
+    }
+
+    // TTL warning: alert for slots expiring within 15 minutes
+    if let Ok(expiring) = state.mission.db().find_expiring_dynamic_slots(900) {
+        for slot in &expiring {
+            debug!(slot_id = %slot.id, expires_at = %slot.expires_at, "Dynamic slot expiring soon (15min warning)");
+        }
+    }
+}
+
+/// GC completed/failed jobs older than 30 minutes from the in-memory store.
+async fn gc_completed_jobs(state: &AppState) {
+    use missiond_core::types::AsyncJobStatus;
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::minutes(30);
+    let cutoff_str = cutoff.to_rfc3339();
+
+    let mut store = state.job_store.write().await;
+    let before = store.len();
+    store.retain(|_, job| {
+        // Keep running jobs and recently completed ones
+        if job.status == AsyncJobStatus::Running {
+            return true;
+        }
+        match &job.completed_at {
+            Some(t) => t.as_str() > cutoff_str.as_str(),
+            None => true,
+        }
+    });
+    let removed = before - store.len();
+    if removed > 0 {
+        debug!(removed, remaining = store.len(), "GC'd completed async jobs");
+    }
 }

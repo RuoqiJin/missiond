@@ -153,6 +153,26 @@ impl SlotManager {
         SlotReloadResult { added, removed, updated }
     }
 
+    /// Register a dynamic slot at runtime (dual-source merge).
+    pub fn register_dynamic_slot(&self, mut config: SlotConfig) {
+        config.apply_default_traits();
+        let mut slots = self.slots.write().unwrap();
+        info!(slot_id = %config.id, role = %config.role, "Dynamic slot registered");
+        slots.insert(config.id.clone(), Slot {
+            config,
+            session_id: None,
+        });
+    }
+
+    /// Unregister a dynamic slot (remove from runtime).
+    pub fn unregister_dynamic_slot(&self, slot_id: &str) {
+        let mut slots = self.slots.write().unwrap();
+        if slots.remove(slot_id).is_some() {
+            self.db.clear_slot_session(slot_id);
+            info!(slot_id = %slot_id, "Dynamic slot unregistered");
+        }
+    }
+
     /// Get statistics (config stats only, no process state)
     pub fn get_stats(&self) -> SlotStats {
         let slots = self.slots.read().unwrap();

@@ -11,6 +11,8 @@ mod skill;
 mod conversation;
 mod incident;
 mod infra;
+mod dynamic_slot;
+mod async_job;
 
 pub use slot::*;
 pub use task::*;
@@ -21,6 +23,8 @@ pub use skill::*;
 pub use conversation::*;
 pub use incident::*;
 pub use infra::*;
+pub use dynamic_slot::*;
+pub use async_job::*;
 
 #[cfg(test)]
 mod tests {

@@ -1,33 +1,31 @@
 //! Handler dispatch for MCP tool calls.
 //! Routes tool names to domain-specific handler modules.
+//!
+//! Domain layout (Phase 3):
+//!   knowledge/ — board, kb, skill, memory
+//!   compute/   — pty, task, process, worker, cc_tasks, minimax, compute_slot
+//!   comm/      — router_chat, question, conversation, timeline, audit, retrospective
+//!   sysinfra/  — infra, permission, system, health, misc
 
-mod task;
-mod process;
-mod pty;
-mod permission;
-mod cc_tasks;
-mod kb;
-mod router_chat;
-mod memory;
-mod conversation;
-mod audit;
-mod board;
-mod skill;
-mod infra;
-mod question;
-mod misc;
-mod health;
-mod timeline;
-mod minimax;
-mod worker;
-mod system;
-pub(crate) mod retrospective;
+mod knowledge;
+mod compute;
+mod comm;
+mod sysinfra;
 
 use anyhow::Result;
 use serde_json::Value;
-use missiond_mcp::tools::ToolResult;
+use missiond_mcp::tools::{ToolResult, ToolError, error_codes};
 
 use crate::state::AppState;
+
+// Re-export for external access (e.g. main.rs references retrospective::handle directly)
+pub(crate) use comm::retrospective;
+
+// Domain aliases for dispatch readability
+use knowledge::{board, kb, skill, memory};
+use compute::{task, process, pty, cc_tasks, minimax, worker, compute_slot, job};
+use comm::{router_chat, question, conversation, timeline, audit};
+use sysinfra::{infra, permission, system, health, misc};
 
 // @beacon: mcp
 /// Dispatch a tool call to the appropriate handler module.
@@ -61,6 +59,9 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         "mission_worker" => worker::handle(state, name, args).await,
         "mission_sys_logs" | "mission_sys_config"
             => system::handle(state, name, args).await,
+        "mission_compute_slot"
+            => compute_slot::handle(state, name, args).await,
+        "mission_job_poll" => job::handle(state, name, args).await,
 
         // ===== Legacy names (backward compatibility) =====
         "mission_submit" | "mission_ask" | "mission_status" | "mission_cancel"
@@ -119,9 +120,10 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
             }
         }
         _ => {
-            let mut res = ToolResult::text(format!("Unknown tool: {}", name));
-            res.is_error = Some(true);
-            Ok(res)
+            Ok(ToolResult::structured_error(
+                ToolError::new(error_codes::UNKNOWN_TOOL, format!("Unknown tool: {}", name))
+                    .with_suggestion("Use mission_slots to list available tools, or check tool name spelling"),
+            ))
         }
     }
 }

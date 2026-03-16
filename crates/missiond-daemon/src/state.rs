@@ -205,6 +205,8 @@ pub(crate) struct AppState {
     pub(crate) pending_compact_restart: Arc<std::sync::Mutex<HashSet<String>>>,
     /// Per-file async lock for sys_config patch operations (prevents TOCTOU races).
     pub(crate) config_file_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// In-memory async job store — tracks long-running operations.
+    pub(crate) job_store: Arc<tokio::sync::RwLock<HashMap<String, missiond_core::types::AsyncJob>>>,
 }
 
 /// Event-driven embedding tasks — the Worker sleeps until triggered.

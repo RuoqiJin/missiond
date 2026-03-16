@@ -2279,6 +2279,7 @@ dependencies = [
  "missiond-core",
  "missiond-mcp",
  "notify",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
