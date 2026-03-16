@@ -1362,6 +1362,29 @@ impl MissionDB {
             CREATE INDEX IF NOT EXISTS idx_dynamic_slots_active ON dynamic_slots(status, expires_at);"
         )?;
 
+        // Utility Score: Darwin GC — add utility_score to knowledge table
+        {
+            let kb_columns: Vec<String> = conn
+                .prepare("PRAGMA table_info(knowledge)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !kb_columns.iter().any(|c| c == "utility_score") {
+                conn.execute_batch(
+                    "ALTER TABLE knowledge ADD COLUMN utility_score REAL NOT NULL DEFAULT 0.5;"
+                )?;
+                // Migrate existing data: access_count → initial utility_score
+                conn.execute_batch(
+                    "UPDATE knowledge SET utility_score = MIN(1.0, 0.5 + (access_count * 0.05))
+                     WHERE access_count > 0;
+                     UPDATE knowledge SET utility_score = MAX(utility_score, 0.7)
+                     WHERE category IN ('preference', 'policy:decision', 'memory:architecture', 'memory:decision');
+                     CREATE INDEX IF NOT EXISTS idx_kb_utility ON knowledge(utility_score);"
+                )?;
+                tracing::info!("Migration: knowledge.utility_score column added, existing data migrated");
+            }
+        }
+
         Ok(())
     }
 }

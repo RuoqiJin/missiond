@@ -69,6 +69,7 @@ impl MissionDB {
                     kb_type: Self::infer_kb_type(&input.category).to_string(),
                     context_snippet: None,
                     scope_task_id: None,
+                    utility_score: 0.0,
                 },
                 action: "rejected".into(),
                 merged_key: None,
@@ -87,8 +88,10 @@ impl MissionDB {
         let conn = self.conn();
 
         // 1. Exact match by (category, key) → update
+        // Reset utility_score to 0.8 on explicit update (Gemini ARB: user-updated entries must not be low-ranked)
         let updated = conn.execute(
-            "UPDATE knowledge SET summary = ?1, detail = ?2, source = ?3, confidence = ?4, updated_at = ?5
+            "UPDATE knowledge SET summary = ?1, detail = ?2, source = ?3, confidence = ?4, updated_at = ?5,
+             utility_score = MAX(utility_score, 0.8)
              WHERE category = ?6 AND key = ?7",
             params![input.summary, detail_str, source, confidence, now, input.category, input.key],
         )?;
@@ -119,7 +122,8 @@ impl MissionDB {
         if let Some(existing) = existing_by_key {
             let old_category = existing.category.clone();
             conn.execute(
-                "UPDATE knowledge SET category = ?1, summary = ?2, detail = ?3, source = ?4, confidence = ?5, updated_at = ?6
+                "UPDATE knowledge SET category = ?1, summary = ?2, detail = ?3, source = ?4, confidence = ?5, updated_at = ?6,
+                 utility_score = MAX(utility_score, 0.8)
                  WHERE id = ?7",
                 params![input.category, input.summary, detail_str, source, confidence, now, existing.id],
             )?;
@@ -146,7 +150,8 @@ impl MissionDB {
         )? {
             // Merge: update the existing entry with new summary
             conn.execute(
-                "UPDATE knowledge SET summary = ?1, detail = ?2, source = ?3, confidence = ?4, updated_at = ?5
+                "UPDATE knowledge SET summary = ?1, detail = ?2, source = ?3, confidence = ?4, updated_at = ?5,
+                 utility_score = MAX(utility_score, 0.8)
                  WHERE id = ?6",
                 params![input.summary, detail_str, source, confidence, now, existing.id],
             )?;
@@ -188,6 +193,7 @@ impl MissionDB {
             kb_type: kb_type.to_string(),
             context_snippet: None,
             scope_task_id: None,
+            utility_score: 0.5,
         };
 
         Self::kb_sync_fts_with_conn(&conn, &entry)?;
@@ -311,6 +317,9 @@ impl MissionDB {
     }
 
     /// Get a knowledge entry by key
+    /// Hit boost constant for utility_score: score += HIT_BOOST * (1.0 - score)
+    const UTILITY_HIT_BOOST: f64 = 0.15;
+
     pub fn kb_get(&self, key: &str) -> DbResult<Option<KnowledgeEntry>> {
         let conn = self.conn(); // Need write conn for access_count update
         let mut stmt = conn.prepare(
@@ -319,14 +328,17 @@ impl MissionDB {
         let mut rows = stmt.query(params![key])?;
         if let Some(row) = rows.next()? {
             let mut entry = Self::row_to_knowledge_entry(row)?;
-            // Bump access count
+            // Bump access count + utility score (Darwinian boost)
             let now = chrono::Utc::now().to_rfc3339();
+            let new_utility = (entry.utility_score + Self::UTILITY_HIT_BOOST * (1.0 - entry.utility_score)).min(1.0);
             conn.execute(
-                "UPDATE knowledge SET access_count = access_count + 1, last_accessed_at = ?1 WHERE id = ?2",
-                params![now, entry.id],
+                "UPDATE knowledge SET access_count = access_count + 1, last_accessed_at = ?1,
+                 utility_score = ?3 WHERE id = ?2",
+                params![now, entry.id, new_utility],
             )?;
             entry.access_count += 1;
-            entry.last_accessed_at = Some(now);
+            entry.last_accessed_at = Some(now.clone());
+            entry.utility_score = new_utility;
             Ok(Some(entry))
         } else {
             Ok(None)
@@ -634,15 +646,20 @@ impl MissionDB {
         Ok(results)
     }
 
-    /// Batch update access_count and last_accessed_at for search hits
+    /// Batch update access_count, last_accessed_at, and utility_score for search hits.
+    /// Anti-spam: skip utility boost if last_accessed_at < 1 hour ago.
     pub fn kb_update_access_stats(&self, entries: &[KnowledgeEntry]) -> DbResult<()> {
         let conn = self.conn();
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now();
+        let now_str = now.to_rfc3339();
         let mut stmt = conn.prepare(
-            "UPDATE knowledge SET access_count = access_count + 1, last_accessed_at = ?1 WHERE id = ?2"
+            "UPDATE knowledge SET access_count = access_count + 1, last_accessed_at = ?1,
+             utility_score = MIN(1.0, utility_score + ?3 * (1.0 - utility_score))
+             WHERE id = ?2
+             AND (last_accessed_at IS NULL OR julianday(?1) - julianday(last_accessed_at) > 0.0417)"
         )?;
         for entry in entries {
-            stmt.execute(params![now, entry.id])?;
+            stmt.execute(params![now_str, entry.id, Self::UTILITY_HIT_BOOST])?;
         }
         Ok(())
     }
@@ -1082,6 +1099,21 @@ impl MissionDB {
             "SELECT COUNT(*) FROM knowledge WHERE access_count = 0 AND last_accessed_at IS NULL",
             [], |row| row.get(0),
         )?;
+        // Utility score distribution
+        let utility_high: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM knowledge WHERE utility_score >= 0.7", [], |row| row.get(0)
+        ).unwrap_or(0);
+        let utility_medium: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM knowledge WHERE utility_score >= 0.3 AND utility_score < 0.7", [], |row| row.get(0)
+        ).unwrap_or(0);
+        let utility_low: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM knowledge WHERE utility_score < 0.3", [], |row| row.get(0)
+        ).unwrap_or(0);
+        let gc_candidates: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM knowledge WHERE utility_score < 0.15 AND julianday('now') - julianday(created_at) > 7 \
+             AND category NOT IN ('preference', 'memory:decision', 'memory:architecture', 'project', 'policy:decision')",
+            [], |row| row.get(0)
+        ).unwrap_or(0);
         let most_accessed: Option<(String, String, i64)> = conn.query_row(
             "SELECT category, key, access_count FROM knowledge ORDER BY access_count DESC LIMIT 1",
             [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -1095,6 +1127,12 @@ impl MissionDB {
         let mut stats = serde_json::json!({
             "total": total,
             "neverAccessed": never_accessed,
+            "utilityDistribution": {
+                "high": utility_high,
+                "medium": utility_medium,
+                "low": utility_low,
+            },
+            "gcCandidates": gc_candidates,
         });
         if let Some((cat, key, count)) = most_accessed {
             stats["mostAccessed"] = serde_json::json!({"category": cat, "key": key, "accessCount": count});
@@ -1122,43 +1160,67 @@ impl MissionDB {
         Ok(stats)
     }
 
-    /// Auto-GC: delete infra (duplicates servers.yaml), expired bugfix (>30d),
-    /// and stale zero-access entries (>14d, non-protected categories).
+    /// Darwinian GC: time-decay utility scores, then prune low-utility entries.
+    /// Protected categories (preference, policy:decision, memory:architecture, memory:decision, project)
+    /// are never auto-deleted. Replaces hardcoded 14/30-day rules.
     pub fn kb_auto_gc(&self) -> DbResult<usize> {
         let conn = self.conn();
         let mut deleted = 0;
 
-        // Rule 1: infra entries — servers.yaml + mission_infra_get already covers this
+        // Phase 1: Time-decay utility_score for non-evergreen categories.
+        // Uses category-specific half-lives (same as temporal_decay).
+        // decay_factor = exp(-ln2 / half_life_days * elapsed_days_since_last_gc)
+        // Simplified: multiply by 0.95 per day equivalent for each category's rate.
+        // We do per-category batch UPDATE using julianday delta since updated_at.
+        for (category, half_life_days) in &[
+            ("memory:debug", 14.0_f64),
+            ("memory:bugfix", 30.0),
+            ("memory:ops", 21.0),
+            ("memory:feature", 90.0),
+            ("memory", 60.0),
+        ] {
+            // decay = exp(-ln2 / half_life * days_since_update)
+            // SQLite doesn't have exp(), so we use: score * power(0.5, days/half_life)
+            // Approximated as: score * (1 - 0.693/half_life * min(days_since_update, half_life))
+            // Simpler: just multiply by a fixed daily factor = 0.5^(1/half_life)
+            let daily_factor = 0.5_f64.powf(1.0 / half_life_days);
+            conn.execute(
+                &format!(
+                    "UPDATE knowledge SET utility_score = utility_score * POWER(?1, MAX(0, julianday('now') - julianday(updated_at)))
+                     WHERE category {} ?2 AND utility_score > 0.01",
+                    if category.contains(':') { "=" } else { "LIKE" }
+                ),
+                params![
+                    daily_factor,
+                    if category.contains(':') { category.to_string() } else { format!("{}%", category) }
+                ],
+            )?;
+        }
+
+        // Phase 2: Delete infra entries — servers.yaml + mission_infra_get covers this
         deleted += conn.execute("DELETE FROM knowledge WHERE category = 'infra'", [])?;
 
-        // Rule 2: memory:bugfix older than 30 days
+        // Phase 3: Darwinian pruning — low utility + minimum age guard
+        // Threshold 0.15: entries must prove their worth or be pruned
+        // 7-day grace period: give new entries a chance to be discovered
         deleted += conn.execute(
-            "DELETE FROM knowledge WHERE category = 'memory:bugfix' \
-             AND julianday('now') - julianday(updated_at) > 30",
+            "DELETE FROM knowledge WHERE utility_score < 0.15 \
+             AND julianday('now') - julianday(created_at) > 7 \
+             AND category NOT IN ('preference', 'memory:decision', 'memory:architecture', 'project', 'policy:decision') \
+             AND scope_task_id IS NULL",
             [],
         )?;
 
-        // Rule 2b: memory:debug older than 14 days (debug process logs lose value once resolved;
-        // valuable insights should be distilled into memory:bugfix or architecture by then)
-        deleted += conn.execute(
-            "DELETE FROM knowledge WHERE category = 'memory:debug' \
-             AND julianday('now') - julianday(updated_at) > 14",
-            [],
-        )?;
-
-        // Rule 3: zero access + 14 days stale + not in protected categories
-        deleted += conn.execute(
-            "DELETE FROM knowledge WHERE access_count = 0 \
-             AND last_accessed_at IS NULL \
-             AND julianday('now') - julianday(updated_at) > 14 \
-             AND category NOT IN ('preference', 'memory:decision', 'memory:architecture', 'project', 'policy:decision')",
-            [],
-        )?;
-
+        // Phase 4: Clean up dangling edges for deleted nodes
         if deleted > 0 {
+            conn.execute(
+                "DELETE FROM knowledge_edges WHERE source_id NOT IN (SELECT id FROM knowledge)
+                 OR target_id NOT IN (SELECT id FROM knowledge)",
+                [],
+            )?;
             conn.execute_batch("INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild')")?;
             self.fts_dirty.store(false, Ordering::Relaxed);
-            tracing::info!(deleted, "kb_auto_gc: cleaned up entries, FTS rebuilt");
+            tracing::info!(deleted, "kb_auto_gc (darwin): pruned low-utility entries, cleaned edges, FTS rebuilt");
         }
 
         Ok(deleted)
@@ -1373,6 +1435,7 @@ impl MissionDB {
             kb_type,
             context_snippet: None,
             scope_task_id: row.get("scope_task_id").unwrap_or(None),
+            utility_score: row.get("utility_score").unwrap_or(0.5),
         })
     }
 
