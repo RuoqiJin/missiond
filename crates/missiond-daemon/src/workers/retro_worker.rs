@@ -131,12 +131,16 @@ async fn analyze_session(
         .unwrap_or("{}");
 
     // ── L2: Sonnet triage (all sessions) ──
+    let mut triage_severity: Option<String> = None;
+    let mut triage_actionable = false;
     let full_analysis = match call_sonnet_triage(state, session_id, stats_text).await {
         Ok(analysis) => {
             // Check severity + actionable for Board task creation
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&analysis) {
                 let severity = parsed["severity"].as_str().unwrap_or("low");
                 let actionable = parsed["actionable"].as_bool().unwrap_or(true); // default true for safety
+                triage_severity = Some(severity.to_string());
+                triage_actionable = actionable;
                 if (severity == "high" || severity == "critical") && actionable {
                     create_anomaly_board_task(state, session_id, &trigger, &parsed);
                 }
@@ -148,6 +152,31 @@ async fn analyze_session(
             None
         }
     };
+
+    // Phase 4b: Session-level utility_score feedback based on retro severity.
+    // Gemini ARB: no double-penalty risk — retro only processes user sessions
+    // (conversation_type="user"), while autopilot tasks have their own direct
+    // feedback path via task_cited_kbs cache. kb_access_log session_ids differ
+    // (user session ID vs autopilot task ID).
+    if let Some(ref severity) = triage_severity {
+        let cited_kb_ids = db.get_session_cited_kb_ids(session_id)
+            .unwrap_or_default();
+        if !cited_kb_ids.is_empty() {
+            let feedback = match severity.as_str() {
+                "low" => Some(true),  // mild boost — session went well
+                "high" | "critical" if triage_actionable => Some(false),  // penalty — actionable failure
+                _ => None,  // medium or non-actionable — no adjustment
+            };
+            if let Some(success) = feedback {
+                match db.kb_batch_apply_utility_feedback(&cited_kb_ids, success) {
+                    Ok(n) if n > 0 => info!(session_id, severity, adjusted = n, success,
+                        "Retro 4b: session-level utility feedback applied"),
+                    Err(e) => warn!(session_id, error = %e, "Retro 4b: utility feedback failed"),
+                    _ => {}
+                }
+            }
+        }
+    }
 
     // Persist results
     db.save_retrospective_result(

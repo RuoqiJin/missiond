@@ -379,6 +379,12 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
                     }
                     fb
                 });
+            // Truncate fallback to 200 chars to match topic length constraints
+            let fallback = if fallback.chars().count() > 200 {
+                fallback.chars().take(200).collect()
+            } else {
+                fallback
+            };
             vec![fallback]
         }
     };

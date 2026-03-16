@@ -41,6 +41,7 @@ missiond-mcp = { workspace = true }
 regex = { workspace = true }
 sha2 = "0.10.9"
 base64 = { workspace = true }
+tempfile = "3"
 
 [lints]
 workspace = true

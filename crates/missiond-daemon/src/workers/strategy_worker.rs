@@ -1,12 +1,19 @@
 //! Strategic Analysis Worker — analyzes conversation logs to discover patterns,
 //! user preferences, collaboration friction, and architectural insights.
 //!
+//! **Architecture**: Workspace-based agentic analysis. Instead of stuffing all
+//! context into the prompt, we write session data to a temporary workspace
+//! directory and let Gemini CLI use its built-in tools (read_file, grep_search)
+//! to selectively explore the data.
+//!
 //! **Key design principle**: Completely stateless per call. Each analysis is an
 //! independent Gemini request. The worker's "memory" lives entirely in the
 //! Strategic State JSON stored in KB (key: `strategic-state`).
 //!
 //! Design doc: `docs/designs/arch-maintenance-and-strategic-analysis.md`
 
+use std::collections::HashMap;
+use std::io::Write;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -22,23 +29,15 @@ use crate::embedding_worker::resolve_llm_credentials;
 use crate::state::AppState;
 
 /// Analysis version — bump to re-analyze all sessions with a new schema.
-const STRATEGY_ANALYSIS_VERSION: i32 = 1;
+const STRATEGY_ANALYSIS_VERSION: i32 = 2; // v2: workspace-based agentic analysis
 /// Max analysis retries before giving up on a session.
 const MAX_ANALYSIS_RETRIES: i32 = 3;
-/// Maximum cleaned prompt size (bytes) before truncation.
-/// OS ARG_MAX is ~2MB on macOS; keep well under to avoid "Argument list too long".
-const MAX_PROMPT_SIZE: usize = 1_500_000;
+/// Max chars per JSONL content field — prevents grep single-line explosion.
+const MAX_CONTENT_CHARS: usize = 5000;
 static RE_ANSI: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap());
 static RE_BASE64: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"data:[a-zA-Z/]+;base64,[A-Za-z0-9+/=]{100,}").unwrap());
-
-/// Byte budget per chunk for dynamic chunking (~800KB cleaned text).
-const CHUNK_BYTE_BUDGET: usize = 800_000;
-/// Overlap window: include last N messages from previous chunk for context continuity.
-const CHUNK_OVERLAP: i64 = 30;
-/// Sessions with more than this many messages use chunked analysis.
-const CHUNK_THRESHOLD: i64 = 800;
 
 /// Find and analyze all pending sessions.
 /// Called by session_reflection_consumer on SessionCompleted events.
@@ -68,16 +67,8 @@ pub(crate) async fn run_pending_analysis(state: &AppState) {
             None
         };
 
-        // For completed/compacted sessions with many messages: use chunked analysis
-        let is_long_completed = conv.status != "active"
-            && watermark.is_none()
-            && conv.message_count > CHUNK_THRESHOLD;
-
-        let result = if is_long_completed {
-            analyze_session_chunked(state, session_id, conv.message_count as i64).await
-        } else {
-            analyze_session_stateless(state, session_id, watermark).await
-        };
+        // Workspace-based analysis: no chunking needed — Gemini CLI reads files selectively
+        let result = analyze_session_stateless(state, session_id, watermark).await;
 
         match result {
             Ok(analyzed_up_to) => {
@@ -111,209 +102,154 @@ pub(crate) async fn run_pending_analysis(state: &AppState) {
     }
 }
 
-/// Chunked analysis for ultra-long completed sessions (>CHUNK_THRESHOLD messages).
-/// Dynamically splits by byte budget, passes Strategic State between chunks.
-async fn analyze_session_chunked(
-    state: &AppState,
-    session_id: &str,
-    total_messages: i64,
-) -> Result<i64> {
-    let db = state.mission.db();
-    let mut since_id: Option<i64> = None;
-    let mut chunk_index = 0u32;
-    let mut last_analyzed_id: i64 = 0;
+// ── Workspace Preparation ──
 
-    info!(
-        session = %session_id,
-        total_messages,
-        "strategy_analyst: starting chunked analysis"
-    );
+/// TASK.md template — analysis instructions for Gemini CLI.
+/// Gemini reads this file first, then uses tools (read_file, grep_search)
+/// to explore session data and produce JSON output.
+const STRATEGY_TASK_TEMPLATE: &str = r#"# 战略分析任务
 
-    loop {
-        // Load a batch of messages (generous limit, we'll chunk by bytes below)
-        let messages = db.get_conversation_messages(session_id, since_id, 50000)?;
-        if messages.is_empty() {
-            break;
-        }
+你是一个顶尖的系统架构师和协作分析师。
 
-        // Dynamic byte-based chunking: accumulate messages until budget reached
-        let mut chunk_messages = Vec::new();
-        let mut chunk_bytes = 0usize;
+## 数据文件
+- `state.json` — 当前累积的战略状态快照（上一次分析结果）
+- `session.jsonl` — 原始会话记录（JSON Lines 格式，每行含 id/role/content 字段）
+- `meta.json` — 会话元数据（消息数、角色分布、字节大小）
 
-        for msg in &messages {
-            let cleaned = format!("[{}] {}", msg.role, strip_noise(&msg.content, &msg.role));
-            chunk_bytes += cleaned.len() + 1; // +1 for newline
-            chunk_messages.push((msg.id, cleaned));
+## 工作流指令
+1. 读 `meta.json` 了解会话规模
+2. 读 `state.json` 了解当前战略状态
+3. 用 grep_search 检索 session.jsonl 中的关键模式：
+   - 偏好纠正：`"不要"`, `"别用"`, `"改成"`, `"以后请"`, `"stop"`, `"don't"`
+   - 冲突与重试：`"error"`, `"failed"`, `"重试"`, `"又报错"`, `"timeout"`
+   - 架构演进：`"deploy"`, `"架构"`, `"重构"`, `"refactor"`, `"migration"`
+   - 重复工作流：高频出现的工具名或命令模式
+4. 对 grep 命中的区域，用 read_file 读取前后上下文
+5. 综合分析后输出 JSON
 
-            if chunk_bytes >= CHUNK_BYTE_BUDGET {
-                break;
-            }
-        }
+## 严格约束 (CRITICAL)
+- **只读原则**：只能执行读取和检索操作，严禁修改、创建或删除任何文件
+- **输出格式**：分析完成后，最后一次输出必须是纯 JSON。绝不能包含 markdown 代码块标记，不能有前言或后语
 
-        if chunk_messages.is_empty() {
-            break;
-        }
-
-        let chunk_last_id = chunk_messages.last().map(|(id, _)| *id).unwrap_or(0);
-        let chunk_first_id = chunk_messages.first().map(|(id, _)| *id).unwrap_or(0);
-        let total_chunks_est = (total_messages as f64 / chunk_messages.len() as f64).ceil() as u32;
-
-        info!(
-            session = %session_id,
-            chunk = chunk_index + 1,
-            est_total = total_chunks_est,
-            msgs = chunk_messages.len(),
-            bytes = chunk_bytes,
-            "strategy_analyst: processing chunk"
-        );
-
-        // Build chunked prompt with strategic state + chunk metadata
-        let cleaned_lines: Vec<String> = chunk_messages.iter().map(|(_, s)| s.clone()).collect();
-        let prompt = build_chunked_prompt(
-            state, session_id, &cleaned_lines,
-            chunk_index, total_chunks_est, total_messages,
-            chunk_first_id, chunk_last_id,
-        )?;
-
-        // Stateless LLM call for this chunk
-        let (base_url, jwt) = resolve_llm_credentials().await?;
-        let url = format!("{}/v1/chat/completions", base_url);
-        let body = json!({
-            "model": "gemini-3.1-pro",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 16384,
-            "_channel": "google",
-        });
-
-        let result = REQUEST_CALLER
-            .scope("strategy_analyst".to_string(), async {
-                state
-                    .gemini
-                    .send_with_timeout(&state.http_client, &url, &jwt, &body, Some(Duration::from_secs(600)))
-                    .await
-            })
-            .await?;
-
-        let content = result
-            .pointer("/choices/0/message/content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("{}")
-            .to_string();
-
-        // Parse and apply (updates Strategic State in KB for next chunk)
-        let content = content.trim();
-        if !content.is_empty() && content != "{}" {
-            let json_str = extract_json_from_response(content);
-            match serde_json::from_str::<StrategicOutput>(&json_str) {
-                Ok(output) => {
-                    apply_strategic_output(state, session_id, &output).await?;
-                }
-                Err(e) => {
-                    warn!(error = %e, chunk = chunk_index, "strategy_analyst: chunk parse failed, continuing");
-                }
-            }
-        }
-
-        // Update checkpoint via watermark (reuse existing infrastructure)
-        if let Err(e) = db.update_deep_checkpoint(session_id, chunk_last_id) {
-            warn!(error = %e, "strategy_analyst: failed to update chunk checkpoint");
-        }
-
-        last_analyzed_id = chunk_last_id;
-        chunk_index += 1;
-
-        // Next chunk starts from chunk_last_id - OVERLAP for context continuity
-        since_id = Some((chunk_last_id - CHUNK_OVERLAP).max(0));
-
-        // Check if we've processed all messages
-        if chunk_messages.len() < messages.len() || messages.len() < 50000 {
-            // If we consumed fewer messages than loaded, or loaded fewer than limit,
-            // there might be more. But if chunk consumed all loaded messages and
-            // loaded messages < limit, we're done.
-            if messages.len() < 50000 && chunk_bytes < CHUNK_BYTE_BUDGET {
-                break;
-            }
-        }
-    }
-
-    info!(
-        session = %session_id,
-        chunks = chunk_index,
-        "strategy_analyst: chunked analysis complete"
-    );
-
-    Ok(last_analyzed_id)
+## 期望输出 (Schema)
+```
+{
+  "user_profile": [
+    {"trait": "描述", "confidence": 0.9, "source": "session-id"}
+  ],
+  "development_trajectory": {
+    "current_focus": "当前开发方向",
+    "recent_shifts": ["方向变化"],
+    "inferred_goals": ["推测目标"]
+  },
+  "collaboration_patterns": [
+    {"pattern": "描述", "type": "positive|negative", "count": 1}
+  ],
+  "workflow_proposals": [
+    {"action": "描述", "occurrences": 3, "status": "proposed"}
+  ],
+  "friction_points": [
+    {"issue": "描述", "frequency": 2, "severity": "high|medium|low"}
+  ],
+  "architectural_drifts": [
+    {"description": "描述", "affected_area": "模块/组件"}
+  ],
+  "active_communication": {
+    "should_notify": false,
+    "message": ""
+  }
 }
+```
 
-/// Build prompt for a chunk of a long session, with state-collapse prevention.
-fn build_chunked_prompt(
+规则：
+- user_profile 上限 20 条，与 state.json 合并（更新已有、删除过时、新增发现）
+- 如果没有有意义的发现，输出 `{}`
+"#;
+
+/// Prepare a workspace directory with session data for Gemini CLI to explore.
+/// Returns TempDir (RAII: auto-cleaned on drop) and last message ID.
+fn prepare_workspace(
     state: &AppState,
     session_id: &str,
-    cleaned_lines: &[String],
-    chunk_index: u32,
-    total_chunks_est: u32,
-    total_messages: i64,
-    first_id: i64,
-    last_id: i64,
-) -> Result<String> {
+    since_id: Option<i64>,
+) -> Result<(tempfile::TempDir, i64)> {
     let db = state.mission.db();
+    let messages = db.get_conversation_messages(session_id, since_id, 50000)?;
+    if messages.is_empty() {
+        return Err(anyhow!("No messages found for session {}", session_id));
+    }
+    let last_id = messages.last().unwrap().id;
 
-    // Load current Strategic State (updated after each chunk)
+    // RAII temp directory — cleaned on drop (even on panic/process exit)
+    let base = missiond_core::default_mission_home().join("tmp");
+    std::fs::create_dir_all(&base)?;
+    let workspace = tempfile::Builder::new()
+        .prefix(&format!("strategy-{}-", &session_id[..8.min(session_id.len())]))
+        .tempdir_in(&base)
+        .map_err(|e| anyhow!("Failed to create strategy workspace: {}", e))?;
+
+    // Write session.jsonl (noise-stripped + content-truncated)
+    let jsonl_path = workspace.path().join("session.jsonl");
+    let mut file = std::io::BufWriter::new(
+        std::fs::File::create(&jsonl_path)
+            .map_err(|e| anyhow!("Failed to create session.jsonl: {}", e))?,
+    );
+    let mut role_counts: HashMap<String, u64> = HashMap::new();
+    for msg in &messages {
+        let cleaned = strip_noise(&msg.content, &msg.role);
+        let truncated = truncate_content(&cleaned, MAX_CONTENT_CHARS);
+        let line = json!({"id": msg.id, "role": msg.role, "content": truncated});
+        writeln!(file, "{}", line)?;
+        *role_counts.entry(msg.role.clone()).or_default() += 1;
+    }
+    drop(file); // flush before metadata read
+
+    // Write meta.json
+    let byte_size = std::fs::metadata(&jsonl_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let meta = json!({
+        "session_id": session_id,
+        "message_count": messages.len(),
+        "role_distribution": role_counts,
+        "byte_size": byte_size,
+    });
+    std::fs::write(
+        workspace.path().join("meta.json"),
+        serde_json::to_string_pretty(&meta)?,
+    )?;
+
+    // Write state.json (current strategic state from KB)
     let state_json = db
         .kb_get("strategic-state")?
         .and_then(|e| e.detail.map(|d| d.to_string()))
         .unwrap_or_else(|| "{}".to_string());
+    std::fs::write(workspace.path().join("state.json"), &state_json)?;
 
-    let cleaned_text = cleaned_lines.join("\n");
+    // Write TASK.md (analysis instructions)
+    std::fs::write(workspace.path().join("TASK.md"), STRATEGY_TASK_TEMPLATE)?;
 
-    Ok(format!(
-        r#"你是一个顶尖的系统架构师和协作分析师。阅读下方一字不改的原始对话与操作日志。
+    info!(
+        session = %session_id,
+        msg_count = messages.len(),
+        jsonl_bytes = byte_size,
+        workspace = %workspace.path().display(),
+        "strategy_analyst: workspace prepared"
+    );
 
-## 分块信息
-你正在分析一个长会话的第 {chunk}/{total} 块。
-- 会话 ID: {session_id}
-- 当前块: 消息 #{first_id} - #{last_id}，共 {msg_count} 条
-- 会话总计约 {total_messages} 条消息
+    Ok((workspace, last_id))
+}
 
-## 当前战略状态（前 {prev_chunks} 块的累积分析结果）
-{state_json}
-
-## 本块原始会话记录（完整保留）
-{cleaned_text}
-
-## 分析指令
-基于当前战略状态和本块新消息，输出更新后的完整战略分析 JSON。
-
-**关键规则**：
-- **你必须完整保留上一轮 JSON 中的有效洞察**。只有当本块消息提供了明确的新证据时，才进行追加或修正。
-- **严禁因为本块信息量少而清空原有状态**。如果本块没有新发现，原样返回当前状态。
-- user_profile 上限 20 条，与当前状态合并（更新已有、删除过时、新增发现）
-- 不要复述发生了什么。直接输出 JSON，不要 markdown 包裹。
-- 如果没有有意义的新发现，输出 `{{}}`
-
-严格按以下 schema：
-```json
-{{
-  "user_profile": [{{"trait": "描述", "confidence": 0.9, "source": "session-id"}}],
-  "development_trajectory": {{"current_focus": "", "recent_shifts": [], "inferred_goals": []}},
-  "collaboration_patterns": [{{"pattern": "描述", "type": "positive|negative", "count": 1}}],
-  "workflow_proposals": [{{"action": "描述", "occurrences": 3, "status": "proposed"}}],
-  "friction_points": [{{"issue": "描述", "frequency": 2, "severity": "high|medium|low"}}],
-  "architectural_drifts": [{{"description": "描述", "affected_area": "模块"}}],
-  "active_communication": {{"should_notify": false, "message": ""}}
-}}
-```"#,
-        chunk = chunk_index + 1,
-        total = total_chunks_est,
-        session_id = session_id,
-        first_id = first_id,
-        last_id = last_id,
-        msg_count = cleaned_lines.len(),
-        total_messages = total_messages,
-        prev_chunks = chunk_index,
-        state_json = state_json,
-        cleaned_text = cleaned_text,
-    ))
+/// Truncate content to max_chars, preserving head and tail for context.
+fn truncate_content(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_string();
+    }
+    let half = max_chars / 2;
+    let head: String = s.chars().take(half).collect();
+    let tail: String = s.chars().skip(count - half).collect();
+    format!("{}…[截断 {} 字符]…{}", head, count - max_chars, tail)
 }
 
 // ── Noise Stripping ──
@@ -436,132 +372,32 @@ fn is_error_signal(line: &str) -> bool {
         || lower.contains("syntaxerror")
 }
 
-// ── Prompt Assembly ──
-
-/// Build the analysis prompt from session messages + Strategic State.
-async fn build_analysis_prompt(
-    state: &AppState,
-    session_id: &str,
-    since_id: Option<i64>,
-) -> Result<(String, i64)> {
-    let db = state.mission.db();
-
-    // 1. Load session messages
-    let messages = db.get_conversation_messages(
-        session_id,
-        since_id,
-        50000, // generous limit
-    )?;
-
-    if messages.is_empty() {
-        return Err(anyhow!("No messages found for session {}", session_id));
-    }
-
-    let last_message_id = messages.last().map(|m| m.id).unwrap_or(0);
-
-    // 2. Noise stripping (mechanical rules)
-    let cleaned: Vec<String> = messages
-        .iter()
-        .map(|m| format!("[{}] {}", m.role, strip_noise(&m.content, &m.role)))
-        .collect();
-
-    // 3. Extreme size guard: truncate oldest messages if > MAX_PROMPT_SIZE
-    // Account for newlines from join("\n")
-    let mut total_size: usize = cleaned.iter().map(|s| s.len()).sum::<usize>()
-        + cleaned.len().saturating_sub(1); // newline separators
-    let mut start_idx = 0;
-    while total_size > MAX_PROMPT_SIZE && start_idx < cleaned.len() {
-        total_size -= cleaned[start_idx].len() + 1; // +1 for newline
-        start_idx += 1;
-    }
-    let cleaned = if start_idx > 0 {
-        let mut truncated = vec![format!("[截断: 跳过最早 {} 条消息]", start_idx)];
-        truncated.extend_from_slice(&cleaned[start_idx..]);
-        truncated
-    } else {
-        cleaned
-    };
-
-    // 4. Load current Strategic State from KB
-    let state_json = db
-        .kb_get("strategic-state")?
-        .and_then(|e| e.detail.map(|d| d.to_string()))
-        .unwrap_or_else(|| "{}".to_string());
-
-    // 5. Assemble prompt
-    let cleaned_text = cleaned.join("\n");
-    let prompt = format!(
-        r#"你是一个顶尖的系统架构师和协作分析师。阅读下方一字不改的原始对话与操作日志。
-
-## 当前战略状态
-{state_json}
-
-## 原始会话记录（完整保留）
-{cleaned_text}
-
-## 分析指令
-基于以上原始操作记录，输出 JSON 格式的更新。严格按以下 schema：
-
-```json
-{{
-  "user_profile": [
-    {{"trait": "描述", "confidence": 0.9, "source": "session-id"}}
-  ],
-  "development_trajectory": {{
-    "current_focus": "当前开发方向",
-    "recent_shifts": ["方向变化"],
-    "inferred_goals": ["推测目标"]
-  }},
-  "collaboration_patterns": [
-    {{"pattern": "描述", "type": "positive|negative", "count": 1}}
-  ],
-  "workflow_proposals": [
-    {{"action": "描述", "occurrences": 3, "status": "proposed"}}
-  ],
-  "friction_points": [
-    {{"issue": "描述", "frequency": 2, "severity": "high|medium|low"}}
-  ],
-  "architectural_drifts": [
-    {{"description": "描述", "affected_area": "模块/组件"}}
-  ],
-  "active_communication": {{
-    "should_notify": false,
-    "message": ""
-  }}
-}}
-```
-
-规则：
-- user_profile 上限 20 条，与当前状态合并（更新已有、删除过时、新增发现）
-- 不要复述发生了什么。直接输出 JSON，不要 markdown 包裹。
-- 如果没有有意义的发现，输出 `{{}}`"#
-    );
-
-    Ok((prompt, last_message_id))
-}
-
 // ── Analysis Execution ──
 
-/// Run a single stateless analysis for a session.
+/// Run a single workspace-based analysis for a session.
+/// Writes session data to a temp workspace, lets Gemini CLI explore with tools.
 /// Returns the last analyzed message ID.
 async fn analyze_session_stateless(
     state: &AppState,
     session_id: &str,
     since_id: Option<i64>,
 ) -> Result<i64> {
-    info!(session = %session_id, since = ?since_id, "strategy_analyst: starting analysis");
+    info!(session = %session_id, since = ?since_id, "strategy_analyst: starting workspace-based analysis");
 
-    // 1. Build prompt
-    let (prompt, last_message_id) = build_analysis_prompt(state, session_id, since_id).await?;
+    // 1. Prepare workspace (TempDir — RAII auto-cleanup on drop)
+    let (workspace, last_message_id) = prepare_workspace(state, session_id, since_id)?;
 
     info!(
         session = %session_id,
-        prompt_chars = prompt.len(),
+        workspace = %workspace.path().display(),
         messages_up_to = last_message_id,
-        "strategy_analyst: calling Gemini"
+        "strategy_analyst: calling Gemini CLI with workspace"
     );
 
-    // 2. Stateless LLM call
+    // 2. Short prompt — Gemini reads TASK.md and explores workspace with tools
+    let prompt = "Read TASK.md and follow the analysis workflow. Output only JSON.";
+
+    // 3. LLM call with workspace directory
     let (base_url, jwt) = resolve_llm_credentials().await?;
     let model = "gemini-3.1-pro";
     let url = format!("{}/v1/chat/completions", base_url);
@@ -570,6 +406,7 @@ async fn analyze_session_stateless(
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 16384,
         "_channel": "google",
+        "_workspace": workspace.path().to_string_lossy(),
     });
 
     let result = REQUEST_CALLER
@@ -599,14 +436,13 @@ async fn analyze_session_stateless(
         "strategy_analyst: Gemini response received"
     );
 
-    // 3. Parse and apply output
+    // 4. Parse and apply output
     let content = content.trim();
     if content == "{}" || content.is_empty() {
         debug!(session = %session_id, "strategy_analyst: no findings");
         return Ok(last_message_id);
     }
 
-    // Extract JSON from response — handle preamble text and markdown code blocks
     let json_str = extract_json_from_response(content);
 
     match serde_json::from_str::<StrategicOutput>(&json_str) {
@@ -622,10 +458,10 @@ async fn analyze_session_stateless(
                 response_preview = %preview,
                 "strategy_analyst: failed to parse JSON output"
             );
-            // Return error so checkpoint is NOT advanced — session will be retried
             Err(anyhow!("JSON parse failed: {}", e))
         }
     }
+    // workspace TempDir drops here — auto-cleaned
 }
 
 // ── Output Types ──
