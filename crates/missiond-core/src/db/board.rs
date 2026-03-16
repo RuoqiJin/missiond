@@ -11,8 +11,8 @@ impl MissionDB {
         let conn = self.conn();
         let depends_on_json = serde_json::to_string(&task.depends_on).unwrap_or_else(|_| "[]".to_string());
         conn.execute(
-            "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, hidden, retry_count, max_retries, order_idx, created_at, updated_at, depends_on, dedupe_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+            "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, hidden, retry_count, max_retries, order_idx, created_at, updated_at, depends_on, dedupe_key, timeout_secs, context_intent)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
             params![
                 task.id,
                 task.title,
@@ -35,6 +35,8 @@ impl MissionDB {
                 task.updated_at,
                 depends_on_json,
                 task.dedupe_key,
+                task.timeout_secs,
+                task.context_intent,
             ],
         )?;
         Ok(())
@@ -93,6 +95,8 @@ impl MissionDB {
             depends_on: input.depends_on.clone().unwrap_or_default(),
             lease_expires_at: None,
             dedupe_key: input.dedupe_key.clone(),
+            timeout_secs: input.timeout_secs,
+            context_intent: input.context_intent.clone(),
             notes_count: 0,
         };
 
@@ -417,13 +421,15 @@ impl MissionDB {
                AND lease_expires_at < ?1",
             params![now],
         )?;
-        // Fallback: recover tasks without lease using old time-based check
+        // Fallback: recover tasks without lease using time-based check.
+        // Respects per-task timeout_secs (from task_delegate), else uses fallback_stale_minutes.
         let unleased = conn.execute(
             "UPDATE board_tasks SET status = 'open', claim_executor_id = NULL,
                  claim_executor_type = NULL, claimed_at = NULL, updated_at = ?1
              WHERE status = 'running'
                AND lease_expires_at IS NULL
-               AND julianday('now') - julianday(updated_at) > ?2 / 1440.0",
+               AND julianday('now') - julianday(updated_at) >
+                   COALESCE(timeout_secs, ?2 * 60) / 86400.0",
             params![now, fallback_stale_minutes as f64],
         )?;
         let count = leased + unleased;
@@ -693,6 +699,8 @@ impl MissionDB {
             },
             lease_expires_at: row.get("lease_expires_at").unwrap_or(None),
             dedupe_key: row.get("dedupe_key").unwrap_or(None),
+            timeout_secs: row.get("timeout_secs").unwrap_or(None),
+            context_intent: row.get("context_intent").unwrap_or(None),
             notes_count: row.get("notes_count").unwrap_or(0),
         })
     }

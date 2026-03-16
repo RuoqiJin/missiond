@@ -310,6 +310,8 @@ fn create_anomaly_board_task(
         flow_template: None,
         depends_on: None,
         dedupe_key: Some(dedupe),
+        timeout_secs: None,
+        context_intent: None,
     };
 
     match db.create_board_task(&input) {

@@ -378,6 +378,8 @@ async fn create_explore_task(
         flow_template: None,
         depends_on: None,
         dedupe_key: None,
+        timeout_secs: None,
+        context_intent: None,
     };
 
     match state.mission.db().create_board_task(&input) {

@@ -245,6 +245,8 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
             flow_template: None,
             depends_on: None,
             dedupe_key: Some(dedupe_key.clone()),
+            timeout_secs: None,
+            context_intent: None,
         };
 
         match db.create_board_task(&task_input) {
@@ -330,6 +332,8 @@ pub(crate) fn create_pty_remediation_task(
         flow_template: None,
         depends_on: None,
         dedupe_key: Some(dedupe_key.to_string()),
+        timeout_secs: None,
+        context_intent: None,
     };
 
     match state.mission.db().create_board_task(&task_input) {

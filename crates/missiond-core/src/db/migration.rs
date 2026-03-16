@@ -1362,6 +1362,24 @@ impl MissionDB {
             CREATE INDEX IF NOT EXISTS idx_dynamic_slots_active ON dynamic_slots(status, expires_at);"
         )?;
 
+        // Phase 2: KB-AST Graph Unification — bipartite links between KB entries and AST code nodes
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS kb_ast_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kb_id TEXT NOT NULL,
+                ast_node_id TEXT,
+                symbol_name TEXT NOT NULL,
+                file_path TEXT,
+                relation TEXT NOT NULL DEFAULT 'related_to',
+                confidence REAL DEFAULT 0.8,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_kb_ast_kb ON kb_ast_links(kb_id);
+            CREATE INDEX IF NOT EXISTS idx_kb_ast_symbol ON kb_ast_links(symbol_name);
+            CREATE INDEX IF NOT EXISTS idx_kb_ast_file ON kb_ast_links(file_path);
+            CREATE INDEX IF NOT EXISTS idx_kb_ast_node ON kb_ast_links(ast_node_id);"
+        )?;
+
         // Utility Score: Darwin GC — add utility_score to knowledge table
         {
             let kb_columns: Vec<String> = conn
@@ -1382,6 +1400,22 @@ impl MissionDB {
                      CREATE INDEX IF NOT EXISTS idx_kb_utility ON knowledge(utility_score);"
                 )?;
                 tracing::info!("Migration: knowledge.utility_score column added, existing data migrated");
+            }
+        }
+
+        // Phase 5.3: board_tasks — timeout_secs + context_intent
+        {
+            let bt_columns: Vec<String> = conn
+                .prepare("PRAGMA table_info(board_tasks)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !bt_columns.iter().any(|c| c == "timeout_secs") {
+                conn.execute_batch(
+                    "ALTER TABLE board_tasks ADD COLUMN timeout_secs INTEGER;
+                     ALTER TABLE board_tasks ADD COLUMN context_intent TEXT;"
+                )?;
+                tracing::info!("Migration: board_tasks.timeout_secs + context_intent columns added");
             }
         }
 

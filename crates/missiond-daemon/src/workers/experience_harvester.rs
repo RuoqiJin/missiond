@@ -413,6 +413,8 @@ pub(crate) fn harvest_session(db: &MissionDB, session_id: &str) {
             flow_template: None,
             depends_on: None,
             dedupe_key: Some(format!("skill-synthesis-{}", beacon_name)),
+            timeout_secs: None,
+            context_intent: None,
         };
         match db.create_board_task(&input) {
             Ok(task) => info!(task_id = %task.id, beacon = %beacon_name, "Skill synthesis triggered"),

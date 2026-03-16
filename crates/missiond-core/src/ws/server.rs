@@ -1040,6 +1040,8 @@ impl PTYWebSocketServer {
                     flow_template: None,
                     depends_on: None,
                     dedupe_key: None,
+                    timeout_secs: None,
+                    context_intent: None,
                 };
 
                 match db.create_board_task(&task_input) {

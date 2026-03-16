@@ -96,6 +96,8 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         assignee: if assignee.is_empty() { None } else { Some(assignee.clone()) },
         auto_execute: Some(true),
         depends_on: if depends_on.is_empty() { None } else { Some(depends_on) },
+        timeout_secs: Some(timeout_secs),
+        context_intent: Some(intent.to_string()),
         ..Default::default()
     };
 
