@@ -1066,6 +1066,15 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     );
 
+    // Architecture maintenance worker — auto-updates YAML manifests on structural code changes
+    workers::spawn_worker(
+        workers::arch_maintenance_worker::ArchMaintenanceWorker {
+            timeline_rx: timeline_broadcast_tx.subscribe(),
+        },
+        Arc::new(state.clone()),
+        shutdown_rx.clone(),
+    );
+
     info!("All event handlers started (isolated tasks)");
 
     // ---- Slots hot-reload: SIGHUP + fsnotify ----
