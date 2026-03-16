@@ -47,6 +47,10 @@ pub(crate) fn start_event_consumers(state: &AppState, timeline_tx: &broadcast::S
     spawn_submit_consumer(state, timeline_tx);
     spawn_decision_consumer(state, timeline_tx);
     spawn_harvest_consumer(state, timeline_tx);
+    // Phase 3: Reflection consumers (Shadow Mode — log-only, no action)
+    spawn_realtime_extraction_consumer(state, timeline_tx);
+    spawn_session_reflection_consumer(state, timeline_tx);
+    spawn_kb_consolidation_consumer(state, timeline_tx);
 }
 
 /// Extraction lane: SlotBecameIdle → schedule_memory_tasks.
@@ -240,6 +244,141 @@ fn spawn_harvest_consumer(state: &AppState, timeline_tx: &broadcast::Sender<Time
                 }
                 Err(RecvError::Lagged(n)) => {
                     tracing::debug!(skipped = n, "Harvest consumer lagged (non-critical)");
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+// ===== Phase 3: Reflection consumers (Shadow Mode) =====
+// These consumers observe events and log what they would do.
+// Once validated (Shadow vs old-poll consistency ≥95%), they will
+// be switched to real execution and the old polling paths removed.
+
+/// Realtime extraction: ConversationMessageLogged → schedule extraction.
+/// Shadow Mode: logs trigger, does NOT call schedule_realtime_extraction().
+/// Trailing-edge debounce: 3s window.
+fn spawn_realtime_extraction_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>) {
+    let s = state.clone();
+    let mut rx = timeline_tx.subscribe();
+    tokio::spawn(async move {
+        let mut pending = false;
+        let mut pending_session: Option<String> = None;
+        loop {
+            if pending {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                loop {
+                    match tokio::time::timeout_at(deadline, rx.recv()).await {
+                        Ok(Ok(te)) => {
+                            if let DaemonEvent::ConversationMessageLogged { ref session_id, ref slot_id, .. } = te.event {
+                                // Only care about slot sessions (not master CLI)
+                                if slot_id.is_some() {
+                                    pending_session = Some(session_id.clone());
+                                }
+                            }
+                        }
+                        Ok(Err(RecvError::Lagged(_))) => {}
+                        Ok(Err(RecvError::Closed)) => return,
+                        Err(_) => break,
+                    }
+                }
+                if let Some(ref sid) = pending_session {
+                    tracing::info!(session_id = %sid, "[Shadow] Would schedule realtime extraction");
+                }
+                pending = false;
+                pending_session = None;
+            } else {
+                match rx.recv().await {
+                    Ok(te) => {
+                        if let DaemonEvent::ConversationMessageLogged { ref session_id, ref slot_id, .. } = te.event {
+                            if slot_id.is_some() && !s.memory_paused.load(Ordering::Relaxed) {
+                                pending = true;
+                                pending_session = Some(session_id.clone());
+                            }
+                        }
+                    }
+                    Err(RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "[Shadow] Realtime extraction consumer lagged");
+                    }
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        }
+    });
+}
+
+/// Session reflection: SessionCompleted → deep analysis + retrospective.
+/// Shadow Mode: logs trigger, does NOT dispatch.
+/// Trailing-edge debounce: 5s window (幂等 session_id 去重).
+fn spawn_session_reflection_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>) {
+    let _s = state.clone();
+    let mut rx = timeline_tx.subscribe();
+    tokio::spawn(async move {
+        let mut pending_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
+        loop {
+            if !pending_sessions.is_empty() {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    match tokio::time::timeout_at(deadline, rx.recv()).await {
+                        Ok(Ok(te)) => {
+                            if let DaemonEvent::SessionCompleted { ref session_id, ref status, .. } = te.event {
+                                // Skip aborted/error sessions (Gemini ARB: don't waste on empty sessions)
+                                if matches!(status, crate::event_bus::SessionEndStatus::Success) {
+                                    pending_sessions.insert(session_id.clone());
+                                }
+                            }
+                        }
+                        Ok(Err(RecvError::Lagged(_))) => {}
+                        Ok(Err(RecvError::Closed)) => return,
+                        Err(_) => break,
+                    }
+                }
+                for sid in &pending_sessions {
+                    tracing::info!(session_id = %sid, "[Shadow] Would schedule deep analysis + retrospective");
+                }
+                pending_sessions.clear();
+            } else {
+                match rx.recv().await {
+                    Ok(te) => {
+                        if let DaemonEvent::SessionCompleted { ref session_id, ref status, .. } = te.event {
+                            if matches!(status, crate::event_bus::SessionEndStatus::Success) {
+                                pending_sessions.insert(session_id.clone());
+                            }
+                        }
+                    }
+                    Err(RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "[Shadow] Session reflection consumer lagged");
+                    }
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        }
+    });
+}
+
+/// KB consolidation: DeepAnalysisCompleted → accumulate N → trigger consolidation.
+/// Shadow Mode: logs trigger, does NOT dispatch.
+/// No debounce — uses counter accumulation (fire at threshold).
+fn spawn_kb_consolidation_consumer(_state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>) {
+    let mut rx = timeline_tx.subscribe();
+    let threshold: u32 = 5; // Trigger consolidation after 5 deep analyses
+    tokio::spawn(async move {
+        let mut count: u32 = 0;
+        loop {
+            match rx.recv().await {
+                Ok(te) => {
+                    if let DaemonEvent::DeepAnalysisCompleted { ref session_id, .. } = te.event {
+                        count += 1;
+                        tracing::debug!(session_id = %session_id, count, "[Shadow] DeepAnalysis completed ({}/{})", count, threshold);
+                        if count >= threshold {
+                            tracing::info!(count, "[Shadow] Would schedule KB consolidation (threshold reached)");
+                            count = 0;
+                        }
+                    }
+                }
+                Err(RecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "[Shadow] KB consolidation consumer lagged");
                 }
                 Err(RecvError::Closed) => break,
             }
