@@ -827,7 +827,7 @@ async fn main() -> Result<()> {
         step_narrator::StepNarratorWorker,
         Arc::new(state.clone()), shutdown_rx.clone(),
     );
-    if state.minimax.is_some() {
+    if state.sonnet.is_some() {
         workers::spawn_worker(
             briefing_worker::BriefingWorker,
             Arc::new(state.clone()), shutdown_rx.clone(),

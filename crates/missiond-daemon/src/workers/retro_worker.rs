@@ -130,8 +130,8 @@ async fn analyze_session(
         })
         .unwrap_or("{}");
 
-    // ── L2: MiniMax triage (all sessions) ──
-    let full_analysis = match call_minimax_triage(state, session_id, stats_text).await {
+    // ── L2: Sonnet triage (all sessions) ──
+    let full_analysis = match call_sonnet_triage(state, session_id, stats_text).await {
         Ok(analysis) => {
             // Check severity + actionable for Board task creation
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&analysis) {
@@ -144,7 +144,7 @@ async fn analyze_session(
             Some(analysis)
         }
         Err(e) => {
-            warn!(session_id, error = %e, "Retro worker: MiniMax triage failed, saving L1 only");
+            warn!(session_id, error = %e, "Retro worker: Sonnet triage failed, saving L1 only");
             None
         }
     };
@@ -163,15 +163,15 @@ async fn analyze_session(
     Ok(())
 }
 
-/// Call MiniMax M2.5 to triage the session analysis.
+/// Call Sonnet to triage the session analysis.
 /// Returns structured JSON: { findings, recommendations, severity, summary }.
-async fn call_minimax_triage(
+async fn call_sonnet_triage(
     state: &AppState,
     session_id: &str,
     detailed_stats: &str,
 ) -> anyhow::Result<String> {
-    let minimax = state.minimax.as_ref()
-        .ok_or_else(|| anyhow::anyhow!("MiniMax gateway not available"))?;
+    let sonnet = state.sonnet.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Sonnet gateway not available"))?;
 
     let prompt = format!(
         r#"你是 AI 工程效率分析师。分析以下 Claude Code 会话的量化数据，给出结构化诊断。
@@ -223,7 +223,7 @@ async fn call_minimax_triage(
         content: prompt,
     }];
 
-    minimax.call_briefing(messages, Some(MINIMAX_MAX_TOKENS), Some(session_id.to_string())).await
+    sonnet.call_briefing(messages, Some(MINIMAX_MAX_TOKENS), Some(session_id.to_string())).await
 }
 
 /// Create a Board task for high-severity anomaly sessions.

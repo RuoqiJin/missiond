@@ -3,6 +3,7 @@ pub mod gemini_cli;
 pub mod gemini_file_api;
 pub mod minimax_client;
 pub mod minimax_gateway;
+pub mod sonnet_gateway;
 pub mod codex_cli;
 pub mod llm_gateway;
 pub mod prompts;

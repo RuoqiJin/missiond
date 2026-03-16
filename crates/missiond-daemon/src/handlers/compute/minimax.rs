@@ -1,5 +1,6 @@
-//! Handler for mission_minimax_* MCP tools.
-//! Routes through MinimaxGateway (P0: interactive priority) for unified rate limiting.
+//! Handler for mission_minimax_process / mission_sonnet_process MCP tools.
+//! Routes through SonnetGateway (P0: interactive priority) for unified rate limiting.
+//! Legacy name `mission_minimax_process` preserved for backward compatibility.
 
 use anyhow::Result;
 use serde_json::Value;
@@ -11,15 +12,15 @@ use crate::state::AppState;
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
-        "mission_minimax_process" => handle_process(state, args).await,
-        _ => Ok(ToolResult::error(format!("Unknown minimax tool: {}", name))),
+        "mission_minimax_process" | "mission_sonnet_process" => handle_process(state, args).await,
+        _ => Ok(ToolResult::error(format!("Unknown tool: {}", name))),
     }
 }
 
 async fn handle_process(state: &AppState, args: Value) -> Result<ToolResult> {
-    let minimax = match state.minimax.as_ref() {
-        Some(m) => m,
-        None => return Ok(ToolResult::error("MiniMax gateway not available (API key not configured)")),
+    let sonnet = match state.sonnet.as_ref() {
+        Some(s) => s,
+        None => return Ok(ToolResult::error("Sonnet gateway not available")),
     };
 
     let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
@@ -40,7 +41,7 @@ async fn handle_process(state: &AppState, args: Value) -> Result<ToolResult> {
                 role: "user".to_string(),
                 content: prompt,
             }];
-            minimax.call_interactive(messages, Some(500), "minimax_process").await
+            sonnet.call_interactive(messages, Some(500), "sonnet_process").await
         }
         "translate" => {
             let target_lang = args.get("targetLang").and_then(|v| v.as_str()).unwrap_or("en");
@@ -52,7 +53,7 @@ async fn handle_process(state: &AppState, args: Value) -> Result<ToolResult> {
                 role: "user".to_string(),
                 content: prompt,
             }];
-            minimax.call_interactive(messages, None, "minimax_process").await
+            sonnet.call_interactive(messages, None, "sonnet_process").await
         }
         "custom" => {
             let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
@@ -63,16 +64,16 @@ async fn handle_process(state: &AppState, args: Value) -> Result<ToolResult> {
                 role: "user".to_string(),
                 content: format!("{}\n\n{}", prompt, text),
             }];
-            minimax.call_interactive(messages, None, "minimax_process").await
+            sonnet.call_interactive(messages, None, "sonnet_process").await
         }
         _ => return Ok(ToolResult::error(format!("Unknown task type: {}", task))),
     };
 
     match result {
         Ok(content) => {
-            info!(task, input_chars = text.len(), output_chars = content.len(), "MiniMax process completed");
+            info!(task, input_chars = text.len(), output_chars = content.len(), "Sonnet process completed");
             Ok(ToolResult::text(content))
         }
-        Err(e) => Ok(ToolResult::error(format!("MiniMax API error: {}", e))),
+        Err(e) => Ok(ToolResult::error(format!("Sonnet API error: {}", e))),
     }
 }
