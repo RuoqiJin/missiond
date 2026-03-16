@@ -268,6 +268,16 @@ pub(crate) async fn init_embedding_provider(
 pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_id: &str) {
     let db = state.mission.db();
 
+    // 0. Skip memory/agent slot conversations (content is AI thinking/tool_call, not user topics)
+    if let Ok(Some(conv)) = db.get_conversation(session_id) {
+        if conv.conversation_type == "memory"
+            || conv.slot_id.as_deref() == Some("slot-memory")
+        {
+            debug!(session = %session_id, "Skipping memory slot conversation for embedding");
+            return;
+        }
+    }
+
     // 1. Fetch messages
     debug!(session = %session_id, "Topic pipeline: fetching messages");
     let messages = match db.get_conversation_messages(session_id, None, 200) {
@@ -437,44 +447,26 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
     info!(session = %session_id, topics = topics.len(), "Multi-topic embeddings generated");
 }
 
-/// Extract structured topics from conversation via MiniMax M2.5 (through Gateway).
-/// Returns a Vec of topic summary strings (each 30-80 chars, optimized for embedding).
-async fn extract_conv_topics_llm(
-    state: &AppState,
-    conv_text: &str,
-    has_timeline: bool,
-) -> Option<Vec<String>> {
-    let handle = state.minimax.as_ref()?;
-
-    let max_topics = if has_timeline { 8 } else { 5 };
-
-    let system_prompt = format!(
+/// Build the system prompt for topic extraction.
+fn topic_extraction_prompt(max_topics: usize) -> String {
+    format!(
         "你是一个技术文档分析专家。请从以下对话中提取所有独立讨论的核心主题。\n\n\
         规则：\n\
         1. 每个主题用一句话总结（30-80字），包含关键技术术语、工具名、文件路径\n\
         2. 最少1个，最多{}个主题\n\
         3. 主题之间应该是不同的技术方向，不要重复\n\
-        4. 必须输出合法 JSON 数组，不要其他内容\n\n\
+        4. 必须输出合法 JSON 数组，不要其他内容\n\
+        5. 不要照搬原文，必须提炼归纳\n\n\
         示例输出：\n\
         [\"排查 Router 自动 Fallback 到 Gemini 的超时机制\", \"配置 RustDesk 自建 hbbs/hbbr 服务器与 Tailscale 组网\", \"修复 GA 构建流水线 Docker 镜像标签问题\"]",
         max_topics
-    );
+    )
+}
 
-    let messages = vec![
-        ChatMessage { role: "system".into(), content: system_prompt },
-        ChatMessage { role: "user".into(), content: conv_text.to_string() },
-    ];
-
-    let content = match handle.call_embedding(messages, Some(1024), None).await {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(error = %e, "MiniMax topic extraction failed");
-            return None;
-        }
-    };
-
-    // Parse JSON array from response (handle markdown code fences)
-    let json_str = content.trim();
+/// Parse and validate topic strings from LLM response.
+/// Strips code fences, filters garbage (tool output leaks, XML tags, overlength).
+fn parse_and_validate_topics(raw: &str, max_topics: usize) -> Option<Vec<String>> {
+    let json_str = raw.trim();
     let json_str = if json_str.starts_with("```") {
         json_str
             .trim_start_matches("```json")
@@ -485,21 +477,97 @@ async fn extract_conv_topics_llm(
         json_str
     };
 
-    match serde_json::from_str::<Vec<String>>(json_str) {
-        Ok(topics) if !topics.is_empty() => {
-            let topics: Vec<String> = topics.into_iter()
-                .filter(|t| !t.trim().is_empty())
-                .take(max_topics)
-                .collect();
-            debug!(count = topics.len(), "Topic extraction OK (MiniMax Gateway)");
-            Some(topics)
+    let topics: Vec<String> = match serde_json::from_str(json_str) {
+        Ok(t) => t,
+        Err(e) => {
+            debug!(error = %e, raw_len = json_str.len(), "Topic JSON parse failed");
+            return None;
         }
-        Ok(_) => {
-            debug!("Topic extraction returned empty array");
+    };
+
+    // Regex for generic XML/HTML tags
+    let tag_re = regex::Regex::new(r"<[^>]{2,}>").unwrap();
+
+    let valid: Vec<String> = topics.into_iter()
+        .filter(|t| {
+            let t = t.trim();
+            let len = t.len();
+            // Length guard: 10-200 chars
+            if len < 10 || len > 200 { return false; }
+            // Content blacklist: tool output / XML / thinking leaks
+            if t.contains("[Tool:") || t.contains("[Tool：") { return false; }
+            if t.contains("<invoke") || t.contains("</think>") { return false; }
+            if t.starts_with("[A]") || t.starts_with("[R]") || t.starts_with("[T]") { return false; }
+            // Contains internal newlines → likely raw output paste
+            if t.contains('\n') { return false; }
+            // Generic XML tag pollution
+            if tag_re.is_match(t) { return false; }
+            true
+        })
+        .map(|t| {
+            let t = t.trim().to_string();
+            // Strip leading list markers: "1. ", "- ", "* "
+            let t = t.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-' || c == '*')
+                .trim_start()
+                .to_string();
+            // Final truncation safety net
+            if t.len() > 150 {
+                t[..char_boundary_at(&t, 150)].to_string()
+            } else {
+                t
+            }
+        })
+        .filter(|t| t.len() >= 10) // Re-check after stripping
+        .take(max_topics)
+        .collect();
+
+    if valid.is_empty() { None } else { Some(valid) }
+}
+
+/// Extract structured topics from conversation.
+/// Primary: Claude Sonnet via Router (cpapi-claude-sonnet).
+/// Fallback: MiniMax M2.5 via Gateway.
+async fn extract_conv_topics_llm(
+    state: &AppState,
+    conv_text: &str,
+    has_timeline: bool,
+) -> Option<Vec<String>> {
+    let max_topics = if has_timeline { 8 } else { 5 };
+    let system_prompt = topic_extraction_prompt(max_topics);
+
+    // Primary: Sonnet via Router
+    match crate::llm_gateway::call_sonnet_stateless(
+        state, &system_prompt, conv_text, 1024, "embedding_topics",
+    ).await {
+        Ok(content) => {
+            if let Some(topics) = parse_and_validate_topics(&content, max_topics) {
+                info!(count = topics.len(), "Topic extraction OK (Sonnet)");
+                return Some(topics);
+            }
+            warn!("Sonnet returned content but validation failed, trying MiniMax fallback");
+        }
+        Err(e) => {
+            warn!(error = %e, "Sonnet topic extraction failed, trying MiniMax fallback");
+        }
+    }
+
+    // Fallback: MiniMax M2.5
+    let handle = state.minimax.as_ref()?;
+    let messages = vec![
+        ChatMessage { role: "system".into(), content: system_prompt },
+        ChatMessage { role: "user".into(), content: conv_text.to_string() },
+    ];
+    match handle.call_embedding(messages, Some(1024), None).await {
+        Ok(content) => {
+            if let Some(topics) = parse_and_validate_topics(&content, max_topics) {
+                info!(count = topics.len(), "Topic extraction OK (MiniMax fallback)");
+                return Some(topics);
+            }
+            debug!("MiniMax fallback also failed validation");
             None
         }
         Err(e) => {
-            debug!(error = %e, raw = %json_str, "Topic extraction JSON parse failed");
+            warn!(error = %e, "MiniMax topic extraction failed");
             None
         }
     }
