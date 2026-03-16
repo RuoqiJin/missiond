@@ -1,0 +1,248 @@
+# MissionD Architecture Manifest
+# AI 寻路地图 — 读此文件即可定位任何模块
+# 更新时机：crate 新增/删除、trait 签名变更、数据流变更
+
+project:
+  name: missiond
+  path: /Users/jinchen/Projects/missiond
+  lang: rust
+  framework: tokio + axum (ws) + sqlx (sqlite)
+  description: "Claude Code 多实例编排系统：PTY 管理、语义解析、知识库、MCP 工具暴露"
+
+# ── Crate 依赖拓扑 ──
+# missiond-daemon ─┬─→ missiond-core (基础库)
+#                  └─→ missiond-mcp  ─→ missiond-core
+# missiond-runner  ─→ missiond-core
+# missiond-attach  ─→ missiond-core
+
+crates:
+  missiond-core:
+    path: crates/missiond-core
+    role: "基础库：PTY、语义解析、DB、类型、trait 定义"
+    modules:
+      pty:
+        role: "PTY 会话生命周期管理"
+        entry: src/pty/mod.rs
+        key_types: [PTYSession, PtyHandle]
+      semantic:
+        role: "Claude Code 终端输出语义解析"
+        entry: src/semantic/mod.rs
+        traits: [StateParser, ConfirmParser, TitleParser, ToolOutputParser, StatusParser]
+        state_machine: [Idle, Thinking, Responding, ToolRunning, Confirming, Editing]
+      db:
+        role: "SQLite WAL 存储层"
+        entry: src/db/mod.rs
+        key_types: [KnowledgeEntry, Task]
+      types:
+        role: "跨 crate 共享类型"
+        entry: src/types/mod.rs
+        key_types: [SlotConfig, SlotId, TaskStatus, CliEngine]
+      embedding:
+        role: "语义向量（FastEmbed / Ollama）"
+        entry: src/embedding/mod.rs
+        traits: [EmbeddingProvider]
+      ast:
+        role: "代码结构提取（多语言 AST 剪枝）"
+        entry: src/ast/mod.rs
+        traits: [AstPruner]
+      skill:
+        role: "Skill 元数据加载"
+        entry: src/skill/mod.rs
+        key_types: [SkillMeta]
+      ws:
+        role: "WebSocket 网关（Jarvis 前端通信）"
+        entry: src/ws/server.rs
+      ipc:
+        role: "Unix socket IPC（daemon ↔ mcp）"
+        entry: src/ipc/
+      sync:
+        role: "远程同步（VDS 部署）"
+        entry: src/sync/
+
+  missiond-daemon:
+    path: crates/missiond-daemon
+    role: "主守护进程：状态管理、handler 分发、worker 任务"
+    depends_on: [missiond-core, missiond-mcp]
+    modules:
+      handlers:
+        role: "MCP 工具请求处理（20+ handler）"
+        entry: src/handlers/
+        pattern: "每个 MCP 工具对应一个 handler 文件"
+      llm:
+        role: "外部 LLM 调用（Gemini CLI / Client / Router）"
+        entry: src/llm/
+        key_files: [gemini_cli.rs, gemini_client.rs, router_chat.rs]
+      workers:
+        role: "后台任务（巡检、记忆提取、合并）"
+        entry: src/workers/
+      engine:
+        role: "PTY 引擎封装"
+        entry: src/engine/
+      context:
+        role: "上下文构建（skill + kb 注入）"
+        entry: src/context/
+      state:
+        role: "全局状态管理（AppState）"
+        entry: src/state/
+      events:
+        role: "事件总线（EventBus）"
+        entry: src/events/
+
+  missiond-mcp:
+    path: crates/missiond-mcp
+    role: "MCP Server：stdio JSON-RPC 协议，暴露工具给 Claude Code"
+    depends_on: [missiond-core]
+    modules:
+      tools:
+        role: "18+ 工具定义（tool schema + dispatch）"
+        entry: src/tools/
+        pattern: "每个文件定义一组相关工具的 schema 和路由"
+      server:
+        role: "JSON-RPC 协议处理"
+        entry: src/server.rs
+      protocol:
+        role: "MCP 协议类型"
+        entry: src/protocol.rs
+
+  missiond-runner:
+    path: crates/missiond-runner
+    role: "Claude CLI 包装器（启动 Claude Code 进程）"
+    depends_on: [missiond-core]
+
+  missiond-attach:
+    path: crates/missiond-attach
+    role: "交互式终端附着（attach 到运行中的 slot）"
+    depends_on: [missiond-core]
+
+# ── 核心 Trait 契约 ──
+traits:
+  StateParser:
+    crate: missiond-core
+    module: semantic
+    contract: "终端输出 → 状态枚举（Idle/Thinking/Responding/...）"
+  ConfirmParser:
+    crate: missiond-core
+    module: semantic
+    contract: "终端输出 → 确认对话框信息（工具名、参数、选项）"
+  TitleParser:
+    crate: missiond-core
+    module: semantic
+    contract: "终端标题 → 任务名提取"
+  ToolOutputParser:
+    crate: missiond-core
+    module: semantic
+    contract: "工具输出区域 → 结构化结果"
+  StatusParser:
+    crate: missiond-core
+    module: semantic
+    contract: "状态栏 → 模型/token/cost 信息"
+  EmbeddingProvider:
+    crate: missiond-core
+    module: embedding
+    contract: "文本 → 向量，支持 FastEmbed(本地) / Ollama(远程)"
+  AstPruner:
+    crate: missiond-core
+    module: ast
+    contract: "源代码 → 骨架（保留签名、删除函数体）"
+  PermissionPolicy:
+    crate: missiond-daemon
+    module: handlers
+    contract: "工具名 + 参数 → Allow/Confirm/Deny 决策"
+
+# ── 数据流 ──
+data_flows:
+  mcp_request:
+    description: "MCP 工具调用全链路"
+    flow: "Claude Code → stdio → missiond-mcp(JSON-RPC) → IPC socket → missiond-daemon(handler) → DB/PTY/LLM → response 原路返回"
+
+  pty_lifecycle:
+    description: "PTY 会话生命周期"
+    flow: "spawn(SlotConfig) → PTY 进程 → 语义解析(StateParser) → 状态事件 → 确认处理(PermissionPolicy) → 任务完成 → idle"
+
+  knowledge_pipeline:
+    description: "知识提取管线"
+    flow: "PTY 输出 → 实时提取(fast slot) → 深度分析(slow slot) → KB 写入 → 向量索引 → 合并去重"
+
+  hybrid_search:
+    description: "混合搜索"
+    flow: "查询 → FTS5 全文搜索 + 向量相似度 → RRF 排序融合 → top-k 结果"
+
+# ── 关键不变量 ──
+invariants:
+  - "一个 slot 同一时刻只处理一个任务"
+  - "MCP server 是无状态的，所有状态在 daemon 侧"
+  - "SQLite WAL 模式：单写多读"
+  - "PTY 语义解析是尽力而为，不阻塞主流程"
+  - "知识库写入幂等（相同 key 覆盖）"
+
+# ── 反面模式（AI 禁止做的事）──
+anti_patterns:
+  - do: "在 missiond-mcp 中持有状态或缓存"
+    why: "MCP 进程随 Claude Code 启停，状态必须在 daemon 侧"
+  - do: "在 missiond-core 中引入 daemon 特有依赖（如 handler 逻辑）"
+    why: "core 是叶子 crate，被所有上层依赖，引入上层依赖会循环"
+  - do: "直接在 handler 中操作 PTY 底层字节流"
+    why: "PTY 操作必须经 engine 层封装，handler 只调高层 API"
+  - do: "在语义解析中使用硬编码字符串匹配替代正则/状态机"
+    why: "Claude Code 输出格式会随版本变化，硬编码极易失效"
+  - do: "跳过 EventBus 直接在 handler 间互调"
+    why: "handler 间解耦靠事件总线，直接调用会引入隐式依赖"
+  - do: "在 workers 中同步阻塞等待 LLM 响应"
+    why: "LLM 调用可能耗时数分钟，必须 async + timeout"
+  - do: "直接绕过状态机手动修改全局 AppState"
+    why: "状态（如 Idle→Thinking）必须由事件驱动（EventBus），强行修改会导致 PTY 输出解析与实际状态脱节"
+
+# ── 错误处理策略（每层的 Error 职责）──
+error_handling:
+  missiond-core:
+    error_type: "自定义 Error enum（CoreError）"
+    strategy: "返回领域错误，不做 HTTP 映射，不吞错"
+    rule: "所有 IO/DB 错误用 ? 向上传播，不在内部 log 后静默"
+  missiond-daemon:
+    error_type: "anyhow::Error 或 handler-specific Error"
+    strategy: "handler 捕获 CoreError → 转 MCP ToolResult(error)"
+    rule: "handler 是错误边界：记日志 + 返回结构化错误给 MCP"
+  missiond-mcp:
+    error_type: "JSON-RPC Error"
+    strategy: "IPC 调用失败 → JSON-RPC error response（code + message）"
+    rule: "不解释错误原因，透传 daemon 返回的错误信息"
+  workers:
+    error_type: "log + 指数退避重试"
+    strategy: "后台任务失败不 panic，记日志后指数退避重试或跳过（禁止无间隔死循环重试）"
+    rule: "worker 崩溃不能影响 daemon 主循环"
+
+# ── 领域词汇表 ──
+glossary:
+  slot: "一个 Claude Code 实例的运行位（含 PTY + 配置 + 状态）"
+  task: "分配给 slot 执行的具体工作单元"
+  KB/知识库: "SQLite 中的长期记忆存储（KnowledgeEntry 表）"
+  beacon: "代码库中的关键锚点，用于快速定位（文件+行号+摘要）"
+  semantic_parsing: "从 PTY 终端原始输出提取结构化状态的过程"
+  confirm/确认: "Claude Code 请求用户批准工具调用时的对话框"
+  permission_policy: "自动批准/拒绝/等待人工确认的策略规则"
+  handler: "daemon 中处理单个 MCP 工具调用的函数"
+  worker: "daemon 中的后台持续任务（巡检/提取/合并）"
+  EventBus: "daemon 内部的异步事件发布-订阅通道"
+  IPC: "daemon 与 MCP server 之间的 Unix socket 通信"
+  hybrid_search: "FTS5 全文 + 向量相似度 + RRF 融合的搜索模式"
+
+# ── 设计决策记录（防止 AI 自作聪明重构）──
+design_rationale:
+  sqlite_over_postgres:
+    decision: "用 SQLite 而非 PostgreSQL"
+    why: "MissionD 是本地 daemon，跟随用户桌面环境，零运维 > 性能天花板"
+  wal_single_writer:
+    decision: "SQLite WAL 模式 + 单写连接"
+    why: "避免 SQLITE_BUSY，写操作串行化是有意为之，并发写会导致不可预测的锁争用"
+  mcp_stateless:
+    decision: "MCP server 不持有任何状态"
+    why: "MCP 进程生命周期由 Claude Code 控制，随时可能被杀，状态放 daemon 才安全"
+  semantic_best_effort:
+    decision: "语义解析失败不阻塞主流程"
+    why: "Claude Code 终端输出格式无 SLA，解析失败是常态，降级为 raw 文本继续运行"
+  event_bus_decouple:
+    decision: "handler 间通过 EventBus 解耦，不直接调用"
+    why: "handler 数量 20+，直接互调会形成蜘蛛网依赖，EventBus 保持 O(1) 耦合度"
+  ipc_over_http:
+    decision: "daemon ↔ MCP 用 Unix socket IPC 而非 HTTP"
+    why: "同机通信，IPC 延迟 < 1ms，HTTP 有序列化/连接开销；且 MCP 协议本身是 stdio JSON-RPC"
