@@ -169,7 +169,7 @@ data_flows:
 
   strategy_analysis:
     description: "用户偏好与模式分析流"
-    flow: "Timeline事件广播(timeline_rx) → StrategyWorker订阅 → 偏好发现与模式提取"
+    flow: "Timeline事件广播(timeline_rx) → StrategyWorker订阅 → 偏好发现与模式提取(长会话触发分块分析) → 写入KB(strategic-state)"
 
 # ── 关键不变量 ──
 invariants:
@@ -195,6 +195,8 @@ anti_patterns:
     why: "LLM 调用可能耗时数分钟，必须 async + timeout"
   - do: "直接绕过状态机手动修改全局 AppState"
     why: "状态（如 Idle→Thinking）必须由事件驱动（EventBus），强行修改会导致 PTY 输出解析与实际状态脱节"
+  - do: "对超长工具输出进行盲目的位置截断（如直接取前后两千字）"
+    why: "会丢失中间的错误堆栈信号，必须使用语义感知截断保留带错误信号的行及其上下文"
 
 # ── 错误处理策略（每层的 Error 职责）──
 error_handling:
@@ -222,6 +224,7 @@ glossary:
   task: "分配给 slot 执行的具体工作单元"
   job_store: "全局状态(AppState)中管理异步作业/任务的内存存储映射"
   KB/知识库: "SQLite 中的长期记忆存储（KnowledgeEntry 表）"
+  strategic_state: "长期维护的关于用户开发轨迹、偏好模式与摩擦点的认知状态，存储在 KB 中"
   beacon: "代码库中的关键锚点，用于快速定位（文件+行号+摘要）"
   semantic_parsing: "从 PTY 终端原始输出提取结构化状态的过程"
   confirm/确认: "Claude Code 请求用户批准工具调用时的对话框"
@@ -255,3 +258,9 @@ design_rationale:
   dynamic_slot_recovery:
     decision: "Daemon启动时自动恢复活跃的 dynamic slots 并清理过期 slots"
     why: "保证动态分配的临时运行位在系统重启/崩溃后能够继续提供服务，同时避免幽灵进程泄露资源"
+  chunked_strategy_analysis:
+    decision: "对于超长已完成会话的战略分析采用按字节预算分块处理，通过 KB 中的 strategic-state 传递分析状态"
+    why: "避免 LLM 上下文超限和状态坍塌，同时复用既有水位线（watermark）实现断点续传"
+  semantic_tool_truncation:
+    decision: "工具输出超长时采用语义感知的截断（提取带错误信号的行及其相邻上下文），取代纯粹基于位置的头尾截断"
+    why: "确保长日志（如构建或循环输出）中间夹杂的关键错误堆栈不被盲目截去，提升排错成功率"
