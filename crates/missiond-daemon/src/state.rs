@@ -222,7 +222,7 @@ pub(crate) struct AppState {
 }
 
 /// Event-driven embedding tasks — the Worker sleeps until triggered.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum EmbeddingTask {
     /// Generate summary + embedding for a single completed session.
     ProcessSession(String),
@@ -230,12 +230,44 @@ pub(crate) enum EmbeddingTask {
     ProcessKBEntry(String),
     /// Incremental: embed a single Skill topic after upsert.
     ProcessSkillTopic(String),
-    /// Batch backfill all systems: KB → Skills → Conversations → AST.
+    /// Batch backfill: kicks off phase-by-phase processing with yield between batches.
     BackfillAll,
+    /// Run a single batch of a specific backfill phase, then re-enqueue next batch.
+    RunBackfillPhase { phase: BackfillPhase, cursor: i64 },
     /// Incremental: embed AST nodes after commit sync (P3 Holographic Context Engine).
     ProcessAstBatch(Vec<String>),
 }
 
+/// Backfill phases — processed in order, each yields between batches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackfillPhase {
+    KbStale, KbMissing, SkillStale, SkillMissing,
+    ConvTopicVectors, ConvSummary, ConvRetry, AstNodes, Timeline,
+}
+
+impl BackfillPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::KbStale => "kb_stale", Self::KbMissing => "kb_missing",
+            Self::SkillStale => "skill_stale", Self::SkillMissing => "skill_missing",
+            Self::ConvTopicVectors => "conv_topic_vectors", Self::ConvSummary => "conv_summary",
+            Self::ConvRetry => "conv_retry", Self::AstNodes => "ast_nodes", Self::Timeline => "timeline",
+        }
+    }
+    pub fn next(&self) -> Option<Self> {
+        match self {
+            Self::KbStale => Some(Self::KbMissing), Self::KbMissing => Some(Self::SkillStale),
+            Self::SkillStale => Some(Self::SkillMissing), Self::SkillMissing => Some(Self::ConvTopicVectors),
+            Self::ConvTopicVectors => Some(Self::ConvSummary), Self::ConvSummary => Some(Self::ConvRetry),
+            Self::ConvRetry => Some(Self::AstNodes), Self::AstNodes => Some(Self::Timeline), Self::Timeline => None,
+        }
+    }
+    pub fn first() -> Self { Self::KbStale }
+    pub fn all() -> &'static [Self] {
+        &[Self::KbStale, Self::KbMissing, Self::SkillStale, Self::SkillMissing,
+          Self::ConvTopicVectors, Self::ConvSummary, Self::ConvRetry, Self::AstNodes, Self::Timeline]
+    }
+}
 
 pub(crate) struct PermissionAdapter {
     pub(crate) permission: Arc<PermissionPolicy>,

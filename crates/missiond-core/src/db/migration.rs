@@ -1460,6 +1460,38 @@ impl MissionDB {
             }
         }
 
+        // ── Backfill progress tracking tables ──
+        {
+            let has_table: bool = conn.query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='backfill_progress'",
+                [], |row| row.get(0),
+            )?;
+            if !has_table {
+                conn.execute_batch("
+                    CREATE TABLE backfill_progress (
+                        phase TEXT PRIMARY KEY,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        last_cursor INTEGER DEFAULT 0,
+                        total_estimated INTEGER DEFAULT 0,
+                        processed INTEGER DEFAULT 0,
+                        failed INTEGER DEFAULT 0,
+                        started_at TEXT,
+                        completed_at TEXT,
+                        updated_at TEXT DEFAULT (datetime('now'))
+                    );
+                    CREATE TABLE backfill_failures (
+                        session_id TEXT NOT NULL,
+                        phase TEXT NOT NULL,
+                        retry_count INTEGER DEFAULT 1,
+                        last_error TEXT,
+                        updated_at TEXT DEFAULT (datetime('now')),
+                        PRIMARY KEY (session_id, phase)
+                    );
+                ")?;
+                tracing::info!("Migration: created backfill_progress and backfill_failures tables");
+            }
+        }
+
         Ok(())
     }
 }
