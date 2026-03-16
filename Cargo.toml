@@ -7,6 +7,7 @@ members = [
     "crates/missiond-attach",
     "crates/missiond-daemon",
     "crates/semantic-terminal-napi",
+    "crates/skill-store",
 ]
 
 [workspace.lints.clippy]
