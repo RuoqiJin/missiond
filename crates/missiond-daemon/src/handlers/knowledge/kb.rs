@@ -373,6 +373,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let count = state.mission.db()
                 .kb_batch_forget(&keys)
                 .map_err(|e| anyhow!("DB error: {}", e))?;
+            // Phase 3: Emit KBBatchMutated for event-driven consumers
+            if count > 0 {
+                state.event_bus.publish(crate::event_bus::DaemonEvent::KBBatchMutated {
+                    count: count as u32,
+                    categories: vec![],
+                    action: "deleted".to_string(),
+                });
+            }
             Ok(ToolResult::json(&serde_json::json!({
                 "deleted_count": count,
                 "requested_keys": keys.len(),
@@ -402,6 +410,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     if content_changed {
                         let _ = state.embedding_tx.try_send(EmbeddingTask::ProcessKBEntry(entry.id.clone()));
                     }
+                    // Phase 3: Emit KBBatchMutated for event-driven consumers
+                    state.event_bus.publish(crate::event_bus::DaemonEvent::KBBatchMutated {
+                        count: 1,
+                        categories: vec![entry.category.clone()],
+                        action: "updated".to_string(),
+                    });
                     Ok(ToolResult::json_pretty(&serde_json::json!({
                         "updated": true,
                         "content_changed": content_changed,
