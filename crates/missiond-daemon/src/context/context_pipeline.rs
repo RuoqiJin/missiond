@@ -588,9 +588,16 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
     let cited_kb_ids: Vec<String> = kb_entries.iter().map(|e| e.id.clone()).collect();
 
     // Log KB co-access for preemptive prefetch pattern learning
+    // Phase 4b: pass session_id when available. Autopilot tasks use task_id as proxy —
+    // each autopilot task maps 1:1 to a PTY session; retro_worker only processes user
+    // sessions (different IDs), so no cross-contamination.
     if cited_kb_ids.len() >= 2 {
         let ids = cited_kb_ids.clone();
-        let _ = state.mission.db().kb_log_co_access(&ids, "prefetch");
+        let session_id = match &req.source {
+            PrefetchSource::Autopilot { task_id } => Some(task_id.as_str()),
+            _ => None,
+        };
+        let _ = state.mission.db().kb_log_co_access(&ids, "prefetch", session_id);
     }
 
     PrefetchResult {

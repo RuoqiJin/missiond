@@ -1492,6 +1492,37 @@ impl MissionDB {
             }
         }
 
+        // Phase 4b: kb_access_log — add session_id for precise session-level feedback
+        {
+            let al_columns: Vec<String> = conn
+                .prepare("PRAGMA table_info(kb_access_log)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !al_columns.iter().any(|c| c == "session_id") {
+                conn.execute_batch(
+                    "ALTER TABLE kb_access_log ADD COLUMN session_id TEXT;
+                     CREATE INDEX IF NOT EXISTS idx_kb_access_log_session ON kb_access_log(session_id);"
+                )?;
+                tracing::info!("Migration: kb_access_log.session_id column added");
+            }
+        }
+
+        // Phase 4c: knowledge — add needs_re_extraction flag for weekly LLM reflection
+        {
+            let kb_columns: Vec<String> = conn
+                .prepare("PRAGMA table_info(knowledge)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !kb_columns.iter().any(|c| c == "needs_re_extraction") {
+                conn.execute_batch(
+                    "ALTER TABLE knowledge ADD COLUMN needs_re_extraction INTEGER NOT NULL DEFAULT 0;"
+                )?;
+                tracing::info!("Migration: knowledge.needs_re_extraction column added");
+            }
+        }
+
         Ok(())
     }
 }

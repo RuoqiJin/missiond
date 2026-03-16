@@ -233,6 +233,11 @@ impl GeminiClient {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
+                // Extract optional working directory (for file-based agentic workflows)
+                let workspace_path = body.get("_workspace")
+                    .and_then(|v| v.as_str())
+                    .map(std::path::PathBuf::from);
+
                 // Whitelist: only these models are allowed via CLI. Others fall back to default.
                 // Note: flash-lite is NOT supported by Gemini CLI (ModelNotFoundError).
                 let cli_model = body.get("model").and_then(|v| v.as_str())
@@ -303,7 +308,7 @@ impl GeminiClient {
                     }
                 });
 
-                let resp = cli.call(messages, cli_model, max_tokens, idle_timeout_override, Some(progress_tx), auth_override.as_deref()).await;
+                let resp = cli.call(messages, cli_model, max_tokens, idle_timeout_override, Some(progress_tx), auth_override.as_deref(), workspace_path.as_deref()).await;
                 drop(permit);
                 // Drop the sender side is implicit (cli.call finished), wait for forwarder to drain
                 let _ = forwarder.await;

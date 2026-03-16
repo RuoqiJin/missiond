@@ -736,6 +736,12 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                         if count > 0 {
                             info!(task_id = %task.id, kb_count = count, "KB feedback: boosted confidence for {} cited entries", count);
                         }
+                        // Phase 4a: Utility score boost on task success (atomic SQL)
+                        match state.mission.db().kb_batch_apply_utility_feedback(&kb_ids, true) {
+                            Ok(n) if n > 0 => info!(task_id = %task.id, boosted = n, "KB utility: boosted for task success"),
+                            Err(e) => warn!(task_id = %task.id, error = %e, "KB utility: boost failed"),
+                            _ => {}
+                        }
                     }
                 }
 
@@ -870,12 +876,18 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                         let _ = state.mission.db().update_prompt_snapshot_outcome(task.id.as_str(), "failed");
                         notify_jarvis_failure(state, &task, &err_msg);
 
-                        // Negative confidence feedback with LLM attribution
-                        // Asks MiniMax which cited KB entries actually caused the failure
+                        // Negative feedback: confidence (LLM-attributed) + utility_score (blanket)
                         {
                             let cited = state.task_cited_kbs.lock().unwrap().remove(task.id.as_str());
                             if let Some(kb_ids) = cited {
                                 if !kb_ids.is_empty() {
+                                    // Phase 4a: Utility score penalty (sync, atomic SQL)
+                                    match state.mission.db().kb_batch_apply_utility_feedback(&kb_ids, false) {
+                                        Ok(n) if n > 0 => info!(task_id = %task.id, penalized = n, "KB utility: penalized for task failure"),
+                                        Err(e) => warn!(task_id = %task.id, error = %e, "KB utility: penalty failed"),
+                                        _ => {}
+                                    }
+                                    // Confidence penalty (async, LLM-attributed)
                                     let state2 = state.clone();
                                     let task_id2 = task.id.to_string();
                                     let err_msg2 = err_msg.clone();

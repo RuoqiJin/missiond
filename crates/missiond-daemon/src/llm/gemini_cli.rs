@@ -77,6 +77,7 @@ impl GeminiCli {
     ///
     /// `progress_tx`: optional channel to emit real-time tool activity events.
     /// `auth_override`: per-call channel override ("apikey" or "google"). Skips global config when set.
+    /// `working_dir`: optional working directory for CLI (enables file-based agentic workflows).
     pub async fn call(
         &self,
         messages: &[Value],
@@ -85,6 +86,7 @@ impl GeminiCli {
         idle_timeout_override: Option<Duration>,
         progress_tx: Option<mpsc::UnboundedSender<GeminiCliProgress>>,
         auth_override: Option<&str>,
+        working_dir: Option<&std::path::Path>,
     ) -> Result<GeminiCliResponse> {
         let model = model.unwrap_or(&self.default_model);
         let idle_timeout = idle_timeout_override.unwrap_or(self.idle_timeout);
@@ -107,7 +109,7 @@ impl GeminiCli {
         };
         info!(mode = %auth_config.mode, override = is_override, "Gemini CLI: using {} mode", auth_config.mode);
 
-        let mut child = self.spawn_cli(&prompt, model, &auth_config)?;
+        let mut child = self.spawn_cli(&prompt, model, &auth_config, working_dir)?;
         let (events, drained_stderr) = self.stream_events(&mut child, idle_timeout, &progress_tx).await?;
 
         // Wait for process to fully exit
@@ -131,13 +133,18 @@ impl GeminiCli {
         parse_stream_events(&events, model)
     }
 
-    fn spawn_cli(&self, prompt: &str, model: &str, auth: &GeminiAuthConfig) -> Result<tokio::process::Child> {
+    fn spawn_cli(&self, prompt: &str, model: &str, auth: &GeminiAuthConfig, working_dir: Option<&std::path::Path>) -> Result<tokio::process::Child> {
         let mut cmd = tokio::process::Command::new(&self.binary);
         cmd.args(["-p", prompt, "-m", model, "-o", "stream-json", "--yolo"])
             .stdin(std::process::Stdio::null())  // Prevent interactive prompts from hanging
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);  // Cancel safety: kill orphan process when future is dropped
+
+        // Set working directory for file-based agentic workflows (e.g. strategy_analyst workspace)
+        if let Some(dir) = working_dir {
+            cmd.current_dir(dir);
+        }
 
         if let Some(ref key) = auth.api_key {
             cmd.env("GEMINI_API_KEY", key);
@@ -170,11 +177,14 @@ impl GeminiCli {
         // P0 fix: concurrently drain stderr to prevent 64KB pipe buffer deadlock.
         // Without this, if Gemini CLI writes >64KB to stderr while we only read stdout,
         // the OS pipe buffer fills up and the subprocess blocks forever.
+        // Capped at 1MB to prevent OOM if subprocess emits unbounded error output.
         let stderr = child.stderr.take();
         let stderr_handle = tokio::spawn(async move {
             let mut buf = String::new();
-            if let Some(mut stderr) = stderr {
-                let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut buf).await;
+            if let Some(stderr) = stderr {
+                let limited = tokio::io::AsyncReadExt::take(stderr, 1024 * 1024);
+                let mut limited = tokio::io::BufReader::new(limited);
+                let _ = tokio::io::AsyncReadExt::read_to_string(&mut limited, &mut buf).await;
             }
             buf
         });
@@ -259,7 +269,7 @@ impl GeminiCli {
     #[allow(dead_code)]
     pub async fn prompt(&self, text: &str, model: Option<&str>) -> Result<String> {
         let messages = vec![serde_json::json!({"role": "user", "content": text})];
-        let resp = self.call(&messages, model, None, None, None, None).await?;
+        let resp = self.call(&messages, model, None, None, None, None, None).await?;
         Ok(resp.content)
     }
 }
@@ -508,21 +518,11 @@ fn resolve_apikey_config() -> Option<GeminiAuthConfig> {
 /// - `settings.json` with `selectedType: "oauth-personal"` (LOGIN_WITH_GOOGLE)
 /// - Symlinks to real OAuth credential files from `~/.gemini/`
 ///
-/// Uses OnceLock for one-time initialization — safe under concurrent calls.
+/// Idempotent and safe under concurrent calls:
+/// - Atomic rename for settings.json prevents corruption
+/// - AlreadyExists ignored on symlinks prevents TOCTOU races
+/// - No OnceLock: transient failures (disk full, etc.) don't permanently disable google mode
 fn ensure_google_auth_home() -> Result<String> {
-    static GOOGLE_HOME: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
-
-    let result = GOOGLE_HOME.get_or_init(|| {
-        init_google_auth_home().map_err(|e| e.to_string())
-    });
-
-    match result {
-        Ok(path) => Ok(path.clone()),
-        Err(e) => Err(anyhow!("{}", e)),
-    }
-}
-
-fn init_google_auth_home() -> Result<String> {
     let mission_home = missiond_core::default_mission_home();
     let google_home = mission_home.join("gemini-google-home");
     let shadow_gemini_dir = google_home.join(".gemini");
@@ -534,9 +534,9 @@ fn init_google_auth_home() -> Result<String> {
         .ok_or_else(|| anyhow!("Cannot resolve home directory"))?
         .join(".gemini");
 
-    // Atomic write: write to temp file, then rename to avoid corruption from concurrent reads
+    // Atomic write: write to PID-suffixed temp file, then rename to avoid corruption
     let settings_path = shadow_gemini_dir.join("settings.json");
-    let tmp_path = shadow_gemini_dir.join("settings.json.tmp");
+    let tmp_path = shadow_gemini_dir.join(format!("settings.json.{}.tmp", std::process::id()));
     let real_settings = std::fs::read_to_string(real_gemini_dir.join("settings.json"))
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
@@ -565,6 +565,11 @@ fn init_google_auth_home() -> Result<String> {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(anyhow!("Failed to symlink {}: {}", file, e)),
+            }
+            #[cfg(not(unix))]
+            if !dst.exists() {
+                std::fs::copy(&src, &dst)
+                    .map_err(|e| anyhow!("Failed to copy {}: {}", file, e))?;
             }
         }
     }

@@ -1244,6 +1244,39 @@ impl MissionDB {
         Ok(new_conf)
     }
 
+    /// Batch utility_score feedback after task completion.
+    /// success=true: boost (same formula as hit_boost)
+    /// success=false: 10% relative penalty, floored at 0.1
+    /// Gemini ARB: wrapped in explicit transaction for atomicity + fsync batching.
+    pub fn kb_batch_apply_utility_feedback(&self, kb_ids: &[String], success: bool) -> DbResult<usize> {
+        if kb_ids.is_empty() { return Ok(0); }
+        let conn = self.conn();
+        let tx = conn.unchecked_transaction()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut count = 0usize;
+        if success {
+            let mut stmt = tx.prepare(
+                "UPDATE knowledge SET utility_score = MIN(1.0, utility_score + ?1 * (1.0 - utility_score)),
+                 updated_at = ?2 WHERE id = ?3"
+            )?;
+            for id in kb_ids {
+                count += stmt.execute(params![Self::UTILITY_HIT_BOOST, now, id])?;
+            }
+            drop(stmt);
+        } else {
+            let mut stmt = tx.prepare(
+                "UPDATE knowledge SET utility_score = MAX(0.1, utility_score * 0.90),
+                 updated_at = ?1 WHERE id = ?2"
+            )?;
+            for id in kb_ids {
+                count += stmt.execute(params![now, id])?;
+            }
+            drop(stmt);
+        }
+        tx.commit()?;
+        Ok(count)
+    }
+
     /// List KB entries with confidence below threshold (for idle exploration).
     pub fn kb_list_low_confidence(&self, threshold: f64, limit: usize) -> DbResult<Vec<KnowledgeEntry>> {
         let conn = self.read_conn();
@@ -1254,6 +1287,37 @@ impl MissionDB {
         let mut entries = Vec::new();
         for entry in rows { entries.push(entry?); }
         Ok(entries)
+    }
+
+    /// List low-utility KB entries that have been used but underperform (Phase 4c).
+    /// Criteria: utility_score < threshold AND access_count >= min_access.
+    pub fn kb_list_low_utility(&self, threshold: f64, min_access: i64, limit: usize) -> DbResult<Vec<KnowledgeEntry>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM knowledge WHERE utility_score < ?1 AND access_count >= ?2
+             ORDER BY utility_score ASC LIMIT ?3"
+        )?;
+        let rows = stmt.query_map(params![threshold, min_access, limit as i64], |row| Self::row_to_knowledge_entry(row))?;
+        let mut entries = Vec::new();
+        for entry in rows { entries.push(entry?); }
+        Ok(entries)
+    }
+
+    /// Mark KB entries as needing re-extraction (Phase 4c).
+    /// TODO: Consumer needed — extraction pipeline should scan `needs_re_extraction = 1`
+    /// on startup/sweep, re-extract from source, then clear the flag.
+    pub fn kb_mark_needs_re_extraction(&self, ids: &[String]) -> DbResult<usize> {
+        if ids.is_empty() { return Ok(0); }
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut count = 0usize;
+        let mut stmt = conn.prepare(
+            "UPDATE knowledge SET needs_re_extraction = 1, updated_at = ?1 WHERE id = ?2"
+        )?;
+        for id in ids {
+            count += stmt.execute(params![now, id])?;
+        }
+        Ok(count)
     }
 
     // ============ KB Operation Queue ============
@@ -1510,18 +1574,31 @@ impl MissionDB {
     // ============ Co-access Pattern Tracking ============
 
     /// Log a group of KB entries that were co-accessed in the same context pipeline.
-    pub fn kb_log_co_access(&self, kb_ids: &[String], source: &str) -> DbResult<()> {
+    /// Phase 4b: session_id enables precise session-level feedback (avoids cross-session pollution).
+    pub fn kb_log_co_access(&self, kb_ids: &[String], source: &str, session_id: Option<&str>) -> DbResult<()> {
         if kb_ids.len() < 2 { return Ok(()); }
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "INSERT INTO kb_access_log (kb_id, co_accessed_ids, context_source) VALUES (?1, ?2, ?3)"
+            "INSERT INTO kb_access_log (kb_id, co_accessed_ids, context_source, session_id) VALUES (?1, ?2, ?3, ?4)"
         )?;
         for id in kb_ids {
             let others: Vec<&str> = kb_ids.iter().filter(|x| *x != id).map(|s| s.as_str()).collect();
             let others_json = serde_json::to_string(&others).unwrap_or_default();
-            stmt.execute(params![id, others_json, source])?;
+            stmt.execute(params![id, others_json, source, session_id])?;
         }
         Ok(())
+    }
+
+    /// Get all KB IDs cited in a specific session (Phase 4b).
+    pub fn get_session_cited_kb_ids(&self, session_id: &str) -> DbResult<Vec<String>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT kb_id FROM kb_access_log WHERE session_id = ?1"
+        )?;
+        let ids: Vec<String> = stmt.query_map(params![session_id], |row| {
+            row.get::<_, String>(0)
+        })?.filter_map(|r| r.ok()).collect();
+        Ok(ids)
     }
 
     /// Compute co-occurrence matrix from access log.

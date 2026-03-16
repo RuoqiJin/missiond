@@ -22,7 +22,7 @@ use crate::experience_harvester;
 use crate::state::{AppState, MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 use crate::memory_scheduler::{schedule_memory_tasks, dispatch_queued_submit_tasks};
 use crate::decision_engine::process_pending_master_questions;
-use crate::extraction::{check_realtime_extraction, check_deep_analysis, check_kb_consolidation};
+use crate::extraction::{check_realtime_extraction, check_deep_analysis, check_kb_consolidation, check_kb_reflection};
 use crate::workers::{retro_worker, strategy_worker};
 
 /// Exponential backoff for Lagged recovery: 100ms → 200ms → … → 2000ms cap.
@@ -521,6 +521,9 @@ async fn reconciliation_sweep(state: &AppState) {
 
     // KB consolidation: check if overdue
     check_kb_consolidation(state).await;
+
+    // Phase 4c: Weekly KB reflection on low-utility entries
+    check_kb_reflection(state).await;
 
     tracing::info!("Sweeper: reconciliation sweep complete");
 }

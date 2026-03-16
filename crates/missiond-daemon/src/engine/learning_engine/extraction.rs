@@ -635,3 +635,138 @@ pub(crate) fn check_kb_auto_gc(state: &AppState) {
     }
     let _ = state.mission.db().daemon_state_set("last_auto_gc_at", now);
 }
+
+/// Phase 4c: Weekly LLM reflection on low-utility KB entries.
+/// Sonnet diagnoses why certain KBs underperform and recommends actions.
+const KB_REFLECTION_INTERVAL_SECS: i64 = 7 * 86400; // 7 days
+const KB_REFLECTION_UTILITY_THRESHOLD: f64 = 0.3;
+const KB_REFLECTION_MIN_ACCESS: i64 = 3;
+const KB_REFLECTION_MAX_ENTRIES: usize = 20;
+
+pub(crate) async fn check_kb_reflection(state: &AppState) {
+    let now = chrono::Utc::now().timestamp();
+    let last = state.mission.db().daemon_state_get("last_kb_reflection").unwrap_or(None).unwrap_or(0);
+    if now - last < KB_REFLECTION_INTERVAL_SECS {
+        return;
+    }
+
+    let sonnet = match state.sonnet.as_ref() {
+        Some(s) => s,
+        None => {
+            debug!("KB reflection: Sonnet gateway not available, skipping");
+            return;
+        }
+    };
+
+    let entries = match state.mission.db().kb_list_low_utility(
+        KB_REFLECTION_UTILITY_THRESHOLD,
+        KB_REFLECTION_MIN_ACCESS,
+        KB_REFLECTION_MAX_ENTRIES,
+    ) {
+        Ok(e) if e.is_empty() => {
+            debug!("KB reflection: no low-utility entries to reflect on");
+            let _ = state.mission.db().daemon_state_set("last_kb_reflection", now);
+            return;
+        }
+        Ok(e) => e,
+        Err(e) => {
+            warn!(error = %e, "KB reflection: failed to list low-utility entries");
+            return;
+        }
+    };
+
+    info!(count = entries.len(), "KB reflection: analyzing low-utility entries");
+
+    // Build context
+    let mut kb_context = String::new();
+    for entry in &entries {
+        kb_context.push_str(&format!(
+            "- [{}] category={}, key=\"{}\", utility={:.2}, access={}, summary=\"{}\"\n",
+            &entry.id[..8.min(entry.id.len())], entry.category, entry.key,
+            entry.utility_score, entry.access_count, entry.summary,
+        ));
+    }
+
+    let prompt = format!(
+        r#"你是知识库质量分析师。以下 KB 条目的效用评分低（被引用但任务表现不佳）。诊断原因并给出处置建议。
+
+## 低效用 KB 条目
+{kb_context}
+## 诊断维度
+- 粒度不当（太粗/太细）→ 建议拆分/合并
+- 内容过时 → 建议删除
+- 上下文缺失 → 建议补充关联信息
+- 提取质量差 → 建议重新提取
+- 正常但场景有限 → 建议保留
+
+## 输出要求
+严格返回 JSON 数组（不要 markdown 围栏）：
+[{{"id": "完整ID", "reason": "诊断原因", "action": "keep|delete|re-extract", "detail": "具体说明"}}]
+
+保守原则：不确定时选 keep。只有明确过时/错误的才选 delete。"#
+    );
+
+    let messages = vec![crate::minimax_client::ChatMessage {
+        role: "user".to_string(),
+        content: prompt,
+    }];
+
+    let analysis = match sonnet.call_briefing(messages, Some(2000), Some("kb-reflection".to_string())).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            warn!(error = %e, "KB reflection: Sonnet call failed");
+            return;
+        }
+    };
+
+    // Parse and execute actions
+    let actions: Vec<serde_json::Value> = match serde_json::from_str(&analysis) {
+        Ok(a) => a,
+        Err(e) => {
+            warn!(error = %e, raw = %analysis, "KB reflection: failed to parse Sonnet response");
+            let _ = state.mission.db().daemon_state_set("last_kb_reflection", now);
+            return;
+        }
+    };
+
+    let db = state.mission.db();
+    let mut deleted = 0usize;
+    let mut re_extract = 0usize;
+    let mut kept = 0usize;
+
+    for action in &actions {
+        let id = match action["id"].as_str() { Some(s) => s, None => continue };
+        match action["action"].as_str() {
+            Some("delete") => {
+                // Gemini ARB safety net: verify utility is actually low before trusting LLM delete verdict
+                if let Ok(Some(entry)) = db.kb_get_by_id(id) {
+                    if entry.utility_score >= KB_REFLECTION_UTILITY_THRESHOLD {
+                        warn!(kb_id = id, utility = entry.utility_score,
+                            "KB reflection: LLM suggested delete but utility recovered, skipping");
+                        kept += 1;
+                        continue;
+                    }
+                    match db.kb_forget(&entry.key) {
+                        Ok(true) => { deleted += 1; }
+                        Ok(false) => {}
+                        Err(e) => warn!(kb_id = id, error = %e, "KB reflection: delete failed"),
+                    }
+                }
+            }
+            Some("re-extract") => {
+                match db.kb_mark_needs_re_extraction(&[id.to_string()]) {
+                    Ok(n) => { re_extract += n; }
+                    Err(e) => warn!(kb_id = id, error = %e, "KB reflection: mark re-extract failed"),
+                }
+            }
+            _ => {
+                // keep: mild boost to recover
+                let _ = db.kb_batch_apply_utility_feedback(&[id.to_string()], true);
+                kept += 1;
+            }
+        }
+    }
+
+    info!(deleted, re_extract, kept, total = actions.len(), "KB reflection: completed");
+    let _ = state.mission.db().daemon_state_set("last_kb_reflection", now);
+}
