@@ -273,6 +273,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 }
             }
 
+            // Phase 3: Emit KBBatchMutated for event-driven FTS rebuild / consolidation triggers
+            state.event_bus.publish(crate::event_bus::DaemonEvent::KBBatchMutated {
+                count: 1,
+                categories: vec![input.category.clone()],
+                action: result.action.clone(),
+            });
+
             // Conflict detection: for new entries, check semantic similarity against existing KB
             let conflicts = if result.action == "created" {
                 detect_kb_conflicts(state, &result.entry).await
@@ -331,6 +338,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     let _ = state.mission.db().kb_delete_edges_for(id);
                     let _ = state.mission.db().kb_delete_ast_links_for(id);
                 }
+            }
+            // Phase 3: Emit KBBatchMutated for event-driven FTS rebuild
+            if deleted {
+                state.event_bus.publish(crate::event_bus::DaemonEvent::KBBatchMutated {
+                    count: 1,
+                    categories: vec![],
+                    action: "deleted".to_string(),
+                });
             }
             Ok(ToolResult::json(&serde_json::json!({
                 "deleted": deleted,
