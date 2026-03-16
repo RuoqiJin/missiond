@@ -5,7 +5,7 @@ use crate::state::AppState;
 const MANAGED_START: &str = "<!-- missiond:managed:start -->";
 const MANAGED_END: &str = "<!-- missiond:managed:end -->";
 
-/// Sync KB preferences + hot topics into ~/.claude/CLAUDE.md managed section.
+/// Sync KB preferences + strategic context + hot topics into ~/.claude/CLAUDE.md managed section.
 /// Only writes when content actually changes (hash-based detection).
 pub(crate) fn sync_claude_md(state: &AppState) {
     let db = state.mission.db();
@@ -13,8 +13,14 @@ pub(crate) fn sync_claude_md(state: &AppState) {
     let preferences = db.kb_list(Some("preference")).unwrap_or_default();
     let hot_keys = db.kb_hot_keys(20).unwrap_or_default();
 
+    // Load strategic state from KB (Phase 2b: context feedback)
+    let strategic_state = db.kb_get("strategic-state")
+        .ok()
+        .flatten()
+        .and_then(|e| e.detail);
+
     // Nothing to sync
-    if preferences.is_empty() && hot_keys.is_empty() {
+    if preferences.is_empty() && hot_keys.is_empty() && strategic_state.is_none() {
         return;
     }
 
@@ -24,6 +30,7 @@ pub(crate) fn sync_claude_md(state: &AppState) {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for p in &preferences { p.summary.hash(&mut hasher); }
         for k in &hot_keys { k.hash(&mut hasher); }
+        if let Some(ref s) = strategic_state { s.to_string().hash(&mut hasher); }
         hasher.finish()
     };
     let last_hash = state.claude_md_hash.load(std::sync::atomic::Ordering::Relaxed);
@@ -35,6 +42,11 @@ pub(crate) fn sync_claude_md(state: &AppState) {
     let mut managed = String::new();
     managed.push_str(MANAGED_START);
     managed.push_str("\n# MissionD Managed\n");
+
+    // Phase 2b: Inject strategic context (dev trajectory, anti-patterns, collaboration patterns)
+    if let Some(ref state_json) = strategic_state {
+        build_strategic_section(&mut managed, state_json);
+    }
 
     if !preferences.is_empty() {
         managed.push_str("\n## Preferences\n");
@@ -94,5 +106,71 @@ pub(crate) fn sync_claude_md(state: &AppState) {
             state.claude_md_hash.store(new_hash, std::sync::atomic::Ordering::Relaxed);
         }
         Err(e) => warn!(error = %e, "Failed to write CLAUDE.md"),
+    }
+}
+
+/// Build strategic context section from Strategic State JSON.
+/// Injects development trajectory, anti-patterns, and negative collaboration patterns
+/// so every new Claude Code session has strategic awareness.
+///
+/// **Capped** to prevent CLAUDE.md bloat (Gemini ARB recommendation):
+/// - Focus: 1 entry, Goals: max 2, Anti-patterns: max 3, Negative patterns: max 3
+fn build_strategic_section(managed: &mut String, state_json: &serde_json::Value) {
+    let mut has_content = false;
+
+    // Development trajectory — current focus (1) & goals (max 2)
+    if let Some(traj) = state_json.get("development_trajectory") {
+        let focus = traj.get("current_focus").and_then(|v| v.as_str()).unwrap_or("");
+        let goals: Vec<&str> = traj.get("inferred_goals")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).take(2).collect())
+            .unwrap_or_default();
+
+        if !focus.is_empty() || !goals.is_empty() {
+            if !has_content {
+                managed.push_str("\n## Strategic Context\n");
+                has_content = true;
+            }
+            if !focus.is_empty() {
+                managed.push_str(&format!("- 当前焦点: {}\n", focus));
+            }
+            for goal in &goals {
+                managed.push_str(&format!("- 推测目标: {}\n", goal));
+            }
+        }
+    }
+
+    // Anti-patterns — high-severity friction points as warnings (max 3)
+    if let Some(anti) = state_json.get("anti_patterns").and_then(|v| v.as_array()) {
+        let rules: Vec<&str> = anti.iter()
+            .filter_map(|v| v.get("rule").and_then(|r| r.as_str()))
+            .take(3)
+            .collect();
+        if !rules.is_empty() {
+            if !has_content {
+                managed.push_str("\n## Strategic Context\n");
+                has_content = true;
+            }
+            for rule in &rules {
+                managed.push_str(&format!("- 反面模式: {}\n", rule));
+            }
+        }
+    }
+
+    // Negative collaboration patterns — things to avoid (max 3)
+    if let Some(patterns) = state_json.get("collaboration_patterns").and_then(|v| v.as_array()) {
+        let negatives: Vec<&str> = patterns.iter()
+            .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("negative"))
+            .filter_map(|v| v.get("pattern").and_then(|p| p.as_str()))
+            .take(3)
+            .collect();
+        if !negatives.is_empty() {
+            if !has_content {
+                managed.push_str("\n## Strategic Context\n");
+            }
+            for neg in &negatives {
+                managed.push_str(&format!("- 避免: {}\n", neg));
+            }
+        }
     }
 }

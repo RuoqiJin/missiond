@@ -495,9 +495,38 @@ async fn apply_strategic_output(
         }
     }
 
-    // 3. Create Board tasks for workflow proposals (≥3 occurrences)
+    // 3. Create Board tasks for workflow proposals
+    // Phase 2b: ≥5 occurrences → auto-generate Skill (auto_execute + assignee)
+    // Phase 2a: ≥3 occurrences → human review task
     for proposal in &output.workflow_proposals {
-        if proposal.occurrences >= 3 {
+        if proposal.occurrences >= 5 {
+            // Phase 2b: High-confidence workflow → auto-dispatch to Agent for Skill generation
+            let dedupe = format!("strategy-skill-gen-{}", slug(&proposal.action));
+            let skill_slug = slug(&proposal.action);
+            db.create_board_task(&missiond_core::types::CreateBoardTaskInput {
+                title: format!("自动生成 Skill: {}", truncate(&proposal.action, 50)),
+                description: Some(format!(
+                    "战略分析发现此操作出现 {} 次，已达自动化阈值。\n\n\
+                    请创建 Skill 文件 `~/.claude/skills/{}/SKILL.md`：\n\
+                    1. 分析此工作流涉及的代码路径和工具\n\
+                    2. 编写 frontmatter (name, description, allowed-tools)\n\
+                    3. 编写 INDEX 表和关键章节\n\
+                    4. 工作流描述: {}\n\n\
+                    来源: session {}",
+                    proposal.occurrences, skill_slug, proposal.action, session_id
+                )),
+                category: Some("dev".to_string()),
+                priority: Some("medium".to_string()),
+                assignee: Some("slot-memory-slow".to_string()),
+                auto_execute: Some(true),
+                dedupe_key: Some(dedupe),
+                project: Some("missiond".to_string()),
+                ..Default::default()
+            })?;
+            info!(action = %proposal.action, occurrences = proposal.occurrences,
+                "strategy_analyst: auto-dispatching Skill generation task");
+        } else if proposal.occurrences >= 3 {
+            // Phase 2a: Moderate frequency → human review
             let dedupe = format!("strategy-workflow-{}", slug(&proposal.action));
             db.create_board_task(&missiond_core::types::CreateBoardTaskInput {
                 title: format!("工作流自动化: {}", proposal.action),
@@ -549,16 +578,38 @@ async fn apply_strategic_output(
         }
     }
 
-    // 6. Notify via EventBus if needed
+    // 6. Phase 2c: Proactive communication — EventBus (WS/frontend) + Inbox (pull on next turn)
+    //
+    // Gemini ARB decision: NEVER send_fire_and_forget to user PTY slots.
+    // Rationale: injecting into active terminal disrupts UX, wastes tokens, breaks UI state.
+    // Instead: write to Inbox for pull-on-next-turn, broadcast to EventBus for frontend Toast.
     if let Some(comm) = &output.active_communication {
         if comm.should_notify {
             if let Some(msg) = &comm.message {
                 info!(message = %msg, "strategy_analyst: proactive notification");
+
+                // Path 1: EventBus → WS → frontend Toast/notification panel
                 state.event_bus.publish(DaemonEvent::InsightGenerated {
                     category: "strategy".to_string(),
                     priority: "medium".to_string(),
                     title: msg.clone(),
                 });
+
+                // Path 2: Inbox → pulled by Context Pipeline on next user turn
+                let formatted = format!("[战略洞察] {}", msg);
+                let inbox_msg = missiond_core::types::InboxMessage {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    task_id: "strategy_analyst".to_string(),
+                    from_role: "system".to_string(),
+                    content: formatted,
+                    read: false,
+                    created_at: chrono::Utc::now().timestamp_millis(),
+                };
+                if let Err(e) = db.insert_inbox_message(&inbox_msg) {
+                    warn!(error = %e, "strategy_analyst: failed to queue inbox message");
+                } else {
+                    info!("strategy_analyst: insight queued to inbox for next-turn injection");
+                }
             }
         }
     }
