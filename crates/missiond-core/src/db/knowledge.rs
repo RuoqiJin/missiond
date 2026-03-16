@@ -1110,7 +1110,19 @@ impl MissionDB {
             "SELECT COUNT(*) FROM knowledge WHERE utility_score < 0.3", [], |row| row.get(0)
         ).unwrap_or(0);
         let gc_candidates: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM knowledge WHERE utility_score < 0.15 AND julianday('now') - julianday(created_at) > 7 \
+            "SELECT COUNT(*) FROM knowledge WHERE
+             utility_score * POWER(
+               CASE
+                 WHEN category = 'memory:debug' THEN 0.9517
+                 WHEN category = 'memory:bugfix' THEN 0.9772
+                 WHEN category = 'memory:ops' THEN 0.9675
+                 WHEN category = 'memory:feature' THEN 0.9923
+                 WHEN category LIKE 'memory%' THEN 0.9885
+                 ELSE 1.0
+               END,
+               MAX(0, julianday('now') - julianday(COALESCE(last_accessed_at, updated_at)))
+             ) < 0.15
+             AND julianday('now') - julianday(created_at) > 7
              AND category NOT IN ('preference', 'memory:decision', 'memory:architecture', 'project', 'policy:decision')",
             [], |row| row.get(0)
         ).unwrap_or(0);
@@ -1160,58 +1172,44 @@ impl MissionDB {
         Ok(stats)
     }
 
-    /// Darwinian GC: time-decay utility scores, then prune low-utility entries.
+    /// Darwinian GC: read-time decay + prune low-utility entries.
+    /// **No batch UPDATE** — utility_score is decayed at read time (Gemini ARB: eliminate write amplification).
+    /// Effective score = base_score * POWER(daily_factor, days_since_last_interaction).
     /// Protected categories (preference, policy:decision, memory:architecture, memory:decision, project)
-    /// are never auto-deleted. Replaces hardcoded 14/30-day rules.
+    /// are never auto-deleted.
     pub fn kb_auto_gc(&self) -> DbResult<usize> {
         let conn = self.conn();
         let mut deleted = 0;
 
-        // Phase 1: Time-decay utility_score for non-evergreen categories.
-        // Uses category-specific half-lives (same as temporal_decay).
-        // decay_factor = exp(-ln2 / half_life_days * elapsed_days_since_last_gc)
-        // Simplified: multiply by 0.95 per day equivalent for each category's rate.
-        // We do per-category batch UPDATE using julianday delta since updated_at.
-        for (category, half_life_days) in &[
-            ("memory:debug", 14.0_f64),
-            ("memory:bugfix", 30.0),
-            ("memory:ops", 21.0),
-            ("memory:feature", 90.0),
-            ("memory", 60.0),
-        ] {
-            // decay = exp(-ln2 / half_life * days_since_update)
-            // SQLite doesn't have exp(), so we use: score * power(0.5, days/half_life)
-            // Approximated as: score * (1 - 0.693/half_life * min(days_since_update, half_life))
-            // Simpler: just multiply by a fixed daily factor = 0.5^(1/half_life)
-            let daily_factor = 0.5_f64.powf(1.0 / half_life_days);
-            conn.execute(
-                &format!(
-                    "UPDATE knowledge SET utility_score = utility_score * POWER(?1, MAX(0, julianday('now') - julianday(updated_at)))
-                     WHERE category {} ?2 AND utility_score > 0.01",
-                    if category.contains(':') { "=" } else { "LIKE" }
-                ),
-                params![
-                    daily_factor,
-                    if category.contains(':') { category.to_string() } else { format!("{}%", category) }
-                ],
-            )?;
-        }
-
-        // Phase 2: Delete infra entries — servers.yaml + mission_infra_get covers this
+        // Phase 1: Delete infra entries — servers.yaml + mission_infra_get covers this
         deleted += conn.execute("DELETE FROM knowledge WHERE category = 'infra'", [])?;
 
-        // Phase 3: Darwinian pruning — low utility + minimum age guard
-        // Threshold 0.15: entries must prove their worth or be pruned
-        // 7-day grace period: give new entries a chance to be discovered
+        // Phase 2: Darwinian pruning with read-time decay (no batch UPDATE needed).
+        // effective_score = utility_score * POWER(daily_factor, days_since_interaction)
+        // Prune when effective_score < 0.15 AND age > 7d (cold start grace period).
+        // CASE maps category → daily_factor (0.5^(1/half_life)):
+        //   memory:debug=14d→0.9517, memory:bugfix=30d→0.9772, memory:ops=21d→0.9675,
+        //   memory:feature=90d→0.9923, memory*=60d→0.9885, other=1.0 (no decay)
         deleted += conn.execute(
-            "DELETE FROM knowledge WHERE utility_score < 0.15 \
-             AND julianday('now') - julianday(created_at) > 7 \
-             AND category NOT IN ('preference', 'memory:decision', 'memory:architecture', 'project', 'policy:decision') \
+            "DELETE FROM knowledge WHERE
+             utility_score * POWER(
+               CASE
+                 WHEN category = 'memory:debug' THEN 0.9517
+                 WHEN category = 'memory:bugfix' THEN 0.9772
+                 WHEN category = 'memory:ops' THEN 0.9675
+                 WHEN category = 'memory:feature' THEN 0.9923
+                 WHEN category LIKE 'memory%' THEN 0.9885
+                 ELSE 1.0
+               END,
+               MAX(0, julianday('now') - julianday(COALESCE(last_accessed_at, updated_at)))
+             ) < 0.15
+             AND julianday('now') - julianday(created_at) > 7
+             AND category NOT IN ('preference', 'memory:decision', 'memory:architecture', 'project', 'policy:decision')
              AND scope_task_id IS NULL",
             [],
         )?;
 
-        // Phase 4: Clean up dangling edges for deleted nodes
+        // Phase 3: Clean up dangling edges for deleted nodes
         if deleted > 0 {
             conn.execute(
                 "DELETE FROM knowledge_edges WHERE source_id NOT IN (SELECT id FROM knowledge)
@@ -1611,6 +1609,102 @@ impl MissionDB {
             ))
         })?.filter_map(|r| r.ok()).collect();
         Ok(rows)
+    }
+
+    // ============ KB-AST Graph Links ============
+
+    /// Add a link between a KB entry and an AST code symbol.
+    /// Uses symbol_name as stable anchor; ast_node_id is a cache that may go stale.
+    pub fn kb_add_ast_link(
+        &self, kb_id: &str, symbol_name: &str, file_path: Option<&str>,
+        ast_node_id: Option<&str>, relation: &str, confidence: f64,
+    ) -> DbResult<()> {
+        let conn = self.conn();
+        // Upsert: avoid duplicate (kb_id, symbol_name) pairs
+        conn.execute(
+            "INSERT INTO kb_ast_links (kb_id, ast_node_id, symbol_name, file_path, relation, confidence)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT DO NOTHING",
+            params![kb_id, ast_node_id, symbol_name, file_path, relation, confidence],
+        )?;
+        Ok(())
+    }
+
+    /// Get all KB entries linked to a given AST symbol name.
+    pub fn kb_get_memories_for_symbol(&self, symbol_name: &str) -> DbResult<Vec<KnowledgeEntry>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT k.* FROM knowledge k
+             JOIN kb_ast_links l ON l.kb_id = k.id
+             WHERE l.symbol_name = ?1
+             ORDER BY k.utility_score DESC, k.updated_at DESC
+             LIMIT 10"
+        )?;
+        let rows = stmt.query_map(params![symbol_name], Self::row_to_knowledge_entry)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Get all KB entries linked to symbols in a given file, grouped by symbol.
+    pub fn kb_get_memories_for_file(&self, file_path: &str) -> DbResult<Vec<(String, KnowledgeEntry)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT l.symbol_name, k.id, k.category, k.key, k.summary, k.detail,
+                    k.source, k.confidence, k.access_count, k.created_at, k.updated_at,
+                    k.last_accessed_at, k.linked_task_id, k.kb_type, k.scope_task_id, k.utility_score
+             FROM knowledge k
+             JOIN kb_ast_links l ON l.kb_id = k.id
+             WHERE l.file_path = ?1
+             ORDER BY l.symbol_name, k.utility_score DESC
+             LIMIT 30"
+        )?;
+        let rows = stmt.query_map(params![file_path], |row| {
+            let symbol: String = row.get(0)?;
+            let entry = KnowledgeEntry {
+                id: row.get(1)?,
+                category: row.get(2)?,
+                key: row.get(3)?,
+                summary: row.get(4)?,
+                detail: row.get::<_, Option<String>>(5)?
+                    .and_then(|s| serde_json::from_str(&s).ok()),
+                source: row.get(6)?,
+                confidence: row.get(7)?,
+                access_count: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+                last_accessed_at: row.get(11)?,
+                linked_task_id: row.get(12)?,
+                kb_type: row.get::<_, Option<String>>(13)?.unwrap_or_else(|| "fact".to_string()),
+                context_snippet: None,
+                scope_task_id: row.get(14)?,
+                utility_score: row.get::<_, Option<f64>>(15)?.unwrap_or(0.5),
+            };
+            Ok((symbol, entry))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Delete all AST links for a KB entry (cleanup on forget).
+    pub fn kb_delete_ast_links_for(&self, kb_id: &str) -> DbResult<()> {
+        let conn = self.conn();
+        conn.execute("DELETE FROM kb_ast_links WHERE kb_id = ?1", params![kb_id])?;
+        Ok(())
+    }
+
+    /// Lazy resolution: fix stale ast_node_id by re-resolving from symbol_name.
+    pub fn kb_ast_lazy_resolve(&self, link_id: i64, symbol_name: &str) -> DbResult<Option<String>> {
+        let conn = self.conn();
+        let new_id: Option<String> = conn.query_row(
+            "SELECT id FROM ast_nodes WHERE name = ?1 LIMIT 1",
+            params![symbol_name],
+            |row| row.get(0),
+        ).optional()?;
+        if let Some(ref nid) = new_id {
+            conn.execute(
+                "UPDATE kb_ast_links SET ast_node_id = ?1 WHERE id = ?2",
+                params![nid, link_id],
+            )?;
+        }
+        Ok(new_id)
     }
 
     /// rule: policy/preference/system_rule → always-apply directives

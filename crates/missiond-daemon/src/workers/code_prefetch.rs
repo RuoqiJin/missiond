@@ -357,8 +357,25 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
         INTERACTIVE_BUDGET
     };
 
-    // Render XML output with progressive folding
-    let xml = render_code_context_tiered(&ranked, token_budget);
+    // Phase 2: Pre-fetch KB memories linked to code symbols in results
+    let file_paths: Vec<String> = ranked.iter()
+        .map(|r| r.hit.file_path.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let mut symbol_memories: HashMap<String, Vec<String>> = HashMap::new();
+    for fp in &file_paths {
+        if let Ok(memories) = db.kb_get_memories_for_file(fp) {
+            for (symbol, entry) in memories {
+                symbol_memories.entry(symbol)
+                    .or_default()
+                    .push(entry.summary);
+            }
+        }
+    }
+
+    // Render XML output with progressive folding + historical context
+    let xml = render_code_context_tiered(&ranked, token_budget, &symbol_memories);
 
     info!(
         query_prefix = &query[..query.len().min(60)],
@@ -442,7 +459,11 @@ fn render_folded(hit: &AstSearchHit) -> String {
 /// - Expansion: always signature-only
 ///
 /// High-tier nodes rendered first within each file (Gemini review: lost-in-middle).
-fn render_code_context_tiered(ranked: &[RankedHit], token_budget: usize) -> String {
+fn render_code_context_tiered(
+    ranked: &[RankedHit],
+    token_budget: usize,
+    symbol_memories: &HashMap<String, Vec<String>>,
+) -> String {
     if ranked.is_empty() {
         return String::new();
     }
@@ -509,6 +530,22 @@ fn render_code_context_tiered(ranked: &[RankedHit], token_budget: usize) -> Stri
             let cost = estimate_tokens(&rendered);
             remaining = remaining.saturating_sub(cost);
             xml.push_str(&rendered);
+
+            // Phase 2: Inject historical_context — KB memories linked to this symbol
+            if let Some(memories) = symbol_memories.get(&r.hit.name) {
+                if !memories.is_empty() && remaining > 0 {
+                    let mut hist = format!("<historical_context symbol=\"{}\">\n", r.hit.name);
+                    for (i, mem) in memories.iter().take(3).enumerate() {
+                        hist.push_str(&format!("  {}. {}\n", i + 1, mem));
+                    }
+                    hist.push_str("</historical_context>\n");
+                    let hist_cost = estimate_tokens(&hist);
+                    if hist_cost <= remaining {
+                        remaining = remaining.saturating_sub(hist_cost);
+                        xml.push_str(&hist);
+                    }
+                }
+            }
         }
         xml.push_str("</file>\n");
     }
@@ -523,7 +560,7 @@ fn render_code_context(hits: &[AstSearchHit]) -> String {
     let ranked: Vec<RankedHit> = hits.iter()
         .map(|h| RankedHit { hit: h.clone(), tier: RenderTier::Primary })
         .collect();
-    render_code_context_tiered(&ranked, TOKEN_BUDGET)
+    render_code_context_tiered(&ranked, TOKEN_BUDGET, &HashMap::new())
 }
 
 #[cfg(test)]
@@ -647,7 +684,7 @@ mod tests {
         let hit = make_hit("a", "a.rs", "Foo", "struct", "pub struct Foo",
             "pub struct Foo {\n    pub x: u32,\n}");
         let ranked = vec![RankedHit { hit, tier: RenderTier::Beacon }];
-        let xml = render_code_context_tiered(&ranked, 50); // tiny budget
+        let xml = render_code_context_tiered(&ranked, 50, &HashMap::new()); // tiny budget
         assert!(xml.contains("pub x: u32"), "Beacon should always render full");
     }
 
@@ -657,7 +694,7 @@ mod tests {
             "pub fn bar() -> i32",
             "pub fn bar() -> i32 {\n    // Calls: baz\n    /* elided */\n}");
         let ranked = vec![RankedHit { hit, tier: RenderTier::Expansion }];
-        let xml = render_code_context_tiered(&ranked, 10000);
+        let xml = render_code_context_tiered(&ranked, 10000, &HashMap::new());
         assert!(xml.contains("pub fn bar() -> i32"), "Should contain signature");
         assert!(!xml.contains("elided"), "Expansion should NOT contain body");
     }
@@ -677,7 +714,7 @@ mod tests {
             RankedHit { hit: hit2, tier: RenderTier::Primary },
         ];
         // Budget barely covers the big node
-        let xml = render_code_context_tiered(&ranked, 500);
+        let xml = render_code_context_tiered(&ranked, 500, &HashMap::new());
         assert!(xml.contains("pub fn big()"), "Beacon always rendered");
         // small should still appear (signature-only or full depending on remaining budget)
         assert!(xml.contains("pub fn small()"), "Small node should still appear");
