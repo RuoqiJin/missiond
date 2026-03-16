@@ -371,6 +371,43 @@ pub(crate) enum DaemonEvent {
         result_preview: Option<String>,
         is_error: bool,
     },
+
+    // ===== Phase 3: Reflection Engine lifecycle events =====
+    /// A conversation session ended (PTY exit or status → completed).
+    /// Single emission point: pty_event_worker. Consumers: session_reflection.
+    SessionCompleted {
+        session_id: String,
+        slot_id: Option<String>,
+        message_count: u32,
+        duration_secs: u64,
+        status: SessionEndStatus,
+    },
+    /// Deep analysis for a session finished (Strategy Worker wrote KB entries).
+    /// Consumer: kb_consolidation (accumulate N → trigger consolidation).
+    DeepAnalysisCompleted {
+        session_id: String,
+        kb_entries_created: u32,
+    },
+    /// KB entries were mutated (batch semantics to prevent event storms).
+    /// Emitted from kb_remember/kb_forget with count aggregation.
+    KBBatchMutated {
+        count: u32,
+        categories: Vec<String>,
+        /// "created" | "updated" | "deleted" | "mixed"
+        action: String,
+    },
+}
+
+/// How a conversation session ended.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionEndStatus {
+    /// Normal completion (user exited, /exit, or natural end).
+    Success,
+    /// User interrupted or PTY force-killed.
+    Aborted,
+    /// Abnormal crash or error.
+    Error,
 }
 
 impl DaemonEvent {
@@ -424,6 +461,9 @@ impl DaemonEvent {
             Self::CliRequestStarted { .. } => "cli_request_started",
             Self::CliRequestCompleted { .. } => "cli_request_completed",
             Self::CliToolActivity { .. } => "cli_tool_activity",
+            Self::SessionCompleted { .. } => "session_completed",
+            Self::DeepAnalysisCompleted { .. } => "deep_analysis_completed",
+            Self::KBBatchMutated { .. } => "kb_batch_mutated",
         }
     }
 
@@ -638,6 +678,12 @@ impl DaemonEvent {
                 "path": path,
                 "kind": kind,
             }),
+            Self::SessionCompleted { session_id, slot_id, message_count, duration_secs, status } =>
+                json!({ "session_id": session_id, "slot_id": slot_id, "message_count": message_count, "duration_secs": duration_secs, "status": status }),
+            Self::DeepAnalysisCompleted { session_id, kb_entries_created } =>
+                json!({ "session_id": session_id, "kb_entries_created": kb_entries_created }),
+            Self::KBBatchMutated { count, categories, action } =>
+                json!({ "count": count, "categories": categories, "action": action }),
         }
     }
 }

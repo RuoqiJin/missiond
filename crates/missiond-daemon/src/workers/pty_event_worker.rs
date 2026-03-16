@@ -66,6 +66,42 @@ async fn handle_exited(s: &AppState, slot_id: &str, exit_code: i32) {
         // Ground truth: persist exit code for Learning Engine
         let _ = s.mission.db().save_conversation_exit_code(uuid, exit_code);
         let _ = s.embedding_tx.try_send(EmbeddingTask::ProcessSession(uuid.clone()));
+
+        // Phase 3: Emit SessionCompleted for event-driven reflection pipeline
+        let (msg_count, duration) = s.mission.db().get_conversation(uuid)
+            .ok()
+            .flatten()
+            .map(|conv| {
+                let msgs = conv.message_count as u32;
+                let dur = conv.ended_at.as_ref()
+                    .and_then(|end| chrono::DateTime::parse_from_rfc3339(end).ok())
+                    .and_then(|end| chrono::DateTime::parse_from_rfc3339(&conv.started_at).ok().map(|start| (end - start).num_seconds().max(0) as u64))
+                    .unwrap_or(0);
+                (msgs, dur)
+            })
+            .unwrap_or((0, 0));
+        let end_status = if exit_code == 0 {
+            event_bus::SessionEndStatus::Success
+        } else if exit_code == -1 || exit_code == 130 {
+            event_bus::SessionEndStatus::Aborted // SIGINT or force kill
+        } else {
+            event_bus::SessionEndStatus::Error
+        };
+        s.event_bus.publish_traced(
+            event_bus::DaemonEvent::SessionCompleted {
+                session_id: uuid.clone(),
+                slot_id: Some(slot_id.to_string()),
+                message_count: msg_count,
+                duration_secs: duration,
+                status: end_status,
+            },
+            event_bus::TraceContext {
+                trace_id: Some(uuid.clone()),
+                summary: Some(format!("{}: session completed (exit={})", slot_id, exit_code)),
+                ..Default::default()
+            },
+        );
+
         s.pty_session_uuids.write().await.remove(uuid);
     }
     s.mission.db().clear_slot_session(slot_id);
