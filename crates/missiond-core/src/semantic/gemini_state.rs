@@ -6,43 +6,20 @@
 //!
 //! Detection strategy: bottom-up scan with box drawing sanitization.
 
-use once_cell::sync::Lazy;
-use regex::Regex;
+use std::sync::Arc;
 
+use super::patterns::CompiledPatterns;
 use super::types::{ParserContext, ParserMeta, State, StateDetectionResult, StateParser};
-
-/// Box drawing characters to strip for clean text analysis.
-static BOX_DRAWING_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"[╭╮╰╯│─├┤┬┴┼┌┐└┘╌╍]").unwrap());
-/// Braille spinner characters used by Ink's `dots` spinner type.
-static SPINNER_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]").unwrap());
-/// Gemini prompt indicator: `> ` at start of cleaned line (inside bordered input box).
-static PROMPT_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*>\s").unwrap());
-/// Thinking/loading indicator keywords.
-static THINKING_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)(Thinking\s*\.\.\.?|esc to cancel)").unwrap());
-/// Error indicator.
-static ERROR_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^Error:|error:").unwrap());
-/// Footer signature: `/model ` prefix indicates the Gemini footer bar.
-static FOOTER_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"/model\s+\S").unwrap());
-/// Tool execution indicators (checklist items with status).
-static TOOL_EXEC_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)(Executing|Running|✓|✗|⠏)\s+\w").unwrap());
-/// Placeholder text in empty input prompt.
-static PLACEHOLDER_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"Type your message|@path/to/file").unwrap());
 
 /// State parser for Gemini CLI interactive terminal (Ink TUI).
 pub struct GeminiCliStateParser {
     meta: ParserMeta,
+    patterns: Arc<CompiledPatterns>,
 }
 
 impl GeminiCliStateParser {
-    pub fn new() -> Self {
+    /// Create with external patterns
+    pub fn with_patterns(patterns: Arc<CompiledPatterns>) -> Self {
         Self {
             meta: ParserMeta {
                 name: "gemini-cli".to_string(),
@@ -50,13 +27,32 @@ impl GeminiCliStateParser {
                 priority: 10,
                 version: "1.0.0".to_string(),
             },
+            patterns,
         }
     }
 
+    /// Create with default embedded patterns
+    pub fn new() -> Self {
+        let patterns = Arc::new(
+            super::patterns::default_compiled(crate::types::CliEngine::Gemini)
+                .expect("embedded gemini-cli patterns must parse"),
+        );
+        Self::with_patterns(patterns)
+    }
+
     /// Strip box drawing characters and trailing whitespace for clean text analysis.
-    fn sanitize_line(line: &str) -> String {
-        let cleaned = BOX_DRAWING_RE.replace_all(line, " ");
-        cleaned.trim_end().to_string()
+    fn sanitize_line(&self, line: &str) -> String {
+        if let Some(re) = self.patterns.regex("box_drawing.strip") {
+            let cleaned = re.replace_all(line, " ");
+            cleaned.trim_end().to_string()
+        } else {
+            line.trim_end().to_string()
+        }
+    }
+
+    /// Check if a line contains any spinner character
+    fn has_spinner_char(&self, line: &str) -> bool {
+        line.chars().any(|c| self.patterns.is_spinner_char(c))
     }
 }
 
@@ -66,11 +62,18 @@ impl StateParser for GeminiCliStateParser {
     }
 
     fn detect_state(&self, context: &ParserContext) -> Option<StateDetectionResult> {
+        let prompt_re = self.patterns.regex("prompt.input");
+        let thinking_re = self.patterns.regex("thinking.pattern");
+        let error_re = self.patterns.regex("error.pattern");
+        let footer_re = self.patterns.regex("footer.pattern");
+        let tool_exec_re = self.patterns.regex("tool_exec.pattern");
+        let placeholder_re = self.patterns.regex("placeholder.pattern");
+
         // Sanitize and filter empty lines
         let lines: Vec<String> = context
             .last_lines
             .iter()
-            .map(|l| Self::sanitize_line(l))
+            .map(|l| self.sanitize_line(l))
             .collect();
 
         let non_empty: Vec<&str> = lines.iter().filter(|l| !l.trim().is_empty()).map(|s| s.as_str()).collect();
@@ -88,28 +91,27 @@ impl StateParser for GeminiCliStateParser {
         let mut has_placeholder = false;
 
         // Bottom-up scan — Ink TUI layers: Footer → InputPrompt → Loading/Tools → Messages
-        // Check bottom 20 lines (covers footer + input + loading indicator)
         let scan_depth = non_empty.len().min(20);
         for line in non_empty.iter().rev().take(scan_depth) {
-            if SPINNER_RE.is_match(line) {
+            if self.has_spinner_char(line) {
                 has_spinner = true;
             }
-            if THINKING_RE.is_match(line) {
+            if thinking_re.map_or(false, |re| re.is_match(line)) {
                 has_thinking = true;
             }
-            if PROMPT_RE.is_match(line) {
+            if prompt_re.map_or(false, |re| re.is_match(line)) {
                 has_prompt = true;
             }
-            if FOOTER_RE.is_match(line) {
+            if footer_re.map_or(false, |re| re.is_match(line)) {
                 has_footer = true;
             }
-            if ERROR_RE.is_match(line) {
+            if error_re.map_or(false, |re| re.is_match(line)) {
                 has_error = true;
             }
-            if TOOL_EXEC_RE.is_match(line) {
+            if tool_exec_re.map_or(false, |re| re.is_match(line)) {
                 has_tool_exec = true;
             }
-            if PLACEHOLDER_RE.is_match(line) {
+            if placeholder_re.map_or(false, |re| re.is_match(line)) {
                 has_placeholder = true;
             }
         }
@@ -262,12 +264,13 @@ mod tests {
 
     #[test]
     fn test_sanitize_box_drawing() {
+        let parser = GeminiCliStateParser::new();
         assert_eq!(
-            GeminiCliStateParser::sanitize_line("│ > hello │"),
+            parser.sanitize_line("│ > hello │"),
             "  > hello"
         );
         assert_eq!(
-            GeminiCliStateParser::sanitize_line("╭─────╮"),
+            parser.sanitize_line("╭─────╮"),
             ""  // all replaced with spaces, then trim_end removes them
         );
     }

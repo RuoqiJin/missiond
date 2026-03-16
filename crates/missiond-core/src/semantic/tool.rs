@@ -2,35 +2,16 @@
 //!
 //! Parses tool call boxes (tool name, parameters, output) from Claude Code CLI output.
 
-use once_cell::sync::Lazy;
-use regex::Regex;
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use super::patterns::CompiledPatterns;
 use super::types::{
     ClaudeCodeToolOutput, ParserContext, ParserMeta, ToolOutputParser, ToolOutputResult,
     ToolStatus,
 };
 
-/// Tool header patterns:
-/// - Box style: "⏺ Bash" or "⏺ Bash (completed in 0.5s)"
-static TOOL_HEADER_BOX_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^⏺\s+(\w+)(?:\s+\(completed\s+in\s+([\d.]+)s?\))?$").unwrap());
-
-/// Tool header inline style: "⏺ Bash(git status)" or "⏺ Search(pattern: \"*.ts\")"
-static TOOL_HEADER_INLINE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^⏺\s+(\w+)\((.*)\)$").unwrap());
-
-/// Tool parameter line pattern: │ key: value
-/// Example: "  │ command: \"git status\""
-/// Example: "  │ file_path: \"/path/to/file\""
-static PARAM_LINE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*│\s*(\w+):\s*(.+)$").unwrap());
-
-/// Inline tool output lines often start with ⎿
-static INLINE_OUTPUT_LINE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*⎿\s*(.+)$").unwrap());
-
-/// Known tool names
+/// Legacy known tool names (kept for external consumers like napi crate)
 pub const KNOWN_TOOLS: &[&str] = &[
     "Bash",
     "Read",
@@ -67,6 +48,7 @@ enum ToolStyle {
 /// - Status (running/completed)
 pub struct ClaudeCodeToolOutputParser {
     meta: ParserMeta,
+    patterns: Arc<CompiledPatterns>,
 }
 
 impl Default for ClaudeCodeToolOutputParser {
@@ -76,8 +58,8 @@ impl Default for ClaudeCodeToolOutputParser {
 }
 
 impl ClaudeCodeToolOutputParser {
-    /// Create a new Claude Code tool output parser
-    pub fn new() -> Self {
+    /// Create with external patterns
+    pub fn with_patterns(patterns: Arc<CompiledPatterns>) -> Self {
         Self {
             meta: ParserMeta {
                 name: "claude-code-tool".to_string(),
@@ -85,7 +67,17 @@ impl ClaudeCodeToolOutputParser {
                 priority: 92,
                 version: "1.0.0".to_string(),
             },
+            patterns,
         }
+    }
+
+    /// Create with default embedded patterns
+    pub fn new() -> Self {
+        let patterns = Arc::new(
+            super::patterns::default_compiled(crate::types::CliEngine::ClaudeCode)
+                .expect("embedded claude-code patterns must parse"),
+        );
+        Self::with_patterns(patterns)
     }
 
     /// Parse inline arguments like "git status" or "pattern: \"*.ts\", path: \"/src\""
@@ -190,7 +182,7 @@ impl ClaudeCodeToolOutputParser {
 
     /// Check if a tool name is known
     fn is_known_tool(&self, name: &str) -> bool {
-        KNOWN_TOOLS.contains(&name)
+        self.patterns.is_known_tool(name)
     }
 }
 
@@ -200,16 +192,23 @@ impl ToolOutputParser for ClaudeCodeToolOutputParser {
     }
 
     fn can_parse(&self, context: &ParserContext) -> bool {
-        // Check if any line matches tool header pattern
+        let header_box_re = self.patterns.regex("tool_output.header_box");
+        let header_inline_re = self.patterns.regex("tool_output.header_inline");
+        let output_line_re = self.patterns.regex("tool_output.output_line");
         context.last_lines.iter().any(|line| {
             let trimmed = line.trim();
-            TOOL_HEADER_BOX_PATTERN.is_match(trimmed)
-                || TOOL_HEADER_INLINE_PATTERN.is_match(trimmed)
-                || INLINE_OUTPUT_LINE_PATTERN.is_match(trimmed)
+            header_box_re.map_or(false, |re| re.is_match(trimmed))
+                || header_inline_re.map_or(false, |re| re.is_match(trimmed))
+                || output_line_re.map_or(false, |re| re.is_match(trimmed))
         })
     }
 
     fn parse(&self, context: &ParserContext) -> Option<ToolOutputResult> {
+        let header_box_re = self.patterns.regex("tool_output.header_box");
+        let header_inline_re = self.patterns.regex("tool_output.header_inline");
+        let param_line_re = self.patterns.regex("tool_output.param_line");
+        let output_line_re = self.patterns.regex("tool_output.output_line");
+
         let lines = &context.last_lines;
         let mut tool_name: Option<String> = None;
         let mut duration_ms: Option<f64> = None;
@@ -223,10 +222,9 @@ impl ToolOutputParser for ClaudeCodeToolOutputParser {
             let trimmed = line.trim();
 
             // Check for box-style tool header
-            if let Some(caps) = TOOL_HEADER_BOX_PATTERN.captures(trimmed) {
+            if let Some(caps) = header_box_re.and_then(|re| re.captures(trimmed)) {
                 tool_name = Some(caps.get(1).unwrap().as_str().to_string());
                 if let Some(duration_match) = caps.get(2) {
-                    // Convert seconds to milliseconds
                     if let Ok(secs) = duration_match.as_str().parse::<f64>() {
                         duration_ms = Some(secs * 1000.0);
                     }
@@ -238,7 +236,7 @@ impl ToolOutputParser for ClaudeCodeToolOutputParser {
             }
 
             // Check for inline-style tool header
-            if let Some(caps) = TOOL_HEADER_INLINE_PATTERN.captures(trimmed) {
+            if let Some(caps) = header_inline_re.and_then(|re| re.captures(trimmed)) {
                 let name = caps.get(1).unwrap().as_str();
                 tool_name = Some(name.to_string());
                 let arg_string = caps.get(2).map(|m| m.as_str()).unwrap_or("");
@@ -253,17 +251,15 @@ impl ToolOutputParser for ClaudeCodeToolOutputParser {
                 match tool_style {
                     Some(ToolStyle::Box) => {
                         // Check for parameter line
-                        if let Some(caps) = PARAM_LINE_PATTERN.captures(trimmed) {
+                        if let Some(caps) = param_line_re.and_then(|re| re.captures(trimmed)) {
                             let key = caps.get(1).unwrap().as_str();
                             let value_raw = caps.get(2).unwrap().as_str();
 
-                            // Try to parse JSON value, fallback to string
                             let value =
                                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(value_raw)
                                 {
                                     v
                                 } else {
-                                    // Remove surrounding quotes if present
                                     let cleaned =
                                         if value_raw.starts_with('"') && value_raw.ends_with('"') {
                                             &value_raw[1..value_raw.len() - 1]
@@ -281,7 +277,9 @@ impl ToolOutputParser for ClaudeCodeToolOutputParser {
                         // Check for output content (lines starting with │ but not key: value)
                         if let Some(rest) = trimmed.strip_prefix('│') {
                             let content = rest.trim();
-                            if !content.is_empty() && !PARAM_LINE_PATTERN.is_match(trimmed) {
+                            if !content.is_empty()
+                                && !param_line_re.map_or(false, |re| re.is_match(trimmed))
+                            {
                                 output_lines.push(content.to_string());
                                 raw_lines.push(line.clone());
                             }
@@ -295,7 +293,7 @@ impl ToolOutputParser for ClaudeCodeToolOutputParser {
                     }
                     Some(ToolStyle::Inline) => {
                         // Check for inline output line
-                        if let Some(caps) = INLINE_OUTPUT_LINE_PATTERN.captures(trimmed) {
+                        if let Some(caps) = output_line_re.and_then(|re| re.captures(trimmed)) {
                             let content = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("");
                             if !content.is_empty() {
                                 output_lines.push(content.to_string());
@@ -316,7 +314,9 @@ impl ToolOutputParser for ClaudeCodeToolOutputParser {
                         }
 
                         // End of tool block
-                        if !trimmed.is_empty() && !INLINE_OUTPUT_LINE_PATTERN.is_match(trimmed) {
+                        if !trimmed.is_empty()
+                            && !output_line_re.map_or(false, |re| re.is_match(trimmed))
+                        {
                             break;
                         }
                     }
@@ -327,7 +327,6 @@ impl ToolOutputParser for ClaudeCodeToolOutputParser {
 
         let tool_name = tool_name?;
 
-        // Determine status
         let status = if duration_ms.is_some() {
             ToolStatus::Completed
         } else {

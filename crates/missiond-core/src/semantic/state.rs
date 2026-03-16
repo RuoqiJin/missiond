@@ -19,10 +19,9 @@
 //! - We use `last_non_empty_lines(N)` to focus on the active region.
 //! - Detection order: Confirm → Idle → Processing → Responding → Error.
 
-use once_cell::sync::Lazy;
-use regex::Regex;
+use std::sync::Arc;
 
-use super::status::SPINNER_CHARS;
+use super::patterns::CompiledPatterns;
 use super::types::{
     ConfirmType, ParserContext, ParserMeta, State, StateDetectionResult, StateMeta, StateParser,
 };
@@ -35,34 +34,10 @@ pub enum PhaseHint {
     Unknown(String),
 }
 
-/// Regex patterns for state detection
-static OPTION_CONFIRM_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?mi)^[\s❯>]*1\.\s*(Yes|Allow)").unwrap());
-
-/// General numbered option list (AskUserQuestion): "❯ 1. <any text>"
-static ASK_USER_OPTION_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?mi)^[\s❯>]*1\.\s+\S").unwrap());
-
-static YES_NO_CONFIRM_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\[Y/n\]|\(yes/no\)|Allow\?|Do you want to proceed").unwrap());
-
-static PROMPT_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[❯>]\s*").unwrap());
-
-/// Spinner line pattern: optional whitespace + spinner char + whitespace + text
-/// Matches: `✳ Determining…`, `  ✻ Reading...`, `· Processing`
-/// Does NOT match bottom bar: `⏵⏵ bypass permissions on ... · esc to interrupt`
-static SPINNER_LINE_PATTERN: Lazy<Regex> = Lazy::new(|| {
-    let chars = SPINNER_CHARS
-        .iter()
-        .map(|c| regex::escape(&c.to_string()))
-        .collect::<Vec<_>>()
-        .join("");
-    Regex::new(&format!(r"^\s*[{}]\s+\S", chars)).unwrap()
-});
-
 /// Claude Code state parser
 pub struct ClaudeCodeStateParser {
     meta: ParserMeta,
+    patterns: Arc<CompiledPatterns>,
 }
 
 impl Default for ClaudeCodeStateParser {
@@ -72,7 +47,8 @@ impl Default for ClaudeCodeStateParser {
 }
 
 impl ClaudeCodeStateParser {
-    pub fn new() -> Self {
+    /// Create with external patterns
+    pub fn with_patterns(patterns: Arc<CompiledPatterns>) -> Self {
         Self {
             meta: ParserMeta {
                 name: "claude-code-state".to_string(),
@@ -80,26 +56,48 @@ impl ClaudeCodeStateParser {
                 priority: 100,
                 version: "2.0.0".to_string(),
             },
+            patterns,
         }
+    }
+
+    /// Create with default embedded patterns
+    pub fn new() -> Self {
+        let patterns = Arc::new(
+            super::patterns::default_compiled(crate::types::CliEngine::ClaudeCode)
+                .expect("embedded claude-code patterns must parse"),
+        );
+        Self::with_patterns(patterns)
     }
 
     /// Check for options-style confirmation (full text, dialog spans many lines)
     fn is_option_confirm(&self, text: &str) -> bool {
-        let has_standard = OPTION_CONFIRM_PATTERN.is_match(text);
-        let has_ask_user = ASK_USER_OPTION_PATTERN.is_match(text) && text.contains("Enter to select");
-        (has_standard || has_ask_user) && text.contains("Esc to cancel")
+        let has_standard = self
+            .patterns
+            .regex("confirm.option_trigger")
+            .map_or(false, |re| re.is_match(text));
+        let ask_user_marker = self.patterns.ask_user_marker().unwrap_or("Enter to select");
+        let has_ask_user = self
+            .patterns
+            .regex("confirm.ask_user_trigger")
+            .map_or(false, |re| re.is_match(text))
+            && text.contains(ask_user_marker);
+        let cancel_marker = self.patterns.cancel_marker().unwrap_or("Esc to cancel");
+        (has_standard || has_ask_user) && text.contains(cancel_marker)
     }
 
     /// Check for Y/n style confirmation
     fn is_yes_no_confirm(&self, text: &str) -> bool {
-        YES_NO_CONFIRM_PATTERN.is_match(text)
+        self.patterns
+            .regex("confirm.yes_no")
+            .map_or(false, |re| re.is_match(text))
     }
 
     /// Check if any line has a prompt indicator
     fn has_prompt_in(&self, lines: &[&str]) -> bool {
-        lines
-            .iter()
-            .any(|line| PROMPT_PATTERN.is_match(line.trim()))
+        let Some(re) = self.patterns.regex("prompt.input") else {
+            return false;
+        };
+        lines.iter().any(|line| re.is_match(line.trim()))
     }
 
     /// Check if the slash command autocomplete menu is visible.
@@ -142,7 +140,10 @@ impl ClaudeCodeStateParser {
 
     /// Check if any line is a spinner/status line (processing indicator)
     fn has_spinner_line(&self, lines: &[&str]) -> bool {
-        lines.iter().any(|line| SPINNER_LINE_PATTERN.is_match(line))
+        let Some(re) = self.patterns.regex("state.spinner_line") else {
+            return false;
+        };
+        lines.iter().any(|line| re.is_match(line))
     }
 
     /// Check if the spinner is actively processing (not a stale/completion spinner).
@@ -154,9 +155,11 @@ impl ClaudeCodeStateParser {
     /// Completion spinners remain on screen after task finishes. They must NOT
     /// be treated as active processing indicators.
     fn has_active_spinner(&self, lines: &[&str]) -> bool {
+        let Some(re) = self.patterns.regex("state.spinner_line") else {
+            return false;
+        };
         lines.iter().any(|line| {
-            SPINNER_LINE_PATTERN.is_match(line)
-                && (line.contains('…') || line.contains("..."))
+            re.is_match(line) && (line.contains('…') || line.contains("..."))
         })
     }
 
@@ -175,19 +178,14 @@ impl ClaudeCodeStateParser {
                 return false;
             };
             let after = after.trim_start();
-            // Tool call: ⏺ followed by a tool name (capitalized word or contains "(MCP)")
-            after.contains("(MCP)")
-                || after.starts_with("Bash")
-                || after.starts_with("Read")
-                || after.starts_with("Edit")
-                || after.starts_with("Write")
-                || after.starts_with("Glob")
-                || after.starts_with("Grep")
-                || after.starts_with("Task")
-                || after.starts_with("WebFetch")
-                || after.starts_with("WebSearch")
-                || after.starts_with("LSP")
-                || after.starts_with("NotebookEdit")
+            // Tool call: ⏺ followed by a known tool name or "(MCP)"
+            if after.contains("(MCP)") {
+                return true;
+            }
+            self.patterns
+                .known_tools
+                .iter()
+                .any(|tool| after.starts_with(tool.as_str()))
         })
     }
 
@@ -204,8 +202,11 @@ impl ClaudeCodeStateParser {
     /// 1. If parens has `·` separator, take last segment's first word
     /// 2. If parens is a single word (like "thinking"), use it directly
     fn extract_phase_hint(&self, lines: &[&str]) -> Option<PhaseHint> {
+        let spinner_re = self.patterns.regex("state.spinner_line")?;
+        let skip_words = self.patterns.phase_skip_words();
+        let keywords = self.patterns.phase_keywords();
         for line in lines {
-            if !SPINNER_LINE_PATTERN.is_match(line) {
+            if !spinner_re.is_match(line) {
                 continue;
             }
             let trimmed = line.trim();
@@ -239,13 +240,23 @@ impl ClaudeCodeStateParser {
             };
 
             if let Some(word) = phase_word {
-                return Some(match word.to_lowercase().as_str() {
-                    "thinking" | "thought" => PhaseHint::Thinking,
-                    "tool" | "running" => PhaseHint::ToolRunning,
-                    // Skip common non-phase words
-                    "esc" | "shift" | "tab" | "bypass" => continue,
-                    other => PhaseHint::Unknown(other.to_string()),
-                });
+                let lower = word.to_lowercase();
+                // Skip configured non-phase words
+                if skip_words.iter().any(|w| w == &lower) {
+                    continue;
+                }
+                // Check configured phase keywords
+                if let Some(thinking_words) = keywords.get("thinking") {
+                    if thinking_words.iter().any(|w| w == &lower) {
+                        return Some(PhaseHint::Thinking);
+                    }
+                }
+                if let Some(tool_words) = keywords.get("tool_running") {
+                    if tool_words.iter().any(|w| w == &lower) {
+                        return Some(PhaseHint::ToolRunning);
+                    }
+                }
+                return Some(PhaseHint::Unknown(lower));
             }
         }
         None
@@ -440,7 +451,7 @@ mod tests {
     fn test_detect_thinking_all_spinner_chars() {
         let parser = ClaudeCodeStateParser::new();
 
-        for spinner in SPINNER_CHARS {
+        for spinner in &parser.patterns.spinner_chars {
             let line = format!("{} Processing…", spinner);
             let context = make_context(&[&line]);
             let result = parser.detect_state(&context);
@@ -804,19 +815,20 @@ mod tests {
 
     #[test]
     fn test_spinner_line_pattern_no_false_positive() {
+        let parser = ClaudeCodeStateParser::new();
+        let re = parser.patterns.regex("state.spinner_line").unwrap();
         // Bottom bar should NOT match spinner pattern
-        assert!(!SPINNER_LINE_PATTERN
-            .is_match("  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt"));
+        assert!(!re.is_match("  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt"));
         // Standalone spinner char without text should NOT match
-        assert!(!SPINNER_LINE_PATTERN.is_match("    ✻"));
-        assert!(!SPINNER_LINE_PATTERN.is_match("  ·"));
+        assert!(!re.is_match("    ✻"));
+        assert!(!re.is_match("  ·"));
         // Valid spinner lines SHOULD match
-        assert!(SPINNER_LINE_PATTERN.is_match("✳ Determining…"));
-        assert!(SPINNER_LINE_PATTERN.is_match("  ✻ Reading file..."));
-        assert!(SPINNER_LINE_PATTERN.is_match("· Processing (esc to interrupt)"));
+        assert!(re.is_match("✳ Determining…"));
+        assert!(re.is_match("  ✻ Reading file..."));
+        assert!(re.is_match("· Processing (esc to interrupt)"));
         // ASCII `*` spinner (non-native/basic terminal mode on VPS)
-        assert!(SPINNER_LINE_PATTERN.is_match("* Honking…"));
-        assert!(SPINNER_LINE_PATTERN.is_match("  * Embellishing… (5s · thinking)"));
+        assert!(re.is_match("* Honking…"));
+        assert!(re.is_match("  * Embellishing… (5s · thinking)"));
     }
 
     #[test]

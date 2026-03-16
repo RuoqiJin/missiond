@@ -7,6 +7,7 @@
 //! - `PTYManager`: Manages multiple PTY sessions
 //! - `IncrementalExtractor`: Frame-by-frame text extraction
 
+pub mod anomaly;
 mod extractor;
 mod manager;
 pub mod screenshot;

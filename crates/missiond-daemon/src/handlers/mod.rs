@@ -23,7 +23,7 @@ pub(crate) use comm::retrospective;
 
 // Domain aliases for dispatch readability
 use knowledge::{board, insight, kb, skill, memory};
-use compute::{task, process, pty, cc_tasks, minimax, worker, compute_slot, job};
+use compute::{task, task_delegate, process, pty, cc_tasks, minimax, worker, compute_slot, job};
 use comm::{router_chat, question, conversation, timeline, audit};
 use sysinfra::{infra, permission, system, health, misc};
 
@@ -62,6 +62,8 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
             => system::handle(state, name, args).await,
         "mission_compute_slot"
             => compute_slot::handle(state, name, args).await,
+        "mission_task_delegate"
+            => task_delegate::handle(state, name, args).await,
         "mission_job_poll" => job::handle(state, name, args).await,
 
         // ===== Legacy names (backward compatibility) =====

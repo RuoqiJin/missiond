@@ -8,6 +8,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use super::patterns::CompiledPatterns;
 use super::ParserContext;
 
 // ========== Types ==========
@@ -302,81 +303,28 @@ impl FingerprintRegistry {
 
 // ========== Claude Code Fingerprints ==========
 
-/// Pre-compiled regex patterns for Claude Code
-mod patterns {
-    use once_cell::sync::Lazy;
-    use regex::Regex;
-
-    pub static STATUSBAR_PATTERN: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^([·✻✽✶✳✢])\s+(\S+…?)\s*\((?:esc|ESC)\s+to\s+interrupt(?:\s*·\s*(\w+))?\)")
-            .expect("Invalid statusbar regex")
-    });
-
-    pub static PROMPT_INPUT: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^[❯>]\s*$").expect("Invalid prompt input regex")
-    });
-
-    pub static PROMPT_WITH_TEXT: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^[❯>]\s+.+").expect("Invalid prompt with text regex")
-    });
-
-    pub static SEPARATOR: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^[─━═]+$").expect("Invalid separator regex")
-    });
-
-    pub static TOOL_HEADER: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^⏺\s+(\w+)(?:\s+\(completed\s+in\s+([\d.]+)s?\))?$")
-            .expect("Invalid tool header regex")
-    });
-
-    pub static TOOL_INLINE_HEADER: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^⏺\s+(\w+)\(.+\)$").expect("Invalid tool inline header regex")
-    });
-
-    pub static TOOL_PARAM: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^\s*│\s*(\w+):\s*(.+)$").expect("Invalid tool param regex")
-    });
-
-    pub static TOOL_OUTPUT_LINE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^\s*│\s+(.+)$").expect("Invalid tool output line regex")
-    });
-
-    pub static TOOL_INLINE_OUTPUT: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^\s*⎿\s+.+$").expect("Invalid tool inline output regex")
-    });
-
-    pub static CONFIRM_NUMBERED: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^\s*(\d+)\.\s+(.+)$").expect("Invalid confirm numbered regex")
-    });
-
-    pub static CONFIRM_YES: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?i)^\s*1\.\s+Yes,?\s").expect("Invalid confirm yes regex")
-    });
-
-    pub static CONFIRM_NO: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?i)^\s*\d+\.\s+No,?\s").expect("Invalid confirm no regex")
-    });
-
-    pub static ERROR_STACK_TRACE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^\s+at\s+.+\(.+:\d+:\d+\)$").expect("Invalid error stack trace regex")
-    });
-
-    pub static TITLE_PATTERN: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^([⠐⠂⠈⠁⠉⠃⠋⠓⠒⠖⠦⠤✳])\s+(.+)$").expect("Invalid title pattern regex")
-    });
+/// Helper: get regex from CompiledPatterns or compile a fallback
+fn get_or_compile(compiled: &CompiledPatterns, key: &str, fallback: &str) -> Regex {
+    compiled
+        .regex(key)
+        .cloned()
+        .unwrap_or_else(|| Regex::new(fallback).expect("invalid fallback regex"))
 }
 
-/// Create the default Claude Code fingerprints
-pub fn claude_code_fingerprints() -> Vec<Fingerprint> {
+/// Create fingerprints from CompiledPatterns (configurable via YAML)
+pub fn claude_code_fingerprints_from(compiled: &CompiledPatterns) -> Vec<Fingerprint> {
+    // Spinner chars from config
+    let spinner_strs: Vec<String> = compiled.spinner_chars.iter().map(|c| c.to_string()).collect();
+    // Known tool names from config
+    let tool_names: Vec<String> = compiled.known_tools.clone();
+
     vec![
         // ========== Spinners ==========
         Fingerprint {
             id: "claude-code.spinner.status",
             fingerprint_type: FingerprintType::Enum,
             category: FingerprintCategory::Spinner,
-            pattern: FingerprintPattern::Enum(vec![
-                "·".into(), "✻".into(), "✽".into(), "✶".into(), "✳".into(), "✢".into(),
-            ]),
+            pattern: FingerprintPattern::Enum(spinner_strs),
             confidence: 0.95,
             priority: 100,
             source: "claude-code-v1.0",
@@ -399,7 +347,11 @@ pub fn claude_code_fingerprints() -> Vec<Fingerprint> {
             id: "claude-code.statusbar.pattern",
             fingerprint_type: FingerprintType::Regex,
             category: FingerprintCategory::Statusbar,
-            pattern: FingerprintPattern::Regex(patterns::STATUSBAR_PATTERN.clone()),
+            pattern: FingerprintPattern::Regex(get_or_compile(
+                compiled,
+                "status_bar.pattern",
+                r"^([·✻✽✶✳✢])\s+(\S+…?)\s*\((?:esc|ESC)\s+to\s+interrupt(?:\s*·\s*(\w+))?\)",
+            )),
             confidence: 0.95,
             priority: 95,
             source: "claude-code-v1.0",
@@ -419,7 +371,9 @@ pub fn claude_code_fingerprints() -> Vec<Fingerprint> {
             id: "claude-code.prompt.input",
             fingerprint_type: FingerprintType::Regex,
             category: FingerprintCategory::Prompt,
-            pattern: FingerprintPattern::Regex(patterns::PROMPT_INPUT.clone()),
+            pattern: FingerprintPattern::Regex(get_or_compile(
+                compiled, "prompt.input", r"^[❯>]\s*$",
+            )),
             confidence: 0.90,
             priority: 90,
             source: "claude-code-v1.0",
@@ -428,7 +382,9 @@ pub fn claude_code_fingerprints() -> Vec<Fingerprint> {
             id: "claude-code.prompt.with-text",
             fingerprint_type: FingerprintType::Regex,
             category: FingerprintCategory::Prompt,
-            pattern: FingerprintPattern::Regex(patterns::PROMPT_WITH_TEXT.clone()),
+            pattern: FingerprintPattern::Regex(get_or_compile(
+                compiled, "prompt.with_text", r"^[❯>]\s+.+",
+            )),
             confidence: 0.85,
             priority: 85,
             source: "claude-code-v1.0",
@@ -448,7 +404,9 @@ pub fn claude_code_fingerprints() -> Vec<Fingerprint> {
             id: "claude-code.marker.separator",
             fingerprint_type: FingerprintType::Regex,
             category: FingerprintCategory::Separator,
-            pattern: FingerprintPattern::Regex(patterns::SEPARATOR.clone()),
+            pattern: FingerprintPattern::Regex(get_or_compile(
+                compiled, "state.separator", r"^[─━═]+$",
+            )),
             confidence: 0.90,
             priority: 80,
             source: "claude-code-v1.0",
@@ -459,7 +417,11 @@ pub fn claude_code_fingerprints() -> Vec<Fingerprint> {
             id: "claude-code.tool.header",
             fingerprint_type: FingerprintType::Regex,
             category: FingerprintCategory::Tool,
-            pattern: FingerprintPattern::Regex(patterns::TOOL_HEADER.clone()),
+            pattern: FingerprintPattern::Regex(get_or_compile(
+                compiled,
+                "tool_output.header_box",
+                r"^⏺\s+(\w+)(?:\s+\(completed\s+in\s+([\d.]+)s?\))?$",
+            )),
             confidence: 0.95,
             priority: 92,
             source: "claude-code-v1.0",
@@ -468,7 +430,11 @@ pub fn claude_code_fingerprints() -> Vec<Fingerprint> {
             id: "claude-code.tool.inline-header",
             fingerprint_type: FingerprintType::Regex,
             category: FingerprintCategory::Tool,
-            pattern: FingerprintPattern::Regex(patterns::TOOL_INLINE_HEADER.clone()),
+            pattern: FingerprintPattern::Regex(get_or_compile(
+                compiled,
+                "tool_output.header_inline",
+                r"^⏺\s+(\w+)\(.+\)$",
+            )),
             confidence: 0.90,
             priority: 92,
             source: "claude-code-v1.0",
@@ -477,7 +443,11 @@ pub fn claude_code_fingerprints() -> Vec<Fingerprint> {
             id: "claude-code.tool.param",
             fingerprint_type: FingerprintType::Regex,
             category: FingerprintCategory::Tool,
-            pattern: FingerprintPattern::Regex(patterns::TOOL_PARAM.clone()),
+            pattern: FingerprintPattern::Regex(get_or_compile(
+                compiled,
+                "tool_output.param_line",
+                r"^\s*│\s*(\w+):\s*(.+)$",
+            )),
             confidence: 0.90,
             priority: 90,
             source: "claude-code-v1.0",
@@ -486,7 +456,9 @@ pub fn claude_code_fingerprints() -> Vec<Fingerprint> {
             id: "claude-code.tool.output-line",
             fingerprint_type: FingerprintType::Regex,
             category: FingerprintCategory::Tool,
-            pattern: FingerprintPattern::Regex(patterns::TOOL_OUTPUT_LINE.clone()),
+            pattern: FingerprintPattern::Regex(
+                Regex::new(r"^\s*│\s+(.+)$").expect("tool output-line regex"),
+            ),
             confidence: 0.85,
             priority: 85,
             source: "claude-code-v1.0",
@@ -495,7 +467,11 @@ pub fn claude_code_fingerprints() -> Vec<Fingerprint> {
             id: "claude-code.tool.inline-output-line",
             fingerprint_type: FingerprintType::Regex,
             category: FingerprintCategory::Tool,
-            pattern: FingerprintPattern::Regex(patterns::TOOL_INLINE_OUTPUT.clone()),
+            pattern: FingerprintPattern::Regex(get_or_compile(
+                compiled,
+                "tool_output.output_line",
+                r"^\s*⎿\s+.+$",
+            )),
             confidence: 0.85,
             priority: 85,
             source: "claude-code-v1.0",
@@ -504,12 +480,7 @@ pub fn claude_code_fingerprints() -> Vec<Fingerprint> {
             id: "claude-code.tool.known-names",
             fingerprint_type: FingerprintType::Enum,
             category: FingerprintCategory::Tool,
-            pattern: FingerprintPattern::Enum(vec![
-                "Bash".into(), "Read".into(), "Edit".into(), "Write".into(),
-                "Glob".into(), "Grep".into(), "WebFetch".into(), "WebSearch".into(),
-                "Task".into(), "LSP".into(), "NotebookEdit".into(),
-                "TodoRead".into(), "TodoWrite".into(),
-            ]),
+            pattern: FingerprintPattern::Enum(tool_names),
             confidence: 0.95,
             priority: 92,
             source: "claude-code-v1.0",
@@ -520,7 +491,11 @@ pub fn claude_code_fingerprints() -> Vec<Fingerprint> {
             id: "claude-code.confirm.numbered-option",
             fingerprint_type: FingerprintType::Regex,
             category: FingerprintCategory::Confirm,
-            pattern: FingerprintPattern::Regex(patterns::CONFIRM_NUMBERED.clone()),
+            pattern: FingerprintPattern::Regex(get_or_compile(
+                compiled,
+                "confirm.option_line",
+                r"^\s*(\d+)\.\s+(.+)$",
+            )),
             confidence: 0.85,
             priority: 85,
             source: "claude-code-v1.0",
@@ -529,7 +504,9 @@ pub fn claude_code_fingerprints() -> Vec<Fingerprint> {
             id: "claude-code.confirm.yes-option",
             fingerprint_type: FingerprintType::Regex,
             category: FingerprintCategory::Confirm,
-            pattern: FingerprintPattern::Regex(patterns::CONFIRM_YES.clone()),
+            pattern: FingerprintPattern::Regex(
+                Regex::new(r"(?i)^\s*1\.\s+Yes,?\s").expect("confirm yes regex"),
+            ),
             confidence: 0.90,
             priority: 88,
             source: "claude-code-v1.0",
@@ -538,7 +515,9 @@ pub fn claude_code_fingerprints() -> Vec<Fingerprint> {
             id: "claude-code.confirm.no-option",
             fingerprint_type: FingerprintType::Regex,
             category: FingerprintCategory::Confirm,
-            pattern: FingerprintPattern::Regex(patterns::CONFIRM_NO.clone()),
+            pattern: FingerprintPattern::Regex(
+                Regex::new(r"(?i)^\s*\d+\.\s+No,?\s").expect("confirm no regex"),
+            ),
             confidence: 0.90,
             priority: 88,
             source: "claude-code-v1.0",
@@ -562,7 +541,9 @@ pub fn claude_code_fingerprints() -> Vec<Fingerprint> {
             id: "claude-code.error.stack-trace",
             fingerprint_type: FingerprintType::Regex,
             category: FingerprintCategory::Error,
-            pattern: FingerprintPattern::Regex(patterns::ERROR_STACK_TRACE.clone()),
+            pattern: FingerprintPattern::Regex(
+                Regex::new(r"^\s+at\s+.+\(.+:\d+:\d+\)$").expect("error stack trace regex"),
+            ),
             confidence: 0.90,
             priority: 82,
             source: "claude-code-v1.0",
@@ -573,12 +554,21 @@ pub fn claude_code_fingerprints() -> Vec<Fingerprint> {
             id: "claude-code.title.pattern",
             fingerprint_type: FingerprintType::Regex,
             category: FingerprintCategory::Statusbar,
-            pattern: FingerprintPattern::Regex(patterns::TITLE_PATTERN.clone()),
+            pattern: FingerprintPattern::Regex(
+                Regex::new(r"^([⠐⠂⠈⠁⠉⠃⠋⠓⠒⠖⠦⠤✳])\s+(.+)$").expect("title pattern regex"),
+            ),
             confidence: 0.90,
             priority: 85,
             source: "claude-code-v1.0",
         },
     ]
+}
+
+/// Legacy: create fingerprints with default embedded patterns
+pub fn claude_code_fingerprints() -> Vec<Fingerprint> {
+    let compiled = super::patterns::default_compiled(crate::types::CliEngine::ClaudeCode)
+        .expect("embedded claude-code patterns must parse");
+    claude_code_fingerprints_from(&compiled)
 }
 
 /// Pre-built Claude Code fingerprints as a lazy static
@@ -588,6 +578,13 @@ pub static CLAUDE_CODE_FINGERPRINTS: Lazy<Vec<Fingerprint>> = Lazy::new(claude_c
 pub fn default_registry() -> FingerprintRegistry {
     let mut registry = FingerprintRegistry::new();
     registry.register_all(claude_code_fingerprints());
+    registry
+}
+
+/// Create a registry from specific CompiledPatterns
+pub fn registry_from(compiled: &CompiledPatterns) -> FingerprintRegistry {
+    let mut registry = FingerprintRegistry::new();
+    registry.register_all(claude_code_fingerprints_from(compiled));
     registry
 }
 
