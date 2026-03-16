@@ -20,6 +20,7 @@ mod health;
 mod timeline;
 mod minimax;
 mod worker;
+mod system;
 pub(crate) mod retrospective;
 
 use anyhow::Result;
@@ -58,6 +59,8 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         "mission_infra_query" | "mission_infra_ops"
             => infra::handle(state, name, args).await,
         "mission_worker" => worker::handle(state, name, args).await,
+        "mission_sys_logs" | "mission_sys_config"
+            => system::handle(state, name, args).await,
 
         // ===== Legacy names (backward compatibility) =====
         "mission_submit" | "mission_ask" | "mission_status" | "mission_cancel"

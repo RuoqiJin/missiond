@@ -78,6 +78,7 @@ impl GeminiCli {
     /// This means long thinking (with streaming deltas) or large responses never cause timeout.
     ///
     /// `progress_tx`: optional channel to emit real-time tool activity events.
+    /// `auth_override`: per-call channel override ("apikey" or "google"). Skips global config when set.
     pub async fn call(
         &self,
         messages: &[Value],
@@ -85,6 +86,7 @@ impl GeminiCli {
         _max_tokens: Option<u32>,
         idle_timeout_override: Option<Duration>,
         progress_tx: Option<mpsc::UnboundedSender<GeminiCliProgress>>,
+        auth_override: Option<&str>,
     ) -> Result<GeminiCliResponse> {
         let model = model.unwrap_or(&self.default_model);
         let idle_timeout = idle_timeout_override.unwrap_or(self.idle_timeout);
@@ -97,8 +99,15 @@ impl GeminiCli {
         info!(model, prompt_len = prompt.len(), idle_timeout_secs = idle_timeout.as_secs(),
               "Gemini CLI: calling (stream-json mode)");
 
-        let auth_config = resolve_gemini_auth_config();
-        info!(mode = %auth_config.mode, "Gemini CLI: using {} mode", auth_config.mode);
+        let is_override = auth_override.is_some();
+        let auth_config = match auth_override {
+            Some("apikey") => resolve_apikey_config()
+                .ok_or_else(|| anyhow!("channel='apikey' 但 llm.yaml 中未配置 gemini_api_key"))?,
+            Some("google") => GeminiAuthConfig { mode: "google".to_string(), api_key: None },
+            Some(other) => return Err(anyhow!("未知 channel: '{}', 支持 apikey/google", other)),
+            None => resolve_gemini_auth_config(),
+        };
+        info!(mode = %auth_config.mode, override = is_override, "Gemini CLI: using {} mode", auth_config.mode);
 
         let mut child = self.spawn_cli(&prompt, model, &auth_config)?;
         let events = self.stream_events(&mut child, idle_timeout, &progress_tx).await?;
@@ -117,7 +126,10 @@ impl GeminiCli {
                 let _guard = AUTH_FALLBACK_LOCK.lock().await;
                 let fallback = resolve_apikey_config();
                 if let Some(ref fallback_config) = fallback {
-                    sync_settings_json("gemini-api-key");
+                    // Only sync global config when NOT using per-call override
+                    if !is_override {
+                        sync_settings_json("gemini-api-key");
+                    }
                     match self.spawn_cli(&prompt, model, fallback_config) {
                         Ok(mut retry_child) => {
                             let retry_result = self.stream_events(&mut retry_child, idle_timeout, &progress_tx).await;
@@ -269,7 +281,7 @@ impl GeminiCli {
     #[allow(dead_code)]
     pub async fn prompt(&self, text: &str, model: Option<&str>) -> Result<String> {
         let messages = vec![serde_json::json!({"role": "user", "content": text})];
-        let resp = self.call(&messages, model, None, None, None).await?;
+        let resp = self.call(&messages, model, None, None, None, None).await?;
         Ok(resp.content)
     }
 }

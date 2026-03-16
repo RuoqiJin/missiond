@@ -228,6 +228,11 @@ impl GeminiClient {
                     .ok_or_else(|| anyhow!("CLI mode: missing 'messages' in body"))?;
                 let max_tokens = body.get("max_tokens").and_then(|v| v.as_u64()).map(|n| n as u32);
 
+                // Extract per-call channel override (injected by router_chat handler)
+                let auth_override = body.get("_channel")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
                 // Whitelist: only these models are allowed via CLI. Others fall back to default.
                 // Note: flash-lite is NOT supported by Gemini CLI (ModelNotFoundError).
                 let cli_model = body.get("model").and_then(|v| v.as_str())
@@ -298,7 +303,7 @@ impl GeminiClient {
                     }
                 });
 
-                let resp = cli.call(messages, cli_model, max_tokens, idle_timeout_override, Some(progress_tx)).await;
+                let resp = cli.call(messages, cli_model, max_tokens, idle_timeout_override, Some(progress_tx), auth_override.as_deref()).await;
                 drop(permit);
                 // Drop the sender side is implicit (cli.call finished), wait for forwarder to drain
                 let _ = forwarder.await;

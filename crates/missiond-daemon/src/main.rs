@@ -40,7 +40,7 @@ use missiond_core::{
     PTYManager, PTYWebSocketServer, WSServerOptions, SkillIndex, InfraConfig,
 };
 use missiond_core::{CCTasksWatcher, CCTasksWatcherOptions};
-use missiond_mcp::tools::ToolResult;
+use missiond_mcp::tools::{ToolResult, all_tools};
 use serde_json::Value;
 use tokio::io::BufReader;
 use tokio::sync::{Mutex, broadcast};
@@ -320,6 +320,7 @@ async fn main() -> Result<()> {
         frontend_events_tx: Some(frontend_events_tx.clone()),
         db: Some(mission.db_arc()),
         context_enricher: Arc::clone(&context_enricher_slot),
+        tool_count: all_tools().len(),
     });
     if let Err(e) = ws_server.start().await {
         // Match Node behavior: continue running even if WS is unavailable (e.g. port in use).
@@ -438,6 +439,7 @@ async fn main() -> Result<()> {
         task_cited_kbs: Arc::new(std::sync::Mutex::new(HashMap::new())),
         kb_cooccurrence_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         pending_compact_restart: Arc::new(std::sync::Mutex::new(HashSet::new())),
+        config_file_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         slot_current_model: Arc::new(std::sync::Mutex::new(HashMap::new())),
         screenshot_broker: Arc::clone(&screenshot_broker),
         jarvis_trace: ws_server.jarvis_trace_store().clone(),

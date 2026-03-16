@@ -55,6 +55,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "idle_timeout": {
                         "type": "integer",
                         "description": "CLI 模式空闲超时秒数（默认 120）。长 prompt 或复杂推理时可设为 300-600"
+                    },
+                    "channel": {
+                        "type": "string",
+                        "enum": ["apikey", "google"],
+                        "description": "Gemini 认证渠道。apikey=API Key, google=Google One AI Pro。不传则用全局配置（仅 CLI 模式生效）"
                     }
                 }
             }),
