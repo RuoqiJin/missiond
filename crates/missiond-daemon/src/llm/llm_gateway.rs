@@ -1,4 +1,4 @@
-//! LLM Gateway — infrastructure client for Gemini API calls.
+//! LLM Gateway — infrastructure client for multi-model API calls.
 //!
 //! Pure infrastructure layer (anti-corruption boundary). Accepts pre-formatted
 //! prompts and returns raw strings. No knowledge of Tasks, Decisions, or other
@@ -64,6 +64,48 @@ pub(crate) async fn call_gemini_for_flow(state: &AppState, task_id: &str, prompt
         warn!(conv_id = %conv_id, error = %e, "Flow engine: failed to save Gemini chat history");
     }
 
+    Ok(content)
+}
+
+/// Stateless Sonnet call via Router API (cpapi-claude-sonnet endpoint).
+/// No conversation history — fire-and-forget for background tasks like topic extraction.
+/// Shares GeminiClient's HTTP client + governor rate limiter.
+pub(crate) async fn call_sonnet_stateless(
+    state: &AppState,
+    system: &str,
+    user_msg: &str,
+    max_tokens: u32,
+    caller: &str,
+) -> Result<String> {
+    let (base_url, jwt) = resolve_llm_credentials().await?;
+    let model = "cpapi-claude-sonnet";
+    let url = format!("{}/v1/chat/completions", base_url);
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ],
+        "max_tokens": max_tokens,
+    });
+
+    info!(caller, model, user_len = user_msg.len(), "LLM Gateway: calling Sonnet");
+
+    let result = REQUEST_CALLER.scope(caller.to_string(), async {
+        state.gemini.send(&state.http_client, &url, &jwt, &body).await
+    }).await?;
+
+    let content = result
+        .pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if content.is_empty() {
+        return Err(anyhow!("Sonnet returned empty response"));
+    }
+
+    info!(caller, response_len = content.len(), "LLM Gateway: Sonnet OK");
     Ok(content)
 }
 
