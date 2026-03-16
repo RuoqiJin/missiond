@@ -934,7 +934,7 @@ async fn main() -> Result<()> {
 
     // --- P3: Event-driven handlers via EventBus (Phase 2) ---
     // Extracted to event_router.rs to prevent main.rs from becoming a God Module (R4).
-    event_router::start_event_consumers(&state, &timeline_broadcast_tx);
+    event_router::start_event_consumers(&state, &timeline_broadcast_tx, shutdown_rx.clone());
 
     // --- Phase 6: Timeline Writer Task ---
     // MPSC → SQLite batch INSERT (get seq) → broadcast<TimelineEvent> + broadcast<String> (WS)
