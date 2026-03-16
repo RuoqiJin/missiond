@@ -86,6 +86,13 @@ impl BackgroundWorker for StrategyWorker {
     }
 }
 
+/// Byte budget per chunk for dynamic chunking (~800KB cleaned text).
+const CHUNK_BYTE_BUDGET: usize = 800_000;
+/// Overlap window: include last N messages from previous chunk for context continuity.
+const CHUNK_OVERLAP: i64 = 30;
+/// Sessions with more than this many messages use chunked analysis.
+const CHUNK_THRESHOLD: i64 = 800;
+
 /// Find and analyze all pending sessions.
 async fn run_pending_analysis(state: &AppState, ctx: &mut WorkerContext) {
     let db = state.mission.db();
@@ -113,7 +120,18 @@ async fn run_pending_analysis(state: &AppState, ctx: &mut WorkerContext) {
             None
         };
 
-        match analyze_session_stateless(state, session_id, watermark).await {
+        // For completed/compacted sessions with many messages: use chunked analysis
+        let is_long_completed = conv.status != "active"
+            && watermark.is_none()
+            && conv.message_count > CHUNK_THRESHOLD;
+
+        let result = if is_long_completed {
+            analyze_session_chunked(state, session_id, conv.message_count as i64).await
+        } else {
+            analyze_session_stateless(state, session_id, watermark).await
+        };
+
+        match result {
             Ok(analyzed_up_to) => {
                 info!(session = %session_id, up_to = analyzed_up_to, "strategy_analyst: session analyzed");
 
@@ -140,6 +158,210 @@ async fn run_pending_analysis(state: &AppState, ctx: &mut WorkerContext) {
     }
 }
 
+/// Chunked analysis for ultra-long completed sessions (>CHUNK_THRESHOLD messages).
+/// Dynamically splits by byte budget, passes Strategic State between chunks.
+async fn analyze_session_chunked(
+    state: &AppState,
+    session_id: &str,
+    total_messages: i64,
+) -> Result<i64> {
+    let db = state.mission.db();
+    let mut since_id: Option<i64> = None;
+    let mut chunk_index = 0u32;
+    let mut last_analyzed_id: i64 = 0;
+
+    info!(
+        session = %session_id,
+        total_messages,
+        "strategy_analyst: starting chunked analysis"
+    );
+
+    loop {
+        // Load a batch of messages (generous limit, we'll chunk by bytes below)
+        let messages = db.get_conversation_messages(session_id, since_id, 50000)?;
+        if messages.is_empty() {
+            break;
+        }
+
+        // Dynamic byte-based chunking: accumulate messages until budget reached
+        let mut chunk_messages = Vec::new();
+        let mut chunk_bytes = 0usize;
+
+        for msg in &messages {
+            let cleaned = format!("[{}] {}", msg.role, strip_noise(&msg.content, &msg.role));
+            chunk_bytes += cleaned.len() + 1; // +1 for newline
+            chunk_messages.push((msg.id, cleaned));
+
+            if chunk_bytes >= CHUNK_BYTE_BUDGET {
+                break;
+            }
+        }
+
+        if chunk_messages.is_empty() {
+            break;
+        }
+
+        let chunk_last_id = chunk_messages.last().map(|(id, _)| *id).unwrap_or(0);
+        let chunk_first_id = chunk_messages.first().map(|(id, _)| *id).unwrap_or(0);
+        let total_chunks_est = (total_messages as f64 / chunk_messages.len() as f64).ceil() as u32;
+
+        info!(
+            session = %session_id,
+            chunk = chunk_index + 1,
+            est_total = total_chunks_est,
+            msgs = chunk_messages.len(),
+            bytes = chunk_bytes,
+            "strategy_analyst: processing chunk"
+        );
+
+        // Build chunked prompt with strategic state + chunk metadata
+        let cleaned_lines: Vec<String> = chunk_messages.iter().map(|(_, s)| s.clone()).collect();
+        let prompt = build_chunked_prompt(
+            state, session_id, &cleaned_lines,
+            chunk_index, total_chunks_est, total_messages,
+            chunk_first_id, chunk_last_id,
+        )?;
+
+        // Stateless LLM call for this chunk
+        let (base_url, jwt) = resolve_llm_credentials().await?;
+        let url = format!("{}/v1/chat/completions", base_url);
+        let body = json!({
+            "model": "gemini-3.1-pro",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 16384,
+        });
+
+        let result = REQUEST_CALLER
+            .scope("strategy_analyst".to_string(), async {
+                state
+                    .gemini
+                    .send_with_timeout(&state.http_client, &url, &jwt, &body, Some(Duration::from_secs(600)))
+                    .await
+            })
+            .await?;
+
+        let content = result
+            .pointer("/choices/0/message/content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("{}")
+            .to_string();
+
+        // Parse and apply (updates Strategic State in KB for next chunk)
+        let content = content.trim();
+        if !content.is_empty() && content != "{}" {
+            let json_str = extract_json_from_response(content);
+            match serde_json::from_str::<StrategicOutput>(&json_str) {
+                Ok(output) => {
+                    apply_strategic_output(state, session_id, &output).await?;
+                }
+                Err(e) => {
+                    warn!(error = %e, chunk = chunk_index, "strategy_analyst: chunk parse failed, continuing");
+                }
+            }
+        }
+
+        // Update checkpoint via watermark (reuse existing infrastructure)
+        if let Err(e) = db.update_deep_checkpoint(session_id, chunk_last_id) {
+            warn!(error = %e, "strategy_analyst: failed to update chunk checkpoint");
+        }
+
+        last_analyzed_id = chunk_last_id;
+        chunk_index += 1;
+
+        // Next chunk starts from chunk_last_id - OVERLAP for context continuity
+        since_id = Some((chunk_last_id - CHUNK_OVERLAP).max(0));
+
+        // Check if we've processed all messages
+        if chunk_messages.len() < messages.len() || messages.len() < 50000 {
+            // If we consumed fewer messages than loaded, or loaded fewer than limit,
+            // there might be more. But if chunk consumed all loaded messages and
+            // loaded messages < limit, we're done.
+            if messages.len() < 50000 && chunk_bytes < CHUNK_BYTE_BUDGET {
+                break;
+            }
+        }
+    }
+
+    info!(
+        session = %session_id,
+        chunks = chunk_index,
+        "strategy_analyst: chunked analysis complete"
+    );
+
+    Ok(last_analyzed_id)
+}
+
+/// Build prompt for a chunk of a long session, with state-collapse prevention.
+fn build_chunked_prompt(
+    state: &AppState,
+    session_id: &str,
+    cleaned_lines: &[String],
+    chunk_index: u32,
+    total_chunks_est: u32,
+    total_messages: i64,
+    first_id: i64,
+    last_id: i64,
+) -> Result<String> {
+    let db = state.mission.db();
+
+    // Load current Strategic State (updated after each chunk)
+    let state_json = db
+        .kb_get("strategic-state")?
+        .and_then(|e| e.detail.map(|d| d.to_string()))
+        .unwrap_or_else(|| "{}".to_string());
+
+    let cleaned_text = cleaned_lines.join("\n");
+
+    Ok(format!(
+        r#"你是一个顶尖的系统架构师和协作分析师。阅读下方一字不改的原始对话与操作日志。
+
+## 分块信息
+你正在分析一个长会话的第 {chunk}/{total} 块。
+- 会话 ID: {session_id}
+- 当前块: 消息 #{first_id} - #{last_id}，共 {msg_count} 条
+- 会话总计约 {total_messages} 条消息
+
+## 当前战略状态（前 {prev_chunks} 块的累积分析结果）
+{state_json}
+
+## 本块原始会话记录（完整保留）
+{cleaned_text}
+
+## 分析指令
+基于当前战略状态和本块新消息，输出更新后的完整战略分析 JSON。
+
+**关键规则**：
+- **你必须完整保留上一轮 JSON 中的有效洞察**。只有当本块消息提供了明确的新证据时，才进行追加或修正。
+- **严禁因为本块信息量少而清空原有状态**。如果本块没有新发现，原样返回当前状态。
+- user_profile 上限 20 条，与当前状态合并（更新已有、删除过时、新增发现）
+- 不要复述发生了什么。直接输出 JSON，不要 markdown 包裹。
+- 如果没有有意义的新发现，输出 `{{}}`
+
+严格按以下 schema：
+```json
+{{
+  "user_profile": [{{"trait": "描述", "confidence": 0.9, "source": "session-id"}}],
+  "development_trajectory": {{"current_focus": "", "recent_shifts": [], "inferred_goals": []}},
+  "collaboration_patterns": [{{"pattern": "描述", "type": "positive|negative", "count": 1}}],
+  "workflow_proposals": [{{"action": "描述", "occurrences": 3, "status": "proposed"}}],
+  "friction_points": [{{"issue": "描述", "frequency": 2, "severity": "high|medium|low"}}],
+  "architectural_drifts": [{{"description": "描述", "affected_area": "模块"}}],
+  "active_communication": {{"should_notify": false, "message": ""}}
+}}
+```"#,
+        chunk = chunk_index + 1,
+        total = total_chunks_est,
+        session_id = session_id,
+        first_id = first_id,
+        last_id = last_id,
+        msg_count = cleaned_lines.len(),
+        total_messages = total_messages,
+        prev_chunks = chunk_index,
+        state_json = state_json,
+        cleaned_text = cleaned_text,
+    ))
+}
+
 // ── Noise Stripping ──
 
 /// Mechanical noise removal. NOT summarization — user words and AI reasoning preserved verbatim.
@@ -150,21 +372,114 @@ fn strip_noise(content: &str, role: &str) -> String {
     // Rule 2: base64 images → placeholder
     let content = RE_BASE64.replace_all(&content, "[图片]");
 
-    // Rule 3: Long tool outputs → head + tail (UTF-8 safe, char-based)
-    let char_count = content.chars().count();
-    if role == "tool_result" && char_count > 5000 {
-        let head: String = content.chars().take(2000).collect();
-        let tail: String = content.chars().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect();
-        return format!(
-            "{}...[截断 {}字符]...{}",
-            head,
-            char_count - 4000,
-            tail
-        );
+    // Rule 3: Long tool outputs → semantic-aware truncation
+    // Preserves error signals instead of blind positional head+tail truncation.
+    // Gemini ARB: "保留操作头尾 + 中间错误信号行±1上下文"
+    if role == "tool_result" && content.len() > 5000 {
+        return truncate_tool_output(&content);
     }
 
     // Rules 4-5: User words + AI reasoning → preserve verbatim
     content.to_string()
+}
+
+/// Max characters per line — prevents webpack-minified megablobs from bypassing line-count checks.
+const MAX_LINE_LENGTH: usize = 2000;
+
+/// Semantic-aware truncation for tool outputs.
+/// Head (command context) + Tail (final status/errors) + middle error signal lines with ±1 context.
+fn truncate_tool_output(content: &str) -> String {
+    // Step 1: Truncate individual mega-lines (e.g., minified JS, base64 leftovers)
+    let lines: Vec<String> = content
+        .lines()
+        .map(|line| {
+            let char_count = line.chars().count();
+            if char_count > MAX_LINE_LENGTH {
+                let truncated: String = line.chars().take(MAX_LINE_LENGTH).collect();
+                format!("{}...[行截断]", truncated)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+
+    // Short output (≤80 lines): preserve fully
+    if lines.len() <= 80 {
+        return lines.join("\n");
+    }
+
+    // Head: first 15 lines (command + initial output context)
+    let head = &lines[..15];
+    // Tail: last 40 lines (final status, exit code, error summary — errors cluster at end)
+    let tail_start = lines.len().saturating_sub(40);
+    let tail = &lines[tail_start..];
+    // Middle: extract lines with error signals + ±1 line context
+    let middle = &lines[15..tail_start];
+
+    let error_indices: Vec<usize> = middle
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| is_error_signal(line))
+        .map(|(i, _)| i)
+        .collect();
+
+    // Deduplicate with ±1 context window, cap total at 60 lines
+    let mut context_indices = std::collections::BTreeSet::new();
+    for &idx in &error_indices {
+        if idx > 0 {
+            context_indices.insert(idx - 1);
+        }
+        context_indices.insert(idx);
+        if idx + 1 < middle.len() {
+            context_indices.insert(idx + 1);
+        }
+        if context_indices.len() >= 60 {
+            break;
+        }
+    }
+
+    // Assemble result
+    let mut result = head.join("\n");
+    if !context_indices.is_empty() {
+        result.push_str(&format!(
+            "\n[... 中间 {} 行折叠, 保留 {} 行错误信号+上下文 ...]\n",
+            middle.len(),
+            context_indices.len()
+        ));
+        for &idx in &context_indices {
+            result.push_str(&middle[idx]);
+            result.push('\n');
+        }
+    } else {
+        result.push_str(&format!(
+            "\n[... {} 行正常输出折叠 ...]\n",
+            middle.len()
+        ));
+    }
+    result.push_str(&tail.join("\n"));
+    result
+}
+
+/// Check if a line contains error/diagnostic signals.
+/// Covers: Rust (panic/error), Node.js (ERR!), Python (traceback/exception),
+/// generic (failed/denied/timeout/refused/fatal/critical/abort).
+fn is_error_signal(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("panic")
+        || lower.contains("warning")
+        || lower.contains("denied")
+        || lower.contains("not found")
+        || lower.contains("timeout")
+        || lower.contains("refused")
+        || lower.contains("exception")
+        || lower.contains("fatal")
+        || lower.contains("critical")
+        || lower.contains("traceback")
+        || lower.contains("err!")
+        || lower.contains("abort")
+        || lower.contains("syntaxerror")
 }
 
 // ── Prompt Assembly ──
