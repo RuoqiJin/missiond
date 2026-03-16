@@ -21,7 +21,9 @@ mod timeline;
 mod dynamic_slot;
 mod narration;
 mod translation;
+mod backfill;
 
+pub use backfill::BackfillPhaseStatus;
 pub use timeline::{TimelineRow, TimelineStats, LatencyStats};
 
 use rusqlite::Connection;

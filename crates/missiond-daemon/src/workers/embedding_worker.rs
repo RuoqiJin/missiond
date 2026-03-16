@@ -837,7 +837,25 @@ async fn backfill_start(state: &AppState, db: &missiond_core::db::MissionDB, pro
     };
     let _ = db.backfill_start_phase(resume_phase.as_str(), total);
     let cursor = db.backfill_get_phase(resume_phase.as_str()).ok().flatten().map(|s| s.last_cursor).unwrap_or(0);
-    let _ = state.embedding_tx.try_send(EmbeddingTask::RunBackfillPhase { phase: resume_phase, cursor });
+    backfill_enqueue(state, EmbeddingTask::RunBackfillPhase { phase: resume_phase, cursor }).await;
+}
+
+/// Enqueue a backfill task with retry on channel full (prevents silent task loss).
+async fn backfill_enqueue(state: &AppState, task: EmbeddingTask) {
+    for attempt in 0..5 {
+        match state.embedding_tx.try_send(task.clone()) {
+            Ok(()) => return,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                warn!(attempt, "Backfill enqueue: channel full, backing off");
+                tokio::time::sleep(std::time::Duration::from_millis(500 * (1 << attempt))).await;
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                warn!("Backfill enqueue: channel closed, aborting");
+                return;
+            }
+        }
+    }
+    warn!("Backfill enqueue: channel still full after 5 retries, task will resume on next restart");
 }
 
 /// Run one batch of a backfill phase, then re-enqueue next batch (yield pattern).
@@ -871,12 +889,12 @@ async fn backfill_run_phase(state: &AppState, db: &missiond_core::db::MissionDB,
                 _ => 0,
             };
             let _ = db.backfill_start_phase(next.as_str(), total);
-            let _ = state.embedding_tx.try_send(EmbeddingTask::RunBackfillPhase { phase: next, cursor: 0 });
+            backfill_enqueue(state, EmbeddingTask::RunBackfillPhase { phase: next, cursor: 0 }).await;
         } else {
             info!("Full embedding backfill complete");
         }
     } else {
-        let _ = state.embedding_tx.try_send(EmbeddingTask::RunBackfillPhase { phase, cursor: new_cursor });
+        backfill_enqueue(state, EmbeddingTask::RunBackfillPhase { phase, cursor: new_cursor }).await;
     }
 }
 
@@ -978,9 +996,15 @@ async fn backfill_conv_summary(state: &AppState, db: &missiond_core::db::Mission
 
 async fn backfill_conv_retry(state: &AppState, db: &missiond_core::db::MissionDB, max_retries: i64, batch_size: i64) -> (i64, i64, i64, bool) {
     let mut total_success = 0i64; let mut total_failed = 0i64; let mut has_work = false;
+    let mut has_cooling = false;
     for phase_name in &["conv_summary", "conv_topic_vectors"] {
         let retryable = db.backfill_retryable_failures(phase_name, max_retries, batch_size).unwrap_or_default();
-        if retryable.is_empty() { continue; }
+        if retryable.is_empty() {
+            // Check if failures exist but are in cooldown (updated_at within last 5 min)
+            let all_remaining = db.backfill_retryable_failures_no_cooldown(phase_name, max_retries).unwrap_or(0);
+            if all_remaining > 0 { has_cooling = true; }
+            continue;
+        }
         has_work = true;
         info!(count = retryable.len(), phase = *phase_name, "Retrying failed sessions");
         for session_id in &retryable {
@@ -991,7 +1015,9 @@ async fn backfill_conv_retry(state: &AppState, db: &missiond_core::db::MissionDB
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
     }
-    (total_success, total_failed, 0, !has_work)
+    // phase_done only if no work AND nothing cooling down
+    let phase_done = !has_work && !has_cooling;
+    (total_success, total_failed, 0, phase_done)
 }
 
 async fn backfill_ast_nodes(state: &AppState, db: &missiond_core::db::MissionDB, provider_id: &str) -> (i64, i64, i64, bool) {
