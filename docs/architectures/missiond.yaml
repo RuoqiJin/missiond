@@ -160,12 +160,12 @@ data_flows:
     flow: "spawn(SlotConfig) → PTY 进程 → 语义解析(StateParser) → 状态事件 → 确认处理(PermissionPolicy) → 任务完成 → idle"
 
   knowledge_pipeline:
-    description: "知识提取管线"
-    flow: "PTY 输出 → 实时提取(fast slot) → 深度分析(slow slot) → KB 写入 → 向量索引 → 合并去重"
+    description: "知识提取与演化管线"
+    flow: "PTY 输出 → 实时提取(fast slot) → 深度分析(slow slot) → KB 写入 → 向量索引 → 合并去重 → 达尔文 GC(基于 utility_score 淘汰)"
 
   hybrid_search:
-    description: "混合搜索"
-    flow: "查询 → FTS5 全文搜索 + 向量相似度 → RRF 排序融合 → top-k 结果"
+    description: "混合搜索与重排序"
+    flow: "查询 → FTS5 全文搜索 + 向量相似度 → RRF 排序融合 → 结合时间衰减(temporal_decay)与效用分数(utility_score)重打分 → top-k 结果"
 
   strategy_analysis:
     description: "用户偏好与模式分析流"
@@ -234,6 +234,8 @@ glossary:
   EventBus: "daemon 内部的异步事件发布-订阅通道"
   IPC: "daemon 与 MCP server 之间的 Unix socket 通信"
   hybrid_search: "FTS5 全文 + 向量相似度 + RRF 融合的搜索模式"
+  utility_score: "达尔文效用分数 [0.0, 1.0]，随访问命中增加，随时间衰减，用于决定知识条目的存活或淘汰"
+  darwinian_gc: "基于 utility_score 的达尔文垃圾回收机制，取代硬编码的过期时间规则"
 
 # ── 设计决策记录（防止 AI 自作聪明重构）──
 design_rationale:
@@ -264,3 +266,6 @@ design_rationale:
   semantic_tool_truncation:
     decision: "工具输出超长时采用语义感知的截断（提取带错误信号的行及其相邻上下文），取代纯粹基于位置的头尾截断"
     why: "确保长日志（如构建或循环输出）中间夹杂的关键错误堆栈不被盲目截去，提升排错成功率"
+  darwinian_knowledge_gc:
+    decision: "知识库采用基于效用分数(utility_score)的达尔文回收机制，弃用硬编码过期时间"
+    why: "确保经常被访问的高价值记忆（即使是很久前记录的）能永久存活，而迅速淘汰从未被命中的低质量/噪音记忆，提升检索信噪比并控制数据库体积"
