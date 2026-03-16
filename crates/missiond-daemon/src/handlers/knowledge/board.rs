@@ -53,7 +53,7 @@ async fn board_get(state: &AppState, args: Value) -> Result<ToolResult> {
             .map_err(|e| anyhow!("DB error: {}", e))?;
         match task {
             Some(ref t) => {
-                record_session_task_binding(state, &t.task.id, &t.task.title);
+                record_session_task_binding(state, t.task.id.as_str(), &t.task.title);
                 Ok(ToolResult::json_pretty(&t))
             }
             None => Ok(ToolResult::error("Task not found")),
@@ -65,12 +65,12 @@ async fn board_get(state: &AppState, args: Value) -> Result<ToolResult> {
 fn publish_board_created(state: &AppState, task: &missiond_core::types::BoardTask) {
     state.event_bus.publish_traced(
         DaemonEvent::BoardTaskCreated {
-            task_id: task.id.clone(),
+            task_id: task.id.to_string(),
             title: task.title.clone(),
             category: task.category.clone(),
         },
         TraceContext {
-            trace_id: Some(task.id.clone()),
+            trace_id: Some(task.id.to_string()),
             summary: Some(format!("board: created {}", task.title)),
             ..Default::default()
         },
@@ -81,12 +81,12 @@ fn publish_board_created(state: &AppState, task: &missiond_core::types::BoardTas
 fn publish_board_update(state: &AppState, task: &missiond_core::types::BoardTask) {
     state.event_bus.publish_traced(
         DaemonEvent::BoardTaskUpdated {
-            task_id: task.id.clone(),
+            task_id: task.id.to_string(),
             status: format!("{:?}", task.status),
             category: task.category.clone(),
         },
         TraceContext {
-            trace_id: Some(task.id.clone()),
+            trace_id: Some(task.id.to_string()),
             summary: Some(format!("board: {} → {:?}", task.title, task.status)),
             ..Default::default()
         },
@@ -97,12 +97,12 @@ fn publish_board_update(state: &AppState, task: &missiond_core::types::BoardTask
 fn publish_board_status_changed(state: &AppState, task: &missiond_core::types::BoardTask, old_status: &str) {
     state.event_bus.publish_traced(
         DaemonEvent::BoardTaskStatusChanged {
-            task_id: task.id.clone(),
+            task_id: task.id.to_string(),
             old_status: old_status.to_string(),
             new_status: format!("{:?}", task.status),
         },
         TraceContext {
-            trace_id: Some(task.id.clone()),
+            trace_id: Some(task.id.to_string()),
             summary: Some(format!("board: {} → {:?}", task.title, task.status)),
             ..Default::default()
         },
@@ -199,7 +199,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 let flow_ctx = serde_json::to_string(&missiond_core::types::FlowContext::default())
                     .unwrap_or_else(|_| "{}".to_string());
                 let updated = state.mission.db().update_board_task(
-                    &task.id,
+                    task.id.as_str(),
                     &missiond_core::types::UpdateBoardTaskInput {
                         flow_phase: Some(flow_phase),
                         flow_context: Some(flow_ctx),
@@ -238,7 +238,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                             if let Some(old) = old_status { publish_board_status_changed(state, &t, &old); }
                             else { publish_board_update(state, &t); }
                             if is_marking_done {
-                                let state = state.clone(); let task_id = t.id.clone(); let task_title = t.title.clone();
+                                let state = state.clone(); let task_id = t.id.to_string(); let task_title = t.title.clone();
                                 tokio::spawn(async move { harvest_decisions_for_task(&state, &task_id, &task_title).await; });
                             }
                             success_count += 1;
@@ -259,7 +259,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     Some(t) => {
                         publish_board_status_changed(state, &t, &old_status);
                         if t.status == missiond_core::types::BoardTaskStatus::Done {
-                            let state = state.clone(); let task_id = t.id.clone(); let task_title = t.title.clone();
+                            let state = state.clone(); let task_id = t.id.to_string(); let task_title = t.title.clone();
                             tokio::spawn(async move { harvest_decisions_for_task(&state, &task_id, &task_title).await; });
                         }
                         Ok(ToolResult::json_pretty(&t))
@@ -280,11 +280,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 let task = state.mission.db().update_board_task(&id, &update).map_err(|e| anyhow!("DB error: {}", e))?;
                 match task {
                     Some(t) => {
-                        record_session_task_binding(state, &t.id, &t.title);
+                        record_session_task_binding(state, t.id.as_str(), &t.title);
                         if let Some(old) = old_status { publish_board_status_changed(state, &t, &old); }
                         else { publish_board_update(state, &t); }
                         if is_marking_done {
-                            let state = state.clone(); let task_id = t.id.clone(); let task_title = t.title.clone();
+                            let state = state.clone(); let task_id = t.id.to_string(); let task_title = t.title.clone();
                             tokio::spawn(async move { harvest_decisions_for_task(&state, &task_id, &task_title).await; });
                         }
                         Ok(ToolResult::json_pretty(&t))
@@ -334,14 +334,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let executor_id = executor_id.as_str();
             match state.mission.db().claim_board_task(task_id, executor_id, executor_type) {
                 Ok(Some(task)) => {
-                    record_session_task_binding(state, &task.id, &task.title);
+                    record_session_task_binding(state, task.id.as_str(), &task.title);
                     state.event_bus.publish_traced(
                         DaemonEvent::BoardTaskClaimed {
-                            task_id: task.id.clone(),
+                            task_id: task.id.to_string(),
                             slot_id: executor_id.to_string(),
                         },
                         TraceContext {
-                            trace_id: Some(task.id.clone()),
+                            trace_id: Some(task.id.to_string()),
                             summary: Some(format!("board: {} claimed by {}", task.title, executor_id)),
                             ..Default::default()
                         },
@@ -384,7 +384,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             // Refresh binding — session is actively updating this task
             if let Ok(Some(task)) = state.mission.db().get_board_task(&task_id) {
-                record_session_task_binding(state, &task.id, &task.title);
+                record_session_task_binding(state, task.id.as_str(), &task.title);
             }
             state.event_bus.publish_traced(
                 DaemonEvent::BoardTaskNoteAdded {
@@ -431,7 +431,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .list_board_tasks(None, true)
                 .map_err(|e| anyhow!("DB error: {}", e))?
                 .into_iter()
-                .filter(|t| t.parent_id.as_deref() == Some(&task.id))
+                .filter(|t| t.parent_id.as_ref() == Some(&task.id))
                 .count();
             if subtasks > 0 {
                 return Ok(ToolResult::text(format!(
@@ -555,7 +555,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             // Write note on parent task
             let _ = state.mission.db().add_board_task_note(
                 &missiond_core::types::AddBoardTaskNoteInput {
-                    task_id: task.id.clone(),
+                    task_id: task.id.to_string(),
                     content: format!("🔀 任务拆分已启动 → submit task {} → slot {}", submit_task_id, slot_id),
                     note_type: Some("progress".to_string()),
                     author: Some("decompose".to_string()),
@@ -587,13 +587,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .ok_or_else(|| anyhow!("Task not found: {}", args.task_id))?;
 
             let reset_ids = state.mission.db()
-                .retry_board_task(&task.id, args.reset_downstream)
+                .retry_board_task(task.id.as_str(), args.reset_downstream)
                 .map_err(|e| anyhow!("DB error: {}", e))?;
 
             // Write note
             let _ = state.mission.db().add_board_task_note(
                 &missiond_core::types::AddBoardTaskNoteInput {
-                    task_id: task.id.clone(),
+                    task_id: task.id.to_string(),
                     content: format!(
                         "🔄 任务重试\n- 重置任务数: {}\n- 级联下游: {}",
                         reset_ids.len(),

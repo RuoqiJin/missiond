@@ -193,12 +193,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 ..Default::default()
             };
             state.mission.db()
-                .update_board_task(&task.id, &update)
+                .update_board_task(task.id.as_str(), &update)
                 .map_err(|e| anyhow!("DB error updating flow: {}", e))?;
 
             // Write progress note
             let note_input = missiond_core::types::AddBoardTaskNoteInput {
-                task_id: task.id.clone(),
+                task_id: task.id.to_string(),
                 content: format!(
                     "✅ Flow phase '{}' completed → '{}'\nArtifact: {} ({} chars)",
                     phase.display_name(),
@@ -221,7 +221,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 let q_input = missiond_core::types::CreateAgentQuestionInput {
                     question: format!("[硬拦截] Plan→Execute 执行方案审核：{}", task.title),
                     context: Some(format!("执行方案摘要：\n{}", plan_summary)),
-                    task_id: Some(task.id.clone()),
+                    task_id: Some(task.id.to_string()),
                     slot_id: None,
                     session_id: None,
                     target: Some("master".to_string()),
@@ -242,7 +242,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 let q_input = missiond_core::types::CreateAgentQuestionInput {
                     question: format!("[Flow {} → {}] {}", phase.display_name(), next_phase.display_name(), concern),
                     context: Some(format!("Slot flagged uncertainty during phase transition. Artifact: {} ({} chars)", args.artifact_type, args.content.len())),
-                    task_id: Some(task.id.clone()),
+                    task_id: Some(task.id.to_string()),
                     slot_id: None,
                     session_id: None,
                     target: Some("master".to_string()),

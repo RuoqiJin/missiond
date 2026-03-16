@@ -76,7 +76,7 @@ pub(crate) async fn health_scan(state: &AppState) {
                 Ok(Some(task)) => {
                     // Add recovery note
                     let _ = db.add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
-                        task_id: task.id.clone(),
+                        task_id: task.id.to_string(),
                         content: format!("✅ 已自动恢复 ({})", chrono::Utc::now().format("%H:%M UTC")),
                         note_type: Some("progress".to_string()),
                         author: Some("aiops".to_string()),
@@ -138,7 +138,7 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
             if let Some(ref task) = existing {
                 let note = format!("🔄 告警重复触发 +1 ({})", chrono::Utc::now().format("%m-%d %H:%M UTC"));
                 let _ = db.add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
-                    task_id: task.id.clone(),
+                    task_id: task.id.to_string(),
                     content: note,
                     note_type: Some("progress".to_string()),
                     author: Some("aiops".to_string()),
@@ -180,7 +180,7 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
             chrono::Utc::now().format("%m-%d %H:%M UTC"),
         );
         if let Err(e) = db.add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
-            task_id: task.id.clone(),
+            task_id: task.id.to_string(),
             content: note_content,
             note_type: Some("progress".to_string()),
             author: Some("aiops".to_string()),
@@ -188,7 +188,7 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
             warn!(error = %e, "AIOps: failed to append note to existing task");
         }
         // Touch updated_at so it floats to the top
-        let _ = db.update_board_task(&task.id, &missiond_core::types::UpdateBoardTaskInput {
+        let _ = db.update_board_task(task.id.as_str(), &missiond_core::types::UpdateBoardTaskInput {
             ..Default::default()
         });
         debug!(
@@ -196,7 +196,7 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
             dedupe_key = %dedupe_key,
             "AIOps: alert aggregated into existing task"
         );
-        Some(task.id.clone())
+        Some(task.id.to_string())
     } else {
         // No open task — create a new one with dedupe_key for future aggregation
         let raw_str = incident.raw_payload.to_string();
@@ -260,7 +260,7 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
                 );
                 // Notify autopilot
                 state.event_bus.publish(crate::event_bus::DaemonEvent::TaskCreated { task_id: String::new() });
-                Some(task.id)
+                Some(task.id.to_string())
             }
             Err(e) => {
                 error!(error = %e, "AIOps: failed to create board task for incident");

@@ -45,7 +45,7 @@ impl MissionDB {
     /// Create a board task from input
     pub fn create_board_task(&self, input: &CreateBoardTaskInput) -> DbResult<BoardTask> {
         let now = chrono::Utc::now().to_rfc3339();
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = TaskId::new();
 
         // Phase 6.6: Enforce description size limit (50KB) — DB-layer safety net
         const MAX_DESC_LEN: usize = 50_000;
@@ -78,6 +78,24 @@ impl MissionDB {
         };
         drop(conn);
 
+        // Resolve parent_id: try to find full UUID, fallback to raw value wrapped as TaskId
+        let resolved_parent_id = if let Some(ref raw) = input.parent_id {
+            let full = self.resolve_board_task_id(raw)?;
+            Some(TaskId::from_trusted(full.unwrap_or_else(|| raw.clone())))
+        } else {
+            None
+        };
+
+        // Resolve depends_on: each raw ID → full UUID via resolve, fallback to raw
+        let resolved_depends_on: Vec<TaskId> = if let Some(ref deps) = input.depends_on {
+            deps.iter().map(|raw| {
+                let full = self.resolve_board_task_id(raw).ok().flatten();
+                TaskId::from_trusted(full.unwrap_or_else(|| raw.clone()))
+            }).collect()
+        } else {
+            Vec::new()
+        };
+
         let task = BoardTask {
             id,
             title: input.title.clone(),
@@ -88,7 +106,7 @@ impl MissionDB {
             project: input.project.clone(),
             server: input.server.clone(),
             due_date: input.due_date.clone(),
-            parent_id: input.parent_id.clone(),
+            parent_id: resolved_parent_id,
             assignee: input.assignee.clone(),
             auto_execute: input.auto_execute.unwrap_or(false),
             prompt_template: input.prompt_template.clone(),
@@ -104,7 +122,7 @@ impl MissionDB {
             flow_phase: None,
             flow_context: None,
             flow_template: None,
-            depends_on: input.depends_on.clone().unwrap_or_default(),
+            depends_on: resolved_depends_on,
             lease_expires_at: None,
             dedupe_key: input.dedupe_key.clone(),
             timeout_secs: input.timeout_secs,
@@ -256,7 +274,12 @@ impl MissionDB {
         push_field!(project, "project");
         push_field!(server, "server");
         push_field!(due_date, "due_date");
-        push_field!(parent_id, "parent_id");
+        // Resolve parent_id: short ID → full UUID before persisting
+        if let Some(ref raw_pid) = update.parent_id {
+            let resolved = self.resolve_board_task_id(raw_pid)?.unwrap_or_else(|| raw_pid.clone());
+            fields.push("parent_id = ?".to_string());
+            values.push(Box::new(resolved));
+        }
         push_field!(assignee, "assignee");
         push_field!(prompt_template, "prompt_template");
 
@@ -302,10 +325,13 @@ impl MissionDB {
         push_field!(flow_context, "flow_context");
         push_field!(flow_template, "flow_template");
 
-        // DAG dependency
+        // DAG dependency — resolve each short ID → full UUID
         if let Some(ref deps) = update.depends_on {
+            let resolved: Vec<String> = deps.iter().map(|raw| {
+                self.resolve_board_task_id(raw).ok().flatten().unwrap_or_else(|| raw.clone())
+            }).collect();
             fields.push("depends_on = ?".to_string());
-            values.push(Box::new(serde_json::to_string(deps).unwrap_or_else(|_| "[]".to_string())));
+            values.push(Box::new(serde_json::to_string(&resolved).unwrap_or_else(|_| "[]".to_string())));
         }
 
         let sql = format!(
@@ -582,7 +608,7 @@ impl MissionDB {
     }
 
     /// Check whether all DAG dependencies of a task are satisfied.
-    pub fn check_dependencies(&self, depends_on: &[String]) -> DbResult<crate::types::DependencyStatus> {
+    pub fn check_dependencies(&self, depends_on: &[TaskId]) -> DbResult<crate::types::DependencyStatus> {
         use crate::types::DependencyStatus;
         if depends_on.is_empty() {
             return Ok(DependencyStatus::Ready);
@@ -591,7 +617,7 @@ impl MissionDB {
         for dep_id in depends_on {
             let row: Option<String> = conn.query_row(
                 "SELECT status FROM board_tasks WHERE id = ?1",
-                params![dep_id],
+                params![dep_id.as_str()],
                 |row| row.get(0),
             ).optional()?;
             match row.as_deref() {
@@ -600,9 +626,9 @@ impl MissionDB {
                     // Get title for human-readable reason
                     let title: String = conn.query_row(
                         "SELECT title FROM board_tasks WHERE id = ?1",
-                        params![dep_id],
+                        params![dep_id.as_str()],
                         |row| row.get(0),
-                    ).unwrap_or_else(|_| dep_id.clone());
+                    ).unwrap_or_else(|_| dep_id.to_string());
                     return Ok(DependencyStatus::Blocked(format!("{} ({})", title, row.unwrap())));
                 }
                 Some(_) => return Ok(DependencyStatus::Pending), // open, running, blocked, verifying
@@ -630,10 +656,11 @@ impl MissionDB {
 
         while let Some(current) = queue.pop() {
             for t in &all_tasks {
-                if t.depends_on.iter().any(|d| d.starts_with(&current) || current.starts_with(d)) {
-                    if visited.insert(t.id.clone()) {
-                        downstream.push(t.id.clone());
-                        queue.push(t.id.clone());
+                if t.depends_on.iter().any(|d| d.as_str().starts_with(&current) || current.starts_with(d.as_str())) {
+                    let tid_str = t.id.as_str().to_string();
+                    if visited.insert(tid_str.clone()) {
+                        downstream.push(tid_str.clone());
+                        queue.push(tid_str);
                     }
                 }
             }
@@ -877,23 +904,23 @@ impl MissionDB {
                 "SELECT * FROM board_tasks WHERE parent_id IN ({}) ORDER BY order_idx ASC",
                 parent_placeholders.join(",")
             );
-            let parent_ids: Vec<String> = main_tasks.iter().map(|t| t.id.clone()).collect();
+            let parent_ids: Vec<String> = main_tasks.iter().map(|t| t.id.as_str().to_string()).collect();
             let params: Vec<&dyn rusqlite::ToSql> = parent_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
             let mut stmt = conn.prepare(&child_sql)?;
             let rows = stmt.query_map(params.as_slice(), |row| Self::row_to_board_task(row))?;
             for row in rows {
                 let task = row?;
                 if let Some(ref pid) = task.parent_id {
-                    children_by_parent.entry(pid.clone()).or_default().push(task);
+                    children_by_parent.entry(pid.as_str().to_string()).or_default().push(task);
                 }
             }
         }
 
         // Query 3: Fetch all notes in one batch
-        let mut all_task_ids: Vec<String> = main_tasks.iter().map(|t| t.id.clone()).collect();
+        let mut all_task_ids: Vec<String> = main_tasks.iter().map(|t| t.id.as_str().to_string()).collect();
         for children in children_by_parent.values() {
             for child in children {
-                all_task_ids.push(child.id.clone());
+                all_task_ids.push(child.id.as_str().to_string());
             }
         }
 
@@ -917,13 +944,13 @@ impl MissionDB {
         let results: Vec<crate::types::BoardTaskWithContext> = main_tasks
             .into_iter()
             .map(|task| {
-                let task_id = task.id.clone();
-                let notes = notes_by_task.remove(&task_id).unwrap_or_default();
+                let task_id_str = task.id.as_str().to_string();
+                let notes = notes_by_task.remove(&task_id_str).unwrap_or_default();
                 let children = if include_children {
-                    let child_tasks = children_by_parent.remove(&task_id).unwrap_or_default();
+                    let child_tasks = children_by_parent.remove(&task_id_str).unwrap_or_default();
                     Some(child_tasks.into_iter().map(|child| {
-                        let child_id = child.id.clone();
-                        let child_notes = notes_by_task.remove(&child_id).unwrap_or_default();
+                        let child_id_str = child.id.as_str().to_string();
+                        let child_notes = notes_by_task.remove(&child_id_str).unwrap_or_default();
                         crate::types::BoardTaskWithContext {
                             task: child,
                             notes: child_notes,
@@ -1006,7 +1033,7 @@ impl MissionDB {
         id: &str,
     ) -> DbResult<Option<BoardTaskWithNotes>> {
         if let Some(task) = self.get_board_task(id)? {
-            let notes = self.get_board_task_notes(&task.id)?;
+            let notes = self.get_board_task_notes(task.id.as_str())?;
             Ok(Some(BoardTaskWithNotes { task, notes }))
         } else {
             Ok(None)

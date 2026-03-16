@@ -963,7 +963,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 let mut open_lines = Vec::new();
                 let mut done_lines = Vec::new();
                 for t in &tasks {
-                    let line = format!("{} {}", &t.id[..8], t.title);
+                    let line = format!("{} {}", &t.id.as_str()[..8], t.title);
                     match t.status {
                         missiond_core::types::BoardTaskStatus::Done => done_lines.push(line),
                         _ => open_lines.push(line),
