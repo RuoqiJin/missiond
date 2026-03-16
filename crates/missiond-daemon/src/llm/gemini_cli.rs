@@ -23,11 +23,9 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-/// Guard against concurrent auth fallback writes (OAuth expired → apikey switch).
-static AUTH_FALLBACK_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
 
 /// Absolute safety cap: kill process no matter what after this duration.
 const ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(900); // 15 minutes
@@ -119,58 +117,10 @@ impl GeminiCli {
             let exit_code = status.code();
             let stderr_msg = read_stderr(&mut child).await;
 
-            // OAuth expired detection: auto-fallback to apikey and retry once
+            // Fail fast on auth errors — no silent fallback
             if auth_config.mode == "google" && is_auth_error(exit_code, &stderr_msg) {
-                warn!(exit_code = ?exit_code, "Gemini CLI: OAuth auth failed, attempting fallback to API key mode");
-                // Serialize fallback to prevent concurrent config writes
-                let _guard = AUTH_FALLBACK_LOCK.lock().await;
-                let fallback = resolve_apikey_config();
-                if let Some(ref fallback_config) = fallback {
-                    // Only sync global config when NOT using per-call override
-                    if !is_override {
-                        sync_settings_json("gemini-api-key");
-                    }
-                    match self.spawn_cli(&prompt, model, fallback_config) {
-                        Ok(mut retry_child) => {
-                            let retry_result = self.stream_events(&mut retry_child, idle_timeout, &progress_tx).await;
-                            let retry_status = retry_child.wait().await;
-                            match (&retry_result, &retry_status) {
-                                (Ok(events), Ok(s)) if s.success() => {
-                                    info!("Gemini CLI: fallback to API key succeeded");
-                                    return parse_stream_events(events, model);
-                                }
-                                (Err(retry_err), _) => {
-                                    let retry_stderr = read_stderr(&mut retry_child).await;
-                                    return Err(anyhow!(
-                                        "Gemini CLI: OAuth expired (exit {}), API key fallback also failed: {}. stderr: {}. Original stderr: {}",
-                                        exit_code.unwrap_or(-1), retry_err, retry_stderr, stderr_msg
-                                    ));
-                                }
-                                (_, Ok(s)) => {
-                                    let retry_stderr = read_stderr(&mut retry_child).await;
-                                    return Err(anyhow!(
-                                        "Gemini CLI: OAuth expired (exit {}), API key fallback exited {}: {}. Original stderr: {}",
-                                        exit_code.unwrap_or(-1), s, retry_stderr, stderr_msg
-                                    ));
-                                }
-                                (_, Err(e)) => {
-                                    return Err(anyhow!(
-                                        "Gemini CLI: OAuth expired (exit {}), API key fallback process error: {}. Original stderr: {}",
-                                        exit_code.unwrap_or(-1), e, stderr_msg
-                                    ));
-                                }
-                            }
-                        }
-                        Err(spawn_err) => {
-                            return Err(anyhow!(
-                                "Gemini CLI: OAuth expired (exit {}), failed to spawn fallback: {}. Original stderr: {}",
-                                exit_code.unwrap_or(-1), spawn_err, stderr_msg
-                            ));
-                        }
-                    }
-                }
                 return Err(anyhow!(
-                    "Gemini CLI: OAuth expired (exit {}), no API key configured for fallback. Run `gemini` to re-authenticate. stderr: {}",
+                    "Gemini CLI: OAuth auth failed (exit {}). Run `gemini` to re-authenticate or switch to apikey mode. stderr: {}",
                     exit_code.unwrap_or(-1), stderr_msg
                 ));
             }
