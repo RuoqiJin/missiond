@@ -91,6 +91,13 @@ pub(crate) async fn process_pending(state: &AppState) -> anyhow::Result<usize> {
             }
             Err(e) => {
                 warn!(session_id, error = %e, "Retro worker: session analysis failed");
+                // Gemini ARB: record failure to prevent infinite retry loop
+                let _ = state.mission.db().save_retrospective_result(
+                    session_id,
+                    "error",
+                    &format!("{{\"error\": \"{}\"}}", e.to_string().replace('"', "'")),
+                    None,
+                );
             }
         }
     }
