@@ -146,6 +146,11 @@ async fn run_pending_analysis(state: &AppState, ctx: &mut WorkerContext) {
                     if let Err(e) = db.mark_analysis_complete(session_id, STRATEGY_ANALYSIS_VERSION) {
                         warn!(error = %e, "strategy_analyst: failed to mark complete");
                     }
+                    // Phase 3: Emit DeepAnalysisCompleted for KB consolidation consumer
+                    state.event_bus.publish(crate::event_bus::DaemonEvent::DeepAnalysisCompleted {
+                        session_id: session_id.to_string(),
+                        kb_entries_created: 0, // exact count not tracked here; consumer uses as trigger
+                    });
                 }
                 ctx.record_success();
             }
