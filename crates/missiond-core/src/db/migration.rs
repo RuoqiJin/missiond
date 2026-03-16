@@ -1343,6 +1343,25 @@ impl MissionDB {
             CREATE INDEX IF NOT EXISTS idx_kb_access_log_created ON kb_access_log(created_at);"
         )?;
 
+        // Dynamic slots: Jarvis-created ephemeral compute slots with TTL
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS dynamic_slots (
+                id TEXT PRIMARY KEY,
+                parent_slot_id TEXT NOT NULL,
+                template TEXT NOT NULL,
+                objective TEXT,
+                config TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                termination_reason TEXT,
+                created_at TEXT NOT NULL,
+                terminated_at TEXT,
+                ttl_seconds INTEGER NOT NULL DEFAULT 14400,
+                expires_at TEXT NOT NULL,
+                extend_count INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_dynamic_slots_active ON dynamic_slots(status, expires_at);"
+        )?;
+
         Ok(())
     }
 }

@@ -7,7 +7,7 @@ use super::{
 };
 use crate::db::MissionDB;
 use crate::types::{
-    CreateTaskInput, EventType, InboxMessage, Slot, SlotsConfig, Task, TaskStatus, TaskUpdate,
+    CreateTaskInput, EventType, InboxMessage, Slot, SlotConfig, SlotsConfig, Task, TaskStatus, TaskUpdate,
 };
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
@@ -296,6 +296,16 @@ impl MissionControl {
     /// Reset a slot's session
     pub fn reset_slot_session(&self, slot_id: &str) {
         self.slot_manager.reset_session(slot_id);
+    }
+
+    /// Register a dynamic slot at runtime (dual-source merge with static slots).
+    pub fn register_dynamic_slot(&self, config: SlotConfig) {
+        self.slot_manager.register_dynamic_slot(config);
+    }
+
+    /// Unregister a dynamic slot (remove from runtime).
+    pub fn unregister_dynamic_slot(&self, slot_id: &str) {
+        self.slot_manager.unregister_dynamic_slot(slot_id);
     }
 
     // ============ Statistics ============

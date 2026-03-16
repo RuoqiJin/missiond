@@ -1,5 +1,5 @@
 use serde_json::json;
-use super::ToolDefinition;
+use crate::ToolDefinition;
 
 pub fn definitions() -> Vec<ToolDefinition> {
     vec![
