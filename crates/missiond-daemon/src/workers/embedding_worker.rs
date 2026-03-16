@@ -536,7 +536,7 @@ async fn extract_conv_topics_llm(
     let max_topics = if has_timeline { 8 } else { 5 };
     let system_prompt = topic_extraction_prompt(max_topics);
 
-    // Primary: Sonnet via Router
+    // Direct HTTP to Router — no Gemini CLI, no fallback, fast fail
     match crate::llm_gateway::call_sonnet_stateless(
         state, &system_prompt, conv_text, 1024, "embedding_topics",
     ).await {
@@ -545,36 +545,11 @@ async fn extract_conv_topics_llm(
                 info!(count = topics.len(), "Topic extraction OK (Sonnet)");
                 return Some(topics);
             }
-            warn!("Sonnet returned content but validation failed, trying MiniMax fallback");
-        }
-        Err(e) => {
-            warn!(error = %e, "Sonnet topic extraction failed, trying MiniMax fallback");
-        }
-    }
-
-    // Fallback: MiniMax M2.5
-    let handle = match state.minimax.as_ref() {
-        Some(h) => h,
-        None => {
-            warn!("MiniMax not configured, fallback aborted — no topic extraction possible");
-            return None;
-        }
-    };
-    let messages = vec![
-        ChatMessage { role: "system".into(), content: system_prompt },
-        ChatMessage { role: "user".into(), content: conv_text.to_string() },
-    ];
-    match handle.call_embedding(messages, Some(1024), None).await {
-        Ok(content) => {
-            if let Some(topics) = parse_and_validate_topics(&content, max_topics) {
-                info!(count = topics.len(), "Topic extraction OK (MiniMax fallback)");
-                return Some(topics);
-            }
-            debug!("MiniMax fallback also failed validation");
+            warn!("Sonnet returned content but topic validation failed");
             None
         }
         Err(e) => {
-            warn!(error = %e, "MiniMax topic extraction failed");
+            warn!(error = %e, "Sonnet topic extraction failed");
             None
         }
     }
@@ -586,7 +561,7 @@ async fn generate_conv_summary_llm_legacy(
     conv_text: &str,
     has_timeline: bool,
 ) -> Option<String> {
-    let handle = state.minimax.as_ref()?;
+    let handle = state.sonnet.as_ref()?;
 
     let system_prompt = if has_timeline {
         "作为技术专家，请用 300 字以内总结以下长会话的完整生命周期。\n\
@@ -612,11 +587,11 @@ async fn generate_conv_summary_llm_legacy(
     match handle.call_embedding(messages, Some(512), None).await {
         Ok(content) => {
             let trimmed = content.trim().to_string();
-            debug!(len = trimmed.len(), "Legacy LLM summary generated (MiniMax)");
+            debug!(len = trimmed.len(), "Legacy LLM summary generated (Sonnet)");
             Some(trimmed)
         }
         Err(e) => {
-            warn!(error = %e, "MiniMax legacy summary failed");
+            warn!(error = %e, "Sonnet legacy summary failed");
             None
         }
     }
