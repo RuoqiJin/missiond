@@ -493,9 +493,9 @@ fn parse_and_validate_topics(raw: &str, max_topics: usize) -> Option<Vec<String>
     let valid: Vec<String> = topics.into_iter()
         .filter(|t| {
             let t = t.trim();
-            let len = t.len();
-            // Length guard: 10-200 chars
-            if len < 10 || len > 200 { return false; }
+            let char_count = t.chars().count();
+            // Length guard: 10-200 characters (not bytes — Chinese chars are 3 bytes each)
+            if char_count < 10 || char_count > 200 { return false; }
             // Content blacklist: tool output / thinking leaks
             if t.contains("[Tool:") || t.contains("[Tool：") { return false; }
             if t.starts_with("[A]") || t.starts_with("[R]") || t.starts_with("[T]") { return false; }
@@ -511,14 +511,14 @@ fn parse_and_validate_topics(raw: &str, max_topics: usize) -> Option<Vec<String>
             let t = t.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-' || c == '*')
                 .trim_start()
                 .to_string();
-            // Final truncation safety net
-            if t.len() > 150 {
-                t[..char_boundary_at(&t, 150)].to_string()
+            // Final truncation safety net (by character count, not bytes)
+            if t.chars().count() > 150 {
+                t.chars().take(150).collect()
             } else {
                 t
             }
         })
-        .filter(|t| t.len() >= 10) // Re-check after stripping
+        .filter(|t| t.chars().count() >= 10) // Re-check after stripping
         .take(max_topics)
         .collect();
 
