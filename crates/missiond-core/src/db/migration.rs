@@ -1,5 +1,6 @@
 //! Database schema initialization and migrations.
 
+use rusqlite::params;
 use super::MissionDB;
 use super::error::DbResult;
 use super::extract_parent_session_id;
@@ -1574,6 +1575,82 @@ impl MissionDB {
         // NOTE: Watermark migration from conversations → consumer_watermarks is deferred to P3.
         // Migrating now would snapshot stale data; consumers still write to conversations table.
         // When each consumer is migrated to use consumer_watermarks, it should do a fresh sync.
+
+        // Event dedup: add event_uuid column + UNIQUE index to conversation_events.
+        // Previously events had NO dedup mechanism and were duplicated on every daemon restart.
+        {
+            let ev_columns: Vec<String> = conn
+                .prepare("PRAGMA table_info(conversation_events)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if !ev_columns.iter().any(|c| c == "event_uuid") {
+                // 1. Add event_uuid column
+                conn.execute_batch(
+                    "ALTER TABLE conversation_events ADD COLUMN event_uuid TEXT;"
+                )?;
+
+                // 2. Backfill event_uuid from raw_data JSON for existing rows (before dedup)
+                let mut stmt = conn.prepare(
+                    "SELECT id, raw_data FROM conversation_events WHERE event_uuid IS NULL AND raw_data IS NOT NULL"
+                )?;
+                let rows: Vec<(i64, String)> = stmt.query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?.filter_map(|r| r.ok()).collect();
+                drop(stmt);
+
+                let mut filled = 0usize;
+                for (id, raw) in &rows {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) {
+                        // progress/system events have top-level "uuid"
+                        // file-history-snapshot has "messageId"
+                        let uuid = val.get("uuid").and_then(|v| v.as_str())
+                            .or_else(|| val.get("messageId").and_then(|v| v.as_str()));
+                        if let Some(u) = uuid {
+                            conn.execute(
+                                "UPDATE conversation_events SET event_uuid = ?1 WHERE id = ?2",
+                                params![u, id],
+                            )?;
+                            filled += 1;
+                        }
+                    }
+                }
+
+                // 3. Deduplicate: keep min(id) per (session_id, event_uuid) for rows with UUID,
+                //    and per (session_id, event_type, content, timestamp) for rows without.
+                let deleted_uuid: usize = conn.execute(
+                    "DELETE FROM conversation_events WHERE event_uuid IS NOT NULL AND id NOT IN (
+                        SELECT MIN(id) FROM conversation_events
+                        WHERE event_uuid IS NOT NULL
+                        GROUP BY session_id, event_uuid
+                    )",
+                    [],
+                )?;
+                let deleted_no_uuid: usize = conn.execute(
+                    "DELETE FROM conversation_events WHERE event_uuid IS NULL AND id NOT IN (
+                        SELECT MIN(id) FROM conversation_events
+                        WHERE event_uuid IS NULL
+                        GROUP BY session_id, event_type, COALESCE(content, ''), timestamp
+                    )",
+                    [],
+                )?;
+                let deleted = deleted_uuid + deleted_no_uuid;
+
+                // 4. Create UNIQUE index on (session_id, event_uuid) — same UUID can appear
+                //    in different sessions (e.g., agent sub-sessions sharing parent hook events)
+                conn.execute_batch(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_event_uuid
+                     ON conversation_events(session_id, event_uuid) WHERE event_uuid IS NOT NULL;"
+                )?;
+
+                tracing::info!(
+                    deleted_duplicates = deleted,
+                    uuid_backfilled = filled,
+                    "Migration: conversation_events dedup — added event_uuid column, purged duplicates, created UNIQUE index"
+                );
+            }
+        }
 
         Ok(())
     }

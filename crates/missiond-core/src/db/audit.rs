@@ -145,6 +145,7 @@ impl MissionDB {
     }
 
     /// Batch insert conversation events (system events from JSONL: turn_duration, etc.)
+    /// Dedup via UNIQUE index on event_uuid — duplicate inserts are silently ignored.
     pub fn insert_conversation_events_batch(&self, events: &[crate::types::ConversationEvent]) -> DbResult<usize> {
         if events.is_empty() {
             return Ok(0);
@@ -154,11 +155,13 @@ impl MissionDB {
         let mut count = 0usize;
         for event in events {
             tx.execute(
-                "INSERT INTO conversation_events (session_id, event_type, content, raw_data, timestamp)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![event.session_id, event.event_type, event.content, event.raw_data, event.timestamp],
+                "INSERT OR IGNORE INTO conversation_events (session_id, event_uuid, event_type, content, raw_data, timestamp)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![event.session_id, event.event_uuid, event.event_type, event.content, event.raw_data, event.timestamp],
             )?;
-            count += 1;
+            if tx.changes() > 0 {
+                count += 1;
+            }
         }
         tx.commit()?;
         Ok(count)
@@ -175,7 +178,7 @@ impl MissionDB {
         let mut events = Vec::new();
         if let Some(et) = event_type {
             let mut stmt = conn.prepare(
-                "SELECT id, session_id, event_type, content, raw_data, timestamp
+                "SELECT id, session_id, event_uuid, event_type, content, raw_data, timestamp
                  FROM conversation_events WHERE session_id = ?1 AND event_type = ?2
                  ORDER BY id ASC LIMIT ?3"
             )?;
@@ -183,16 +186,17 @@ impl MissionDB {
                 Ok(crate::types::ConversationEvent {
                     id: row.get(0)?,
                     session_id: row.get(1)?,
-                    event_type: row.get(2)?,
-                    content: row.get(3)?,
-                    raw_data: row.get(4)?,
-                    timestamp: row.get(5)?,
+                    event_uuid: row.get(2)?,
+                    event_type: row.get(3)?,
+                    content: row.get(4)?,
+                    raw_data: row.get(5)?,
+                    timestamp: row.get(6)?,
                 })
             })?;
             for e in rows { events.push(e?); }
         } else {
             let mut stmt = conn.prepare(
-                "SELECT id, session_id, event_type, content, raw_data, timestamp
+                "SELECT id, session_id, event_uuid, event_type, content, raw_data, timestamp
                  FROM conversation_events WHERE session_id = ?1
                  ORDER BY id ASC LIMIT ?2"
             )?;
@@ -200,10 +204,11 @@ impl MissionDB {
                 Ok(crate::types::ConversationEvent {
                     id: row.get(0)?,
                     session_id: row.get(1)?,
-                    event_type: row.get(2)?,
-                    content: row.get(3)?,
-                    raw_data: row.get(4)?,
-                    timestamp: row.get(5)?,
+                    event_uuid: row.get(2)?,
+                    event_type: row.get(3)?,
+                    content: row.get(4)?,
+                    raw_data: row.get(5)?,
+                    timestamp: row.get(6)?,
                 })
             })?;
             for e in rows { events.push(e?); }

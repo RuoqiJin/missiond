@@ -117,6 +117,7 @@ fn is_false(v: &bool) -> bool { !v }
 pub struct ConversationEvent {
     pub id: i64,
     pub session_id: String,
+    pub event_uuid: Option<String>,
     pub event_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
