@@ -152,11 +152,18 @@ impl GeminiCli {
 
         // Per-subprocess auth override via GEMINI_CLI_HOME:
         // Gemini CLI reads settings from $GEMINI_CLI_HOME/.gemini/settings.json.
-        // When google mode is requested but global settings.json says "gemini-api-key",
-        // we point CLI to a shadow home dir with selectedType="oauth-personal".
-        if auth.mode == "google" {
-            let google_home = ensure_google_auth_home()?;
-            cmd.env("GEMINI_CLI_HOME", google_home);
+        // GEMINI_API_KEY env var alone does NOT override settings.json selectedType,
+        // so both modes need a shadow home with the correct selectedType.
+        match auth.mode.as_str() {
+            "google" => {
+                let home = ensure_auth_home("google", "oauth-personal", true)?;
+                cmd.env("GEMINI_CLI_HOME", home);
+            }
+            "apikey" => {
+                let home = ensure_auth_home("apikey", "gemini-api-key", false)?;
+                cmd.env("GEMINI_CLI_HOME", home);
+            }
+            _ => {}
         }
 
         cmd.spawn()
@@ -508,27 +515,26 @@ fn resolve_apikey_config() -> Option<GeminiAuthConfig> {
     Some(GeminiAuthConfig { mode: "apikey".to_string(), api_key: Some(key) })
 }
 
-/// Create/maintain a shadow home directory for Google OAuth Gemini CLI calls.
+/// Create/maintain a shadow home directory for Gemini CLI auth isolation.
 ///
 /// Gemini CLI resolves config via `GEMINI_CLI_HOME` env var → `$HOME/.gemini/`.
-/// When our global settings.json has `selectedType: "gemini-api-key"`, spawning
-/// with `_channel: "google"` fails (exit 41) because CLI tries API key auth.
+/// The GEMINI_API_KEY env var does NOT override settings.json's selectedType,
+/// so both auth modes need a dedicated shadow home with the correct selectedType.
 ///
-/// Solution: maintain `~/.xjp-mission/gemini-google-home/.gemini/` with:
-/// - `settings.json` with `selectedType: "oauth-personal"` (LOGIN_WITH_GOOGLE)
-/// - Symlinks to real OAuth credential files from `~/.gemini/`
+/// `channel`: "google" or "apikey" — determines directory name
+/// `selected_type`: "oauth-personal" or "gemini-api-key" — written to settings.json
+/// `symlink_oauth`: if true, symlinks OAuth credential files from ~/.gemini/
 ///
 /// Idempotent and safe under concurrent calls:
 /// - Atomic rename for settings.json prevents corruption
 /// - AlreadyExists ignored on symlinks prevents TOCTOU races
-/// - No OnceLock: transient failures (disk full, etc.) don't permanently disable google mode
-fn ensure_google_auth_home() -> Result<String> {
+fn ensure_auth_home(channel: &str, selected_type: &str, symlink_oauth: bool) -> Result<String> {
     let mission_home = missiond_core::default_mission_home();
-    let google_home = mission_home.join("gemini-google-home");
-    let shadow_gemini_dir = google_home.join(".gemini");
+    let home = mission_home.join(format!("gemini-{}-home", channel));
+    let shadow_gemini_dir = home.join(".gemini");
 
     std::fs::create_dir_all(&shadow_gemini_dir)
-        .map_err(|e| anyhow!("Failed to create google auth home: {}", e))?;
+        .map_err(|e| anyhow!("Failed to create {} auth home: {}", channel, e))?;
 
     let real_gemini_dir = dirs::home_dir()
         .ok_or_else(|| anyhow!("Cannot resolve home directory"))?
@@ -548,33 +554,35 @@ fn ensure_google_auth_home() -> Result<String> {
     if settings["security"].get("auth").is_none() {
         settings["security"]["auth"] = serde_json::json!({});
     }
-    settings["security"]["auth"]["selectedType"] = serde_json::json!("oauth-personal");
+    settings["security"]["auth"]["selectedType"] = serde_json::json!(selected_type);
 
     std::fs::write(&tmp_path, serde_json::to_string_pretty(&settings)?)
         .map_err(|e| anyhow!("Failed to write shadow settings.json: {}", e))?;
     std::fs::rename(&tmp_path, &settings_path)
         .map_err(|e| anyhow!("Failed to atomically place shadow settings.json: {}", e))?;
 
-    // Symlink OAuth credential files — ignore AlreadyExists (TOCTOU safe)
-    for file in &["oauth_creds.json", "google_accounts.json", "google_account_id"] {
-        let src = real_gemini_dir.join(file);
-        let dst = shadow_gemini_dir.join(file);
-        if src.exists() {
-            #[cfg(unix)]
-            match std::os::unix::fs::symlink(&src, &dst) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(anyhow!("Failed to symlink {}: {}", file, e)),
-            }
-            #[cfg(not(unix))]
-            if !dst.exists() {
-                std::fs::copy(&src, &dst)
-                    .map_err(|e| anyhow!("Failed to copy {}: {}", file, e))?;
+    // Symlink OAuth credential files (only needed for google mode)
+    if symlink_oauth {
+        for file in &["oauth_creds.json", "google_accounts.json", "google_account_id"] {
+            let src = real_gemini_dir.join(file);
+            let dst = shadow_gemini_dir.join(file);
+            if src.exists() {
+                #[cfg(unix)]
+                match std::os::unix::fs::symlink(&src, &dst) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(anyhow!("Failed to symlink {}: {}", file, e)),
+                }
+                #[cfg(not(unix))]
+                if !dst.exists() {
+                    std::fs::copy(&src, &dst)
+                        .map_err(|e| anyhow!("Failed to copy {}: {}", file, e))?;
+                }
             }
         }
     }
 
-    Ok(google_home.to_string_lossy().to_string())
+    Ok(home.to_string_lossy().to_string())
 }
 
 /// Detect OAuth/auth-related errors from exit code and stderr.
