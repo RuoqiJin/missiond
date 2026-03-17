@@ -31,17 +31,15 @@ impl AppState {
         if depth > MAX_DEPTH {
             return Err(anyhow!("Workflow recursion depth exceeded (max {}). Skill '{}' action '{}'", MAX_DEPTH, skill_name, action_id));
         }
-        let db = self.mission.db();
-
         // Guard: prevent concurrent execution of same action
         if !dry_run {
-            if let Ok(true) = db.skill_execution_is_running(skill_name, action_id) {
+            if let Ok(true) = self.store.skill_execution_is_running(skill_name, action_id).await {
                 return Err(anyhow!("Action '{}' on skill '{}' is already running", action_id, skill_name));
             }
         }
 
         // Step 1: Load skill content from file
-        let topic = db.skill_topic_get(skill_name)
+        let topic = self.store.skill_topic_get(skill_name).await
             .map_err(|e| anyhow!("DB: {}", e))?
             .ok_or_else(|| anyhow!("Skill '{}' not found", skill_name))?;
 
@@ -81,10 +79,10 @@ impl AppState {
 
         // Step 5: Create execution log
         let exec_id = uuid::Uuid::new_v4().to_string();
-        let _ = db.skill_execution_insert(
+        let _ = self.store.skill_execution_insert(
             &exec_id, skill_name, action_id,
             workflow.steps.len() as i32, "manual",
-        );
+        ).await;
         let exec_start = std::time::Instant::now();
 
         // Step 5b: Execute context hooks (pre-flight probes, best-effort)
@@ -140,12 +138,12 @@ impl AppState {
                 let duration_ms = exec_start.elapsed().as_millis() as i64;
                 let err_msg = format!("Step {} ('{}') visited {} times — infinite loop detected", i, step.tool, visits);
                 warn!(%err_msg);
-                let _ = db.skill_execution_update_with_duration(
+                let _ = self.store.skill_execution_update_with_duration(
                     &exec_id, "failed", (i + 1) as i32,
                     Some(&serde_json::to_string(&context).unwrap_or_default()),
                     Some(&err_msg),
                     Some(duration_ms),
-                );
+                ).await;
                 return Ok(WorkflowResult::Failed {
                     steps_completed: i,
                     error_step: i,
@@ -189,9 +187,9 @@ impl AppState {
             });
 
             // Update progress
-            let _ = db.skill_execution_update(
+            let _ = self.store.skill_execution_update(
                 &exec_id, "running", (i + 1) as i32, None, None,
-            );
+            ).await;
 
             // Error handling
             if is_error {
@@ -236,12 +234,12 @@ impl AppState {
                         }
                         if !succeeded {
                             let duration_ms = exec_start.elapsed().as_millis() as i64;
-                            let _ = db.skill_execution_update_with_duration(
+                            let _ = self.store.skill_execution_update_with_duration(
                                 &exec_id, "failed", (i + 1) as i32,
                                 Some(&serde_json::to_string(&context).unwrap_or_default()),
                                 Some(&format!("Failed after {} retries: {}", max, output)),
                                 Some(duration_ms),
-                            );
+                            ).await;
                             return Ok(WorkflowResult::Failed {
                                 steps_completed: i + 1,
                                 error_step: i,
@@ -259,12 +257,12 @@ impl AppState {
                         } else {
                             let duration_ms = exec_start.elapsed().as_millis() as i64;
                             let err_msg = format!("Fallback target '{}' not found", target_id);
-                            let _ = db.skill_execution_update_with_duration(
+                            let _ = self.store.skill_execution_update_with_duration(
                                 &exec_id, "failed", (i + 1) as i32,
                                 Some(&serde_json::to_string(&context).unwrap_or_default()),
                                 Some(&err_msg),
                                 Some(duration_ms),
-                            );
+                            ).await;
                             return Ok(WorkflowResult::Failed {
                                 steps_completed: i + 1,
                                 error_step: i,
@@ -276,12 +274,12 @@ impl AppState {
                     _ => {
                         // "stop" (default)
                         let duration_ms = exec_start.elapsed().as_millis() as i64;
-                        let _ = db.skill_execution_update_with_duration(
+                        let _ = self.store.skill_execution_update_with_duration(
                             &exec_id, "failed", (i + 1) as i32,
                             Some(&serde_json::to_string(&context).unwrap_or_default()),
                             Some(&output),
                             Some(duration_ms),
-                        );
+                        ).await;
                         return Ok(WorkflowResult::Failed {
                             steps_completed: i + 1,
                             error_step: i,
@@ -296,12 +294,12 @@ impl AppState {
 
         // Success
         let duration_ms = exec_start.elapsed().as_millis() as i64;
-        let _ = db.skill_execution_update_with_duration(
+        let _ = self.store.skill_execution_update_with_duration(
             &exec_id, "success", workflow.steps.len() as i32,
             Some(&serde_json::to_string(&context).unwrap_or_default()),
             None,
             Some(duration_ms),
-        );
+        ).await;
 
         Ok(WorkflowResult::Success {
             steps_completed: workflow.steps.len(),

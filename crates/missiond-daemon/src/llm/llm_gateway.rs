@@ -21,13 +21,28 @@ pub(crate) async fn call_gemini_for_flow(state: &AppState, task_id: &str, prompt
     let model = "gemini-3.1-pro";
 
     // Get or create conversation for this task (maintains Gemini context across phases)
-    let conv_id = state.mission.db().router_chat_get_or_create(task_id, model)
+    let conv_id = state.store.router_chat_get_or_create(task_id, model).await
         .map_err(|e| anyhow!("Failed to get/create router chat conversation: {}", e))?;
 
-    // Load history for context continuity
-    let mut messages = state.mission.db().router_chat_load_history(&conv_id)
+    // Rolling summary + active history (avoids sending unbounded full history)
+    let (summary_opt, cursor) = state.store.router_chat_get_summary(&conv_id).await
+        .unwrap_or((None, 0));
+    let active_history = state.store.router_chat_load_active_history(&conv_id, cursor).await
         .unwrap_or_default();
-    let history_count = messages.len();
+
+    let mut messages = Vec::new();
+    if let Some(ref summary) = summary_opt {
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": format!("[对话历史摘要] 以下是之前对话的核心要点：\n{}", summary)
+        }));
+        messages.push(serde_json::json!({
+            "role": "assistant",
+            "content": "好的，我已了解之前的对话背景。"
+        }));
+    }
+    let prepended_count = messages.len() + active_history.len();
+    messages.extend(active_history);
 
     // Append current user message
     messages.push(serde_json::json!({"role": "user", "content": prompt}));
@@ -51,8 +66,8 @@ pub(crate) async fn call_gemini_for_flow(state: &AppState, task_id: &str, prompt
         .unwrap_or("(empty response)")
         .to_string();
 
-    // Save messages to conversation history
-    let new_msgs: Vec<(String, String)> = messages.iter().skip(history_count)
+    // Save only new messages (skip prepended summary + active history)
+    let new_msgs: Vec<(String, String)> = messages.iter().skip(prepended_count)
         .map(|m| {
             let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("user").to_string();
             let msg_content = m.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -61,7 +76,7 @@ pub(crate) async fn call_gemini_for_flow(state: &AppState, task_id: &str, prompt
         .chain(std::iter::once(("assistant".to_string(), content.clone())))
         .collect();
 
-    if let Err(e) = state.mission.db().router_chat_append_messages(&conv_id, &new_msgs) {
+    if let Err(e) = state.store.router_chat_append_messages(&conv_id, &new_msgs).await {
         warn!(conv_id = %conv_id, error = %e, "Flow engine: failed to save Gemini chat history");
     }
 

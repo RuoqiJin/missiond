@@ -9,19 +9,18 @@ use crate::state::AppState;
 /// We detect this by checking if any active slot has a session in the same project directory.
 ///
 /// Returns (slot_id, old_session_id, old_task_id) if compaction is detected.
-pub(crate) fn detect_compaction(
+pub(crate) async fn detect_compaction(
     state: &AppState,
     new_session_id: &str,
     new_project: &str,
 ) -> Option<(String, String, Option<String>)> {
-    let db = state.mission.db();
-    let all_slot_sessions = db.get_all_slot_sessions().ok()?;
+    let all_slot_sessions = state.store.get_all_slot_sessions().await.ok()?;
 
     for (slot_id, old_uuid) in &all_slot_sessions {
         if old_uuid == new_session_id {
             continue; // Same session, not compaction
         }
-        let old_conv = db.get_conversation(old_uuid).ok()??;
+        let old_conv = state.store.get_conversation(old_uuid).await.ok()??;
         // Must be same project and still active
         if old_conv.project.as_deref() != Some(new_project) || old_conv.status != "active" {
             continue;

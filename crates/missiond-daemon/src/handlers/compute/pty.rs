@@ -204,9 +204,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             // Clear from compact restart pending set (slot is being rebuilt)
             state.pending_compact_restart.lock().unwrap().remove(&slot_id);
             // Requeue any Running submit tasks assigned to this slot
-            let requeued = state.mission.db().requeue_running_tasks_for_slot(&slot_id).unwrap_or(0);
+            let requeued = state.store.requeue_running_tasks_for_slot(&slot_id).await.unwrap_or(0);
             // Release any board task claims held by this slot
-            let claims_released = state.mission.db().release_board_claims_by_executor(&slot_id).unwrap_or(0);
+            let claims_released = state.store.release_board_claims_by_executor(&slot_id).await.unwrap_or(0);
             Ok(ToolResult::json(
                 &serde_json::json!({ "success": true, "slotId": slot_id, "requeuedTasks": requeued, "claimsReleased": claims_released }),
             ))
@@ -235,9 +235,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     Some(info) => {
                         let mut obj = serde_json::to_value(&info).unwrap_or_default();
                         // Enrich with session_uuid and JSONL activity
-                        if let Ok(Some(session_uuid)) = state.mission.db().get_slot_session(&slot_id) {
+                        if let Ok(Some(session_uuid)) = state.store.get_slot_session(&slot_id).await {
                             obj["sessionId"] = json!(session_uuid);
-                            if let Ok(Some(conv)) = state.mission.db().get_conversation(&session_uuid) {
+                            if let Ok(Some(conv)) = state.store.get_conversation(&session_uuid).await {
                                 if let Some(ref jsonl_path) = conv.jsonl_path {
                                     if let Ok(metadata) = std::fs::metadata(jsonl_path) {
                                         if let Ok(modified) = metadata.modified() {
@@ -380,12 +380,15 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let status = state.pty.get_status(&slot_id).await;
             let status = status.ok_or_else(|| anyhow!("PTY session not found"))?;
             // Find JSONL path from slot→session DB mapping
-            let jsonl_path = state.mission.db().get_all_slot_sessions().ok()
-                .and_then(|sessions| sessions.into_iter().find(|(sid, _)| sid == &slot_id))
-                .and_then(|(_, session_uuid)| {
-                    state.mission.db().get_conversation(&session_uuid).ok().flatten()
-                        .and_then(|c| c.jsonl_path)
-                });
+            let jsonl_path = match state.store.get_all_slot_sessions().await.ok() {
+                Some(sessions) => {
+                    if let Some((_, session_uuid)) = sessions.into_iter().find(|(sid, _)| sid == &slot_id) {
+                        state.store.get_conversation(&session_uuid).await.ok().flatten()
+                            .and_then(|c| c.jsonl_path)
+                    } else { None }
+                }
+                None => None,
+            };
             #[cfg(unix)]
             let hint = if let Some(ref jp) = jsonl_path {
                 format!("tail -f {}", jp)

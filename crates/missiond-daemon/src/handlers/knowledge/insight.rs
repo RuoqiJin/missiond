@@ -10,10 +10,8 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         .and_then(|v| v.as_str())
         .unwrap_or("all");
 
-    let db = state.mission.db();
-
     // Read strategic-state from KB
-    let entry = match db.kb_get("strategic-state") {
+    let entry = match state.store.kb_get("strategic-state").await {
         Ok(Some(e)) => e,
         Ok(None) => return Ok(ToolResult::text("尚无战略分析数据。StrategyWorker 需要分析至少一个完成的会话后才会生成。")),
         Err(e) => return Ok(ToolResult::error(format!("KB 读取失败: {}", e))),

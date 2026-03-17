@@ -276,12 +276,8 @@ fn spawn_harvest_consumer(state: &AppState, timeline_tx: &broadcast::Sender<Time
                 result = rx.recv() => match result {
                     Ok(te) => {
                         if let DaemonEvent::NarrationSessionCompleted { session_id, .. } = &te.event {
-                            let mc = std::sync::Arc::clone(&s.mission);
                             let sid = session_id.clone();
-                            // Run in blocking context since it does DB queries
-                            let _ = tokio::task::spawn_blocking(move || {
-                                experience_harvester::harvest_session(mc.db(), &sid);
-                            }).await;
+                            experience_harvester::harvest_session(&s, &sid).await;
                         }
                     }
                     Err(RecvError::Lagged(n)) => {

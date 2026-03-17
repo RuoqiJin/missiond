@@ -107,7 +107,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             // Best-effort context injection: if task_id is missing, try to infer
             // from running autopilot tasks (single running task → unambiguous)
             let inferred_task_id = if args.task_id.is_none() {
-                match state.mission.db().list_running_autopilot_tasks() {
+                match state.store.list_running_autopilot_tasks().await {
                     Ok(running) if running.len() == 1 => {
                         let tid = running[0].id.to_string();
                         let sid = running[0].claim_executor_id.clone();
@@ -134,10 +134,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 options: args.options,
                 decision_type: args.decision_type,
             };
-            let q = state
-                .mission
-                .db()
-                .create_agent_question(&input)
+            let q = state.store
+                .create_agent_question(&input).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             // Signal Decision Engine if target=master
             if q.target == "master" {
@@ -156,19 +154,15 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         "mission_question_list" => {
             let QuestionListArgs { status, target, limit } =
                 serde_json::from_value(args).unwrap_or(QuestionListArgs { status: None, target: None, limit: None });
-            let questions = state
-                .mission
-                .db()
-                .list_agent_questions(status.as_deref(), target.as_deref(), limit)
+            let questions = state.store
+                .list_agent_questions(status.as_deref(), target.as_deref(), limit).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&questions))
         }
         "mission_question_get" => {
             let QuestionIdArgs { id } = serde_json::from_value(args)?;
-            match state
-                .mission
-                .db()
-                .get_agent_question(&id)
+            match state.store
+                .get_agent_question(&id).await
                 .map_err(|e| anyhow!("DB error: {}", e))?
             {
                 Some(q) => Ok(ToolResult::json_pretty(&q)),
@@ -177,10 +171,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         }
         "mission_question_answer" => {
             let QuestionAnswerArgs { id, answer } = serde_json::from_value(args)?;
-            match state
-                .mission
-                .db()
-                .answer_agent_question(&id, &answer)
+            match state.store
+                .answer_agent_question(&id, &answer).await
                 .map_err(|e| anyhow!("DB error: {}", e))?
             {
                 Some(q) => {
@@ -204,10 +196,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         }
         "mission_question_dismiss" => {
             let QuestionIdArgs { id } = serde_json::from_value(args)?;
-            match state
-                .mission
-                .db()
-                .dismiss_agent_question(&id)
+            match state.store
+                .dismiss_agent_question(&id).await
                 .map_err(|e| anyhow!("DB error: {}", e))?
             {
                 Some(q) => {
@@ -230,7 +220,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
         "mission_decision_stats" => {
             let hours = args.get("hours").and_then(|v| v.as_i64()).unwrap_or(24);
-            let stats = state.mission.db().decision_stats(hours)
+            let stats = state.store.decision_stats(hours).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&stats))
         }

@@ -4,10 +4,11 @@
 //! - handle_new_events: routes raw JSONL values to conversation_messages / conversation_events
 //! - backfill_conversation_events: one-time historical data backfill on startup
 
-use missiond_core::db::MissionDB;
 use missiond_core::types::ToolCallRecord;
 use serde_json::Value;
 use tracing::{info, warn};
+
+use crate::state::AppState;
 
 /// Extract readable text from Claude message content (string or content blocks).
 /// Full content — no truncation in storage layer.
@@ -379,7 +380,7 @@ pub fn extract_tool_results_from_user(content: &Value) -> Vec<(String, String, S
 /// Handle NewEvents from JSONL watcher: progress, system, queue-operation, file-history-snapshot.
 /// - agent_progress → conversation_messages with agent_* roles
 /// - everything else → conversation_events table
-pub fn handle_new_events(db: &MissionDB, session_id: String, events: Vec<Value>) {
+pub async fn handle_new_events(state: &AppState, session_id: String, events: Vec<Value>) {
     let mut conv_events: Vec<missiond_core::types::ConversationEvent> = Vec::new();
     let mut agent_messages: Vec<missiond_core::types::ConversationMessage> = Vec::new();
 
@@ -604,7 +605,7 @@ pub fn handle_new_events(db: &MissionDB, session_id: String, events: Vec<Value>)
     }
 
     if !agent_messages.is_empty() {
-        match db.insert_conversation_messages_batch(&agent_messages) {
+        match state.store.insert_conversation_messages_batch(&agent_messages).await {
             Ok(ids) if !ids.is_empty() => {
                 info!(session = %session_id, count = ids.len(), "Logged agent sub-conversation messages");
             }
@@ -616,7 +617,7 @@ pub fn handle_new_events(db: &MissionDB, session_id: String, events: Vec<Value>)
     }
 
     if !conv_events.is_empty() {
-        match db.insert_conversation_events_batch(&conv_events) {
+        match state.store.insert_conversation_events_batch(&conv_events).await {
             Ok(count) if count > 0 => {
                 info!(session = %session_id, count, "Logged conversation events");
             }
@@ -630,12 +631,12 @@ pub fn handle_new_events(db: &MissionDB, session_id: String, events: Vec<Value>)
 
 /// One-time backfill: scan historical JSONL files and populate conversation_events
 /// for sessions that don't yet have events.
-pub async fn backfill_conversation_events(db: &MissionDB) {
+pub async fn backfill_conversation_events(state: &AppState) {
     // Get sessions that already have events (skip them)
-    let sessions_with_events = db.get_sessions_with_events().unwrap_or_default();
+    let sessions_with_events = state.store.get_sessions_with_events().await.unwrap_or_default();
 
     // Get all conversations with jsonl_path
-    let conversations = db.get_conversations_with_jsonl().unwrap_or_default();
+    let conversations = state.store.get_conversations_with_jsonl().await.unwrap_or_default();
 
     let to_backfill: Vec<_> = conversations
         .into_iter()
@@ -688,7 +689,7 @@ pub async fn backfill_conversation_events(db: &MissionDB) {
         }
 
         // Reuse existing handle_new_events logic
-        handle_new_events(db, session_id.clone(), event_lines);
+        handle_new_events(state, session_id.clone(), event_lines).await;
         total_events += 1;
         backfilled += 1;
 
@@ -707,7 +708,7 @@ pub async fn backfill_conversation_events(db: &MissionDB) {
 
     // TTL cleanup: delete progress events older than 30 days
     let cutoff = (chrono::Utc::now() - chrono::TimeDelta::days(30)).to_rfc3339();
-    match db.cleanup_old_events(&cutoff) {
+    match state.store.cleanup_old_events(&cutoff).await {
         Ok(n) if n > 0 => info!(deleted = n, "Cleaned up old progress events (>30 days)"),
         Err(e) => warn!(error = %e, "Failed to cleanup old events"),
         _ => {}
@@ -716,12 +717,12 @@ pub async fn backfill_conversation_events(db: &MissionDB) {
 
 /// One-time backfill: scan historical conversation_messages and populate conversation_tool_calls
 /// for sessions that don't yet have tool call records.
-pub async fn backfill_tool_calls(db: &MissionDB) {
+pub async fn backfill_tool_calls(state: &crate::state::AppState) {
     // Sessions already backfilled — skip
-    let sessions_with_tc = db.get_sessions_with_tool_calls().unwrap_or_default();
+    let sessions_with_tc = state.store.get_sessions_with_tool_calls().await.unwrap_or_default();
 
     // All conversations
-    let conversations = db.get_conversations_with_jsonl().unwrap_or_default();
+    let conversations = state.store.get_conversations_with_jsonl().await.unwrap_or_default();
     let to_backfill: Vec<_> = conversations
         .into_iter()
         .filter(|(id, _)| !sessions_with_tc.contains(id))
@@ -743,7 +744,7 @@ pub async fn backfill_tool_calls(db: &MissionDB) {
 
     for (session_id, _jsonl_path) in &to_backfill {
         // Read stored messages from DB (raw_content has the full JSON content array)
-        let messages = match db.get_messages_for_tool_call_backfill(session_id) {
+        let messages = match state.store.get_messages_for_tool_call_backfill(session_id).await {
             Ok(msgs) => msgs,
             Err(_) => continue,
         };
@@ -777,7 +778,7 @@ pub async fn backfill_tool_calls(db: &MissionDB) {
 
         // Insert tool calls
         if !tool_calls.is_empty() {
-            match db.insert_tool_calls_batch(&tool_calls) {
+            match state.store.insert_tool_calls_batch(&tool_calls).await {
                 Ok(count) => total_tc += count,
                 Err(e) => {
                     warn!(session = %session_id, error = %e, "Tool call backfill: insert failed");
@@ -788,7 +789,7 @@ pub async fn backfill_tool_calls(db: &MissionDB) {
 
         // Update tool results
         for (tool_use_id, summary, raw, status) in &tool_results {
-            if let Err(e) = db.update_tool_call_output(tool_use_id, summary, raw, status) {
+            if let Err(e) = state.store.update_tool_call_output(tool_use_id, summary, raw, status).await {
                 warn!(tool_use_id, error = %e, "Tool call backfill: update output failed");
             } else {
                 total_results += 1;
@@ -810,13 +811,13 @@ pub async fn backfill_tool_calls(db: &MissionDB) {
 
     // Second pass: update pending tool calls that are missing output
     // (previous backfill may have inserted tool_use but missed tool_result)
-    let pending_count = db.count_pending_tool_calls().unwrap_or(0);
+    let pending_count = state.store.count_pending_tool_calls().await.unwrap_or(0);
     if pending_count > 0 {
         info!(pending_count, "Tool call backfill: updating pending tool calls with missing output");
-        let sessions_with_pending = db.get_sessions_with_pending_tool_calls().unwrap_or_default();
+        let sessions_with_pending = state.store.get_sessions_with_pending_tool_calls().await.unwrap_or_default();
         let mut patched = 0usize;
         for session_id in &sessions_with_pending {
-            let messages = match db.get_messages_for_tool_call_backfill(session_id) {
+            let messages = match state.store.get_messages_for_tool_call_backfill(session_id).await {
                 Ok(msgs) => msgs,
                 Err(_) => continue,
             };
@@ -830,7 +831,7 @@ pub async fn backfill_tool_calls(db: &MissionDB) {
                 };
                 let results = extract_tool_results_from_user(&content);
                 for (tool_use_id, summary, raw, status) in &results {
-                    if let Ok(true) = db.update_tool_call_output(tool_use_id, summary, raw, status) {
+                    if let Ok(true) = state.store.update_tool_call_output(tool_use_id, summary, raw, status).await {
                         patched += 1;
                     }
                 }
@@ -850,7 +851,7 @@ pub async fn backfill_tool_calls(db: &MissionDB) {
 /// Reconcile conversation_messages for a single session by re-reading its JSONL file.
 /// Used as a compensating action when broadcast lag causes message loss.
 /// INSERT OR IGNORE ensures idempotency via UNIQUE index on message_uuid.
-pub async fn reconcile_conversation_messages(db: &MissionDB, session_id: &str, jsonl_path: &str) {
+pub async fn reconcile_conversation_messages(state: &crate::state::AppState, session_id: &str, jsonl_path: &str) {
     use missiond_core::cc_tasks::parse_jsonl_stream;
     use std::path::Path;
 
@@ -860,7 +861,7 @@ pub async fn reconcile_conversation_messages(db: &MissionDB, session_id: &str, j
     }
 
     // Check if slot session (affects role mapping)
-    let is_slot_session = db.get_slot_for_session(session_id).unwrap_or(None).is_some();
+    let is_slot_session = state.store.get_slot_for_session(session_id).await.unwrap_or(None).is_some();
 
     let mut batch: Vec<missiond_core::types::ConversationMessage> = Vec::new();
     let sid = session_id.to_string();
@@ -930,7 +931,7 @@ pub async fn reconcile_conversation_messages(db: &MissionDB, session_id: &str, j
         return;
     }
 
-    match db.insert_conversation_messages_batch(&batch) {
+    match state.store.insert_conversation_messages_batch(&batch).await {
         Ok(ids) if !ids.is_empty() => {
             info!(session = %session_id, recovered = ids.len(), total = batch.len(),
                 "Reconcile: recovered missing messages after broadcast lag");

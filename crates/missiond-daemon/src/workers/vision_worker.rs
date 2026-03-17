@@ -83,10 +83,8 @@ fn write_image_to_cache(base64_data: &str, media_type: &str) -> Result<(std::pat
 
 /// Process a single message: extract images, get descriptions, update content.
 async fn process_message(codex: &CodexCli, state: &AppState, message_id: i64, session_id: &str) -> Result<bool> {
-    let db = state.mission.db();
-
     // 1. Get raw_content
-    let raw_content = match db.get_message_raw_content(message_id)? {
+    let raw_content = match state.store.get_message_raw_content(message_id).await? {
         Some(rc) => rc,
         None => return Ok(false),
     };
@@ -133,14 +131,14 @@ async fn process_message(codex: &CodexCli, state: &AppState, message_id: i64, se
                     let hash = format!("{:x}", Sha256::digest(data.as_bytes()));
 
                     // Check cache first
-                    let description = if let Ok(Some(cached)) = db.get_image_description(&hash) {
+                    let description = if let Ok(Some(cached)) = state.store.get_image_description(&hash).await {
                         debug!(hash = %&hash[..12], "Vision: cache hit");
                         cached
                     } else {
                         match call_codex_vision(codex, data, media_type, &hash).await {
                             Ok(desc) => {
                                 let desc = truncate_description(&desc);
-                                let _ = db.save_image_description(&hash, media_type, &desc);
+                                let _ = state.store.save_image_description(&hash, media_type, &desc).await;
                                 info!(hash = %&hash[..12], chars = desc.len(), "Vision: described image");
                                 desc
                             }
@@ -171,7 +169,7 @@ async fn process_message(codex: &CodexCli, state: &AppState, message_id: i64, se
 
     // 4. Update content column
     let new_content = new_parts.join("\n");
-    db.update_message_content(message_id, &new_content)?;
+    state.store.update_message_content(message_id, &new_content).await?;
     debug!(message_id, session = %session_id, "Vision: content updated");
 
     Ok(true)
@@ -199,8 +197,8 @@ fn truncate_description(desc: &str) -> String {
 }
 
 /// Mark a message as permanently failed so it no longer matches the unprocessed query.
-fn mark_vision_permanently_failed(state: &AppState, message_id: i64) {
-    match state.mission.db().mark_vision_permanently_failed(message_id) {
+async fn mark_vision_permanently_failed(state: &AppState, message_id: i64) {
+    match state.store.mark_vision_permanently_failed(message_id).await {
         Ok(true) => info!(message_id, "Vision worker: marked as permanently failed"),
         Ok(false) => debug!(message_id, "Vision worker: nothing to mark failed"),
         Err(e) => warn!(message_id, error = %e, "Vision worker: failed to mark"),
@@ -231,7 +229,7 @@ impl super::BackgroundWorker for VisionWorker {
         loop {
             ctx.wait_if_paused().await;
             // Find unprocessed image messages
-            let pending = match state.mission.db().find_unprocessed_image_messages(BATCH_SIZE) {
+            let pending = match state.store.find_unprocessed_image_messages(BATCH_SIZE).await {
                 Ok(p) => p,
                 Err(e) => {
                     warn!(error = %e, "Vision worker: DB query failed");
@@ -254,7 +252,7 @@ impl super::BackgroundWorker for VisionWorker {
 
                 if *attempts > MAX_RETRIES {
                     warn!(message_id = msg_id, attempts = *attempts, "Vision worker: max retries exceeded");
-                    mark_vision_permanently_failed(&state, msg_id);
+                    mark_vision_permanently_failed(&state, msg_id).await;
                     attempt_counts.remove(&msg_id);
                     continue;
                 }

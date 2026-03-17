@@ -102,7 +102,8 @@ impl super::BackgroundWorker for StepNarratorWorker {
 
 async fn process_pending(state: &AppState, codex: &CodexCli) -> anyhow::Result<()> {
     // Discover sessions with unnarrated messages
-    let pending = state.mission.db().get_sessions_needing_narration(MIN_UNNARRATED)?;
+    let pending = state.store.get_sessions_needing_narration(MIN_UNNARRATED).await
+        .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
     if pending.is_empty() {
         return Ok(());
     }
@@ -121,12 +122,12 @@ async fn process_pending(state: &AppState, codex: &CodexCli) -> anyhow::Result<(
 
 /// Process a single session: iterate batches until all messages are narrated.
 async fn process_session(state: &AppState, codex: &CodexCli, session_id: &str) -> anyhow::Result<()> {
-    let db = state.mission.db();
     let short_id = &session_id[..8.min(session_id.len())];
 
     // Get or create cursor
     let (last_processed_id, batch_index, status, _retry_count, total_messages) =
-        db.get_or_create_narration_cursor(session_id)?;
+        state.store.get_or_create_narration_cursor(session_id).await
+            .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
 
     if status == "error" {
         info!(session = %short_id, "Step Narrator: skipping errored session");
@@ -134,7 +135,8 @@ async fn process_session(state: &AppState, codex: &CodexCli, session_id: &str) -
     }
 
     // Count already narrated
-    let narrations = db.get_narrations_for_session(session_id)?;
+    let narrations = state.store.get_narrations_for_session(session_id).await
+        .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
     let already_narrated = narrations.len();
 
     info!(session = %short_id, total = total_messages, already = already_narrated,
@@ -161,7 +163,8 @@ async fn process_session(state: &AppState, codex: &CodexCli, session_id: &str) -
 
     loop {
         // Fetch next batch
-        let batch = db.fetch_narration_batch(session_id, current_cursor, BATCH_SIZE)?;
+        let batch = state.store.fetch_narration_batch(session_id, current_cursor, BATCH_SIZE).await
+            .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
         if batch.is_empty() {
             break; // All messages processed
         }
@@ -173,10 +176,11 @@ async fn process_session(state: &AppState, codex: &CodexCli, session_id: &str) -
               "Step Narrator: processing batch");
 
         // Mark cursor as processing
-        db.mark_narration_cursor_processing(session_id)?;
+        state.store.mark_narration_cursor_processing(session_id).await
+            .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
 
         // Build prompt with context
-        let prompt = build_batch_prompt(db, session_id, current_batch_index, &batch)?;
+        let prompt = build_batch_prompt(state, session_id, current_batch_index, &batch).await?;
 
         let batch_start = Instant::now();
 
@@ -199,7 +203,8 @@ async fn process_session(state: &AppState, codex: &CodexCli, session_id: &str) -
                             .map(|n| (n.message_id, session_id, n.step_title.as_str(), n.step_intent.as_str(), n.step_result.as_str()))
                             .collect();
 
-                        let count = db.commit_narration_batch(session_id, batch_last_id, &narration_batch)?;
+                        let count = state.store.commit_narration_batch(session_id, batch_last_id, &narration_batch).await
+                            .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
                         session_narrated_count += count;
 
                         info!(session = %short_id, batch = current_batch_index,
@@ -223,7 +228,8 @@ async fn process_session(state: &AppState, codex: &CodexCli, session_id: &str) -
                     Err(e) => {
                         warn!(session = %short_id, batch = current_batch_index, error = %e,
                               "Step Narrator: failed to parse response");
-                        let permanently_failed = db.mark_narration_cursor_failed(session_id, MAX_RETRIES)?;
+                        let permanently_failed = state.store.mark_narration_cursor_failed(session_id, MAX_RETRIES).await
+                            .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
                         state.event_bus.publish_traced(
                             DaemonEvent::NarrationFailed {
                                 session_id: session_id.to_string(),
@@ -241,7 +247,8 @@ async fn process_session(state: &AppState, codex: &CodexCli, session_id: &str) -
                 let duration_ms = batch_start.elapsed().as_millis() as u64;
                 warn!(session = %short_id, batch = current_batch_index, error = %e, duration_ms,
                       "Step Narrator: codex call failed");
-                let permanently_failed = db.mark_narration_cursor_failed(session_id, MAX_RETRIES)?;
+                let permanently_failed = state.store.mark_narration_cursor_failed(session_id, MAX_RETRIES).await
+                    .map_err(|e2| anyhow::anyhow!("DB error: {}", e2))?;
                 state.event_bus.publish_traced(
                     DaemonEvent::NarrationFailed {
                         session_id: session_id.to_string(),
@@ -276,8 +283,8 @@ async fn process_session(state: &AppState, codex: &CodexCli, session_id: &str) -
 }
 
 /// Build the prompt for a single batch, including context from previous batches.
-fn build_batch_prompt(
-    db: &missiond_core::db::MissionDB,
+async fn build_batch_prompt(
+    state: &AppState,
     session_id: &str,
     batch_index: i64,
     batch_messages: &[missiond_core::types::ConversationMessage],
@@ -294,9 +301,9 @@ fn build_batch_prompt(
     // Previous context (for batch_index > 0)
     if batch_index > 0 {
         parts.push("<previous_context>\n".to_string());
-        if let Ok(Some((last_msg_id, title, intent, result))) = db.get_last_narration(session_id) {
+        if let Ok(Some((last_msg_id, title, intent, result))) = state.store.get_last_narration(session_id).await {
             // Get the actual message content for anchoring
-            if let Ok(Some(msg)) = db.get_conversation_message_by_id(last_msg_id) {
+            if let Ok(Some(msg)) = state.store.get_conversation_message_by_id(last_msg_id).await {
                 parts.push(format!(
                     "上一批最后一条消息 [MSG_ID:{}] [{}]：\n{}\n\n该消息的解说：\n- step_title: {}\n- step_intent: {}\n- step_result: {}\n",
                     msg.id, msg.role, msg.content, title, intent, result

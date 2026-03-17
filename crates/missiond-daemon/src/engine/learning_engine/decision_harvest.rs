@@ -13,7 +13,7 @@ use crate::llm_gateway::call_gemini_for_flow;
 /// calls Gemini to generalize into reusable rules, writes to KB.
 pub(crate) async fn harvest_decisions_for_task(state: &AppState, task_id: &str, task_title: &str) {
     // 1. Scan answered master questions for this task
-    let questions = match state.mission.db().list_questions_for_task(task_id) {
+    let questions = match state.store.list_questions_for_task(task_id).await {
         Ok(qs) => qs,
         Err(e) => {
             warn!(task_id, error = %e, "Decision harvester: failed to query questions");
@@ -96,7 +96,7 @@ pub(crate) async fn harvest_decisions_for_task(state: &AppState, task_id: &str, 
             confidence: Some(0.8),
         };
 
-        match state.mission.db().kb_remember(&input) {
+        match state.store.kb_remember(&input).await {
             Ok(result) => {
                 let action = &result.action;
                 // ── Confidence reinforcement on repeated decisions ──
@@ -106,12 +106,12 @@ pub(crate) async fn harvest_decisions_for_task(state: &AppState, task_id: &str, 
                     let existing_confidence = result.entry.confidence;
                     let boosted = (existing_confidence + 0.05).min(1.0);
                     if boosted > existing_confidence {
-                        let _ = state.mission.db().kb_update(
+                        let _ = state.store.kb_update(
                             &result.entry.key,
                             None, None, None,
                             Some(boosted),
                             None,
-                        );
+                        ).await;
                         reinforced += 1;
                         if boosted > 0.95 {
                             info!(key, confidence = boosted, "Policy verified: repeated decision reached high confidence");
@@ -138,13 +138,13 @@ pub(crate) async fn harvest_decisions_for_task(state: &AppState, task_id: &str, 
             format!("[决策引擎] 从 {} 条主控决策中提炼了 {} 条 policy:decision 规则",
                 master_questions.len(), written)
         };
-        let _ = state.mission.db().add_board_task_note(
+        let _ = state.store.add_board_task_note(
             &missiond_core::types::AddBoardTaskNoteInput {
                 task_id: task_id.to_string(),
                 content: note,
                 note_type: Some("progress".to_string()),
                 author: Some("decision-harvester".to_string()),
             },
-        );
+        ).await;
     }
 }

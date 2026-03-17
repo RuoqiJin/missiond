@@ -7,7 +7,6 @@ use missiond_core::SessionState;
 use crate::memory_scheduler::ensure_memory_slot_by_id;
 use crate::helpers::char_boundary_at;
 use std::sync::Arc;
-use missiond_core::MissionControl;
 
 /// Threshold: mark for graceful restart when context drops below this %.
 const COMPACT_GRACEFUL_THRESHOLD: u32 = 15;
@@ -43,12 +42,12 @@ pub(crate) async fn check_slot_context_levels(state: &AppState) {
                         warn!(error = %e, slot_id = %slot.config.id, "Failed to emergency kill slot");
                         return;
                     }
-                    match state.mission.db().requeue_running_tasks_for_slot(&slot.config.id) {
+                    match state.store.requeue_running_tasks_for_slot(&slot.config.id).await {
                         Ok(n) if n > 0 => warn!(slot_id = %slot.config.id, count = n, "Requeued tasks after emergency kill"),
                         Err(e) => warn!(slot_id = %slot.config.id, error = %e, "Failed to requeue after emergency kill"),
                         _ => {}
                     }
-                    let _ = state.mission.db().release_board_claims_by_executor(&slot.config.id);
+                    let _ = state.store.release_board_claims_by_executor(&slot.config.id).await;
                     // Clear from pending set (will be respawned by ensure_memory_slot or autopilot)
                     state.pending_compact_restart.lock().unwrap().remove(&slot.config.id);
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -115,12 +114,12 @@ pub(crate) async fn check_pending_compact_restarts(state: &AppState) {
             continue;
         }
         // Requeue any Running submit tasks
-        match state.mission.db().requeue_running_tasks_for_slot(&slot_id) {
+        match state.store.requeue_running_tasks_for_slot(&slot_id).await {
             Ok(n) if n > 0 => warn!(slot_id = %slot_id, count = n, "Requeued running submit tasks after compact restart"),
             Err(e) => warn!(slot_id = %slot_id, error = %e, "Failed to requeue tasks after compact restart"),
             _ => {}
         }
-        let _ = state.mission.db().release_board_claims_by_executor(&slot_id);
+        let _ = state.store.release_board_claims_by_executor(&slot_id).await;
 
         // Release dispatch guard before blocking sleep+respawn
         state.slot_dispatch.release(&slot_id);
@@ -246,10 +245,10 @@ pub(crate) fn extract_context_percentage(screen: &str) -> Option<u32> {
     None
 }
 
-pub(crate) fn get_task_jsonl_path(state: &AppState, task: &missiond_core::types::Task) -> Option<String> {
+pub(crate) async fn get_task_jsonl_path(state: &AppState, task: &missiond_core::types::Task) -> Option<String> {
     let slot_id = task.slot_id.as_ref()?;
-    let session_uuid = state.mission.db().get_slot_session(slot_id).ok()??;
-    let conv = state.mission.db().get_conversation(&session_uuid).ok()??;
+    let session_uuid = state.store.get_slot_session(slot_id).await.ok()??;
+    let conv = state.store.get_conversation(&session_uuid).await.ok()??;
     conv.jsonl_path
 }
 
@@ -383,8 +382,8 @@ pub(crate) async fn check_slot_stuck(
     // However, enforce an absolute ceiling to prevent infinite loops where the model
     // produces useless tool calls that keep JSONL active indefinitely.
     if stuck_duration < ABSOLUTE_STUCK_CEILING_SECS {
-        if let Ok(Some(session_uuid)) = state.mission.db().get_slot_session(slot_id) {
-            if let Ok(Some(conv)) = state.mission.db().get_conversation(&session_uuid) {
+        if let Ok(Some(session_uuid)) = state.store.get_slot_session(slot_id).await {
+            if let Ok(Some(conv)) = state.store.get_conversation(&session_uuid).await {
                 if let Some(ref jsonl_path) = conv.jsonl_path {
                     if let Ok(metadata) = std::fs::metadata(jsonl_path) {
                         if let Ok(modified) = metadata.modified() {
@@ -427,13 +426,13 @@ pub(crate) async fn check_slot_stuck(
     state.pending_compact_restart.lock().unwrap().remove(slot_id);
 
     // Requeue any Running submit tasks assigned to this slot — they were lost with the old session
-    match state.mission.db().requeue_running_tasks_for_slot(slot_id) {
+    match state.store.requeue_running_tasks_for_slot(slot_id).await {
         Ok(n) if n > 0 => warn!(slot_id, count = n, "Requeued running submit tasks after slot restart"),
         Err(e) => warn!(slot_id, error = %e, "Failed to requeue tasks after slot restart"),
         _ => {}
     }
     // Release board task claims held by this slot
-    let _ = state.mission.db().release_board_claims_by_executor(slot_id);
+    let _ = state.store.release_board_claims_by_executor(slot_id).await;
 
     // Allow next tick to respawn
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -444,19 +443,18 @@ pub(crate) async fn check_slot_stuck(
         let mut es = extraction_state.write().await;
         // Mark deep analysis as failed so it increments retry count (not silently lost)
         if let Some(conv_id) = es.current_deep_conv_id.take() {
-            let _ = state.mission.db().mark_analysis_failed(&conv_id);
+            let _ = state.store.mark_analysis_failed(&conv_id).await;
             warn!(conv_id = %conv_id, "Marked stuck deep analysis as failed");
         }
         // Mark slot task as failed (stuck)
         if let Some(ref st_id) = es.current_slot_task_id {
-            let _ = state.mission.db().slot_task_set_failed(st_id, "slot stuck, force reset");
+            let _ = state.store.slot_task_set_failed(st_id, "slot stuck, force reset").await;
         }
         // Advance realtime watermarks BEFORE clearing active_type (P0 fix: use-after-clear)
         let was_realtime = matches!(es.active_type, Some("realtime"));
         if was_realtime && !es.watermark_targets.is_empty() {
-            let db = state.mission.db();
             for (session_id, timestamp) in &es.watermark_targets {
-                if let Err(e) = db.update_realtime_forwarded_at(session_id, timestamp) {
+                if let Err(e) = state.store.update_realtime_forwarded_at(session_id, timestamp).await {
                     warn!(slot_id, session_id, error = %e, "Failed to advance watermark on slot kill");
                 }
             }
@@ -483,7 +481,7 @@ pub(crate) async fn check_slot_stuck(
 /// Handles safety-valve timeout for WaitingForSlotIdle phase.
 pub(crate) async fn check_extraction_gate(
     extraction_state: &tokio::sync::RwLock<ExtractionState>,
-    mission: &MissionControl,
+    state: &AppState,
     label: &str,
 ) -> bool {
     let now = chrono::Utc::now().timestamp();
@@ -500,18 +498,17 @@ pub(crate) async fn check_extraction_gate(
             warn!(age_secs = age, "{}: extraction stuck in WaitingForSlotIdle, forcing reset", label);
             // Mark deep analysis as failed (increments retry count) instead of silently losing
             if let Some(conv_id) = es.current_deep_conv_id.take() {
-                let _ = mission.db().mark_analysis_failed(&conv_id);
+                let _ = state.store.mark_analysis_failed(&conv_id).await;
             }
             // Mark slot task as failed (timeout)
             if let Some(ref st_id) = es.current_slot_task_id {
-                let _ = mission.db().slot_task_set_failed(st_id, "WaitingForSlotIdle timeout");
+                let _ = state.store.slot_task_set_failed(st_id, "WaitingForSlotIdle timeout").await;
             }
             // Advance realtime watermarks BEFORE clearing active_type (P0 fix: use-after-clear)
             let was_realtime = matches!(es.active_type, Some("realtime"));
             if was_realtime && !es.watermark_targets.is_empty() {
-                let db = mission.db();
                 for (session_id, timestamp) in &es.watermark_targets {
-                    if let Err(e) = db.update_realtime_forwarded_at(session_id, timestamp) {
+                    if let Err(e) = state.store.update_realtime_forwarded_at(session_id, timestamp).await {
                         warn!(session_id, error = %e, "{}: failed to advance watermark on timeout", label);
                     }
                 }

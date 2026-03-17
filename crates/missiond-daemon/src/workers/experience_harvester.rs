@@ -11,7 +11,6 @@ use std::collections::{HashMap, HashSet};
 
 use tracing::{debug, info, warn};
 
-use missiond_core::db::MissionDB;
 use missiond_core::types::ToolCallRecord;
 
 /// Default repo name for the main project.
@@ -164,12 +163,12 @@ impl NodeCandidate {
     }
 }
 
-/// Resolve file paths to AST node candidates.
+/// Resolve file paths to AST node candidates (async via state.store).
 ///
 /// Gemini review: Modified files → all nodes (not limited to exported).
 /// Read-only files → only exported struct/trait.
-fn resolve_ast_candidates(
-    db: &MissionDB,
+async fn resolve_ast_candidates_async(
+    state: &crate::state::AppState,
     exploration: &ExplorationPath,
 ) -> Vec<NodeCandidate> {
     let mut candidates = Vec::new();
@@ -181,7 +180,7 @@ fn resolve_ast_candidates(
     for file_path in &exploration.files_modified {
         // Strip project prefix to get repo-relative path
         let rel_path = strip_project_prefix(file_path);
-        if let Ok(nodes) = db.ast_get_file_nodes(DEFAULT_REPO, &rel_path) {
+        if let Ok(nodes) = state.store.ast_get_file_nodes(DEFAULT_REPO, &rel_path).await {
             for node in &nodes {
                 candidates.push(NodeCandidate {
                     name: node.node.name.clone(),
@@ -208,7 +207,7 @@ fn resolve_ast_candidates(
             continue; // Already processed
         }
         let rel_path = strip_project_prefix(file_path);
-        if let Ok(nodes) = db.ast_get_file_nodes(DEFAULT_REPO, &rel_path) {
+        if let Ok(nodes) = state.store.ast_get_file_nodes(DEFAULT_REPO, &rel_path).await {
             for node in &nodes {
                 let dominated_type = matches!(
                     node.node.node_type.as_str(),
@@ -276,9 +275,9 @@ fn slugify_intent(intent: &str) -> String {
 /// Main entry point: harvest exploration from a completed session.
 ///
 /// Called from event_router when NarrationSessionCompleted fires.
-pub(crate) fn harvest_session(db: &MissionDB, session_id: &str) {
+pub(crate) async fn harvest_session(state: &crate::state::AppState, session_id: &str) {
     // 1. Get tool calls for this session
-    let tool_calls = match db.get_tool_calls_by_session(session_id, None, 500) {
+    let tool_calls = match state.store.get_tool_calls_by_session(session_id, None, 500).await {
         Ok(tc) => tc,
         Err(e) => {
             debug!(session = %session_id, error = %e, "Failed to get tool calls for harvest");
@@ -313,7 +312,7 @@ pub(crate) fn harvest_session(db: &MissionDB, session_id: &str) {
     }
 
     // 5. Resolve AST nodes
-    let candidates = resolve_ast_candidates(db, &exploration);
+    let candidates = resolve_ast_candidates_async(state, &exploration).await;
 
     if candidates.is_empty() {
         debug!(
@@ -326,7 +325,7 @@ pub(crate) fn harvest_session(db: &MissionDB, session_id: &str) {
     // 6. Create beacon
     let beacon_name = slugify_intent(&exploration.query_intent);
 
-    let beacon_id = match db.beacon_ensure(&beacon_name) {
+    let beacon_id = match state.store.beacon_ensure(&beacon_name).await {
         Ok(id) => id,
         Err(e) => {
             warn!(error = %e, "Failed to create harvest beacon");
@@ -342,7 +341,7 @@ pub(crate) fn harvest_session(db: &MissionDB, session_id: &str) {
         exploration.files_read.len(),
         exploration.patterns_searched.iter().take(3).collect::<Vec<_>>(),
     );
-    let _ = db.beacon_set_description(&beacon_name, &desc);
+    let _ = state.store.beacon_set_description(&beacon_name, &desc).await;
 
     // 7. Link nodes
     let mut linked = 0usize;
@@ -352,19 +351,19 @@ pub(crate) fn harvest_session(db: &MissionDB, session_id: &str) {
         } else {
             Some("read-context")
         };
-        if db.beacon_node_upsert(
+        if state.store.beacon_node_upsert(
             &beacon_id,
             DEFAULT_REPO,
             &candidate.file_path,
             &candidate.name,
             annotation,
-        ).is_ok() {
+        ).await.is_ok() {
             linked += 1;
         }
     }
 
     // Track harvest frequency for skill synthesis
-    let harvest_count = db.beacon_increment_harvest(&beacon_name).unwrap_or(0);
+    let harvest_count = state.store.beacon_increment_harvest(&beacon_name).await.unwrap_or(0);
 
     info!(
         beacon = %beacon_name,
@@ -416,7 +415,7 @@ pub(crate) fn harvest_session(db: &MissionDB, session_id: &str) {
             timeout_secs: None,
             context_intent: None,
         };
-        match db.create_board_task(&input) {
+        match state.store.create_board_task(&input).await {
             Ok(task) => info!(task_id = %task.id, beacon = %beacon_name, "Skill synthesis triggered"),
             Err(e) => debug!(error = %e, "Skill synthesis task creation failed (may be deduped)"),
         }

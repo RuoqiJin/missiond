@@ -86,7 +86,7 @@ pub(crate) async fn schedule_memory_tasks(state: &AppState) {
 /// Part of the unified priority scheduler — called before extraction checks.
 pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
     // spawn_blocking: batch table scan
-    let queued = match state.db_exec.run(|db| db.get_tasks_by_status(missiond_core::types::TaskStatus::Queued)).await {
+    let queued = match state.store.get_tasks_by_status(missiond_core::types::TaskStatus::Queued).await {
         Ok(tasks) => tasks,
         Err(e) => {
             warn!(error = %e, "Failed to query queued submit tasks");
@@ -137,7 +137,7 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
 
             if sent {
                 let now = chrono::Utc::now().timestamp_millis();
-                let _ = state.mission.db().update_task(
+                let _ = state.store.update_task(
                     &task.id,
                     &missiond_core::types::TaskUpdate {
                         status: Some(missiond_core::types::TaskStatus::Running),
@@ -145,7 +145,7 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
                         started_at: Some(now),
                         ..Default::default()
                     },
-                );
+                ).await;
                 let preview = if task.prompt.len() > 200 {
                     let mut end = 200;
                     while end > 0 && !task.prompt.is_char_boundary(end) { end -= 1; }
@@ -178,7 +178,7 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
     // Phase 2: Wake-on-Demand — auto-spawn stopped slots for queued tasks
     // Respects pinned slot_id: if task specifies a slot, only wake that exact slot.
     {
-        let remaining = match state.db_exec.run(|db| db.get_tasks_by_status(missiond_core::types::TaskStatus::Queued)).await {
+        let remaining = match state.store.get_tasks_by_status(missiond_core::types::TaskStatus::Queued).await {
             Ok(t) => t,
             Err(_) => vec![],
         };
@@ -192,7 +192,7 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
                     if !slots.iter().any(|s| s.config.id == *pinned) {
                         warn!(task_id = %task.id, slot_id = %pinned, "Autopilot: pinned slot not found, marking task Failed");
                         let now = chrono::Utc::now().timestamp_millis();
-                        let _ = state.mission.db().update_task(
+                        let _ = state.store.update_task(
                             &task.id,
                             &missiond_core::types::TaskUpdate {
                                 status: Some(missiond_core::types::TaskStatus::Failed),
@@ -200,7 +200,7 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
                                 result: Some(format!("pinned slot '{pinned}' not found in slots.yaml")),
                                 ..Default::default()
                             },
-                        );
+                        ).await;
                         continue;
                     }
                     pinned.clone()
@@ -241,7 +241,7 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
 /// If the slot is Idle, mark Done; otherwise mark Failed after timeout.
 pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
     // spawn_blocking: batch table scan
-    let running = match state.db_exec.run(|db| db.get_tasks_by_status(missiond_core::types::TaskStatus::Running)).await {
+    let running = match state.store.get_tasks_by_status(missiond_core::types::TaskStatus::Running).await {
         Ok(t) => t,
         Err(_) => return,
     };
@@ -266,7 +266,7 @@ pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
             if let Some(ref slot_id) = task.slot_id {
                 // Guard 1: slot's current session must match task's session
                 let session_matches = match (
-                    state.mission.db().get_slot_session(slot_id),
+                    state.store.get_slot_session(slot_id).await,
                     &task.session_id,
                 ) {
                     (Ok(Some(current_session)), Some(task_session)) => current_session == *task_session,
@@ -275,7 +275,7 @@ pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
                 };
 
                 if session_matches {
-                    if let Some(jsonl_path) = get_task_jsonl_path(state, task) {
+                    if let Some(jsonl_path) = get_task_jsonl_path(state, task).await {
                         let path = std::path::Path::new(&jsonl_path);
                         if missiond_core::jsonl_has_completed_turn(path).await {
                             // JSONL confirms turn completed — extract result and close
@@ -289,7 +289,7 @@ pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
                             } else {
                                 result_text
                             };
-                            let _ = state.mission.db().update_task(
+                            let _ = state.store.update_task(
                                 &task.id,
                                 &missiond_core::types::TaskUpdate {
                                     status: Some(missiond_core::types::TaskStatus::Done),
@@ -297,12 +297,12 @@ pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
                                     result: Some(result_text.clone()),
                                     ..Default::default()
                                 },
-                            );
+                            ).await;
                             // Update associated kb_operation
-                            let _ = state.mission.db().kb_ops_complete_by_task_id(&task.id, "done", Some(&result_text));
+                            let _ = state.store.kb_ops_complete_by_task_id(&task.id, "done", Some(&result_text)).await;
                             // Board progress extraction: parse JSON output and write notes
                             if task.prompt.starts_with("[board_progress]") {
-                                apply_board_progress_result(state, &result_text);
+                                apply_board_progress_result(state, &result_text).await;
                             }
                             info!(
                                 task_id = %task.id, slot_id = %slot_id,
@@ -330,7 +330,7 @@ pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
         let (new_status, result_msg) = if slot_idle {
             // Try JSONL result even at timeout
             let jsonl_result = if task.slot_id.is_some() {
-                if let Some(jsonl_path) = get_task_jsonl_path(state, task) {
+                if let Some(jsonl_path) = get_task_jsonl_path(state, task).await {
                     missiond_core::extract_last_assistant_text(std::path::Path::new(&jsonl_path)).await
                 } else { None }
             } else { None };
@@ -340,7 +340,7 @@ pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
             (missiond_core::types::TaskStatus::Failed, "timed out after 15 minutes".to_string())
         };
 
-        let _ = state.mission.db().update_task(
+        let _ = state.store.update_task(
             &task.id,
             &missiond_core::types::TaskUpdate {
                 status: Some(new_status),
@@ -348,15 +348,15 @@ pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
                 result: Some(result_msg.clone()),
                 ..Default::default()
             },
-        );
+        ).await;
         // Update associated kb_operation (done or failed depending on task status)
         let kb_status = if new_status == missiond_core::types::TaskStatus::Done { "done" } else { "failed" };
-        if let Ok(true) = state.mission.db().kb_ops_complete_by_task_id(&task.id, kb_status, Some(&result_msg)) {
+        if let Ok(true) = state.store.kb_ops_complete_by_task_id(&task.id, kb_status, Some(&result_msg)).await {
             info!(task_id = %task.id, kb_status = kb_status, "KB operation updated via reaper");
         }
         // Board progress extraction: parse JSON output and write notes (timeout path)
         if new_status == missiond_core::types::TaskStatus::Done && task.prompt.starts_with("[board_progress]") {
-            apply_board_progress_result(state, &result_msg);
+            apply_board_progress_result(state, &result_msg).await;
         }
         warn!(
             task_id = %task.id,
@@ -371,7 +371,7 @@ pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
 /// Parse structured JSON from board_progress extraction task and write notes/status to DB.
 /// Worker outputs: { "task_progress": [{ task_id, summary, is_done, confidence }] }
 /// Daemon writes directly to DB — no MCP tool calls needed (Gemini ARB recommendation).
-fn apply_board_progress_result(state: &AppState, json_text: &str) {
+async fn apply_board_progress_result(state: &AppState, json_text: &str) {
     #[derive(serde::Deserialize)]
     struct ProgressOutput {
         task_progress: Vec<TaskProgress>,
@@ -403,32 +403,31 @@ fn apply_board_progress_result(state: &AppState, json_text: &str) {
         }
     };
 
-    let db = state.mission.db();
     for tp in &output.task_progress {
         if tp.confidence < 0.5 { continue; }
 
         // Write progress note
-        let _ = db.add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+        let _ = state.store.add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
             task_id: tp.task_id.clone(),
             content: tp.summary.clone(),
             note_type: Some("progress".to_string()),
             author: Some("auto-extract".to_string()),
-        });
+        }).await;
         info!(task_id = %tp.task_id, is_done = tp.is_done, confidence = tp.confidence,
             "Board progress note written (auto-extract)");
 
         // Auto-mark done only with high confidence + CAS: verify task still Running
         // Gemini ARB: prevents overwriting Cancelled/Blocked status set during extraction delay
         if tp.is_done && tp.confidence >= 0.8 {
-            let still_running = db.get_board_task(&tp.task_id)
+            let still_running = state.store.get_board_task(&tp.task_id).await
                 .ok().flatten()
                 .map(|t| t.status == missiond_core::types::BoardTaskStatus::Running)
                 .unwrap_or(false);
             if still_running {
-                let _ = db.update_board_task(&tp.task_id, &missiond_core::types::UpdateBoardTaskInput {
+                let _ = state.store.update_board_task(&tp.task_id, &missiond_core::types::UpdateBoardTaskInput {
                     status: Some("done".to_string()),
                     ..Default::default()
-                });
+                }).await;
                 info!(task_id = %tp.task_id, confidence = tp.confidence, "Board task auto-marked done");
             } else {
                 debug!(task_id = %tp.task_id, "Board task no longer running, skipping auto-done");

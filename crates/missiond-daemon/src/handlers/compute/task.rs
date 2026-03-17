@@ -84,13 +84,13 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
 
     // If slotId specified, store it on the task for autopilot fallback
     if let Some(ref target) = target_slot {
-        let _ = state.mission.db().update_task(
+        let _ = state.store.update_task(
             &task_id,
             &missiond_core::types::TaskUpdate {
                 slot_id: Some(target.clone()),
                 ..Default::default()
             },
-        );
+        ).await;
     }
 
     // Try immediate dispatch
@@ -121,8 +121,8 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
 
         if sent {
             let now = chrono::Utc::now().timestamp_millis();
-            let slot_session = state.mission.db().get_slot_session(candidate_id).ok().flatten();
-            let _ = state.mission.db().update_task(
+            let slot_session = state.store.get_slot_session(candidate_id).await.ok().flatten();
+            let _ = state.store.update_task(
                 &task_id,
                 &missiond_core::types::TaskUpdate {
                     status: Some(missiond_core::types::TaskStatus::Running),
@@ -131,7 +131,7 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
                     started_at: Some(now),
                     ..Default::default()
                 },
-            );
+            ).await;
             let preview = if prompt.len() > 200 {
                 let mut end = 200;
                 while end > 0 && !prompt.is_char_boundary(end) { end -= 1; }
@@ -205,8 +205,8 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
 
             if sent {
                 let now = chrono::Utc::now().timestamp_millis();
-                let slot_session = state.mission.db().get_slot_session(candidate_id).ok().flatten();
-                let _ = state.mission.db().update_task(
+                let slot_session = state.store.get_slot_session(candidate_id).await.ok().flatten();
+                let _ = state.store.update_task(
                     &task_id,
                     &missiond_core::types::TaskUpdate {
                         status: Some(missiond_core::types::TaskStatus::Running),
@@ -215,7 +215,7 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
                         started_at: Some(now),
                         ..Default::default()
                     },
-                );
+                ).await;
                 let preview = if prompt.len() > 200 {
                     let mut end = 200;
                     while end > 0 && !prompt.is_char_boundary(end) { end -= 1; }
@@ -293,12 +293,12 @@ async fn handle_task_list(state: &AppState, args: Value) -> Result<ToolResult> {
     let limit = args.limit.unwrap_or(20);
     let tasks = if let Some(ref status_str) = args.status {
         if let Some(status) = missiond_core::types::TaskStatus::from_str(status_str) {
-            state.mission.db().get_tasks_by_status(status)?
+            state.store.get_tasks_by_status(status).await?
         } else {
             return Ok(ToolResult::error(format!("Invalid status: {}. Use: queued, running, done, failed", status_str)));
         }
     } else {
-        state.mission.db().get_all_tasks(limit)?
+        state.store.get_all_tasks(limit).await?
     };
     Ok(ToolResult::json(&tasks))
 }
@@ -306,7 +306,7 @@ async fn handle_task_list(state: &AppState, args: Value) -> Result<ToolResult> {
 async fn handle_task_ack(state: &AppState, args: Value) -> Result<ToolResult> {
     let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
     let since = args_val.get("since").and_then(|v| v.as_i64());
-    let tasks = state.mission.db().ack_completed_tasks(since)?;
+    let tasks = state.store.ack_completed_tasks(since).await?;
     Ok(ToolResult::json(&tasks))
 }
 
@@ -317,7 +317,7 @@ async fn handle_task_track(state: &AppState, args: Value) -> Result<ToolResult> 
     let Args { task_id } = serde_json::from_value(args)?;
 
     // 1. Task status
-    let task = state.mission.db().get_task(&task_id)
+    let task = state.store.get_task(&task_id).await
         .map_err(|e| anyhow!("DB error: {}", e))?
         .ok_or_else(|| anyhow!("Task not found: {}", task_id))?;
     let mut result = serde_json::json!({
@@ -342,9 +342,9 @@ async fn handle_task_track(state: &AppState, args: Value) -> Result<ToolResult> 
                 "statusText": info.status_text,
             });
             // Session & activity
-            if let Ok(Some(session_uuid)) = state.mission.db().get_slot_session(slot_id) {
+            if let Ok(Some(session_uuid)) = state.store.get_slot_session(slot_id).await {
                 slot_obj["sessionId"] = json!(session_uuid);
-                if let Ok(Some(conv)) = state.mission.db().get_conversation(&session_uuid) {
+                if let Ok(Some(conv)) = state.store.get_conversation(&session_uuid).await {
                     if let Some(ref jp) = conv.jsonl_path {
                         if let Ok(md) = std::fs::metadata(jp) {
                             if let Ok(m) = md.modified() {

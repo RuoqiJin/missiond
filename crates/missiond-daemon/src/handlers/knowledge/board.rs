@@ -41,15 +41,15 @@ async fn board_get(state: &AppState, args: Value) -> Result<ToolResult> {
     };
     let single_mode = args.get("ids").is_none() && args.get("id").is_some();
     if include_children || ids.len() > 1 {
-        let results = state.mission.db()
-            .get_board_tasks_with_context(&ids, include_children)
+        let results = state.store
+            .get_board_tasks_with_context(&ids, include_children).await
             .map_err(|e| anyhow!("DB error: {}", e))?;
         if results.is_empty() { return Ok(ToolResult::error("Task not found")); }
         if single_mode { Ok(ToolResult::json_pretty(&results[0])) }
         else { Ok(ToolResult::json_pretty(&results)) }
     } else {
-        let task = state.mission.db()
-            .get_board_task_with_notes(&ids[0])
+        let task = state.store
+            .get_board_task_with_notes(&ids[0]).await
             .map_err(|e| anyhow!("DB error: {}", e))?;
         match task {
             Some(ref t) => {
@@ -150,8 +150,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "list" => {
                     let BoardListArgs { status, include_hidden } =
                         serde_json::from_value(args).unwrap_or(BoardListArgs { status: None, include_hidden: None });
-                    let tasks = state.mission.db()
-                        .list_board_tasks(status.as_deref(), include_hidden.unwrap_or(false))
+                    let tasks = state.store
+                        .list_board_tasks(status.as_deref(), include_hidden.unwrap_or(false)).await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json_pretty(&tasks))
                 }
@@ -161,8 +161,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "search" => {
                     let input: missiond_core::types::BoardSearchInput =
                         serde_json::from_value(args).unwrap_or_default();
-                    let result = state.mission.db()
-                        .search_board_tasks(&input)
+                    let result = state.store
+                        .search_board_tasks(&input).await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json_pretty(&result))
                 }
@@ -170,14 +170,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     #[derive(Deserialize)]
                     struct SummaryArgs { since: Option<String> }
                     let a: SummaryArgs = serde_json::from_value(args)?;
-                    let summary = state.mission.db()
-                        .board_summary(a.since.as_deref())
+                    let summary = state.store
+                        .board_summary(a.since.as_deref()).await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json_pretty(&summary))
                 }
                 "clear_done" => {
-                    let deleted = state.mission.db()
-                        .clear_done_board_tasks()
+                    let deleted = state.store
+                        .clear_done_board_tasks().await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::text(format!("Cleared {} completed tasks", deleted)))
                 }
@@ -187,10 +187,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_board_create" => {
             let input: missiond_core::types::CreateBoardTaskInput =
                 serde_json::from_value(args)?;
-            let mut task = state
-                .mission
-                .db()
-                .create_board_task(&input)
+            let mut task = state.store
+                .create_board_task(&input).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
 
             // If flowTemplate is set, initialize flow fields
@@ -198,7 +196,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 let flow_phase = "investigate".to_string();
                 let flow_ctx = serde_json::to_string(&missiond_core::types::FlowContext::default())
                     .unwrap_or_else(|_| "{}".to_string());
-                let updated = state.mission.db().update_board_task(
+                let updated = state.store.update_board_task(
                     task.id.as_str(),
                     &missiond_core::types::UpdateBoardTaskInput {
                         flow_phase: Some(flow_phase),
@@ -206,7 +204,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                         flow_template: input.flow_template.clone(),
                         ..Default::default()
                     },
-                ).map_err(|e| anyhow!("DB error setting flow: {}", e))?;
+                ).await.map_err(|e| anyhow!("DB error setting flow: {}", e))?;
                 if let Some(t) = updated {
                     task = t;
                 }
@@ -231,9 +229,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 let (mut success_count, mut fail_count) = (0u32, 0u32);
                 for id in &ids {
                     let old_status = if is_status_change {
-                        state.mission.db().get_board_task(id).ok().flatten().map(|t| format!("{:?}", t.status))
+                        state.store.get_board_task(id).await.ok().flatten().map(|t| format!("{:?}", t.status))
                     } else { None };
-                    match state.mission.db().update_board_task(id, &update_template) {
+                    match state.store.update_board_task(id, &update_template).await {
                         Ok(Some(t)) => {
                             if let Some(old) = old_status { publish_board_status_changed(state, &t, &old); }
                             else { publish_board_update(state, &t); }
@@ -252,9 +250,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             } else if name == "mission_board_toggle" {
                 // === Toggle path (backward compat) ===
                 let BoardIdArgs { id } = serde_json::from_value(args)?;
-                let old_status = state.mission.db().get_board_task(&id).ok().flatten()
+                let old_status = state.store.get_board_task(&id).await.ok().flatten()
                     .map(|t| format!("{:?}", t.status)).unwrap_or_else(|| "unknown".to_string());
-                let task = state.mission.db().toggle_board_task(&id).map_err(|e| anyhow!("DB error: {}", e))?;
+                let task = state.store.toggle_board_task(&id).await.map_err(|e| anyhow!("DB error: {}", e))?;
                 match task {
                     Some(t) => {
                         publish_board_status_changed(state, &t, &old_status);
@@ -274,10 +272,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 let is_status_change = args_val.get("status").and_then(|v| v.as_str()).is_some();
                 let is_marking_done = args_val.get("status").and_then(|v| v.as_str()).map(|s| s == "done").unwrap_or(false);
                 let old_status = if is_status_change {
-                    state.mission.db().get_board_task(&id).ok().flatten().map(|t| format!("{:?}", t.status))
+                    state.store.get_board_task(&id).await.ok().flatten().map(|t| format!("{:?}", t.status))
                 } else { None };
                 let update: missiond_core::types::UpdateBoardTaskInput = serde_json::from_value(args_val)?;
-                let task = state.mission.db().update_board_task(&id, &update).map_err(|e| anyhow!("DB error: {}", e))?;
+                let task = state.store.update_board_task(&id, &update).await.map_err(|e| anyhow!("DB error: {}", e))?;
                 match task {
                     Some(t) => {
                         record_session_task_binding(state, t.id.as_str(), &t.title);
@@ -296,12 +294,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_board_delete" => {
             let BoardIdArgs { id } = serde_json::from_value(args)?;
             // Fetch task info before deletion for event
-            let task_title = state.mission.db().get_board_task(&id).ok().flatten()
+            let task_title = state.store.get_board_task(&id).await.ok().flatten()
                 .map(|t| t.title.clone()).unwrap_or_default();
-            let deleted = state
-                .mission
-                .db()
-                .delete_board_task(&id)
+            let deleted = state.store
+                .delete_board_task(&id).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             if deleted > 0 {
                 state.event_bus.publish_traced(
@@ -332,7 +328,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .or_else(|| current_session_id())
                 .unwrap_or_else(|| "claude-code-session".to_string());
             let executor_id = executor_id.as_str();
-            match state.mission.db().claim_board_task(task_id, executor_id, executor_type) {
+            match state.store.claim_board_task(task_id, executor_id, executor_type).await {
                 Ok(Some(task)) => {
                     record_session_task_binding(state, task.id.as_str(), &task.title);
                     state.event_bus.publish_traced(
@@ -350,7 +346,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 }
                 Ok(None) => {
                     // Check why it failed: task not found vs already claimed
-                    match state.mission.db().get_board_task(task_id) {
+                    match state.store.get_board_task(task_id).await {
                         Ok(Some(existing)) => {
                             let msg = if let Some(ref claimer) = existing.claim_executor_id {
                                 format!("Task already claimed by {} ({})",
@@ -377,13 +373,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 note_type: args.note_type,
                 author: args.author,
             };
-            let note = state
-                .mission
-                .db()
-                .add_board_task_note(&input)
+            let note = state.store
+                .add_board_task_note(&input).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             // Refresh binding — session is actively updating this task
-            if let Ok(Some(task)) = state.mission.db().get_board_task(&task_id) {
+            if let Ok(Some(task)) = state.store.get_board_task(&task_id).await {
                 record_session_task_binding(state, task.id.as_str(), &task.title);
             }
             state.event_bus.publish_traced(
@@ -414,8 +408,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let slot_id = args.slot_id.unwrap_or_else(|| "slot-coder-1".to_string());
 
             // Get the task
-            let task = state.mission.db()
-                .get_board_task(&args.task_id)
+            let task = state.store
+                .get_board_task(&args.task_id).await
                 .map_err(|e| anyhow!("DB error: {}", e))?
                 .ok_or_else(|| anyhow!("Task not found: {}", args.task_id))?;
 
@@ -427,8 +421,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
 
             // Check if already has subtasks
-            let subtasks = state.mission.db()
-                .list_board_tasks(None, true)
+            let subtasks = state.store
+                .list_board_tasks(None, true).await
                 .map_err(|e| anyhow!("DB error: {}", e))?
                 .into_iter()
                 .filter(|t| t.parent_id.as_ref() == Some(&task.id))
@@ -510,21 +504,21 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let submit_task_id = state.mission.submit("coder", &decompose_prompt)?;
 
             // Store target slot
-            let _ = state.mission.db().update_task(
+            let _ = state.store.update_task(
                 &submit_task_id,
                 &missiond_core::types::TaskUpdate {
                     slot_id: Some(slot_id.clone()),
                     ..Default::default()
                 },
-            );
+            ).await;
 
             // Try immediate dispatch
             if let Some(status) = state.pty.get_status(&slot_id).await {
                 if status.state == missiond_core::pty::SessionState::Idle {
                     if let Ok(()) = state.pty.send_fire_and_forget(&slot_id, &decompose_prompt).await {
                         let now = chrono::Utc::now().timestamp_millis();
-                        let slot_session = state.mission.db().get_slot_session(&slot_id).ok().flatten();
-                        let _ = state.mission.db().update_task(
+                        let slot_session = state.store.get_slot_session(&slot_id).await.ok().flatten();
+                        let _ = state.store.update_task(
                             &submit_task_id,
                             &missiond_core::types::TaskUpdate {
                                 status: Some(missiond_core::types::TaskStatus::Running),
@@ -533,7 +527,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                                 started_at: Some(now),
                                 ..Default::default()
                             },
-                        );
+                        ).await;
                         // Emit dispatch event for timeline visibility
                         let preview = if decompose_prompt.len() > 200 {
                             let mut end = 200;
@@ -553,14 +547,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
 
             // Write note on parent task
-            let _ = state.mission.db().add_board_task_note(
+            let _ = state.store.add_board_task_note(
                 &missiond_core::types::AddBoardTaskNoteInput {
                     task_id: task.id.to_string(),
                     content: format!("🔀 任务拆分已启动 → submit task {} → slot {}", submit_task_id, slot_id),
                     note_type: Some("progress".to_string()),
                     author: Some("decompose".to_string()),
                 },
-            );
+            ).await;
 
             Ok(ToolResult::text(format!(
                 "✅ 拆分任务已派发\n- Submit Task: {}\n- 工位: {}\n- 父任务: {} ({})\n\n工位将调查代码后自动创建子任务。用 mission_task_track(taskId: \"{}\") 追踪进度。",
@@ -581,17 +575,17 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let args: RetryArgs = serde_json::from_value(args)?;
 
             // Verify task exists
-            let task = state.mission.db()
-                .get_board_task(&args.task_id)
+            let task = state.store
+                .get_board_task(&args.task_id).await
                 .map_err(|e| anyhow!("DB error: {}", e))?
                 .ok_or_else(|| anyhow!("Task not found: {}", args.task_id))?;
 
-            let reset_ids = state.mission.db()
-                .retry_board_task(task.id.as_str(), args.reset_downstream)
+            let reset_ids = state.store
+                .retry_board_task(task.id.as_str(), args.reset_downstream).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
 
             // Write note
-            let _ = state.mission.db().add_board_task_note(
+            let _ = state.store.add_board_task_note(
                 &missiond_core::types::AddBoardTaskNoteInput {
                     task_id: task.id.to_string(),
                     content: format!(
@@ -602,7 +596,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     note_type: Some("progress".to_string()),
                     author: Some("retry".to_string()),
                 },
-            );
+            ).await;
 
             Ok(ToolResult::text(format!(
                 "✅ 已重试任务 '{}'\n- 重置任务数: {}\n- 重置的任务 ID: {:?}",

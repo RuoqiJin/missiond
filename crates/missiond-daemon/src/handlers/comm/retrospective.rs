@@ -31,11 +31,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 /// Factored out of `handle()` to break circular Send dependency
 /// (handle → handle_backfill → spawn(backfill) → analyze_session → handle).
 pub(crate) async fn run_analysis(state: &AppState, session_id: &str, depth: &str) -> Result<ToolResult> {
-    let db = state.mission.db();
 
     // 1. Session meta
-    let (total_calls, total_duration, unique_tools, compact_count) = db
-        .get_retrospective_meta(&session_id)
+    let (total_calls, total_duration, unique_tools, compact_count) = state.store
+        .get_retrospective_meta(&session_id).await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
     if total_calls == 0 {
@@ -56,8 +55,8 @@ pub(crate) async fn run_analysis(state: &AppState, session_id: &str, depth: &str
     }
 
     // 2. Top tools
-    let top_tools = db
-        .get_retrospective_tool_stats(&session_id, 15)
+    let top_tools = state.store
+        .get_retrospective_tool_stats(&session_id, 15).await
         .map_err(|e| anyhow!("DB error: {}", e))?;
     let top_tools_json: Vec<Value> = top_tools
         .iter()
@@ -73,8 +72,8 @@ pub(crate) async fn run_analysis(state: &AppState, session_id: &str, depth: &str
         .collect();
 
     // 3. Time black holes (top turn durations from events)
-    let events = db
-        .get_conversation_events(&session_id, Some("turn_duration"), 500)
+    let events = state.store
+        .get_conversation_events(&session_id, Some("turn_duration"), 500).await
         .map_err(|e| anyhow!("DB error: {}", e))?;
     let mut durations: Vec<(f64, String, String)> = events
         .iter()
@@ -101,8 +100,8 @@ pub(crate) async fn run_analysis(state: &AppState, session_id: &str, depth: &str
         .collect();
 
     // 4. Consecutive repeat patterns (Gaps-and-Islands)
-    let repeats = db
-        .get_retrospective_repeat_patterns(&session_id, 3)
+    let repeats = state.store
+        .get_retrospective_repeat_patterns(&session_id, 3).await
         .map_err(|e| anyhow!("DB error: {}", e))?;
     let repeat_patterns: Vec<Value> = repeats
         .iter()
@@ -117,14 +116,14 @@ pub(crate) async fn run_analysis(state: &AppState, session_id: &str, depth: &str
         .collect();
 
     // 5. N-Gram alternating patterns (Rust-side sliding window)
-    let tool_seq = db
-        .get_tool_name_sequence(&session_id)
+    let tool_seq = state.store
+        .get_tool_name_sequence(&session_id).await
         .map_err(|e| anyhow!("DB error: {}", e))?;
     let ngram_patterns = detect_ngram_patterns(&tool_seq, 3);
 
     // 6. High error rate tools
-    let high_error = db
-        .get_retrospective_high_error_tools(&session_id, 10.0)
+    let high_error = state.store
+        .get_retrospective_high_error_tools(&session_id, 10.0).await
         .map_err(|e| anyhow!("DB error: {}", e))?;
     let high_error_json: Vec<Value> = high_error
         .iter()
@@ -138,7 +137,7 @@ pub(crate) async fn run_analysis(state: &AppState, session_id: &str, depth: &str
         .collect();
 
     // 7. Session outcome
-    let conv_info = db.get_conversation(&session_id).ok().flatten();
+    let conv_info = state.store.get_conversation(&session_id).await.ok().flatten();
     let session_status = conv_info.as_ref().map(|c| c.status.as_str()).unwrap_or("unknown");
 
     // 8. Waste score: repeat calls / total calls
@@ -328,14 +327,12 @@ struct DetailedAnalysis {
 
 /// Build detailed analysis: file heatmap, server map, error recovery chains
 async fn run_detailed_analysis(state: &AppState, session_id: &str) -> Result<DetailedAnalysis> {
-    let db = state.mission.db();
-
-    let tool_calls = db
-        .get_tool_calls_for_detailed_analysis(session_id)
+    let tool_calls = state.store
+        .get_tool_calls_for_detailed_analysis(session_id).await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
-    let timeline = db
-        .get_tool_calls_with_status_timeline(session_id)
+    let timeline = state.store
+        .get_tool_calls_with_status_timeline(session_id).await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
     let file_heatmap = build_file_heatmap(&tool_calls);
@@ -645,11 +642,9 @@ fn classify_command(cmd: &str) -> &'static str {
 
 /// Full analysis: compose prompt from aggregated data + Gemini
 async fn run_full_analysis(state: &AppState, session_id: &str, stats: &Value) -> Result<Value> {
-    let db = state.mission.db();
-
     // Get mission objective (first user message)
-    let objective = db
-        .get_first_user_message(session_id)
+    let objective = state.store
+        .get_first_user_message(session_id).await
         .ok()
         .flatten()
         .map(|msg| {
@@ -666,7 +661,7 @@ async fn run_full_analysis(state: &AppState, session_id: &str, stats: &Value) ->
     if let Some(tools) = stats["highErrorTools"].as_array() {
         for tool in tools.iter().take(3) {
             if let Some(name) = tool["name"].as_str() {
-                if let Ok(samples) = db.get_tool_error_samples(session_id, name) {
+                if let Ok(samples) = state.store.get_tool_error_samples(session_id, name).await {
                     for (input, output, ts) in &samples {
                         error_samples.push(json!({
                             "tool": name,
@@ -681,13 +676,12 @@ async fn run_full_analysis(state: &AppState, session_id: &str, stats: &Value) ->
     }
 
     // Get board task if linked
-    let conv = db.get_conversation(session_id).ok().flatten();
-    let task_title = conv
-        .as_ref()
-        .and_then(|c| c.task_id.as_deref())
-        .and_then(|tid| db.get_board_task(tid).ok().flatten())
-        .map(|t| t.title)
-        .unwrap_or_default();
+    let conv = state.store.get_conversation(session_id).await.ok().flatten();
+    let task_title = if let Some(tid) = conv.as_ref().and_then(|c| c.task_id.as_deref()) {
+        state.store.get_board_task(tid).await.ok().flatten().map(|t| t.title).unwrap_or_default()
+    } else {
+        String::new()
+    };
 
     // Build detailed sections for prompt (if available)
     let file_heatmap_str = stats.get("fileHeatmap")
@@ -835,8 +829,7 @@ async fn handle_list(state: &AppState, args: Value) -> Result<ToolResult> {
         .and_then(|a| a.limit)
         .unwrap_or(10);
 
-    let db = state.mission.db();
-    let results = db.list_retrospective_results(limit)
+    let results = state.store.list_retrospective_results(limit).await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
     let items: Vec<Value> = results.iter().map(|(sid, trigger, stats, full, created)| {
@@ -866,8 +859,8 @@ async fn handle_backfill(state: &AppState, args: Value) -> Result<ToolResult> {
     let Args { since } = serde_json::from_value(args)?;
 
     // Count sessions first (before spawning)
-    let count = state.mission.db()
-        .get_sessions_for_retro_backfill(&since, false)
+    let count = state.store
+        .get_sessions_for_retro_backfill(&since, false).await
         .map(|v| v.len())
         .unwrap_or(0);
 

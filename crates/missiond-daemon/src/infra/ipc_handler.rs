@@ -55,8 +55,7 @@ pub(crate) async fn handle_ipc_request(state: AppState, request: Request) -> Res
     match method {
         "ping" => Response::success(id, serde_json::json!({})),
         "kb/summary" => {
-            let db = state.mission.db();
-            let instructions = match db.kb_summary() {
+            let instructions = match state.store.kb_summary().await {
                 Ok(counts) => {
                     if counts.is_empty() {
                         "MissionD KB is empty. Use mission_kb_remember when you learn new facts. Use mission_kb_search before guessing.".to_string()

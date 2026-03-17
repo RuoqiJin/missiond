@@ -48,9 +48,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             }
 
             const PENDING_MSG_LIMIT: usize = 60;
-            // spawn_blocking: complex join + watermark query
-            let pending = state.db_exec.run(move |db| db.get_pending_realtime_messages_with_limit(PENDING_MSG_LIMIT))
-                .await.map_err(|e| anyhow!("DB error: {}", e))?;
+            let pending = state.store.get_pending_realtime_messages_with_limit(PENDING_MSG_LIMIT).await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
 
             if pending.is_empty() {
                 return Ok(ToolResult::text("没有待分析的新对话内容。"));
@@ -189,18 +188,17 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             drop(slow_es);
 
             // Pending counts
-            let db = state.mission.db();
-            let pending_realtime = db.count_pending_realtime().unwrap_or(0);
-            let pending_deep = db.count_pending_deep_analysis(
+            let pending_realtime = state.store.count_pending_realtime().await.unwrap_or(0);
+            let pending_deep = state.store.count_pending_deep_analysis(
                 CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES
-            ).unwrap_or(0);
+            ).await.unwrap_or(0);
 
             // Timestamps
-            let last_consolidation = db.last_completed_slot_task_at("kb_consolidation").unwrap_or(None).unwrap_or(0);
-            let last_gc = db.daemon_state_get("last_auto_gc_at").unwrap_or(None).unwrap_or(0);
+            let last_consolidation = state.store.last_completed_slot_task_at("kb_consolidation").await.unwrap_or(None).unwrap_or(0);
+            let last_gc = state.store.daemon_state_get("last_auto_gc_at").await.unwrap_or(None).unwrap_or(0);
 
             // KB stats (full — includes mostAccessed, oldest, subcategories)
-            let kb_stats = db.kb_stats()
+            let kb_stats = state.store.kb_stats().await
                 .map(|s| serde_json::json!({
                     "total": s["total"],
                     "categories": s.get("categoryRollup").unwrap_or(&s["categories"]),
@@ -214,7 +212,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             // Recent memory slot tasks (last 15 across both slots)
             let mut recent: Vec<serde_json::Value> = Vec::new();
             for sid in &[MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID] {
-                if let Ok(tasks) = db.list_slot_tasks(Some(sid), None, None, 10) {
+                if let Ok(tasks) = state.store.list_slot_tasks(Some(sid), None, None, 10).await {
                     for t in tasks {
                         recent.push(serde_json::json!({
                             "id": t.id,
@@ -239,14 +237,14 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             recent.truncate(15);
 
             // Queue detail (per-session / per-conversation)
-            let realtime_detail: Vec<serde_json::Value> = db.pending_realtime_detail()
+            let realtime_detail: Vec<serde_json::Value> = state.store.pending_realtime_detail().await
                 .unwrap_or_default()
                 .into_iter()
                 .map(|(sid, cnt, oldest)| serde_json::json!({"sessionId": sid, "msgCount": cnt, "oldest": oldest}))
                 .collect();
-            let deep_detail: Vec<serde_json::Value> = db.pending_deep_detail(
+            let deep_detail: Vec<serde_json::Value> = state.store.pending_deep_detail(
                 CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES
-            ).unwrap_or_default()
+            ).await.unwrap_or_default()
                 .into_iter()
                 .map(|(id, ended, retries)| serde_json::json!({"conversationId": id, "endedAt": ended, "retries": retries}))
                 .collect();

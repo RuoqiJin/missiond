@@ -48,7 +48,6 @@ async fn process_entry(
     event_type: &str,
     payload: &str,
 ) -> Result<ProcessResult> {
-    let db = state.mission.db();
 
     // Thinking messages: static rule, no LLM call needed
     if event_type == "thinking_message" {
@@ -67,7 +66,7 @@ async fn process_entry(
             }
             _ => "[思考] ...".to_string(),
         };
-        db.update_timeline_summary(seq, &summary)?;
+        state.store.update_timeline_summary(seq, &summary).await?;
         state.event_bus.publish(DaemonEvent::BriefingSummaryGenerated {
             target_seq: seq, summary: summary.clone(), method: "static_rule".into(),
         });
@@ -82,7 +81,7 @@ async fn process_entry(
         .unwrap_or_default();
     if preview.starts_with('[') && preview.ends_with(']') && !preview.contains(' ') {
         // Mark as summarized with the tool name to prevent infinite retry
-        db.update_timeline_summary(seq, &preview)?;
+        state.store.update_timeline_summary(seq, &preview).await?;
         state.event_bus.publish(DaemonEvent::BriefingSummaryGenerated {
             target_seq: seq, summary: preview.clone(), method: "tool_skip".into(),
         });
@@ -98,7 +97,7 @@ async fn process_entry(
         .and_then(|v| v.as_i64());
 
     let full_content = if let Some(msg_id) = message_id {
-        db.get_conversation_message_by_id(msg_id)
+        state.store.get_conversation_message_by_id(msg_id).await
             .ok()
             .flatten()
             .map(|m| m.content)
@@ -155,7 +154,7 @@ async fn process_entry(
     // Truncate to limit, preferring sentence boundaries
     let summary = truncate_at_boundary(&summary, max_chars + 30);
 
-    db.update_timeline_summary(seq, &summary)?;
+    state.store.update_timeline_summary(seq, &summary).await?;
     state.event_bus.publish(DaemonEvent::BriefingSummaryGenerated {
         target_seq: seq, summary: summary.clone(), method: "sonnet".into(),
     });
@@ -239,7 +238,7 @@ impl super::BackgroundWorker for BriefingWorker {
             ctx.wait_if_paused().await;
 
             // Gemini ARB: check DB first — historical backlog may exist after restart
-            let pending = match state.mission.db().find_timeline_needing_briefing(MIN_CONTENT_CHARS, BATCH_SIZE) {
+            let pending = match state.store.find_timeline_needing_briefing(MIN_CONTENT_CHARS, BATCH_SIZE).await {
                 Ok(p) => p,
                 Err(e) => {
                     warn!(error = %e, "Briefing worker: DB query failed");

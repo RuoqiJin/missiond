@@ -270,10 +270,8 @@ pub(crate) async fn init_embedding_provider(
 /// 5. Generate embedding for EACH topic independently
 /// 6. Store topic vectors to DB + update TopicCache
 pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_id: &str) {
-    let db = state.mission.db();
-
     // 0. Skip memory/agent slot conversations (content is AI thinking/tool_call, not user topics)
-    if let Ok(Some(conv)) = db.get_conversation(session_id) {
+    if let Ok(Some(conv)) = state.store.get_conversation(session_id).await {
         if conv.conversation_type == "memory"
             || conv.slot_id.as_deref() == Some("slot-memory")
         {
@@ -284,7 +282,7 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
 
     // 1. Fetch messages
     debug!(session = %session_id, "Topic pipeline: fetching messages");
-    let messages = match db.get_conversation_messages(session_id, None, 200) {
+    let messages = match state.store.get_conversation_messages(session_id, None, 200).await {
         Ok(msgs) if !msgs.is_empty() => msgs,
         Ok(_) => {
             debug!(session = %session_id, "No messages for topic extraction");
@@ -298,7 +296,7 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
 
     // 2. Build conversation text for LLM
     let mut conv_text = String::with_capacity(8192);
-    let has_timeline = if let Ok(Some(conv)) = db.get_conversation(session_id) {
+    let has_timeline = if let Ok(Some(conv)) = state.store.get_conversation(session_id).await {
         if let Some(ref tl_json) = conv.session_timeline {
             if let Ok(timeline) = serde_json::from_str::<Vec<serde_json::Value>>(tl_json) {
                 if !timeline.is_empty() {
@@ -335,7 +333,7 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
 
     // Fetch briefing summaries: semantic summaries are much more information-dense
     // than raw content, improving topic extraction quality while reducing token usage.
-    let briefing_map = db.get_briefing_summaries_for_session(session_id)
+    let briefing_map = state.store.get_briefing_summaries_for_session(session_id).await
         .unwrap_or_default();
 
     let msg_budget = if has_timeline { 4000 } else { 8000 };
@@ -384,7 +382,7 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
             .collect::<Vec<_>>()
             .join("\n")
     };
-    if let Err(e) = db.set_conversation_summary(session_id, &combined_summary) {
+    if let Err(e) = state.store.set_conversation_summary(session_id, &combined_summary).await {
         warn!(session = %session_id, error = %e, "Failed to store summary");
         return;
     }
@@ -422,12 +420,12 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
     }
 
     // 6. Store topic vectors to DB
-    if let Err(e) = db.set_conversation_topic_vectors(session_id, &topic_vectors, &provider_id) {
+    if let Err(e) = state.store.set_conversation_topic_vectors(session_id, &topic_vectors, &provider_id).await {
         warn!(session = %session_id, error = %e, "Failed to store topic vectors");
         return;
     }
     // Also update old single-vec for backwards compat (first topic as representative)
-    let _ = db.set_conversation_embedding(session_id, &topic_vectors[0].1, &provider_id);
+    let _ = state.store.set_conversation_embedding(session_id, &topic_vectors[0].1, &provider_id).await;
 
     // 7. Update TopicCache
     let vecs_only: Vec<Vec<f32>> = topic_vectors.into_iter().map(|(_, v)| v).collect();
@@ -702,7 +700,7 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                 }
                 EmbeddingTask::ProcessKBEntry(id) => {
                     if let Some(ref emb_svc) = state.embedding_service {
-                        if let Ok(Some(entry)) = db.kb_get_by_id(&id) {
+                        if let Ok(Some(entry)) = state.store.kb_get_by_id(&id).await {
                             let detail_text = entry.detail.as_ref()
                                 .map(|d| serde_json::to_string(d).unwrap_or_default())
                                 .unwrap_or_default();
@@ -712,7 +710,7 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                                 std::time::Duration::from_secs(30),
                                 tokio::task::spawn_blocking(move || svc.embed(&embed_text)),
                             ).await {
-                                let _ = db.kb_set_embedding(&id, &vec, &provider_id);
+                                let _ = state.store.kb_set_embedding(&id, &vec, &provider_id).await;
                                 if entry.category.starts_with("policy:decision") {
                                     let mut guard = state.embedding_cache.write().await;
                                     guard.retain(|(eid, _)| eid != &id);
@@ -730,7 +728,7 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                 }
                 EmbeddingTask::ProcessSkillTopic(topic) => {
                     if let Some(ref emb_svc) = state.embedding_service {
-                        if let Ok(missing) = db.skill_topics_missing_embedding(1) {
+                        if let Ok(missing) = state.store.skill_topics_missing_embedding(1).await {
                             let embed_text = if let Some((_, text)) = missing.iter().find(|(t, _)| t == &topic) {
                                 text.clone()
                             } else {
@@ -741,7 +739,7 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                                 std::time::Duration::from_secs(30),
                                 tokio::task::spawn_blocking(move || svc.embed(&embed_text)),
                             ).await {
-                                let _ = db.skill_set_topic_embedding(&topic, &vec, &provider_id);
+                                let _ = state.store.skill_set_topic_embedding(&topic, &vec, &provider_id).await;
                                 let mut cache = state.skill_embedding_cache.write().await;
                                 cache.retain(|(t, _)| t != &topic);
                                 cache.push((topic.clone(), vec));
@@ -754,7 +752,7 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                     if let Some(ref emb_svc) = state.embedding_service {
                         let mut embedded = 0usize;
                         for node_id in &node_ids {
-                            if let Ok(Some(node_row)) = db.ast_get_node(node_id) {
+                            if let Ok(Some(node_row)) = state.store.ast_get_node(node_id).await {
                                 let embed_text = node_row.node.embedding_text(&node_row.file_path);
                                 let svc = Arc::clone(emb_svc);
                                 if let Ok(Ok(Some(vec))) = tokio::time::timeout(
@@ -762,7 +760,7 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                                     tokio::task::spawn_blocking(move || svc.embed(&embed_text)),
                                 ).await {
                                     let bytes = missiond_core::embedding::f32_vec_to_bytes(&vec);
-                                    let _ = db.ast_set_embedding(node_id, &bytes, &provider_id);
+                                    let _ = state.store.ast_set_embedding(node_id, &bytes, &provider_id).await;
                                     let mut guard = state.ast_embedding_cache.write().await;
                                     guard.retain(|(eid, _)| eid != node_id);
                                     guard.push((node_id.clone(), vec));
@@ -789,7 +787,7 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
 
 /// Backfill entry point: determine resume phase from DB, then kick off first batch.
 /// Gated by `llm.yaml` → `backfill_enabled: true`. Skips silently when disabled.
-async fn backfill_start(state: &AppState, db: &missiond_core::db::MissionDB, provider_id: &str) {
+async fn backfill_start(state: &AppState, _db: &missiond_core::db::MissionDB, provider_id: &str) {
     if !state.backfill_enabled.load(std::sync::atomic::Ordering::Relaxed) {
         debug!("Backfill: disabled by config (backfill_enabled: false)");
         return;
@@ -798,7 +796,7 @@ async fn backfill_start(state: &AppState, db: &missiond_core::db::MissionDB, pro
 
     let resume_phase = 'find: {
         for phase in BackfillPhase::all() {
-            match db.backfill_get_phase(phase.as_str()) {
+            match state.store.backfill_get_phase(phase.as_str()).await {
                 Ok(Some(status)) if status.status == "completed" => continue,
                 Ok(Some(status)) => {
                     info!(phase = phase.as_str(), cursor = status.last_cursor, processed = status.processed, "Backfill: resuming");
@@ -812,12 +810,12 @@ async fn backfill_start(state: &AppState, db: &missiond_core::db::MissionDB, pro
 
     info!(phase = resume_phase.as_str(), "Backfill: starting from phase");
     let total = match resume_phase {
-        BackfillPhase::ConvSummary => db.conversations_missing_summary_count().unwrap_or(0),
-        BackfillPhase::ConvTopicVectors => db.conversations_needing_topic_vectors_count(provider_id).unwrap_or(0),
+        BackfillPhase::ConvSummary => state.store.conversations_missing_summary_count().await.unwrap_or(0),
+        BackfillPhase::ConvTopicVectors => state.store.conversations_needing_topic_vectors_count(provider_id).await.unwrap_or(0),
         _ => 0,
     };
-    let _ = db.backfill_start_phase(resume_phase.as_str(), total);
-    let cursor = db.backfill_get_phase(resume_phase.as_str()).ok().flatten().map(|s| s.last_cursor).unwrap_or(0);
+    let _ = state.store.backfill_start_phase(resume_phase.as_str(), total).await;
+    let cursor = state.store.backfill_get_phase(resume_phase.as_str()).await.ok().flatten().map(|s| s.last_cursor).unwrap_or(0);
     backfill_enqueue(state, EmbeddingTask::RunBackfillPhase { phase: resume_phase, cursor }).await;
 }
 
@@ -853,23 +851,23 @@ async fn backfill_run_phase(state: &AppState, db: &missiond_core::db::MissionDB,
         BackfillPhase::ConvSummary => backfill_conv_summary(state, db, cursor, BATCH_SIZE).await,
         BackfillPhase::ConvRetry => backfill_conv_retry(state, db, MAX_RETRIES, BATCH_SIZE).await,
         BackfillPhase::AstNodes => { let r = backfill_ast_nodes(state, db, provider_id).await; if r.3 { warm_ast_cache(state, db).await; } r }
-        BackfillPhase::Timeline => backfill_timelines(db).await,
+        BackfillPhase::Timeline => backfill_timelines(state).await,
     };
 
     if batch_success > 0 || batch_failed > 0 {
-        let _ = db.backfill_update_progress(phase.as_str(), new_cursor, batch_success, batch_failed);
+        let _ = state.store.backfill_update_progress(phase.as_str(), new_cursor, batch_success, batch_failed).await;
     }
 
     if phase_done {
-        let _ = db.backfill_complete_phase(phase.as_str());
+        let _ = state.store.backfill_complete_phase(phase.as_str()).await;
         info!(phase = phase.as_str(), "Backfill phase completed");
         if let Some(next) = phase.next() {
             let total = match next {
-                BackfillPhase::ConvSummary => db.conversations_missing_summary_count().unwrap_or(0),
-                BackfillPhase::ConvTopicVectors => db.conversations_needing_topic_vectors_count(provider_id).unwrap_or(0),
+                BackfillPhase::ConvSummary => state.store.conversations_missing_summary_count().await.unwrap_or(0),
+                BackfillPhase::ConvTopicVectors => state.store.conversations_needing_topic_vectors_count(provider_id).await.unwrap_or(0),
                 _ => 0,
             };
-            let _ = db.backfill_start_phase(next.as_str(), total);
+            let _ = state.store.backfill_start_phase(next.as_str(), total).await;
             backfill_enqueue(state, EmbeddingTask::RunBackfillPhase { phase: next, cursor: 0 }).await;
         } else {
             info!("Full embedding backfill complete");
@@ -881,9 +879,9 @@ async fn backfill_run_phase(state: &AppState, db: &missiond_core::db::MissionDB,
 
 // ── Phase implementations (each returns: success, failed, new_cursor, phase_done) ──
 
-async fn backfill_kb_stale(state: &AppState, db: &missiond_core::db::MissionDB, provider_id: &str) -> (i64, i64, i64, bool) {
+async fn backfill_kb_stale(state: &AppState, _db: &missiond_core::db::MissionDB, provider_id: &str) -> (i64, i64, i64, bool) {
     let Some(ref emb_svc) = state.embedding_service else { return (0, 0, 0, true) };
-    let stale = db.kb_entries_stale_embedding(provider_id, 20).unwrap_or_default();
+    let stale = state.store.kb_entries_stale_embedding(provider_id, 20).await.unwrap_or_default();
     if stale.is_empty() { return (0, 0, 0, true); }
     info!(count = stale.len(), "KB stale re-embedding");
     let mut success = 0i64;
@@ -891,15 +889,15 @@ async fn backfill_kb_stale(state: &AppState, db: &missiond_core::db::MissionDB, 
         let embed_text = format!("知识条目：{}\n详情：{}", summary, detail);
         let svc = Arc::clone(emb_svc);
         if let Ok(Ok(Some(vec))) = tokio::time::timeout(std::time::Duration::from_secs(30), tokio::task::spawn_blocking(move || svc.embed(&embed_text))).await {
-            let _ = db.kb_set_embedding(id, &vec, provider_id); success += 1;
+            let _ = state.store.kb_set_embedding(id, &vec, provider_id).await; success += 1;
         }
     }
     (success, 0, 0, stale.len() < 20)
 }
 
-async fn backfill_kb_missing(state: &AppState, db: &missiond_core::db::MissionDB, provider_id: &str) -> (i64, i64, i64, bool) {
+async fn backfill_kb_missing(state: &AppState, _db: &missiond_core::db::MissionDB, provider_id: &str) -> (i64, i64, i64, bool) {
     let Some(ref emb_svc) = state.embedding_service else { return (0, 0, 0, true) };
-    let missing = db.kb_entries_missing_embedding(None).unwrap_or_default();
+    let missing = state.store.kb_entries_missing_embedding(None).await.unwrap_or_default();
     if missing.is_empty() { return (0, 0, 0, true); }
     info!(count = missing.len(), "KB missing embedding backfill");
     let mut success = 0i64;
@@ -907,60 +905,60 @@ async fn backfill_kb_missing(state: &AppState, db: &missiond_core::db::MissionDB
         let embed_text = format!("知识条目：{}\n详情：{}", summary, detail);
         let svc = Arc::clone(emb_svc);
         if let Ok(Ok(Some(vec))) = tokio::time::timeout(std::time::Duration::from_secs(30), tokio::task::spawn_blocking(move || svc.embed(&embed_text))).await {
-            let _ = db.kb_set_embedding(id, &vec, provider_id); success += 1;
+            let _ = state.store.kb_set_embedding(id, &vec, provider_id).await; success += 1;
         }
     }
     (success, 0, 0, missing.len() < 20)
 }
 
-async fn backfill_skill_stale(state: &AppState, db: &missiond_core::db::MissionDB, provider_id: &str) -> (i64, i64, i64, bool) {
+async fn backfill_skill_stale(state: &AppState, _db: &missiond_core::db::MissionDB, provider_id: &str) -> (i64, i64, i64, bool) {
     let Some(ref emb_svc) = state.embedding_service else { return (0, 0, 0, true) };
-    let stale = db.skill_topics_stale_embedding(provider_id, 20).unwrap_or_default();
+    let stale = state.store.skill_topics_stale_embedding(provider_id, 20).await.unwrap_or_default();
     if stale.is_empty() { return (0, 0, 0, true); }
     info!(count = stale.len(), "Skill stale re-embedding");
     let mut success = 0i64;
     for (topic, embed_text) in &stale {
         let svc = Arc::clone(emb_svc); let text = embed_text.clone();
         if let Ok(Ok(Some(vec))) = tokio::time::timeout(std::time::Duration::from_secs(30), tokio::task::spawn_blocking(move || svc.embed(&text))).await {
-            let _ = db.skill_set_topic_embedding(topic, &vec, provider_id); success += 1;
+            let _ = state.store.skill_set_topic_embedding(topic, &vec, provider_id).await; success += 1;
         }
     }
     (success, 0, 0, stale.len() < 20)
 }
 
-async fn backfill_skill_missing(state: &AppState, db: &missiond_core::db::MissionDB, provider_id: &str) -> (i64, i64, i64, bool) {
+async fn backfill_skill_missing(state: &AppState, _db: &missiond_core::db::MissionDB, provider_id: &str) -> (i64, i64, i64, bool) {
     let Some(ref emb_svc) = state.embedding_service else { return (0, 0, 0, true) };
-    let missing = db.skill_topics_missing_embedding(20).unwrap_or_default();
+    let missing = state.store.skill_topics_missing_embedding(20).await.unwrap_or_default();
     if missing.is_empty() { return (0, 0, 0, true); }
     info!(count = missing.len(), "Skill missing embedding backfill");
     let mut success = 0i64;
     for (topic, embed_text) in &missing {
         let svc = Arc::clone(emb_svc); let text = embed_text.clone();
         if let Ok(Ok(Some(vec))) = tokio::time::timeout(std::time::Duration::from_secs(30), tokio::task::spawn_blocking(move || svc.embed(&text))).await {
-            let _ = db.skill_set_topic_embedding(topic, &vec, provider_id); success += 1;
+            let _ = state.store.skill_set_topic_embedding(topic, &vec, provider_id).await; success += 1;
         }
     }
     (success, 0, 0, missing.len() < 20)
 }
 
-async fn backfill_conv_topic_vectors(state: &AppState, db: &missiond_core::db::MissionDB, provider_id: &str, cursor: i64, batch_size: i64) -> (i64, i64, i64, bool) {
-    let batch = db.conversations_needing_topic_vectors_cursor(provider_id, cursor, batch_size).unwrap_or_default();
+async fn backfill_conv_topic_vectors(state: &AppState, _db: &missiond_core::db::MissionDB, provider_id: &str, cursor: i64, batch_size: i64) -> (i64, i64, i64, bool) {
+    let batch = state.store.conversations_needing_topic_vectors_cursor(provider_id, cursor, batch_size).await.unwrap_or_default();
     if batch.is_empty() { return (0, 0, cursor, true); }
     info!(count = batch.len(), cursor, "Conv topic vector backfill batch");
     let mut success = 0i64; let mut failed = 0i64; let mut max_rowid = cursor;
     for (rowid, session_id) in &batch {
         max_rowid = max_rowid.max(*rowid);
         match tokio::time::timeout(std::time::Duration::from_secs(90), generate_and_store_conv_embedding(state, session_id)).await {
-            Ok(()) => { success += 1; let _ = db.backfill_clear_failure(session_id, "conv_topic_vectors"); }
-            Err(_) => { warn!(session = %session_id, "Topic vector backfill timed out"); let _ = db.backfill_record_failure(session_id, "conv_topic_vectors", "timeout_90s"); failed += 1; }
+            Ok(()) => { success += 1; let _ = state.store.backfill_clear_failure(session_id, "conv_topic_vectors").await; }
+            Err(_) => { warn!(session = %session_id, "Topic vector backfill timed out"); let _ = state.store.backfill_record_failure(session_id, "conv_topic_vectors", "timeout_90s").await; failed += 1; }
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
     (success, failed, max_rowid, batch.len() < batch_size as usize)
 }
 
-async fn backfill_conv_summary(state: &AppState, db: &missiond_core::db::MissionDB, cursor: i64, batch_size: i64) -> (i64, i64, i64, bool) {
-    let batch = db.conversations_missing_summary_cursor(cursor, batch_size).unwrap_or_default();
+async fn backfill_conv_summary(state: &AppState, _db: &missiond_core::db::MissionDB, cursor: i64, batch_size: i64) -> (i64, i64, i64, bool) {
+    let batch = state.store.conversations_missing_summary_cursor(cursor, batch_size).await.unwrap_or_default();
     if batch.is_empty() { return (0, 0, cursor, true); }
     info!(count = batch.len(), cursor, "Conv summary backfill batch");
     let mut success = 0i64; let mut failed = 0i64; let mut max_rowid = cursor;
@@ -968,21 +966,21 @@ async fn backfill_conv_summary(state: &AppState, db: &missiond_core::db::Mission
         max_rowid = max_rowid.max(*rowid);
         info!(session = %session_id, idx = idx + 1, total = batch.len(), "Processing session");
         match tokio::time::timeout(std::time::Duration::from_secs(90), generate_and_store_conv_embedding(state, session_id)).await {
-            Ok(()) => { info!(session = %session_id, idx = idx + 1, "Session done"); success += 1; let _ = db.backfill_clear_failure(session_id, "conv_summary"); }
-            Err(_) => { warn!(session = %session_id, idx = idx + 1, "Conv embedding timed out (90s)"); let _ = db.backfill_record_failure(session_id, "conv_summary", "timeout_90s"); failed += 1; }
+            Ok(()) => { info!(session = %session_id, idx = idx + 1, "Session done"); success += 1; let _ = state.store.backfill_clear_failure(session_id, "conv_summary").await; }
+            Err(_) => { warn!(session = %session_id, idx = idx + 1, "Conv embedding timed out (90s)"); let _ = state.store.backfill_record_failure(session_id, "conv_summary", "timeout_90s").await; failed += 1; }
         }
     }
     (success, failed, max_rowid, batch.len() < batch_size as usize)
 }
 
-async fn backfill_conv_retry(state: &AppState, db: &missiond_core::db::MissionDB, max_retries: i64, batch_size: i64) -> (i64, i64, i64, bool) {
+async fn backfill_conv_retry(state: &AppState, _db: &missiond_core::db::MissionDB, max_retries: i64, batch_size: i64) -> (i64, i64, i64, bool) {
     let mut total_success = 0i64; let mut total_failed = 0i64; let mut has_work = false;
     let mut has_cooling = false;
     for phase_name in &["conv_summary", "conv_topic_vectors"] {
-        let retryable = db.backfill_retryable_failures(phase_name, max_retries, batch_size).unwrap_or_default();
+        let retryable = state.store.backfill_retryable_failures(phase_name, max_retries, batch_size).await.unwrap_or_default();
         if retryable.is_empty() {
             // Check if failures exist but are in cooldown (updated_at within last 5 min)
-            let all_remaining = db.backfill_retryable_failures_no_cooldown(phase_name, max_retries).unwrap_or(0);
+            let all_remaining = state.store.backfill_retryable_failures_no_cooldown(phase_name, max_retries).await.unwrap_or(0);
             if all_remaining > 0 { has_cooling = true; }
             continue;
         }
@@ -990,8 +988,8 @@ async fn backfill_conv_retry(state: &AppState, db: &missiond_core::db::MissionDB
         info!(count = retryable.len(), phase = *phase_name, "Retrying failed sessions");
         for session_id in &retryable {
             match tokio::time::timeout(std::time::Duration::from_secs(120), generate_and_store_conv_embedding(state, session_id)).await {
-                Ok(()) => { info!(session = %session_id, "Retry succeeded"); let _ = db.backfill_clear_failure(session_id, phase_name); total_success += 1; }
-                Err(_) => { warn!(session = %session_id, "Retry timed out"); let _ = db.backfill_record_failure(session_id, phase_name, "retry_timeout_120s"); total_failed += 1; }
+                Ok(()) => { info!(session = %session_id, "Retry succeeded"); let _ = state.store.backfill_clear_failure(session_id, phase_name).await; total_success += 1; }
+                Err(_) => { warn!(session = %session_id, "Retry timed out"); let _ = state.store.backfill_record_failure(session_id, phase_name, "retry_timeout_120s").await; total_failed += 1; }
             }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
@@ -1001,60 +999,60 @@ async fn backfill_conv_retry(state: &AppState, db: &missiond_core::db::MissionDB
     (total_success, total_failed, 0, phase_done)
 }
 
-async fn backfill_ast_nodes(state: &AppState, db: &missiond_core::db::MissionDB, provider_id: &str) -> (i64, i64, i64, bool) {
+async fn backfill_ast_nodes(state: &AppState, _db: &missiond_core::db::MissionDB, provider_id: &str) -> (i64, i64, i64, bool) {
     let Some(ref emb_svc) = state.embedding_service else { return (0, 0, 0, true) };
-    let missing = db.ast_find_unembedded(20).unwrap_or_default();
+    let missing = state.store.ast_find_unembedded(20).await.unwrap_or_default();
     if missing.is_empty() { return (0, 0, 0, true); }
     info!(count = missing.len(), "AST embedding backfill batch");
     let mut success = 0i64;
     for (node_id, _repo, file_path) in &missing {
-        if let Ok(Some(node_row)) = db.ast_get_node(node_id) {
+        if let Ok(Some(node_row)) = state.store.ast_get_node(node_id).await {
             let embed_text = node_row.node.embedding_text(file_path);
             let svc = Arc::clone(emb_svc);
             if let Ok(Ok(Some(vec))) = tokio::time::timeout(std::time::Duration::from_secs(30), tokio::task::spawn_blocking(move || svc.embed(&embed_text))).await {
                 let bytes = missiond_core::embedding::f32_vec_to_bytes(&vec);
-                let _ = db.ast_set_embedding(node_id, &bytes, provider_id); success += 1;
+                let _ = state.store.ast_set_embedding(node_id, &bytes, provider_id).await; success += 1;
             }
         }
     }
     (success, 0, 0, missing.len() < 20)
 }
 
-async fn backfill_timelines(db: &missiond_core::db::MissionDB) -> (i64, i64, i64, bool) {
-    let needing = db.conversations_needing_timeline(50).unwrap_or_default();
+async fn backfill_timelines(state: &AppState) -> (i64, i64, i64, bool) {
+    let needing = state.store.conversations_needing_timeline(50).await.unwrap_or_default();
     if needing.is_empty() { return (0, 0, 0, true); }
     info!(count = needing.len(), "Building session timelines for compaction parents");
     let mut success = 0i64;
     for parent_id in &needing {
-        let fragments = match db.get_compaction_fragments(parent_id) {
+        let fragments = match state.store.get_compaction_fragments(parent_id).await {
             Ok(f) => f, Err(e) => { warn!(parent = %parent_id, error = %e, "Failed to get compaction fragments"); continue; }
         };
         if fragments.is_empty() { continue; }
         let mut timeline_entries = Vec::new();
         for (idx, (frag_id, started_at, msg_count)) in fragments.iter().enumerate() {
-            let summary = db.get_last_assistant_content(frag_id).unwrap_or(None);
+            let summary = state.store.get_last_assistant_content(frag_id).await.unwrap_or(None);
             let summary_tokens = summary.as_ref().map(|s| s.len() / 4).unwrap_or(0);
             timeline_entries.push(serde_json::json!({ "fragment_id": frag_id, "shard_index": idx, "started_at": started_at, "message_count": msg_count, "summary_tokens": summary_tokens, "summary": summary, "segment_embedding_id": null }));
         }
         let timeline_json = serde_json::to_string(&timeline_entries).unwrap_or_else(|_| "[]".to_string());
-        match db.set_session_timeline(parent_id, &timeline_json) {
-            Ok(true) => { let _ = db.clear_conversation_summary(parent_id); info!(parent = %parent_id, fragments = fragments.len(), "Session timeline built"); success += 1; }
+        match state.store.set_session_timeline(parent_id, &timeline_json).await {
+            Ok(true) => { let _ = state.store.clear_conversation_summary(parent_id).await; info!(parent = %parent_id, fragments = fragments.len(), "Session timeline built"); success += 1; }
             Ok(false) => {} Err(e) => { warn!(parent = %parent_id, error = %e, "Failed to set session timeline"); }
         }
     }
     (success, 0, 0, needing.len() < 50)
 }
 
-async fn warm_kb_caches(state: &AppState, db: &missiond_core::db::MissionDB) {
-    if let Ok(all) = db.kb_load_embeddings("policy:decision") { let mut guard = state.embedding_cache.write().await; *guard = all; info!(count = guard.len(), "KB policy cache refreshed after backfill"); }
-    if let Ok(all) = db.kb_load_all_embeddings() { let mut guard = state.kb_search_cache.write().await; *guard = all; info!(count = guard.len(), "KB search cache refreshed after backfill"); }
+async fn warm_kb_caches(state: &AppState, _db: &missiond_core::db::MissionDB) {
+    if let Ok(all) = state.store.kb_load_embeddings("policy:decision").await { let mut guard = state.embedding_cache.write().await; *guard = all; info!(count = guard.len(), "KB policy cache refreshed after backfill"); }
+    if let Ok(all) = state.store.kb_load_all_embeddings().await { let mut guard = state.kb_search_cache.write().await; *guard = all; info!(count = guard.len(), "KB search cache refreshed after backfill"); }
 }
 
-async fn warm_skill_cache(state: &AppState, db: &missiond_core::db::MissionDB) {
-    if let Ok(all) = db.skill_load_topic_embeddings() { let mut guard = state.skill_embedding_cache.write().await; *guard = all; info!(count = guard.len(), "Skill embedding cache refreshed after backfill"); }
+async fn warm_skill_cache(state: &AppState, _db: &missiond_core::db::MissionDB) {
+    if let Ok(all) = state.store.skill_load_topic_embeddings().await { let mut guard = state.skill_embedding_cache.write().await; *guard = all; info!(count = guard.len(), "Skill embedding cache refreshed after backfill"); }
 }
 
-async fn warm_ast_cache(state: &AppState, db: &missiond_core::db::MissionDB) {
-    if let Ok(all) = db.ast_load_all_embeddings() { let mut guard = state.ast_embedding_cache.write().await; *guard = all; info!(count = guard.len(), "AST embedding cache refreshed after backfill"); }
+async fn warm_ast_cache(state: &AppState, _db: &missiond_core::db::MissionDB) {
+    if let Ok(all) = state.store.ast_load_all_embeddings().await { let mut guard = state.ast_embedding_cache.write().await; *guard = all; info!(count = guard.len(), "AST embedding cache refreshed after backfill"); }
 }
 

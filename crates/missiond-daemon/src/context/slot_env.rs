@@ -189,7 +189,7 @@ pub(crate) async fn capture_slot_session_uuid(
             );
 
             // Persist in DB (activates the previously-orphaned slot_sessions table)
-            if let Err(e) = state.mission.db().set_slot_session(slot_id, &session_uuid) {
+            if let Err(e) = state.store.set_slot_session(slot_id, &session_uuid).await {
                 warn!(slot_id = %slot_id, error = %e, "Failed to persist slot session mapping");
             }
 
@@ -197,7 +197,7 @@ pub(crate) async fn capture_slot_session_uuid(
             state.pty_session_uuids.write().await.insert(session_uuid.clone());
 
             // Retroactive fix: if conversation already exists with slot_id=None, tag it
-            if let Ok(Some(conv)) = state.mission.db().get_conversation(&session_uuid) {
+            if let Ok(Some(conv)) = state.store.get_conversation(&session_uuid).await {
                 if conv.slot_id.is_none() {
                     let mut updated = conv;
                     updated.slot_id = Some(slot_id.to_string());
@@ -205,7 +205,7 @@ pub(crate) async fn capture_slot_session_uuid(
                     updated.conversation_type = missiond_core::db::derive_conversation_type(
                         Some(slot_id), &session_uuid
                     );
-                    let _ = state.mission.db().upsert_conversation(&updated);
+                    let _ = state.store.upsert_conversation(&updated).await;
                     info!(session = %session_uuid, slot_id = %slot_id, "Retroactively tagged conversation with slot_id and conversation_type");
                 }
             }

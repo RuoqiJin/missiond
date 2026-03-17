@@ -5,6 +5,7 @@ use missiond_core::{
     CorePermissionDecision, MissionControl, PermissionPolicy,
     PTYManager, SkillIndex, InfraConfig, CCTasksWatcher, DbExecutor,
 };
+use missiond_core::db::traits::MissionStore;
 use tokio::sync::Mutex;
 
 use crate::control_tree::ControlManager;
@@ -106,6 +107,9 @@ pub(crate) struct SessionTaskBinding {
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) mission: Arc<MissionControl>,
+    /// Trait-based DB access — all new code should use this instead of mission.db().
+    /// Backed by SqliteMissionStore (M1), will be swapped to PgMissionStore in M2.
+    pub(crate) store: Arc<dyn MissionStore>,
     pub(crate) permission: Arc<PermissionPolicy>,
     pub(crate) pty: Arc<PTYManager>,
     pub(crate) cc_tasks: Arc<Mutex<CCTasksWatcher>>,

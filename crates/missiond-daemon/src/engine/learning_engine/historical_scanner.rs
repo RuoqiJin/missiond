@@ -23,7 +23,7 @@ const BATCH_SIZE: usize = 5;
 pub(crate) async fn check_historical_scan(state: &AppState) {
     // Gate 1: 4h cadence
     let now = chrono::Utc::now().timestamp();
-    let last = state.mission.db().daemon_state_get(LAST_HABIT_SCAN_KEY)
+    let last = state.store.daemon_state_get(LAST_HABIT_SCAN_KEY).await
         .unwrap_or(None).unwrap_or(0);
     if now - last < HABIT_SCAN_INTERVAL_SECS {
         return;
@@ -38,7 +38,7 @@ pub(crate) async fn check_historical_scan(state: &AppState) {
     }
 
     // Gate 3: no high/medium priority open work
-    if let Ok(urgent) = state.mission.db().count_open_tasks_by_priority(&["high", "medium"]) {
+    if let Ok(urgent) = state.store.count_open_tasks_by_priority(&["high", "medium"]).await {
         if urgent > 0 {
             debug!(urgent, "habit_scan: skipping, urgent tasks pending");
             return;
@@ -46,14 +46,14 @@ pub(crate) async fn check_historical_scan(state: &AppState) {
     }
 
     // Gate 4: check unscanned count
-    let unscanned = match state.mission.db().count_unscanned_conversations() {
+    let unscanned = match state.store.count_unscanned_conversations().await {
         Ok(n) => n,
         Err(_) => return,
     };
     if unscanned == 0 {
         debug!("habit_scan: all conversations scanned");
         // Update cadence to avoid repeated DB queries
-        let _ = state.mission.db().daemon_state_set(LAST_HABIT_SCAN_KEY, now);
+        let _ = state.store.daemon_state_set(LAST_HABIT_SCAN_KEY, now).await;
         return;
     }
 
@@ -72,7 +72,7 @@ pub(crate) async fn check_historical_scan(state: &AppState) {
     }
 
     // Fetch batch of unscanned conversations
-    let convs = match state.mission.db().get_unscanned_conversations(BATCH_SIZE) {
+    let convs = match state.store.get_unscanned_conversations(BATCH_SIZE).await {
         Ok(c) if !c.is_empty() => c,
         Ok(_) => return,
         Err(e) => {
@@ -82,7 +82,7 @@ pub(crate) async fn check_historical_scan(state: &AppState) {
     };
 
     // Update cadence immediately to prevent re-entry
-    let _ = state.mission.db().daemon_state_set(LAST_HABIT_SCAN_KEY, now);
+    let _ = state.store.daemon_state_set(LAST_HABIT_SCAN_KEY, now).await;
 
     let session_ids: Vec<String> = convs.iter().map(|c| c.id.clone()).collect();
     let batch_size = convs.len();
@@ -119,7 +119,7 @@ pub(crate) async fn check_historical_scan(state: &AppState) {
     });
 
     let pty = Arc::clone(&state.pty);
-    let db = state.mission.db_arc();
+    let store = Arc::clone(&state.store);
     let event_bus = state.event_bus.clone();
     let ids = session_ids.clone();
 
@@ -134,7 +134,7 @@ pub(crate) async fn check_historical_scan(state: &AppState) {
                 );
                 // Mark all sessions as scanned
                 for id in &ids {
-                    if let Err(e) = db.mark_habit_scanned(id) {
+                    if let Err(e) = store.mark_habit_scanned(id).await {
                         warn!(session_id = id, error = %e, "Failed to mark habit scanned");
                     }
                 }
@@ -148,7 +148,7 @@ pub(crate) async fn check_historical_scan(state: &AppState) {
                 warn!(error = %e, "Habit scan batch failed");
                 // Still mark as scanned to prevent infinite retry on broken sessions
                 for id in &ids {
-                    let _ = db.mark_habit_scanned(id);
+                    let _ = store.mark_habit_scanned(id).await;
                 }
             }
         }

@@ -18,8 +18,7 @@ const POLL_INTERVAL_SECS: u64 = 3600;
 /// Backfill: analyze ALL sessions since a given time (no threshold filtering).
 /// Returns (analyzed_count, skipped_count).
 pub(crate) async fn backfill(state: &AppState, since: &str) -> anyhow::Result<(usize, usize)> {
-    let db = state.mission.db();
-    let sessions = db.get_sessions_for_retro_backfill(since, false)
+    let sessions = state.store.get_sessions_for_retro_backfill(since, false).await
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
 
     info!(count = sessions.len(), since, "Retro backfill: found sessions");
@@ -50,9 +49,7 @@ const INTER_SESSION_DELAY_SECS: u64 = 10;
 const MINIMAX_MAX_TOKENS: u32 = 2000;
 
 pub(crate) async fn process_pending(state: &AppState) -> anyhow::Result<usize> {
-    let db = state.mission.db();
-
-    let pending = db.get_sessions_needing_retrospective()
+    let pending = state.store.get_sessions_needing_retrospective().await
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
 
     if pending.is_empty() {
@@ -72,12 +69,12 @@ pub(crate) async fn process_pending(state: &AppState) -> anyhow::Result<usize> {
             Err(e) => {
                 warn!(session_id, error = %e, "Retro worker: session analysis failed");
                 // Gemini ARB: record failure to prevent infinite retry loop
-                let _ = state.mission.db().save_retrospective_result(
+                let _ = state.store.save_retrospective_result(
                     session_id,
                     "error",
                     &format!("{{\"error\": \"{}\"}}", e.to_string().replace('"', "'")),
                     None,
-                );
+                ).await;
             }
         }
     }
@@ -92,10 +89,8 @@ async fn analyze_session(
     tool_count: i64,
     error_rate: f64,
 ) -> anyhow::Result<()> {
-    let db = state.mission.db();
-
     // Circuit breaker: runtime check — skip meta-agent sessions even if they slipped through SQL
-    if let Some(conv) = db.get_conversation(session_id).ok().flatten() {
+    if let Some(conv) = state.store.get_conversation(session_id).await.ok().flatten() {
         if conv.conversation_type != "user" {
             info!(session_id, conv_type = %conv.conversation_type, "Retro: skipping non-user session");
             return Ok(());
@@ -142,7 +137,7 @@ async fn analyze_session(
                 triage_severity = Some(severity.to_string());
                 triage_actionable = actionable;
                 if (severity == "high" || severity == "critical") && actionable {
-                    create_anomaly_board_task(state, session_id, &trigger, &parsed);
+                    create_anomaly_board_task(state, session_id, &trigger, &parsed).await;
                 }
             }
             Some(analysis)
@@ -159,7 +154,7 @@ async fn analyze_session(
     // feedback path via task_cited_kbs cache. kb_access_log session_ids differ
     // (user session ID vs autopilot task ID).
     if let Some(ref severity) = triage_severity {
-        let cited_kb_ids = db.get_session_cited_kb_ids(session_id)
+        let cited_kb_ids = state.store.get_session_cited_kb_ids(session_id).await
             .unwrap_or_default();
         if !cited_kb_ids.is_empty() {
             let feedback = match severity.as_str() {
@@ -168,7 +163,7 @@ async fn analyze_session(
                 _ => None,  // medium or non-actionable — no adjustment
             };
             if let Some(success) = feedback {
-                match db.kb_batch_apply_utility_feedback(&cited_kb_ids, success) {
+                match state.store.kb_batch_apply_utility_feedback(&cited_kb_ids, success).await {
                     Ok(n) if n > 0 => info!(session_id, severity, adjusted = n, success,
                         "Retro 4b: session-level utility feedback applied"),
                     Err(e) => warn!(session_id, error = %e, "Retro 4b: utility feedback failed"),
@@ -179,12 +174,12 @@ async fn analyze_session(
     }
 
     // Persist results
-    db.save_retrospective_result(
+    state.store.save_retrospective_result(
         session_id,
         &trigger,
         stats_text,
         full_analysis.as_deref(),
-    ).map_err(|e| anyhow::anyhow!("DB error saving retrospective: {}", e))?;
+    ).await.map_err(|e| anyhow::anyhow!("DB error saving retrospective: {}", e))?;
 
     info!(session_id, trigger = %trigger,
           has_triage = full_analysis.is_some(),
@@ -258,13 +253,12 @@ async fn call_sonnet_triage(
 /// Create a Board task for high-severity anomaly sessions.
 /// Sets assignee=slot-memory-slow + auto_execute=true so autopilot dispatches automatically.
 /// All instructions go in description (NOT prompt_template, which would hide the triage data).
-fn create_anomaly_board_task(
+async fn create_anomaly_board_task(
     state: &AppState,
     session_id: &str,
     trigger: &str,
     triage: &serde_json::Value,
 ) {
-    let db = state.mission.db();
 
     let summary = triage["summary"].as_str().unwrap_or("异常会话需人工复盘");
     let severity = triage["severity"].as_str().unwrap_or("high");
@@ -315,7 +309,7 @@ fn create_anomaly_board_task(
         context_intent: None,
     };
 
-    match db.create_board_task(&input) {
+    match state.store.create_board_task(&input).await {
         Ok(task) => info!(task_id = %task.id, session_id, "Retro worker: created anomaly Board task"),
         Err(e) => warn!(session_id, error = %e, "Retro worker: failed to create Board task"),
     }

@@ -21,15 +21,15 @@ use crate::flow_engine::{execute_flow_task, ensure_autopilot_pty};
 
 /// Notify Jarvis conversation when an async task fails.
 /// Extracts conversation_id from task metadata, writes error message, and emits event.
-fn notify_jarvis_failure(state: &AppState, task: &missiond_core::types::BoardTask, reason: &str) {
+async fn notify_jarvis_failure(state: &AppState, task: &missiond_core::types::BoardTask, reason: &str) {
     if task.category != "jarvis" { return; }
     if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&task.description) {
         if let Some(conv_id) = meta.get("conversation_id").and_then(|v| v.as_str()) {
             if !conv_id.is_empty() {
                 let error_msg = format!("❌ 后台任务执行失败：{}", reason);
-                let _ = state.mission.db().router_chat_append_messages(conv_id, &[
+                let _ = state.store.router_chat_append_messages(conv_id, &[
                     ("assistant".to_string(), error_msg),
-                ]);
+                ]).await;
                 state.event_bus.publish_traced(
                     DaemonEvent::JarvisTaskCompleted {
                         conversation_id: conv_id.to_string(),
@@ -58,7 +58,7 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     // Complete stale active conversations (no messages for > 10 minutes)
     let cutoff = (chrono::Utc::now() - chrono::TimeDelta::minutes(10))
         .to_rfc3339();
-    match state.mission.db().complete_stale_conversations(&cutoff) {
+    match state.store.complete_stale_conversations(&cutoff).await {
         Ok(n) if n > 0 => info!(count = n, "Completed stale conversations"),
         Err(e) => warn!(error = %e, "Failed to complete stale conversations"),
         _ => {}
@@ -107,14 +107,14 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     }
 
     // FTS dirty flag rebuild: after kb_forget sets dirty, rebuild here
-    match state.mission.db().kb_rebuild_fts_if_dirty() {
+    match state.store.kb_rebuild_fts_if_dirty().await {
         Ok(true) => info!("autopilot: FTS index rebuilt (dirty flag)"),
         Err(e) => warn!(error = %e, "FTS dirty rebuild failed"),
         _ => {}
     }
 
     // Sync KB preferences + hot topics into CLAUDE.md
-    sync_claude_md(state);
+    sync_claude_md(state).await;
 
     // ── Learning Engine tick (KB GC, decision reaper, harvest, timeline) ──
     learning_engine::learning_tick(state).await;
@@ -125,7 +125,7 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     }
 
     // Reaper: force-fail stale slot tasks (pending/running > 30 min)
-    match state.mission.db().reap_stale_slot_tasks(1800) {
+    match state.store.reap_stale_slot_tasks(1800).await {
         Ok(n) if n > 0 => warn!(count = n, "Reaped stale slot tasks"),
         Err(e) => warn!(error = %e, "Slot task reaper failed"),
         _ => {}
@@ -165,7 +165,7 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     // This catches orphaned tasks much faster than the 15-min time-based fallback.
     // Scenario: daemon restart loses the in-flight send() call, slot finishes but
     // no one reads the result — task stays 'running' forever.
-    match state.mission.db().list_running_autopilot_tasks() {
+    match state.store.list_running_autopilot_tasks().await {
         Ok(running) if !running.is_empty() => {
             debug!(count = running.len(), "Watchdog: checking running autopilot tasks");
             for rt in &running {
@@ -185,8 +185,8 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                             task_id = %rt.id, slot_id, age_secs = claimed_age,
                             "Watchdog: slot idle but task still running — recovering orphaned task"
                         );
-                        let _ = state.mission.db().unclaim_board_task(rt.id.as_str());
-                        let _ = state.mission.db().add_board_task_note(
+                        let _ = state.store.unclaim_board_task(rt.id.as_str()).await;
+                        let _ = state.store.add_board_task_note(
                             &missiond_core::types::AddBoardTaskNoteInput {
                                 task_id: rt.id.to_string(),
                                 content: format!(
@@ -196,7 +196,7 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                                 note_type: Some("note".to_string()),
                                 author: Some("watchdog".to_string()),
                             },
-                        );
+                        ).await;
                     }
                 } else {
                     // No PTY session at all — slot not even spawned, definitely orphaned
@@ -204,7 +204,7 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                         task_id = %rt.id, slot_id, age_secs = claimed_age,
                         "Watchdog: no PTY session for slot — recovering orphaned task"
                     );
-                    let _ = state.mission.db().unclaim_board_task(rt.id.as_str());
+                    let _ = state.store.unclaim_board_task(rt.id.as_str()).await;
                 }
             }
         }
@@ -215,12 +215,12 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     }
 
     // Time-based fallback: recover running tasks stuck > 15 min (catch-all)
-    let _ = state.mission.db().recover_stale_running_tasks(15);
+    let _ = state.store.recover_stale_running_tasks(15).await;
 
     dispatch_board_tasks(state).await?;
 
     // Safety net: running tasks with no recent notes → Inbox reminder
-    check_stale_board_progress(state);
+    check_stale_board_progress(state).await;
 
     // Record tick timing to DaemonStats
     let tick_ms = tick_start.elapsed().as_millis() as u64;
@@ -238,7 +238,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
         return Ok(());
     }
 
-    let tasks = state.mission.db().list_autopilot_tasks()
+    let tasks = state.store.list_autopilot_tasks().await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
     if tasks.is_empty() {
@@ -293,7 +293,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
 
         // ===== DAG dependency check =====
         if !task.depends_on.is_empty() {
-            match state.mission.db().check_dependencies(&task.depends_on) {
+            match state.store.check_dependencies(&task.depends_on).await {
                 Ok(missiond_core::types::DependencyStatus::Ready) => {
                     // All deps done — proceed
                 }
@@ -303,28 +303,28 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                 }
                 Ok(missiond_core::types::DependencyStatus::Blocked(reason)) => {
                     warn!(task_id = %task.id, reason = %reason, "Autopilot: DAG dep failed, blocking task");
-                    let _ = state.mission.db().update_board_task(
+                    let _ = state.store.update_board_task(
                         task.id.as_str(),
                         &missiond_core::types::UpdateBoardTaskInput {
                             status: Some("blocked".to_string()),
                             ..Default::default()
                         },
-                    );
+                    ).await;
                     state.event_bus.publish_traced(
                         DaemonEvent::BoardTaskStatusChanged {
                             task_id: task.id.to_string(), old_status: format!("{:?}", task.status), new_status: "blocked".to_string(),
                         },
                         TraceContext { trace_id: Some(task.id.to_string()), summary: Some(format!("board: {} → blocked", task.title)), ..Default::default() },
                     );
-                    let _ = state.mission.db().add_board_task_note(
+                    let _ = state.store.add_board_task_note(
                         &missiond_core::types::AddBoardTaskNoteInput {
                             task_id: task.id.to_string(),
                             content: format!("因前置任务失败或取消，本任务自动阻塞。\n原因：{}", reason),
                             note_type: Some("note".to_string()),
                             author: Some("autopilot".to_string()),
                         },
-                    );
-                    notify_jarvis_failure(state, &task, &format!("前置任务失败，本任务已阻塞：{}", reason));
+                    ).await;
+                    notify_jarvis_failure(state, &task, &format!("前置任务失败，本任务已阻塞：{}", reason)).await;
                     continue;
                 }
                 Err(e) => {
@@ -390,12 +390,12 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
         info!(task_id = %task.id, slot_id = %slot_id, title = %task.title, "Autopilot: executing task");
 
         // Atomically claim the task (CAS: only succeeds if open + unclaimed)
-        match state.mission.db().claim_board_task(task.id.as_str(), &slot_id, "pty_slot") {
+        match state.store.claim_board_task(task.id.as_str(), &slot_id, "pty_slot").await {
             Ok(Some(_)) => {
                 dispatched_slots.insert(slot_id.clone());
                 // Set lease: normal autopilot tasks get 20 minutes
                 let lease = (chrono::Utc::now() + chrono::TimeDelta::minutes(20)).to_rfc3339();
-                let _ = state.mission.db().set_board_task_lease(task.id.as_str(), &lease);
+                let _ = state.store.set_board_task_lease(task.id.as_str(), &lease).await;
             }
             Ok(None) => {
                 debug!(task_id = %task.id, slot_id = %slot_id, "Autopilot: task already claimed, skipping");
@@ -419,13 +419,13 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
         }
 
         // Link PTY session to task for audit trail
-        if let Ok(Some(session_uuid)) = state.mission.db().get_slot_session(&slot_id) {
-            let _ = state.mission.db().set_conversation_task_id(&session_uuid, task.id.as_str());
+        if let Ok(Some(session_uuid)) = state.store.get_slot_session(&slot_id).await {
+            let _ = state.store.set_conversation_task_id(&session_uuid, task.id.as_str()).await;
         }
 
         // Inject answered questions as context (Phase 2 linkage)
         let full_prompt = {
-            let answered = state.mission.db().list_questions_for_task(task.id.as_str()).unwrap_or_default();
+            let answered = state.store.list_questions_for_task(task.id.as_str()).await.unwrap_or_default();
             if answered.is_empty() {
                 full_prompt
             } else {
@@ -446,7 +446,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
         let full_prompt = if !task.depends_on.is_empty() {
             let mut handover_blocks = Vec::new();
             for dep_id in &task.depends_on {
-                if let Ok(Some(dep_with_notes)) = state.mission.db().get_board_task_with_notes(dep_id.as_str()) {
+                if let Ok(Some(dep_with_notes)) = state.store.get_board_task_with_notes(dep_id.as_str()).await {
                     // Find last summary note from predecessor
                     let summary = dep_with_notes.notes.iter()
                         .rev()
@@ -505,12 +505,12 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
         }
 
         // Prompt snapshot: save full context for Skill auto-verification replay
-        let _ = state.mission.db().save_prompt_snapshot(
+        let _ = state.store.save_prompt_snapshot(
             task.id.as_str(),
             &full_prompt,
             &cited_kb_ids,
             &task.category,
-        );
+        ).await;
 
         // Emit dispatch event for timeline visibility
         {
@@ -533,7 +533,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
         if !state.slot_dispatch.try_acquire(&slot_id) {
             debug!(task_id = %task.id, slot_id = %slot_id,
                 "Autopilot: slot dispatch guard busy, releasing task");
-            let _ = state.mission.db().unclaim_board_task(task.id.as_str());
+            let _ = state.store.unclaim_board_task(task.id.as_str()).await;
             continue;
         }
         if let Some(pre_send_status) = state.pty.get_status(&slot_id).await {
@@ -541,7 +541,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                 state.slot_dispatch.release(&slot_id);
                 debug!(task_id = %task.id, slot_id = %slot_id, state = ?pre_send_status.state,
                     "Autopilot: slot not Idle pre-send, releasing task without penalty");
-                let _ = state.mission.db().unclaim_board_task(task.id.as_str());
+                let _ = state.store.unclaim_board_task(task.id.as_str()).await;
                 continue;
             }
         }
@@ -558,14 +558,14 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                 // Check for auth errors in successful PTY response
                 if is_auth_error(&res.response) {
                     warn!(slot_id = %slot_id, task_id = %task.id, "Autopilot: auth error detected in PTY response, treating as failure");
-                    let _ = state.mission.db().add_board_task_note(
+                    let _ = state.store.add_board_task_note(
                         &missiond_core::types::AddBoardTaskNoteInput {
                             task_id: task.id.to_string(),
                             content: format!("⚠️ **Auth Error** — slot {} OAuth token 可能已过期，需要 `/login`\n\n{}", slot_id, &truncate_safe(&res.response, 500)),
                             note_type: Some("note".to_string()),
                             author: Some("autopilot".to_string()),
                         },
-                    );
+                    ).await;
                     // Treat as failure: increment slot_fail_counts
                     {
                         let mut fail_map = state.slot_fail_counts.lock().unwrap();
@@ -579,22 +579,22 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                     // Back to open for retry (don't mark done)
                     let new_retry = task.retry_count + 1;
                     if new_retry >= task.max_retries {
-                        let _ = state.mission.db().update_board_task(
+                        let _ = state.store.update_board_task(
                         task.id.as_str(),
                             &missiond_core::types::UpdateBoardTaskInput {
                                 status: Some("failed".to_string()),
                                 ..Default::default()
                             },
-                        );
+                        ).await;
                         state.event_bus.publish_traced(
                             DaemonEvent::BoardTaskStatusChanged {
                                 task_id: task.id.to_string(), old_status: format!("{:?}", task.status), new_status: "failed".to_string(),
                             },
                             TraceContext { trace_id: Some(task.id.to_string()), summary: Some(format!("board: {} → failed", task.title)), ..Default::default() },
                         );
-                        notify_jarvis_failure(state, &task, "OAuth token 过期，工位认证失败");
+                        notify_jarvis_failure(state, &task, "OAuth token 过期，工位认证失败").await;
                     } else {
-                        let _ = state.mission.db().increment_board_task_retry(task.id.as_str(), new_retry);
+                        let _ = state.store.increment_board_task_retry(task.id.as_str(), new_retry).await;
                     }
                     continue;
                 }
@@ -611,7 +611,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                         now.to_string(),
                     );
                     // Add note to the task
-                    let _ = state.mission.db().add_board_task_note(
+                    let _ = state.store.add_board_task_note(
                         &missiond_core::types::AddBoardTaskNoteInput {
                             task_id: task.id.to_string(),
                             content: format!(
@@ -622,15 +622,15 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                             note_type: Some("note".to_string()),
                             author: Some("circuit-breaker".to_string()),
                         },
-                    );
+                    ).await;
                     // Return task to open for retry after quota resets
-                    let _ = state.mission.db().update_board_task(
+                    let _ = state.store.update_board_task(
                         task.id.as_str(),
                         &missiond_core::types::UpdateBoardTaskInput {
                             status: Some("open".to_string()),
                             ..Default::default()
                         },
-                    );
+                    ).await;
                     // Create incident for visibility
                     let incident = missiond_core::types::MissionIncident {
                         id: format!("inc-{}", uuid::Uuid::new_v4()),
@@ -651,24 +651,24 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                         created_at: chrono::Utc::now().to_rfc3339(),
                     };
                     let _ = state.incident_tx.try_send(incident);
-                    notify_jarvis_failure(state, &task, "API 配额耗尽，系统已全局暂停");
+                    notify_jarvis_failure(state, &task, "API 配额耗尽，系统已全局暂停").await;
                     // Stop processing remaining tasks — quota is gone
                     break;
                 }
 
                 // Record result as a board note
                 let note_content = format!("**Autopilot 执行完成** ({}ms)\n\n{}", res.duration_ms, res.response);
-                let _ = state.mission.db().add_board_task_note(
+                let _ = state.store.add_board_task_note(
                     &missiond_core::types::AddBoardTaskNoteInput {
                         task_id: task.id.to_string(),
                         content: note_content,
                         note_type: Some("summary".to_string()),
                         author: Some("autopilot".to_string()),
                     },
-                );
+                ).await;
                 // CAS guard: only mark done if task is still in 'running' state.
                 // If task was auto-blocked by mission_question_create, preserve 'blocked' status.
-                let current_status = state.mission.db().get_board_task(task.id.as_str())
+                let current_status = state.store.get_board_task(task.id.as_str()).await
                     .ok().flatten()
                     .map(|t| t.status);
                 match current_status {
@@ -678,25 +678,25 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                     }
                     Some(missiond_core::types::BoardTaskStatus::Blocked) => {
                         // Task was blocked by pending questions — do NOT overwrite
-                        let _ = state.mission.db().add_board_task_note(
+                        let _ = state.store.add_board_task_note(
                             &missiond_core::types::AddBoardTaskNoteInput {
                                 task_id: task.id.to_string(),
                                 content: "⚠️ PTY 执行已返回，但任务有未回答的 pending questions，保持 blocked 状态。".to_string(),
                                 note_type: Some("note".to_string()),
                                 author: Some("autopilot".to_string()),
                             },
-                        );
+                        ).await;
                         warn!(task_id = %task.id, "Autopilot: pty.send completed but task is blocked — preserving blocked status");
                     }
                     _ => {
                         // Normal case: running → done
-                        let _ = state.mission.db().update_board_task(
+                        let _ = state.store.update_board_task(
                         task.id.as_str(),
                             &missiond_core::types::UpdateBoardTaskInput {
                                 status: Some("done".to_string()),
                                 ..Default::default()
                             },
-                        );
+                        ).await;
                         state.event_bus.publish_traced(
                             DaemonEvent::BoardTaskStatusChanged {
                                 task_id: task.id.to_string(), old_status: format!("{:?}", task.status), new_status: "done".to_string(),
@@ -705,7 +705,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                         );
                         info!(task_id = %task.id, duration_ms = res.duration_ms, "Autopilot: task completed");
                         // Record outcome for Skill auto-verification replay
-                        let _ = state.mission.db().update_prompt_snapshot_outcome(task.id.as_str(), "success");
+                        let _ = state.store.update_prompt_snapshot_outcome(task.id.as_str(), "success").await;
                     }
                 }
                 // Reset slot failure count on success
@@ -723,11 +723,11 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                         let count = kb_ids.len();
                         for kb_id in &kb_ids {
                             // Check current confidence to determine boost amount
-                            let delta = state.mission.db().kb_get_by_id(kb_id)
+                            let delta = state.store.kb_get_by_id(kb_id).await
                                 .ok().flatten()
                                 .map(|e| if e.confidence < 0.8 { 0.05 } else { 0.03 })
                                 .unwrap_or(0.03);
-                            match state.mission.db().kb_adjust_confidence(kb_id, delta) {
+                            match state.store.kb_adjust_confidence(kb_id, delta).await {
                                 Ok(Some(new_conf)) => debug!(kb_id = %kb_id, delta, new_conf, "KB confidence boost (task success)"),
                                 Ok(None) => debug!(kb_id = %kb_id, "KB entry not found for confidence adjustment"),
                                 Err(e) => warn!(kb_id = %kb_id, error = %e, "Failed to adjust KB confidence"),
@@ -737,7 +737,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                             info!(task_id = %task.id, kb_count = count, "KB feedback: boosted confidence for {} cited entries", count);
                         }
                         // Phase 4a: Utility score boost on task success (atomic SQL)
-                        match state.mission.db().kb_batch_apply_utility_feedback(&kb_ids, true) {
+                        match state.store.kb_batch_apply_utility_feedback(&kb_ids, true).await {
                             Ok(n) if n > 0 => info!(task_id = %task.id, boosted = n, "KB utility: boosted for task success"),
                             Err(e) => warn!(task_id = %task.id, error = %e, "KB utility: boost failed"),
                             _ => {}
@@ -747,18 +747,18 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
 
                 // Working Memory graduation: promote worthy scratchpad entries to global KB
                 {
-                    let scratchpad = state.mission.db().kb_list_by_scope(task.id.as_str());
+                    let scratchpad = state.store.kb_list_by_scope(task.id.as_str()).await;
                     if let Ok(entries) = scratchpad {
                         let mut graduated = 0u32;
                         let mut expired = 0u32;
                         for entry in &entries {
                             if entry.confidence >= 0.7 && entry.access_count > 0 {
                                 // Graduate: clear scope to make it global
-                                let _ = state.mission.db().kb_clear_scope(&entry.id);
+                                let _ = state.store.kb_clear_scope(&entry.id).await;
                                 graduated += 1;
                             } else {
                                 // Expire: remove low-value scratchpad entries
-                                let _ = state.mission.db().kb_forget(&entry.key);
+                                let _ = state.store.kb_forget(&entry.key).await;
                                 expired += 1;
                             }
                         }
@@ -773,9 +773,9 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                     if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&task.description) {
                         if let Some(conv_id) = meta.get("conversation_id").and_then(|v| v.as_str()) {
                             if !conv_id.is_empty() {
-                                let _ = state.mission.db().router_chat_append_messages(conv_id, &[
+                                let _ = state.store.router_chat_append_messages(conv_id, &[
                                     ("assistant".to_string(), res.response.clone()),
-                                ]);
+                                ]).await;
                                 state.event_bus.publish_traced(
                                     DaemonEvent::JarvisTaskCompleted {
                                         conversation_id: conv_id.to_string(),
@@ -832,18 +832,18 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                     // Slot not ready — transient failure, just unclaim without penalty
                     debug!(task_id = %task.id, slot_id = %slot_id, error = %err_msg,
                         "Autopilot: slot not ready (transient), returning task to queue");
-                    let _ = state.mission.db().unclaim_board_task(task.id.as_str());
+                    let _ = state.store.unclaim_board_task(task.id.as_str()).await;
                 } else {
                     // Real execution failure — track and retry
                     let note_content = format!("**Autopilot 执行失败** (retry {}/{})\n\n{}", task.retry_count + 1, task.max_retries, err_msg);
-                    let _ = state.mission.db().add_board_task_note(
+                    let _ = state.store.add_board_task_note(
                         &missiond_core::types::AddBoardTaskNoteInput {
                             task_id: task.id.to_string(),
                             content: note_content,
                             note_type: Some("note".to_string()),
                             author: Some("autopilot".to_string()),
                         },
-                    );
+                    ).await;
 
                     // Track slot consecutive failures
                     {
@@ -859,13 +859,13 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                     // Retry logic: increment count, mark failed if exhausted
                     let new_retry = task.retry_count + 1;
                     if new_retry >= task.max_retries {
-                        let _ = state.mission.db().update_board_task(
+                        let _ = state.store.update_board_task(
                         task.id.as_str(),
                             &missiond_core::types::UpdateBoardTaskInput {
                                 status: Some("failed".to_string()),
                                 ..Default::default()
                             },
-                        );
+                        ).await;
                         state.event_bus.publish_traced(
                             DaemonEvent::BoardTaskStatusChanged {
                                 task_id: task.id.to_string(), old_status: format!("{:?}", task.status), new_status: "failed".to_string(),
@@ -873,8 +873,8 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                             TraceContext { trace_id: Some(task.id.to_string()), summary: Some(format!("board: {} → failed", task.title)), ..Default::default() },
                         );
                         warn!(task_id = %task.id, retries = new_retry, "Autopilot: task failed after max retries");
-                        let _ = state.mission.db().update_prompt_snapshot_outcome(task.id.as_str(), "failed");
-                        notify_jarvis_failure(state, &task, &err_msg);
+                        let _ = state.store.update_prompt_snapshot_outcome(task.id.as_str(), "failed").await;
+                        notify_jarvis_failure(state, &task, &err_msg).await;
 
                         // Negative feedback: confidence (LLM-attributed) + utility_score (blanket)
                         {
@@ -882,7 +882,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                             if let Some(kb_ids) = cited {
                                 if !kb_ids.is_empty() {
                                     // Phase 4a: Utility score penalty (sync, atomic SQL)
-                                    match state.mission.db().kb_batch_apply_utility_feedback(&kb_ids, false) {
+                                    match state.store.kb_batch_apply_utility_feedback(&kb_ids, false).await {
                                         Ok(n) if n > 0 => info!(task_id = %task.id, penalized = n, "KB utility: penalized for task failure"),
                                         Err(e) => warn!(task_id = %task.id, error = %e, "KB utility: penalty failed"),
                                         _ => {}
@@ -900,7 +900,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                         }
                     } else {
                         // Back to open for retry, increment retry_count
-                        let _ = state.mission.db().increment_board_task_retry(task.id.as_str(), new_retry);
+                        let _ = state.store.increment_board_task_retry(task.id.as_str(), new_retry).await;
                         warn!(task_id = %task.id, retry = new_retry, max = task.max_retries, error = %err_msg, "Autopilot: task failed, will retry");
                     }
                 }
@@ -926,7 +926,7 @@ async fn apply_attributed_penalty(
     // Build KB summaries for context
     let mut kb_context = String::new();
     for kb_id in kb_ids {
-        if let Ok(Some(entry)) = state.mission.db().kb_get_by_id(kb_id) {
+        if let Ok(Some(entry)) = state.store.kb_get_by_id(kb_id).await {
             kb_context.push_str(&format!(
                 "- [{}] category={}, key={}, summary={}\n",
                 &kb_id[..8.min(kb_id.len())], entry.category, entry.key, entry.summary
@@ -998,7 +998,6 @@ async fn apply_attributed_penalty(
         None
     };
 
-    let db = state.mission.db();
     match attribution {
         Some(verdicts) => {
             let mut stats = (0u32, 0u32, 0u32); // innocent, contributed, caused
@@ -1009,7 +1008,7 @@ async fn apply_attributed_penalty(
                     _ => { stats.0 += 1; 0.0 }, // innocent — no penalty
                 };
                 if delta != 0.0 {
-                    match db.kb_adjust_confidence(kb_id, delta) {
+                    match state.store.kb_adjust_confidence(kb_id, delta).await {
                         Ok(Some(new_conf)) => debug!(kb_id = %kb_id, delta, new_conf, "KB attributed penalty"),
                         Ok(None) => {}
                         Err(e) => warn!(kb_id = %kb_id, error = %e, "Failed to adjust KB confidence"),
@@ -1022,7 +1021,7 @@ async fn apply_attributed_penalty(
         None => {
             // Fallback: blanket -0.02
             for kb_id in kb_ids {
-                let _ = db.kb_adjust_confidence(kb_id, -0.02);
+                let _ = state.store.kb_adjust_confidence(kb_id, -0.02).await;
             }
             info!(task_id, kb_count = kb_ids.len(), "KB feedback: fallback -0.02 for all cited entries");
         }
@@ -1057,7 +1056,7 @@ fn parse_attribution(response: &str, kb_ids: &[String]) -> Option<Vec<(String, S
 /// Reap expired dynamic slots: SIGTERM → 30s grace → unregister.
 async fn reap_expired_dynamic_slots(state: &AppState) {
     // Find expired active slots
-    let expired = match state.mission.db().find_expired_dynamic_slots() {
+    let expired = match state.store.find_expired_dynamic_slots().await {
         Ok(slots) => slots,
         Err(e) => {
             warn!(error = %e, "Failed to find expired dynamic slots");
@@ -1072,7 +1071,7 @@ async fn reap_expired_dynamic_slots(state: &AppState) {
         let _ = state.pty.kill(&slot.id).await;
 
         // Mark terminated in DB
-        if let Err(e) = state.mission.db().terminate_dynamic_slot(&slot.id, "ttl_expired") {
+        if let Err(e) = state.store.terminate_dynamic_slot(&slot.id, "ttl_expired").await {
             warn!(slot_id = %slot.id, error = %e, "Failed to terminate dynamic slot in DB");
         }
 
@@ -1085,7 +1084,7 @@ async fn reap_expired_dynamic_slots(state: &AppState) {
     }
 
     // TTL warning: alert for slots expiring within 15 minutes
-    if let Ok(expiring) = state.mission.db().find_expiring_dynamic_slots(900) {
+    if let Ok(expiring) = state.store.find_expiring_dynamic_slots(900).await {
         for slot in &expiring {
             debug!(slot_id = %slot.id, expires_at = %slot.expires_at, "Dynamic slot expiring soon (15min warning)");
         }
@@ -1094,23 +1093,22 @@ async fn reap_expired_dynamic_slots(state: &AppState) {
 
 /// Safety net: running Board tasks with no recent progress notes → Inbox reminder.
 /// Runs every 5 ticks (~5 min). Deduplicates by checking existing unread inbox.
-fn check_stale_board_progress(state: &AppState) {
+async fn check_stale_board_progress(state: &AppState) {
     let tick = state.stats.autopilot_ticks.load(std::sync::atomic::Ordering::Relaxed);
     if tick % 5 != 0 { return; }
 
-    let db = state.mission.db();
-    let running = db.list_board_tasks(Some("running"), false).unwrap_or_default();
+    let running = state.store.list_board_tasks(Some("running"), false).await.unwrap_or_default();
     if running.is_empty() { return; }
 
     // Prefetch recent unread inbox for dedup
-    let recent_inbox = db.get_inbox_messages(true, 50).unwrap_or_default();
+    let recent_inbox = state.store.get_inbox_messages(true, 50).await.unwrap_or_default();
 
     for task in &running {
         // Skip autopilot-managed tasks (they have their own watchdog above)
         if task.claim_executor_type.as_deref() == Some("pty_slot") { continue; }
 
         // Check latest note time
-        let last_note_at = db.get_board_task_with_notes(task.id.as_str())
+        let last_note_at = state.store.get_board_task_with_notes(task.id.as_str()).await
             .ok().flatten()
             .and_then(|r| r.notes.last().and_then(|n|
                 chrono::DateTime::parse_from_rfc3339(&n.created_at).ok()
@@ -1142,7 +1140,7 @@ fn check_stale_board_progress(state: &AppState) {
                     read: false,
                     created_at: chrono::Utc::now().timestamp(),
                 };
-                let _ = db.insert_inbox_message(&msg);
+                let _ = state.store.insert_inbox_message(&msg).await;
                 debug!(task_id = %task.id, age_min, "Stale board task reminder sent to inbox");
             }
         }

@@ -69,6 +69,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             "delete_message" => handle_inner(state, "mission_router_chat_delete_message", args).await,
             "restore" => handle_inner(state, "mission_router_chat_restore", args).await,
             "stats" => handle_inner(state, "mission_router_chat_stats", args).await,
+            "compress" => handle_inner(state, "mission_router_chat_compress", args).await,
             _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
         };
     }
@@ -117,18 +118,43 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 .map(|s| s.to_string());
             let task_id = params.get("task_id").and_then(|v| v.as_str()).map(|s| s.to_string());
 
-            // If task_id provided, load conversation history and prepend
+            // If task_id provided, load conversation context (rolling summary + active history)
+            let mut prepended_count = 0usize; // track how many messages were prepended for save logic
             let conv_id = if let Some(ref tid) = task_id {
-                let cid = state.mission.db().router_chat_get_or_create(tid, &model)
+                let cid = state.store.router_chat_get_or_create(tid, &model).await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
-                let history = state.mission.db().router_chat_load_history(&cid)
+
+                // Rolling summary architecture: summary + active (unsummarized) messages
+                let (summary_opt, cursor) = state.store.router_chat_get_summary(&cid).await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
-                if !history.is_empty() {
-                    // Prepend history before new messages
-                    let mut combined = history;
+                let active_history = state.store.router_chat_load_active_history(&cid, cursor).await
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
+
+                if summary_opt.is_some() || !active_history.is_empty() {
+                    let mut combined = Vec::new();
+
+                    // Inject rolling summary as context preamble
+                    if let Some(ref summary) = summary_opt {
+                        combined.push(serde_json::json!({
+                            "role": "user",
+                            "content": format!("[对话历史摘要] 以下是之前对话的核心要点，请基于此上下文继续：\n{}", summary)
+                        }));
+                        combined.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": "好的，我已了解之前的对话背景，将基于此继续。"
+                        }));
+                    }
+
+                    combined.extend(active_history);
+                    prepended_count = combined.len(); // summary msgs + active history
                     combined.extend(messages);
+                    let active_count = combined.len();
                     messages = combined;
-                    info!(task_id = %tid, history_msgs = messages.len(), "Router chat: loaded history for task");
+                    info!(
+                        task_id = %tid, active_msgs = active_count,
+                        has_summary = summary_opt.is_some(), cursor,
+                        "Router chat: loaded context (summary + active)"
+                    );
                 }
                 Some(cid)
             } else {
@@ -140,8 +166,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 let mut context_parts: Vec<String> = Vec::new();
 
                 if context_mode == "kb" || context_mode == "both" {
-                    let entries = state.mission.db()
-                        .kb_list(None)
+                    let entries = state.store
+                        .kb_list(None).await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     let kb_lines: Vec<String> = entries.iter()
                         .filter(|e| e.category != "credential")
@@ -263,7 +289,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                             // Binary file — try multimodal upload via Gemini File API
                             let mime = detect_mime(&path);
                             if let Some(ref api) = file_api {
-                                match api.prepare_file(&path, state.mission.db()).await {
+                                match api.prepare_file(&path, state.store.as_ref()).await {
                                     Ok(prepared) => {
                                         info!(path = %path.display(), mime, "Multimodal file prepared");
                                         multimodal_files.push(prepared);
@@ -445,11 +471,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             // Save new messages + assistant response to conversation history
             if let Some(ref cid) = conv_id {
                 let mut new_msgs: Vec<(String, String)> = Vec::new();
-                // Count how many history messages were prepended
-                let history_count = state.mission.db().router_chat_load_history(cid)
-                    .map(|h| h.len()).unwrap_or(0);
-                // messages array = history + new_user_messages; skip history portion
-                for msg in messages.iter().skip(history_count) {
+                // messages array = [summary pseudo-msgs + active history + new user messages]
+                // Skip the prepended portion (summary + active history) to save only new messages
+                for msg in messages.iter().skip(prepended_count) {
                     let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
                     let msg_content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
                     new_msgs.push((role.to_string(), msg_content.to_string()));
@@ -457,7 +481,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 // Add assistant response
                 new_msgs.push(("assistant".to_string(), content.to_string()));
 
-                if let Err(e) = state.mission.db().router_chat_append_messages(cid, &new_msgs) {
+                if let Err(e) = state.store.router_chat_append_messages(cid, &new_msgs).await {
                     warn!("Failed to save router chat history: {}", e);
                 } else {
                     info!(conv_id = %cid, saved = new_msgs.len(), "Router chat: saved messages to history");
@@ -473,9 +497,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let task_id = args_val.get("task_id").and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("task_id is required"))?;
             let model = "gemini-3.1-pro"; // default model for lookup
-            let conv_id = state.mission.db().router_chat_get_or_create(task_id, model)
+            let conv_id = state.store.router_chat_get_or_create(task_id, model).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
-            let history = state.mission.db().router_chat_load_history(&conv_id)
+            let history = state.store.router_chat_load_history(&conv_id).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             if history.is_empty() {
                 return Ok(ToolResult::text(format!("任务 {} 暂无 Gemini 对话记录", task_id)));
@@ -492,7 +516,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         "mission_router_chat_list" => {
             let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
             let limit = args_val.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
-            let convs = state.mission.db().router_chat_list(limit)
+            let convs = state.store.router_chat_list(limit).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             let count = convs.len();
             Ok(ToolResult::json_pretty(&serde_json::json!({
@@ -502,7 +526,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         }
 
         "mission_router_chat_stats" => {
-            let stats = state.mission.db().router_chat_stats()
+            let stats = state.store.router_chat_stats().await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&stats))
         }
@@ -516,7 +540,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let count = if count_raw < 0 { None } else { Some(count_raw) };
             match (conv_id, task_id) {
                 (Some(cid), _) => {
-                    let (archived, remaining) = state.mission.db().router_chat_clear(cid, count)
+                    let (archived, remaining) = state.store.router_chat_clear(cid, count).await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json(&serde_json::json!({
                         "conversation_id": cid,
@@ -526,7 +550,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     })))
                 }
                 (None, Some(tid)) => {
-                    let archived = state.mission.db().router_chat_clear_by_task(tid, count)
+                    let archived = state.store.router_chat_clear_by_task(tid, count).await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json(&serde_json::json!({
                         "task_id": tid,
@@ -544,7 +568,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let task_id = args_val.get("task_id").and_then(|v| v.as_str());
             match (conv_id, task_id) {
                 (Some(cid), _) => {
-                    let (conv_del, msg_del) = state.mission.db().router_chat_delete(cid)
+                    let (conv_del, msg_del) = state.store.router_chat_delete(cid).await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json(&serde_json::json!({
                         "deleted_conversations": conv_del,
@@ -552,7 +576,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     })))
                 }
                 (None, Some(tid)) => {
-                    let (conv_del, msg_del) = state.mission.db().router_chat_delete_by_task(tid)
+                    let (conv_del, msg_del) = state.store.router_chat_delete_by_task(tid).await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json(&serde_json::json!({
                         "task_id": tid,
@@ -569,7 +593,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
             let message_id = args_val.get("message_id").and_then(|v| v.as_i64())
                 .ok_or_else(|| anyhow!("需要提供 message_id (整数)"))?;
-            match state.mission.db().router_chat_delete_message(message_id)
+            match state.store.router_chat_delete_message(message_id).await
                 .map_err(|e| anyhow!("DB error: {}", e))? {
                 Some(conversation_id) => {
                     Ok(ToolResult::json(&serde_json::json!({
@@ -588,12 +612,134 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
             let conv_id = args_val.get("conversation_id").and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("需要提供 conversation_id"))?;
-            let restored = state.mission.db().router_chat_restore(conv_id)
+            let restored = state.store.router_chat_restore(conv_id).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json(&serde_json::json!({
                 "conversation_id": conv_id,
                 "restored_messages": restored,
             })))
+        }
+
+        // Rolling summary compression: compress old messages into a summary via Sonnet
+        "mission_router_chat_compress" => {
+            let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
+            let conv_id = args_val.get("conversation_id").and_then(|v| v.as_str());
+            let task_id_arg = args_val.get("task_id").and_then(|v| v.as_str());
+            // Default: compress oldest 20 messages into summary, keep recent ones active
+            let batch_size = args_val.get("batch_size").and_then(|v| v.as_i64()).unwrap_or(20);
+            // Minimum messages to keep in active window (don't compress below this)
+            let keep_recent = args_val.get("keep_recent").and_then(|v| v.as_i64()).unwrap_or(10);
+
+            // Resolve conversation ID
+            let cid = match (conv_id, task_id_arg) {
+                (Some(c), _) => c.to_string(),
+                (None, Some(tid)) => {
+                    state.store.router_chat_get_or_create(tid, "gemini-3.1-pro").await
+                        .map_err(|e| anyhow!("DB error: {}", e))?
+                }
+                _ => return Ok(ToolResult::error("需要提供 conversation_id 或 task_id")),
+            };
+
+            // Get current summary state
+            let (existing_summary, cursor) = state.store.router_chat_get_summary(&cid).await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            let unsummarized = state.store.router_chat_unsummarized_count(&cid, cursor).await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+
+            // Guard: don't compress if too few messages
+            if unsummarized <= keep_recent {
+                return Ok(ToolResult::json(&serde_json::json!({
+                    "conversation_id": cid,
+                    "status": "skip",
+                    "reason": format!("只有 {} 条未摘要消息，低于保留阈值 {}", unsummarized, keep_recent),
+                    "unsummarized_count": unsummarized,
+                })));
+            }
+
+            // Load the oldest batch for compression (leave keep_recent in active window)
+            let compress_count = (unsummarized - keep_recent).min(batch_size);
+            let to_compress = state.store.router_chat_load_compressible(&cid, cursor, compress_count).await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+
+            if to_compress.is_empty() {
+                return Ok(ToolResult::json(&serde_json::json!({
+                    "conversation_id": cid,
+                    "status": "skip",
+                    "reason": "没有可压缩的消息",
+                })));
+            }
+
+            // Format messages for Sonnet summarization
+            let messages_text: String = to_compress.iter()
+                .map(|(_, role, content)| format!("[{}]: {}", role, content))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let new_cursor = to_compress.last().map(|(id, _, _)| *id).unwrap_or(cursor);
+
+            let sonnet = state.sonnet.as_ref()
+                .ok_or_else(|| anyhow!("SonnetGateway 未初始化，无法生成摘要"))?;
+
+            let system_prompt = "You are a conversation summarizer. Your job is to maintain a rolling summary of a conversation between a user and an AI assistant (Gemini). Keep technical details, decisions, task IDs, and established context. Drop irrelevant chit-chat. Output only the updated summary in the same language as the conversation (Chinese if the conversation is in Chinese). Be concise but comprehensive.";
+
+            let user_prompt = if let Some(ref prev) = existing_summary {
+                format!(
+                    "[之前的摘要]\n{}\n\n[需要合并的新对话]\n{}\n\n请更新摘要，合并新对话的关键信息。",
+                    prev, messages_text
+                )
+            } else {
+                format!(
+                    "[需要摘要的对话]\n{}\n\n请生成对话摘要，保留关键技术细节和决策。",
+                    messages_text
+                )
+            };
+
+            use crate::minimax_client::ChatMessage;
+            let sonnet_msgs = vec![
+                ChatMessage { role: "system".to_string(), content: system_prompt.to_string() },
+                ChatMessage { role: "user".to_string(), content: user_prompt },
+            ];
+
+            let summary_result = sonnet.call_interactive(sonnet_msgs, Some(1024), "router_chat_compress").await;
+
+            match summary_result {
+                Ok(new_summary) => {
+                    let updated = state.store.router_chat_update_summary(
+                        &cid, &new_summary, new_cursor, cursor,
+                    ).await.map_err(|e| anyhow!("DB error: {}", e))?;
+
+                    if updated {
+                        info!(
+                            conv_id = %cid, compressed = to_compress.len(),
+                            new_cursor, summary_len = new_summary.len(),
+                            "Router chat: compressed messages into rolling summary"
+                        );
+                        Ok(ToolResult::json_pretty(&serde_json::json!({
+                            "conversation_id": cid,
+                            "status": "ok",
+                            "compressed_messages": to_compress.len(),
+                            "new_cursor": new_cursor,
+                            "remaining_active": unsummarized - to_compress.len() as i64,
+                            "summary_chars": new_summary.len(),
+                            "summary_preview": new_summary.chars().take(200).collect::<String>(),
+                        })))
+                    } else {
+                        Ok(ToolResult::json(&serde_json::json!({
+                            "conversation_id": cid,
+                            "status": "conflict",
+                            "reason": "游标已被其他压缩任务推进（乐观锁冲突），本次跳过",
+                        })))
+                    }
+                }
+                Err(e) => {
+                    warn!(conv_id = %cid, error = %e, "Router chat compress: Sonnet summarization failed");
+                    Ok(ToolResult::json(&serde_json::json!({
+                        "conversation_id": cid,
+                        "status": "error",
+                        "error": format!("Sonnet 摘要生成失败: {}", e),
+                        "note": "原始消息未受影响，可重试",
+                    })))
+                }
+            }
         }
 
         _ => Err(anyhow!("Unknown router_chat tool: {name}")),

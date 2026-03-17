@@ -227,8 +227,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 source: args.source,
                 confidence: args.confidence,
             };
-            let result = state.mission.db()
-                .kb_remember(&input)
+            let result = state.store
+                .kb_remember(&input).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             // Trigger async embedding update via Worker (avoids block_in_place in MCP handler)
             let _ = state.embedding_tx.try_send(EmbeddingTask::ProcessKBEntry(result.entry.id.clone()));
@@ -239,10 +239,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     if let Some(from_keys) = detail.get("consolidated_from").and_then(|v| v.as_array()) {
                         for key_val in from_keys {
                             if let Some(key) = key_val.as_str() {
-                                if let Ok(Some(target_id)) = state.mission.db().kb_get_id_by_key(key) {
-                                    let _ = state.mission.db().kb_add_edge(
+                                if let Ok(Some(target_id)) = state.store.kb_get_id_by_key(key).await {
+                                    let _ = state.store.kb_add_edge(
                                         &result.entry.id, &target_id, "supersedes", 1.0,
-                                    );
+                                    ).await;
                                 }
                             }
                         }
@@ -257,18 +257,18 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     let file_hint = detail.get("file_hint").and_then(|v| v.as_str());
                     if let Some(sym) = symbol {
                         // Search AST for this symbol to get ast_node_id
-                        let ast_node_id = state.mission.db()
-                            .ast_find_related(sym, 1)
+                        let ast_node_id = state.store
+                            .ast_find_related(sym, 1).await
                             .ok()
                             .and_then(|hits| hits.into_iter().next().map(|h| h.id));
-                        let _ = state.mission.db().kb_add_ast_link(
+                        let _ = state.store.kb_add_ast_link(
                             &result.entry.id,
                             sym,
                             file_hint,
                             ast_node_id.as_deref(),
                             "related_to",
                             0.8,
-                        );
+                        ).await;
                     }
                 }
             }
@@ -298,18 +298,18 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     .fold(0.0f64, f64::max);
                 if max_conflict_conf > result.entry.confidence {
                     let reduced = (max_conflict_conf / 2.0).max(0.1);
-                    let _ = state.mission.db().kb_adjust_confidence(
+                    let _ = state.store.kb_adjust_confidence(
                         &result.entry.id,
                         reduced - result.entry.confidence, // delta to reach target
-                    );
+                    ).await;
                 }
 
                 // Add contradicts edges for detected conflicts
                 for c in &conflicts {
                     if let Some(cid) = c.get("id").and_then(|v| v.as_str()) {
-                        let _ = state.mission.db().kb_add_edge(
+                        let _ = state.store.kb_add_edge(
                             &result.entry.id, cid, "contradicts", 0.8,
-                        );
+                        ).await;
                     }
                 }
 
@@ -325,9 +325,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_kb_forget" => {
             let KBKeyArgs { key } = serde_json::from_value(args)?;
             // Get entry ID before deletion for cache invalidation
-            let entry_id = state.mission.db().kb_get_id_by_key(&key).ok().flatten();
-            let deleted = state.mission.db()
-                .kb_forget(&key)
+            let entry_id = state.store.kb_get_id_by_key(&key).await.ok().flatten();
+            let deleted = state.store
+                .kb_forget(&key).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             // Remove from embedding cache if deleted
             if deleted {
@@ -335,8 +335,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     let mut guard = state.embedding_cache.write().await;
                     guard.retain(|(eid, _)| eid != id);
                     // Clean up knowledge graph edges + AST links
-                    let _ = state.mission.db().kb_delete_edges_for(id);
-                    let _ = state.mission.db().kb_delete_ast_links_for(id);
+                    let _ = state.store.kb_delete_edges_for(id).await;
+                    let _ = state.store.kb_delete_ast_links_for(id).await;
                 }
             }
             // Phase 3: Emit KBBatchMutated for event-driven FTS rebuild
@@ -370,8 +370,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             if keys.is_empty() {
                 return Ok(ToolResult::error("keys array is empty"));
             }
-            let count = state.mission.db()
-                .kb_batch_forget(&keys)
+            let count = state.store
+                .kb_batch_forget(&keys).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             // Phase 3: Emit KBBatchMutated for event-driven consumers
             if count > 0 {
@@ -394,7 +394,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     return Ok(ToolResult::error(&rejection));
                 }
             }
-            let result = state.mission.db()
+            let result = state.store
                 .kb_update(
                     &args.key,
                     args.category.as_deref(),
@@ -402,7 +402,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     args.detail.as_ref(),
                     args.confidence,
                     args.linked_task_id.as_deref(),
-                )
+                ).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             match result {
                 Some((entry, content_changed)) => {
@@ -430,8 +430,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .unwrap_or(KBSearchArgs { query: None, category: None, limit: None, offset: None, search_mode: None });
             let query = query.unwrap_or_default();
             if query.is_empty() && category.is_none() {
-                let entries = state.mission.db()
-                    .kb_list(None)
+                let entries = state.store
+                    .kb_list(None).await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 return Ok(ToolResult::json_pretty(&entries));
             }
@@ -440,21 +440,19 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let offset = offset.unwrap_or(0).min(100);
             let exact_mode = search_mode.as_deref() == Some("exact");
 
-            // 1. FTS5 ranked IDs (fallback to LIKE for Chinese) — spawn_blocking
-            let q = query.clone();
-            let cat = category.clone();
-            let fts_ranked: Vec<(String, usize, Option<String>)> = state.db_exec.run(move |db| {
-                let ranked = db.kb_search_fts_ranked(&q, cat.as_deref())
+            // 1. FTS5 ranked IDs (fallback to LIKE for Chinese)
+            let fts_ranked: Vec<(String, usize, Option<String>)> = {
+                let ranked = state.store.kb_search_fts_ranked(&query, category.as_deref()).await
                     .unwrap_or_default();
                 if ranked.is_empty() {
                     // like_ranked returns (id, rank) — pad with None snippet
-                    let like = db.kb_search_like_ranked(&q, cat.as_deref())
+                    let like = state.store.kb_search_like_ranked(&query, category.as_deref()).await
                         .unwrap_or_default();
-                    Ok(like.into_iter().map(|(id, rank)| (id, rank, None)).collect())
+                    like.into_iter().map(|(id, rank)| (id, rank, None)).collect()
                 } else {
-                    Ok(ranked)
+                    ranked
                 }
-            }).await.unwrap_or_default();
+            };
 
             // 2. Embedding cosine similarity against kb_search_cache
             // Use floor of 60 candidates; expand for offset pagination
@@ -511,11 +509,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             ranked.truncate(fetch_k);
 
             // 4. Fetch full entries + apply temporal decay on enlarged pool
-            let db = state.mission.db();
             let now = chrono::Utc::now();
             let mut scored_entries: Vec<(missiond_core::types::KnowledgeEntry, f64)> = Vec::new();
             for (id, rrf, _fts_r, _vec_r, _sim) in &ranked {
-                if let Ok(Some(entry)) = db.kb_get_by_id(id) {
+                if let Ok(Some(entry)) = state.store.kb_get_by_id(id).await {
                     let age_days = chrono::DateTime::parse_from_rfc3339(&entry.updated_at)
                         .map(|t| (now - t.with_timezone(&chrono::Utc)).num_hours() as f64 / 24.0)
                         .unwrap_or(0.0);
@@ -637,15 +634,15 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
             // Update access stats
             if !results.is_empty() {
-                let _ = db.kb_update_access_stats(&results);
+                let _ = state.store.kb_update_access_stats(&results).await;
             }
 
             Ok(ToolResult::json_pretty(&results))
         }
         "mission_kb_get" => {
             let KBKeyArgs { key } = serde_json::from_value(args)?;
-            let entry = state.mission.db()
-                .kb_get(&key)
+            let entry = state.store
+                .kb_get(&key).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             match entry {
                 Some(e) => Ok(ToolResult::json_pretty(&e)),
@@ -655,8 +652,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_kb_list" => {
             let KBListArgs { category } =
                 serde_json::from_value(args).unwrap_or(KBListArgs { category: None });
-            let entries = state.mission.db()
-                .kb_list(category.as_deref())
+            let entries = state.store
+                .kb_list(category.as_deref()).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&entries))
         }
@@ -685,8 +682,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                             source: Some("import".to_string()),
                             confidence: Some(1.0),
                         };
-                        state.mission.db()
-                            .kb_remember(&input)
+                        state.store
+                            .kb_remember(&input).await
                             .map_err(|e| anyhow!("DB error: {}", e))?;
                         imported += 1;
                     }
@@ -709,8 +706,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 let ip_owned = server.and_then(|s| s.host.clone()).unwrap_or_else(|| host.clone());
                 let ip = ip_owned.as_str();
                 // Look up credentials from KB
-                let db = state.mission.db();
-                let cred_pass = db.kb_search(&format!("{} password", host), Some("credential"))
+                let cred_pass = state.store.kb_search(&format!("{} password", host), Some("credential")).await
                     .ok()
                     .and_then(|entries| entries.into_iter().next())
                     .and_then(|e| e.detail.as_ref().and_then(|d| d.get("password").and_then(|v| v.as_str().map(String::from))));
@@ -814,8 +810,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 source: Some("discovery".to_string()),
                 confidence: Some(1.0),
             };
-            state.mission.db()
-                .kb_remember(&input)
+            state.store
+                .kb_remember(&input).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
 
             Ok(ToolResult::json(&serde_json::json!({
@@ -828,16 +824,15 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
         "mission_kb_gc" => {
             let KBGCArgs { action, days } = serde_json::from_value(args)?;
-            let db = state.mission.db();
             match action.as_str() {
                 "stats" => {
-                    let stats = db.kb_stats()
+                    let stats = state.store.kb_stats().await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json_pretty(&stats))
                 }
                 "stale" => {
                     let threshold = days.unwrap_or(30);
-                    let stale = db.kb_find_stale(threshold)
+                    let stale = state.store.kb_find_stale(threshold).await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json(&serde_json::json!({
                         "threshold_days": threshold,
@@ -851,7 +846,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     })))
                 }
                 "duplicates" => {
-                    let dups = db.kb_find_duplicates()
+                    let dups = state.store.kb_find_duplicates().await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json(&serde_json::json!({
                         "count": dups.len(),
@@ -864,10 +859,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 }
                 "clean_stale" => {
                     let threshold = days.unwrap_or(30);
-                    let stale = db.kb_find_stale(threshold)
+                    let stale = state.store.kb_find_stale(threshold).await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     let keys: Vec<String> = stale.iter().map(|e| e.key.clone()).collect();
-                    let count = db.kb_batch_forget(&keys)
+                    let count = state.store.kb_batch_forget(&keys).await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json(&serde_json::json!({
                         "action": "clean_stale",
@@ -877,7 +872,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     })))
                 }
                 "clean_duplicates" => {
-                    let dups = db.kb_find_duplicates()
+                    let dups = state.store.kb_find_duplicates().await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     // Keep entry with higher access_count (or newer updated_at), delete the other
                     let mut to_delete = Vec::new();
@@ -904,7 +899,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     let keys: Vec<String> = to_delete.iter()
                         .filter_map(|d| d["deleted_key"].as_str().map(String::from))
                         .collect();
-                    let count = db.kb_batch_forget(&keys)
+                    let count = state.store.kb_batch_forget(&keys).await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json(&serde_json::json!({
                         "action": "clean_duplicates",
@@ -933,8 +928,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .unwrap_or(16384) as u32;
 
             // 1. Read KB entries with pagination
-            let entries = state.mission.db()
-                .kb_list_paginated(target_category, limit, offset)
+            let entries = state.store
+                .kb_list_paginated(target_category, limit, offset).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
 
             if entries.is_empty() {
@@ -942,8 +937,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
 
             // Also get total count for pagination info
-            let total_count = state.mission.db()
-                .kb_list(target_category.map(|s| s))
+            let total_count = state.store
+                .kb_list(target_category.map(|s| s)).await
                 .map(|v| v.len())
                 .unwrap_or(0);
 
@@ -987,7 +982,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
             // 2b. Build Board context if requested
             let board_context = if include_board_context {
-                let tasks = state.mission.db().list_board_tasks(None, false)
+                let tasks = state.store.list_board_tasks(None, false).await
                     .unwrap_or_default();
                 let mut open_lines = Vec::new();
                 let mut done_lines = Vec::new();
@@ -1211,7 +1206,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                                 })
                             }).collect();
                             if !ops.is_empty() {
-                                match state.mission.db().kb_ops_save_plan(&plan_id, task_id_param, &ops) {
+                                match state.store.kb_ops_save_plan(&plan_id, task_id_param, &ops).await {
                                     Ok(n) => {
                                         resp["plan_id"] = serde_json::json!(plan_id);
                                         resp["operations_saved"] = serde_json::json!(n);
@@ -1248,12 +1243,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let plan_id = args_val.get("plan_id").and_then(|v| v.as_str());
             let status_filter = args_val.get("status").and_then(|v| v.as_str());
 
-            let ops = state.mission.db().kb_ops_list(plan_id, status_filter)
+            let ops = state.store.kb_ops_list(plan_id, status_filter).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
 
             // If plan_id given, also get summary
             let summary = if let Some(pid) = plan_id {
-                state.mission.db().kb_ops_plan_summary(pid).ok()
+                state.store.kb_ops_plan_summary(pid).await.ok()
             } else {
                 None
             };
@@ -1274,7 +1269,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let limit = args_val.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
 
             // Expire stale pending ops (>24h)
-            let expired = state.mission.db().kb_ops_expire_stale(86400).unwrap_or(0);
+            let expired = state.store.kb_ops_expire_stale(86400).await.unwrap_or(0);
             if expired > 0 {
                 info!(expired, "kb_execute_plan: expired stale pending ops");
             }
@@ -1282,7 +1277,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let plan_id = plan_id.ok_or_else(|| anyhow!("plan_id is required"))?;
 
             // Get pending operations
-            let ops = state.mission.db().kb_ops_list(Some(plan_id), Some("pending"))
+            let ops = state.store.kb_ops_list(Some(plan_id), Some("pending")).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
 
             if ops.is_empty() {
@@ -1294,14 +1289,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
             for op in &batch {
                 // Mark as running
-                let _ = state.mission.db().kb_ops_update_status(&op.id, "running", None, None);
+                let _ = state.store.kb_ops_update_status(&op.id, "running", None, None).await;
 
                 let target_keys: Vec<String> = serde_json::from_str(&op.target_keys).unwrap_or_default();
                 let outcome = match op.operation.as_str() {
                     "delete" => {
                         let mut deleted = 0usize;
                         for key in &target_keys {
-                            if state.mission.db().kb_forget(key).unwrap_or(false) {
+                            if state.store.kb_forget(key).await.unwrap_or(false) {
                                 deleted += 1;
                             }
                         }
@@ -1328,7 +1323,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                                     source: Some("consolidation".to_string()),
                                     confidence: new_entry.and_then(|ne| ne.get("confidence").and_then(|v| v.as_f64())),
                                 };
-                                match state.mission.db().kb_remember(&input) {
+                                match state.store.kb_remember(&input).await {
                                     Ok(r) => Ok(format!("Updated key={} category={} action={}", key, cat, r.action)),
                                     Err(e) => Err(format!("Failed to update: {}", e)),
                                 }
@@ -1340,7 +1335,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                         // Auto-dispatch: fetch entries, build prompt, submit to slot-memory-slow
                         let mut entries_text = String::new();
                         for key in &target_keys {
-                            if let Ok(Some(entry)) = state.mission.db().kb_get(key) {
+                            if let Ok(Some(entry)) = state.store.kb_get(key).await {
                                 entries_text.push_str(&format!(
                                     "---\nKey: {}\nCategory: {}\nSummary: {}\nDetail: {}\n",
                                     entry.key, entry.category, entry.summary,
@@ -1395,11 +1390,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                                 "result": msg,
                             }))
                         };
-                        let _ = state.mission.db().kb_ops_update_status(&op.id, status_str, Some(&msg), None);
+                        let _ = state.store.kb_ops_update_status(&op.id, status_str, Some(&msg), None).await;
                         results.push(result_json);
                     }
                     Err(msg) => {
-                        let _ = state.mission.db().kb_ops_update_status(&op.id, "failed", None, Some(&msg));
+                        let _ = state.store.kb_ops_update_status(&op.id, "failed", None, Some(&msg)).await;
                         results.push(serde_json::json!({
                             "id": op.id,
                             "operation": op.operation,
@@ -1416,7 +1411,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
 
             // Get remaining count
-            let remaining = state.mission.db().kb_ops_list(Some(plan_id), Some("pending"))
+            let remaining = state.store.kb_ops_list(Some(plan_id), Some("pending")).await
                 .map(|v| v.len()).unwrap_or(0);
 
             Ok(ToolResult::json_pretty(&serde_json::json!({
@@ -1428,7 +1423,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
         // ===== Holographic Beacon (P4) =====
         "mission_beacon_list" => {
-            let beacons = state.mission.db().beacon_list()
+            let beacons = state.store.beacon_list().await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&beacons))
         }
@@ -1436,7 +1431,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             #[derive(Deserialize)]
             struct BeaconMapArgs { name: String }
             let BeaconMapArgs { name } = serde_json::from_value(args)?;
-            let nodes = state.mission.db().beacon_map(&name)
+            let nodes = state.store.beacon_map(&name).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             if nodes.is_empty() {
                 return Ok(ToolResult::text(format!("Beacon '{}' not found or has no nodes.", name)));
@@ -1512,7 +1507,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .map_err(|e| anyhow!("Cannot write file {}: {}", file_path, e))?;
 
             // Also immediately record in DB (sync pipeline will re-confirm on next commit)
-            let beacon_id = state.mission.db().beacon_ensure(&feature)
+            let beacon_id = state.store.beacon_ensure(&feature).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
 
             // Determine repo from file_path (find repo root)
@@ -1521,10 +1516,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .find_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
                 .unwrap_or_else(|| "unknown".to_string());
 
-            let _ = state.mission.db().beacon_node_upsert(
+            let _ = state.store.beacon_node_upsert(
                 &beacon_id, &repo_name, &file_path, &symbol,
                 annotation.as_deref(),
-            );
+            ).await;
 
             Ok(ToolResult::text(format!(
                 "Tagged '{}' with beacon '{}' in {}:{}",
@@ -1548,9 +1543,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .find_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
                 .unwrap_or_else(|| "unknown".to_string());
 
-            let updated = state.mission.db().beacon_node_annotate(
+            let updated = state.store.beacon_node_annotate(
                 &beacon_name, &repo_name, &file_path, &symbol, &annotation,
-            ).map_err(|e| anyhow!("DB error: {}", e))?;
+            ).await.map_err(|e| anyhow!("DB error: {}", e))?;
 
             if updated {
                 Ok(ToolResult::text(format!("Annotation updated for {}::{} in beacon '{}'.", file_path, symbol, beacon_name)))
@@ -1578,10 +1573,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let limit = limit.unwrap_or(20).min(50);
 
             // FTS search
-            let q = query.clone();
-            let hits = state.db_exec.run(move |db| {
-                db.ast_search(&q, limit * 2)
-            }).await.unwrap_or_default();
+            let hits = state.store.ast_search(&query, limit * 2)
+                .await.unwrap_or_default();
 
             if hits.is_empty() {
                 return Ok(ToolResult::text("No code nodes found matching query."));
@@ -1626,10 +1619,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
             // Also do cross-file association for top results
             let mut related_results: Vec<serde_json::Value> = Vec::new();
-            let db = state.mission.db();
             for h in filtered.iter().take(5) {
                 if h.node_type == "impl" {
-                    if let Ok(related) = db.ast_find_related(&h.name, 3) {
+                    if let Ok(related) = state.store.ast_find_related(&h.name, 3).await {
                         for r in related {
                             if !filtered.iter().any(|f| f.id == r.id)
                                 && !related_results.iter().any(|rr| rr.get("name").and_then(|v| v.as_str()) == Some(&r.name) && rr.get("node_type").and_then(|v| v.as_str()) == Some(&r.node_type))
@@ -1667,10 +1659,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 /// dry_run=true (default) previews what would be deleted.
 async fn handle_kb_compact(state: &AppState, args: serde_json::Value) -> Result<ToolResult> {
     let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(true);
-    let db = state.mission.db();
-
     // Load all entries for rule-based filtering
-    let all = db.kb_list(None)?;
+    let all = state.store.kb_list(None).await?;
     let now = chrono::Utc::now();
     let mut candidates: Vec<(String, String, String, f64, &str)> = Vec::new(); // (key, category, summary, confidence, reason)
 
@@ -1746,7 +1736,7 @@ async fn handle_kb_compact(state: &AppState, args: serde_json::Value) -> Result<
         })))
     } else {
         let keys: Vec<String> = candidates.iter().map(|(k, _, _, _, _)| k.clone()).collect();
-        let deleted = db.kb_batch_forget(&keys)?;
+        let deleted = state.store.kb_batch_forget(&keys).await?;
         info!(deleted, total, "KB compact: cleaned up entries");
         Ok(ToolResult::json(&serde_json::json!({
             "dryRun": false,
@@ -1792,7 +1782,7 @@ async fn detect_kb_conflicts(
             true
         } else if cosine >= 0.6 {
             // Fetch entry to compute Jaccard on summary text
-            if let Ok(Some(existing)) = state.mission.db().kb_get_by_id(id) {
+            if let Ok(Some(existing)) = state.store.kb_get_by_id(id).await {
                 let existing_prefix = existing.category.split(':').next().unwrap_or(&existing.category);
                 if existing_prefix == category_prefix {
                     let jaccard = text_jaccard(&new_text, &format!("{} {}", existing.key, existing.summary));
@@ -1803,7 +1793,7 @@ async fn detect_kb_conflicts(
             false
         };
         if is_conflict {
-            if let Ok(Some(existing)) = state.mission.db().kb_get_by_id(id) {
+            if let Ok(Some(existing)) = state.store.kb_get_by_id(id).await {
                 let existing_prefix = existing.category.split(':').next().unwrap_or(&existing.category);
                 if existing_prefix == category_prefix {
                     conflicts.push(serde_json::json!({
