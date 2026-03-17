@@ -2,6 +2,8 @@
 
 pub mod error;
 pub mod executor;
+pub mod traits;
+pub mod sqlite;
 mod task;
 mod slot;
 mod board;
@@ -17,11 +19,11 @@ mod vision;
 pub mod ast;
 pub mod beacon;
 mod migration;
-mod timeline;
+pub(crate) mod timeline;
 mod dynamic_slot;
 mod narration;
 mod translation;
-mod backfill;
+pub(crate) mod backfill;
 mod watermark;
 pub mod message_feed;
 
