@@ -134,8 +134,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let args: SubmitPhaseArgs = serde_json::from_value(args)?;
 
             // Get the task
-            let task = state.mission.db()
-                .get_board_task(&args.task_id)
+            let task = state.store.get_board_task(&args.task_id).await
                 .map_err(|e| anyhow!("DB error: {}", e))?
                 .ok_or_else(|| anyhow!("Task not found: {}", args.task_id))?;
 
@@ -192,8 +191,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 flow_context: Some(ctx_json),
                 ..Default::default()
             };
-            state.mission.db()
-                .update_board_task(task.id.as_str(), &update)
+            state.store.update_board_task(task.id.as_str(), &update).await
                 .map_err(|e| anyhow!("DB error updating flow: {}", e))?;
 
             // Write progress note

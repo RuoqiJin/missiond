@@ -39,7 +39,7 @@ pub(crate) async fn save_routing_trace(state: &AppState, question_id: &str, reso
 /// Records routing_trace for each decision for observability.
 pub(crate) async fn process_pending_master_questions(state: &AppState) {
     // Query pending questions with target=master (spawn_blocking: batch scan)
-    let questions = match state.db_exec.run(|db| db.list_agent_questions(Some("pending"), Some("master"), None)).await {
+    let questions = match state.store.list_agent_questions(Some("pending"), Some("master"), None).await {
         Ok(qs) => qs,
         Err(e) => {
             warn!(error = %e, "Decision Engine: failed to list pending master questions");
@@ -645,7 +645,7 @@ pub(crate) async fn decision_tier3_dispatch(state: &AppState, question: &mission
 /// Three recovery actions: downgrade question to user, kill PTY, board warning note
 pub(crate) async fn reap_stale_decision_tasks(state: &AppState) {
     // spawn_blocking: time-based scan
-    let stale_questions = match state.db_exec.run(|db| db.find_stale_master_questions(900)).await {
+    let stale_questions = match state.store.find_stale_master_questions(900).await {
         Ok(qs) => qs,
         Err(e) => {
             warn!(error = %e, "Decision reaper: failed to query stale master questions");

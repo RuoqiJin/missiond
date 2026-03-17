@@ -177,8 +177,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 }
 
                 if context_mode == "board" || context_mode == "both" {
-                    let tasks = state.mission.db()
-                        .list_board_tasks(None, false)
+                    let tasks = state.store.list_board_tasks(None, false).await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     let task_lines: Vec<String> = tasks.iter()
                         .map(|t| {
