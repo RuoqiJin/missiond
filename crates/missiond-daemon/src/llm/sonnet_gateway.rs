@@ -56,6 +56,7 @@ pub(crate) struct SonnetHandle {
 
 impl SonnetHandle {
     /// Send a request at the given priority. Returns the LLM response content.
+    /// Fail-fast: checks gate BEFORE enqueuing to avoid wasting channel capacity.
     async fn send(
         tx: &mpsc::Sender<GatewayRequest>,
         messages: Vec<ChatMessage>,
@@ -66,6 +67,9 @@ impl SonnetHandle {
         trace_id: Option<String>,
         parent_span_id: Option<String>,
     ) -> Result<String> {
+        // P1: Fail-fast gate check — reject before entering channel queue
+        crate::llm_gate::check(crate::llm_gate::LlmProvider::Sonnet)?;
+
         let (reply_tx, reply_rx) = oneshot::channel();
         let req = GatewayRequest {
             messages,
@@ -234,10 +238,10 @@ impl SonnetGateway {
                 }
             };
 
-            // 2b. Kill switch: reject immediately when sonnet gate is closed
-            if crate::llm_gate::is_disabled("sonnet") {
-                warn!(caller = req.caller, "SonnetGateway: disabled via gate, rejecting");
-                let _ = req.reply_tx.send(Err(anyhow!("Sonnet is disabled (sonnet_disabled gate is set)")));
+            // 2b. Second-line defense: drain queued requests if gate closed after enqueue
+            if crate::llm_gate::is_disabled(crate::llm_gate::LlmProvider::Sonnet) {
+                warn!(caller = req.caller, "SonnetGateway: gate closed, draining queued request");
+                let _ = req.reply_tx.send(Err(crate::llm_gate::LlmGateError(crate::llm_gate::LlmProvider::Sonnet).into()));
                 drop(permit);
                 continue;
             }

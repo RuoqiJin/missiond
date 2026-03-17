@@ -41,16 +41,14 @@ const CODEX_RPM: u32 = 20;
 /// Max concurrent Codex CLI subprocesses.
 const CODEX_MAX_CONCURRENT: usize = 2;
 
-/// Check if Codex is disabled via persistent flag file.
-/// Delegates to shared LLM gate: `$MISSIOND_HOME/codex_disabled`.
+/// Check if Codex is disabled via LLM gate.
 pub(crate) fn is_codex_disabled() -> bool {
-    crate::llm_gate::is_disabled("codex")
+    crate::llm_gate::is_disabled(crate::llm_gate::LlmProvider::Codex)
 }
 
-/// Set or clear the Codex disabled flag file.
-/// Delegates to shared LLM gate.
+/// Set or clear the Codex disabled flag.
 pub(crate) fn set_codex_disabled(disabled: bool) {
-    crate::llm_gate::set_disabled("codex", disabled);
+    crate::llm_gate::set_disabled(crate::llm_gate::LlmProvider::Codex, disabled);
 }
 
 /// Codex CLI subprocess wrapper with rate limiting and timeline instrumentation.
