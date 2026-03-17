@@ -42,41 +42,15 @@ const CODEX_RPM: u32 = 20;
 const CODEX_MAX_CONCURRENT: usize = 2;
 
 /// Check if Codex is disabled via persistent flag file.
-/// Flag file: `$MISSIOND_HOME/codex_disabled` (or `~/.xjp-mission/codex_disabled`).
+/// Delegates to shared LLM gate: `$MISSIOND_HOME/codex_disabled`.
 pub(crate) fn is_codex_disabled() -> bool {
-    let home = std::env::var("MISSIOND_HOME")
-        .or_else(|_| std::env::var("XJP_MISSION_HOME"))
-        .unwrap_or_else(|_| {
-            let h = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-            if h.join(".missiond").exists() {
-                h.join(".missiond").to_string_lossy().to_string()
-            } else {
-                h.join(".xjp-mission").to_string_lossy().to_string()
-            }
-        });
-    std::path::Path::new(&home).join("codex_disabled").exists()
+    crate::llm_gate::is_disabled("codex")
 }
 
 /// Set or clear the Codex disabled flag file.
+/// Delegates to shared LLM gate.
 pub(crate) fn set_codex_disabled(disabled: bool) {
-    let home = std::env::var("MISSIOND_HOME")
-        .or_else(|_| std::env::var("XJP_MISSION_HOME"))
-        .unwrap_or_else(|_| {
-            let h = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-            if h.join(".missiond").exists() {
-                h.join(".missiond").to_string_lossy().to_string()
-            } else {
-                h.join(".xjp-mission").to_string_lossy().to_string()
-            }
-        });
-    let flag = std::path::PathBuf::from(home).join("codex_disabled");
-    if disabled {
-        let _ = std::fs::write(&flag, chrono::Utc::now().to_rfc3339());
-        warn!("Codex disabled — flag file created at {:?}", flag);
-    } else {
-        let _ = std::fs::remove_file(&flag);
-        info!("Codex enabled — flag file removed");
-    }
+    crate::llm_gate::set_disabled("codex", disabled);
 }
 
 /// Codex CLI subprocess wrapper with rate limiting and timeline instrumentation.

@@ -16,6 +16,10 @@ use crate::state::AppState;
 /// Call Gemini via the router API for flow daemon phases.
 /// Uses the same HTTP client + credentials as mission_router_chat.
 pub(crate) async fn call_gemini_for_flow(state: &AppState, task_id: &str, prompt: &str) -> Result<String> {
+    // Kill switch: reject immediately when gemini gate is closed
+    if crate::llm_gate::is_disabled("gemini") {
+        return Err(anyhow!("Gemini is disabled (gemini_disabled gate is set)"));
+    }
     let (base_url, jwt) = resolve_llm_credentials().await?;
     let model = "gemini-3.1-pro";
 
@@ -77,6 +81,10 @@ pub(crate) async fn call_sonnet_stateless(
     max_tokens: u32,
     caller: &str,
 ) -> Result<String> {
+    // Kill switch: reject immediately when sonnet gate is closed
+    if crate::llm_gate::is_disabled("sonnet") {
+        return Err(anyhow!("Sonnet is disabled (sonnet_disabled gate is set)"));
+    }
     let (base_url, mut jwt) = resolve_llm_credentials().await?;
     let model = "cpapi-claude-sonnet";
     let url = format!("{}/v1/chat/completions", base_url);

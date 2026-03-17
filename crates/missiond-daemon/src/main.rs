@@ -24,7 +24,7 @@ mod supervisor;
 mod slot_dispatch;
 
 // ── Re-exports for backward-compatible `use crate::xxx` paths ──
-use llm::{gemini_client, gemini_cli, minimax_client, minimax_gateway, sonnet_gateway, codex_cli, llm_gateway, prompts};
+use llm::{gemini_client, gemini_cli, minimax_client, minimax_gateway, sonnet_gateway, codex_cli, llm_gate, llm_gateway, prompts};
 use workers::{embedding_worker, vision_worker, step_narrator, translation_worker, briefing_worker, code_prefetch, experience_harvester, ast_sync_worker};
 use engine::{autopilot, decision_engine, decision_harvest, flow_engine, extraction, memory_scheduler};
 use context::{slot_env, context_pipeline, claude_md_sync, topology_map, context_budget};
@@ -406,6 +406,16 @@ async fn main() -> Result<()> {
         }));
     }
 
+    // Pre-parse llm.yaml for config flags needed by AppState
+    let llm_config_parsed: Option<embedding_worker::LlmConfig> = {
+        let llm_yaml = default_mission_home().join("llm.yaml");
+        llm_yaml.exists()
+            .then(|| std::fs::read_to_string(&llm_yaml).ok())
+            .flatten()
+            .and_then(|content| serde_yaml::from_str(&content).ok())
+    };
+    let backfill_enabled = llm_config_parsed.as_ref().map(|c| c.backfill_enabled).unwrap_or(false);
+
     let state = AppState {
         mission,
         permission,
@@ -476,6 +486,7 @@ async fn main() -> Result<()> {
         session_task_bindings: Arc::new(std::sync::Mutex::new(HashMap::new())),
         config_file_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         job_store: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        backfill_enabled: Arc::new(std::sync::atomic::AtomicBool::new(backfill_enabled)),
         slot_current_model: Arc::new(std::sync::Mutex::new(HashMap::new())),
         screenshot_broker: Arc::clone(&screenshot_broker),
         jarvis_trace: ws_server.jarvis_trace_store().clone(),
