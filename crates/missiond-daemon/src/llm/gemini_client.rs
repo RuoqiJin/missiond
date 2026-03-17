@@ -170,6 +170,10 @@ impl GeminiClient {
         body: &serde_json::Value,
         idle_timeout_override: Option<Duration>,
     ) -> Result<serde_json::Value> {
+        // Kill switch: reject immediately when gemini gate is closed
+        if crate::llm_gate::is_disabled("gemini") {
+            return Err(anyhow!("Gemini is disabled (gemini_disabled gate is set)"));
+        }
         self.request_count.fetch_add(1, Ordering::Relaxed);
         let request_id = uuid::Uuid::new_v4().to_string();
         let caller = current_caller();

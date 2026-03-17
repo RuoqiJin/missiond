@@ -234,6 +234,14 @@ impl SonnetGateway {
                 }
             };
 
+            // 2b. Kill switch: reject immediately when sonnet gate is closed
+            if crate::llm_gate::is_disabled("sonnet") {
+                warn!(caller = req.caller, "SonnetGateway: disabled via gate, rejecting");
+                let _ = req.reply_tx.send(Err(anyhow!("Sonnet is disabled (sonnet_disabled gate is set)")));
+                drop(permit);
+                continue;
+            }
+
             let queue_wait_start = Instant::now();
 
             // 3. Quota check with reservation protection
