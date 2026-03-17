@@ -320,12 +320,13 @@ impl MissionDB {
     pub fn insert_conversation_message(&self, msg: &ConversationMessage) -> DbResult<i64> {
         let conn = self.conn();
         conn.execute(
-            "INSERT OR IGNORE INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT OR IGNORE INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 msg.session_id, msg.role, msg.content, msg.raw_content,
                 msg.message_uuid, msg.parent_uuid, msg.model, msg.timestamp, msg.metadata,
-                msg.tool_name,
+                msg.tool_name, msg.raw_role, msg.content_types, msg.has_image, msg.has_tool_use,
+                msg.has_tool_result, msg.token_count,
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -342,12 +343,13 @@ impl MissionDB {
         let mut inserted_ids = Vec::new();
         for msg in messages {
             tx.execute(
-                "INSERT OR IGNORE INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT OR IGNORE INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     msg.session_id, msg.role, msg.content, msg.raw_content,
                     msg.message_uuid, msg.parent_uuid, msg.model, msg.timestamp, msg.metadata,
-                    msg.tool_name,
+                    msg.tool_name, msg.raw_role, msg.content_types, msg.has_image, msg.has_tool_use,
+                    msg.has_tool_result, msg.token_count,
                 ],
             )?;
             if tx.changes() > 0 {
@@ -1211,7 +1213,7 @@ impl MissionDB {
         })
     }
 
-    pub(crate) fn row_to_conversation_message(row: &rusqlite::Row) -> rusqlite::Result<ConversationMessage> {
+    pub fn row_to_conversation_message(row: &rusqlite::Row) -> rusqlite::Result<ConversationMessage> {
         Ok(ConversationMessage {
             id: row.get("id")?,
             session_id: row.get("session_id")?,
@@ -1224,6 +1226,13 @@ impl MissionDB {
             timestamp: row.get("timestamp")?,
             metadata: row.get("metadata")?,
             tool_name: row.get("tool_name").unwrap_or(None),
+            // Storage layer fields (P0: Three-Layer Refactor)
+            raw_role: row.get("raw_role").unwrap_or(None),
+            content_types: row.get("content_types").unwrap_or(None),
+            has_image: row.get::<_, Option<bool>>("has_image").unwrap_or(None).unwrap_or(false),
+            has_tool_use: row.get::<_, Option<bool>>("has_tool_use").unwrap_or(None).unwrap_or(false),
+            has_tool_result: row.get::<_, Option<bool>>("has_tool_result").unwrap_or(None).unwrap_or(false),
+            token_count: row.get("token_count").unwrap_or(None),
         })
     }
 }

@@ -22,6 +22,8 @@ mod dynamic_slot;
 mod narration;
 mod translation;
 mod backfill;
+mod watermark;
+pub mod message_feed;
 
 pub use backfill::BackfillPhaseStatus;
 pub use timeline::{TimelineRow, TimelineStats, LatencyStats};

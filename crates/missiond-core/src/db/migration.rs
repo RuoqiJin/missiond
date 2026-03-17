@@ -1523,6 +1523,58 @@ impl MissionDB {
             }
         }
 
+        // ── P0: Three-Layer Conversation Log Refactor ──
+        // consumer_watermarks: decouple per-consumer cursors from conversations table (OCP)
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS consumer_watermarks (
+                consumer_name TEXT NOT NULL,
+                session_id    TEXT NOT NULL,
+                last_processed_msg_id INTEGER,
+                last_processed_time   TEXT,
+                extra                 TEXT,
+                PRIMARY KEY (consumer_name, session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_cw_consumer ON consumer_watermarks(consumer_name);"
+        )?;
+
+        // message_labels: EAV model for per-message classification tags
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS message_labels (
+                message_id INTEGER NOT NULL,
+                label      TEXT NOT NULL,
+                value      TEXT,
+                source     TEXT NOT NULL DEFAULT 'rule',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (message_id, label)
+            );
+            CREATE INDEX IF NOT EXISTS idx_msg_label ON message_labels(label, value);
+            CREATE INDEX IF NOT EXISTS idx_msg_label_mid ON message_labels(message_id);"
+        )?;
+
+        // Extend conversation_messages with storage layer metadata
+        {
+            let msg_columns: Vec<String> = conn
+                .prepare("PRAGMA table_info(conversation_messages)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !msg_columns.iter().any(|c| c == "raw_role") {
+                conn.execute_batch(
+                    "ALTER TABLE conversation_messages ADD COLUMN raw_role TEXT;
+                     ALTER TABLE conversation_messages ADD COLUMN content_types TEXT;
+                     ALTER TABLE conversation_messages ADD COLUMN has_image INTEGER DEFAULT 0;
+                     ALTER TABLE conversation_messages ADD COLUMN has_tool_use INTEGER DEFAULT 0;
+                     ALTER TABLE conversation_messages ADD COLUMN has_tool_result INTEGER DEFAULT 0;
+                     ALTER TABLE conversation_messages ADD COLUMN token_count INTEGER;"
+                )?;
+                tracing::info!("Migration: conversation_messages storage-layer columns added (raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count)");
+            }
+        }
+
+        // NOTE: Watermark migration from conversations → consumer_watermarks is deferred to P3.
+        // Migrating now would snapshot stale data; consumers still write to conversations table.
+        // When each consumer is migrated to use consumer_watermarks, it should do a fresh sync.
+
         Ok(())
     }
 }

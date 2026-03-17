@@ -88,7 +88,28 @@ pub struct ConversationMessage {
     /// Comma-separated tool names extracted from raw_content (for tool_use/tool_result messages)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    // ── Storage Layer (P0: Three-Layer Refactor) ──
+    /// Original JSONL role before mapping (e.g., "user" before → "system")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_role: Option<String>,
+    /// JSON array of content block types: ["text","tool_use","image"]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_types: Option<String>,
+    /// Whether this message contains image data
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_image: bool,
+    /// Whether this message contains tool_use blocks
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_tool_use: bool,
+    /// Whether this message contains tool_result blocks
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_tool_result: bool,
+    /// Token count from usage info
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_count: Option<i64>,
 }
+
+fn is_false(v: &bool) -> bool { !v }
 
 /// A non-dialog system event from JSONL (turn_duration, compact_boundary, hook_progress, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -462,6 +462,7 @@ pub fn handle_new_events(db: &MissionDB, session_id: String, events: Vec<Value>)
                                         missiond_core::types::ConversationMessage {
                                             id: 0,
                                             session_id: session_id.clone(),
+                                            raw_role: None,
                                             role: agent_role,
                                             content: text_content,
                                             raw_content: serde_json::to_string(&content_val).ok(),
@@ -471,6 +472,11 @@ pub fn handle_new_events(db: &MissionDB, session_id: String, events: Vec<Value>)
                                             timestamp: inner_timestamp,
                                             metadata,
                                             tool_name,
+                                            content_types: None,
+                                            has_image: false,
+                                            has_tool_use: false,
+                                            has_tool_result: false,
+                                            token_count: None,
                                         },
                                     );
                                 }
@@ -887,6 +893,7 @@ pub async fn reconcile_conversation_messages(db: &MissionDB, session_id: &str, j
         batch.push(missiond_core::types::ConversationMessage {
             id: 0,
             session_id: sid.clone(),
+            raw_role: None,
             role,
             content,
             raw_content,
@@ -896,6 +903,11 @@ pub async fn reconcile_conversation_messages(db: &MissionDB, session_id: &str, j
             timestamp: msg.timestamp.clone(),
             metadata: None,
             tool_name,
+            content_types: None,
+            has_image: false,
+            has_tool_use: false,
+            has_tool_result: false,
+            token_count: None,
         });
     }).await;
 
