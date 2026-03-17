@@ -1652,6 +1652,28 @@ impl MissionDB {
             }
         }
 
+        // ── Compact Summary Role Backfill ──
+        // Reclassify compact summary messages from role='user' to role='compact_summary'.
+        // These are AI-generated conversation summaries injected by Claude Code after
+        // context compaction, not real user input.
+        // Detection: text prefix match on content. Idempotent (role='user' guard).
+        // Note: depends on upstream Claude Code prefix "This session is being continued..."
+        {
+            let fixed: usize = conn.execute(
+                "UPDATE conversation_messages SET role = 'compact_summary'
+                 WHERE (raw_role = 'user' OR raw_role IS NULL) AND role = 'user'
+                   AND content LIKE 'This session is being continued from a previous conversation%'",
+                [],
+            )?;
+
+            if fixed > 0 {
+                tracing::info!(
+                    count = fixed,
+                    "Migration: backfilled compact_summary role for existing messages"
+                );
+            }
+        }
+
         Ok(())
     }
 }

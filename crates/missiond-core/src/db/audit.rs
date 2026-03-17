@@ -216,6 +216,19 @@ impl MissionDB {
         Ok(events)
     }
 
+    /// Check if a given UUID is a compact_boundary event for this session.
+    /// Used by message_handler to detect compact summary messages via parentUuid linkage.
+    pub fn is_compact_boundary_event(&self, session_id: &str, event_uuid: &str) -> DbResult<bool> {
+        let conn = self.read_conn();
+        let exists: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM conversation_events
+             WHERE session_id = ?1 AND event_uuid = ?2 AND event_type = 'compact_boundary'",
+            params![session_id, event_uuid],
+            |row| row.get(0),
+        )?;
+        Ok(exists)
+    }
+
     /// Get agent trajectory: all agent_* messages linked to a specific tool_use_id
     pub fn get_agent_trajectory(
         &self,
