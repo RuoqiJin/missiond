@@ -152,15 +152,14 @@ impl WorkerContext {
 
     /// Block until the worker should run. Call at the top of the main loop.
     /// Wakes on EITHER legacy state change OR ControlTree change.
+    /// P2 fix: no `biased` — fair scheduling between legacy and tree channels.
     pub async fn wait_if_paused(&mut self) {
         if !self.is_effectively_paused() {
             return;
         }
         info!(worker = %self.name, "Worker paused (cascade), waiting to resume...");
         loop {
-            // Wake on whichever changes first
             tokio::select! {
-                biased;
                 res = self.legacy_rx.changed() => {
                     if res.is_err() { return; }
                 }
@@ -168,7 +167,6 @@ impl WorkerContext {
                     if res.is_err() { return; }
                 }
             }
-            // Re-evaluate after wakeup
             if !self.is_effectively_paused() {
                 info!(worker = %self.name, "Worker resumed");
                 return;
@@ -176,12 +174,26 @@ impl WorkerContext {
         }
     }
 
-    /// For use inside `tokio::select!` — resolves when any control state changes.
-    pub async fn state_changed(&mut self) {
-        tokio::select! {
-            biased;
-            _ = self.legacy_rx.changed() => {}
-            _ = self.tree_rx.changed() => {}
+    /// P0 fix (Gemini audit): resolves ONLY when this worker's effective state
+    /// transitions to paused. Prevents thundering herd — unrelated ControlTree
+    /// mutations (e.g., pausing Opus) won't wake a Sonnet-dependent worker.
+    pub async fn wait_until_paused(&mut self) {
+        if self.is_effectively_paused() {
+            return;
+        }
+        loop {
+            tokio::select! {
+                res = self.legacy_rx.changed() => {
+                    if res.is_err() { std::future::pending::<()>().await; }
+                }
+                res = self.tree_rx.changed() => {
+                    if res.is_err() { std::future::pending::<()>().await; }
+                }
+            }
+            if self.is_effectively_paused() {
+                return;
+            }
+            // Spurious wakeup (unrelated change) — keep waiting
         }
     }
 

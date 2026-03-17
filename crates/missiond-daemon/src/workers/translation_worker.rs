@@ -256,7 +256,7 @@ async fn run_loop(
                 continue;
             }
             // Allow external pause to interrupt sleep/recv immediately
-            _ = wctx.state_changed() => {
+            _ = wctx.wait_until_paused() => {
                 continue;
             }
         };

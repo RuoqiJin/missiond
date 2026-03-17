@@ -418,6 +418,22 @@ async fn main() -> Result<()> {
     };
     let backfill_enabled = llm_config_parsed.as_ref().map(|c| c.backfill_enabled).unwrap_or(false);
 
+    // P1 fix (Gemini audit): initialize ControlManager early so its restored
+    // state can hydrate legacy AtomicBools during AppState construction.
+    let (control_manager_instance, _control_rx) = control_tree::ControlManager::new(&home);
+    let control_tree_snapshot = control_manager_instance.current();
+    let control_manager_arc = Arc::new(control_manager_instance);
+
+    // Hydrate legacy llm_gate from ControlTree (prevents startup split-brain)
+    for (&provider, &paused) in &control_tree_snapshot.providers {
+        if paused {
+            if let Some(legacy) = provider.to_llm_provider() {
+                llm_gate::set_disabled(legacy, true);
+                info!(provider = provider.as_str(), "Hydrated legacy llm_gate from ControlTree");
+            }
+        }
+    }
+
     let state = AppState {
         mission,
         permission,
@@ -455,8 +471,12 @@ async fn main() -> Result<()> {
         slow_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         claude_md_hash: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         last_supervisor_patrol_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        // P1 fix (Gemini audit): ControlTree is the single source of truth.
+        // Legacy AtomicBools are hydrated from the restored ControlTree to
+        // prevent split-brain on startup (ControlTree says paused but legacy says running).
         memory_paused: Arc::new(std::sync::atomic::AtomicBool::new(
             home.join("memory_paused").exists()
+                || control_tree_snapshot.domains.get(&control_tree::CtlDomain::Memory).copied().unwrap_or(false)
         )),
         memory_paused_at: Arc::new(std::sync::atomic::AtomicI64::new({
             let flag = home.join("memory_paused");
@@ -464,12 +484,15 @@ async fn main() -> Result<()> {
                 std::fs::read_to_string(&flag).ok()
                     .and_then(|s| s.trim().parse::<i64>().ok())
                     .unwrap_or_else(|| chrono::Utc::now().timestamp())
+            } else if control_tree_snapshot.domains.get(&control_tree::CtlDomain::Memory).copied().unwrap_or(false) {
+                chrono::Utc::now().timestamp()
             } else {
                 0
             }
         })),
         global_paused: Arc::new(std::sync::atomic::AtomicBool::new(
             home.join("global_paused").exists()
+                || control_tree_snapshot.global_paused
         )),
         global_paused_at: Arc::new(std::sync::atomic::AtomicI64::new({
             let flag = home.join("global_paused");
@@ -477,6 +500,8 @@ async fn main() -> Result<()> {
                 std::fs::read_to_string(&flag).ok()
                     .and_then(|s| s.trim().parse::<i64>().ok())
                     .unwrap_or_else(|| chrono::Utc::now().timestamp())
+            } else if control_tree_snapshot.global_paused {
+                chrono::Utc::now().timestamp()
             } else {
                 0
             }
@@ -573,10 +598,7 @@ async fn main() -> Result<()> {
         ast_embedding_cache: missiond_core::embedding::new_cache(),
         last_msg_span: Arc::new(std::sync::Mutex::new(HashMap::new())),
         worker_registry: Arc::new(workers::WorkerRegistry::new()),
-        control_manager: {
-            let (mgr, _rx) = control_tree::ControlManager::new(&home);
-            Arc::new(mgr)
-        },
+        control_manager: Arc::clone(&control_manager_arc),
         slot_dispatch: Arc::new(slot_dispatch::SlotDispatchGuard::new()),
         board_dispatch_notify: Arc::new(tokio::sync::Notify::new()),
         gemini_watch_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
