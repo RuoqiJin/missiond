@@ -4,7 +4,7 @@ use serde_json::Value;
 use missiond_mcp::tools::ToolResult;
 
 use crate::codex_cli::set_codex_disabled;
-use crate::llm_gate;
+use crate::llm_gate::{self, LlmProvider};
 use crate::state::AppState;
 use crate::workers::registry::WorkerState;
 
@@ -34,13 +34,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
 fn list_workers(state: &AppState) -> Result<ToolResult> {
     let workers = state.worker_registry.list_all();
-    // Append LLM gate status to the response
     let gate_status = llm_gate::all_status();
     Ok(ToolResult::json_pretty(&serde_json::json!({
         "workers": workers,
-        "llm_gates": gate_status.iter().map(|(model, disabled)| {
+        "llm_gates": gate_status.iter().map(|(provider, disabled)| {
             serde_json::json!({
-                "model": model,
+                "model": provider.as_str(),
                 "disabled": disabled,
                 "status": if *disabled { "closed" } else { "open" },
             })
@@ -57,12 +56,13 @@ struct ControlArgs {
 fn worker_control(state: &AppState, args: Value) -> Result<ToolResult> {
     let args: ControlArgs = serde_json::from_value(args)?;
 
-    // ── LLM Gate targets: gemini / sonnet / codex ──
-    match args.target.as_str() {
-        "codex" => return codex_gate_control(state, &args.action),
-        "gemini" => return llm_gate_control("gemini", &args.action),
-        "sonnet" => return llm_gate_control("sonnet", &args.action),
-        _ => {}
+    // ── LLM Gate targets ──
+    if let Some(provider) = LlmProvider::from_str(&args.target) {
+        return if provider == LlmProvider::Codex {
+            codex_gate_control(state, &args.action)
+        } else {
+            llm_gate_control(provider, &args.action)
+        };
     }
 
     let handle = match state.worker_registry.get(&args.target) {
@@ -91,24 +91,25 @@ fn worker_control(state: &AppState, args: Value) -> Result<ToolResult> {
 }
 
 /// Unified LLM gate control for gemini/sonnet.
-fn llm_gate_control(model: &str, action: &str) -> Result<ToolResult> {
+fn llm_gate_control(provider: LlmProvider, action: &str) -> Result<ToolResult> {
+    let name = provider.as_str();
     match action {
         "pause" | "disable" => {
-            llm_gate::set_disabled(model, true);
+            llm_gate::set_disabled(provider, true);
             Ok(ToolResult::text(format!(
                 "⏸ {} 已关闸（持久化）。所有 {} API 调用将立即拒绝。\n\
                  恢复：mission_worker(action=\"control\", target=\"{}\", control_action=\"resume\")",
-                model, model, model
+                name, name, name
             )))
         }
         "resume" | "enable" => {
-            llm_gate::set_disabled(model, false);
-            Ok(ToolResult::text(format!("▶️ {} 闸口已开启，API 调用恢复正常。", model)))
+            llm_gate::set_disabled(provider, false);
+            Ok(ToolResult::text(format!("▶️ {} 闸口已开启，API 调用恢复正常。", name)))
         }
         "status" => {
-            let disabled = llm_gate::is_disabled(model);
+            let disabled = llm_gate::is_disabled(provider);
             Ok(ToolResult::json_pretty(&serde_json::json!({
-                "model": model,
+                "model": name,
                 "disabled": disabled,
                 "status": if disabled { "closed" } else { "open" },
             })))

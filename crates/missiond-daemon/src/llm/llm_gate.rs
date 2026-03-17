@@ -1,15 +1,137 @@
-//! LLM Gate — unified file-based kill switch for all model providers.
+//! LLM Gate — unified kill switch for all model providers.
 //!
-//! Each model has a flag file at `$MISSIOND_HOME/{model}_disabled`.
-//! When the file exists, all calls to that model are immediately rejected.
+//! Architecture (per Gemini audit):
+//! - **Hot path**: `AtomicBool` read — sub-nanosecond, zero syscall, no async blocking.
+//! - **Cold path**: File persistence on set — survives daemon restart.
+//! - **Strong-typed error**: `LlmGateError::GateClosed` — callers MUST NOT retry.
 //!
-//! Supported models: gemini, sonnet, codex.
-//! Check cost: single `Path::exists()` syscall per request (< 1µs).
+//! Flag files: `$MISSIOND_HOME/{provider}_disabled` (e.g. `gemini_disabled`).
 
+use std::fmt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::LazyLock;
+
 use tracing::{info, warn};
 
-/// Resolve the MissionD home directory (shared with codex_cli.rs logic).
+// ── Provider Enum (P3: eliminate stringly-typed) ──────────────────────
+
+/// Strongly-typed LLM provider identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum LlmProvider {
+    Gemini,
+    Sonnet,
+    Codex,
+}
+
+impl LlmProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Gemini => "gemini",
+            Self::Sonnet => "sonnet",
+            Self::Codex => "codex",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "gemini" => Some(Self::Gemini),
+            "sonnet" => Some(Self::Sonnet),
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
+
+    const ALL: [Self; 3] = [Self::Gemini, Self::Sonnet, Self::Codex];
+}
+
+impl fmt::Display for LlmProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ── Error Type (P0: prevent retry storms) ─────────────────────────────
+
+/// Dedicated error for gate-closed rejections.
+/// Callers that catch this MUST abort immediately — never retry.
+#[derive(Debug, thiserror::Error)]
+#[error("{0} gate is closed — all API calls rejected")]
+pub(crate) struct LlmGateError(pub LlmProvider);
+
+// ── Atomic Gate State (P2: eliminate hot-path I/O) ────────────────────
+
+struct LlmGates {
+    gemini: AtomicBool,
+    sonnet: AtomicBool,
+    codex: AtomicBool,
+}
+
+impl LlmGates {
+    fn atom(&self, provider: LlmProvider) -> &AtomicBool {
+        match provider {
+            LlmProvider::Gemini => &self.gemini,
+            LlmProvider::Sonnet => &self.sonnet,
+            LlmProvider::Codex => &self.codex,
+        }
+    }
+}
+
+/// Global gate state — initialized once from flag files at first access.
+static GATES: LazyLock<LlmGates> = LazyLock::new(|| {
+    let g = LlmGates {
+        gemini: AtomicBool::new(flag_file_exists(LlmProvider::Gemini)),
+        sonnet: AtomicBool::new(flag_file_exists(LlmProvider::Sonnet)),
+        codex: AtomicBool::new(flag_file_exists(LlmProvider::Codex)),
+    };
+    info!(
+        gemini = g.gemini.load(Ordering::Relaxed),
+        sonnet = g.sonnet.load(Ordering::Relaxed),
+        codex = g.codex.load(Ordering::Relaxed),
+        "LLM gates initialized from flag files"
+    );
+    g
+});
+
+// ── Public API ────────────────────────────────────────────────────────
+
+/// Check if a provider's gate is closed. Cost: single AtomicBool load (~1ns).
+pub(crate) fn is_disabled(provider: LlmProvider) -> bool {
+    GATES.atom(provider).load(Ordering::Relaxed)
+}
+
+/// Convenience: check gate and return typed error if closed.
+/// Use at choke points: `llm_gate::check(LlmProvider::Gemini)?;`
+pub(crate) fn check(provider: LlmProvider) -> Result<(), LlmGateError> {
+    if is_disabled(provider) {
+        Err(LlmGateError(provider))
+    } else {
+        Ok(())
+    }
+}
+
+/// Open or close a provider's gate. Updates AtomicBool + persists to flag file.
+pub(crate) fn set_disabled(provider: LlmProvider, disabled: bool) {
+    GATES.atom(provider).store(disabled, Ordering::Relaxed);
+    // Cold path: persist to flag file for restart survival
+    let path = flag_path(provider);
+    if disabled {
+        let _ = std::fs::write(&path, chrono::Utc::now().to_rfc3339());
+        warn!(%provider, "LLM gate closed — flag file created at {:?}", path);
+    } else {
+        let _ = std::fs::remove_file(&path);
+        info!(%provider, "LLM gate opened — flag file removed");
+    }
+}
+
+/// Return status of all gates.
+pub(crate) fn all_status() -> Vec<(LlmProvider, bool)> {
+    LlmProvider::ALL.iter().map(|&p| (p, is_disabled(p))).collect()
+}
+
+// ── File helpers (cold path only) ─────────────────────────────────────
+
 fn missiond_home() -> PathBuf {
     let home = std::env::var("MISSIOND_HOME")
         .or_else(|_| std::env::var("XJP_MISSION_HOME"))
@@ -24,33 +146,10 @@ fn missiond_home() -> PathBuf {
     PathBuf::from(home)
 }
 
-/// Flag file path for a given model.
-fn flag_path(model: &str) -> PathBuf {
-    missiond_home().join(format!("{}_disabled", model))
+fn flag_path(provider: LlmProvider) -> PathBuf {
+    missiond_home().join(format!("{}_disabled", provider.as_str()))
 }
 
-/// Check if a model is disabled via persistent flag file.
-pub(crate) fn is_disabled(model: &str) -> bool {
-    flag_path(model).exists()
-}
-
-/// Set or clear the disabled flag for a model.
-pub(crate) fn set_disabled(model: &str, disabled: bool) {
-    let path = flag_path(model);
-    if disabled {
-        let _ = std::fs::write(&path, chrono::Utc::now().to_rfc3339());
-        warn!(model, "LLM gate: disabled — flag file created at {:?}", path);
-    } else {
-        let _ = std::fs::remove_file(&path);
-        info!(model, "LLM gate: enabled — flag file removed");
-    }
-}
-
-/// Check all models and return their gate status.
-pub(crate) fn all_status() -> Vec<(&'static str, bool)> {
-    vec![
-        ("gemini", is_disabled("gemini")),
-        ("sonnet", is_disabled("sonnet")),
-        ("codex", is_disabled("codex")),
-    ]
+fn flag_file_exists(provider: LlmProvider) -> bool {
+    flag_path(provider).exists()
 }

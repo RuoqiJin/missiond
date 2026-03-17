@@ -36,6 +36,7 @@ reqwest = { workspace = true }
 governor = { workspace = true }
 notify = { workspace = true }
 
+thiserror = { workspace = true }
 missiond-core = { workspace = true }
 missiond-mcp = { workspace = true }
 regex = { workspace = true }
