@@ -154,6 +154,8 @@ fn ingest(
                 "system".to_string()
             } else if msg.message.role == "user" && parent_session_id.is_some() {
                 "agent_user".to_string()
+            } else if msg.message.role == "user" && is_compact_summary(db, session_id, msg) {
+                "compact_summary".to_string()
             } else {
                 msg.message.role.clone()
             };
@@ -579,4 +581,38 @@ pub(crate) fn handle_pty_text_complete(
             error!(slot = %slot_id, turn = turn_id, error = %e, "Failed to insert PTY message");
         }
     }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Compact Summary Detection
+// ════════════════════════════════════════════════════════════════════════════
+
+const COMPACT_PREFIX: &str = "This session is being continued from a previous conversation";
+
+/// Detect if a user message is actually a compact summary injected by Claude Code.
+/// Primary: parentUuid matches a compact_boundary event UUID (structural).
+/// Fallback: content starts with the known compact summary prefix (heuristic).
+fn is_compact_summary(
+    db: &missiond_core::db::MissionDB,
+    session_id: &str,
+    msg: &missiond_core::CCMessageLine,
+) -> bool {
+    let text = events_sync::extract_text_content(&msg.message.content);
+    if !text.starts_with(COMPACT_PREFIX) {
+        return false;
+    }
+
+    // Text matched — warn if compact_boundary event is missing (race condition or data gap)
+    let has_boundary = msg.parent_uuid.as_ref()
+        .and_then(|uuid| db.is_compact_boundary_event(session_id, uuid).ok())
+        .unwrap_or(false);
+
+    if !has_boundary {
+        warn!(
+            session = %session_id,
+            "Compact summary detected by text pattern only — compact_boundary event not found"
+        );
+    }
+
+    true
 }

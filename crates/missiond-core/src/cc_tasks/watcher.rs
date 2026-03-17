@@ -398,18 +398,20 @@ impl CCTasksWatcher {
                                     }
                                 }
 
+                                // Events first: ensures compact_boundary is in DB
+                                // before compact summary message is processed
+                                if !events.is_empty() {
+                                    let _ = event_tx.send(WatcherEvent::NewEvents {
+                                        session_id: session_id.clone(),
+                                        events,
+                                    });
+                                }
                                 if !messages.is_empty() {
                                     let _ = event_tx.send(WatcherEvent::NewMessages {
-                                        session_id: session_id.clone(),
+                                        session_id,
                                         project_path,
                                         jsonl_path: file_path_str.clone(),
                                         messages,
-                                    });
-                                }
-                                if !events.is_empty() {
-                                    let _ = event_tx.send(WatcherEvent::NewEvents {
-                                        session_id,
-                                        events,
                                     });
                                 }
                             }
@@ -462,18 +464,20 @@ impl CCTasksWatcher {
                     }
                 }
 
+                // Events first: ensures compact_boundary is in DB
+                // before compact summary message is processed
+                if !events.is_empty() {
+                    let _ = event_tx.send(WatcherEvent::NewEvents {
+                        session_id: session.session_id.clone(),
+                        events,
+                    });
+                }
                 if !messages.is_empty() {
                     let _ = event_tx.send(WatcherEvent::NewMessages {
                         session_id: session.session_id.clone(),
                         project_path: session.project_path.clone(),
                         jsonl_path: file_path_str.clone(),
                         messages,
-                    });
-                }
-                if !events.is_empty() {
-                    let _ = event_tx.send(WatcherEvent::NewEvents {
-                        session_id: session.session_id.clone(),
-                        events,
                     });
                 }
             }
