@@ -390,6 +390,10 @@ pub fn handle_new_events(db: &MissionDB, session_id: String, events: Vec<Value>)
             .and_then(|t| t.as_str())
             .unwrap_or("")
             .to_string();
+        // Extract event UUID for dedup: progress/system have "uuid", file-history-snapshot has "messageId"
+        let event_uuid = val.get("uuid").and_then(|v| v.as_str())
+            .or_else(|| val.get("messageId").and_then(|v| v.as_str()))
+            .map(String::from);
 
         match msg_type {
             "progress" => {
@@ -495,6 +499,7 @@ pub fn handle_new_events(db: &MissionDB, session_id: String, events: Vec<Value>)
                         conv_events.push(missiond_core::types::ConversationEvent {
                             id: 0,
                             session_id: session_id.clone(),
+                            event_uuid: event_uuid.clone(),
                             event_type: "hook_progress".to_string(),
                             content: Some(format!("{hook_event}:{hook_name}")),
                             raw_data: serde_json::to_string(val).ok(),
@@ -505,6 +510,7 @@ pub fn handle_new_events(db: &MissionDB, session_id: String, events: Vec<Value>)
                         conv_events.push(missiond_core::types::ConversationEvent {
                             id: 0,
                             session_id: session_id.clone(),
+                            event_uuid: event_uuid.clone(),
                             event_type: format!("progress:{data_type}"),
                             content: None,
                             raw_data: serde_json::to_string(val).ok(),
@@ -540,6 +546,7 @@ pub fn handle_new_events(db: &MissionDB, session_id: String, events: Vec<Value>)
                 conv_events.push(missiond_core::types::ConversationEvent {
                     id: 0,
                     session_id: session_id.clone(),
+                    event_uuid: event_uuid.clone(),
                     event_type: subtype.to_string(),
                     content,
                     raw_data: serde_json::to_string(val).ok(),
@@ -559,6 +566,7 @@ pub fn handle_new_events(db: &MissionDB, session_id: String, events: Vec<Value>)
                 conv_events.push(missiond_core::types::ConversationEvent {
                     id: 0,
                     session_id: session_id.clone(),
+                    event_uuid: event_uuid.clone(),
                     event_type: format!("queue:{operation}"),
                     content: if content.is_empty() {
                         None
@@ -573,6 +581,7 @@ pub fn handle_new_events(db: &MissionDB, session_id: String, events: Vec<Value>)
                 conv_events.push(missiond_core::types::ConversationEvent {
                     id: 0,
                     session_id: session_id.clone(),
+                    event_uuid: event_uuid.clone(),
                     event_type: "file_history_snapshot".to_string(),
                     content: None,
                     raw_data: serde_json::to_string(val).ok(),
@@ -584,6 +593,7 @@ pub fn handle_new_events(db: &MissionDB, session_id: String, events: Vec<Value>)
                 conv_events.push(missiond_core::types::ConversationEvent {
                     id: 0,
                     session_id: session_id.clone(),
+                    event_uuid: event_uuid.clone(),
                     event_type: format!("unknown:{msg_type}"),
                     content: None,
                     raw_data: serde_json::to_string(val).ok(),
