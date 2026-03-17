@@ -20,6 +20,7 @@ use std::future::Future;
 use std::sync::Arc;
 use tracing::info;
 
+use crate::control_tree::Dependency;
 use crate::state::AppState;
 pub use registry::{WorkerRegistry, WorkerContext};
 
@@ -37,6 +38,10 @@ pub(crate) trait BackgroundWorker: Send + 'static {
     /// Human-readable name for logging.
     fn name(&self) -> &'static str;
 
+    /// ControlTree dependencies for cascade pause evaluation.
+    /// Override to declare LLM provider / domain dependencies.
+    fn dependencies(&self) -> Vec<Dependency> { Vec::new() }
+
     /// Run the worker's main loop. This future runs until natural completion
     /// or is cancelled by the shutdown signal in `spawn_worker`.
     fn run(self, state: Arc<AppState>, ctx: WorkerContext) -> impl Future<Output = ()> + Send;
@@ -44,7 +49,7 @@ pub(crate) trait BackgroundWorker: Send + 'static {
 
 /// Spawn a background worker with unified lifecycle management.
 ///
-/// - Registers the worker in the global WorkerRegistry
+/// - Registers the worker in the global WorkerRegistry (with ControlTree deps)
 /// - Logs start/stop with worker name
 /// - Integrates with the shutdown watch channel for graceful termination
 /// - Returns a JoinHandle for optional tracking
@@ -54,7 +59,9 @@ pub(crate) fn spawn_worker<W: BackgroundWorker>(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     let name = worker.name();
-    let ctx = state.worker_registry.register(name);
+    let deps = worker.dependencies();
+    let tree_rx = state.control_manager.subscribe();
+    let ctx = state.worker_registry.register_with_deps(name, deps, tree_rx);
     tokio::spawn(async move {
         tokio::select! {
             biased;

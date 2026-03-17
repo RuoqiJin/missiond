@@ -74,6 +74,11 @@ pub(crate) struct StepNarratorWorker;
 impl super::BackgroundWorker for StepNarratorWorker {
     fn name(&self) -> &'static str { "step_narrator" }
 
+    fn dependencies(&self) -> Vec<crate::control_tree::Dependency> {
+        use crate::control_tree::{Dependency, CtlProvider};
+        vec![Dependency::Provider(CtlProvider::Codex)]
+    }
+
     async fn run(self, state: Arc<AppState>, mut ctx: super::WorkerContext) {
         let codex = CodexCli::new(
             "codex".to_string(),

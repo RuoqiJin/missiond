@@ -13,6 +13,8 @@ mod context;
 mod infra;
 
 // ── Root-level modules ──
+#[allow(dead_code)]
+mod control_tree;
 mod events_sync;
 mod lenient;
 mod state;
@@ -571,6 +573,10 @@ async fn main() -> Result<()> {
         ast_embedding_cache: missiond_core::embedding::new_cache(),
         last_msg_span: Arc::new(std::sync::Mutex::new(HashMap::new())),
         worker_registry: Arc::new(workers::WorkerRegistry::new()),
+        control_manager: {
+            let (mgr, _rx) = control_tree::ControlManager::new(&home);
+            Arc::new(mgr)
+        },
         slot_dispatch: Arc::new(slot_dispatch::SlotDispatchGuard::new()),
         board_dispatch_notify: Arc::new(tokio::sync::Notify::new()),
         gemini_watch_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),

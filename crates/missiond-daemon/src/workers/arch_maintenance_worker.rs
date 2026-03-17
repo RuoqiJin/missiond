@@ -38,6 +38,11 @@ pub(crate) struct ArchMaintenanceWorker {
 impl BackgroundWorker for ArchMaintenanceWorker {
     fn name(&self) -> &'static str { "arch_maintenance" }
 
+    fn dependencies(&self) -> Vec<crate::control_tree::Dependency> {
+        use crate::control_tree::{Dependency, CtlProvider};
+        vec![Dependency::Provider(CtlProvider::Gemini)]
+    }
+
     async fn run(self, state: Arc<AppState>, mut ctx: WorkerContext) {
         let mut rx = self.timeline_rx;
         let mut debounce: HashMap<String, Instant> = HashMap::new();

@@ -30,5 +30,32 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["action"]
             }),
         ),
+        // ===== Unified Control Tree =====
+        ToolDefinition::new(
+            "mission_control",
+            "统一调控闸口。按维度控制: global(全局), provider(LLM模型), domain(功能域), worker(后台进程), slot_role(工位角色)。\
+             级联机制: 关 provider=sonnet 会自动暂停所有依赖 Sonnet 的 Worker(embedding/briefing/translation)。\
+             Provider: gemini/sonnet/codex/opus。Domain: memory/flow/board/strategy。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "target_type": {
+                        "type": "string",
+                        "enum": ["global", "provider", "domain", "worker", "slot_role"],
+                        "description": "控制维度"
+                    },
+                    "target_name": {
+                        "type": "string",
+                        "description": "名称(global 时可省略)。provider: gemini/sonnet/codex/opus, domain: memory/flow/board/strategy, worker: embedding/briefing_worker 等, slot_role: ops/memory/deploy 等"
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["pause", "resume", "status"],
+                        "description": "pause=关闸, resume=开闸, status=查看完整状态树"
+                    }
+                },
+                "required": ["action"]
+            }),
+        ),
     ]
 }

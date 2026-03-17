@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::path::PathBuf;
 use crate::helpers::char_boundary_at;
 use crate::helpers::default_mission_home;
-use crate::minimax_client::ChatMessage;
+
 
 #[derive(serde::Deserialize)]
 pub(crate) struct LlmConfig {
@@ -26,6 +26,10 @@ pub(crate) struct LlmConfig {
     /// Get from https://aistudio.google.com/app/apikey
     #[serde(default)]
     pub(crate) gemini_api_key: Option<String>,
+    /// Enable embedding backfill pipeline (default: false).
+    /// Set to true to run cursor-based backfill across all phases on startup.
+    #[serde(default)]
+    pub(crate) backfill_enabled: bool,
 }
 
 #[derive(serde::Deserialize, Clone)]
@@ -357,45 +361,26 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
         }
     }
 
-    // 3. Extract structured topics via LLM
+    // 3. Extract structured topics via LLM — fast fail, no fallback
     debug!(session = %session_id, text_len = conv_text.len(), "Topic pipeline: extracting topics");
-    let topics = match extract_conv_topics_llm(state, &conv_text, has_timeline).await {
-        Some(t) if !t.is_empty() => {
-            debug!(session = %session_id, count = t.len(), "Topics extracted: {:?}", &t);
+    let topics: Vec<Topic> = match extract_conv_topics_llm(state, &conv_text, has_timeline).await {
+        Some(t) => {
+            debug!(session = %session_id, count = t.len(), "Topics extracted");
             t
         }
-        _ => {
-            debug!(session = %session_id, "Topic extraction failed, using single-summary fallback");
-            // Fallback: try old-style summary as single topic
-            let fallback = generate_conv_summary_llm_legacy(state, &conv_text, has_timeline).await
-                .unwrap_or_else(|| {
-                    let first3: Vec<&str> = messages.iter().take(3).map(|m| m.content.as_str()).collect();
-                    let last3: Vec<&str> = messages.iter().rev().take(3).rev().map(|m| m.content.as_str()).collect();
-                    let mut fb = first3.join("\n");
-                    fb.push_str("\n...\n");
-                    fb.push_str(&last3.join("\n"));
-                    if fb.len() > 2000 {
-                        fb.truncate(char_boundary_at(&fb, 2000));
-                    }
-                    fb
-                });
-            // Truncate fallback to 200 chars to match topic length constraints
-            let fallback = if fallback.chars().count() > 200 {
-                fallback.chars().take(200).collect()
-            } else {
-                fallback
-            };
-            vec![fallback]
+        None => {
+            warn!(session = %session_id, "Topic extraction failed, skipping session");
+            return;
         }
     };
 
     // 4. Store combined summary for display (llm_summary column)
     let combined_summary = if topics.len() == 1 {
-        topics[0].clone()
+        topics[0].as_str().to_string()
     } else {
         topics.iter()
             .enumerate()
-            .map(|(i, t)| format!("{}. {}", i + 1, t))
+            .map(|(i, t)| format!("{}. {}", i + 1, t.as_str()))
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -417,10 +402,10 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
     let mut topic_vectors: Vec<(String, Vec<f32>)> = Vec::new();
     for topic in &topics {
         let svc = Arc::clone(embedding_service);
-        let text = topic.clone();
+        let text = topic.as_str().to_string();
         match tokio::task::spawn_blocking(move || svc.embed(&text)).await {
             Ok(Some(vec)) => {
-                topic_vectors.push((topic.clone(), vec));
+                topic_vectors.push((topic.as_str().to_string(), vec));
             }
             Ok(None) => {
                 warn!(session = %session_id, topic = %topic, "Embedding returned None");
@@ -450,7 +435,7 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
     cache.retain(|(id, _)| id != session_id);
     cache.push((session_id.to_string(), vecs_only));
 
-    info!(session = %session_id, topics = topics.len(), "Multi-topic embeddings generated");
+    info!(session = %session_id, topic_count = topics.len(), "Multi-topic embeddings generated");
 }
 
 /// Build the system prompt for topic extraction.
@@ -474,9 +459,72 @@ static LLM_TAG_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(
     regex::Regex::new(r"</?(?:invoke|think|thought|search|boltAction|minimax:tool_call|parameter)\b[^>]*>").unwrap()
 });
 
-/// Parse and validate topic strings from LLM response.
-/// Strips code fences, filters garbage (tool output leaks, LLM tags, overlength).
-fn parse_and_validate_topics(raw: &str, max_topics: usize) -> Option<Vec<String>> {
+// ─── Topic Value Object ───────────────────────────────────────────────
+// "Parse, don't validate" — once constructed, a Topic is guaranteed valid.
+// All validation rules (length, blacklist, sanitization) live here.
+
+const TOPIC_MIN_CHARS: usize = 10;
+const TOPIC_MAX_CHARS: usize = 200;
+const TOPIC_TRUNCATE_CHARS: usize = 150;
+
+/// A validated, sanitized topic string.
+/// Invariants enforced at construction:
+/// - 10–200 characters (char count, not bytes)
+/// - No internal newlines, no LLM pollution tags
+/// - Leading list markers stripped, truncated to 150 chars if needed
+#[derive(Debug, Clone)]
+struct Topic(String);
+
+impl Topic {
+    /// Sole construction path. Returns None if the raw string is garbage.
+    fn try_new(raw: &str) -> Option<Self> {
+        let t = raw.trim();
+        let char_count = t.chars().count();
+
+        // Hard reject: too short or too long (LLM hallucination)
+        if char_count < TOPIC_MIN_CHARS || char_count > TOPIC_MAX_CHARS {
+            return None;
+        }
+
+        // Content blacklist: tool output / thinking leaks
+        if t.contains("[Tool:") || t.contains("[Tool：") { return None; }
+        if t.starts_with("[A]") || t.starts_with("[R]") || t.starts_with("[T]") { return None; }
+        if t.contains('\n') { return None; }
+        if LLM_TAG_RE.is_match(t) { return None; }
+
+        // Sanitize: strip leading list markers "1. ", "- ", "* "
+        let cleaned = t.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-' || c == '*')
+            .trim_start();
+
+        // Truncate overlong (tolerance zone: 150–200 chars get trimmed, >200 already rejected)
+        let final_str: String = if cleaned.chars().count() > TOPIC_TRUNCATE_CHARS {
+            cleaned.chars().take(TOPIC_TRUNCATE_CHARS).collect()
+        } else {
+            cleaned.to_string()
+        };
+
+        // Re-check after stripping (markers might have been the bulk)
+        if final_str.chars().count() < TOPIC_MIN_CHARS {
+            return None;
+        }
+
+        Some(Self(final_str))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Topic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Parse LLM response into validated Topic objects.
+/// Strips code fences, parses JSON array, filters through Topic::try_new.
+fn parse_and_validate_topics(raw: &str, max_topics: usize) -> Option<Vec<Topic>> {
     let json_str = raw.trim();
     let json_str = if json_str.starts_with("```") {
         json_str
@@ -488,7 +536,7 @@ fn parse_and_validate_topics(raw: &str, max_topics: usize) -> Option<Vec<String>
         json_str
     };
 
-    let topics: Vec<String> = match serde_json::from_str(json_str) {
+    let raw_topics: Vec<String> = match serde_json::from_str(json_str) {
         Ok(t) => t,
         Err(e) => {
             warn!(error = %e, raw_preview = &json_str[..char_boundary_at(json_str, 200)], "Topic JSON parse failed");
@@ -496,53 +544,25 @@ fn parse_and_validate_topics(raw: &str, max_topics: usize) -> Option<Vec<String>
         }
     };
 
-    let valid: Vec<String> = topics.into_iter()
-        .filter(|t| {
-            let t = t.trim();
-            let char_count = t.chars().count();
-            // Length guard: 10-200 characters (not bytes — Chinese chars are 3 bytes each)
-            if char_count < 10 || char_count > 200 { return false; }
-            // Content blacklist: tool output / thinking leaks
-            if t.contains("[Tool:") || t.contains("[Tool：") { return false; }
-            if t.starts_with("[A]") || t.starts_with("[R]") || t.starts_with("[T]") { return false; }
-            // Contains internal newlines → likely raw output paste
-            if t.contains('\n') { return false; }
-            // Known LLM pollution tags only (narrow scope, avoids killing <vector>/<div> etc.)
-            if LLM_TAG_RE.is_match(t) { return false; }
-            true
-        })
-        .map(|t| {
-            let t = t.trim().to_string();
-            // Strip leading list markers: "1. ", "- ", "* "
-            let t = t.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-' || c == '*')
-                .trim_start()
-                .to_string();
-            // Final truncation safety net (by character count, not bytes)
-            if t.chars().count() > 150 {
-                t.chars().take(150).collect()
-            } else {
-                t
-            }
-        })
-        .filter(|t| t.chars().count() >= 10) // Re-check after stripping
+    let valid: Vec<Topic> = raw_topics.into_iter()
+        .filter_map(|t| Topic::try_new(&t))
         .take(max_topics)
         .collect();
 
     if valid.is_empty() { None } else { Some(valid) }
 }
 
-/// Extract structured topics from conversation.
-/// Primary: Claude Sonnet via Router (cpapi-claude-sonnet).
-/// Fallback: MiniMax M2.5 via Gateway.
+/// Extract structured topics from conversation via Sonnet.
+/// Fast fail — no fallback. Returns validated Topic objects or None.
 async fn extract_conv_topics_llm(
     state: &AppState,
     conv_text: &str,
     has_timeline: bool,
-) -> Option<Vec<String>> {
+) -> Option<Vec<Topic>> {
     let max_topics = if has_timeline { 8 } else { 5 };
     let system_prompt = topic_extraction_prompt(max_topics);
 
-    // Direct HTTP to Router — no Gemini CLI, no fallback, fast fail
+    // Direct HTTP to Router — no fallback, fast fail
     match crate::llm_gateway::call_sonnet_stateless(
         state, &system_prompt, conv_text, 1024, "embedding_topics",
     ).await {
@@ -556,48 +576,6 @@ async fn extract_conv_topics_llm(
         }
         Err(e) => {
             warn!(error = %e, "Sonnet topic extraction failed");
-            None
-        }
-    }
-}
-
-/// Legacy single-summary LLM call (fallback when topic extraction fails).
-async fn generate_conv_summary_llm_legacy(
-    state: &AppState,
-    conv_text: &str,
-    has_timeline: bool,
-) -> Option<String> {
-    let handle = state.sonnet.as_ref()?;
-
-    let system_prompt = if has_timeline {
-        "作为技术专家，请用 300 字以内总结以下长会话的完整生命周期。\n\
-        会话包含多个阶段摘要(compaction fragments)和最近消息。请覆盖所有阶段，必须包含：\n\
-        1. 会话的整体目标和演进过程\n\
-        2. 各阶段的关键成果或决策\n\
-        3. 涉及的核心技术栈和文件\n\
-        4. 最终结论或未完成事项\n\
-        输出纯文本，不要 Markdown 格式。"
-    } else {
-        "作为技术专家，请用 200 字以内总结以下排查/开发会话，必须包含：\n\
-        1. 遇到的核心问题或 Bug 表现\n\
-        2. 涉及的代码方法名、文件路径或技术栈\n\
-        3. 最终的解决思路或结论\n\
-        输出纯文本，不要 Markdown 格式。"
-    };
-
-    let messages = vec![
-        ChatMessage { role: "system".into(), content: system_prompt.to_string() },
-        ChatMessage { role: "user".into(), content: conv_text.to_string() },
-    ];
-
-    match handle.call_embedding(messages, Some(512), None).await {
-        Ok(content) => {
-            let trimmed = content.trim().to_string();
-            debug!(len = trimmed.len(), "Legacy LLM summary generated (Sonnet)");
-            Some(trimmed)
-        }
-        Err(e) => {
-            warn!(error = %e, "Sonnet legacy summary failed");
             None
         }
     }
@@ -687,10 +665,27 @@ pub(crate) struct EmbeddingLoopWorker {
 impl super::BackgroundWorker for EmbeddingLoopWorker {
     fn name(&self) -> &'static str { "embedding" }
 
-    async fn run(self, state: Arc<AppState>, _ctx: super::WorkerContext) {
+    fn dependencies(&self) -> Vec<crate::control_tree::Dependency> {
+        use crate::control_tree::{Dependency, CtlProvider, CtlDomain};
+        vec![Dependency::Provider(CtlProvider::Sonnet), Dependency::Domain(CtlDomain::Memory)]
+    }
+
+    async fn run(self, state: Arc<AppState>, mut ctx: super::WorkerContext) {
         let mut rx = self.rx;
-        info!("Embedding worker started (event-driven)");
-        while let Some(task) = rx.recv().await {
+        info!("Embedding worker started (event-driven, ControlTree-aware)");
+        loop {
+            // Block if paused (cascade: global, Sonnet gate, Memory domain, or direct)
+            ctx.wait_if_paused().await;
+
+            // Race: new task vs control state change (prevents phantom blocking on recv)
+            let task = tokio::select! {
+                biased;
+                _ = ctx.state_changed() => continue,
+                msg = rx.recv() => match msg {
+                    Some(t) => t,
+                    None => break,
+                },
+            };
             let db = state.mission.db();
             let provider_id = state.embedding_service.as_ref()
                 .map(|svc| svc.provider_id().to_string())
@@ -793,7 +788,12 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
 }
 
 /// Backfill entry point: determine resume phase from DB, then kick off first batch.
+/// Gated by `llm.yaml` → `backfill_enabled: true`. Skips silently when disabled.
 async fn backfill_start(state: &AppState, db: &missiond_core::db::MissionDB, provider_id: &str) {
+    if !state.backfill_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+        debug!("Backfill: disabled by config (backfill_enabled: false)");
+        return;
+    }
     info!("Backfill: checking resume state");
 
     let resume_phase = 'find: {
