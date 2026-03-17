@@ -264,19 +264,20 @@ impl ControlManager {
 
     fn mutate<F: FnOnce(&mut ControlTree)>(&self, f: F) {
         self.tx.send_modify(f);
-        self.persist();
-    }
-
-    fn persist(&self) {
+        // P0 fix (Gemini audit): persist via spawn_blocking to avoid
+        // blocking the Tokio worker thread with synchronous I/O.
         let tree = self.tx.borrow().clone();
-        match serde_json::to_string_pretty(&tree) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&self.persist_path, &json) {
-                    warn!(error = %e, "ControlTree: failed to persist");
+        let path = self.persist_path.clone();
+        tokio::task::spawn_blocking(move || {
+            match serde_json::to_string_pretty(&tree) {
+                Ok(json) => {
+                    if let Err(e) = std::fs::write(&path, &json) {
+                        warn!(error = %e, "ControlTree: failed to persist");
+                    }
                 }
+                Err(e) => warn!(error = %e, "ControlTree: failed to serialize"),
             }
-            Err(e) => warn!(error = %e, "ControlTree: failed to serialize"),
-        }
+        });
     }
 
     fn load_from_disk(path: &std::path::Path) -> ControlTree {

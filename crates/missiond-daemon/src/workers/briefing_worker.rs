@@ -252,7 +252,7 @@ impl super::BackgroundWorker for BriefingWorker {
                 // Race: event notification vs control state change
                 tokio::select! {
                     biased;
-                    _ = ctx.state_changed() => continue,
+                    _ = ctx.wait_until_paused() => continue,
                     _ = notify.notified() => continue,
                 }
             }

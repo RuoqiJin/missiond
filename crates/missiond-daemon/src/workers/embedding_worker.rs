@@ -680,7 +680,7 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
             // Race: new task vs control state change (prevents phantom blocking on recv)
             let task = tokio::select! {
                 biased;
-                _ = ctx.state_changed() => continue,
+                _ = ctx.wait_until_paused() => continue,
                 msg = rx.recv() => match msg {
                     Some(t) => t,
                     None => break,
