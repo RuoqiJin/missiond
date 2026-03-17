@@ -221,16 +221,23 @@ pub(crate) struct BriefingWorker;
 impl super::BackgroundWorker for BriefingWorker {
     fn name(&self) -> &'static str { "briefing_worker" }
 
-    async fn run(self, state: Arc<AppState>, _ctx: super::WorkerContext) {
+    fn dependencies(&self) -> Vec<crate::control_tree::Dependency> {
+        use crate::control_tree::{Dependency, CtlProvider};
+        vec![Dependency::Provider(CtlProvider::Sonnet)]
+    }
+
+    async fn run(self, state: Arc<AppState>, mut ctx: super::WorkerContext) {
         let notify = Arc::clone(&state.briefing_notify);
 
-        // Phase 3c: event-driven only (120s poll removed)
-        info!("Briefing worker started (event-driven, rate: gateway-managed)");
+        info!("Briefing worker started (event-driven, ControlTree-aware)");
 
         // Initial delay to let the daemon stabilize
         tokio::time::sleep(Duration::from_secs(30)).await;
 
         loop {
+            // Block if paused (cascade: global, Sonnet gate, or direct)
+            ctx.wait_if_paused().await;
+
             // Gemini ARB: check DB first — historical backlog may exist after restart
             let pending = match state.mission.db().find_timeline_needing_briefing(MIN_CONTENT_CHARS, BATCH_SIZE) {
                 Ok(p) => p,
@@ -242,9 +249,12 @@ impl super::BackgroundWorker for BriefingWorker {
             };
 
             if pending.is_empty() {
-                // No backlog — wait for next event notification
-                notify.notified().await;
-                continue;
+                // Race: event notification vs control state change
+                tokio::select! {
+                    biased;
+                    _ = ctx.state_changed() => continue,
+                    _ = notify.notified() => continue,
+                }
             }
 
             let batch_size = pending.len();

@@ -4,11 +4,17 @@ use serde_json::Value;
 use missiond_mcp::tools::ToolResult;
 
 use crate::codex_cli::set_codex_disabled;
+use crate::control_tree::{CtlProvider, CtlDomain};
 use crate::llm_gate::{self, LlmProvider};
 use crate::state::AppState;
 use crate::workers::registry::WorkerState;
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    // ── Unified Control Tree ──
+    if name == "mission_control" {
+        return handle_control(state, args);
+    }
+
     // Consolidated tool: mission_worker
     if name == "mission_worker" {
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
@@ -30,6 +36,98 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_worker_control" => worker_control(state, args),
         _ => Ok(ToolResult::error(format!("Unknown tool: {}", name))),
     }
+}
+
+// ── mission_control handler ─────────────────────────────────────────
+
+fn handle_control(state: &AppState, args: Value) -> Result<ToolResult> {
+    let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("status");
+    let target_type = args.get("target_type").and_then(|v| v.as_str()).unwrap_or("global");
+    let target_name = args.get("target_name").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Status: return full tree
+    if action == "status" {
+        let tree = state.control_manager.current();
+        return Ok(ToolResult::json_pretty(&tree.status_summary()));
+    }
+
+    let paused = match action {
+        "pause" => true,
+        "resume" => false,
+        _ => return Ok(ToolResult::error(format!("Unknown action: {}. Use pause/resume/status", action))),
+    };
+
+    let mgr = &state.control_manager;
+
+    match target_type {
+        "global" => {
+            mgr.set_global_paused(paused);
+            // Sync to legacy global_paused for backward compat
+            state.global_paused.store(paused, std::sync::atomic::Ordering::Relaxed);
+            if paused {
+                let now = chrono::Utc::now().timestamp();
+                state.global_paused_at.store(now, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                state.global_paused_at.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        "provider" => {
+            let provider = CtlProvider::from_str(target_name)
+                .ok_or_else(|| anyhow::anyhow!(
+                    "Unknown provider: '{}'. Available: gemini, sonnet, codex, opus", target_name
+                ))?;
+            mgr.set_provider(provider, paused);
+            // Sync to legacy llm_gate for backward compat
+            if let Some(legacy) = provider.to_llm_provider() {
+                llm_gate::set_disabled(legacy, paused);
+            }
+        }
+        "domain" => {
+            let domain = CtlDomain::from_str(target_name)
+                .ok_or_else(|| anyhow::anyhow!(
+                    "Unknown domain: '{}'. Available: memory, flow, board, strategy", target_name
+                ))?;
+            mgr.set_domain(domain, paused);
+            // Sync legacy memory_paused
+            if domain == CtlDomain::Memory {
+                state.memory_paused.store(paused, std::sync::atomic::Ordering::Relaxed);
+                if paused {
+                    let now = chrono::Utc::now().timestamp();
+                    state.memory_paused_at.store(now, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    state.memory_paused_at.store(0, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+        "worker" => {
+            if target_name.is_empty() {
+                return Ok(ToolResult::error("target_name is required for worker control"));
+            }
+            mgr.set_worker(target_name, paused);
+            // Also set legacy per-worker state
+            if let Some(h) = state.worker_registry.get(target_name) {
+                h.set_state(if paused { WorkerState::Paused } else { WorkerState::Running });
+            }
+        }
+        "slot_role" => {
+            if target_name.is_empty() {
+                return Ok(ToolResult::error("target_name is required for slot_role control"));
+            }
+            mgr.set_slot_role(target_name, paused);
+        }
+        _ => return Ok(ToolResult::error(format!(
+            "Unknown target_type: '{}'. Use: global, provider, domain, worker, slot_role", target_type
+        ))),
+    }
+
+    // Return updated state tree
+    let tree = state.control_manager.current();
+    Ok(ToolResult::json_pretty(&serde_json::json!({
+        "action": action,
+        "target_type": target_type,
+        "target_name": target_name,
+        "control_tree": tree.status_summary(),
+    })))
 }
 
 fn list_workers(state: &AppState) -> Result<ToolResult> {

@@ -7,6 +7,7 @@ use missiond_core::{
 };
 use tokio::sync::Mutex;
 
+use crate::control_tree::ControlManager;
 use crate::daemon_stats::DaemonStats;
 use crate::event_bus::EventBus;
 use crate::gemini_client::GeminiClient;
@@ -195,6 +196,8 @@ pub(crate) struct AppState {
     pub(crate) last_msg_span: Arc<std::sync::Mutex<HashMap<String, String>>>,
     /// Runtime worker registry — pause/resume/stats for all background workers.
     pub(crate) worker_registry: Arc<WorkerRegistry>,
+    /// Unified control tree — centralized pause/resume for all components.
+    pub(crate) control_manager: Arc<ControlManager>,
     /// Per-slot dispatch guard — prevents concurrent dispatch to the same PTY slot.
     pub(crate) slot_dispatch: Arc<SlotDispatchGuard>,
     /// Wakeup signal for board dispatch when a slot becomes idle.
@@ -222,6 +225,8 @@ pub(crate) struct AppState {
     pub(crate) config_file_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// In-memory async job store — tracks long-running operations.
     pub(crate) job_store: Arc<tokio::sync::RwLock<HashMap<String, missiond_core::types::AsyncJob>>>,
+    /// Embedding backfill enabled flag (from llm.yaml `backfill_enabled`).
+    pub(crate) backfill_enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Event-driven embedding tasks — the Worker sleeps until triggered.

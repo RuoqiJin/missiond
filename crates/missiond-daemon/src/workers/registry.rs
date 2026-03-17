@@ -1,8 +1,11 @@
 //! Worker Registry — runtime control for background workers.
 //!
-//! Provides cooperative pause/resume via `tokio::sync::watch` channels.
-//! Workers call `ctx.wait_if_paused()` at their loop boundary;
-//! external callers (MCP tools) use `handle.set_state()` to control them.
+//! Dual-mode pause evaluation:
+//! - **Legacy**: per-worker `watch<WorkerState>` (for MCP `mission_worker control pause X`)
+//! - **ControlTree**: centralized `watch<ControlTree>` with cascade dependencies
+//!
+//! A worker is considered paused if EITHER source says so (OR semantics).
+//! Workers call `ctx.wait_if_paused()` at their loop boundary.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -11,7 +14,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tracing::info;
 
-/// Worker lifecycle state.
+use crate::control_tree::{ControlTree, Dependency};
+
+/// Worker lifecycle state (legacy per-worker control).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkerState {
@@ -35,7 +40,10 @@ pub struct WorkerHandle {
 
 /// Internal context (held by worker, used inside its run loop).
 pub struct WorkerContext {
-    state_rx: watch::Receiver<WorkerState>,
+    name: String,
+    deps: Vec<Dependency>,
+    legacy_rx: watch::Receiver<WorkerState>,
+    tree_rx: watch::Receiver<ControlTree>,
     handle: Arc<WorkerHandle>,
 }
 
@@ -53,8 +61,14 @@ impl WorkerRegistry {
         Self { workers: Mutex::new(HashMap::new()) }
     }
 
-    /// Register a worker and return its context. Called by `spawn_worker`.
-    pub fn register(&self, name: &str) -> WorkerContext {
+    /// Register a worker with ControlTree dependencies.
+    /// Returns a WorkerContext that evaluates both legacy state AND ControlTree.
+    pub fn register_with_deps(
+        &self,
+        name: &str,
+        deps: Vec<Dependency>,
+        tree_rx: watch::Receiver<ControlTree>,
+    ) -> WorkerContext {
         let (tx, rx) = watch::channel(WorkerState::Running);
         let handle = Arc::new(WorkerHandle {
             name: name.to_string(),
@@ -64,7 +78,18 @@ impl WorkerRegistry {
             last_active_at: AtomicI64::new(now_epoch()),
         });
         self.workers.lock().unwrap().insert(name.to_string(), Arc::clone(&handle));
-        WorkerContext { state_rx: rx, handle }
+        WorkerContext {
+            name: name.to_string(),
+            deps,
+            legacy_rx: rx,
+            tree_rx,
+            handle,
+        }
+    }
+
+    /// Legacy register (no ControlTree deps). For workers that don't call LLMs.
+    pub fn register(&self, name: &str, tree_rx: watch::Receiver<ControlTree>) -> WorkerContext {
+        self.register_with_deps(name, Vec::new(), tree_rx)
     }
 
     /// Get a handle for external control (MCP tools).
@@ -114,24 +139,50 @@ impl WorkerHandle {
 // ── Context (worker-internal) ─────────────────────────────────────
 
 impl WorkerContext {
-    /// Block until state is Running. Call at the top of the worker's main loop.
-    /// If already Running, returns immediately (zero cost).
+    /// Is this worker effectively paused? Combines legacy + ControlTree.
+    fn is_effectively_paused(&self) -> bool {
+        // Legacy per-worker pause
+        if *self.legacy_rx.borrow() == WorkerState::Paused {
+            return true;
+        }
+        // ControlTree cascade
+        let tree = self.tree_rx.borrow();
+        tree.is_effectively_paused(&self.name, &self.deps)
+    }
+
+    /// Block until the worker should run. Call at the top of the main loop.
+    /// Wakes on EITHER legacy state change OR ControlTree change.
     pub async fn wait_if_paused(&mut self) {
-        if *self.state_rx.borrow_and_update() == WorkerState::Running {
+        if !self.is_effectively_paused() {
             return;
         }
-        info!(worker = %self.handle.name, "Worker paused, waiting to resume...");
-        while self.state_rx.changed().await.is_ok() {
-            if *self.state_rx.borrow_and_update() == WorkerState::Running {
-                info!(worker = %self.handle.name, "Worker resumed");
+        info!(worker = %self.name, "Worker paused (cascade), waiting to resume...");
+        loop {
+            // Wake on whichever changes first
+            tokio::select! {
+                biased;
+                res = self.legacy_rx.changed() => {
+                    if res.is_err() { return; }
+                }
+                res = self.tree_rx.changed() => {
+                    if res.is_err() { return; }
+                }
+            }
+            // Re-evaluate after wakeup
+            if !self.is_effectively_paused() {
+                info!(worker = %self.name, "Worker resumed");
                 return;
             }
         }
     }
 
-    /// For use inside `tokio::select!` — resolves when state changes (e.g. pause while sleeping).
+    /// For use inside `tokio::select!` — resolves when any control state changes.
     pub async fn state_changed(&mut self) {
-        let _ = self.state_rx.changed().await;
+        tokio::select! {
+            biased;
+            _ = self.legacy_rx.changed() => {}
+            _ = self.tree_rx.changed() => {}
+        }
     }
 
     /// Record a successful task completion.
@@ -148,6 +199,6 @@ impl WorkerContext {
 
     /// Check if currently paused (non-blocking).
     pub fn is_paused(&self) -> bool {
-        *self.state_rx.borrow() == WorkerState::Paused
+        self.is_effectively_paused()
     }
 }
