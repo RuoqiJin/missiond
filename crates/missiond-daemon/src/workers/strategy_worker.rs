@@ -44,6 +44,13 @@ static RE_BASE64: LazyLock<Regex> =
 pub(crate) async fn run_pending_analysis(state: &AppState) {
     let db = state.mission.db();
 
+    // Kill switch: daemon_state key "strategy_analyst_enabled" (default: enabled)
+    // Set to 0 to disable: INSERT OR REPLACE INTO daemon_state(key,value) VALUES('strategy_analyst_enabled','0')
+    if db.daemon_state_get("strategy_analyst_enabled").unwrap_or(None).map(|v| v == 0).unwrap_or(false) {
+        debug!("strategy_analyst: disabled via flag, skipping");
+        return;
+    }
+
     // Use existing deep analysis infrastructure to find pending sessions
     let pending = match db.get_pending_deep_analysis(STRATEGY_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES) {
         Ok(p) => p,
