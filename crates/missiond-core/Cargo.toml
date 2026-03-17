@@ -65,6 +65,9 @@ ab_glyph.workspace = true
 # Database
 rusqlite = { workspace = true }
 
+# Async trait
+async-trait.workspace = true
+
 # Embeddings (feature-gated, requires glibc — not available on MUSL)
 fastembed = { workspace = true, optional = true }
 
