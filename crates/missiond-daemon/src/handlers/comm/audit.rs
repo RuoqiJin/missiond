@@ -35,14 +35,13 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 include_reasoning: Option<bool>,
             }
             let Args { session_id, tool_filter, include_reasoning } = serde_json::from_value(args)?;
-            let db = state.mission.db();
-            let conv = db.get_conversation(&session_id)
+            let conv = state.store.get_conversation(&session_id).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
-            let calls = db.get_tool_calls_by_session(
+            let calls = state.store.get_tool_calls_by_session(
                 &session_id,
                 tool_filter.as_deref(),
                 10000,
-            ).map_err(|e| anyhow!("DB error: {}", e))?;
+            ).await.map_err(|e| anyhow!("DB error: {}", e))?;
 
             // Build Markdown trace
             let mut md = String::new();
@@ -58,7 +57,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
             // Optionally interleave reasoning from conversation_messages
             if include_reasoning.unwrap_or(false) {
-                let msgs = db.get_conversation_messages(&session_id, None, 10000)
+                let msgs = state.store.get_conversation_messages(&session_id, None, 10000).await
                     .unwrap_or_default();
                 // Build timeline: messages + tool calls sorted by timestamp
                 let mut msg_idx = 0;
@@ -97,8 +96,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 tool_id: String,
             }
             let Args { tool_id } = serde_json::from_value(args)?;
-            let db = state.mission.db();
-            let tc = db.get_tool_call_by_id(&tool_id)
+            let tc = state.store.get_tool_call_by_id(&tool_id).await
                 .map_err(|e| anyhow!("DB error: {}", e))?
                 .ok_or_else(|| anyhow!("Tool call not found: {}", tool_id))?;
 
@@ -128,8 +126,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 session_id: String,
             }
             let Args { session_id } = serde_json::from_value(args)?;
-            let db = state.mission.db();
-            let stats = db.get_tool_call_stats(&session_id)
+            let stats = state.store.get_tool_call_stats(&session_id).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
 
             let mut by_tool = serde_json::Map::new();
@@ -148,7 +145,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             }
 
             // Get first/last timestamps
-            let calls = db.get_tool_calls_by_session(&session_id, None, 10000)
+            let calls = state.store.get_tool_calls_by_session(&session_id, None, 10000).await
                 .unwrap_or_default();
             let first_ts = calls.first().map(|c| c.timestamp.as_str()).unwrap_or("N/A");
             let last_ts = calls.last().map(|c| c.timestamp.as_str()).unwrap_or("N/A");
@@ -177,17 +174,16 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             }
             let Args { task_id, include_messages } = serde_json::from_value(args)?;
             let include_msgs = include_messages.unwrap_or(true);
-            let db = state.mission.db();
 
             // 1. Get board task with notes
-            let task = db.get_board_task(&task_id)
+            let task = state.store.get_board_task(&task_id).await
                 .map_err(|e| anyhow!("DB error: {}", e))?
                 .ok_or_else(|| anyhow!("Task not found: {}", task_id))?;
-            let notes = db.get_board_task_notes(&task_id)
+            let notes = state.store.get_board_task_notes(&task_id).await
                 .unwrap_or_default();
 
             // 2. Find all conversations linked to this task
-            let linked_convs = db.list_conversations(None, 100, Some("all"), Some(&task_id), None, None, None)
+            let linked_convs = state.store.list_conversations(None, 100, Some("all"), Some(&task_id), None, None, None).await
                 .unwrap_or_default();
 
             // 3. Build export document
@@ -244,7 +240,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     md.push_str(&format!("- **Started**: {} | **Ended**: {}\n", conv.started_at, conv.ended_at.as_deref().unwrap_or("(active)")));
 
                     if include_msgs {
-                        let msgs = db.get_conversation_messages(&conv.id, None, 500)
+                        let msgs = state.store.get_conversation_messages(&conv.id, None, 500).await
                             .unwrap_or_default();
                         if !msgs.is_empty() {
                             md.push_str("\n#### Messages\n\n");
@@ -267,7 +263,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     }
 
                     // Include child sessions (subagents)
-                    let children = db.get_child_conversations(&conv.id).unwrap_or_default();
+                    let children = state.store.get_child_conversations(&conv.id).await.unwrap_or_default();
                     if !children.is_empty() {
                         md.push_str(&format!("\n#### Subagents ({})\n\n", children.len()));
                         for child in &children {

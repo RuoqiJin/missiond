@@ -314,8 +314,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             }
 
             // KB credential fallback
-            let kb_pass = state.mission.db()
-                .kb_search(&format!("{} password", target), Some("credential"))
+            let kb_pass = state.store
+                .kb_search(&format!("{} password", target), Some("credential")).await
                 .ok()
                 .and_then(|entries| entries.into_iter().next())
                 .and_then(|e| e.detail.as_ref()

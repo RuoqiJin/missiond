@@ -95,7 +95,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     };
 
     // Check slot limit
-    let active_count = state.mission.db().count_active_dynamic_slots()
+    let active_count = state.store.count_active_dynamic_slots().await
         .map_err(|e| anyhow!("DB error: {}", e))?;
     if active_count >= MAX_DYNAMIC_SLOTS {
         return Ok(ToolResult::structured_error(
@@ -177,7 +177,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     };
 
     // Persist to DB
-    state.mission.db().create_dynamic_slot(&dynamic_slot)
+    state.store.create_dynamic_slot(&dynamic_slot).await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
     // Register in SlotManager (runtime merge)
@@ -239,7 +239,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                     }));
                 }
                 Err(e) => {
-                    state_clone.mission.db().terminate_dynamic_slot(&slot_id_owned, "spawn_failed").ok();
+                    state_clone.store.terminate_dynamic_slot(&slot_id_owned, "spawn_failed").await.ok();
                     state_clone.mission.unregister_dynamic_slot(&slot_id_owned);
                     job.fail(format!("Failed to spawn slot: {}", e));
                 }
@@ -270,7 +270,7 @@ async fn terminate_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     let _ = state.pty.kill(slot_id).await;
 
     // Mark terminated in DB
-    let terminated = state.mission.db().terminate_dynamic_slot(slot_id, "user_terminated")
+    let terminated = state.store.terminate_dynamic_slot(slot_id, "user_terminated").await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
     if !terminated {
@@ -309,7 +309,7 @@ async fn extend_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         ));
     }
 
-    match state.mission.db().extend_dynamic_slot(slot_id, additional)
+    match state.store.extend_dynamic_slot(slot_id, additional).await
         .map_err(|e| anyhow!("DB error: {}", e))? {
         Some(new_expires) => Ok(ToolResult::json_pretty(&json!({
             "slot_id": slot_id,
@@ -328,7 +328,7 @@ async fn list_slots(state: &AppState, args: &Value) -> Result<ToolResult> {
     let status_filter = args.get("status").and_then(|v| v.as_str());
 
     // Get dynamic slots from DB
-    let dynamic_slots = state.mission.db().list_dynamic_slots(status_filter)
+    let dynamic_slots = state.store.list_dynamic_slots(status_filter).await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
     // Get static slots

@@ -43,12 +43,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 serde_json::from_value(args).unwrap_or(Args {
                     session_id: None, slot_id: None, since: None, group_by: None,
                 });
-            let rows = state.mission.db().token_stats(
+            let rows = state.store.token_stats(
                 session_id.as_deref(),
                 slot_id.as_deref(),
                 since.as_deref(),
                 group_by.as_deref(),
-            ).map_err(|e| anyhow!("DB error: {}", e))?;
+            ).await.map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&rows))
         }
 
@@ -70,8 +70,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
             let Args { status, limit, conversation_type, task_id, since, until, source } =
                 serde_json::from_value(args).unwrap_or(Args { status: None, limit: None, conversation_type: None, task_id: None, since: None, until: None, source: None });
-            let convs = state.mission.db()
-                .list_conversations(status.as_deref(), limit.unwrap_or(20), conversation_type.as_deref(), task_id.as_deref(), since.as_deref(), until.as_deref(), source.as_deref())
+            let convs = state.store
+                .list_conversations(status.as_deref(), limit.unwrap_or(20), conversation_type.as_deref(), task_id.as_deref(), since.as_deref(), until.as_deref(), source.as_deref()).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&convs))
         }
@@ -89,10 +89,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 include_raw: Option<bool>,
             }
             let Args { session_id, tail, since_id, include_raw } = serde_json::from_value(args)?;
-            let db = state.mission.db();
-            let conv = db.get_conversation(&session_id)
+            let conv = state.store.get_conversation(&session_id).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
-            let msgs = db.get_conversation_messages(&session_id, since_id, tail.unwrap_or(50))
+            let msgs = state.store.get_conversation_messages(&session_id, since_id, tail.unwrap_or(50)).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             let messages: Vec<serde_json::Value> = if include_raw.unwrap_or(false) {
                 // Full messages for frontend (includes rawContent/model/metadata for image rendering)
@@ -124,7 +123,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 }).collect()
             };
             // Include child (subagent) conversations summary
-            let children = db.get_child_conversations(&session_id)
+            let children = state.store.get_child_conversations(&session_id).await
                 .unwrap_or_default();
             let mut result = serde_json::json!({
                 "conversation": conv,
@@ -170,7 +169,6 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let top_k = limit.unwrap_or(10) as usize;
             let skip = offset.unwrap_or(0) as usize;
             let mode = query_mode.as_deref().unwrap_or("hybrid");
-            let db = state.mission.db();
 
             // Resolve timeRange to ISO timestamp
             let time_after: Option<String> = time_range.as_deref().and_then(|tr| {
@@ -187,13 +185,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
             // ── Path A: single-session message search (SQL-pushed filter) ──
             if let Some(ref sid) = session_id {
-                let q = query.clone();
-                let sid_owned = sid.clone();
-                let ta = time_after.clone();
                 let lim = top_k as i64;
-                let msgs = state.db_exec.run(move |db| {
-                    db.search_messages_filtered(&q, Some(&sid_owned), None, None, ta.as_deref(), lim)
-                }).await.map_err(|e| anyhow!("DB error: {}", e))?;
+                let msgs = state.store.search_messages_filtered(&query, Some(sid), None, None, time_after.as_deref(), lim).await
+                    .map_err(|e| anyhow!("DB error: {}", e))?;
                 let msgs_lite: Vec<serde_json::Value> = msgs.iter().map(|m| {
                     serde_json::json!({
                         "id": m.id, "sessionId": m.session_id,
@@ -211,15 +205,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
             // 1. FTS5 path (for hybrid + fts modes)
             let fts_ranked: Vec<(String, usize)> = if mode != "semantic" {
-                let q = query.clone();
                 let pool_limit = ((top_k + skip) * 3) as i64;
-                let ta = time_after.clone();
-                let proj = project.clone();
-                let fts_sessions = state.db_exec.run(move |db| {
-                    db.search_conversation_sessions_fts_filtered(
-                        &q, pool_limit, ta.as_deref(), proj.as_deref(),
-                    )
-                }).await.map_err(|e| anyhow!("DB error: {}", e))?;
+                let fts_sessions = state.store.search_conversation_sessions_fts_filtered(
+                    &query, pool_limit, time_after.as_deref(), project.as_deref(),
+                ).await.map_err(|e| anyhow!("DB error: {}", e))?;
                 fts_sessions.into_iter()
                     .enumerate()
                     .map(|(rank, (sid, _score))| (sid, rank))
@@ -284,12 +273,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             // 4. Enrich with snippets (FTS5 native) or llmSummary fallback
             let mut results = Vec::new();
             for (sid, _rrf, fts_r, _vec_r, sim) in &ranked {
-                let conv = db.get_conversation(sid).ok().flatten();
+                let conv = state.store.get_conversation(sid).await.ok().flatten();
 
                 // Build matchReason: FTS snippet if keyword-matched, llmSummary if vector-only
                 let match_reason = if fts_r.is_some() {
                     // FTS hit — get native snippet() from SQLite
-                    let snippets = db.get_session_fts_snippets(sid, &query, 3)
+                    let snippets = state.store.get_session_fts_snippets(sid, &query, 3).await
                         .unwrap_or_default();
                     if snippets.is_empty() {
                         conv.as_ref()
@@ -365,21 +354,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     .to_rfc3339())
             });
 
-            let q = query.clone();
-            let sid = session_id.clone();
-            let r = role.clone();
-            let tn = tool_name.clone();
-            let ta = time_after.clone();
-            let msgs = state.db_exec.run(move |db| {
-                db.search_messages_filtered(
-                    &q,
-                    sid.as_deref(),
-                    r.as_deref(),
-                    tn.as_deref(),
-                    ta.as_deref(),
-                    lim,
-                )
-            }).await.map_err(|e| anyhow!("DB error: {}", e))?;
+            let msgs = state.store.search_messages_filtered(
+                &query,
+                session_id.as_deref(),
+                role.as_deref(),
+                tool_name.as_deref(),
+                time_after.as_deref(),
+                lim,
+            ).await.map_err(|e| anyhow!("DB error: {}", e))?;
 
             let results: Vec<serde_json::Value> = msgs.iter().map(|m| {
                 serde_json::json!({
@@ -423,8 +405,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let before = before.unwrap_or(3).min(50);
             let after = after.unwrap_or(5).min(50);
 
-            let db = state.mission.db();
-            let result = db.get_messages_around(message_id, before, after)
+            let result = state.store.get_messages_around(message_id, before, after).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
 
             match result {
@@ -434,7 +415,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 }))),
                 Some((session_id, msgs)) => {
                     let anchor_index = msgs.iter().position(|m| m.id == message_id);
-                    let total: Option<i64> = db.get_conversation(&session_id)
+                    let total: Option<i64> = state.store.get_conversation(&session_id).await
                         .ok().flatten().map(|c| c.message_count);
 
                     let messages: Vec<serde_json::Value> = msgs.iter().map(|m| {
@@ -459,21 +440,19 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         }
 
         "mission_trigger_backfill" => {
-            let db = state.mission.db();
             let provider = state.embedding_service.as_ref()
                 .map(|svc| svc.provider_id().to_string())
                 .unwrap_or_else(|| "none".to_string());
 
             // Gather stats for all three systems
-            let conv_missing = db.conversations_missing_summary(9999).map(|v| v.len()).unwrap_or(0);
-            let conv_stale = state.embedding_service.as_ref()
-                .and_then(|svc| db.conversations_stale_embedding(svc.provider_id(), 9999).ok())
-                .map(|v| v.len())
-                .unwrap_or(0);
-            let kb_missing = db.kb_entries_missing_embedding(None).map(|v| v.len()).unwrap_or(0);
-            let kb_stale = db.kb_entries_stale_embedding(&provider, 9999).map(|v| v.len()).unwrap_or(0);
-            let skill_missing = db.skill_topics_missing_embedding(9999).map(|v| v.len()).unwrap_or(0);
-            let skill_stale = db.skill_topics_stale_embedding(&provider, 9999).map(|v| v.len()).unwrap_or(0);
+            let conv_missing = state.store.conversations_missing_summary(9999).await.map(|v| v.len()).unwrap_or(0);
+            let conv_stale = if let Some(svc) = state.embedding_service.as_ref() {
+                state.store.conversations_stale_embedding(svc.provider_id(), 9999).await.map(|v| v.len()).unwrap_or(0)
+            } else { 0 };
+            let kb_missing = state.store.kb_entries_missing_embedding(None).await.map(|v| v.len()).unwrap_or(0);
+            let kb_stale = state.store.kb_entries_stale_embedding(&provider, 9999).await.map(|v| v.len()).unwrap_or(0);
+            let skill_missing = state.store.skill_topics_missing_embedding(9999).await.map(|v| v.len()).unwrap_or(0);
+            let skill_stale = state.store.skill_topics_stale_embedding(&provider, 9999).await.map(|v| v.len()).unwrap_or(0);
 
             let total = conv_missing + conv_stale + kb_missing + kb_stale + skill_missing + skill_stale;
             if total == 0 {
@@ -494,8 +473,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         }
 
         "mission_habit_scan" => {
-            let db = state.mission.db();
-            let unscanned = db.count_unscanned_conversations().unwrap_or(0);
+            let unscanned = state.store.count_unscanned_conversations().await.unwrap_or(0);
 
             let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("status");
             match action {
@@ -507,7 +485,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                         })));
                     }
                     // Reset cadence to allow immediate run
-                    let _ = db.daemon_state_set("last_habit_scan_at", 0);
+                    let _ = state.store.daemon_state_set("last_habit_scan_at", 0).await;
                     Ok(ToolResult::json(&serde_json::json!({
                         "status": "triggered",
                         "unscanned": unscanned,
@@ -516,7 +494,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 }
                 _ => {
                     // Status: show scan progress
-                    let total = db.count_scannable_conversations().unwrap_or(0);
+                    let total = state.store.count_scannable_conversations().await.unwrap_or(0);
                     let scanned = total - unscanned;
                     Ok(ToolResult::json(&serde_json::json!({
                         "total": total,
@@ -529,8 +507,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         }
 
         "mission_embedding_stats" => {
-            let db = state.mission.db();
-            let mut stats = db.embedding_stats()
+            let mut stats = state.store.embedding_stats().await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             // Add cache sizes
             let kb_cache_size = state.kb_search_cache.read().await.len();
@@ -550,7 +527,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             });
             stats["currentProvider"] = serde_json::json!(provider);
             // AST embedding stats (code intelligence health)
-            if let Ok(ast) = db.ast_stats() {
+            if let Ok(ast) = state.store.ast_stats().await {
                 let coverage = if ast.total_nodes > 0 {
                     format!("{:.1}%", ast.embedded_nodes as f64 / ast.total_nodes as f64 * 100.0)
                 } else {
@@ -581,9 +558,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
             let Args { session_id, event_type, limit } =
                 serde_json::from_value(args).unwrap_or(Args { session_id: None, event_type: None, limit: None });
-            let db = state.mission.db();
             if let Some(sid) = &session_id {
-                let events = db.get_conversation_events(sid, event_type.as_deref(), limit.unwrap_or(100))
+                let events = state.store.get_conversation_events(sid, event_type.as_deref(), limit.unwrap_or(100)).await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 Ok(ToolResult::json(&serde_json::json!({
                     "sessionId": sid,
@@ -592,7 +568,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 })))
             } else {
                 // No sessionId → return event type summary
-                let summary = db.get_event_type_summary(None)
+                let summary = state.store.get_event_type_summary(None).await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 let summary_obj: Vec<serde_json::Value> = summary.iter().map(|(t, c)| {
                     serde_json::json!({ "eventType": t, "count": c })
@@ -613,8 +589,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 limit: Option<i64>,
             }
             let Args { tool_use_id, limit } = serde_json::from_value(args)?;
-            let msgs = state.mission.db()
-                .get_agent_trajectory(&tool_use_id, limit.unwrap_or(200))
+            let msgs = state.store.get_agent_trajectory(&tool_use_id, limit.unwrap_or(200)).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             // Extract agentId from first message metadata
             let agent_id = msgs.first()
@@ -642,13 +617,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
             let message_id = args_val.get("message_id").and_then(|v| v.as_i64())
                 .ok_or_else(|| anyhow!("missing message_id"))?;
-            let db = state.mission.db();
             // Include translation if available
-            let translation = db.get_translation(message_id)
+            let translation = state.store.get_translation(message_id).await
                 .ok()
                 .flatten()
                 .map(|(t, _)| t);
-            match db.get_conversation_message_by_id(message_id).map_err(|e| anyhow!("DB error: {}", e))? {
+            match state.store.get_conversation_message_by_id(message_id).await.map_err(|e| anyhow!("DB error: {}", e))? {
                 Some(msg) => Ok(ToolResult::json_pretty(&serde_json::json!({
                     "id": msg.id,
                     "session_id": msg.session_id,
@@ -667,8 +641,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
             let session_id = args_val.get("session_id").and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("missing session_id"))?;
-            let db = state.mission.db();
-            let narrations = db.get_narrations_for_session(session_id)?;
+            let narrations = state.store.get_narrations_for_session(session_id).await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
             let items: Vec<serde_json::Value> = narrations.iter()
                 .map(|(msg_id, title, intent, result)| serde_json::json!({
                     "message_id": msg_id,
@@ -697,7 +671,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let db = state.mission.db();
 
             // 1. Conversations
-            let convs = db.list_conversations(None, 500, Some("all"), None, Some(&since), Some(&until), None)
+            let convs = state.store.list_conversations(None, 500, Some("all"), None, Some(&since), Some(&until), None).await
                 .unwrap_or_default();
             let mut by_source: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
             let mut by_type: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
@@ -709,13 +683,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             // 2. Board tasks — direct SQL for time-based filtering
             let since_iso = db.parse_time_since(&since).replace(' ', "T");
             let until_iso = db.parse_time_until(&until).replace(' ', "T");
-            let board_created = db.query_board_tasks_in_range("created_at", &since_iso, &until_iso)
+            let board_created = state.store.query_board_tasks_in_range("created_at", &since_iso, &until_iso).await
                 .unwrap_or_default();
-            let board_completed = db.query_board_tasks_in_range_with_status("done", &since_iso, &until_iso)
+            let board_completed = state.store.query_board_tasks_in_range_with_status("done", &since_iso, &until_iso).await
                 .unwrap_or_default();
 
             // 3. Timeline stats
-            let timeline_stats = db.query_timeline_stats(Some(&since), Some(&until)).ok();
+            let timeline_stats = state.store.query_timeline_stats(Some(&since), Some(&until)).await.ok();
 
             // 4. Git commits (graceful degradation)
             let git_commits = {

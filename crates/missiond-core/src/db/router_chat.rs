@@ -30,7 +30,8 @@ impl MissionDB {
         Ok(id)
     }
 
-    /// Load router_chat message history as OpenAI-format messages array
+    /// Load router_chat message history as OpenAI-format messages array.
+    /// Full history load — used by callers that need everything (stats, export).
     pub fn router_chat_load_history(&self, conv_id: &str) -> DbResult<Vec<serde_json::Value>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
@@ -42,6 +43,84 @@ impl MissionDB {
             Ok(serde_json::json!({"role": role, "content": content}))
         })?.filter_map(|r| r.ok()).collect();
         Ok(msgs)
+    }
+
+    /// Get rolling summary and cursor for a conversation.
+    /// Returns (summary_text, last_summarized_msg_id).
+    pub fn router_chat_get_summary(&self, conv_id: &str) -> DbResult<(Option<String>, i64)> {
+        let conn = self.read_conn();
+        let result: (Option<String>, i64) = conn.query_row(
+            "SELECT rolling_summary, COALESCE(last_summarized_msg_id, 0)
+             FROM conversations WHERE id = ?1",
+            params![conv_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(result)
+    }
+
+    /// Load only active (unsummarized) messages — those after the summary cursor.
+    pub fn router_chat_load_active_history(&self, conv_id: &str, after_id: i64) -> DbResult<Vec<serde_json::Value>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT role, content FROM conversation_messages
+             WHERE session_id = ?1 AND id > ?2
+             ORDER BY id ASC"
+        )?;
+        let msgs: Vec<serde_json::Value> = stmt.query_map(params![conv_id, after_id], |row| {
+            let role: String = row.get(0)?;
+            let content: String = row.get(1)?;
+            Ok(serde_json::json!({"role": role, "content": content}))
+        })?.filter_map(|r| r.ok()).collect();
+        Ok(msgs)
+    }
+
+    /// Count unsummarized messages (for threshold check).
+    pub fn router_chat_unsummarized_count(&self, conv_id: &str, after_id: i64) -> DbResult<i64> {
+        let conn = self.read_conn();
+        conn.query_row(
+            "SELECT COUNT(*) FROM conversation_messages WHERE session_id = ?1 AND id > ?2",
+            params![conv_id, after_id],
+            |row| row.get(0),
+        ).map_err(Into::into)
+    }
+
+    /// Load a batch of oldest unsummarized messages for compression.
+    /// Returns Vec<(msg_id, role, content)> ordered by id ASC, limited to `batch_size`.
+    pub fn router_chat_load_compressible(
+        &self,
+        conv_id: &str,
+        after_id: i64,
+        batch_size: i64,
+    ) -> DbResult<Vec<(i64, String, String)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, role, content FROM conversation_messages
+             WHERE session_id = ?1 AND id > ?2
+             ORDER BY id ASC LIMIT ?3"
+        )?;
+        let rows: Vec<(i64, String, String)> = stmt.query_map(
+            params![conv_id, after_id, batch_size],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?.filter_map(|r| r.ok()).collect();
+        Ok(rows)
+    }
+
+    /// Update rolling summary and advance the cursor (optimistic lock on cursor).
+    pub fn router_chat_update_summary(
+        &self,
+        conv_id: &str,
+        new_summary: &str,
+        new_cursor: i64,
+        expected_old_cursor: i64,
+    ) -> DbResult<bool> {
+        let conn = self.conn();
+        let updated = conn.execute(
+            "UPDATE conversations
+             SET rolling_summary = ?1, last_summarized_msg_id = ?2
+             WHERE id = ?3 AND COALESCE(last_summarized_msg_id, 0) = ?4",
+            params![new_summary, new_cursor, conv_id, expected_old_cursor],
+        )?;
+        Ok(updated > 0)
     }
 
     /// Append messages to a router_chat conversation

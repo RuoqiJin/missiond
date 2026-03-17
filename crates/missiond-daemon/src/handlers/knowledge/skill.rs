@@ -73,8 +73,6 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         "mission_skill_search" => {
             let SkillSearchArgs { query } = serde_json::from_value(args)?;
 
-            let db = state.mission.db();
-
             // Collect all topic-level scores: (topic, name_bonus, fts_rank, vec_rank, cosine_sim, meta)
             let mut topic_scores: std::collections::HashMap<String, (f64, Option<usize>, Option<usize>, Option<f32>, Value)> = std::collections::HashMap::new();
 
@@ -91,7 +89,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             }
 
             // 2. FTS5 full-text search → fts_rank
-            if let Ok(fts_results) = db.skill_search_fts(&query) {
+            if let Ok(fts_results) = state.store.skill_search_fts(&query).await {
                 for (rank, r) in fts_results.iter().take(20).enumerate() {
                     let entry = topic_scores.entry(r.topic.clone()).or_insert_with(|| {
                         (0.0, None, None, None, serde_json::json!({
@@ -147,7 +145,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
             // Track hits
             for (topic, _, _) in scored.iter().take(5) {
-                let _ = db.skill_topic_hit(topic);
+                let _ = state.store.skill_topic_hit(topic).await;
             }
 
             Ok(ToolResult::json_pretty(&results))
@@ -158,7 +156,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
             // Also search KB for matching knowledge (spawn_blocking: FTS5 full KB scan)
             let q = query.clone();
-            if let Ok(mut entries) = state.db_exec.run(move |db| db.kb_search(&q, None)).await {
+            if let Ok(mut entries) = state.store.kb_search(&q, None).await {
                 // Sort by confidence × log(access_count + 1) descending
                 entries.sort_by(|a, b| {
                     let score_a = a.confidence * (a.access_count as f64 + 1.0).ln();
@@ -192,7 +190,6 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 include_board: Option<bool>,
             }
             let args: ContextResolveArgs = serde_json::from_value(args)?;
-            let db = state.mission.db();
             let include_board = args.include_board.unwrap_or(false);
 
             // Step 1: Find primary skills
@@ -218,7 +215,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 if !seen.insert(topic_name.clone()) { continue; }
                 all_skill_names.push(topic_name.clone());
 
-                if let Ok(Some(topic)) = db.skill_topic_get(topic_name) {
+                if let Ok(Some(topic)) = state.store.skill_topic_get(topic_name).await {
                     skill_results.push(json!({
                         "name": topic.topic,
                         "path": topic.file_path,
@@ -233,7 +230,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                             for dep_name in &req.skills {
                                 if seen.insert(dep_name.clone()) {
                                     all_skill_names.push(dep_name.clone());
-                                    if let Ok(Some(dep_topic)) = db.skill_topic_get(dep_name) {
+                                    if let Ok(Some(dep_topic)) = state.store.skill_topic_get(dep_name).await {
                                         skill_results.push(json!({
                                             "name": dep_topic.topic,
                                             "path": dep_topic.file_path,
@@ -245,7 +242,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                                             if let Ok(dreq) = serde_json::from_str::<missiond_core::SkillRequires>(drj) {
                                                 for dep2_name in &dreq.skills {
                                                     if seen.insert(dep2_name.clone()) {
-                                                        if let Ok(Some(dep2)) = db.skill_topic_get(dep2_name) {
+                                                        if let Ok(Some(dep2)) = state.store.skill_topic_get(dep2_name).await {
                                                             skill_results.push(json!({
                                                                 "name": dep2.topic,
                                                                 "path": dep2.file_path,
@@ -291,27 +288,25 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 }
             }
 
-            // Step 4: Aggregate KB (spawn_blocking: FTS5 per-category + fallback)
-            let q = args.query.clone();
-            let cats = kb_categories.clone();
-            let kb_batch = state.db_exec.run(move |db| {
+            // Step 4: Aggregate KB (FTS5 per-category + fallback)
+            let kb_batch = {
                 let mut results: Vec<(missiond_core::KnowledgeEntry, &'static str)> = Vec::new();
-                for cat in &cats {
-                    if let Ok(entries) = db.kb_search(&q, Some(cat)) {
+                for cat in &kb_categories {
+                    if let Ok(entries) = state.store.kb_search(&args.query, Some(cat)).await {
                         for entry in entries.into_iter().take(5) {
                             results.push((entry, "category_filter"));
                         }
                     }
                 }
                 if results.is_empty() {
-                    if let Ok(entries) = db.kb_search(&q, None) {
+                    if let Ok(entries) = state.store.kb_search(&args.query, None).await {
                         for entry in entries.into_iter().take(5) {
                             results.push((entry, "query"));
                         }
                     }
                 }
-                Ok(results)
-            }).await.unwrap_or_default();
+                results
+            };
             let mut kb_results: Vec<Value> = Vec::new();
             let mut kb_seen = std::collections::HashSet::new();
             for (entry, matched_by) in &kb_batch {
@@ -328,7 +323,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             // Step 5: Optional Board search
             let mut board_results: Vec<Value> = Vec::new();
             if include_board {
-                if let Ok(tasks) = db.list_board_tasks(None, false) {
+                if let Ok(tasks) = state.store.list_board_tasks(None, false).await {
                     let query_lower = args.query.to_lowercase();
                     for task in tasks.iter().take(100) {
                         if task.title.to_lowercase().contains(&query_lower)
@@ -364,39 +359,39 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 sort_order: Option<i32>,
             }
             let args: SkillUpsertArgs = serde_json::from_value(args)?;
-            let db = state.mission.db();
 
             // Ensure topic exists
-            if db.skill_topic_get(&args.topic).map_err(|e| anyhow!("DB: {}", e))?.is_none() {
+            if state.store.skill_topic_get(&args.topic).await.map_err(|e| anyhow!("DB: {}", e))?.is_none() {
                 // Auto-create topic with default path
                 let skills_dir = dirs::home_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
                     .join(".claude/skills");
                 let file_path = skills_dir.join(&args.topic).join("SKILL.md");
-                db.skill_topic_upsert(
+                state.store.skill_topic_upsert(
                     &args.topic, None, None, None,
                     &file_path.to_string_lossy(), None, None,
-                ).map_err(|e| anyhow!("DB: {}", e))?;
+                ).await.map_err(|e| anyhow!("DB: {}", e))?;
             }
 
             // Find existing block with same title, or create new
-            let blocks = db.skill_blocks_for_topic(&args.topic)
+            let blocks = state.store.skill_blocks_for_topic(&args.topic).await
                 .map_err(|e| anyhow!("DB: {}", e))?;
             let existing = blocks.iter().find(|b| b.title.as_deref() == Some(&args.section_title));
 
             let action;
             if let Some(block) = existing {
-                db.skill_block_update(&block.id, &args.content)
+                state.store.skill_block_update(&block.id, &args.content).await
                     .map_err(|e| anyhow!("DB: {}", e))?;
                 action = "updated";
             } else {
                 let sort = args.sort_order.unwrap_or(blocks.len() as i32);
-                db.skill_block_insert(&args.topic, "section", Some(&args.section_title), &args.content, sort)
+                state.store.skill_block_insert(&args.topic, "section", Some(&args.section_title), &args.content, sort).await
                     .map_err(|e| anyhow!("DB: {}", e))?;
                 action = "created";
             }
 
             // Materialize to file
+            let db = state.mission.db();
             let materialize_result = missiond_core::skill::materialize_topic(db, &args.topic);
 
             // Trigger incremental embedding update
@@ -414,28 +409,28 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 content: String,
             }
             let args: SkillRecordArgs = serde_json::from_value(args)?;
-            let db = state.mission.db();
 
             // Ensure topic exists
-            if db.skill_topic_get(&args.topic).map_err(|e| anyhow!("DB: {}", e))?.is_none() {
+            if state.store.skill_topic_get(&args.topic).await.map_err(|e| anyhow!("DB: {}", e))?.is_none() {
                 let skills_dir = dirs::home_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
                     .join(".claude/skills");
                 let file_path = skills_dir.join(&args.topic).join("SKILL.md");
-                db.skill_topic_upsert(
+                state.store.skill_topic_upsert(
                     &args.topic, None, None, None,
                     &file_path.to_string_lossy(), None, None,
-                ).map_err(|e| anyhow!("DB: {}", e))?;
+                ).await.map_err(|e| anyhow!("DB: {}", e))?;
             }
 
-            db.skill_block_insert(&args.topic, "fragment", None, &args.content, 0)
+            state.store.skill_block_insert(&args.topic, "fragment", None, &args.content, 0).await
                 .map_err(|e| anyhow!("DB: {}", e))?;
 
-            let topic_meta = db.skill_topic_get(&args.topic)
+            let topic_meta = state.store.skill_topic_get(&args.topic).await
                 .map_err(|e| anyhow!("DB: {}", e))?;
             let frag_count = topic_meta.map(|t| t.fragment_count).unwrap_or(0);
 
             // Materialize
+            let db = state.mission.db();
             let _ = missiond_core::skill::materialize_topic(db, &args.topic);
 
             // Trigger incremental embedding update
@@ -469,8 +464,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             }
         }
         "mission_skill_topics" => {
-            let db = state.mission.db();
-            let topics = db.skill_topic_list()
+            let topics = state.store.skill_topic_list().await
                 .map_err(|e| anyhow!("DB: {}", e))?;
             Ok(ToolResult::json_pretty(&topics))
         }
@@ -499,14 +493,13 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             }
             let args: SkillActionsArgs = serde_json::from_value(args)
                 .unwrap_or(SkillActionsArgs { skill: None });
-            let db = state.mission.db();
 
             let topics = if let Some(ref name) = args.skill {
-                db.skill_topic_get(name)
+                state.store.skill_topic_get(name).await
                     .map_err(|e| anyhow!("DB: {}", e))?
                     .into_iter().collect::<Vec<_>>()
             } else {
-                db.skill_topic_list()
+                state.store.skill_topic_list().await
                     .map_err(|e| anyhow!("DB: {}", e))?
             };
 
@@ -546,8 +539,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             }
             let args: StatsArgs = serde_json::from_value(args)
                 .unwrap_or(StatsArgs { skill: None });
-            let db = state.mission.db();
-            let stats = db.skill_execution_stats(args.skill.as_deref())
+            let stats = state.store.skill_execution_stats(args.skill.as_deref()).await
                 .map_err(|e| anyhow!("DB: {}", e))?;
             Ok(ToolResult::json_pretty(&stats))
         }
@@ -561,17 +553,16 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 version_id: Option<i64>,
             }
             let args: RollbackArgs = serde_json::from_value(args)?;
-            let db = state.mission.db();
 
             if let Some(vid) = args.version_id {
                 // Rollback to specific version
-                let version = db.skill_version_get(vid)
+                let version = state.store.skill_version_get(vid).await
                     .map_err(|e| anyhow!("DB: {}", e))?
                     .ok_or_else(|| anyhow!("Version {} not found", vid))?;
                 if version.topic != args.skill {
                     return Ok(ToolResult::error(format!("Version {} belongs to '{}', not '{}'", vid, version.topic, args.skill)));
                 }
-                let topic = db.skill_topic_get(&args.skill)
+                let topic = state.store.skill_topic_get(&args.skill).await
                     .map_err(|e| anyhow!("DB: {}", e))?
                     .ok_or_else(|| anyhow!("Skill '{}' not found", args.skill))?;
                 std::fs::write(&topic.file_path, &version.content)
@@ -580,11 +571,12 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 let skills_dir = std::path::Path::new(&topic.file_path).parent()
                     .and_then(|p| p.parent())
                     .unwrap_or(std::path::Path::new("."));
+                let db = state.mission.db();
                 missiond_core::skill::ingest_skills(db, skills_dir);
                 Ok(ToolResult::text(format!("Rolled back '{}' to version {} ({})", args.skill, vid, version.created_at)))
             } else {
                 // List available versions
-                let versions = db.skill_version_list(&args.skill, 10)
+                let versions = state.store.skill_version_list(&args.skill, 10).await
                     .map_err(|e| anyhow!("DB: {}", e))?;
                 if versions.is_empty() {
                     return Ok(ToolResult::text(format!("No version history for '{}'", args.skill)));

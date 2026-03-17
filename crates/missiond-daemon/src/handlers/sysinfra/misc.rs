@@ -209,7 +209,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 note_type: Some("progress".to_string()),
                 author: Some("flow-engine".to_string()),
             };
-            let _ = state.mission.db().add_board_task_note(&note_input);
+            let _ = state.store.add_board_task_note(&note_input).await;
 
             // Hard intercept: Plan → Execute transition requires risk review
             if phase == missiond_core::types::EngineeringPhase::Plan {
@@ -228,7 +228,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     options: None,
                     decision_type: Some("risk".to_string()),
                 };
-                match state.mission.db().create_agent_question(&q_input) {
+                match state.store.create_agent_question(&q_input).await {
                     Ok(q) => {
                         info!(task_id = %task.id, question_id = %q.id, "Hard intercept: Plan→Execute risk review created");
                         state.event_bus.publish(crate::event_bus::DaemonEvent::QuestionCreated { question_id: q.id.clone() });
@@ -249,7 +249,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     options: None,
                     decision_type: Some("implementation".to_string()),
                 };
-                match state.mission.db().create_agent_question(&q_input) {
+                match state.store.create_agent_question(&q_input).await {
                     Ok(q) => {
                         info!(task_id = %task.id, question_id = %q.id, "Soft intercept: created master decision question");
                         state.event_bus.publish(crate::event_bus::DaemonEvent::QuestionCreated { question_id: q.id.clone() });
@@ -283,18 +283,18 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
             let args: SlotHistoryArgs = serde_json::from_value(args)?;
             if args.stats.unwrap_or(false) {
-                let stats = state.mission.db()
-                    .slot_task_stats(args.slot_id.as_deref())
+                let stats = state.store
+                    .slot_task_stats(args.slot_id.as_deref()).await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 Ok(ToolResult::json_pretty(&stats))
             } else {
-                let tasks = state.mission.db()
+                let tasks = state.store
                     .list_slot_tasks(
                         args.slot_id.as_deref(),
                         args.task_type.as_deref(),
                         args.status.as_deref(),
                         args.limit.unwrap_or(20),
-                    )
+                    ).await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 Ok(ToolResult::json_pretty(&tasks))
             }
@@ -344,7 +344,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_incident_list" => {
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as i64;
             let limit = limit.min(100);
-            let incidents = state.mission.db().list_incidents(limit)
+            let incidents = state.store.list_incidents(limit).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&incidents))
         }
@@ -532,8 +532,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let status = args_val.get("status").and_then(|v| v.as_str());
             let limit = args_val.get("limit").and_then(|v| v.as_i64()).unwrap_or(20);
 
-            let db = state.mission.db();
-            let rows = db.gemini_log_query(caller, session_id, status, limit)
+            let rows = state.store.gemini_log_query(caller, session_id, status, limit).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&serde_json::json!({
                 "count": rows.len(),
@@ -542,8 +541,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         }
 
         "mission_gemini_stats" => {
-            let db = state.mission.db();
-            let stats = db.gemini_log_stats()
+            let stats = state.store.gemini_log_stats().await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&stats))
         }
@@ -552,8 +550,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
             let request_id = args_val.get("request_id").and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("missing request_id"))?;
-            let db = state.mission.db();
-            match db.gemini_log_get_content(request_id).map_err(|e| anyhow!("DB error: {}", e))? {
+            match state.store.gemini_log_get_content(request_id).await.map_err(|e| anyhow!("DB error: {}", e))? {
                 Some(content) => Ok(ToolResult::json_pretty(&content)),
                 None => Ok(ToolResult::error("Request not found")),
             }
@@ -694,7 +691,7 @@ async fn gemini_watch_loop(state: AppState) {
                 timeout_secs: None,
                 context_intent: None,
             };
-            if let Err(e) = state.mission.db().create_board_task(&input) {
+            if let Err(e) = state.store.create_board_task(&input).await {
                 warn!("Gemini watch: failed to create board task: {}", e);
             }
             break;

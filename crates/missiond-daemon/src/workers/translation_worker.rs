@@ -121,12 +121,12 @@ async fn translate_message(
     match result {
         Ok(translation) if !translation.is_empty() => {
             // Store in DB
-            state.mission.db().insert_translation(
+            state.store.insert_translation(
                 ctx.message_id,
                 &translation,
                 "MiniMax-M2.5-highspeed",
                 duration_ms,
-            )?;
+            ).await?;
 
             // Preview: first ~80 chars
             let preview: String = translation.chars().take(80).collect();
@@ -277,7 +277,7 @@ async fn run_loop(
 /// Process a single message with its trace context. Returns true on success (or skip), false on failure.
 async fn process_single(state: &AppState, ctx: ThinkingTraceCtx) -> bool {
     // Check if already translated
-    match state.mission.db().has_translation(ctx.message_id) {
+    match state.store.has_translation(ctx.message_id).await {
         Ok(true) => {
             debug!(message_id = ctx.message_id, "Translation: already exists, skipping");
             return true;
@@ -290,7 +290,7 @@ async fn process_single(state: &AppState, ctx: ThinkingTraceCtx) -> bool {
     }
 
     // Fetch full content
-    let content = match state.mission.db().get_conversation_message_by_id(ctx.message_id) {
+    let content = match state.store.get_conversation_message_by_id(ctx.message_id).await {
         Ok(Some(msg)) => msg.content,
         Ok(None) => {
             debug!(message_id = ctx.message_id, "Translation: message not found");
@@ -320,15 +320,14 @@ async fn process_single(state: &AppState, ctx: ThinkingTraceCtx) -> bool {
 /// Poll DB for thinking messages that don't have translations yet.
 async fn poll_pending(state: &AppState, consecutive_failures: &mut u32) {
     // Find thinking_message timeline entries from the last 24h that lack translations
-    let db = state.mission.db();
-    let rows = match db.query_timeline_filtered(
+    let rows = match state.store.query_timeline_filtered(
         Some("thinking_message"),
         None,
         None,
         None,
         50,
         0,
-    ) {
+    ).await {
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "Translation poll: DB query failed");
@@ -352,7 +351,7 @@ async fn poll_pending(state: &AppState, consecutive_failures: &mut u32) {
         };
 
         // Skip if already translated
-        match db.has_translation(msg_id) {
+        match state.store.has_translation(msg_id).await {
             Ok(true) => continue,
             Err(_) => continue,
             _ => {}

@@ -7,20 +7,18 @@ const MANAGED_END: &str = "<!-- missiond:managed:end -->";
 
 /// Sync KB preferences + strategic context + hot topics into ~/.claude/CLAUDE.md managed section.
 /// Only writes when content actually changes (hash-based detection).
-pub(crate) fn sync_claude_md(state: &AppState) {
-    let db = state.mission.db();
-
-    let preferences = db.kb_list(Some("preference")).unwrap_or_default();
-    let hot_keys = db.kb_hot_keys(20).unwrap_or_default();
+pub(crate) async fn sync_claude_md(state: &AppState) {
+    let preferences = state.store.kb_list(Some("preference")).await.unwrap_or_default();
+    let hot_keys = state.store.kb_hot_keys(20).await.unwrap_or_default();
 
     // Load strategic state from KB (Phase 2b: context feedback)
-    let strategic_state = db.kb_get("strategic-state")
+    let strategic_state = state.store.kb_get("strategic-state").await
         .ok()
         .flatten()
         .and_then(|e| e.detail);
 
     // Running board tasks for Active Tasks anchor
-    let running_tasks = db.list_board_tasks(Some("running"), false).unwrap_or_default();
+    let running_tasks = state.store.list_board_tasks(Some("running"), false).await.unwrap_or_default();
 
     // Nothing to sync
     if preferences.is_empty() && hot_keys.is_empty() && strategic_state.is_none() && running_tasks.is_empty() {

@@ -34,7 +34,7 @@ impl super::BackgroundWorker for PtyEventWorker {
                     if !content.is_empty() {
                         state.slot_last_responses.write().await.insert(slot_id.clone(), content.clone());
                     }
-                    handle_pty_text_complete(&state, slot_id, turn_id, content, timestamp);
+                    handle_pty_text_complete(&state, slot_id, turn_id, content, timestamp).await;
                 }
                 Ok(missiond_core::ManagerEvent::Exited { slot_id, exit_code }) => {
                     handle_exited(&state, &slot_id, exit_code).await;
@@ -60,15 +60,15 @@ impl super::BackgroundWorker for PtyEventWorker {
 
 async fn handle_exited(s: &AppState, slot_id: &str, exit_code: i32) {
     info!(slot_id = %slot_id, exit_code = exit_code, "PTY session exited");
-    let old_uuid = s.mission.db().get_slot_session(slot_id).unwrap_or(None);
+    let old_uuid = s.store.get_slot_session(slot_id).await.unwrap_or(None);
     if let Some(ref uuid) = old_uuid {
-        let _ = s.mission.db().complete_conversation(uuid);
+        let _ = s.store.complete_conversation(uuid).await;
         // Ground truth: persist exit code for Learning Engine
-        let _ = s.mission.db().save_conversation_exit_code(uuid, exit_code);
+        let _ = s.store.save_conversation_exit_code(uuid, exit_code).await;
         let _ = s.embedding_tx.try_send(EmbeddingTask::ProcessSession(uuid.clone()));
 
         // Phase 3: Emit SessionCompleted for event-driven reflection pipeline
-        let (msg_count, duration) = s.mission.db().get_conversation(uuid)
+        let (msg_count, duration) = s.store.get_conversation(uuid).await
             .ok()
             .flatten()
             .map(|conv| {
@@ -104,7 +104,7 @@ async fn handle_exited(s: &AppState, slot_id: &str, exit_code: i32) {
 
         s.pty_session_uuids.write().await.remove(uuid);
     }
-    s.mission.db().clear_slot_session(slot_id);
+    let _ = s.store.delete_slot_session(slot_id).await;
 }
 
 async fn handle_state_change(
@@ -114,7 +114,7 @@ async fn handle_state_change(
     prev_state: missiond_core::SessionState,
 ) {
     // Publish slot state change with trace context
-    let trace_id = s.mission.db().get_slot_session(slot_id).ok().flatten();
+    let trace_id = s.store.get_slot_session(slot_id).await.ok().flatten();
     s.event_bus.publish_traced(
         event_bus::DaemonEvent::SlotStateChanged {
             slot_id: slot_id.to_string(),
@@ -181,9 +181,8 @@ async fn handle_memory_lane_state(
                 );
                 if is_realtime {
                     if !es.watermark_targets.is_empty() {
-                        let db = s.mission.db();
                         for (session_id, timestamp) in &es.watermark_targets {
-                            let _ = db.update_realtime_forwarded_at(session_id, timestamp);
+                            let _ = s.store.update_realtime_forwarded_at(session_id, timestamp).await;
                         }
                         info!(sessions = es.watermark_targets.len(), "Realtime: advanced watermarks");
                         es.watermark_targets.clear();
@@ -193,14 +192,14 @@ async fn handle_memory_lane_state(
                     if let Some(conv_id) = es.current_deep_conv_id.take() {
                         if es.is_checkpoint {
                             if let Some(msg_id) = es.checkpoint_message_id.take() {
-                                if let Err(e) = s.mission.db().update_deep_checkpoint(&conv_id, msg_id) {
+                                if let Err(e) = s.store.update_deep_checkpoint(&conv_id, msg_id).await {
                                     warn!(conv_id = %conv_id, error = %e, "Failed to advance checkpoint watermark");
                                 } else {
                                     info!(conv_id = %conv_id, msg_id, "Deep analysis checkpoint: advanced watermark");
                                 }
                             }
                         } else {
-                            if let Err(e) = s.mission.db().mark_analysis_complete(&conv_id, CURRENT_ANALYSIS_VERSION) {
+                            if let Err(e) = s.store.mark_analysis_complete(&conv_id, CURRENT_ANALYSIS_VERSION).await {
                                 warn!(conv_id = %conv_id, error = %e, "Failed to mark analysis complete");
                             } else {
                                 info!(conv_id = %conv_id, version = CURRENT_ANALYSIS_VERSION, "Deep analysis: marked complete");
@@ -209,7 +208,7 @@ async fn handle_memory_lane_state(
                     }
                 }
                 if let Some(ref st_id) = es.current_slot_task_id {
-                    let _ = s.mission.db().slot_task_set_completed(st_id, 0);
+                    let _ = s.store.slot_task_set_completed(st_id, 0).await;
                 }
                 let mem_trace_id = es.current_deep_conv_id.clone()
                     .or_else(|| es.current_task_id.clone());
@@ -244,14 +243,14 @@ async fn handle_memory_lane_state(
 }
 
 async fn handle_submit_task_closure(s: &AppState, slot_id: &str) {
-    if let Ok(running_tasks) = s.mission.db().get_tasks_by_status(missiond_core::types::TaskStatus::Running) {
+    if let Ok(running_tasks) = s.store.get_tasks_by_status(missiond_core::types::TaskStatus::Running).await {
         let now = chrono::Utc::now().timestamp_millis();
         const MIN_EXECUTION_MS: i64 = 5_000;
         const MIN_JSONL_EXECUTION_MS: i64 = 3_000;
         let pty_resp = s.slot_last_responses.write().await.remove(slot_id);
-        let jsonl_resp = match s.mission.db().get_slot_session(slot_id) {
+        let jsonl_resp = match s.store.get_slot_session(slot_id).await {
             Ok(Some(session_uuid)) => {
-                match s.mission.db().get_conversation(&session_uuid) {
+                match s.store.get_conversation(&session_uuid).await {
                     Ok(Some(conv)) => {
                         if let Some(ref jsonl_path) = conv.jsonl_path {
                             missiond_core::extract_last_assistant_text(std::path::Path::new(jsonl_path)).await
@@ -267,7 +266,7 @@ async fn handle_submit_task_closure(s: &AppState, slot_id: &str) {
             status: missiond_core::types::TaskStatus::Running,
             slot_id: Some(slot_id.to_string()), session_id: None,
             result: None, error: None, created_at: 0, started_at: None, finished_at: None,
-        }) {
+        }).await {
             missiond_core::jsonl_has_completed_turn(std::path::Path::new(&jsonl_path)).await
         } else { false };
         for task in &running_tasks {
@@ -303,7 +302,7 @@ async fn handle_submit_task_closure(s: &AppState, slot_id: &str) {
                 } else {
                     result_text
                 };
-                let _ = s.mission.db().update_task(
+                let _ = s.store.update_task(
                     &task.id,
                     &missiond_core::types::TaskUpdate {
                         status: Some(missiond_core::types::TaskStatus::Done),
@@ -311,8 +310,8 @@ async fn handle_submit_task_closure(s: &AppState, slot_id: &str) {
                         result: Some(result_text.clone()),
                         ..Default::default()
                     },
-                );
-                if let Ok(true) = s.mission.db().kb_ops_complete_by_task_id(&task.id, "done", Some(&result_text)) {
+                ).await;
+                if let Ok(true) = s.store.kb_ops_complete_by_task_id(&task.id, "done", Some(&result_text)).await {
                     info!(task_id = %task.id, "KB operation marked done via task completion");
                 }
                 info!(task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,

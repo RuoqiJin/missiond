@@ -85,7 +85,7 @@ impl GeminiFileApi {
     pub async fn prepare_file(
         &self,
         path: &Path,
-        db: &missiond_core::db::MissionDB,
+        store: &dyn missiond_core::db::traits::ObservabilityStore,
     ) -> Result<PreparedFile> {
         let data = tokio::fs::read(path).await
             .map_err(|e| anyhow!("Failed to read '{}': {}", path.display(), e))?;
@@ -104,7 +104,8 @@ impl GeminiFileApi {
         }
 
         // Check cache
-        if let Some(uri) = db.gemini_file_cache_get(&hash)? {
+        if let Some(uri) = store.gemini_file_cache_get(&hash).await
+            .map_err(|e| anyhow!("DB error: {}", e))? {
             info!(hash = %hash, uri = %uri, "Gemini File API: cache hit");
             return Ok(PreparedFile::FileRef { mime_type, file_uri: uri });
         }
@@ -114,7 +115,8 @@ impl GeminiFileApi {
 
         // Cache the result (40h TTL, File API keeps files for 48h)
         let expires_at = chrono::Utc::now().timestamp() + 40 * 3600;
-        db.gemini_file_cache_put(&hash, &file_uri, &mime_type, expires_at)?;
+        store.gemini_file_cache_put(&hash, &file_uri, &mime_type, expires_at).await
+            .map_err(|e| anyhow!("DB error: {}", e))?;
 
         Ok(PreparedFile::FileRef { mime_type, file_uri })
     }

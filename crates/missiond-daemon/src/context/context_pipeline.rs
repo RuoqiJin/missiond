@@ -597,7 +597,7 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
             PrefetchSource::Autopilot { task_id } => Some(task_id.as_str()),
             _ => None,
         };
-        let _ = state.mission.db().kb_log_co_access(&ids, "prefetch", session_id);
+        let _ = state.store.kb_log_co_access(&ids, "prefetch", session_id).await;
     }
 
     PrefetchResult {
@@ -652,8 +652,7 @@ async fn search_skills(state: &AppState, query: &str) -> Vec<SkillHint> {
         }
 
         // 2. FTS5
-        let db = state.mission.db();
-        if let Ok(fts_results) = db.skill_search_fts(query) {
+        if let Ok(fts_results) = state.store.skill_search_fts(query).await {
             for (rank, r) in fts_results.iter().take(20).enumerate() {
                 topic_scores.entry(r.topic.clone()).or_insert_with(|| {
                     (0.0, Some(rank), None, serde_json::json!({
@@ -745,17 +744,16 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
     let fut = async {
         let top_k = 10usize;
 
-        // 1. FTS5 ranked (spawn_blocking)
-        let q = query.to_string();
-        let fts_ranked: Vec<(String, usize, Option<String>)> = state.db_exec.run(move |db| {
-            let ranked = db.kb_search_fts_ranked(&q, None).unwrap_or_default();
+        // 1. FTS5 ranked
+        let fts_ranked: Vec<(String, usize, Option<String>)> = {
+            let ranked = state.store.kb_search_fts_ranked(query, None).await.unwrap_or_default();
             if ranked.is_empty() {
-                let like = db.kb_search_like_ranked(&q, None).unwrap_or_default();
-                Ok(like.into_iter().map(|(id, rank)| (id, rank, None)).collect())
+                let like = state.store.kb_search_like_ranked(query, None).await.unwrap_or_default();
+                like.into_iter().map(|(id, rank)| (id, rank, None)).collect()
             } else {
-                Ok(ranked)
+                ranked
             }
-        }).await.unwrap_or_default();
+        };
 
         // 2. Embedding cosine similarity
         let query_embedding = state.embedding_service.as_ref()
@@ -810,11 +808,10 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
         ranked.truncate(top_k * 3);
 
         // 4. Fetch entries + temporal decay
-        let db = state.mission.db();
         let now = chrono::Utc::now();
         let mut scored_entries: Vec<(KnowledgeEntry, f64)> = Vec::new();
         for (id, rrf) in &ranked {
-            if let Ok(Some(entry)) = db.kb_get_by_id(id) {
+            if let Ok(Some(entry)) = state.store.kb_get_by_id(id).await {
                 // Working Memory scope: skip scratchpad entries in global retrieval
                 if entry.scope_task_id.is_some() { continue; }
                 let age_days = chrono::DateTime::parse_from_rfc3339(&entry.updated_at)
@@ -836,9 +833,9 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
         // Knowledge Graph expansion: follow 1-hop edges to include related entries
         let primary_ids: Vec<String> = scored_entries.iter().map(|(e, _)| e.id.clone()).collect();
         if !primary_ids.is_empty() {
-            if let Ok(related_ids) = db.kb_expand_related(&primary_ids, 3) {
+            if let Ok(related_ids) = state.store.kb_expand_related(&primary_ids, 3).await {
                 for rid in &related_ids {
-                    if let Ok(Some(re)) = db.kb_get_by_id(rid) {
+                    if let Ok(Some(re)) = state.store.kb_get_by_id(rid).await {
                         if re.scope_task_id.is_none() {
                             scored_entries.push((re, 0.0)); // appended at lower priority
                         }
@@ -858,7 +855,7 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
                     for co_id in co_ids {
                         if to_add.len() >= 2 { break; }
                         if !existing_ids.contains(co_id) {
-                            if let Ok(Some(co_entry)) = db.kb_get_by_id(co_id) {
+                            if let Ok(Some(co_entry)) = state.store.kb_get_by_id(co_id).await {
                                 if co_entry.scope_task_id.is_none() {
                                     to_add.push((co_entry, 0.0));
                                 }
@@ -904,8 +901,7 @@ async fn search_task_ack(state: &AppState, ppid: Option<u32>) -> Vec<TaskUpdate>
     };
 
     let fut = async {
-        let db = state.mission.db();
-        let tasks = db.ack_completed_tasks(None).unwrap_or_default();
+        let tasks = state.store.ack_completed_tasks(None).await.unwrap_or_default();
         tasks.into_iter().map(|t| TaskUpdate {
             id: t.id[..8.min(t.id.len())].to_string(),
             slot_id: t.slot_id.unwrap_or_else(|| "?".to_string()),

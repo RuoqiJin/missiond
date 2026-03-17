@@ -56,13 +56,13 @@ fn emit_dispatch_event(event_bus: &EventBus, slot_id: &str, purpose: &str, promp
 
 // @beacon: memory
 pub(crate) async fn check_realtime_extraction(state: &AppState) {
-    if !check_extraction_gate(&state.extraction_state, &state.mission, "realtime").await {
+    if !check_extraction_gate(&state.extraction_state, state, "realtime").await {
         return;
     }
 
     // Priority enforcement: unified scheduler guarantees submit tasks run before this.
     // Skip if slot-memory is occupied by a running submit task (spawn_blocking: batch scan).
-    if let Ok(running) = state.db_exec.run(|db| db.get_tasks_by_status(missiond_core::types::TaskStatus::Running)).await {
+    if let Ok(running) = state.store.get_tasks_by_status(missiond_core::types::TaskStatus::Running).await {
         if running.iter().any(|t| t.slot_id.as_deref() == Some(MEMORY_SLOT_ID)) {
             debug!("realtime: skipping, running submit task on memory slot");
             return;
@@ -70,7 +70,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
     }
 
     // Watermark-based check (spawn_blocking: complex join + watermark query)
-    let raw_pending = match state.db_exec.run(|db| db.get_pending_realtime_messages()).await {
+    let raw_pending = match state.store.get_pending_realtime_messages().await {
         Ok(p) if !p.is_empty() => p,
         Ok(_) => {
             debug!("realtime: no pending messages (watermark)");
@@ -81,21 +81,22 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
 
     // Triage: skip sessions with zero user messages, auto-advance their watermarks.
     // Exception: compacted sessions always pass through (their tail won't get new user messages).
-    let db = state.mission.db();
     let mut pending = Vec::new();
     for (session_id, project, msgs) in raw_pending {
         let has_user = msgs.iter().any(|m| m.role == "user");
         // Lazy: only query DB for compacted status when no user messages (short-circuit)
-        let is_compacted = || {
-            db.get_conversation(&session_id)
+        let is_compacted = if !has_user {
+            state.store.get_conversation(&session_id).await
                 .map(|opt| opt.map_or(false, |c| c.status == "compacted"))
                 .unwrap_or(false)
+        } else {
+            false
         };
-        if has_user || is_compacted() {
+        if has_user || is_compacted {
             pending.push((session_id, project, msgs));
         } else {
             if let Some(last) = msgs.last() {
-                let _ = db.update_realtime_forwarded_at(&session_id, &last.timestamp);
+                let _ = state.store.update_realtime_forwarded_at(&session_id, &last.timestamp).await;
             }
         }
     }
@@ -137,8 +138,8 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
 
     // Generate task_id and tag the memory slot's current session
     let task_id = uuid::Uuid::new_v4().to_string();
-    if let Ok(Some(current_session)) = state.mission.db().get_slot_session(MEMORY_SLOT_ID) {
-        let _ = state.mission.db().set_conversation_task_id(&current_session, &task_id);
+    if let Ok(Some(current_session)) = state.store.get_slot_session(MEMORY_SLOT_ID).await {
+        let _ = state.store.set_conversation_task_id(&current_session, &task_id).await;
     }
 
     // Record slot task for history tracking
@@ -159,7 +160,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
         error: None,
         conversation_id: None,
     };
-    let _ = state.mission.db().insert_slot_task(&slot_task);
+    let _ = state.store.insert_slot_task(&slot_task).await;
 
     // Store watermark targets for advancing on completion
     {
@@ -181,7 +182,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
 
     let pty = Arc::clone(&state.pty);
     let extraction_state = Arc::clone(&state.extraction_state);
-    let mission = Arc::clone(&state.mission);
+    let store = Arc::clone(&state.store);
     let slot_task_id_clone = slot_task_id;
     tokio::spawn(async move {
         match pty.send(MEMORY_SLOT_ID, &prompt, 300_000).await {
@@ -189,7 +190,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
                 if is_auth_error(&res.response) || is_quota_exhausted(&res.response) {
                     let reason = if is_quota_exhausted(&res.response) { "API quota exhausted" } else { "OAuth token expired" };
                     warn!("Realtime extraction: {} on {}, aborting", reason, MEMORY_SLOT_ID);
-                    let _ = mission.db().slot_task_set_failed(&slot_task_id_clone, reason);
+                    let _ = store.slot_task_set_failed(&slot_task_id_clone, reason).await;
                     let mut es = extraction_state.write().await;
                     es.phase = ExtractionPhase::Idle;
                     es.active_type = None;
@@ -209,15 +210,14 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
                 if es.phase == ExtractionPhase::Sending || es.phase == ExtractionPhase::WaitingForSlotIdle {
                     // Advance watermarks for processed sessions
                     if !es.watermark_targets.is_empty() {
-                        let db = mission.db();
                         for (session_id, timestamp) in &es.watermark_targets {
-                            let _ = db.update_realtime_forwarded_at(session_id, timestamp);
+                            let _ = store.update_realtime_forwarded_at(session_id, timestamp).await;
                         }
                         info!(sessions = es.watermark_targets.len(), "Realtime: advanced watermarks (send-complete)");
                         es.watermark_targets.clear();
                     }
                     // Mark slot task completed
-                    let _ = mission.db().slot_task_set_completed(&slot_task_id_clone, 0);
+                    let _ = store.slot_task_set_completed(&slot_task_id_clone, 0).await;
                     info!(duration_ms = res.duration_ms, "Realtime extraction complete (send-path)");
                     es.phase = ExtractionPhase::Idle;
                     es.active_type = None;
@@ -230,14 +230,13 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
             }
             Err(e) => {
                 warn!(error = %e, "realtime extraction trigger failed");
-                let _ = mission.db().slot_task_set_failed(&slot_task_id_clone, &e.to_string());
+                let _ = store.slot_task_set_failed(&slot_task_id_clone, &e.to_string()).await;
                 let mut es = extraction_state.write().await;
                 // P5 fix: advance watermarks even on send() failure to prevent infinite loop.
                 // Messages were already prepared; not advancing causes permanent stall.
                 if matches!(es.active_type, Some("realtime")) && !es.watermark_targets.is_empty() {
-                    let db = mission.db();
                     for (session_id, timestamp) in &es.watermark_targets {
-                        if let Err(we) = db.update_realtime_forwarded_at(session_id, timestamp) {
+                        if let Err(we) = store.update_realtime_forwarded_at(session_id, timestamp).await {
                             warn!(session_id, error = %we, "Failed to advance watermark on send error");
                         }
                     }
@@ -259,13 +258,13 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
 /// Deep analysis on slow lane (slot-memory-slow).
 /// Reviews completed conversations using conversation-level watermark.
 pub(crate) async fn check_deep_analysis(state: &AppState) {
-    if !check_extraction_gate(&state.slow_extraction_state, &state.mission, "deep_analysis").await {
+    if !check_extraction_gate(&state.slow_extraction_state, state, "deep_analysis").await {
         return;
     }
 
     // Priority enforcement (spawn_blocking: batch scan).
     // Skip if slow slot is occupied by a running submit task.
-    if let Ok(running) = state.db_exec.run(|db| db.get_tasks_by_status(missiond_core::types::TaskStatus::Running)).await {
+    if let Ok(running) = state.store.get_tasks_by_status(missiond_core::types::TaskStatus::Running).await {
         if running.iter().any(|t| t.slot_id.as_deref() == Some(MEMORY_SLOW_SLOT_ID)) {
             debug!("deep_analysis: skipping, running submit task on slow slot");
             return;
@@ -286,7 +285,7 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
     }
 
     // spawn_blocking: pending deep analysis query
-    let pending_convs = match state.db_exec.run(|db| db.get_pending_deep_analysis(CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES)).await {
+    let pending_convs = match state.store.get_pending_deep_analysis(CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES).await {
         Ok(convs) => convs,
         Err(_) => return,
     };
@@ -295,7 +294,6 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
         return;
     }
 
-    let db = state.mission.db();
     for conv in &pending_convs {
         let is_checkpoint = conv.status == "active";
         let since_id = if is_checkpoint && conv.deep_analyzed_message_id > 0 {
@@ -304,15 +302,15 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
             None
         };
 
-        let msgs = db
-            .get_conversation_messages(&conv.id, since_id, 1000)
+        let msgs = state.store
+            .get_conversation_messages(&conv.id, since_id, 1000).await
             .unwrap_or_default();
         let msg_count = msgs.len();
 
         // Skip conversations with too few messages — mark analyzed and move on
         // (only for completed sessions; checkpoints already passed the 100-msg threshold)
         if !is_checkpoint && msg_count < 6 {
-            let _ = db.mark_analysis_complete(&conv.id, CURRENT_ANALYSIS_VERSION);
+            let _ = state.store.mark_analysis_complete(&conv.id, CURRENT_ANALYSIS_VERSION).await;
             continue;
         }
 
@@ -368,8 +366,8 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
 
         // Generate task_id and tag the slow slot's current session
         let task_id = uuid::Uuid::new_v4().to_string();
-        if let Ok(Some(current_session)) = state.mission.db().get_slot_session(MEMORY_SLOW_SLOT_ID) {
-            let _ = state.mission.db().set_conversation_task_id(&current_session, &task_id);
+        if let Ok(Some(current_session)) = state.store.get_slot_session(MEMORY_SLOW_SLOT_ID).await {
+            let _ = state.store.set_conversation_task_id(&current_session, &task_id).await;
         }
 
         // Record slot task for history tracking
@@ -389,7 +387,7 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
             error: None,
             conversation_id: None,
         };
-        let _ = state.mission.db().insert_slot_task(&slot_task);
+        let _ = state.store.insert_slot_task(&slot_task).await;
 
         // Set slow extraction state with conv_id for marking complete on Idle
         {
@@ -410,14 +408,14 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
         let conv_id = conv.id.clone();
         let pty = Arc::clone(&state.pty);
         let extraction_state = Arc::clone(&state.slow_extraction_state);
-        let mission = Arc::clone(&state.mission);
+        let store = Arc::clone(&state.store);
         tokio::spawn(async move {
             match pty.send(MEMORY_SLOW_SLOT_ID, &prompt, 900_000).await {
                 Ok(res) => {
                     if is_auth_error(&res.response) || is_quota_exhausted(&res.response) {
                         let reason = if is_quota_exhausted(&res.response) { "API quota exhausted" } else { "OAuth token expired" };
                         warn!(conv_id = %conv_id, "Deep analysis: {} on {}, aborting", reason, MEMORY_SLOW_SLOT_ID);
-                        let _ = mission.db().slot_task_set_failed(&slot_task_id, reason);
+                        let _ = store.slot_task_set_failed(&slot_task_id, reason).await;
                         let mut es = extraction_state.write().await;
                         es.phase = ExtractionPhase::Idle;
                         es.active_type = None;
@@ -439,15 +437,15 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
                         if let Some(cid) = &deep_cid {
                             if is_ckpt {
                                 if let Some(msg_id) = ckpt_msg_id {
-                                    let _ = mission.db().update_deep_checkpoint(cid, msg_id);
+                                    let _ = store.update_deep_checkpoint(cid, msg_id).await;
                                     info!(conv_id = %cid, msg_id, "Deep checkpoint: advanced watermark (send-path)");
                                 }
                             } else {
-                                let _ = mission.db().mark_analysis_complete(cid, CURRENT_ANALYSIS_VERSION);
+                                let _ = store.mark_analysis_complete(cid, CURRENT_ANALYSIS_VERSION).await;
                                 info!(conv_id = %cid, "Deep analysis: marked complete (send-path)");
                             }
                         }
-                        let _ = mission.db().slot_task_set_completed(&slot_task_id, 0);
+                        let _ = store.slot_task_set_completed(&slot_task_id, 0).await;
                         info!(conv_id = %conv_id, duration_ms = res.duration_ms, "Deep analysis complete (send-path)");
                         es.phase = ExtractionPhase::Idle;
                         es.active_type = None;
@@ -460,8 +458,8 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
                 }
                 Err(e) => {
                     warn!(conv_id = %conv_id, error = %e, "Deep analysis send() failed");
-                    let _ = mission.db().mark_analysis_failed(&conv_id);
-                    let _ = mission.db().slot_task_set_failed(&slot_task_id, &e.to_string());
+                    let _ = store.mark_analysis_failed(&conv_id).await;
+                    let _ = store.slot_task_set_failed(&slot_task_id, &e.to_string()).await;
                     let mut es = extraction_state.write().await;
                     es.phase = ExtractionPhase::Idle;
                     es.active_type = None;
@@ -482,22 +480,22 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
 pub(crate) async fn check_kb_consolidation(state: &AppState) {
     // Only run once per 24 hours (persisted in DB to survive daemon restarts)
     let now = chrono::Utc::now().timestamp();
-    if let Ok(Some(last)) = state.mission.db().last_completed_slot_task_at("kb_consolidation") {
+    if let Ok(Some(last)) = state.store.last_completed_slot_task_at("kb_consolidation").await {
         if now - last < 86400 {
             return;
         }
     }
 
     // Yield to deep analysis if there's pending work
-    let has_deep_pending = state.mission.db()
-        .has_pending_deep_analysis(CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES)
+    let has_deep_pending = state.store
+        .has_pending_deep_analysis(CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES).await
         .unwrap_or(false);
     if has_deep_pending {
         return;
     }
 
     // Gate: slow lane must be idle
-    if !check_extraction_gate(&state.slow_extraction_state, &state.mission, "kb_consolidation").await {
+    if !check_extraction_gate(&state.slow_extraction_state, state, "kb_consolidation").await {
         return;
     }
 
@@ -537,8 +535,8 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
 
     // Generate task_id and tag session
     let task_id = uuid::Uuid::new_v4().to_string();
-    if let Ok(Some(current_session)) = state.mission.db().get_slot_session(MEMORY_SLOW_SLOT_ID) {
-        let _ = state.mission.db().set_conversation_task_id(&current_session, &task_id);
+    if let Ok(Some(current_session)) = state.store.get_slot_session(MEMORY_SLOW_SLOT_ID).await {
+        let _ = state.store.set_conversation_task_id(&current_session, &task_id).await;
     }
 
     // Record slot task for history tracking
@@ -558,7 +556,7 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
         error: None,
         conversation_id: None,
     };
-    let _ = state.mission.db().insert_slot_task(&slot_task);
+    let _ = state.store.insert_slot_task(&slot_task).await;
 
     // Set slow extraction state
     {
@@ -574,14 +572,14 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
 
     let pty = Arc::clone(&state.pty);
     let extraction_state = Arc::clone(&state.slow_extraction_state);
-    let mission = Arc::clone(&state.mission);
+    let store = Arc::clone(&state.store);
     tokio::spawn(async move {
         match pty.send(MEMORY_SLOW_SLOT_ID, prompt, 900_000).await {
             Ok(res) => {
                 if is_auth_error(&res.response) || is_quota_exhausted(&res.response) {
                     let reason = if is_quota_exhausted(&res.response) { "API quota exhausted" } else { "OAuth token expired" };
                     warn!("KB consolidation: {} on {}, aborting", reason, MEMORY_SLOW_SLOT_ID);
-                    let _ = mission.db().slot_task_set_failed(&slot_task_id, reason);
+                    let _ = store.slot_task_set_failed(&slot_task_id, reason).await;
                     let mut es = extraction_state.write().await;
                     es.phase = ExtractionPhase::Idle;
                     es.active_type = None;
@@ -595,7 +593,7 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
                 // send() blocks until slot finishes — complete directly
                 let mut es = extraction_state.write().await;
                 if es.phase == ExtractionPhase::Sending || es.phase == ExtractionPhase::WaitingForSlotIdle {
-                    let _ = mission.db().slot_task_set_completed(&slot_task_id, 0);
+                    let _ = store.slot_task_set_completed(&slot_task_id, 0).await;
                     info!(duration_ms = res.duration_ms, "KB consolidation complete (send-path)");
                     es.phase = ExtractionPhase::Idle;
                     es.active_type = None;
@@ -607,7 +605,7 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
             }
             Err(e) => {
                 warn!(error = %e, "KB consolidation send() failed");
-                let _ = mission.db().slot_task_set_failed(&slot_task_id, &e.to_string());
+                let _ = store.slot_task_set_failed(&slot_task_id, &e.to_string()).await;
                 let mut es = extraction_state.write().await;
                 es.phase = ExtractionPhase::Idle;
                 es.active_type = None;
@@ -621,19 +619,19 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
 }
 
 /// KB auto-GC: delete infra, expired bugfix, stale zero-access entries. Runs hourly.
-pub(crate) fn check_kb_auto_gc(state: &AppState) {
+pub(crate) async fn check_kb_auto_gc(state: &AppState) {
     let now = chrono::Utc::now().timestamp();
-    let last = state.mission.db().daemon_state_get("last_auto_gc_at").unwrap_or(None).unwrap_or(0);
+    let last = state.store.daemon_state_get("last_auto_gc_at").await.unwrap_or(None).unwrap_or(0);
     if now - last < 3600 {
         return;
     }
 
-    match state.mission.db().kb_auto_gc() {
+    match state.store.kb_auto_gc().await {
         Ok(n) if n > 0 => info!(deleted = n, "KB auto-GC completed"),
         Ok(_) => debug!("KB auto-GC: nothing to clean"),
         Err(e) => warn!(error = %e, "KB auto-GC failed"),
     }
-    let _ = state.mission.db().daemon_state_set("last_auto_gc_at", now);
+    let _ = state.store.daemon_state_set("last_auto_gc_at", now).await;
 }
 
 /// Phase 4c: Weekly LLM reflection on low-utility KB entries.
@@ -645,7 +643,7 @@ const KB_REFLECTION_MAX_ENTRIES: usize = 20;
 
 pub(crate) async fn check_kb_reflection(state: &AppState) {
     let now = chrono::Utc::now().timestamp();
-    let last = state.mission.db().daemon_state_get("last_kb_reflection").unwrap_or(None).unwrap_or(0);
+    let last = state.store.daemon_state_get("last_kb_reflection").await.unwrap_or(None).unwrap_or(0);
     if now - last < KB_REFLECTION_INTERVAL_SECS {
         return;
     }
@@ -658,14 +656,14 @@ pub(crate) async fn check_kb_reflection(state: &AppState) {
         }
     };
 
-    let entries = match state.mission.db().kb_list_low_utility(
+    let entries = match state.store.kb_list_low_utility(
         KB_REFLECTION_UTILITY_THRESHOLD,
         KB_REFLECTION_MIN_ACCESS,
         KB_REFLECTION_MAX_ENTRIES,
-    ) {
+    ).await {
         Ok(e) if e.is_empty() => {
             debug!("KB reflection: no low-utility entries to reflect on");
-            let _ = state.mission.db().daemon_state_set("last_kb_reflection", now);
+            let _ = state.store.daemon_state_set("last_kb_reflection", now).await;
             return;
         }
         Ok(e) => e,
@@ -724,12 +722,11 @@ pub(crate) async fn check_kb_reflection(state: &AppState) {
         Ok(a) => a,
         Err(e) => {
             warn!(error = %e, raw = %analysis, "KB reflection: failed to parse Sonnet response");
-            let _ = state.mission.db().daemon_state_set("last_kb_reflection", now);
+            let _ = state.store.daemon_state_set("last_kb_reflection", now).await;
             return;
         }
     };
 
-    let db = state.mission.db();
     let mut deleted = 0usize;
     let mut re_extract = 0usize;
     let mut kept = 0usize;
@@ -739,14 +736,14 @@ pub(crate) async fn check_kb_reflection(state: &AppState) {
         match action["action"].as_str() {
             Some("delete") => {
                 // Gemini ARB safety net: verify utility is actually low before trusting LLM delete verdict
-                if let Ok(Some(entry)) = db.kb_get_by_id(id) {
+                if let Ok(Some(entry)) = state.store.kb_get_by_id(id).await {
                     if entry.utility_score >= KB_REFLECTION_UTILITY_THRESHOLD {
                         warn!(kb_id = id, utility = entry.utility_score,
                             "KB reflection: LLM suggested delete but utility recovered, skipping");
                         kept += 1;
                         continue;
                     }
-                    match db.kb_forget(&entry.key) {
+                    match state.store.kb_forget(&entry.key).await {
                         Ok(true) => { deleted += 1; }
                         Ok(false) => {}
                         Err(e) => warn!(kb_id = id, error = %e, "KB reflection: delete failed"),
@@ -754,19 +751,19 @@ pub(crate) async fn check_kb_reflection(state: &AppState) {
                 }
             }
             Some("re-extract") => {
-                match db.kb_mark_needs_re_extraction(&[id.to_string()]) {
+                match state.store.kb_mark_needs_re_extraction(&[id.to_string()]).await {
                     Ok(n) => { re_extract += n; }
                     Err(e) => warn!(kb_id = id, error = %e, "KB reflection: mark re-extract failed"),
                 }
             }
             _ => {
                 // keep: mild boost to recover
-                let _ = db.kb_batch_apply_utility_feedback(&[id.to_string()], true);
+                let _ = state.store.kb_batch_apply_utility_feedback(&[id.to_string()], true).await;
                 kept += 1;
             }
         }
     }
 
     info!(deleted, re_extract, kept, total = actions.len(), "KB reflection: completed");
-    let _ = state.mission.db().daemon_state_set("last_kb_reflection", now);
+    let _ = state.store.daemon_state_set("last_kb_reflection", now).await;
 }

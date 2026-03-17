@@ -20,10 +20,9 @@ impl super::BackgroundWorker for GeminiLoggerWorker {
 
     async fn run(self, state: Arc<AppState>, _ctx: super::WorkerContext) {
         let mut rx = self.timeline_rx;
-        let db = state.mission.db();
 
         // Startup cleanup: remove logs older than 7 days
-        if let Ok(deleted) = db.gemini_log_cleanup(7) {
+        if let Ok(deleted) = state.store.gemini_log_cleanup(7).await {
             if deleted > 0 {
                 info!(deleted, "Gemini log: cleaned up old entries");
             }
@@ -31,7 +30,7 @@ impl super::BackgroundWorker for GeminiLoggerWorker {
 
         loop {
             match rx.recv().await {
-                Ok(te) => handle_event(db, &te.event),
+                Ok(te) => handle_event(&state, &te.event).await,
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(skipped = n, "Gemini log subscriber lagged, some requests not logged");
                 }
@@ -44,18 +43,19 @@ impl super::BackgroundWorker for GeminiLoggerWorker {
     }
 }
 
-fn handle_event(db: &missiond_core::db::MissionDB, event: &event_bus::DaemonEvent) {
+async fn handle_event(state: &AppState, event: &event_bus::DaemonEvent) {
+    let store = state.store.as_ref();
     match event {
         // Unified CLI engine events
         event_bus::DaemonEvent::CliRequestStarted {
             engine, request_id, caller, session_id, model,
             prompt_chars, prompt_text, ..
         } => {
-            if let Err(e) = db.gemini_log_insert_started(
+            if let Err(e) = store.gemini_log_insert_started(
                 request_id, caller, session_id.as_deref(),
                 model, *prompt_chars as i64,
                 prompt_text.as_deref(),
-            ) {
+            ).await {
                 warn!(error = %e, engine = %engine, "CLI log: failed to insert started");
             }
         }
@@ -73,13 +73,13 @@ fn handle_event(db: &missiond_core::db::MissionDB, event: &event_bus::DaemonEven
             let retry_count = extra.get("retry_count")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            if let Err(e) = db.gemini_log_update_completed(
+            if let Err(e) = store.gemini_log_update_completed(
                 request_id, api_mode,
                 *response_chars as i64, queue_wait_ms as i64,
                 *duration_ms as i64, retry_count as i64,
                 status, error_msg.as_deref(),
                 response_text.as_deref(),
-            ) {
+            ).await {
                 warn!(error = %e, engine = %engine, "CLI log: failed to update completed");
             }
         }
@@ -88,11 +88,11 @@ fn handle_event(db: &missiond_core::db::MissionDB, event: &event_bus::DaemonEven
             request_id, caller, session_id, model,
             prompt_chars, prompt_text,
         } => {
-            if let Err(e) = db.gemini_log_insert_started(
+            if let Err(e) = store.gemini_log_insert_started(
                 request_id, caller, session_id.as_deref(),
                 model, *prompt_chars as i64,
                 prompt_text.as_deref(),
-            ) {
+            ).await {
                 warn!(error = %e, "Gemini log: failed to insert started");
             }
         }
@@ -101,24 +101,24 @@ fn handle_event(db: &missiond_core::db::MissionDB, event: &event_bus::DaemonEven
             response_chars, queue_wait_ms, duration_ms,
             retry_count, status, error_msg, response_text, ..
         } => {
-            if let Err(e) = db.gemini_log_update_completed(
+            if let Err(e) = store.gemini_log_update_completed(
                 request_id, api_mode,
                 *response_chars as i64, *queue_wait_ms as i64,
                 *duration_ms as i64, *retry_count as i64,
                 status, error_msg.as_deref(),
                 response_text.as_deref(),
-            ) {
+            ).await {
                 warn!(error = %e, "Gemini log: failed to update completed");
             }
         }
         event_bus::DaemonEvent::CodexRequestStarted {
             request_id, caller, model, prompt_chars, prompt_text, ..
         } => {
-            if let Err(e) = db.gemini_log_insert_started(
+            if let Err(e) = store.gemini_log_insert_started(
                 request_id, caller, None,
                 model, *prompt_chars as i64,
                 prompt_text.as_deref(),
-            ) {
+            ).await {
                 warn!(error = %e, "Codex log: failed to insert started");
             }
         }
@@ -126,13 +126,13 @@ fn handle_event(db: &missiond_core::db::MissionDB, event: &event_bus::DaemonEven
             request_id, response_chars, duration_ms,
             status, error_msg, response_text, ..
         } => {
-            if let Err(e) = db.gemini_log_update_completed(
+            if let Err(e) = store.gemini_log_update_completed(
                 request_id, "codex-cli",
                 *response_chars as i64, 0,
                 *duration_ms as i64, 0,
                 status, error_msg.as_deref(),
                 response_text.as_deref(),
-            ) {
+            ).await {
                 warn!(error = %e, "Codex log: failed to update completed");
             }
         }

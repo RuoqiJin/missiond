@@ -37,7 +37,7 @@ async fn run_loop(s: &AppState, rx: &mut broadcast::Receiver<WatcherEvent>) {
                 handle_new_messages_event(s, session_id, project_path, jsonl_path, messages).await;
             }
             Ok(WatcherEvent::NewEvents { session_id, events }) => {
-                events_sync::handle_new_events(s.mission.db(), session_id, events);
+                events_sync::handle_new_events(s, session_id, events).await;
             }
             Ok(WatcherEvent::SessionInactive(session)) => {
                 handle_session_inactive(s, &session.session_id).await;
@@ -64,16 +64,15 @@ async fn handle_new_messages_event(
     // Compaction detection
     let mut compaction_task_id: Option<String> = None;
     if !is_pty {
-        if let Some((slot_id, old_uuid, old_task_id)) = detect_compaction(s, &session_id, &project_path) {
+        if let Some((slot_id, old_uuid, old_task_id)) = detect_compaction(s, &session_id, &project_path).await {
             info!(
                 slot_id = %slot_id,
                 old_session = %old_uuid,
                 new_session = %session_id,
                 "Compaction detected: session replaced by context compaction"
             );
-            let db = s.mission.db();
-            let _ = db.mark_conversation_compacted(&old_uuid);
-            let _ = db.set_slot_session(&slot_id, &session_id);
+            let _ = s.store.mark_conversation_compacted(&old_uuid).await;
+            let _ = s.store.set_slot_session(&slot_id, &session_id).await;
             s.pty_session_uuids.write().await.remove(&old_uuid);
             s.pty_session_uuids.write().await.insert(session_id.clone());
             compaction_task_id = old_task_id;
@@ -91,7 +90,7 @@ async fn handle_new_messages_event(
 
     // Progress tracking
     if is_pty {
-        if let Ok(Some(slot_id)) = s.mission.db().get_slot_for_session(&session_id) {
+        if let Ok(Some(slot_id)) = s.store.get_slot_for_session(&session_id).await {
             let mut progress = s.slot_progress.write().await;
             let sp = progress.entry(slot_id).or_default();
             if sp.session_id != session_id {
@@ -133,41 +132,40 @@ async fn handle_new_messages_event(
     let db_messages: Vec<_> = messages.into_iter()
         .filter(|m| m.message_type != "tool_use")
         .collect();
-    handle_new_messages(s, session_id.clone(), project_path, jsonl_path, db_messages, is_pty);
+    handle_new_messages(s, session_id.clone(), project_path, jsonl_path, db_messages, is_pty).await;
 
     if let Some(tid) = compaction_task_id {
-        let _ = s.mission.db().set_conversation_task_id(&session_id, &tid);
+        let _ = s.store.set_conversation_task_id(&session_id, &tid).await;
     }
 }
 
 async fn handle_session_inactive(s: &AppState, session_id: &str) {
-    if let Ok(Some(conv)) = s.mission.db().get_conversation(session_id) {
+    if let Ok(Some(conv)) = s.store.get_conversation(session_id).await {
         if conv.status == "compacted" {
             debug!(session = %session_id, "Skipping inactive check for compacted session");
             return;
         }
     }
-    if let Err(e) = s.mission.db().complete_conversation(session_id) {
+    if let Err(e) = s.store.complete_conversation(session_id).await {
         warn!(session = %session_id, error = %e, "Failed to complete conversation");
     } else {
         info!(session = %session_id, "Conversation marked completed");
-        build_session_timeline(s, session_id);
+        build_session_timeline(s, session_id).await;
         let _ = s.embedding_tx.try_send(EmbeddingTask::ProcessSession(session_id.to_string()));
         // Auto-progress extraction: if this session was working on a Board task, extract progress
-        submit_board_progress_extraction(s, session_id);
+        submit_board_progress_extraction(s, session_id).await;
     }
 }
 
 /// Build session timeline if this parent session has compaction fragments.
-fn build_session_timeline(s: &AppState, session_id: &str) {
-    let db = s.mission.db();
-    let frags = db.get_compaction_fragments(session_id).unwrap_or_default();
+async fn build_session_timeline(s: &AppState, session_id: &str) {
+    let frags = s.store.get_compaction_fragments(session_id).await.unwrap_or_default();
     if frags.is_empty() {
         return;
     }
     let mut entries = Vec::new();
     for (idx, (frag_id, started_at, msg_count)) in frags.iter().enumerate() {
-        let summary = db.get_last_assistant_content(frag_id).unwrap_or(None);
+        let summary = s.store.get_last_assistant_content(frag_id).await.unwrap_or(None);
         let summary_tokens = summary.as_ref().map(|s| s.len() / 4).unwrap_or(0);
         entries.push(serde_json::json!({
             "fragment_id": frag_id,
@@ -180,7 +178,7 @@ fn build_session_timeline(s: &AppState, session_id: &str) {
         }));
     }
     if let Ok(json) = serde_json::to_string(&entries) {
-        match db.set_session_timeline(session_id, &json) {
+        match s.store.set_session_timeline(session_id, &json).await {
             Ok(true) => info!(session = %session_id, fragments = frags.len(), "Session timeline built"),
             Ok(false) => debug!(session = %session_id, "Session timeline already exists"),
             Err(e) => warn!(session = %session_id, error = %e, "Failed to build session timeline"),
@@ -190,13 +188,12 @@ fn build_session_timeline(s: &AppState, session_id: &str) {
 
 /// Reconcile: re-scan active sessions' JSONL to recover lost messages after broadcast lag.
 async fn reconcile(s: &AppState) {
-    let db = s.mission.db();
-    let convs = db.list_conversations(Some("active"), 100, Some("all"), None, None, None, None)
+    let convs = s.store.list_conversations(Some("active"), 100, Some("all"), None, None, None, None).await
         .unwrap_or_default();
     let mut reconciled = 0usize;
     for conv in &convs {
         if let Some(ref path) = conv.jsonl_path {
-            events_sync::reconcile_conversation_messages(db, &conv.id, path).await;
+            events_sync::reconcile_conversation_messages(s, &conv.id, path).await;
             reconciled += 1;
         }
     }
@@ -231,7 +228,7 @@ fn inherit_task_bindings(s: &AppState, old_session_id: &str, new_session_id: &st
 /// Submit board progress extraction when a session ends with bound Board tasks.
 /// Daemon-side: pre-assembles a token-safe conversation summary, then dispatches
 /// a structured JSON extraction task to the slow memory worker.
-fn submit_board_progress_extraction(s: &AppState, session_id: &str) {
+async fn submit_board_progress_extraction(s: &AppState, session_id: &str) {
     // 1. Remove bindings (session is ending)
     let bindings = match s.session_task_bindings.lock() {
         Ok(mut map) => map.remove(session_id).unwrap_or_default(),
@@ -240,23 +237,26 @@ fn submit_board_progress_extraction(s: &AppState, session_id: &str) {
     if bindings.is_empty() { return; }
 
     // 2. Filter: only keep tasks still in Running status
-    let db = s.mission.db();
-    let active_bindings: Vec<_> = bindings.into_iter().filter(|b| {
-        db.get_board_task(&b.task_id)
+    let mut active_bindings = Vec::new();
+    for b in bindings {
+        let is_running = s.store.get_board_task(&b.task_id).await
             .ok().flatten()
             .map(|t| t.status == missiond_core::types::BoardTaskStatus::Running)
-            .unwrap_or(false)
-    }).collect();
+            .unwrap_or(false);
+        if is_running {
+            active_bindings.push(b);
+        }
+    }
     if active_bindings.is_empty() { return; }
 
     // 3. Check message volume (< 4 → skip, not enough signal)
     // Gemini ARB: lowered from 10 to 4 — short efficient sessions still deserve progress extraction
-    let msgs = db.get_conversation_messages(session_id, None, 4)
+    let msgs = s.store.get_conversation_messages(session_id, None, 4).await
         .unwrap_or_default();
     if msgs.len() < 4 { return; }
 
     // 4. Build conversation summary (Rust-side, token-safe — Gemini P1)
-    let summary = build_conversation_summary_for_progress(s, session_id, 50);
+    let summary = build_conversation_summary_for_progress(s, session_id, 50).await;
 
     // 5. Build prompt with task info
     let task_list: Vec<String> = active_bindings.iter()
@@ -274,13 +274,13 @@ fn submit_board_progress_extraction(s: &AppState, session_id: &str) {
     match s.mission.submit("memory", &prompt) {
         Ok(task_id) => {
             // Pin to slow memory slot
-            let _ = s.mission.db().update_task(
+            let _ = s.store.update_task(
                 &task_id,
                 &missiond_core::types::TaskUpdate {
                     slot_id: Some(MEMORY_SLOW_SLOT_ID.to_string()),
                     ..Default::default()
                 },
-            );
+            ).await;
             info!(
                 session = %session_id,
                 tasks = active_bindings.len(),
@@ -298,9 +298,9 @@ fn submit_board_progress_extraction(s: &AppState, session_id: &str) {
 /// Extracts user + assistant messages, truncates long content, caps total at ~4000 tokens.
 /// Gemini ARB: tail-biased — recent messages are most important for is_done judgment.
 /// Strategy: build from tail, then reverse so output reads chronologically.
-fn build_conversation_summary_for_progress(s: &AppState, session_id: &str, max_messages: usize) -> String {
-    let messages = s.mission.db()
-        .get_conversation_messages(session_id, None, max_messages as i64)
+async fn build_conversation_summary_for_progress(s: &AppState, session_id: &str, max_messages: usize) -> String {
+    let messages = s.store
+        .get_conversation_messages(session_id, None, max_messages as i64).await
         .unwrap_or_default();
 
     // Build from tail (most recent first) to ensure latest progress is preserved

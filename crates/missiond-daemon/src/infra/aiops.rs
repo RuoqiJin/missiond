@@ -57,8 +57,6 @@ pub(crate) async fn health_scan(state: &AppState) {
         });
     }
 
-    let db = state.mission.db();
-
     while let Some(result) = set.join_next().await {
         let (server_id, server_name, endpoint, healthy) = match result {
             Ok(v) => v,
@@ -72,15 +70,15 @@ pub(crate) async fn health_scan(state: &AppState) {
 
         if healthy {
             // Recovery: auto-close the open alert task if one exists
-            match db.close_task_by_dedupe_key(&dedupe_key) {
+            match state.store.close_task_by_dedupe_key(&dedupe_key).await {
                 Ok(Some(task)) => {
                     // Add recovery note
-                    let _ = db.add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                    let _ = state.store.add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
                         task_id: task.id.to_string(),
                         content: format!("✅ 已自动恢复 ({})", chrono::Utc::now().format("%H:%M UTC")),
                         note_type: Some("progress".to_string()),
                         author: Some("aiops".to_string()),
-                    });
+                    }).await;
                     info!(server_id = %server_id, task_id = %task.id, "AIOps: server recovered, auto-closed alert task");
                 }
                 Ok(None) => {} // No open alert — server was already healthy
@@ -126,7 +124,6 @@ pub(crate) async fn health_scan(state: &AppState) {
 /// - If no open task → create a new one
 /// - Incident records are always inserted for full audit trail
 pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::types::MissionIncident) {
-    let db = state.mission.db();
     let dedupe_key = format!("{}:{}", incident.source, incident.title);
 
     // PtySlot incidents: dispatch remediation to a Claude Code (Opus) slot
@@ -134,20 +131,20 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
         if let Some(slot_id) = incident.raw_payload.get("slot_id").and_then(|v| v.as_str()) {
             // Dedup: check if an active remediation task already exists for this slot+tool
             // Now checks open, in_progress, and queued tasks (not just open)
-            let existing = db.find_open_task_by_dedupe_key(&dedupe_key).ok().flatten();
+            let existing = state.store.find_open_task_by_dedupe_key(&dedupe_key).await.ok().flatten();
             if let Some(ref task) = existing {
                 let note = format!("🔄 告警重复触发 +1 ({})", chrono::Utc::now().format("%m-%d %H:%M UTC"));
-                let _ = db.add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                let _ = state.store.add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
                     task_id: task.id.to_string(),
                     content: note,
                     note_type: Some("progress".to_string()),
                     author: Some("aiops".to_string()),
-                });
+                }).await;
                 debug!(task_id = %task.id, status = task.status.as_str(), "AIOps: PTY alert aggregated into existing task");
             } else {
-                create_pty_remediation_task(state, slot_id, &incident.title, &incident.description, &dedupe_key);
+                create_pty_remediation_task(state, slot_id, &incident.title, &incident.description, &dedupe_key).await;
             }
-            if let Err(e) = db.insert_incident(
+            if let Err(e) = state.store.insert_incident(
                 &incident.id,
                 &incident.severity.to_string(),
                 &incident.source.to_string(),
@@ -157,7 +154,7 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
                 Some(&incident.raw_payload.to_string()),
                 None,
                 &dedupe_key,
-            ) {
+            ).await {
                 warn!(error = %e, "AIOps: failed to insert incident record");
             }
             return;
@@ -165,7 +162,7 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
     }
 
     // State-based aggregation: check if an open Board task already tracks this alert
-    let existing_task = match db.find_open_task_by_dedupe_key(&dedupe_key) {
+    let existing_task = match state.store.find_open_task_by_dedupe_key(&dedupe_key).await {
         Ok(task) => task,
         Err(e) => {
             warn!(error = %e, "AIOps: failed to query open task by dedupe_key");
@@ -179,18 +176,18 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
             "🔄 告警重复触发 ({})",
             chrono::Utc::now().format("%m-%d %H:%M UTC"),
         );
-        if let Err(e) = db.add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+        if let Err(e) = state.store.add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
             task_id: task.id.to_string(),
             content: note_content,
             note_type: Some("progress".to_string()),
             author: Some("aiops".to_string()),
-        }) {
+        }).await {
             warn!(error = %e, "AIOps: failed to append note to existing task");
         }
         // Touch updated_at so it floats to the top
-        let _ = db.update_board_task(task.id.as_str(), &missiond_core::types::UpdateBoardTaskInput {
+        let _ = state.store.update_board_task(task.id.as_str(), &missiond_core::types::UpdateBoardTaskInput {
             ..Default::default()
-        });
+        }).await;
         debug!(
             task_id = %task.id,
             dedupe_key = %dedupe_key,
@@ -249,7 +246,7 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
             context_intent: None,
         };
 
-        match db.create_board_task(&task_input) {
+        match state.store.create_board_task(&task_input).await {
             Ok(task) => {
                 info!(
                     incident_id = %incident.id,
@@ -270,7 +267,7 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
     };
 
     // Always insert incident record for full audit trail
-    if let Err(e) = db.insert_incident(
+    if let Err(e) = state.store.insert_incident(
         &incident.id,
         &incident.severity.to_string(),
         &incident.source.to_string(),
@@ -280,7 +277,7 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
         Some(&incident.raw_payload.to_string()),
         board_task_id.as_deref(),
         &dedupe_key,
-    ) {
+    ).await {
         warn!(error = %e, "AIOps: failed to insert incident record");
     }
 }
@@ -289,7 +286,7 @@ pub(crate) async fn process_incident(state: &AppState, incident: missiond_core::
 
 /// Dispatch a remediation Board task to a Claude Code (Opus) slot.
 /// The slot will use MCP tools (pty_screen, pty_send, pty_kill) to observe and fix.
-pub(crate) fn create_pty_remediation_task(
+pub(crate) async fn create_pty_remediation_task(
     state: &AppState,
     target_slot_id: &str,
     incident_title: &str,
@@ -336,7 +333,7 @@ pub(crate) fn create_pty_remediation_task(
         context_intent: None,
     };
 
-    match state.mission.db().create_board_task(&task_input) {
+    match state.store.create_board_task(&task_input).await {
         Ok(task) => {
             info!(
                 task_id = %task.id,

@@ -68,22 +68,22 @@ pub fn definitions() -> Vec<ToolDefinition> {
         // ===== Router Chat Manage (merged: history + list + delete + clear + delete_message + restore + stats) =====
         ToolDefinition::new(
             "mission_router_chat_manage",
-            "Gemini 对话管理。action: history(查看对话历史), list(列出所有对话), delete(删除对话), clear(清理消息), delete_message(删除单条), restore(恢复已删除), stats(统计)。",
+            "Gemini 对话管理。action: history/list/delete/clear/delete_message/restore/stats/compress。compress: 用 Sonnet 将旧消息压缩为滚动摘要，减少每次请求的上下文量。",
             json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["history", "list", "delete", "clear", "delete_message", "restore", "stats"],
-                        "description": "history=查看历史, list=列出全部, delete=删除对话, clear=清理消息, delete_message=删单条, restore=恢复, stats=统计"
+                        "enum": ["history", "list", "delete", "clear", "delete_message", "restore", "stats", "compress"],
+                        "description": "history=查看历史, list=列出全部, delete=删除对话, clear=清理消息, delete_message=删单条, restore=恢复, stats=统计, compress=压缩旧消息为滚动摘要"
                     },
                     "task_id": {
                         "type": "string",
-                        "description": "Board 任务 ID (action=history/delete/clear 时可用)"
+                        "description": "Board 任务 ID (action=history/delete/clear/compress 时可用)"
                     },
                     "conversation_id": {
                         "type": "string",
-                        "description": "对话 ID (action=delete/clear/restore 时可用)"
+                        "description": "对话 ID (action=delete/clear/restore/compress 时可用)"
                     },
                     "message_id": {
                         "type": "integer",
@@ -96,6 +96,14 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "limit": {
                         "type": "integer",
                         "description": "最大返回数 (action=list 时可选，默认 50)"
+                    },
+                    "batch_size": {
+                        "type": "integer",
+                        "description": "压缩批次大小 (action=compress 时可选，默认 20)"
+                    },
+                    "keep_recent": {
+                        "type": "integer",
+                        "description": "保留最近 N 条不压缩 (action=compress 时可选，默认 10)"
                     }
                 },
                 "required": ["action"]

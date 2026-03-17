@@ -111,17 +111,14 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
     // Stage 0: Beacon priority match (P4)
     // If task title/description contains a beacon name, inject full topology first
     let mut beacon_hits: Vec<AstSearchHit> = Vec::new();
-    let q = query.to_string();
-    let beacon_matches = state.db_exec.run(move |db| {
-        db.beacon_search(&q)
-    }).await.unwrap_or_default();
+    let beacon_matches = state.store.beacon_search(query)
+        .await.unwrap_or_default();
 
     let has_beacon_hits = !beacon_matches.is_empty();
     if has_beacon_hits {
-        let db = state.mission.db();
         for beacon in &beacon_matches {
             if budget_nodes == 0 { break; }
-            let nodes = db.beacon_map(&beacon.name).unwrap_or_default();
+            let nodes = state.store.beacon_map(&beacon.name).await.unwrap_or_default();
             for bn in &nodes {
                 if budget_nodes == 0 { break; }
                 if let (Some(ref stub), Some(start), Some(end)) = (&bn.stub_content, bn.start_line, bn.end_line) {
@@ -150,10 +147,8 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
     }
 
     // Stage 1: FTS5 ranked IDs
-    let q = query.to_string();
-    let fts_ranked = state.db_exec.run(move |db| {
-        db.ast_search_ranked(&q, PRIMARY_TOP_K * 3)
-    }).await.unwrap_or_default();
+    let fts_ranked = state.store.ast_search_ranked(query, PRIMARY_TOP_K * 3)
+        .await.unwrap_or_default();
 
     // Stage 2: Embedding vector search (health-aware — Gemini reviewed)
     // Check embedding health via relative coverage ratio, not absolute count
@@ -220,10 +215,9 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
     }
 
     // Stage 4: Fetch full nodes + structural boost + file cohesion
-    let db = state.mission.db();
     let mut scored_hits: Vec<(String, f64, AstSearchHit)> = Vec::new();
     for (id, rrf) in &rrf_scored {
-        if let Ok(Some(hit)) = db.ast_get_search_hit(id) {
+        if let Ok(Some(hit)) = state.store.ast_get_search_hit(id).await {
             let boost = structural_boost(&hit.node_type, hit.is_exported);
             scored_hits.push((id.clone(), rrf * boost, hit));
         }
@@ -284,9 +278,8 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
     if ranked.is_empty() {
         // Fallback: inject module-level topology map (Step 4, Gemini-reviewed)
         // When no micro-level AST nodes match, provide architectural navigation
-        let summaries = state.db_exec.run(move |db| {
-            db.ast_module_summaries("missiond")
-        }).await.unwrap_or_default();
+        let summaries = state.store.ast_module_summaries("missiond")
+            .await.unwrap_or_default();
 
         if !summaries.is_empty() {
             info!(
@@ -314,7 +307,7 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
         // Expand: impl Foo → find struct/enum/trait Foo
         for r in &ranked {
             if r.hit.node_type == "impl" && expansion_hits.len() < remaining_budget {
-                if let Ok(related) = db.ast_find_related(&r.hit.name, 3) {
+                if let Ok(related) = state.store.ast_find_related(&r.hit.name, 3).await {
                     for rel in related {
                         if !existing_ids.contains(&rel.id)
                             && !expansion_hits.iter().any(|e| e.id == rel.id)
@@ -333,7 +326,7 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
                 if !existing_names.contains(call_name)
                     && expansion_hits.len() < remaining_budget
                 {
-                    if let Ok(related) = db.ast_find_related(call_name, 1) {
+                    if let Ok(related) = state.store.ast_find_related(call_name, 1).await {
                         for rel in related {
                             if !existing_ids.contains(&rel.id)
                                 && !expansion_hits.iter().any(|e| e.id == rel.id)
@@ -365,7 +358,7 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
         .collect();
     let mut symbol_memories: HashMap<String, Vec<String>> = HashMap::new();
     for fp in &file_paths {
-        if let Ok(memories) = db.kb_get_memories_for_file(fp) {
+        if let Ok(memories) = state.store.kb_get_memories_for_file(fp).await {
             for (symbol, entry) in memories {
                 symbol_memories.entry(symbol)
                     .or_default()

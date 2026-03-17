@@ -127,7 +127,7 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         ..Default::default()
     };
 
-    let task_id = state.mission.db().create_board_task(&input)
+    let task_id = state.store.create_board_task(&input).await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
     // 5. Trigger immediate dispatch (don't wait 60s autopilot tick)
@@ -187,7 +187,7 @@ async fn auto_provision_slot(
     cwd: Option<&str>,
 ) -> Result<String> {
     // Check quota
-    let active = state.mission.db().count_active_dynamic_slots()
+    let active = state.store.count_active_dynamic_slots().await
         .map_err(|e| anyhow!("DB error: {}", e))?;
     if active >= 5 {
         return Err(anyhow!("Dynamic slot quota full ({}/5)", active));
@@ -229,7 +229,7 @@ async fn build_context(state: &AppState, keywords: &str) -> Result<String> {
     let mut total_len = 0;
 
     // Search KB (FTS5, take first 3)
-    if let Ok(entries) = state.mission.db().kb_search(keywords, None) {
+    if let Ok(entries) = state.store.kb_search(keywords, None).await {
         for entry in entries.iter().take(3) {
             let summary = truncate_str(&entry.summary, MAX_ENTRY_CHARS);
             let line = format!("- [KB:{}] {}", entry.key, summary);

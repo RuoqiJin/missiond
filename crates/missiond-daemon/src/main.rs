@@ -75,11 +75,11 @@ impl AppState {
     }
 }
 
-/// Phase 6: Timeline Writer — single consumer for MPSC, batch-writes to SQLite,
+/// Phase 6: Timeline Writer — single consumer for MPSC, batch-writes to DB,
 /// then broadcasts TimelineEvent to all consumers + serializes to WS String channel.
 async fn run_timeline_writer(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<event_bus::TimelineEntry>,
-    db: Arc<missiond_core::MissionDB>,
+    store: Arc<dyn missiond_core::db::traits::MissionStore>,
     timeline_tx: broadcast::Sender<event_bus::TimelineEvent>,
     ws_tx: broadcast::Sender<String>,
 ) {
@@ -101,8 +101,7 @@ async fn run_timeline_writer(
             }
         }
 
-        // Batch-write to SQLite in a single transaction (spawn_blocking for sync rusqlite)
-        let db_clone = Arc::clone(&db);
+        // Batch-write to DB via trait store (internally uses spawn_blocking for SQLite)
         let db_entries: Vec<(Option<String>, String, Option<String>, String, Option<String>, String)> = batch
             .iter()
             .map(|entry| {
@@ -118,24 +117,17 @@ async fn run_timeline_writer(
             })
             .collect();
 
-        let seqs = tokio::task::spawn_blocking(move || {
-            let params: Vec<(Option<&str>, &str, Option<&str>, &str, Option<&str>, &str)> = db_entries
-                .iter()
-                .map(|(t, s, p, e, sum, pay)| {
-                    (t.as_deref(), s.as_str(), p.as_deref(), e.as_str(), sum.as_deref(), pay.as_str())
-                })
-                .collect();
-            db_clone.insert_timeline_batch(&params)
-        }).await;
+        let params: Vec<(Option<&str>, &str, Option<&str>, &str, Option<&str>, &str)> = db_entries
+            .iter()
+            .map(|(t, s, p, e, sum, pay)| {
+                (t.as_deref(), s.as_str(), p.as_deref(), e.as_str(), sum.as_deref(), pay.as_str())
+            })
+            .collect();
 
-        let seqs = match seqs {
-            Ok(Ok(seqs)) => seqs,
-            Ok(Err(e)) => {
-                tracing::error!(error = %e, "Timeline Writer: SQLite batch insert failed");
-                continue;
-            }
+        let seqs = match store.insert_timeline_batch(&params).await {
+            Ok(seqs) => seqs,
             Err(e) => {
-                tracing::error!(error = %e, "Timeline Writer: spawn_blocking panicked");
+                tracing::error!(error = %e, "Timeline Writer: batch insert failed");
                 continue;
             }
         };
@@ -270,11 +262,7 @@ async fn main() -> Result<()> {
     }
 
     // Phase 6.4: Recover stale running board tasks from previous daemon crash
-    match mission.db().recover_stale_running_tasks(0) {
-        Ok(n) if n > 0 => info!(count = n, "Startup: recovered stale running board tasks"),
-        Err(e) => warn!(error = %e, "Failed to recover stale board tasks on startup"),
-        _ => {}
-    }
+    // (deferred to after store creation — see below)
 
     // Phase 6.7: Terminate ALL active dynamic slots on daemon restart.
     // Dynamic slots are ephemeral — their PTY processes will be killed by the
@@ -398,14 +386,34 @@ async fn main() -> Result<()> {
 
     let event_bus_instance = Arc::new(event_bus::EventBus::new(timeline_mpsc_tx));
     let daemon_stats = Arc::new(daemon_stats::DaemonStats::new());
-    let mut db_exec = missiond_core::DbExecutor::new(mission.db_arc());
-    {
+
+    // Build shared stats callback for DB latency tracking
+    let db_stats_callback: std::sync::Arc<dyn Fn(u64) + Send + Sync> = {
         let stats = Arc::clone(&daemon_stats);
-        db_exec.set_on_run(std::sync::Arc::new(move |elapsed_us| {
+        std::sync::Arc::new(move |elapsed_us| {
             stats.db_exec_runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             stats.db_exec_total_us.fetch_add(elapsed_us, std::sync::atomic::Ordering::Relaxed);
             stats.db_exec_latency.record(elapsed_us);
-        }));
+        })
+    };
+
+    let mut db_exec = missiond_core::DbExecutor::new(mission.db_arc());
+    db_exec.set_on_run(Arc::clone(&db_stats_callback));
+
+    // M1 Step 4: Trait-based DB store (dual-track with mission.db())
+    // Shares the same Arc<MissionDB> — no data consistency risk.
+    let store: Arc<dyn missiond_core::db::traits::MissionStore> = Arc::new(
+        missiond_core::db::sqlite::SqliteMissionStore::with_callback(
+            mission.db_arc(),
+            db_stats_callback,
+        )
+    );
+
+    // Phase 6.4 (deferred): Recover stale running board tasks from previous daemon crash
+    match store.recover_stale_running_tasks(0).await {
+        Ok(n) if n > 0 => info!(count = n, "Startup: recovered stale running board tasks"),
+        Err(e) => warn!(error = %e, "Failed to recover stale board tasks on startup"),
+        _ => {}
     }
 
     // Pre-parse llm.yaml for config flags needed by AppState
@@ -436,6 +444,7 @@ async fn main() -> Result<()> {
 
     let state = AppState {
         mission,
+        store,
         permission,
         pty,
         cc_tasks,
@@ -700,7 +709,7 @@ async fn main() -> Result<()> {
     {
         let backfill_state = state.clone();
         tokio::spawn(async move {
-            events_sync::backfill_conversation_events(backfill_state.mission.db()).await;
+            events_sync::backfill_conversation_events(&backfill_state).await;
         });
     }
 
@@ -708,7 +717,7 @@ async fn main() -> Result<()> {
     {
         let backfill_state = state.clone();
         tokio::spawn(async move {
-            events_sync::backfill_tool_calls(backfill_state.mission.db()).await;
+            events_sync::backfill_tool_calls(&backfill_state).await;
         });
     }
 
@@ -716,9 +725,8 @@ async fn main() -> Result<()> {
     if state.embedding_service.is_some() {
         let emb_state = state.clone();
         tokio::spawn(async move {
-            let db = emb_state.mission.db();
             let emb_svc = emb_state.embedding_service.as_ref().unwrap();
-            match db.kb_entries_missing_embedding(Some("policy:decision")) {
+            match emb_state.store.kb_entries_missing_embedding(Some("policy:decision")).await {
                 Ok(missing) if !missing.is_empty() => {
                     info!(count = missing.len(), "Backfilling embeddings for policy:decision entries");
                     let mut stored = 0usize;
@@ -726,7 +734,7 @@ async fn main() -> Result<()> {
                     for (id, summary, detail) in &missing {
                         let text = format!("知识条目：{}\n详情：{}", summary, detail);
                         if let Some(vec) = emb_svc.embed(&text) {
-                            if let Err(e) = db.kb_set_embedding(id, &vec, provider_id) {
+                            if let Err(e) = emb_state.store.kb_set_embedding(id, &vec, provider_id).await {
                                 warn!(id = %id, error = %e, "Failed to store embedding");
                             } else {
                                 stored += 1;
@@ -739,7 +747,7 @@ async fn main() -> Result<()> {
                 Err(e) => warn!(error = %e, "Failed to scan for missing embeddings"),
             }
             // Warm the in-memory cache with all policy:decision embeddings
-            match db.kb_load_embeddings("policy:decision") {
+            match emb_state.store.kb_load_embeddings("policy:decision").await {
                 Ok(all) => {
                     let mut guard = emb_state.embedding_cache.write().await;
                     *guard = all;
@@ -748,7 +756,7 @@ async fn main() -> Result<()> {
                 Err(e) => warn!(error = %e, "Failed to warm embedding cache"),
             }
             // Warm full KB search cache (all categories)
-            match db.kb_load_all_embeddings() {
+            match emb_state.store.kb_load_all_embeddings().await {
                 Ok(all) => {
                     let mut guard = emb_state.kb_search_cache.write().await;
                     *guard = all;
@@ -757,7 +765,7 @@ async fn main() -> Result<()> {
                 Err(e) => warn!(error = %e, "Failed to warm KB search cache"),
             }
             // Warm AST embedding cache (P3: code prefetch hybrid search)
-            match db.ast_load_all_embeddings() {
+            match emb_state.store.ast_load_all_embeddings().await {
                 Ok(all) => {
                     let mut guard = emb_state.ast_embedding_cache.write().await;
                     *guard = all;
@@ -772,7 +780,6 @@ async fn main() -> Result<()> {
     {
         let conv_state = state.clone();
         tokio::spawn(async move {
-            let db = conv_state.mission.db();
             let provider_id = conv_state.embedding_service.as_ref()
                 .map(|svc| svc.provider_id().to_string())
                 .unwrap_or_else(|| missiond_core::embedding::FASTEMBED_PROVIDER_ID.to_string());
@@ -782,7 +789,7 @@ async fn main() -> Result<()> {
                 std::collections::HashMap::new();
 
             // Phase 1: Load from conversation_topic_vectors table
-            match db.load_conversation_topic_vectors(&provider_id) {
+            match conv_state.store.load_conversation_topic_vectors(&provider_id).await {
                 Ok(all) => {
                     for (sid, vecs) in all {
                         topic_map.insert(sid, vecs);
@@ -793,7 +800,7 @@ async fn main() -> Result<()> {
             }
 
             // Phase 2: Backfill from old single-embedding (wrap as 1-topic)
-            match db.load_conversation_embeddings(&provider_id) {
+            match conv_state.store.load_conversation_embeddings(&provider_id).await {
                 Ok(all) => {
                     let mut backfilled = 0;
                     for (sid, vec) in all {
@@ -817,7 +824,7 @@ async fn main() -> Result<()> {
             }
 
             // Skill topic embedding cache
-            match db.skill_load_topic_embeddings() {
+            match conv_state.store.skill_load_topic_embeddings().await {
                 Ok(all) => {
                     let mut guard = conv_state.skill_embedding_cache.write().await;
                     *guard = all;
@@ -949,8 +956,7 @@ async fn main() -> Result<()> {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
-                let db = health_state.mission.db();
-                match db.ast_stats() {
+                match health_state.store.ast_stats().await {
                     Ok(ast) if ast.total_nodes > 0 => {
                         let coverage = ast.embedded_nodes as f64 / ast.total_nodes as f64;
                         if ast.embedded_nodes < ast.total_nodes {
@@ -987,9 +993,9 @@ async fn main() -> Result<()> {
         let rx = timeline_mpsc_rx;
         let timeline_tx = timeline_broadcast_tx.clone();
         let ws_tx = frontend_events_tx.clone();
-        let db = state.mission.db_arc();
+        let store_clone = Arc::clone(&state.store);
         tokio::spawn(async move {
-            run_timeline_writer(rx, db, timeline_tx, ws_tx).await;
+            run_timeline_writer(rx, store_clone, timeline_tx, ws_tx).await;
         });
     }
 

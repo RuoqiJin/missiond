@@ -22,7 +22,7 @@ use crate::state::AppState;
 /// - Timeline analyst (12h cadence)
 pub(crate) async fn learning_tick(state: &AppState) {
     // KB auto-GC: every hour (internal cadence guard)
-    extraction::check_kb_auto_gc(state);
+    extraction::check_kb_auto_gc(state).await;
 
     // Decision Engine reaper: 15min timeout for master questions
     decision_engine::reap_stale_decision_tasks(state).await;
@@ -30,10 +30,10 @@ pub(crate) async fn learning_tick(state: &AppState) {
     // Decision Engine: checkpoint harvester (every 24h, tasks with ≥3 unharvested decisions)
     {
         let now = chrono::Utc::now().timestamp();
-        let last = state.mission.db().daemon_state_get("last_decision_harvest_at").unwrap_or(None).unwrap_or(0);
+        let last = state.store.daemon_state_get("last_decision_harvest_at").await.unwrap_or(None).unwrap_or(0);
         if now - last > 86400 {
-            let _ = state.mission.db().daemon_state_set("last_decision_harvest_at", now);
-            if let Ok(tasks) = state.mission.db().find_tasks_with_unharvested_decisions(3) {
+            let _ = state.store.daemon_state_set("last_decision_harvest_at", now).await;
+            if let Ok(tasks) = state.store.find_tasks_with_unharvested_decisions(3).await {
                 for (task_id, task_title, count) in &tasks {
                     info!(task_id, count, "Decision harvester checkpoint: incremental harvest");
                     let state_clone = state.clone();
@@ -53,10 +53,10 @@ pub(crate) async fn learning_tick(state: &AppState) {
     // Co-occurrence cache refresh (every 6h) for preemptive context prefetching
     {
         let now = chrono::Utc::now().timestamp();
-        let last = state.mission.db().daemon_state_get("last_cooccurrence_refresh").unwrap_or(None).unwrap_or(0);
+        let last = state.store.daemon_state_get("last_cooccurrence_refresh").await.unwrap_or(None).unwrap_or(0);
         if now - last > 6 * 3600 {
-            let _ = state.mission.db().daemon_state_set("last_cooccurrence_refresh", now);
-            if let Ok(matrix) = state.mission.db().kb_compute_cooccurrence(168, 3) {
+            let _ = state.store.daemon_state_set("last_cooccurrence_refresh", now).await;
+            if let Ok(matrix) = state.store.kb_compute_cooccurrence(168, 3).await {
                 let count = matrix.len();
                 *state.kb_cooccurrence_cache.write().await = matrix;
                 info!(entries = count, "Co-occurrence cache refreshed");

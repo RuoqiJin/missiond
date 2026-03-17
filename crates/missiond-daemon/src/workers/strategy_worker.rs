@@ -42,17 +42,15 @@ static RE_BASE64: LazyLock<Regex> =
 /// Find and analyze all pending sessions.
 /// Called by session_reflection_consumer on SessionCompleted events.
 pub(crate) async fn run_pending_analysis(state: &AppState) {
-    let db = state.mission.db();
-
     // Kill switch: daemon_state key "strategy_analyst_enabled" (default: enabled)
     // Set to 0 to disable: INSERT OR REPLACE INTO daemon_state(key,value) VALUES('strategy_analyst_enabled','0')
-    if db.daemon_state_get("strategy_analyst_enabled").unwrap_or(None).map(|v| v == 0).unwrap_or(false) {
+    if state.store.daemon_state_get("strategy_analyst_enabled").await.unwrap_or(None).map(|v| v == 0).unwrap_or(false) {
         debug!("strategy_analyst: disabled via flag, skipping");
         return;
     }
 
     // Use existing deep analysis infrastructure to find pending sessions
-    let pending = match db.get_pending_deep_analysis(STRATEGY_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES) {
+    let pending = match state.store.get_pending_deep_analysis(STRATEGY_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES).await {
         Ok(p) => p,
         Err(e) => {
             warn!(error = %e, "strategy_analyst: failed to query pending sessions");
@@ -84,12 +82,12 @@ pub(crate) async fn run_pending_analysis(state: &AppState) {
                 // Mark analysis complete or update checkpoint
                 if conv.status == "active" {
                     // Active session: update watermark for incremental
-                    if let Err(e) = db.update_deep_checkpoint(session_id, analyzed_up_to) {
+                    if let Err(e) = state.store.update_deep_checkpoint(session_id, analyzed_up_to).await {
                         warn!(error = %e, "strategy_analyst: failed to update checkpoint");
                     }
                 } else {
                     // Completed/compacted: mark fully analyzed
-                    if let Err(e) = db.mark_analysis_complete(session_id, STRATEGY_ANALYSIS_VERSION) {
+                    if let Err(e) = state.store.mark_analysis_complete(session_id, STRATEGY_ANALYSIS_VERSION).await {
                         warn!(error = %e, "strategy_analyst: failed to mark complete");
                     }
                     // Phase 3: Emit DeepAnalysisCompleted for KB consolidation consumer
@@ -102,7 +100,7 @@ pub(crate) async fn run_pending_analysis(state: &AppState) {
             }
             Err(e) => {
                 warn!(error = %e, session = %session_id, "strategy_analyst: analysis failed");
-                let _ = db.mark_analysis_failed(session_id);
+                let _ = state.store.mark_analysis_failed(session_id).await;
                 // (WorkerContext stats removed — consumer-driven now)
             }
         }
@@ -175,13 +173,12 @@ const STRATEGY_TASK_TEMPLATE: &str = r#"# 战略分析任务
 
 /// Prepare a workspace directory with session data for Gemini CLI to explore.
 /// Returns TempDir (RAII: auto-cleaned on drop) and last message ID.
-fn prepare_workspace(
+async fn prepare_workspace(
     state: &AppState,
     session_id: &str,
     since_id: Option<i64>,
 ) -> Result<(tempfile::TempDir, i64)> {
-    let db = state.mission.db();
-    let messages = db.get_conversation_messages(session_id, since_id, 50000)?;
+    let messages = state.store.get_conversation_messages(session_id, since_id, 50000).await?;
     if messages.is_empty() {
         return Err(anyhow!("No messages found for session {}", session_id));
     }
@@ -227,8 +224,8 @@ fn prepare_workspace(
     )?;
 
     // Write state.json (current strategic state from KB)
-    let state_json = db
-        .kb_get("strategic-state")?
+    let state_json = state.store
+        .kb_get("strategic-state").await?
         .and_then(|e| e.detail.map(|d| d.to_string()))
         .unwrap_or_else(|| "{}".to_string());
     std::fs::write(workspace.path().join("state.json"), &state_json)?;
@@ -392,7 +389,7 @@ async fn analyze_session_stateless(
     info!(session = %session_id, since = ?since_id, "strategy_analyst: starting workspace-based analysis");
 
     // 1. Prepare workspace (TempDir — RAII auto-cleanup on drop)
-    let (workspace, last_message_id) = prepare_workspace(state, session_id, since_id)?;
+    let (workspace, last_message_id) = prepare_workspace(state, session_id, since_id).await?;
 
     info!(
         session = %session_id,
@@ -563,8 +560,6 @@ async fn apply_strategic_output(
     session_id: &str,
     output: &StrategicOutput,
 ) -> Result<()> {
-    let db = state.mission.db();
-
     // 1. Update Strategic State JSON in KB
     let updated_state = json!({
         "version": STRATEGY_ANALYSIS_VERSION,
@@ -581,20 +576,20 @@ async fn apply_strategic_output(
             .collect::<Vec<_>>(),
     });
 
-    db.kb_remember(&missiond_core::types::KBRememberInput {
+    state.store.kb_remember(&missiond_core::types::KBRememberInput {
         category: "memory:architecture".to_string(),
         key: "strategic-state".to_string(),
         summary: "Strategic analysis state — user profile, dev trajectory, patterns".to_string(),
         detail: Some(updated_state),
         source: Some("strategy_analyst".to_string()),
         confidence: Some(1.0),
-    })?;
+    }).await?;
 
     // 2. Write individual user preferences to KB
     for pref in &output.user_profile {
         if pref.confidence >= 0.7 {
             let key = format!("strategic-pref-{}", slug(&pref.trait_));
-            db.kb_remember(&missiond_core::types::KBRememberInput {
+            state.store.kb_remember(&missiond_core::types::KBRememberInput {
                 category: "preference".to_string(),
                 key,
                 summary: pref.trait_.clone(),
@@ -604,7 +599,7 @@ async fn apply_strategic_output(
                 })),
                 source: Some("strategy_analyst".to_string()),
                 confidence: Some(pref.confidence),
-            })?;
+            }).await?;
         }
     }
 
@@ -616,7 +611,7 @@ async fn apply_strategic_output(
             // Phase 2b: High-confidence workflow → auto-dispatch to Agent for Skill generation
             let dedupe = format!("strategy-skill-gen-{}", slug(&proposal.action));
             let skill_slug = slug(&proposal.action);
-            db.create_board_task(&missiond_core::types::CreateBoardTaskInput {
+            state.store.create_board_task(&missiond_core::types::CreateBoardTaskInput {
                 title: format!("自动生成 Skill: {}", truncate(&proposal.action, 50)),
                 description: Some(format!(
                     "战略分析发现此操作出现 {} 次，已达自动化阈值。\n\n\
@@ -635,13 +630,13 @@ async fn apply_strategic_output(
                 dedupe_key: Some(dedupe),
                 project: Some("missiond".to_string()),
                 ..Default::default()
-            })?;
+            }).await?;
             info!(action = %proposal.action, occurrences = proposal.occurrences,
                 "strategy_analyst: auto-dispatching Skill generation task");
         } else if proposal.occurrences >= 3 {
             // Phase 2a: Moderate frequency → human review
             let dedupe = format!("strategy-workflow-{}", slug(&proposal.action));
-            db.create_board_task(&missiond_core::types::CreateBoardTaskInput {
+            state.store.create_board_task(&missiond_core::types::CreateBoardTaskInput {
                 title: format!("工作流自动化: {}", proposal.action),
                 description: Some(format!(
                     "战略分析发现此操作出现 {} 次，建议固化为 Skill 或自动化。\n来源: session {}",
@@ -651,14 +646,14 @@ async fn apply_strategic_output(
                 priority: Some("medium".to_string()),
                 dedupe_key: Some(dedupe),
                 ..Default::default()
-            })?;
+            }).await?;
         }
     }
 
     // 4. Create Board tasks for architectural drifts
     for drift in &output.architectural_drifts {
         let dedupe = format!("strategy-drift-{}", slug(&drift.description));
-        db.create_board_task(&missiond_core::types::CreateBoardTaskInput {
+        state.store.create_board_task(&missiond_core::types::CreateBoardTaskInput {
             title: format!("架构漂移: {}", truncate(&drift.description, 60)),
             description: Some(format!(
                 "战略分析发现架构偏离。\n影响范围: {}\n建议: 验证后更新 YAML manifest\n来源: session {}",
@@ -669,14 +664,14 @@ async fn apply_strategic_output(
             priority: Some("high".to_string()),
             dedupe_key: Some(dedupe),
             ..Default::default()
-        })?;
+        }).await?;
     }
 
     // 5. Log friction points as KB entries
     for friction in &output.friction_points {
         if friction.frequency >= 2 {
             let key = format!("strategy-friction-{}", slug(&friction.issue));
-            db.kb_remember(&missiond_core::types::KBRememberInput {
+            state.store.kb_remember(&missiond_core::types::KBRememberInput {
                 category: "memory:debug".to_string(),
                 key,
                 summary: format!("摩擦点({}次): {}", friction.frequency, friction.issue),
@@ -687,7 +682,7 @@ async fn apply_strategic_output(
                 })),
                 source: Some("strategy_analyst".to_string()),
                 confidence: Some(0.8),
-            })?;
+            }).await?;
         }
     }
 
@@ -718,7 +713,7 @@ async fn apply_strategic_output(
                     read: false,
                     created_at: chrono::Utc::now().timestamp_millis(),
                 };
-                if let Err(e) = db.insert_inbox_message(&inbox_msg) {
+                if let Err(e) = state.store.insert_inbox_message(&inbox_msg).await {
                     warn!(error = %e, "strategy_analyst: failed to queue inbox message");
                 } else {
                     info!("strategy_analyst: insight queued to inbox for next-turn injection");

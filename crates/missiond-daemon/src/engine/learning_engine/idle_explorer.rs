@@ -20,8 +20,8 @@ const EXPLORE_INTERVAL_SECS: i64 = 2 * 3600;
 pub(crate) async fn check_idle_exploration(state: &AppState) {
     // Gate 1: cadence — at least 2h since last exploration
     let now = chrono::Utc::now().timestamp();
-    let last = state.mission.db()
-        .daemon_state_get("last_idle_explore_at")
+    let last = state.store
+        .daemon_state_get("last_idle_explore_at").await
         .unwrap_or(None)
         .unwrap_or(0);
     if now - last < EXPLORE_INTERVAL_SECS {
@@ -36,7 +36,7 @@ pub(crate) async fn check_idle_exploration(state: &AppState) {
     }
 
     // Gate 3: no pending explore tasks already (prevent flooding)
-    match state.mission.db().count_tasks_by_category("explore") {
+    match state.store.count_tasks_by_category("explore").await {
         Ok(n) if n > 0 => {
             debug!(pending = n, "Idle explorer: existing explore task pending, skipping");
             return;
@@ -49,7 +49,7 @@ pub(crate) async fn check_idle_exploration(state: &AppState) {
     }
 
     // Gate 4: no high/medium priority work in progress
-    match state.mission.db().count_open_tasks_by_priority(&["high", "medium"]) {
+    match state.store.count_open_tasks_by_priority(&["high", "medium"]).await {
         Ok(n) if n > 0 => {
             debug!(active_work = n, "Idle explorer: active work tasks exist, skipping");
             return;
@@ -70,8 +70,8 @@ pub(crate) async fn check_idle_exploration(state: &AppState) {
     let assignee = assignee.unwrap();
 
     // Round-robin through exploration types
-    let explore_idx = state.mission.db()
-        .daemon_state_get("idle_explore_idx")
+    let explore_idx = state.store
+        .daemon_state_get("idle_explore_idx").await
         .unwrap_or(None)
         .unwrap_or(0);
 
@@ -88,11 +88,11 @@ pub(crate) async fn check_idle_exploration(state: &AppState) {
     };
 
     if task_created {
-        let _ = state.mission.db().daemon_state_set("last_idle_explore_at", now);
-        let _ = state.mission.db().daemon_state_set("idle_explore_idx", explore_idx + 1);
+        let _ = state.store.daemon_state_set("last_idle_explore_at", now).await;
+        let _ = state.store.daemon_state_set("idle_explore_idx", explore_idx + 1).await;
         info!(explore_type = explore_idx % 6, assignee = %assignee, "Idle explorer: created exploration task");
     } else {
-        let _ = state.mission.db().daemon_state_set("idle_explore_idx", explore_idx + 1);
+        let _ = state.store.daemon_state_set("idle_explore_idx", explore_idx + 1).await;
         debug!(explore_type = explore_idx % 6, "Idle explorer: no issues found for this type, advancing");
     }
 }
@@ -124,7 +124,7 @@ async fn find_idle_autopilot_slot(state: &AppState) -> Option<String> {
 
 /// Explore 0: KB consistency — find low-confidence entries that need review.
 async fn explore_kb_consistency(state: &AppState, assignee: &str) -> bool {
-    let entries = match state.mission.db().kb_list_low_confidence(0.5, 10) {
+    let entries = match state.store.kb_list_low_confidence(0.5, 10).await {
         Ok(e) => e,
         Err(_) => return false,
     };
@@ -177,7 +177,7 @@ async fn explore_stale_dependencies(state: &AppState, assignee: &str) -> bool {
 
 /// Explore 2: unharvested beacons — find feature beacons that haven't been analyzed.
 async fn explore_unharvested_beacons(state: &AppState, assignee: &str) -> bool {
-    let beacons = match state.mission.db().beacon_list() {
+    let beacons = match state.store.beacon_list().await {
         Ok(b) => b,
         Err(_) => return false,
     };
@@ -215,7 +215,7 @@ async fn explore_unharvested_beacons(state: &AppState, assignee: &str) -> bool {
 /// Explore 3: KB duplicate detection — find KB entries with similar keys.
 async fn explore_kb_duplicates(state: &AppState, assignee: &str) -> bool {
     // Use kb_list to get all entries, then find potential duplicates by key similarity
-    let entries = match state.mission.db().kb_list(None) {
+    let entries = match state.store.kb_list(None).await {
         Ok(e) => e,
         Err(_) => return false,
     };
@@ -265,7 +265,7 @@ async fn explore_kb_duplicates(state: &AppState, assignee: &str) -> bool {
 /// and generate Skill drafts that codify recurring patterns into reusable SOPs.
 async fn explore_skill_synthesis(state: &AppState, assignee: &str) -> bool {
     let now = chrono::Utc::now().timestamp();
-    let entries = match state.mission.db().kb_list(None) {
+    let entries = match state.store.kb_list(None).await {
         Ok(e) => e,
         Err(_) => return false,
     };
@@ -319,7 +319,7 @@ async fn explore_skill_synthesis(state: &AppState, assignee: &str) -> bool {
 
     // Reentry guard: skip clusters synthesized within last 7 days
     let lock_key = format!("skill_synth_{}", cluster_name);
-    let last_synth = state.mission.db().daemon_state_get(&lock_key).unwrap_or(None).unwrap_or(0);
+    let last_synth = state.store.daemon_state_get(&lock_key).await.unwrap_or(None).unwrap_or(0);
     if now - last_synth < 7 * 86400 {
         debug!(cluster = %cluster_name, days_ago = (now - last_synth) / 86400, "Skill synthesis: cluster recently synthesized, skipping");
         return false;
@@ -350,7 +350,7 @@ async fn explore_skill_synthesis(state: &AppState, assignee: &str) -> bool {
     );
 
     // Set reentry lock BEFORE creating task (cleared on failure by autopilot event listener)
-    let _ = state.mission.db().daemon_state_set(&lock_key, now);
+    let _ = state.store.daemon_state_set(&lock_key, now).await;
 
     create_explore_task(state, &format!("Explore: Skill Synthesis — {}", cluster_name), &description, assignee).await
 }
@@ -382,7 +382,7 @@ async fn create_explore_task(
         context_intent: None,
     };
 
-    match state.mission.db().create_board_task(&input) {
+    match state.store.create_board_task(&input).await {
         Ok(task) => {
             state.event_bus.publish(
                 crate::event_bus::DaemonEvent::BoardTaskStatusChanged {
@@ -407,13 +407,13 @@ async fn explore_memory_consolidation(state: &AppState, assignee: &str) -> bool 
     let now = chrono::Utc::now().timestamp();
 
     // Reentry guard: 7-day cooldown
-    let last_run = state.mission.db().daemon_state_get("last_consolidation_at").unwrap_or(None).unwrap_or(0);
+    let last_run = state.store.daemon_state_get("last_consolidation_at").await.unwrap_or(None).unwrap_or(0);
     if now - last_run < 7 * 86400 {
         debug!(days_ago = (now - last_run) / 86400, "Memory consolidation: recently run, skipping");
         return false;
     }
 
-    let entries = match state.mission.db().kb_list(None) {
+    let entries = match state.store.kb_list(None).await {
         Ok(e) => e,
         Err(_) => return false,
     };
@@ -468,14 +468,14 @@ async fn explore_memory_consolidation(state: &AppState, assignee: &str) -> bool 
         target_cat, count, sample_str, target_cat
     );
 
-    let _ = state.mission.db().daemon_state_set("last_consolidation_at", now);
+    let _ = state.store.daemon_state_set("last_consolidation_at", now).await;
     create_explore_task(state, &format!("Explore: Memory Consolidation — {}", target_cat), &description, assignee).await
 }
 
 /// Explore 6: Stale State Verification — verify state-type KB entries that
 /// haven't been accessed recently are still accurate.
 async fn explore_stale_state_verification(state: &AppState, assignee: &str) -> bool {
-    let entries = match state.mission.db().kb_list_stale_state_entries(14, 5) {
+    let entries = match state.store.kb_list_stale_state_entries(14, 5).await {
         Ok(e) => e,
         Err(_) => return false,
     };
@@ -516,7 +516,7 @@ async fn explore_stale_state_verification(state: &AppState, assignee: &str) -> b
 /// previously-successful task dispatch by comparing prompt snapshots
 /// against current KB state.
 async fn explore_shadow_replay(state: &AppState, assignee: &str) -> bool {
-    let snapshots = match state.mission.db().list_modified_snapshots(3) {
+    let snapshots = match state.store.list_modified_snapshots(3).await {
         Ok(s) => s,
         Err(_) => return false,
     };

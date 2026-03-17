@@ -1652,6 +1652,24 @@ impl MissionDB {
             }
         }
 
+        // ── Router Chat Rolling Summary ──
+        // Add rolling_summary and last_summarized_msg_id to conversations table
+        // for sliding-window context management (prevents infinite history accumulation).
+        {
+            let has_rolling_summary: bool = conn.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('conversations') WHERE name = 'rolling_summary'",
+                [],
+                |row| row.get(0),
+            )?;
+            if !has_rolling_summary {
+                conn.execute_batch(
+                    "ALTER TABLE conversations ADD COLUMN rolling_summary TEXT;
+                     ALTER TABLE conversations ADD COLUMN last_summarized_msg_id INTEGER DEFAULT 0;"
+                )?;
+                tracing::info!("Migration: added rolling_summary + last_summarized_msg_id to conversations");
+            }
+        }
+
         // ── Compact Summary Role Backfill ──
         // Reclassify compact summary messages from role='user' to role='compact_summary'.
         // These are AI-generated conversation summaries injected by Claude Code after
