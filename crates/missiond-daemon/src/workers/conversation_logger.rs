@@ -271,7 +271,7 @@ async fn submit_board_progress_extraction(s: &AppState, session_id: &str) {
     );
 
     // 6. Submit as memory task (dispatched to slot-memory-slow by memory_scheduler via role matching)
-    match s.mission.submit("memory", &prompt) {
+    match crate::state::submit_task(s.store.as_ref(), "memory", &prompt).await {
         Ok(task_id) => {
             // Pin to slow memory slot
             let _ = s.store.update_task(

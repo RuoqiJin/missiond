@@ -29,8 +29,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 limit: None,
             });
             let messages = state
-                .mission
-                .get_inbox(unread_only.unwrap_or(true), limit.unwrap_or(10));
+                .store
+                .get_inbox_messages(unread_only.unwrap_or(true), limit.unwrap_or(10) as i64)
+                .await?;
             Ok(ToolResult::json(&messages))
         }
 

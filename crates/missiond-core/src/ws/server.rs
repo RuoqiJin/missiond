@@ -65,8 +65,8 @@ pub struct WSServerOptions {
     pub incident_tx: Option<tokio::sync::mpsc::Sender<crate::types::MissionIncident>>,
     /// Frontend event stream (pre-serialized JSON from daemon EventBus)
     pub frontend_events_tx: Option<broadcast::Sender<String>>,
-    /// Database for timeline catch-up queries (Phase 6)
-    pub db: Option<Arc<crate::db::MissionDB>>,
+    /// Database store for Jarvis chat + timeline queries (M4: trait-based)
+    pub db: Option<Arc<dyn crate::db::traits::MissionStore>>,
     /// Context enricher for Jarvis chat completions (late-bound by daemon)
     pub context_enricher: ContextEnricherSlot,
     /// Number of native MCP tools (injected into Jarvis system prompt)
@@ -83,7 +83,7 @@ pub struct PTYWebSocketServer {
     jarvis_trace: JarvisTraceStore,
     incident_tx: Option<tokio::sync::mpsc::Sender<crate::types::MissionIncident>>,
     frontend_events_tx: Option<broadcast::Sender<String>>,
-    db: Option<Arc<crate::db::MissionDB>>,
+    db: Option<Arc<dyn crate::db::traits::MissionStore>>,
     context_enricher: ContextEnricherSlot,
     tool_count: usize,
 }
@@ -713,7 +713,7 @@ impl PTYWebSocketServer {
         pty_manager: Arc<PTYManager>,
         trace_store: JarvisTraceStore,
         context_enricher: ContextEnricherSlot,
-        db: Option<Arc<crate::db::MissionDB>>,
+        db: Option<Arc<dyn crate::db::traits::MissionStore>>,
         cc_tasks_watcher: Option<Arc<Mutex<CCTasksWatcher>>>,
         tool_count: usize,
     ) -> anyhow::Result<()> {
@@ -944,7 +944,7 @@ impl PTYWebSocketServer {
 
         // Create or reuse Jarvis UI conversation for persistence
         let jarvis_conv_id = if let Some(ref db) = db {
-            match db.jarvis_get_or_create(conversation_id.as_deref()) {
+            match db.jarvis_get_or_create(conversation_id.as_deref()).await {
                 Ok(id) => Some(id),
                 Err(e) => {
                     warn!(error = %e, "Failed to create jarvis conversation");
@@ -1044,7 +1044,7 @@ impl PTYWebSocketServer {
                     context_intent: None,
                 };
 
-                match db.create_board_task(&task_input) {
+                match db.create_board_task(&task_input).await {
                     Ok(task) => {
                         let task_id = task.id.clone();
                         let task_short_id = &task_id.as_str()[..8.min(task_id.as_str().len())];
@@ -1055,9 +1055,9 @@ impl PTYWebSocketServer {
                             if !raw_user_text.is_empty() {
                                 let _ = db.router_chat_append_messages(cid, &[
                                     ("user".to_string(), raw_user_text.clone()),
-                                ]);
+                                ]).await;
                                 if conversation_id.is_none() {
-                                    let _ = db.jarvis_update_title(cid, &task_title);
+                                    let _ = db.jarvis_update_title(cid, &task_title).await;
                                 }
                             }
                         }
@@ -1098,7 +1098,7 @@ impl PTYWebSocketServer {
                             tokio::time::sleep(poll_interval).await;
 
                             // Check task status in DB
-                            if let Ok(Some(t)) = db.get_board_task(task_id.as_str()) {
+                            if let Ok(Some(t)) = db.get_board_task(task_id.as_str()).await {
                                 match t.status {
                                     crate::types::BoardTaskStatus::Running => {
                                         if let Some(ref executor) = t.claim_executor_id {
@@ -1312,7 +1312,7 @@ impl PTYWebSocketServer {
                                                 let _ = stream.write_all(b":\n\n").await;
                                                 let _ = stream.flush().await;
                                                 last_event_time = std::time::Instant::now();
-                                                if let Ok(Some(t)) = db.get_board_task(task_id.as_str()) {
+                                                if let Ok(Some(t)) = db.get_board_task(task_id.as_str()).await {
                                                     match t.status {
                                                         crate::types::BoardTaskStatus::Done
                                                         | crate::types::BoardTaskStatus::Failed => {
@@ -1349,7 +1349,7 @@ impl PTYWebSocketServer {
                                     if attempt > 0 {
                                         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                                     }
-                                    if let Ok(msgs) = db.router_chat_load_history(cid) {
+                                    if let Ok(msgs) = db.router_chat_load_history(cid).await {
                                         // Find last assistant message
                                         if let Some(last_asst) = msgs.iter().rev().find(|m| {
                                             m.get("role").and_then(|v| v.as_str()) == Some("assistant")
@@ -1418,8 +1418,10 @@ impl PTYWebSocketServer {
         };
 
         // Subscribe to JSONL watcher for structured message content
-        let target_session_id: Option<String> = db.as_ref()
-            .and_then(|db| db.get_slot_session(&slot_id).ok().flatten());
+        let target_session_id: Option<String> = match db.as_ref() {
+            Some(db) => db.get_slot_session(&slot_id).await.ok().flatten(),
+            None => None,
+        };
         let mut jsonl_rx: Option<broadcast::Receiver<WatcherEvent>> = match (&cc_tasks_watcher, &target_session_id) {
             (Some(watcher), Some(_)) => {
                 let w = watcher.lock().await;
@@ -1673,7 +1675,7 @@ impl PTYWebSocketServer {
                 // Persist conversation to DB
                 if let (Some(ref db), Some(ref cid)) = (&db, &jarvis_conv_id) {
                     if !raw_user_text.is_empty() {
-                        if let Err(e) = db.jarvis_save_exchange(cid, &raw_user_text, &final_response) {
+                        if let Err(e) = db.jarvis_save_exchange(cid, &raw_user_text, &final_response).await {
                             warn!(error = %e, conv_id = %cid, "Failed to save jarvis exchange");
                         } else if conversation_id.is_none() {
                             let title = if raw_user_text.chars().count() > 80 {
@@ -1682,7 +1684,7 @@ impl PTYWebSocketServer {
                             } else {
                                 raw_user_text.clone()
                             };
-                            let _ = db.jarvis_update_title(cid, &title);
+                            let _ = db.jarvis_update_title(cid, &title).await;
                         }
                     }
                 }
@@ -1736,7 +1738,7 @@ impl PTYWebSocketServer {
         jarvis_trace: JarvisTraceStore,
         incident_tx: Option<tokio::sync::mpsc::Sender<crate::types::MissionIncident>>,
         frontend_events_tx: Option<broadcast::Sender<String>>,
-        db: Option<Arc<crate::db::MissionDB>>,
+        db: Option<Arc<dyn crate::db::traits::MissionStore>>,
         context_enricher: ContextEnricherSlot,
         tool_count: usize,
     ) -> anyhow::Result<()> {
@@ -2067,7 +2069,7 @@ impl PTYWebSocketServer {
         addr: SocketAddr,
         ws_stream: tokio_tungstenite::WebSocketStream<TcpStream>,
         frontend_events_tx: Option<broadcast::Sender<String>>,
-        db: Option<Arc<crate::db::MissionDB>>,
+        db: Option<Arc<dyn crate::db::traits::MissionStore>>,
     ) -> anyhow::Result<()> {
         let tx = match frontend_events_tx {
             Some(tx) => tx,
@@ -2090,9 +2092,10 @@ impl PTYWebSocketServer {
         info!(?addr, "Client subscribing to EventBus stream");
 
         // Send connected message with latest seq from DB (for catch-up protocol)
-        let latest_seq = db.as_ref()
-            .and_then(|d| d.timeline_latest_seq().ok())
-            .unwrap_or(0);
+        let latest_seq = match db.as_ref() {
+            Some(d) => d.timeline_latest_seq().await.unwrap_or(0),
+            None => 0,
+        };
         let connected = serde_json::json!({
             "type": "connected",
             "ts": chrono::Utc::now().timestamp_millis(),
@@ -2173,14 +2176,13 @@ impl PTYWebSocketServer {
     /// Handle catch-up: replay historical events from DB since a given seq.
     async fn handle_catch_up(
         ws_tx: &mut futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, Message>,
-        db: &Arc<crate::db::MissionDB>,
+        db: &Arc<dyn crate::db::traits::MissionStore>,
         since_seq: i64,
     ) {
-        let latest = db.timeline_latest_seq().unwrap_or(0);
+        let latest = db.timeline_latest_seq().await.unwrap_or(0);
         let gap = latest - since_seq;
 
         if gap > 1000 {
-            // Too far behind — client should do full HTTP refresh
             let msg = serde_json::json!({
                 "type": "too_far_behind",
                 "ts": chrono::Utc::now().timestamp_millis(),
@@ -2201,19 +2203,11 @@ impl PTYWebSocketServer {
             return;
         }
 
-        // Replay historical events from SQLite
-        let db_clone = Arc::clone(db);
-        let rows = tokio::task::spawn_blocking(move || {
-            db_clone.query_timeline_since(since_seq, 1000)
-        }).await;
-
-        match rows {
-            Ok(Ok(rows)) => {
+        match db.query_timeline_since(since_seq, 1000).await {
+            Ok(rows) => {
                 for row in &rows {
-                    // Reconstruct the wire-format JSON from TimelineRow
                     let payload: serde_json::Value = serde_json::from_str(&row.payload)
                         .unwrap_or(serde_json::json!({}));
-                    // Parse SQLite datetime "YYYY-MM-DD HH:MM:SS" as UTC millis
                     let ts = chrono::NaiveDateTime::parse_from_str(&row.created_at, "%Y-%m-%d %H:%M:%S")
                         .map(|dt| dt.and_utc().timestamp_millis())
                         .unwrap_or(0);
@@ -2237,8 +2231,8 @@ impl PTYWebSocketServer {
                 });
                 let _ = send_json(ws_tx, &caught_up).await;
             }
-            _ => {
-                warn!("Timeline catch-up query failed");
+            Err(e) => {
+                warn!(error = %e, "Timeline catch-up query failed");
                 let msg = serde_json::json!({
                     "type": "caught_up",
                     "ts": chrono::Utc::now().timestamp_millis(),

@@ -231,6 +231,43 @@ pub(crate) struct AppState {
     pub(crate) backfill_enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// M4: Async task submission — replaces MissionControl::submit() to avoid split-brain.
+/// All task creation goes through `store` (the active backend) instead of MissionControl's
+/// internal SQLite, ensuring data consistency when using PostgreSQL.
+pub(crate) async fn submit_task(
+    store: &dyn MissionStore,
+    role: &str,
+    prompt: &str,
+) -> anyhow::Result<String> {
+    use missiond_core::types::{Task, TaskStatus, EventType};
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let task = Task {
+        id: uuid::Uuid::new_v4().to_string(),
+        role: role.to_string(),
+        prompt: prompt.to_string(),
+        status: TaskStatus::Queued,
+        slot_id: None,
+        session_id: None,
+        result: None,
+        error: None,
+        created_at: now,
+        started_at: None,
+        finished_at: None,
+    };
+
+    store.insert_task(&task).await
+        .map_err(|e| anyhow::anyhow!("Failed to create task: {}", e))?;
+
+    let data = serde_json::json!({ "role": role });
+    if let Err(e) = store.insert_event(&task.id, EventType::TaskCreated, Some(&data), now).await {
+        tracing::error!(task_id = %task.id, error = %e, "Failed to persist task event");
+    }
+
+    tracing::info!(task_id = %task.id, role = %role, "Task created (via store)");
+    Ok(task.id)
+}
+
 /// Event-driven embedding tasks — the Worker sleeps until triggered.
 #[derive(Debug, Clone)]
 pub(crate) enum EmbeddingTask {

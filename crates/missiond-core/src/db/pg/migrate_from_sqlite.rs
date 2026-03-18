@@ -120,7 +120,9 @@ pub async fn migrate_sqlite_to_pg(
     Ok((tables_done, total_rows))
 }
 
-/// Migrate a single table from SQLite to PostgreSQL using generic row copy.
+/// Migrate a single table from SQLite to PostgreSQL using cursor-based pagination.
+///
+/// Reads rows in batches of PAGE_SIZE to avoid OOM on large tables.
 #[cfg(all(feature = "sqlite", feature = "postgres"))]
 async fn migrate_table(
     sqlite: &crate::db::MissionDB,
@@ -128,6 +130,8 @@ async fn migrate_table(
     table: &str,
 ) -> Result<usize, String> {
     use rusqlite::types::ValueRef;
+
+    const PAGE_SIZE: usize = 500;
 
     // Check if PG table already has data (skip if non-empty — idempotent resume)
     let (pg_count,): (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {}", table))
@@ -139,52 +143,55 @@ async fn migrate_table(
         return Ok(0); // Already migrated
     }
 
-    // Read all rows from SQLite
-    let rows = sqlite.with_read(|conn| {
-        let mut stmt = conn.prepare(&format!("SELECT * FROM {}", table))
-            .map_err(|e| crate::db::error::DbError::Other(format!("prepare: {}", e)))?;
+    let mut inserted = 0usize;
+    let mut offset = 0usize;
 
-        let col_count = stmt.column_count();
-        let col_names: Vec<String> = (0..col_count)
-            .map(|i| stmt.column_name(i).unwrap_or("?").to_string())
-            .collect();
+    loop {
+        // Read one page from SQLite
+        let page = sqlite.with_read(|conn| {
+            let sql = format!("SELECT * FROM {} LIMIT {} OFFSET {}", table, PAGE_SIZE, offset);
+            let mut stmt = conn.prepare(&sql)
+                .map_err(|e| crate::db::error::DbError::Other(format!("prepare: {}", e)))?;
 
-        let mut all_rows: Vec<Vec<(String, SqliteValue)>> = Vec::new();
+            let col_count = stmt.column_count();
+            let col_names: Vec<String> = (0..col_count)
+                .map(|i| stmt.column_name(i).unwrap_or("?").to_string())
+                .collect();
 
-        let mut rows_iter = stmt.query([])
-            .map_err(|e| crate::db::error::DbError::Other(format!("query: {}", e)))?;
+            let mut page_rows: Vec<Vec<(String, SqliteValue)>> = Vec::new();
 
-        while let Some(row) = rows_iter.next()
-            .map_err(|e| crate::db::error::DbError::Other(format!("next: {}", e)))?
-        {
-            let mut row_data = Vec::new();
-            for (i, name) in col_names.iter().enumerate() {
-                let val = match row.get_ref(i) {
-                    Ok(ValueRef::Null) => SqliteValue::Null,
-                    Ok(ValueRef::Integer(v)) => SqliteValue::Integer(v),
-                    Ok(ValueRef::Real(v)) => SqliteValue::Real(v),
-                    Ok(ValueRef::Text(v)) => SqliteValue::Text(String::from_utf8_lossy(v).to_string()),
-                    Ok(ValueRef::Blob(v)) => SqliteValue::Blob(v.to_vec()),
-                    Err(_) => SqliteValue::Null,
-                };
-                row_data.push((name.clone(), val));
+            let mut rows_iter = stmt.query([])
+                .map_err(|e| crate::db::error::DbError::Other(format!("query: {}", e)))?;
+
+            while let Some(row) = rows_iter.next()
+                .map_err(|e| crate::db::error::DbError::Other(format!("next: {}", e)))?
+            {
+                let mut row_data = Vec::new();
+                for (i, name) in col_names.iter().enumerate() {
+                    let val = match row.get_ref(i) {
+                        Ok(ValueRef::Null) => SqliteValue::Null,
+                        Ok(ValueRef::Integer(v)) => SqliteValue::Integer(v),
+                        Ok(ValueRef::Real(v)) => SqliteValue::Real(v),
+                        Ok(ValueRef::Text(v)) => SqliteValue::Text(String::from_utf8_lossy(v).to_string()),
+                        Ok(ValueRef::Blob(v)) => SqliteValue::Blob(v.to_vec()),
+                        Err(_) => SqliteValue::Null,
+                    };
+                    row_data.push((name.clone(), val));
+                }
+                page_rows.push(row_data);
             }
-            all_rows.push(row_data);
+
+            Ok(page_rows)
+        }).map_err(|e| format!("SQLite read: {}", e))?;
+
+        if page.is_empty() {
+            break; // No more rows
         }
 
-        Ok(all_rows)
-    }).map_err(|e| format!("SQLite read: {}", e))?;
+        let page_len = page.len();
 
-    if rows.is_empty() {
-        return Ok(0);
-    }
-
-    // Insert into PostgreSQL in batches
-    let batch_size = 100;
-    let mut inserted = 0usize;
-
-    for chunk in rows.chunks(batch_size) {
-        for row in chunk {
+        // Insert page into PostgreSQL
+        for row in &page {
             let col_names: Vec<&str> = row.iter().map(|(n, _)| n.as_str()).collect();
             let placeholders: Vec<String> = (1..=col_names.len()).map(|i| format!("${}", i)).collect();
 
@@ -209,17 +216,142 @@ async fn migrate_table(
             match query.execute(pool).await {
                 Ok(_) => inserted += 1,
                 Err(e) => {
-                    // Log but continue (ON CONFLICT handles dupes)
                     if inserted == 0 {
-                        // Only warn on first failure per table
                         warn!(table, error = %e, "Insert failed");
                     }
                 }
             }
         }
+
+        offset += page_len;
+
+        if page_len < PAGE_SIZE {
+            break; // Last page
+        }
     }
 
     Ok(inserted)
+}
+
+/// Post-migration: backfill pgvector `embedding_vec` columns from BYTEA `embedding` data.
+///
+/// The ETL copies BYTEA as-is but pgvector columns (PG-only) remain NULL.
+/// This function decodes little-endian f32 arrays from BYTEA and writes them as vector(768).
+///
+/// Returns total rows backfilled across all tables.
+#[cfg(feature = "postgres")]
+pub async fn backfill_pg_embeddings(pg_url: &str) -> Result<usize, String> {
+    use sqlx::postgres::PgPoolOptions;
+    use std::time::Duration;
+
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .acquire_timeout(Duration::from_secs(10))
+        .connect(pg_url)
+        .await
+        .map_err(|e| format!("PG connect: {}", e))?;
+
+    // Tables with BYTEA embedding + pgvector embedding_vec columns
+    let tables = [
+        ("knowledge", "id"),
+        ("ast_nodes", "id"),
+        ("skill_topics", "id"),
+        ("conversation_topic_vectors", "id"),
+    ];
+
+    let mut total = 0usize;
+    for (table, pk) in &tables {
+        match backfill_table_embeddings(&pool, table, pk).await {
+            Ok(n) => {
+                if n > 0 {
+                    info!(table, backfilled = n, "Embedding backfill");
+                }
+                total += n;
+            }
+            Err(e) => {
+                warn!(table, error = %e, "Embedding backfill failed — skipping");
+            }
+        }
+    }
+
+    Ok(total)
+}
+
+/// Backfill embedding_vec for a single table using cursor-based pagination.
+#[cfg(feature = "postgres")]
+async fn backfill_table_embeddings(
+    pool: &sqlx::PgPool,
+    table: &str,
+    pk: &str,
+) -> Result<usize, String> {
+    const PAGE_SIZE: i64 = 200;
+    let mut updated = 0usize;
+    let mut last_id = String::new();
+
+    loop {
+        // Cursor-based: fetch next page of rows needing backfill
+        let sql = if last_id.is_empty() {
+            format!(
+                "SELECT {pk}, embedding FROM {table} \
+                 WHERE embedding IS NOT NULL AND embedding_vec IS NULL \
+                 ORDER BY {pk} LIMIT {PAGE_SIZE}"
+            )
+        } else {
+            format!(
+                "SELECT {pk}, embedding FROM {table} \
+                 WHERE embedding IS NOT NULL AND embedding_vec IS NULL AND {pk} > $1 \
+                 ORDER BY {pk} LIMIT {PAGE_SIZE}"
+            )
+        };
+
+        let rows: Vec<(String, Vec<u8>)> = if last_id.is_empty() {
+            sqlx::query_as(&sql).fetch_all(pool).await
+        } else {
+            sqlx::query_as(&sql).bind(&last_id).fetch_all(pool).await
+        }.map_err(|e| format!("fetch: {}", e))?;
+
+        if rows.is_empty() {
+            break;
+        }
+
+        for (id, blob) in &rows {
+            if blob.len() % 4 != 0 {
+                warn!(table, id = %id, len = blob.len(), "Invalid embedding blob size, skipping");
+                continue;
+            }
+            let floats: Vec<f32> = blob
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect();
+
+            let vec_str = format!(
+                "[{}]",
+                floats.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(",")
+            );
+
+            let update_sql = format!(
+                "UPDATE {table} SET embedding_vec = $1::vector WHERE {pk} = $2"
+            );
+            match sqlx::query(&update_sql)
+                .bind(&vec_str)
+                .bind(id)
+                .execute(pool)
+                .await
+            {
+                Ok(_) => updated += 1,
+                Err(e) => {
+                    warn!(table, id = %id, error = %e, "Embedding update failed");
+                }
+            }
+            last_id = id.clone();
+        }
+
+        if (rows.len() as i64) < PAGE_SIZE {
+            break;
+        }
+    }
+
+    Ok(updated)
 }
 
 /// Intermediate value type for SQLite → PG transfer.

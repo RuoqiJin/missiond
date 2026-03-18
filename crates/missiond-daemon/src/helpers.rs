@@ -30,6 +30,12 @@ pub(crate) fn slots_config_path() -> PathBuf {
     env_path("MISSION_SLOTS_CONFIG").unwrap_or_else(|| default_mission_home().join("slots.yaml"))
 }
 
+/// PostgreSQL connection URL (e.g. `postgres://user:pass@host:5432/missiond`).
+/// When set, daemon uses PgMissionStore instead of SqliteMissionStore.
+pub(crate) fn pg_url() -> Option<String> {
+    std::env::var("MISSION_PG_URL").ok().filter(|s| !s.is_empty())
+}
+
 pub(crate) fn ws_port() -> u16 {
     std::env::var("MISSION_WS_PORT")
         .ok()
