@@ -12,6 +12,7 @@ members = [
 
 [workspace.lints.clippy]
 string_slice = "warn"
+disallowed_methods = "warn"
 
 [workspace.package]
 version = "0.1.0"

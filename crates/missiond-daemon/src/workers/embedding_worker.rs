@@ -684,7 +684,6 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                     None => break,
                 },
             };
-            let db = state.mission.db();
             let provider_id = state.embedding_service.as_ref()
                 .map(|svc| svc.provider_id().to_string())
                 .unwrap_or_else(|| missiond_core::embedding::FASTEMBED_PROVIDER_ID.to_string());
@@ -774,10 +773,10 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                     }
                 }
                 EmbeddingTask::BackfillAll => {
-                    backfill_start(&state, db, &provider_id).await;
+                    backfill_start(&state, &provider_id).await;
                 }
                 EmbeddingTask::RunBackfillPhase { phase, cursor } => {
-                    backfill_run_phase(&state, db, &provider_id, phase, cursor).await;
+                    backfill_run_phase(&state, &provider_id, phase, cursor).await;
                 }
             }
         }
@@ -787,7 +786,7 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
 
 /// Backfill entry point: determine resume phase from DB, then kick off first batch.
 /// Gated by `llm.yaml` → `backfill_enabled: true`. Skips silently when disabled.
-async fn backfill_start(state: &AppState, _db: &missiond_core::db::MissionDB, provider_id: &str) {
+async fn backfill_start(state: &AppState, provider_id: &str) {
     if !state.backfill_enabled.load(std::sync::atomic::Ordering::Relaxed) {
         debug!("Backfill: disabled by config (backfill_enabled: false)");
         return;
@@ -838,19 +837,19 @@ async fn backfill_enqueue(state: &AppState, task: EmbeddingTask) {
 }
 
 /// Run one batch of a backfill phase, then re-enqueue next batch (yield pattern).
-async fn backfill_run_phase(state: &AppState, db: &missiond_core::db::MissionDB, provider_id: &str, phase: BackfillPhase, cursor: i64) {
+async fn backfill_run_phase(state: &AppState, provider_id: &str, phase: BackfillPhase, cursor: i64) {
     const BATCH_SIZE: i64 = 20;
     const MAX_RETRIES: i64 = 3;
 
     let (batch_success, batch_failed, new_cursor, phase_done) = match phase {
-        BackfillPhase::KbStale => backfill_kb_stale(state, db, provider_id).await,
-        BackfillPhase::KbMissing => { let r = backfill_kb_missing(state, db, provider_id).await; if r.3 { warm_kb_caches(state, db).await; } r }
-        BackfillPhase::SkillStale => backfill_skill_stale(state, db, provider_id).await,
-        BackfillPhase::SkillMissing => { let r = backfill_skill_missing(state, db, provider_id).await; if r.3 { warm_skill_cache(state, db).await; } r }
-        BackfillPhase::ConvTopicVectors => backfill_conv_topic_vectors(state, db, provider_id, cursor, BATCH_SIZE).await,
-        BackfillPhase::ConvSummary => backfill_conv_summary(state, db, cursor, BATCH_SIZE).await,
-        BackfillPhase::ConvRetry => backfill_conv_retry(state, db, MAX_RETRIES, BATCH_SIZE).await,
-        BackfillPhase::AstNodes => { let r = backfill_ast_nodes(state, db, provider_id).await; if r.3 { warm_ast_cache(state, db).await; } r }
+        BackfillPhase::KbStale => backfill_kb_stale(state, provider_id).await,
+        BackfillPhase::KbMissing => { let r = backfill_kb_missing(state, provider_id).await; if r.3 { warm_kb_caches(state).await; } r }
+        BackfillPhase::SkillStale => backfill_skill_stale(state, provider_id).await,
+        BackfillPhase::SkillMissing => { let r = backfill_skill_missing(state, provider_id).await; if r.3 { warm_skill_cache(state).await; } r }
+        BackfillPhase::ConvTopicVectors => backfill_conv_topic_vectors(state, provider_id, cursor, BATCH_SIZE).await,
+        BackfillPhase::ConvSummary => backfill_conv_summary(state, cursor, BATCH_SIZE).await,
+        BackfillPhase::ConvRetry => backfill_conv_retry(state, MAX_RETRIES, BATCH_SIZE).await,
+        BackfillPhase::AstNodes => { let r = backfill_ast_nodes(state, provider_id).await; if r.3 { warm_ast_cache(state).await; } r }
         BackfillPhase::Timeline => backfill_timelines(state).await,
     };
 
@@ -879,7 +878,7 @@ async fn backfill_run_phase(state: &AppState, db: &missiond_core::db::MissionDB,
 
 // ── Phase implementations (each returns: success, failed, new_cursor, phase_done) ──
 
-async fn backfill_kb_stale(state: &AppState, _db: &missiond_core::db::MissionDB, provider_id: &str) -> (i64, i64, i64, bool) {
+async fn backfill_kb_stale(state: &AppState, provider_id: &str) -> (i64, i64, i64, bool) {
     let Some(ref emb_svc) = state.embedding_service else { return (0, 0, 0, true) };
     let stale = state.store.kb_entries_stale_embedding(provider_id, 20).await.unwrap_or_default();
     if stale.is_empty() { return (0, 0, 0, true); }
@@ -895,7 +894,7 @@ async fn backfill_kb_stale(state: &AppState, _db: &missiond_core::db::MissionDB,
     (success, 0, 0, stale.len() < 20)
 }
 
-async fn backfill_kb_missing(state: &AppState, _db: &missiond_core::db::MissionDB, provider_id: &str) -> (i64, i64, i64, bool) {
+async fn backfill_kb_missing(state: &AppState, provider_id: &str) -> (i64, i64, i64, bool) {
     let Some(ref emb_svc) = state.embedding_service else { return (0, 0, 0, true) };
     let missing = state.store.kb_entries_missing_embedding(None).await.unwrap_or_default();
     if missing.is_empty() { return (0, 0, 0, true); }
@@ -911,7 +910,7 @@ async fn backfill_kb_missing(state: &AppState, _db: &missiond_core::db::MissionD
     (success, 0, 0, missing.len() < 20)
 }
 
-async fn backfill_skill_stale(state: &AppState, _db: &missiond_core::db::MissionDB, provider_id: &str) -> (i64, i64, i64, bool) {
+async fn backfill_skill_stale(state: &AppState, provider_id: &str) -> (i64, i64, i64, bool) {
     let Some(ref emb_svc) = state.embedding_service else { return (0, 0, 0, true) };
     let stale = state.store.skill_topics_stale_embedding(provider_id, 20).await.unwrap_or_default();
     if stale.is_empty() { return (0, 0, 0, true); }
@@ -926,7 +925,7 @@ async fn backfill_skill_stale(state: &AppState, _db: &missiond_core::db::Mission
     (success, 0, 0, stale.len() < 20)
 }
 
-async fn backfill_skill_missing(state: &AppState, _db: &missiond_core::db::MissionDB, provider_id: &str) -> (i64, i64, i64, bool) {
+async fn backfill_skill_missing(state: &AppState, provider_id: &str) -> (i64, i64, i64, bool) {
     let Some(ref emb_svc) = state.embedding_service else { return (0, 0, 0, true) };
     let missing = state.store.skill_topics_missing_embedding(20).await.unwrap_or_default();
     if missing.is_empty() { return (0, 0, 0, true); }
@@ -941,7 +940,7 @@ async fn backfill_skill_missing(state: &AppState, _db: &missiond_core::db::Missi
     (success, 0, 0, missing.len() < 20)
 }
 
-async fn backfill_conv_topic_vectors(state: &AppState, _db: &missiond_core::db::MissionDB, provider_id: &str, cursor: i64, batch_size: i64) -> (i64, i64, i64, bool) {
+async fn backfill_conv_topic_vectors(state: &AppState, provider_id: &str, cursor: i64, batch_size: i64) -> (i64, i64, i64, bool) {
     let batch = state.store.conversations_needing_topic_vectors_cursor(provider_id, cursor, batch_size).await.unwrap_or_default();
     if batch.is_empty() { return (0, 0, cursor, true); }
     info!(count = batch.len(), cursor, "Conv topic vector backfill batch");
@@ -957,7 +956,7 @@ async fn backfill_conv_topic_vectors(state: &AppState, _db: &missiond_core::db::
     (success, failed, max_rowid, batch.len() < batch_size as usize)
 }
 
-async fn backfill_conv_summary(state: &AppState, _db: &missiond_core::db::MissionDB, cursor: i64, batch_size: i64) -> (i64, i64, i64, bool) {
+async fn backfill_conv_summary(state: &AppState, cursor: i64, batch_size: i64) -> (i64, i64, i64, bool) {
     let batch = state.store.conversations_missing_summary_cursor(cursor, batch_size).await.unwrap_or_default();
     if batch.is_empty() { return (0, 0, cursor, true); }
     info!(count = batch.len(), cursor, "Conv summary backfill batch");
@@ -973,7 +972,7 @@ async fn backfill_conv_summary(state: &AppState, _db: &missiond_core::db::Missio
     (success, failed, max_rowid, batch.len() < batch_size as usize)
 }
 
-async fn backfill_conv_retry(state: &AppState, _db: &missiond_core::db::MissionDB, max_retries: i64, batch_size: i64) -> (i64, i64, i64, bool) {
+async fn backfill_conv_retry(state: &AppState, max_retries: i64, batch_size: i64) -> (i64, i64, i64, bool) {
     let mut total_success = 0i64; let mut total_failed = 0i64; let mut has_work = false;
     let mut has_cooling = false;
     for phase_name in &["conv_summary", "conv_topic_vectors"] {
@@ -999,7 +998,7 @@ async fn backfill_conv_retry(state: &AppState, _db: &missiond_core::db::MissionD
     (total_success, total_failed, 0, phase_done)
 }
 
-async fn backfill_ast_nodes(state: &AppState, _db: &missiond_core::db::MissionDB, provider_id: &str) -> (i64, i64, i64, bool) {
+async fn backfill_ast_nodes(state: &AppState, provider_id: &str) -> (i64, i64, i64, bool) {
     let Some(ref emb_svc) = state.embedding_service else { return (0, 0, 0, true) };
     let missing = state.store.ast_find_unembedded(20).await.unwrap_or_default();
     if missing.is_empty() { return (0, 0, 0, true); }
@@ -1043,16 +1042,16 @@ async fn backfill_timelines(state: &AppState) -> (i64, i64, i64, bool) {
     (success, 0, 0, needing.len() < 50)
 }
 
-async fn warm_kb_caches(state: &AppState, _db: &missiond_core::db::MissionDB) {
+async fn warm_kb_caches(state: &AppState) {
     if let Ok(all) = state.store.kb_load_embeddings("policy:decision").await { let mut guard = state.embedding_cache.write().await; *guard = all; info!(count = guard.len(), "KB policy cache refreshed after backfill"); }
     if let Ok(all) = state.store.kb_load_all_embeddings().await { let mut guard = state.kb_search_cache.write().await; *guard = all; info!(count = guard.len(), "KB search cache refreshed after backfill"); }
 }
 
-async fn warm_skill_cache(state: &AppState, _db: &missiond_core::db::MissionDB) {
+async fn warm_skill_cache(state: &AppState) {
     if let Ok(all) = state.store.skill_load_topic_embeddings().await { let mut guard = state.skill_embedding_cache.write().await; *guard = all; info!(count = guard.len(), "Skill embedding cache refreshed after backfill"); }
 }
 
-async fn warm_ast_cache(state: &AppState, _db: &missiond_core::db::MissionDB) {
+async fn warm_ast_cache(state: &AppState) {
     if let Ok(all) = state.store.ast_load_all_embeddings().await { let mut guard = state.ast_embedding_cache.write().await; *guard = all; info!(count = guard.len(), "AST embedding cache refreshed after backfill"); }
 }
 

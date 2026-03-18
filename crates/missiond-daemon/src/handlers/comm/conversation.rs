@@ -668,8 +668,6 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
             let Args { since, until } = serde_json::from_value(args)?;
             let until = until.unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string());
-            let db = state.mission.db();
-
             // 1. Conversations
             let convs = state.store.list_conversations(None, 500, Some("all"), None, Some(&since), Some(&until), None).await
                 .unwrap_or_default();
@@ -680,9 +678,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 *by_type.entry(c.conversation_type.clone()).or_default() += 1;
             }
 
-            // 2. Board tasks — direct SQL for time-based filtering
-            let since_iso = db.parse_time_since(&since).replace(' ', "T");
-            let until_iso = db.parse_time_until(&until).replace(' ', "T");
+            // 2. Board tasks — time-based filtering via static parse helpers
+            let since_iso = missiond_core::db::MissionDB::parse_since(&since).replace(' ', "T");
+            let until_iso = missiond_core::db::MissionDB::parse_until(&until).replace(' ', "T");
             let board_created = state.store.query_board_tasks_in_range("created_at", &since_iso, &until_iso).await
                 .unwrap_or_default();
             let board_completed = state.store.query_board_tasks_in_range_with_status("done", &since_iso, &until_iso).await
@@ -693,8 +691,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
             // 4. Git commits (graceful degradation)
             let git_commits = {
-                let git_since = db.parse_time_since(&since);
-                let git_until = db.parse_time_until(&until);
+                let git_since = missiond_core::db::MissionDB::parse_since(&since);
+                let git_until = missiond_core::db::MissionDB::parse_until(&until);
                 match std::process::Command::new("git")
                     .args(["log", "--oneline", &format!("--after={}", git_since), &format!("--before={}", git_until), "--all"])
                     .output()
