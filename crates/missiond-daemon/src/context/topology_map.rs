@@ -7,7 +7,7 @@
 
 use tracing::{debug, info};
 
-use missiond_core::db::MissionDB;
+use missiond_core::db::traits::MissionStore;
 use missiond_core::db::ast::ModuleAstSummary;
 use missiond_core::types::KBRememberInput;
 
@@ -21,8 +21,8 @@ const MODULE_NAV_BUDGET: usize = 1500;
 ///
 /// Pure computation (DB queries + aggregation), no LLM calls.
 /// Called from ast_sync_worker after FullSync or CommitSync.
-pub(crate) fn update_module_summaries(db: &MissionDB, repo: &str) {
-    let summaries = match db.ast_module_summaries(repo) {
+pub(crate) async fn update_module_summaries(store: &dyn MissionStore, repo: &str) {
+    let summaries = match store.ast_module_summaries(repo).await {
         Ok(s) => s,
         Err(e) => {
             debug!(error = %e, "Failed to generate module summaries");
@@ -45,7 +45,6 @@ pub(crate) fn update_module_summaries(db: &MissionDB, repo: &str) {
             "file_docs": summary.file_docs,
         });
 
-        // Build human-readable summary line
         let type_list = if summary.public_types.len() <= 8 {
             summary.public_types.join(", ")
         } else {
@@ -73,7 +72,7 @@ pub(crate) fn update_module_summaries(db: &MissionDB, repo: &str) {
             confidence: Some(1.0),
         };
 
-        match db.kb_remember(&input) {
+        match store.kb_remember(&input).await {
             Ok(_) => updated += 1,
             Err(e) => debug!(module = %summary.module_path, error = %e, "Failed to store module summary"),
         }

@@ -8,13 +8,13 @@
 //! Part of P2: Holographic Context Engine.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use missiond_core::MissionControl;
-use missiond_core::db::MissionDB;
+use missiond_core::db::traits::MissionStore;
 
 /// Source code file extensions we index.
 const CODE_EXTENSIONS: &[&str] = &["rs", "ts", "tsx", "py"];
@@ -52,7 +52,7 @@ pub(crate) enum AstSyncTask {
 /// Run the AST sync worker loop. Receives tasks from channel, coalesces commits.
 pub(crate) async fn run_ast_sync_worker(
     mut rx: mpsc::Receiver<AstSyncTask>,
-    mission: std::sync::Arc<MissionControl>,
+    store: Arc<dyn MissionStore>,
     embedding_tx: mpsc::Sender<crate::state::EmbeddingTask>,
 ) {
     info!("AST sync worker started");
@@ -60,37 +60,16 @@ pub(crate) async fn run_ast_sync_worker(
     while let Some(task) = rx.recv().await {
         match task {
             AstSyncTask::CommitSync { repo_path, repo_name, old_hash, new_hash } => {
-                // Coalesce: collect more CommitSync for same repo within window
                 let (final_old, final_new) = coalesce_commits(
                     &mut rx, &repo_path, &repo_name, old_hash, new_hash,
                 ).await;
-
-                let mc = mission.clone();
-                let etx = embedding_tx.clone();
-                let rp = repo_path.clone();
-                let rn = repo_name.clone();
-                tokio::task::spawn_blocking(move || {
-                    process_commit_sync(mc.db(), &rp, &rn, &final_old, &final_new, &etx);
-                }).await.ok();
+                process_commit_sync(store.as_ref(), &repo_path, &repo_name, &final_old, &final_new, &embedding_tx).await;
             }
             AstSyncTask::FullSync { repo_path, repo_name } => {
-                let mc = mission.clone();
-                let etx = embedding_tx.clone();
-                let rp = repo_path.clone();
-                let rn = repo_name.clone();
-                tokio::task::spawn_blocking(move || {
-                    process_full_sync(mc.db(), &rp, &rn, &etx);
-                }).await.ok();
+                process_full_sync(store.as_ref(), &repo_path, &repo_name, &embedding_tx).await;
             }
             AstSyncTask::FileSync { repo_path, repo_name, file_path } => {
-                let mc = mission.clone();
-                let etx = embedding_tx.clone();
-                let rp = repo_path.clone();
-                let rn = repo_name.clone();
-                let fp = file_path.clone();
-                tokio::task::spawn_blocking(move || {
-                    process_file_sync(mc.db(), &rp, &rn, &fp, &etx);
-                }).await.ok();
+                process_file_sync(store.as_ref(), &repo_path, &repo_name, &file_path, &embedding_tx).await;
             }
         }
     }
@@ -137,8 +116,8 @@ async fn coalesce_commits(
 }
 
 /// Process incremental commit sync: git diff-tree → parse changed files.
-fn process_commit_sync(
-    db: &MissionDB,
+async fn process_commit_sync(
+    store: &dyn MissionStore,
     repo_path: &Path,
     repo_name: &str,
     old_hash: &str,
@@ -163,37 +142,33 @@ fn process_commit_sync(
     for (status, file_path) in &changed {
         match status.as_str() {
             "D" => {
-                // File deleted — remove nodes
-                match db.ast_delete_file(repo_name, file_path) {
+                match store.ast_delete_file(repo_name, file_path).await {
                     Ok(n) => if n > 0 { debug!(file = %file_path, deleted = n, "AST: deleted nodes"); },
                     Err(e) => warn!(file = %file_path, err = %e, "AST: delete failed"),
                 }
             }
             "A" | "M" | "R" | "C" | "T" => {
-                // Added, Modified, Renamed, Copied, Type-changed — re-parse
-                let ids = sync_single_file(db, repo_path, repo_name, file_path, new_hash);
+                let ids = sync_single_file(store, repo_path, repo_name, file_path, new_hash).await;
                 node_ids.extend(ids);
             }
             _ => {
                 debug!(status = %status, file = %file_path, "AST: unknown git status, treating as modified");
-                let ids = sync_single_file(db, repo_path, repo_name, file_path, new_hash);
+                let ids = sync_single_file(store, repo_path, repo_name, file_path, new_hash).await;
                 node_ids.extend(ids);
             }
         }
     }
 
-    // Trigger embedding for new/changed nodes
     if !node_ids.is_empty() {
         trigger_embedding(embedding_tx, node_ids);
     }
 
-    // Update topology map (module-level summaries) after commit changes
-    crate::topology_map::update_module_summaries(db, repo_name);
+    crate::topology_map::update_module_summaries(store, repo_name).await;
 }
 
 /// Process full sync: scan repo for all code files, sync stale ones.
-fn process_full_sync(
-    db: &MissionDB,
+async fn process_full_sync(
+    store: &dyn MissionStore,
     repo_path: &Path,
     repo_name: &str,
     embedding_tx: &mpsc::Sender<crate::state::EmbeddingTask>,
@@ -218,8 +193,7 @@ fn process_full_sync(
 
     for (batch_idx, chunk) in files.chunks(FULL_SYNC_BATCH_SIZE).enumerate() {
         for file_path in chunk {
-            // Check if already up-to-date
-            match db.ast_get_file_commit(repo_name, file_path) {
+            match store.ast_get_file_commit(repo_name, file_path).await {
                 Ok(Some(ref cached_hash)) if cached_hash == &head_hash => {
                     skipped += 1;
                     continue;
@@ -227,24 +201,22 @@ fn process_full_sync(
                 _ => {}
             }
 
-            let ids = sync_single_file(db, repo_path, repo_name, file_path, &head_hash);
+            let ids = sync_single_file(store, repo_path, repo_name, file_path, &head_hash).await;
             node_ids.extend(ids);
             synced += 1;
         }
 
-        // Rate limit between batches
+        // Rate limit between batches (async sleep, not thread::sleep)
         if batch_idx > 0 && synced > 0 {
-            std::thread::sleep(Duration::from_secs(1));
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
 
-    // Trigger embedding
     if !node_ids.is_empty() {
         trigger_embedding(embedding_tx, node_ids);
     }
 
-    // Update topology map after full sync
-    crate::topology_map::update_module_summaries(db, repo_name);
+    crate::topology_map::update_module_summaries(store, repo_name).await;
 
     info!(
         repo = %repo_name,
@@ -254,23 +226,23 @@ fn process_full_sync(
 }
 
 /// Process single file sync (for uncommitted changes).
-fn process_file_sync(
-    db: &MissionDB,
+async fn process_file_sync(
+    store: &dyn MissionStore,
     repo_path: &Path,
     repo_name: &str,
     file_path: &str,
     embedding_tx: &mpsc::Sender<crate::state::EmbeddingTask>,
 ) {
     let hash = git_head_hash(repo_path).unwrap_or_else(|| "worktree".to_string());
-    let ids = sync_single_file(db, repo_path, repo_name, file_path, &hash);
+    let ids = sync_single_file(store, repo_path, repo_name, file_path, &hash).await;
     if !ids.is_empty() {
         trigger_embedding(embedding_tx, ids);
     }
 }
 
 /// Parse a single file and sync to DB. Returns node IDs of inserted nodes.
-fn sync_single_file(
-    db: &MissionDB,
+async fn sync_single_file(
+    store: &dyn MissionStore,
     repo_path: &Path,
     repo_name: &str,
     file_path: &str,
@@ -291,18 +263,15 @@ fn sync_single_file(
     let nodes: Vec<missiond_core::ast::CodeNode> = Vec::new();
 
     if nodes.is_empty() {
-        // Either unsupported extension or parse failure — still update meta
-        // to avoid re-attempting on next sync
-        let _ = db.ast_sync_file(repo_name, file_path, commit_hash, &[]);
+        let _ = store.ast_sync_file(repo_name, file_path, commit_hash, &[]).await;
         return Vec::new();
     }
 
-    // Collect IDs before sync (sync consumes nothing, but we need them for embedding)
     let ids: Vec<String> = nodes.iter()
         .map(|n| n.build_id(repo_name, file_path))
         .collect();
 
-    match db.ast_sync_file(repo_name, file_path, commit_hash, &nodes) {
+    match store.ast_sync_file(repo_name, file_path, commit_hash, &nodes).await {
         Ok(result) => {
             debug!(
                 file = %file_path,
@@ -318,14 +287,13 @@ fn sync_single_file(
     }
 
     // P4: Extract @beacon: tags and sync to beacon_nodes
-    // First, clean old beacon_nodes for this file (re-extract from scratch)
-    let _ = db.beacon_nodes_delete_file(repo_name, file_path);
+    let _ = store.beacon_nodes_delete_file(repo_name, file_path).await;
     for node in &nodes {
         if !node.beacons.is_empty() {
             for beacon_name in &node.beacons {
-                match db.beacon_ensure(beacon_name) {
+                match store.beacon_ensure(beacon_name).await {
                     Ok(beacon_id) => {
-                        let _ = db.beacon_node_upsert(&beacon_id, repo_name, file_path, &node.name, None);
+                        let _ = store.beacon_node_upsert(&beacon_id, repo_name, file_path, &node.name, None).await;
                     }
                     Err(e) => {
                         debug!(beacon = %beacon_name, err = %e, "Beacon: ensure failed");
