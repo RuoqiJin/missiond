@@ -3,19 +3,12 @@
 //! Unified management of task queue, slot configuration, agent processes, and inbox.
 
 use super::{
-    Inbox, PermissionConfig, PermissionPolicy, PermissionRule, SlotManager,
+    PermissionConfig, PermissionPolicy, PermissionRule, SlotManager,
 };
 #[cfg(feature = "sqlite")]
 use crate::db::MissionDB;
-#[cfg(feature = "sqlite")]
-use crate::types::{
-    CreateTaskInput, EventType, InboxMessage, Slot, SlotConfig, SlotsConfig, Task, TaskStatus, TaskUpdate,
-};
-#[cfg(not(feature = "sqlite"))]
-use crate::types::{
-    CreateTaskInput, InboxMessage, Slot, SlotConfig, SlotsConfig, Task,
-};
-use anyhow::{anyhow, Result};
+use crate::types::{Slot, SlotConfig, SlotsConfig};
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "sqlite")]
 use std::sync::Arc;
@@ -61,14 +54,13 @@ pub struct MissionControlOptions {
 
 /// Mission Control
 ///
-/// Main coordinator for task queue, slot configuration, and inbox.
-/// Agent process lifecycle is managed by PTYManager (single source of truth).
+/// Coordinator for slot configuration and permissions.
+/// Task/inbox operations have been migrated to async MissionStore trait.
 pub struct MissionControl {
     #[cfg(feature = "sqlite")]
     db: Option<Arc<MissionDB>>,
     slot_manager: SlotManager,
     permission_policy: PermissionPolicy,
-    inbox: Inbox,
     started: RwLock<bool>,
     #[allow(dead_code)]
     logs_dir: PathBuf,
@@ -99,7 +91,6 @@ impl MissionControl {
 
         // Initialize components (DB-optional)
         let slot_manager = SlotManager::new(db.clone());
-        let inbox = Inbox::new(db.clone());
 
         // Load permission config
         let permission_config_path = options.permission_config_path.unwrap_or_else(|| {
@@ -117,7 +108,6 @@ impl MissionControl {
             db,
             slot_manager,
             permission_policy,
-            inbox,
             started: RwLock::new(false),
             logs_dir,
             default_mode: RwLock::new(default_mode),
@@ -144,7 +134,6 @@ impl MissionControl {
         let default_mode = options.default_mode.unwrap_or(ExecutionMode::Batch);
 
         let slot_manager = SlotManager::new();
-        let inbox = Inbox::new();
 
         // Load permission config
         let permission_config_path = options.permission_config_path.unwrap_or_else(|| {
@@ -160,7 +149,6 @@ impl MissionControl {
         let mc = Self {
             slot_manager,
             permission_policy,
-            inbox,
             started: RwLock::new(false),
             logs_dir,
             default_mode: RwLock::new(default_mode),
@@ -245,127 +233,6 @@ impl MissionControl {
         Arc::clone(self.db.as_ref().expect("db_arc() called in PG mode — use store instead"))
     }
 
-    // ============ Task Operations ============
-
-    /// Submit a task (async, returns immediately)
-    pub fn submit(&self, role: &str, prompt: &str) -> Result<String> {
-        let input = CreateTaskInput {
-            role: role.to_string(),
-            prompt: prompt.to_string(),
-        };
-        let task = self.create_task(input)?;
-        Ok(task.id)
-    }
-
-    /// Synchronous ask — creates a task and returns its ID.
-    /// Actual execution is dispatched via PTY by the caller (mission_ask handler).
-    pub async fn ask_expert(
-        &self,
-        role: &str,
-        question: &str,
-        _timeout_ms: u64,
-    ) -> Result<String> {
-        let input = CreateTaskInput {
-            role: role.to_string(),
-            prompt: question.to_string(),
-        };
-        let task = self.create_task(input)?;
-        Ok(task.id)
-    }
-
-    /// Create a task (legacy — callers should use state::submit_task() instead)
-    #[cfg(feature = "sqlite")]
-    fn create_task(&self, input: CreateTaskInput) -> Result<Task> {
-        let db = self.db.as_ref().ok_or_else(|| anyhow!("create_task() called in PG mode — use submit_task()"))?;
-        let now = chrono::Utc::now().timestamp_millis();
-        let task = Task {
-            id: Uuid::new_v4().to_string(),
-            role: input.role.clone(),
-            prompt: input.prompt.clone(),
-            status: TaskStatus::Queued,
-            slot_id: None,
-            session_id: None,
-            result: None,
-            error: None,
-            created_at: now,
-            started_at: None,
-            finished_at: None,
-        };
-
-        if let Err(e) = db.insert_task(&task) {
-            error!(task_id = %task.id, error = %e, "Failed to persist task to DB");
-            return Err(anyhow!("Failed to create task: {}", e));
-        }
-        let data = serde_json::json!({ "role": input.role });
-        if let Err(e) = db.insert_event(&task.id, EventType::TaskCreated, Some(&data), now) {
-            error!(task_id = %task.id, error = %e, "Failed to persist task event");
-        }
-
-        info!(task_id = %task.id, role = %input.role, "Task created");
-        Ok(task)
-    }
-
-    #[cfg(not(feature = "sqlite"))]
-    fn create_task(&self, _input: CreateTaskInput) -> Result<Task> {
-        Err(anyhow!("create_task() not available in PG mode — use submit_task()"))
-    }
-
-    /// Get task status (legacy)
-    #[cfg(feature = "sqlite")]
-    pub fn get_status(&self, task_id: &str) -> Option<Task> {
-        self.db.as_ref()?.get_task(task_id).ok().flatten()
-    }
-
-    #[cfg(not(feature = "sqlite"))]
-    pub fn get_status(&self, _task_id: &str) -> Option<Task> {
-        None
-    }
-
-    /// Cancel a task (legacy — callers should use store directly)
-    #[cfg(feature = "sqlite")]
-    pub async fn cancel(&self, task_id: &str) -> Result<bool> {
-        let db = self.db.as_ref().ok_or_else(|| anyhow!("cancel() called in PG mode"))?;
-        let task = match db.get_task(task_id).ok().flatten() {
-            Some(t) => t,
-            None => return Ok(false),
-        };
-
-        let now = chrono::Utc::now().timestamp_millis();
-
-        if task.status == TaskStatus::Queued || task.status == TaskStatus::Running {
-            if let Err(e) = db.update_task(
-                task_id,
-                &TaskUpdate {
-                    status: Some(TaskStatus::Cancelled),
-                    finished_at: Some(now),
-                    ..Default::default()
-                },
-            ) {
-                error!(task_id = %task_id, error = %e, "Failed to cancel task");
-            }
-            return Ok(true);
-        }
-
-        Ok(false)
-    }
-
-    #[cfg(not(feature = "sqlite"))]
-    pub async fn cancel(&self, _task_id: &str) -> Result<bool> {
-        Err(anyhow!("cancel() not available in PG mode"))
-    }
-
-    // ============ Inbox Operations ============
-
-    /// Get inbox messages
-    pub fn get_inbox(&self, unread_only: bool, limit: usize) -> Vec<InboxMessage> {
-        self.inbox.get_messages(unread_only, limit)
-    }
-
-    /// Mark a message as read
-    pub fn mark_inbox_read(&self, message_id: &str) {
-        self.inbox.mark_read(message_id);
-    }
-
     // ============ Slot Operations ============
 
     /// List all slots
@@ -391,49 +258,6 @@ impl MissionControl {
     /// Unregister a dynamic slot (remove from runtime).
     pub fn unregister_dynamic_slot(&self, slot_id: &str) {
         self.slot_manager.unregister_dynamic_slot(slot_id);
-    }
-
-    // ============ Statistics ============
-
-    /// Get statistics
-    #[cfg(feature = "sqlite")]
-    pub fn get_stats(&self) -> MissionStats {
-        let slot_stats = self.slot_manager.get_stats();
-        let task_count = |status: TaskStatus| -> usize {
-            self.db.as_ref()
-                .and_then(|db| db.get_tasks_by_status(status).ok())
-                .map(|v| v.len())
-                .unwrap_or(0)
-        };
-
-        MissionStats {
-            tasks: TaskStats {
-                queued: task_count(TaskStatus::Queued),
-                running: task_count(TaskStatus::Running),
-                done: task_count(TaskStatus::Done),
-                failed: task_count(TaskStatus::Failed),
-            },
-            slots: SlotStats {
-                total: slot_stats.total,
-                by_role: slot_stats.by_role,
-            },
-            inbox: InboxStats {
-                unread: self.inbox.get_unread_count(),
-            },
-        }
-    }
-
-    #[cfg(not(feature = "sqlite"))]
-    pub fn get_stats(&self) -> MissionStats {
-        let slot_stats = self.slot_manager.get_stats();
-        MissionStats {
-            tasks: TaskStats { queued: 0, running: 0, done: 0, failed: 0 },
-            slots: SlotStats {
-                total: slot_stats.total,
-                by_role: slot_stats.by_role,
-            },
-            inbox: InboxStats { unread: 0 },
-        }
     }
 
     /// Get default execution mode
@@ -496,35 +320,6 @@ impl MissionControl {
     }
 }
 
-/// Task statistics
-#[derive(Debug, Clone)]
-pub struct TaskStats {
-    pub queued: usize,
-    pub running: usize,
-    pub done: usize,
-    pub failed: usize,
-}
-
-/// Slot statistics
-#[derive(Debug, Clone)]
-pub struct SlotStats {
-    pub total: usize,
-    pub by_role: std::collections::HashMap<String, usize>,
-}
-
-/// Inbox statistics
-#[derive(Debug, Clone)]
-pub struct InboxStats {
-    pub unread: usize,
-}
-
-/// Mission statistics
-#[derive(Debug, Clone)]
-pub struct MissionStats {
-    pub tasks: TaskStats,
-    pub slots: SlotStats,
-    pub inbox: InboxStats,
-}
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
