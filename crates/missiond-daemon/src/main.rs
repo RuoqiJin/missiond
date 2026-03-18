@@ -101,8 +101,33 @@ async fn run_timeline_writer(
             }
         }
 
-        // Batch-write to DB via trait store (internally uses spawn_blocking for SQLite)
-        let db_entries: Vec<(Option<String>, String, Option<String>, String, Option<String>, String)> = batch
+        let ts = chrono::Utc::now().timestamp_millis();
+
+        // Split: ephemeral events skip DB, persistent events get written.
+        let (persistent, ephemeral): (Vec<TimelineEntry>, Vec<TimelineEntry>) =
+            batch.into_iter().partition(|e| !e.event.is_ephemeral());
+
+        // Ephemeral: broadcast to WS + internal consumers without DB persistence.
+        for entry in ephemeral {
+            let te = TimelineEvent {
+                seq: 0,
+                trace_id: entry.trace_id,
+                span_id: entry.span_id,
+                parent_span_id: entry.parent_span_id,
+                event: entry.event,
+                summary: entry.summary,
+                ts,
+            };
+            let _ = ws_tx.send(te.to_frontend_json());
+            let _ = timeline_tx.send(te);
+        }
+
+        // Persistent: batch-write to DB, then broadcast with assigned seq.
+        if persistent.is_empty() {
+            continue;
+        }
+
+        let db_entries: Vec<(Option<String>, String, Option<String>, String, Option<String>, String)> = persistent
             .iter()
             .map(|entry| {
                 let payload_json = entry.event.to_frontend_payload().to_string();
@@ -132,10 +157,7 @@ async fn run_timeline_writer(
             }
         };
 
-        let ts = chrono::Utc::now().timestamp_millis();
-
-        // Broadcast each event with its persistent seq
-        for (entry, seq) in batch.into_iter().zip(seqs) {
+        for (entry, seq) in persistent.into_iter().zip(seqs) {
             let te = TimelineEvent {
                 seq,
                 trace_id: entry.trace_id,
@@ -145,12 +167,7 @@ async fn run_timeline_writer(
                 summary: entry.summary,
                 ts,
             };
-
-            // Forward to WS clients as JSON string
-            let json_str = te.to_frontend_json();
-            let _ = ws_tx.send(json_str);
-
-            // Broadcast to internal consumers (event_router, gemini log, etc.)
+            let _ = ws_tx.send(te.to_frontend_json());
             let _ = timeline_tx.send(te);
         }
     }

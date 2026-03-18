@@ -4,6 +4,7 @@
 //! Layer 2 (Classifier): Role mapping + audit extraction + rule-based labeling
 //! Layer 3 (Emitter): Timeline events + token ledger + briefing wake
 
+use std::collections::HashSet;
 use tracing::{error, info, warn};
 
 use crate::event_bus::{DaemonEvent, TraceContext};
@@ -39,13 +40,13 @@ pub(crate) async fn handle_new_messages(
     };
 
     // ── Layer 1: Ingestor ──
-    let inserted_ids = ingest(
+    let ingest_result = ingest(
         state, &session_id, &project_path, &jsonl_path, &messages,
         source, slot_id.as_deref(), parent_session_id.as_deref(),
         is_slot_session,
     ).await;
-    let inserted_ids = match inserted_ids {
-        Some(ids) if !ids.is_empty() => ids,
+    let IngestResult { inserted_ids, inserted_uuids, uuid_to_id } = match ingest_result {
+        Some(r) if !r.inserted_ids.is_empty() => r,
         _ => return, // Nothing inserted, nothing to classify/emit
     };
 
@@ -54,7 +55,7 @@ pub(crate) async fn handle_new_messages(
 
     // ── Layer 3: Emitter (timeline events + token ledger) ──
     emit(
-        state, &session_id, &inserted_ids, &messages,
+        state, &session_id, &inserted_ids, &inserted_uuids, &uuid_to_id, &messages,
         is_pty, slot_id.as_deref(), parent_session_id.as_deref(),
     ).await;
 }
@@ -62,6 +63,17 @@ pub(crate) async fn handle_new_messages(
 // ════════════════════════════════════════════════════════════════════════════
 // Layer 1: Ingestor — ensure conversation + batch insert messages
 // ════════════════════════════════════════════════════════════════════════════
+
+/// Result of Layer 1 ingestion: DB IDs + UUIDs of newly inserted messages.
+struct IngestResult {
+    inserted_ids: Vec<i64>,
+    /// UUIDs of messages that were actually new (not ON CONFLICT skipped).
+    /// Used by Layer 3 to filter emit_tool_completions/emit_token_usage
+    /// so they only process new messages, preventing duplicate side effects.
+    inserted_uuids: HashSet<String>,
+    /// UUID → DB ID mapping for token_usage_ledger message_id dedup.
+    uuid_to_id: std::collections::HashMap<String, i64>,
+}
 
 async fn ingest(
     state: &AppState,
@@ -73,7 +85,7 @@ async fn ingest(
     slot_id: Option<&str>,
     parent_session_id: Option<&str>,
     is_slot_session: bool,
-) -> Option<Vec<i64>> {
+) -> Option<IngestResult> {
     // Ensure conversation exists; re-activate if completed
     let existing_conv = state.store.get_conversation(session_id).await.unwrap_or(None);
     if let Some(ref conv) = existing_conv {
@@ -198,7 +210,21 @@ async fn ingest(
     match state.store.insert_conversation_messages_batch(&batch).await {
         Ok(inserted_ids) if !inserted_ids.is_empty() => {
             info!(session = %session_id, count = inserted_ids.len(), "Logged conversation messages");
-            Some(inserted_ids)
+
+            // Collect UUIDs + ID mapping of newly inserted messages for emit-layer filtering.
+            // Point lookups on PK — trivially fast for typical batch sizes (5-20).
+            let mut inserted_uuids = HashSet::with_capacity(inserted_ids.len());
+            let mut uuid_to_id = std::collections::HashMap::with_capacity(inserted_ids.len());
+            for &id in &inserted_ids {
+                if let Ok(Some(msg)) = state.store.get_conversation_message_by_id(id).await {
+                    if let Some(uuid) = msg.message_uuid {
+                        inserted_uuids.insert(uuid.clone());
+                        uuid_to_id.insert(uuid, id);
+                    }
+                }
+            }
+
+            Some(IngestResult { inserted_ids, inserted_uuids, uuid_to_id })
         }
         Err(e) => {
             error!(session = %session_id, error = %e, "Failed to insert conversation messages");
@@ -358,6 +384,8 @@ async fn emit(
     state: &AppState,
     session_id: &str,
     inserted_ids: &[i64],
+    inserted_uuids: &HashSet<String>,
+    uuid_to_id: &std::collections::HashMap<String, i64>,
     messages: &[missiond_core::CCMessageLine],
     is_pty: bool,
     slot_id: Option<&str>,
@@ -405,7 +433,11 @@ async fn emit(
             };
 
             let content_chars = db_msg.content.len();
-            let msg_span_id = uuid::Uuid::new_v4().to_string();
+            // Use deterministic span_id based on message_uuid so that
+            // retries/replays produce the same span_id (enables future UNIQUE dedup).
+            let msg_span_id = db_msg.message_uuid
+                .clone()
+                .unwrap_or_else(|| format!("msg-{}", msg_id));
             state.event_bus.publish_traced(
                 DaemonEvent::ConversationMessageLogged {
                     message_id: msg_id,
@@ -432,18 +464,26 @@ async fn emit(
         }
     }
 
+    // Filter to only newly inserted messages for side-effect functions.
+    // This prevents duplicate tool_completed events and token_usage records
+    // when a batch contains a mix of new and already-seen messages (e.g., after
+    // reconciliation or watcher cursor loss).
+    let new_messages: Vec<&missiond_core::CCMessageLine> = messages.iter()
+        .filter(|m| inserted_uuids.contains(&m.uuid))
+        .collect();
+
     // ── Auto-instrumentation: high-value tool completions ──
-    emit_tool_completions(state, session_id, messages, slot_id).await;
+    emit_tool_completions(state, session_id, &new_messages, slot_id).await;
 
     // ── Token usage ledger ──
-    emit_token_usage(state, session_id, messages, slot_id).await;
+    emit_token_usage(state, session_id, &new_messages, slot_id, uuid_to_id).await;
 }
 
 /// Emit timeline events for high-value tool completions (Bash, Write, Edit, MCP).
 async fn emit_tool_completions(
     state: &AppState,
     session_id: &str,
-    messages: &[missiond_core::CCMessageLine],
+    messages: &[&missiond_core::CCMessageLine],
     slot_id: Option<&str>,
 ) {
     const HIGH_VALUE_TOOLS: &[&str] = &["Bash", "Write", "Edit"];
@@ -495,8 +535,9 @@ async fn emit_tool_completions(
 async fn emit_token_usage(
     state: &AppState,
     session_id: &str,
-    messages: &[missiond_core::CCMessageLine],
+    messages: &[&missiond_core::CCMessageLine],
     slot_id: Option<&str>,
+    uuid_to_id: &std::collections::HashMap<String, i64>,
 ) {
     let slot_task_id = match slot_id {
         Some(sid) => state.store.get_running_slot_task(sid).await.ok().flatten(),
@@ -509,6 +550,8 @@ async fn emit_token_usage(
             if total == 0 {
                 continue;
             }
+            // Look up DB message_id via uuid→id mapping (built in ingest)
+            let db_msg_id = uuid_to_id.get(&msg.uuid).copied();
             if let Err(e) = state.store.insert_token_usage(
                 session_id,
                 slot_id,
@@ -518,6 +561,7 @@ async fn emit_token_usage(
                 usage.cache_creation_input_tokens,
                 usage.cache_read_input_tokens,
                 usage.output_tokens,
+                db_msg_id,
             ).await {
                 warn!(session = %session_id, error = %e, "Failed to insert token usage");
             }

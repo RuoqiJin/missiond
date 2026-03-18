@@ -391,10 +391,23 @@ pub async fn handle_new_events(state: &AppState, session_id: String, events: Vec
             .and_then(|t| t.as_str())
             .unwrap_or("")
             .to_string();
-        // Extract event UUID for dedup: progress/system have "uuid", file-history-snapshot has "messageId"
+        // Extract event UUID for dedup: progress/system have "uuid", file-history-snapshot has "messageId".
+        // Fallback: synthesize deterministic UUID from content hash so that
+        // UNIQUE(session_id, event_uuid) prevents duplicate inserts for events without UUID.
         let event_uuid = val.get("uuid").and_then(|v| v.as_str())
             .or_else(|| val.get("messageId").and_then(|v| v.as_str()))
-            .map(String::from);
+            .map(String::from)
+            .or_else(|| {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                session_id.hash(&mut hasher);
+                timestamp.hash(&mut hasher);
+                msg_type.hash(&mut hasher);
+                if let Ok(raw) = serde_json::to_string(val) {
+                    raw.hash(&mut hasher);
+                }
+                Some(format!("synth-{:016x}", hasher.finish()))
+            });
 
         match msg_type {
             "progress" => {

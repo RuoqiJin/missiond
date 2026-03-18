@@ -528,7 +528,7 @@ pub trait ObservabilityStore: Send + Sync {
     async fn list_incidents(&self, limit: i64) -> DbResult<Vec<IncidentRow>>;
 
     // -- incident.rs: token ledger --
-    async fn insert_token_usage(&self, conversation_id: &str, slot_id: Option<&str>, slot_task_id: Option<&str>, model: Option<&str>, input_tokens: i64, cache_creation_tokens: i64, cache_read_tokens: i64, output_tokens: i64) -> DbResult<()>;
+    async fn insert_token_usage(&self, conversation_id: &str, slot_id: Option<&str>, slot_task_id: Option<&str>, model: Option<&str>, input_tokens: i64, cache_creation_tokens: i64, cache_read_tokens: i64, output_tokens: i64, message_id: Option<i64>) -> DbResult<()>;
     async fn token_stats(&self, conversation_id: Option<&str>, slot_id: Option<&str>, since: Option<&str>, group_by: Option<&str>) -> DbResult<Vec<HashMap<String, serde_json::Value>>>;
 
     // -- watermark.rs --

@@ -353,7 +353,7 @@ CREATE TABLE IF NOT EXISTS conversation_events (
 CREATE INDEX IF NOT EXISTS idx_conv_event_session ON conversation_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_conv_event_type ON conversation_events(event_type);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_event_uuid
-    ON conversation_events(session_id, event_uuid) WHERE event_uuid IS NOT NULL;
+    ON conversation_events(session_id, event_uuid);
 
 CREATE TABLE IF NOT EXISTS conversation_tool_calls (
     id TEXT PRIMARY KEY,
@@ -418,11 +418,13 @@ CREATE TABLE IF NOT EXISTS token_usage_ledger (
     input_tokens INTEGER NOT NULL DEFAULT 0,
     cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
     cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-    output_tokens INTEGER NOT NULL DEFAULT 0
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    message_id BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_token_ledger_conv ON token_usage_ledger(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_token_ledger_slot ON token_usage_ledger(slot_id);
 CREATE INDEX IF NOT EXISTS idx_token_ledger_created ON token_usage_ledger(created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_token_ledger_msg_dedup ON token_usage_ledger(message_id) WHERE message_id IS NOT NULL;
 
 -- ============================================================================
 -- 7. Skills Engine

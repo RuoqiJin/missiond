@@ -80,12 +80,15 @@ async fn process_entry(
         .and_then(|v| v.get("preview").and_then(|p| p.as_str()).map(String::from))
         .unwrap_or_default();
     if preview.starts_with('[') && preview.ends_with(']') && !preview.contains(' ') {
-        // Mark as summarized with the tool name to prevent infinite retry
-        state.store.update_timeline_summary(seq, &preview).await?;
+        // Mark with prefix so summary ≠ preview, breaking the re-selection loop.
+        // Bug fix: setting summary = preview caused find_timeline_needing_briefing
+        // to match forever (WHERE summary = preview), creating infinite loop.
+        let briefed = format!("⚙ {}", preview);
+        state.store.update_timeline_summary(seq, &briefed).await?;
         state.event_bus.publish(DaemonEvent::BriefingSummaryGenerated {
-            target_seq: seq, summary: preview.clone(), method: "tool_skip".into(),
+            target_seq: seq, summary: briefed.clone(), method: "tool_skip".into(),
         });
-        debug!(seq, preview = %preview, "Briefing: tool-only message, keeping as-is");
+        debug!(seq, preview = %preview, "Briefing: tool-only message, marked as briefed");
         return Ok(ProcessResult::Local);
     }
 
@@ -108,7 +111,11 @@ async fn process_entry(
     let text = match full_content {
         Some(ref c) if c.len() >= MIN_CONTENT_CHARS => c.as_str(),
         _ => {
-            debug!(seq, "Briefing: content too short or not found, skipping");
+            // Mark as skipped to prevent infinite re-selection.
+            // Without this, entries with content_chars > 300 in payload but
+            // actual content < 300 (or not found) stay in the pending queue forever.
+            state.store.update_timeline_summary(seq, "<skipped>").await?;
+            debug!(seq, "Briefing: content too short or not found, marked skipped");
             return Ok(ProcessResult::Skipped);
         }
     };

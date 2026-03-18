@@ -433,12 +433,15 @@ impl ObservabilityStore for PgMissionStore {
         cache_creation_tokens: i64,
         cache_read_tokens: i64,
         output_tokens: i64,
+        message_id: Option<i64>,
     ) -> DbResult<()> {
         sqlx::query(
             "INSERT INTO token_usage_ledger
                 (conversation_id, slot_id, slot_task_id, model,
-                 input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+                 input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
+                 message_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (message_id) WHERE message_id IS NOT NULL DO NOTHING"
         )
         .bind(conversation_id)
         .bind(slot_id)
@@ -448,6 +451,7 @@ impl ObservabilityStore for PgMissionStore {
         .bind(cache_creation_tokens)
         .bind(cache_read_tokens)
         .bind(output_tokens)
+        .bind(message_id)
         .execute(&self.pool)
         .await?;
         Ok(())
