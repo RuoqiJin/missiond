@@ -42,6 +42,11 @@ impl MissionDB {
         PATTERNS.iter().any(|re| re.is_match(text))
     }
 
+    /// Public wrapper for contains_sensitive_data (used by PG backend).
+    pub fn contains_sensitive_data_pub(text: &str) -> bool {
+        Self::contains_sensitive_data(text)
+    }
+
     /// Remember (upsert) a knowledge entry, with FTS similarity dedup
     pub fn kb_remember(&self, input: &KBRememberInput) -> DbResult<KBRememberResult> {
         let now = chrono::Utc::now().to_rfc3339();
@@ -1827,7 +1832,7 @@ fn tokenize_for_similarity(text: &str) -> HashSet<String> {
 }
 
 /// Token-level Jaccard similarity (supports Chinese + English mixed text)
-fn token_jaccard_similarity(a: &str, b: &str) -> f64 {
+pub(crate) fn token_jaccard_similarity(a: &str, b: &str) -> f64 {
     let ta = tokenize_for_similarity(a);
     let tb = tokenize_for_similarity(b);
     if ta.is_empty() && tb.is_empty() {
