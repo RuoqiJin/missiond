@@ -235,6 +235,11 @@ impl GeminiClient {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
+                // Extract per-call API key alias (injected by router_chat handler)
+                let api_key_alias = body.get("_api_key_alias")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
                 // Extract optional working directory (for file-based agentic workflows)
                 let workspace_path = body.get("_workspace")
                     .and_then(|v| v.as_str())
@@ -310,7 +315,7 @@ impl GeminiClient {
                     }
                 });
 
-                let resp = cli.call(messages, cli_model, max_tokens, idle_timeout_override, Some(progress_tx), auth_override.as_deref(), workspace_path.as_deref()).await;
+                let resp = cli.call(messages, cli_model, max_tokens, idle_timeout_override, Some(progress_tx), auth_override.as_deref(), api_key_alias.as_deref(), workspace_path.as_deref()).await;
                 drop(permit);
                 // Drop the sender side is implicit (cli.call finished), wait for forwarder to drain
                 let _ = forwarder.await;

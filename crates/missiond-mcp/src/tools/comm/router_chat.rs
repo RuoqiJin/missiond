@@ -60,6 +60,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "enum": ["apikey", "google"],
                         "description": "Gemini 认证渠道。apikey=API Key, google=Google One AI Pro。不传则用全局配置（仅 CLI 模式生效）"
+                    },
+                    "api_key_alias": {
+                        "type": "string",
+                        "description": "指定 API key 别名（需在 llm.yaml gemini_api_keys 中配置 alias）。指定后固定使用该 key，exhausted 直接报错不轮换"
                     }
                 }
             }),
