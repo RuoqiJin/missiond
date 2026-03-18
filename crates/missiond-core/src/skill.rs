@@ -599,7 +599,7 @@ pub fn parse_sections(body: &str) -> Vec<ParsedSection> {
 
 /// Ingest all SKILL.md files into the database.
 /// Scans ~/.claude/skills/, parses frontmatter + sections, writes to skill_topics + skill_blocks.
-pub fn ingest_skills(db: &crate::db::MissionDB, skills_dir: &Path) -> usize {
+pub async fn ingest_skills(store: &dyn crate::db::traits::SkillStore, skills_dir: &Path) -> usize {
     let index = SkillIndex::build(skills_dir);
     let skills = index.list();
     let mut ingested = 0;
@@ -636,7 +636,7 @@ pub fn ingest_skills(db: &crate::db::MissionDB, skills_dir: &Path) -> usize {
         let file_path_str = skill.path.to_string_lossy().to_string();
 
         // Upsert topic
-        if let Err(e) = db.skill_topic_upsert_full(
+        if let Err(e) = store.skill_topic_upsert_full(
             &skill.name,
             skill.description.as_deref(),
             aka_json.as_deref(),
@@ -645,13 +645,13 @@ pub fn ingest_skills(db: &crate::db::MissionDB, skills_dir: &Path) -> usize {
             requires_json.as_deref(),
             actions_json.as_deref(),
             context_hooks_json.as_deref(),
-        ) {
+        ).await {
             warn!(topic = %skill.name, error = %e, "Failed to upsert skill topic");
             continue;
         }
 
         // Delete existing blocks for this topic (full re-ingest)
-        if let Err(e) = db.skill_blocks_delete_topic(&skill.name) {
+        if let Err(e) = store.skill_blocks_delete_topic(&skill.name).await {
             warn!(topic = %skill.name, error = %e, "Failed to clear old blocks");
             continue;
         }
@@ -665,13 +665,13 @@ pub fn ingest_skills(db: &crate::db::MissionDB, skills_dir: &Path) -> usize {
             {
                 continue;
             }
-            if let Err(e) = db.skill_block_insert(
+            if let Err(e) = store.skill_block_insert(
                 &skill.name,
                 "section",
                 Some(&section.title),
                 &section.content,
                 section.sort_order,
-            ) {
+            ).await {
                 warn!(
                     topic = %skill.name,
                     section = %section.title,
@@ -684,7 +684,7 @@ pub fn ingest_skills(db: &crate::db::MissionDB, skills_dir: &Path) -> usize {
         // Update line count
         let total_lines = content.lines().count() as i32;
         let checksum = format!("{:x}", md5_hash(content.as_bytes()));
-        let _ = db.skill_topic_update_stats(&skill.name, total_lines, &checksum);
+        let _ = store.skill_topic_update_stats(&skill.name, total_lines, &checksum).await;
 
         debug!(
             topic = %skill.name,
@@ -696,7 +696,7 @@ pub fn ingest_skills(db: &crate::db::MissionDB, skills_dir: &Path) -> usize {
     }
 
     // Rebuild FTS after bulk ingest
-    if let Err(e) = db.skill_rebuild_fts() {
+    if let Err(e) = store.skill_rebuild_fts().await {
         warn!(error = %e, "Failed to rebuild skill FTS after ingest");
     }
 
@@ -713,14 +713,14 @@ fn md5_hash(data: &[u8]) -> u64 {
 }
 
 /// Materialize a single topic from DB to SKILL.md
-pub fn materialize_topic(db: &crate::db::MissionDB, topic: &str) -> Result<String, String> {
-    let topic_meta = db
-        .skill_topic_get(topic)
+pub async fn materialize_topic(store: &dyn crate::db::traits::SkillStore, topic: &str) -> Result<String, String> {
+    let topic_meta = store
+        .skill_topic_get(topic).await
         .map_err(|e| format!("DB error: {}", e))?
         .ok_or_else(|| format!("Topic not found: {}", topic))?;
 
-    let blocks = db
-        .skill_blocks_for_topic(topic)
+    let blocks = store
+        .skill_blocks_for_topic(topic).await
         .map_err(|e| format!("DB error: {}", e))?;
 
     // Build frontmatter
@@ -790,7 +790,7 @@ pub fn materialize_topic(db: &crate::db::MissionDB, topic: &str) -> Result<Strin
                 }
             }
 
-            let _ = db.skill_version_save(topic, &existing, &old_checksum);
+            let _ = store.skill_version_save(topic, &existing, &old_checksum).await;
         }
     }
 
@@ -803,20 +803,20 @@ pub fn materialize_topic(db: &crate::db::MissionDB, topic: &str) -> Result<Strin
     // Update stats
     let total_lines = output.lines().count() as i32;
     let checksum = format!("{:x}", md5_hash(output.as_bytes()));
-    let _ = db.skill_topic_update_stats(topic, total_lines, &checksum);
+    let _ = store.skill_topic_update_stats(topic, total_lines, &checksum).await;
 
     Ok(output)
 }
 
 /// Materialize all topics from DB to SKILL.md files
-pub fn materialize_all(db: &crate::db::MissionDB) -> Result<usize, String> {
-    let topics = db
-        .skill_topic_list()
+pub async fn materialize_all(store: &dyn crate::db::traits::SkillStore) -> Result<usize, String> {
+    let topics = store
+        .skill_topic_list().await
         .map_err(|e| format!("DB error: {}", e))?;
 
     let mut count = 0;
     for topic in &topics {
-        match materialize_topic(db, &topic.topic) {
+        match materialize_topic(store, &topic.topic).await {
             Ok(_) => count += 1,
             Err(e) => warn!(topic = %topic.topic, error = %e, "Failed to materialize"),
         }

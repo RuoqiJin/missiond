@@ -391,8 +391,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             }
 
             // Materialize to file
-            let db = state.mission.db();
-            let materialize_result = missiond_core::skill::materialize_topic(db, &args.topic);
+            let materialize_result = missiond_core::skill::materialize_topic(state.store.as_ref(), &args.topic).await;
 
             // Trigger incremental embedding update
             let _ = state.embedding_tx.try_send(EmbeddingTask::ProcessSkillTopic(args.topic.clone()));
@@ -430,8 +429,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let frag_count = topic_meta.map(|t| t.fragment_count).unwrap_or(0);
 
             // Materialize
-            let db = state.mission.db();
-            let _ = missiond_core::skill::materialize_topic(db, &args.topic);
+            let _ = missiond_core::skill::materialize_topic(state.store.as_ref(), &args.topic).await;
 
             // Trigger incremental embedding update
             let _ = state.embedding_tx.try_send(EmbeddingTask::ProcessSkillTopic(args.topic.clone()));
@@ -449,15 +447,13 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             }
             let args: SkillRenderArgs = serde_json::from_value(args)
                 .unwrap_or(SkillRenderArgs { topic: None });
-            let db = state.mission.db();
-
             if let Some(topic) = args.topic {
-                match missiond_core::skill::materialize_topic(db, &topic) {
+                match missiond_core::skill::materialize_topic(state.store.as_ref(), &topic).await {
                     Ok(output) => Ok(ToolResult::text(format!("Rendered '{}' ({} lines)", topic, output.lines().count()))),
                     Err(e) => Ok(ToolResult::error(format!("Render failed: {}", e))),
                 }
             } else {
-                match missiond_core::skill::materialize_all(db) {
+                match missiond_core::skill::materialize_all(state.store.as_ref()).await {
                     Ok(count) => Ok(ToolResult::text(format!("Rendered all {} skills", count))),
                     Err(e) => Ok(ToolResult::error(format!("Render all failed: {}", e))),
                 }
@@ -571,8 +567,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 let skills_dir = std::path::Path::new(&topic.file_path).parent()
                     .and_then(|p| p.parent())
                     .unwrap_or(std::path::Path::new("."));
-                let db = state.mission.db();
-                missiond_core::skill::ingest_skills(db, skills_dir);
+                missiond_core::skill::ingest_skills(state.store.as_ref(), skills_dir).await;
                 Ok(ToolResult::text(format!("Rolled back '{}' to version {} ({})", args.skill, vid, version.created_at)))
             } else {
                 // List available versions

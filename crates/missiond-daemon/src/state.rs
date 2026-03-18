@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use missiond_core::{
     CorePermissionDecision, MissionControl, PermissionPolicy,
-    PTYManager, SkillIndex, InfraConfig, CCTasksWatcher, DbExecutor,
+    PTYManager, SkillIndex, InfraConfig, CCTasksWatcher,
 };
 use missiond_core::db::traits::MissionStore;
 use tokio::sync::Mutex;
@@ -182,8 +182,6 @@ pub(crate) struct AppState {
     pub(crate) incident_tx: tokio::sync::mpsc::Sender<missiond_core::types::MissionIncident>,
     /// Centralized event bus for inter-module communication (replaces Notify signals).
     pub(crate) event_bus: Arc<EventBus>,
-    /// Async DB executor — offloads hot-path SQLite calls to spawn_blocking.
-    pub(crate) db_exec: DbExecutor,
     /// Process-level daemon statistics (counters + histograms).
     pub(crate) stats: Arc<DaemonStats>,
     /// Centralized LLM prompts with file-based hot-reload.

@@ -371,8 +371,7 @@ async fn main() -> Result<()> {
     info!(count = skills.list().len(), "Skill index loaded");
 
     // Skill Engine: ingest SKILL.md files into DB for FTS5 search
-    let ingested = missiond_core::skill::ingest_skills(mission.db(), &skills_dir);
-    info!(count = ingested, "Skill engine: ingested skills into DB");
+    // (deferred to after store creation — needs async trait access)
 
     // Warm PTY session UUID cache from DB (activates slot_sessions table)
     let existing_slot_sessions = mission.db().get_all_slot_sessions().unwrap_or_default();
@@ -397,9 +396,6 @@ async fn main() -> Result<()> {
         })
     };
 
-    let mut db_exec = missiond_core::DbExecutor::new(mission.db_arc());
-    db_exec.set_on_run(Arc::clone(&db_stats_callback));
-
     // M1 Step 4: Trait-based DB store (dual-track with mission.db())
     // Shares the same Arc<MissionDB> — no data consistency risk.
     let store: Arc<dyn missiond_core::db::traits::MissionStore> = Arc::new(
@@ -415,6 +411,10 @@ async fn main() -> Result<()> {
         Err(e) => warn!(error = %e, "Failed to recover stale board tasks on startup"),
         _ => {}
     }
+
+    // M1 Step 6: Skill ingest via async store (moved from pre-store section)
+    let ingested = missiond_core::skill::ingest_skills(store.as_ref(), &skills_dir).await;
+    info!(count = ingested, "Skill engine: ingested skills into DB");
 
     // Pre-parse llm.yaml for config flags needed by AppState
     let llm_config_parsed: Option<embedding_worker::LlmConfig> = {
@@ -599,7 +599,6 @@ async fn main() -> Result<()> {
         embedding_tx: embedding_tx,
         incident_tx: incident_tx.clone(),
         event_bus: Arc::clone(&event_bus_instance),
-        db_exec,
         stats: Arc::clone(&daemon_stats),
         prompts: Arc::new(prompts::PromptStore::load()),
         briefing_notify: Arc::new(tokio::sync::Notify::new()),
