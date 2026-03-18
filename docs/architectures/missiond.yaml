@@ -6,7 +6,7 @@ project:
   name: missiond
   path: <REPO_ROOT>
   lang: rust
-  framework: tokio + axum (ws) + sqlx (sqlite)
+  framework: tokio + axum (ws) + sqlx (sqlite/pg)
   description: "Claude Code 多实例编排系统：PTY 管理、语义解析、知识库、MCP 工具暴露"
 
 # ── Crate 依赖拓扑 ──
@@ -30,9 +30,10 @@ crates:
         traits: [StateParser, ConfirmParser, TitleParser, ToolOutputParser, StatusParser]
         state_machine: [Idle, Thinking, Responding, ToolRunning, Confirming, Editing]
       db:
-        role: "SQLite WAL 存储层"
+        role: "数据库存储层（SQLite/PostgreSQL 多引擎适配）"
         entry: src/db/mod.rs
         key_types: [KnowledgeEntry, Task]
+        traits: [MissionStore]
       types:
         role: "跨 crate 共享类型"
         entry: src/types/mod.rs
@@ -148,6 +149,10 @@ traits:
     crate: missiond-daemon
     module: handlers
     contract: "工具名 + 参数 → Allow/Confirm/Deny 决策"
+  MissionStore:
+    crate: missiond-core
+    module: db
+    contract: "数据库后端抽象，隔离上层业务与底层存储（SQLite/Pg）实现"
 
 # ── 数据流 ──
 data_flows:
@@ -165,7 +170,7 @@ data_flows:
 
   hybrid_search:
     description: "混合搜索与重排序"
-    flow: "查询 → FTS5 全文搜索 + 向量相似度 → RRF 排序融合 → 结合时间衰减(temporal_decay)与效用分数(utility_score)重打分 → top-k 结果"
+    flow: "查询 → FTS5/PG全文搜索 + 向量相似度 → RRF 排序融合 → 结合时间衰减(temporal_decay)与效用分数(utility_score)重打分 → top-k 结果"
 
   strategy_analysis:
     description: "用户偏好与模式分析流"
@@ -175,7 +180,7 @@ data_flows:
 invariants:
   - "一个 slot 同一时刻只处理一个任务"
   - "MCP server 是无状态的，所有状态在 daemon 侧"
-  - "SQLite WAL 模式：单写多读"
+  - "存储层通过 MissionStore 等 traits 抽象，隐蔽底层并发与写入机制差异"
   - "PTY 语义解析是尽力而为，不阻塞主流程"
   - "知识库写入幂等（相同 key 覆盖）"
 
@@ -201,6 +206,8 @@ anti_patterns:
     why: "必须使用 SlotAcquireGuard 实现 RAII 自动释放，防止错误提早返回或 panic 导致插槽锁泄露和死锁"
   - do: "将未知的 task intent 静默降级为默认角色（如 coder）"
     why: "必须严格使用白名单校验并 fail-fast，否则会导致安全策略和资源隔离（如 ops 角色限制）被绕过"
+  - do: "在业务层绕过 trait 直接使用特定的数据库原生类型（如 sqlite/pg specific）"
+    why: "必须依靠 db::traits 中的抽象，以确保多后端支持和解耦"
 
 # ── 错误处理策略（每层的 Error 职责）──
 error_handling:
@@ -227,7 +234,7 @@ glossary:
   dynamic_slot: "动态运行位，支持超时自动销毁（系统重启时采取 clean slate 策略全部回收）"
   task: "分配给 slot 执行的具体工作单元"
   job_store: "全局状态(AppState)中管理异步作业/任务的内存存储映射"
-  KB/知识库: "SQLite 中的长期记忆存储（KnowledgeEntry 表）"
+  KB/知识库: "SQLite/PG 中的长期记忆存储（KnowledgeEntry 表）"
   strategic_state: "长期维护的关于用户开发轨迹、偏好模式与摩擦点的认知状态，存储在 KB 中"
   beacon: "代码库中的关键锚点，用于快速定位（文件+行号+摘要）"
   semantic_parsing: "从 PTY 终端原始输出提取结构化状态的过程"
@@ -237,18 +244,18 @@ glossary:
   worker: "daemon 中的后台持续任务（巡检/提取/合并/分析）"
   EventBus: "daemon 内部的异步事件发布-订阅通道"
   IPC: "daemon 与 MCP server 之间的 Unix socket 通信"
-  hybrid_search: "FTS5 全文 + 向量相似度 + RRF 融合的搜索模式"
+  hybrid_search: "全文(FTS5/PG) + 向量相似度 + RRF 融合的搜索模式"
   utility_score: "达尔文效用分数 [0.0, 1.0]，随访问命中增加，随时间衰减，用于决定知识条目的存活或淘汰"
   darwinian_gc: "基于 utility_score 的达尔文垃圾回收机制，取代硬编码的过期时间规则"
 
 # ── 设计决策记录（防止 AI 自作聪明重构）──
 design_rationale:
-  sqlite_over_postgres:
-    decision: "用 SQLite 而非 PostgreSQL"
-    why: "MissionD 是本地 daemon，跟随用户桌面环境，零运维 > 性能天花板"
+  multi_engine_db:
+    decision: "从强制单机 SQLite 扩展为 SQLite / PostgreSQL 双引擎（提取 MissionStore trait）"
+    why: "本地桌面继续使用 SQLite 保持零运维，而 PostgreSQL 允许在云端和大型服务化部署中获得更好的并发与生态兼容"
   wal_single_writer:
-    decision: "SQLite WAL 模式 + 单写连接"
-    why: "避免 SQLITE_BUSY，写操作串行化是有意为之，并发写会导致不可预测的锁争用"
+    decision: "对于 SQLite 模式使用 WAL + 单写连接"
+    why: "避免 SQLITE_BUSY，写操作串行化是有意为之，并发写会导致不可预测的锁争用（Postgres 模式不受此限）"
   mcp_stateless:
     decision: "MCP server 不持有任何状态"
     why: "MCP 进程生命周期由 Claude Code 控制，随时可能被杀，状态放 daemon 才安全"
