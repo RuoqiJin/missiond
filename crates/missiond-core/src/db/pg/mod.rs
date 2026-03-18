@@ -51,16 +51,38 @@ impl PgMissionStore {
     }
 }
 
-// Domain trait implementations will be added in subsequent files:
-// - conversation.rs  (ConversationStore)
-// - message.rs       (MessageStore)
-// - tool_call.rs     (ToolCallStore)
-// - event.rs         (EventStore)
-// - retrospective.rs (RetrospectiveStore)
-// - vision.rs        (VisionStore)
-// - knowledge.rs     (KnowledgeStore)
-// - board.rs         (BoardStore)
-// - timeline.rs      (TimelineStore)
-// - slot.rs          (SlotStore)
-// - skill.rs         (SkillStore)
-// - observability.rs (ObservabilityStore)
+// MissionStore super-trait implementation
+#[cfg(feature = "postgres")]
+#[async_trait::async_trait]
+impl crate::db::traits::MissionStore for PgMissionStore {
+    async fn init(&self) -> crate::db::error::DbResult<()> {
+        // Migrations are run in connect(), nothing else needed.
+        Ok(())
+    }
+}
+
+// Domain trait implementations — one file per trait:
+#[cfg(feature = "postgres")]
+mod vision;
+#[cfg(feature = "postgres")]
+mod event;
+#[cfg(feature = "postgres")]
+mod skill;
+#[cfg(feature = "postgres")]
+mod observability;
+#[cfg(feature = "postgres")]
+mod timeline;
+#[cfg(feature = "postgres")]
+mod retrospective;
+#[cfg(feature = "postgres")]
+mod slot;
+#[cfg(feature = "postgres")]
+mod board;
+#[cfg(feature = "postgres")]
+mod conversation;
+#[cfg(feature = "postgres")]
+mod message;
+#[cfg(feature = "postgres")]
+mod tool_call;
+#[cfg(feature = "postgres")]
+mod knowledge;

@@ -1,13 +1,18 @@
-//! Database error types — anti-corruption layer between rusqlite and business logic.
+//! Database error types — anti-corruption layer between rusqlite/sqlx and business logic.
 //!
-//! Phase 3 will swap `Sqlite(rusqlite::Error)` for `Sqlx(sqlx::Error)` with zero
-//! impact on callers that only use `DbResult<T>`.
+//! Both SQLite (rusqlite) and PostgreSQL (sqlx) errors convert to `DbError`,
+//! so callers only ever see `DbResult<T>`.
 
 /// Database-specific error type that hides the underlying driver.
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
+    #[cfg(feature = "sqlite")]
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
+
+    #[cfg(feature = "postgres")]
+    #[error("sqlx: {0}")]
+    Sqlx(#[from] sqlx::Error),
 
     #[error("not found: {entity} {id}")]
     NotFound { entity: &'static str, id: String },
