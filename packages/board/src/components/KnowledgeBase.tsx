@@ -146,7 +146,8 @@ export function KnowledgeBase() {
     try {
       const res = await fetch('/api/kb');
       if (res.ok) {
-        setEntries(await res.json());
+        const data = await res.json();
+        if (Array.isArray(data)) setEntries(data);
       }
     } catch {
       // silent
