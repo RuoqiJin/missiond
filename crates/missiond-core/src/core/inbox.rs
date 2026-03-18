@@ -12,12 +12,13 @@ use uuid::Uuid;
 ///
 /// Manages the message inbox for task results.
 pub struct Inbox {
-    db: Arc<MissionDB>,
+    db: Option<Arc<MissionDB>>,
 }
 
 impl Inbox {
-    /// Create a new Inbox
-    pub fn new(db: Arc<MissionDB>) -> Self {
+    /// Create a new Inbox. `db` is optional — when None (PG mode),
+    /// all operations are no-ops (handled by async store instead).
+    pub fn new(db: Option<Arc<MissionDB>>) -> Self {
         Self { db }
     }
 
@@ -27,42 +28,41 @@ impl Inbox {
     /// * `unread_only` - If true, only return unread messages
     /// * `limit` - Maximum number of messages to return
     pub fn get_messages(&self, unread_only: bool, limit: usize) -> Vec<InboxMessage> {
-        self.db
-            .get_inbox_messages(unread_only, limit as i64)
+        self.db.as_ref()
+            .and_then(|db| db.get_inbox_messages(unread_only, limit as i64).ok())
             .unwrap_or_default()
     }
 
     /// Mark a message as read
     pub fn mark_read(&self, message_id: &str) {
-        let _ = self.db.mark_inbox_read(message_id);
-        debug!(message_id = %message_id, "Message marked as read");
+        if let Some(ref db) = self.db {
+            let _ = db.mark_inbox_read(message_id);
+            debug!(message_id = %message_id, "Message marked as read");
+        }
     }
 
     /// Mark all messages as read
     pub fn mark_all_read(&self) {
-        let messages = self
-            .db
-            .get_inbox_messages(true, 10000)
-            .unwrap_or_default();
+        let Some(ref db) = self.db else { return };
+        let messages = db.get_inbox_messages(true, 10000).unwrap_or_default();
         let count = messages.len();
-
         for msg in messages {
-            let _ = self.db.mark_inbox_read(&msg.id);
+            let _ = db.mark_inbox_read(&msg.id);
         }
-
         info!(count = count, "All messages marked as read");
     }
 
     /// Get unread message count
     pub fn get_unread_count(&self) -> usize {
-        self.db
-            .get_inbox_messages(true, 10000)
+        self.db.as_ref()
+            .and_then(|db| db.get_inbox_messages(true, 10000).ok())
             .map(|v| v.len())
             .unwrap_or(0)
     }
 
     /// Add a message to the inbox
     pub fn add_message(&self, task_id: &str, from_role: &str, content: &str) {
+        let Some(ref db) = self.db else { return };
         let msg = InboxMessage {
             id: Uuid::new_v4().to_string(),
             task_id: task_id.to_string(),
@@ -71,8 +71,7 @@ impl Inbox {
             read: false,
             created_at: chrono::Utc::now().timestamp_millis(),
         };
-
-        let _ = self.db.insert_inbox_message(&msg);
+        let _ = db.insert_inbox_message(&msg);
         debug!(message_id = %msg.id, task_id = %task_id, "Message added to inbox");
     }
 }
@@ -88,7 +87,7 @@ mod tests {
     #[test]
     fn test_add_and_get_messages() {
         let db = create_test_db();
-        let inbox = Inbox::new(db);
+        let inbox = Inbox::new(Some(db));
 
         // Add messages
         inbox.add_message("task-1", "worker", "Result 1");
@@ -110,7 +109,7 @@ mod tests {
     #[test]
     fn test_mark_read() {
         let db = create_test_db();
-        let inbox = Inbox::new(db);
+        let inbox = Inbox::new(Some(db));
 
         // Add a message
         inbox.add_message("task-1", "worker", "Result");
@@ -135,7 +134,7 @@ mod tests {
     #[test]
     fn test_mark_all_read() {
         let db = create_test_db();
-        let inbox = Inbox::new(db);
+        let inbox = Inbox::new(Some(db));
 
         // Add multiple messages
         inbox.add_message("task-1", "worker", "Result 1");
@@ -155,7 +154,7 @@ mod tests {
     #[test]
     fn test_get_unread_count() {
         let db = create_test_db();
-        let inbox = Inbox::new(db);
+        let inbox = Inbox::new(Some(db));
 
         assert_eq!(inbox.get_unread_count(), 0);
 
@@ -175,7 +174,7 @@ mod tests {
     #[test]
     fn test_limit() {
         let db = create_test_db();
-        let inbox = Inbox::new(db);
+        let inbox = Inbox::new(Some(db));
 
         // Add 5 messages
         for i in 0..5 {

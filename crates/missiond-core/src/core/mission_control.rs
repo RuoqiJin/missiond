@@ -36,8 +36,8 @@ impl ExecutionMode {
 
 /// Options for creating MissionControl
 pub struct MissionControlOptions {
-    /// Database path
-    pub db_path: PathBuf,
+    /// Database path. None = PG mode (skip SQLite entirely).
+    pub db_path: Option<PathBuf>,
     /// Slots configuration file path
     pub slots_config_path: PathBuf,
     /// Permission configuration file path (optional)
@@ -53,7 +53,7 @@ pub struct MissionControlOptions {
 /// Main coordinator for task queue, slot configuration, and inbox.
 /// Agent process lifecycle is managed by PTYManager (single source of truth).
 pub struct MissionControl {
-    db: Arc<MissionDB>,
+    db: Option<Arc<MissionDB>>,
     slot_manager: SlotManager,
     permission_policy: PermissionPolicy,
     inbox: Inbox,
@@ -65,28 +65,34 @@ pub struct MissionControl {
 }
 
 impl MissionControl {
-    /// Create a new MissionControl
+    /// Create a new MissionControl.
+    /// When `db_path` is None (PG mode), SQLite is not opened at all.
     pub fn new(options: MissionControlOptions) -> Result<Self> {
-        // Initialize database
-        let db = Arc::new(MissionDB::open(&options.db_path)?);
+        // Initialize database (optional — None in PG mode)
+        let db = match &options.db_path {
+            Some(path) => Some(Arc::new(MissionDB::open(path)?)),
+            None => None,
+        };
 
         // Logs directory
-        let logs_dir = options
-            .logs_dir
-            .unwrap_or_else(|| options.db_path.parent().unwrap().join("logs"));
+        let logs_dir = options.logs_dir.unwrap_or_else(|| {
+            options.db_path.as_ref()
+                .and_then(|p| p.parent())
+                .unwrap_or_else(|| Path::new("."))
+                .join("logs")
+        });
 
         let default_mode = options.default_mode.unwrap_or(ExecutionMode::Batch);
 
-        // Initialize components
-        let slot_manager = SlotManager::new(Arc::clone(&db));
-        let inbox = Inbox::new(Arc::clone(&db));
+        // Initialize components (DB-optional)
+        let slot_manager = SlotManager::new(db.clone());
+        let inbox = Inbox::new(db.clone());
 
         // Load permission config
         let permission_config_path = options.permission_config_path.unwrap_or_else(|| {
-            options
-                .db_path
-                .parent()
-                .unwrap()
+            options.db_path.as_ref()
+                .and_then(|p| p.parent())
+                .unwrap_or_else(|| Path::new("."))
                 .join("config")
                 .join("permissions.yaml")
         });
@@ -169,14 +175,16 @@ impl MissionControl {
         Ok(())
     }
 
-    /// Get a reference to the database
+    /// Get a reference to the database.
+    /// Panics in PG mode — all callers should use `store` instead.
     pub fn db(&self) -> &MissionDB {
-        &self.db
+        self.db.as_ref().expect("db() called in PG mode — use store instead")
     }
 
-    /// Get a shared Arc to the database (for DbExecutor construction).
+    /// Get a shared Arc to the database.
+    /// Panics in PG mode — all callers should use `store` instead.
     pub fn db_arc(&self) -> Arc<MissionDB> {
-        Arc::clone(&self.db)
+        Arc::clone(self.db.as_ref().expect("db_arc() called in PG mode — use store instead"))
     }
 
     // ============ Task Operations ============
@@ -207,8 +215,9 @@ impl MissionControl {
         Ok(task.id)
     }
 
-    /// Create a task
+    /// Create a task (legacy — callers should use state::submit_task() instead)
     fn create_task(&self, input: CreateTaskInput) -> Result<Task> {
+        let db = self.db.as_ref().ok_or_else(|| anyhow!("create_task() called in PG mode — use submit_task()"))?;
         let now = chrono::Utc::now().timestamp_millis();
         let task = Task {
             id: Uuid::new_v4().to_string(),
@@ -224,28 +233,28 @@ impl MissionControl {
             finished_at: None,
         };
 
-        if let Err(e) = self.db.insert_task(&task) {
+        if let Err(e) = db.insert_task(&task) {
             error!(task_id = %task.id, error = %e, "Failed to persist task to DB");
             return Err(anyhow!("Failed to create task: {}", e));
         }
         let data = serde_json::json!({ "role": input.role });
-        if let Err(e) = self.db.insert_event(&task.id, EventType::TaskCreated, Some(&data), now) {
+        if let Err(e) = db.insert_event(&task.id, EventType::TaskCreated, Some(&data), now) {
             error!(task_id = %task.id, error = %e, "Failed to persist task event");
-            // Non-fatal: task row exists, event is supplementary
         }
 
         info!(task_id = %task.id, role = %input.role, "Task created");
         Ok(task)
     }
 
-    /// Get task status
+    /// Get task status (legacy)
     pub fn get_status(&self, task_id: &str) -> Option<Task> {
-        self.db.get_task(task_id).ok().flatten()
+        self.db.as_ref()?.get_task(task_id).ok().flatten()
     }
 
-    /// Cancel a task (DB status update only; PTY kill is caller's responsibility)
+    /// Cancel a task (legacy — callers should use store directly)
     pub async fn cancel(&self, task_id: &str) -> Result<bool> {
-        let task = match self.db.get_task(task_id).ok().flatten() {
+        let db = self.db.as_ref().ok_or_else(|| anyhow!("cancel() called in PG mode"))?;
+        let task = match db.get_task(task_id).ok().flatten() {
             Some(t) => t,
             None => return Ok(false),
         };
@@ -253,7 +262,7 @@ impl MissionControl {
         let now = chrono::Utc::now().timestamp_millis();
 
         if task.status == TaskStatus::Queued || task.status == TaskStatus::Running {
-            if let Err(e) = self.db.update_task(
+            if let Err(e) = db.update_task(
                 task_id,
                 &TaskUpdate {
                     status: Some(TaskStatus::Cancelled),
@@ -313,29 +322,19 @@ impl MissionControl {
     /// Get statistics
     pub fn get_stats(&self) -> MissionStats {
         let slot_stats = self.slot_manager.get_stats();
+        let task_count = |status: TaskStatus| -> usize {
+            self.db.as_ref()
+                .and_then(|db| db.get_tasks_by_status(status).ok())
+                .map(|v| v.len())
+                .unwrap_or(0)
+        };
 
         MissionStats {
             tasks: TaskStats {
-                queued: self
-                    .db
-                    .get_tasks_by_status(TaskStatus::Queued)
-                    .map(|v| v.len())
-                    .unwrap_or(0),
-                running: self
-                    .db
-                    .get_tasks_by_status(TaskStatus::Running)
-                    .map(|v| v.len())
-                    .unwrap_or(0),
-                done: self
-                    .db
-                    .get_tasks_by_status(TaskStatus::Done)
-                    .map(|v| v.len())
-                    .unwrap_or(0),
-                failed: self
-                    .db
-                    .get_tasks_by_status(TaskStatus::Failed)
-                    .map(|v| v.len())
-                    .unwrap_or(0),
+                queued: task_count(TaskStatus::Queued),
+                running: task_count(TaskStatus::Running),
+                done: task_count(TaskStatus::Done),
+                failed: task_count(TaskStatus::Failed),
             },
             slots: SlotStats {
                 total: slot_stats.total,
@@ -467,7 +466,7 @@ slots:
         let (db_path, slots_config_path) = create_test_config(dir.path());
 
         let mc = MissionControl::new(MissionControlOptions {
-            db_path,
+            db_path: Some(db_path),
             slots_config_path,
             permission_config_path: None,
             logs_dir: None,
@@ -485,7 +484,7 @@ slots:
         let (db_path, slots_config_path) = create_test_config(dir.path());
 
         let mc = MissionControl::new(MissionControlOptions {
-            db_path,
+            db_path: Some(db_path),
             slots_config_path,
             permission_config_path: None,
             logs_dir: None,
@@ -503,7 +502,7 @@ slots:
         let (db_path, slots_config_path) = create_test_config(dir.path());
 
         let mc = MissionControl::new(MissionControlOptions {
-            db_path,
+            db_path: Some(db_path),
             slots_config_path,
             permission_config_path: None,
             logs_dir: None,

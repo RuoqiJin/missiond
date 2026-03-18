@@ -13,12 +13,13 @@ use tracing::{debug, info};
 /// Manages workstation configurations (process lifecycle handled by PTYManager)
 pub struct SlotManager {
     slots: Arc<RwLock<HashMap<String, Slot>>>,
-    db: Arc<MissionDB>,
+    db: Option<Arc<MissionDB>>,
 }
 
 impl SlotManager {
-    /// Create a new SlotManager
-    pub fn new(db: Arc<MissionDB>) -> Self {
+    /// Create a new SlotManager. `db` is optional — when None (PG mode),
+    /// session persistence is skipped (handled by async store instead).
+    pub fn new(db: Option<Arc<MissionDB>>) -> Self {
         Self {
             slots: Arc::new(RwLock::new(HashMap::new())),
             db,
@@ -33,8 +34,9 @@ impl SlotManager {
             // Apply default traits based on role if none explicitly configured
             config.apply_default_traits();
 
-            // Restore session_id from database
-            let saved_session_id = self.db.get_slot_session(&config.id).ok().flatten();
+            // Restore session_id from database (if SQLite available)
+            let saved_session_id = self.db.as_ref()
+                .and_then(|db| db.get_slot_session(&config.id).ok().flatten());
 
             let traits_desc = if config.traits.is_empty() {
                 String::new()
@@ -91,7 +93,9 @@ impl SlotManager {
 
         if let Some(slot) = slots.get_mut(slot_id) {
             slot.session_id = Some(session_id.to_string());
-            let _ = self.db.set_slot_session(slot_id, session_id);
+            if let Some(ref db) = self.db {
+                let _ = db.set_slot_session(slot_id, session_id);
+            }
             debug!(slot_id = %slot_id, session_id = %session_id, "Session updated");
         }
     }
@@ -102,7 +106,9 @@ impl SlotManager {
 
         if let Some(slot) = slots.get_mut(slot_id) {
             slot.session_id = None;
-            self.db.clear_slot_session(slot_id);
+            if let Some(ref db) = self.db {
+                db.clear_slot_session(slot_id);
+            }
             info!(slot_id = %slot_id, "Session reset");
         }
     }
@@ -139,7 +145,8 @@ impl SlotManager {
                 }
             } else {
                 // New slot
-                let saved_session_id = self.db.get_slot_session(&config.id).ok().flatten();
+                let saved_session_id = self.db.as_ref()
+                    .and_then(|db| db.get_slot_session(&config.id).ok().flatten());
                 let slot = Slot {
                     config: config.clone(),
                     session_id: saved_session_id,
@@ -168,7 +175,9 @@ impl SlotManager {
     pub fn unregister_dynamic_slot(&self, slot_id: &str) {
         let mut slots = self.slots.write().unwrap();
         if slots.remove(slot_id).is_some() {
-            self.db.clear_slot_session(slot_id);
+            if let Some(ref db) = self.db {
+                db.clear_slot_session(slot_id);
+            }
             info!(slot_id = %slot_id, "Dynamic slot unregistered");
         }
     }
@@ -224,7 +233,7 @@ mod tests {
     #[test]
     fn test_load_and_get_slots() {
         let db = create_test_db();
-        let manager = SlotManager::new(db);
+        let manager = SlotManager::new(Some(db));
 
         let configs = vec![
             SlotConfig {
@@ -293,7 +302,7 @@ mod tests {
     #[test]
     fn test_session_management() {
         let db = create_test_db();
-        let manager = SlotManager::new(db);
+        let manager = SlotManager::new(Some(db));
 
         let configs = vec![SlotConfig {
             id: "slot-1".to_string(),
@@ -330,7 +339,7 @@ mod tests {
     #[test]
     fn test_reload_slots() {
         let db = create_test_db();
-        let manager = SlotManager::new(db);
+        let manager = SlotManager::new(Some(db));
 
         // Initial load
         manager.load_slots(vec![
@@ -420,7 +429,7 @@ mod tests {
     #[test]
     fn test_stats() {
         let db = create_test_db();
-        let manager = SlotManager::new(db);
+        let manager = SlotManager::new(Some(db));
 
         let configs = vec![
             SlotConfig {

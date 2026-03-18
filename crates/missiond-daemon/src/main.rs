@@ -260,8 +260,10 @@ async fn main() -> Result<()> {
     };
     let permission = Arc::new(PermissionPolicy::new_with_learned(&permission_config_path, learned.clone()));
 
+    // In PG mode (MISSION_PG_URL set), skip SQLite entirely
+    let mc_db_path = if pg_url().is_some() { None } else { Some(db_path.clone()) };
     let mission = Arc::new(MissionControl::new(MissionControlOptions {
-        db_path: db_path.clone(),
+        db_path: mc_db_path,
         slots_config_path: slots_path.clone(),
         permission_config_path: None,
         logs_dir: Some(logs_dir.clone()),
