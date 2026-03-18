@@ -122,7 +122,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let task_id = params.get("task_id").and_then(|v| v.as_str()).map(|s| s.to_string());
 
             // If task_id provided, load conversation context (rolling summary + active history)
-            let mut prepended_count = 0usize; // track how many messages were prepended for save logic
+            // Separate context (not saved) from new_messages (saved) for robustness
+            let new_messages = messages.clone(); // preserve original new messages for saving
             let conv_id = if let Some(ref tid) = task_id {
                 let cid = state.store.router_chat_get_or_create(tid, &model).await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
@@ -134,27 +135,24 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     .map_err(|e| anyhow!("DB error: {}", e))?;
 
                 if summary_opt.is_some() || !active_history.is_empty() {
-                    let mut combined = Vec::new();
+                    let mut context_msgs: Vec<serde_json::Value> = Vec::new();
 
-                    // Inject rolling summary as context preamble
+                    // Inject rolling summary as system context
                     if let Some(ref summary) = summary_opt {
-                        combined.push(serde_json::json!({
-                            "role": "user",
-                            "content": format!("[对话历史摘要] 以下是之前对话的核心要点，请基于此上下文继续：\n{}", summary)
-                        }));
-                        combined.push(serde_json::json!({
-                            "role": "assistant",
-                            "content": "好的，我已了解之前的对话背景，将基于此继续。"
+                        context_msgs.push(serde_json::json!({
+                            "role": "system",
+                            "content": format!("[对话历史摘要] 以下是之前对话的核心要点，请基于此上下文继续对话：\n\n{}", summary)
                         }));
                     }
+                    context_msgs.extend(active_history);
 
-                    combined.extend(active_history);
-                    prepended_count = combined.len(); // summary msgs + active history
-                    combined.extend(messages);
-                    let active_count = combined.len();
-                    messages = combined;
+                    // Assemble: context + new messages
+                    let active_count = context_msgs.len();
+                    context_msgs.extend(messages);
+                    messages = context_msgs;
                     info!(
-                        task_id = %tid, active_msgs = active_count,
+                        task_id = %tid, context_msgs = active_count,
+                        new_msgs = new_messages.len(),
                         has_summary = summary_opt.is_some(), cursor,
                         "Router chat: loaded context (summary + active)"
                     );
@@ -473,23 +471,22 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 resp["context_budget"] = serde_json::json!(note);
             }
 
-            // Save new messages + assistant response to conversation history
+            // Save only NEW messages + assistant response (new_messages is pre-separated from context)
             if let Some(ref cid) = conv_id {
-                let mut new_msgs: Vec<(String, String)> = Vec::new();
-                // messages array = [summary pseudo-msgs + active history + new user messages]
-                // Skip the prepended portion (summary + active history) to save only new messages
-                for msg in messages.iter().skip(prepended_count) {
-                    let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
-                    let msg_content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                    new_msgs.push((role.to_string(), msg_content.to_string()));
-                }
+                let mut save_msgs: Vec<(String, String)> = new_messages.iter()
+                    .map(|msg| {
+                        let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+                        let msg_content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                        (role.to_string(), msg_content.to_string())
+                    })
+                    .collect();
                 // Add assistant response
-                new_msgs.push(("assistant".to_string(), content.to_string()));
+                save_msgs.push(("assistant".to_string(), content.to_string()));
 
-                if let Err(e) = state.store.router_chat_append_messages(cid, &new_msgs).await {
+                if let Err(e) = state.store.router_chat_append_messages(cid, &save_msgs).await {
                     warn!("Failed to save router chat history: {}", e);
                 } else {
-                    info!(conv_id = %cid, saved = new_msgs.len(), "Router chat: saved messages to history");
+                    info!(conv_id = %cid, saved = save_msgs.len(), "Router chat: saved messages to history");
                 }
                 resp["conversation_id"] = serde_json::json!(cid);
             }
@@ -674,12 +671,23 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 })));
             }
 
-            // Format messages for Sonnet summarization
-            let messages_text: String = to_compress.iter()
-                .map(|(_, role, content)| format!("[{}]: {}", role, content))
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            let new_cursor = to_compress.last().map(|(id, _, _)| *id).unwrap_or(cursor);
+            // Format messages for summarization, with char budget to prevent token overflow
+            const COMPRESS_CHAR_BUDGET: usize = 100_000; // ~25k tokens, safe for Gemini input
+            let mut messages_text = String::new();
+            let mut actual_count = 0usize;
+            for (_, role, content) in &to_compress {
+                let entry = format!("[{}]: {}\n\n", role, content);
+                if messages_text.len() + entry.len() > COMPRESS_CHAR_BUDGET && actual_count > 0 {
+                    info!(conv_id = %cid, budget = COMPRESS_CHAR_BUDGET,
+                          "Router chat compress: char budget reached, truncating batch at {} of {} messages",
+                          actual_count, to_compress.len());
+                    break;
+                }
+                messages_text.push_str(&entry);
+                actual_count += 1;
+            }
+            let new_cursor = to_compress.get(actual_count.saturating_sub(1))
+                .map(|(id, _, _)| *id).unwrap_or(cursor);
 
             // Use Gemini (google one channel) for summarization — Gemini summarizes its own content best
             let system_prompt = "You are a conversation summarizer. Your job is to maintain a rolling summary of a conversation between a user and an AI assistant (Gemini). Keep technical details, decisions, task IDs, and established context. Drop irrelevant chit-chat. Output only the updated summary in the same language as the conversation (Chinese if the conversation is in Chinese). Be concise but comprehensive.";
@@ -722,22 +730,47 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
             match summary_result {
                 Ok(new_summary) => {
+                    // Defensive validation: reject garbage summaries
+                    let reject_patterns = ["I cannot", "I'm sorry", "I apologize", "As an AI"];
+                    let is_garbage = new_summary.len() < 20
+                        || reject_patterns.iter().any(|p| new_summary.starts_with(p));
+                    if is_garbage {
+                        warn!(conv_id = %cid, summary_len = new_summary.len(),
+                              "Router chat compress: rejected low-quality summary");
+                        return Ok(ToolResult::json(&serde_json::json!({
+                            "conversation_id": cid,
+                            "status": "error",
+                            "error": "Gemini 返回的摘要质量不合格（过短或拒绝服务），已丢弃",
+                            "summary_preview": new_summary.chars().take(100).collect::<String>(),
+                            "note": "原始消息未受影响，可重试",
+                        })));
+                    }
+
+                    // Snapshot previous summary before overwrite (for rollback)
+                    if let Some(ref prev) = existing_summary {
+                        if let Err(e) = state.store.router_chat_append_messages(&cid, &[
+                            ("_summary_snapshot".to_string(), prev.clone()),
+                        ]).await {
+                            warn!(conv_id = %cid, error = %e, "Failed to snapshot previous summary");
+                        }
+                    }
+
                     let updated = state.store.router_chat_update_summary(
                         &cid, &new_summary, new_cursor, cursor,
                     ).await.map_err(|e| anyhow!("DB error: {}", e))?;
 
                     if updated {
                         info!(
-                            conv_id = %cid, compressed = to_compress.len(),
+                            conv_id = %cid, compressed = actual_count,
                             new_cursor, summary_len = new_summary.len(),
                             "Router chat: compressed messages into rolling summary"
                         );
                         Ok(ToolResult::json_pretty(&serde_json::json!({
                             "conversation_id": cid,
                             "status": "ok",
-                            "compressed_messages": to_compress.len(),
+                            "compressed_messages": actual_count,
                             "new_cursor": new_cursor,
-                            "remaining_active": unsummarized - to_compress.len() as i64,
+                            "remaining_active": unsummarized - actual_count as i64,
                             "summary_chars": new_summary.len(),
                             "summary_preview": new_summary.chars().take(200).collect::<String>(),
                         })))
