@@ -89,7 +89,7 @@ impl ObservabilityStore for SqliteMissionStore {
 
     // ── incident.rs: token ledger ─────────────────────────────────
 
-    async fn insert_token_usage(&self, conversation_id: &str, slot_id: Option<&str>, slot_task_id: Option<&str>, model: Option<&str>, input_tokens: i64, cache_creation_tokens: i64, cache_read_tokens: i64, output_tokens: i64) -> DbResult<()> {
+    async fn insert_token_usage(&self, conversation_id: &str, slot_id: Option<&str>, slot_task_id: Option<&str>, model: Option<&str>, input_tokens: i64, cache_creation_tokens: i64, cache_read_tokens: i64, output_tokens: i64, _message_id: Option<i64>) -> DbResult<()> {
         let conversation_id = conversation_id.to_owned();
         let slot_id = slot_id.map(|s| s.to_owned());
         let slot_task_id = slot_task_id.map(|s| s.to_owned());

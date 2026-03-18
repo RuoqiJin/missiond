@@ -467,6 +467,21 @@ impl DaemonEvent {
         }
     }
 
+    /// Whether this event is ephemeral (should NOT be persisted to system_timeline).
+    /// Ephemeral events are still broadcast to WS clients and internal consumers,
+    /// but they don't create DB rows. This prevents internal worker telemetry
+    /// from inflating the timeline table.
+    pub fn is_ephemeral(&self) -> bool {
+        matches!(self,
+            Self::BriefingBatchStarted { .. }
+            | Self::BriefingSummaryGenerated { .. }
+            | Self::WorkerLlmCall { .. }
+            | Self::ImageMessageInserted { .. }
+            | Self::TranslationStarted { .. }
+            | Self::NarrationBatchCompleted { .. }
+        )
+    }
+
     /// Build frontend-compatible JSON payload (without seq/ts envelope).
     pub fn to_frontend_payload(&self) -> serde_json::Value {
         match self {
