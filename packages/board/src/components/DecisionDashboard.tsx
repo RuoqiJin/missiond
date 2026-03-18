@@ -495,7 +495,7 @@ export function DecisionDashboard() {
       questionsApi.fetchMasterQuestions(filter === 'all' ? undefined : filter, 100),
       questionsApi.fetchDecisionStats(24),
     ]);
-    if (qRes.status === 'fulfilled') setQuestions(qRes.value);
+    if (qRes.status === 'fulfilled' && Array.isArray(qRes.value)) setQuestions(qRes.value);
     if (sRes.status === 'fulfilled') setStats(sRes.value);
   }, [filter]);
 
