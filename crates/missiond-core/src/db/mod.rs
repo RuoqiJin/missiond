@@ -10,7 +10,7 @@ mod task;
 mod slot;
 mod board;
 mod question;
-mod knowledge;
+pub(crate) mod knowledge;
 mod skill;
 mod conversation;
 mod audit;
