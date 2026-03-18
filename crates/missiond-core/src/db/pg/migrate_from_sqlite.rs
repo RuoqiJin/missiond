@@ -262,17 +262,18 @@ pub async fn backfill_pg_embeddings(pg_url: &str) -> Result<usize, String> {
         .await
         .map_err(|e| format!("PG connect: {}", e))?;
 
-    // Tables with BYTEA embedding + pgvector embedding_vec columns
-    let tables = [
-        ("knowledge", "id"),
-        ("ast_nodes", "id"),
-        ("skill_topics", "id"),
-        ("conversation_topic_vectors", "id"),
+    // Tables with BYTEA embedding + pgvector embedding_vec columns.
+    // PK is &[&str] — supports single and composite keys with tuple comparison.
+    let tables: Vec<(&str, &[&str])> = vec![
+        ("knowledge", &["id"]),
+        ("ast_nodes", &["id"]),
+        ("skill_topics", &["topic"]),
+        ("conversation_topic_vectors", &["session_id", "chunk_idx"]),
     ];
 
     let mut total = 0usize;
-    for (table, pk) in &tables {
-        match backfill_table_embeddings(&pool, table, pk).await {
+    for (table, pk_cols) in &tables {
+        match backfill_table_embeddings(&pool, table, pk_cols).await {
             Ok(n) => {
                 if n > 0 {
                     info!(table, backfilled = n, "Embedding backfill");
@@ -288,46 +289,70 @@ pub async fn backfill_pg_embeddings(pg_url: &str) -> Result<usize, String> {
     Ok(total)
 }
 
-/// Backfill embedding_vec for a single table using cursor-based pagination.
+/// Backfill embedding_vec for a single table using keyset pagination.
+/// Supports single and composite PKs via tuple comparison: `(a, b) > ($1, $2)`.
 #[cfg(feature = "postgres")]
 async fn backfill_table_embeddings(
     pool: &sqlx::PgPool,
     table: &str,
-    pk: &str,
+    pk_cols: &[&str],
 ) -> Result<usize, String> {
     const PAGE_SIZE: i64 = 200;
     let mut updated = 0usize;
-    let mut last_id = String::new();
+    let mut cursor_values: Vec<String> = Vec::new();
+
+    let pk_select = pk_cols.join(", ");
+    let pk_order = pk_cols.join(", ");
 
     loop {
-        // Cursor-based: fetch next page of rows needing backfill
-        let sql = if last_id.is_empty() {
+        let sql = if cursor_values.is_empty() {
             format!(
-                "SELECT {pk}, embedding FROM {table} \
+                "SELECT {pk_select}, embedding FROM {table} \
                  WHERE embedding IS NOT NULL AND embedding_vec IS NULL \
-                 ORDER BY {pk} LIMIT {PAGE_SIZE}"
+                 ORDER BY {pk_order} LIMIT {PAGE_SIZE}"
             )
         } else {
+            // Tuple comparison: (col1, col2) > ($1, $2)
+            let pk_tuple = format!("({})", pk_cols.join(", "));
+            let param_tuple = format!("({})", (1..=pk_cols.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(", "));
             format!(
-                "SELECT {pk}, embedding FROM {table} \
-                 WHERE embedding IS NOT NULL AND embedding_vec IS NULL AND {pk} > $1 \
-                 ORDER BY {pk} LIMIT {PAGE_SIZE}"
+                "SELECT {pk_select}, embedding FROM {table} \
+                 WHERE embedding IS NOT NULL AND embedding_vec IS NULL \
+                 AND {pk_tuple} > {param_tuple} \
+                 ORDER BY {pk_order} LIMIT {PAGE_SIZE}"
             )
         };
 
-        let rows: Vec<(String, Vec<u8>)> = if last_id.is_empty() {
-            sqlx::query_as(&sql).fetch_all(pool).await
+        // Fetch page — extract PK values + embedding blob dynamically
+        let rows = if cursor_values.is_empty() {
+            sqlx::query(&sql).fetch_all(pool).await
         } else {
-            sqlx::query_as(&sql).bind(&last_id).fetch_all(pool).await
+            let mut q = sqlx::query(&sql);
+            for v in &cursor_values {
+                q = q.bind(v.as_str());
+            }
+            q.fetch_all(pool).await
         }.map_err(|e| format!("fetch: {}", e))?;
 
         if rows.is_empty() {
             break;
         }
 
-        for (id, blob) in &rows {
+        let row_count = rows.len();
+
+        for row in &rows {
+            use sqlx::Row;
+            // Extract PK values for cursor + WHERE clause
+            let mut pk_vals: Vec<String> = Vec::new();
+            for (i, _col) in pk_cols.iter().enumerate() {
+                let val: String = row.try_get(i).unwrap_or_default();
+                pk_vals.push(val);
+            }
+
+            // Extract embedding blob (last column after PK columns)
+            let blob: Vec<u8> = row.try_get(pk_cols.len()).unwrap_or_default();
+
             if blob.len() % 4 != 0 {
-                warn!(table, id = %id, len = blob.len(), "Invalid embedding blob size, skipping");
                 continue;
             }
             let floats: Vec<f32> = blob
@@ -340,24 +365,29 @@ async fn backfill_table_embeddings(
                 floats.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(",")
             );
 
+            // Build UPDATE with correct PK WHERE clause
+            let set_param = 1; // $1 = vector string
+            let where_parts: Vec<String> = pk_cols.iter().enumerate()
+                .map(|(i, col)| format!("{col} = ${}", set_param + 1 + i))
+                .collect();
             let update_sql = format!(
-                "UPDATE {table} SET embedding_vec = $1::vector WHERE {pk} = $2"
+                "UPDATE {table} SET embedding_vec = $1::vector WHERE {}",
+                where_parts.join(" AND ")
             );
-            match sqlx::query(&update_sql)
-                .bind(&vec_str)
-                .bind(id)
-                .execute(pool)
-                .await
-            {
+            let mut q = sqlx::query(&update_sql).bind(&vec_str);
+            for v in &pk_vals {
+                q = q.bind(v.as_str());
+            }
+            match q.execute(pool).await {
                 Ok(_) => updated += 1,
                 Err(e) => {
-                    warn!(table, id = %id, error = %e, "Embedding update failed");
+                    warn!(table, pk = ?pk_vals, error = %e, "Embedding update failed");
                 }
             }
-            last_id = id.clone();
+            cursor_values = pk_vals;
         }
 
-        if (rows.len() as i64) < PAGE_SIZE {
+        if (row_count as i64) < PAGE_SIZE {
             break;
         }
     }

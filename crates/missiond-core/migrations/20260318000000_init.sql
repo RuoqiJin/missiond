@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS knowledge (
     last_accessed_at TEXT,
     linked_task_id TEXT,
     embedding BYTEA,
-    embedding_vec vector(768),
+    embedding_vec vector,
     embedding_provider TEXT,
     kb_type TEXT DEFAULT 'fact',
     scope_task_id TEXT,
@@ -186,7 +186,7 @@ CREATE INDEX IF NOT EXISTS idx_kb_scope ON knowledge(scope_task_id);
 CREATE INDEX IF NOT EXISTS idx_kb_utility ON knowledge(utility_score);
 CREATE INDEX IF NOT EXISTS idx_kb_fts ON knowledge USING GIN(fts_doc);
 CREATE INDEX IF NOT EXISTS idx_kb_trgm ON knowledge USING GIN((key || ' ' || summary) gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_kb_embedding ON knowledge USING hnsw(embedding_vec vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX IF NOT EXISTS idx_kb_embedding ON knowledge USING hnsw((embedding_vec::vector(512)) vector_cosine_ops) WITH (m = 16, ef_construction = 64);
 
 CREATE TABLE IF NOT EXISTS credentials (
     id TEXT PRIMARY KEY,
@@ -376,13 +376,13 @@ CREATE TABLE IF NOT EXISTS conversation_topic_vectors (
     chunk_idx INTEGER NOT NULL,
     topic TEXT NOT NULL,
     embedding BYTEA NOT NULL,
-    embedding_vec vector(768),
+    embedding_vec vector,
     embedding_provider TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
     PRIMARY KEY (session_id, chunk_idx)
 );
 CREATE INDEX IF NOT EXISTS idx_ctv_provider ON conversation_topic_vectors(embedding_provider);
-CREATE INDEX IF NOT EXISTS idx_ctv_embedding ON conversation_topic_vectors USING hnsw(embedding_vec vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX IF NOT EXISTS idx_ctv_embedding ON conversation_topic_vectors USING hnsw((embedding_vec::vector(512)) vector_cosine_ops) WITH (m = 16, ef_construction = 64);
 
 -- ============================================================================
 -- 6. Slot Tasks & Token Ledger
@@ -444,10 +444,10 @@ CREATE TABLE IF NOT EXISTS skill_topics (
     actions_json TEXT,
     context_hooks_json TEXT,
     embedding BYTEA,
-    embedding_vec vector(768),
+    embedding_vec vector,
     embedding_provider TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_skill_embedding ON skill_topics USING hnsw(embedding_vec vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX IF NOT EXISTS idx_skill_embedding ON skill_topics USING hnsw((embedding_vec::vector(512)) vector_cosine_ops) WITH (m = 16, ef_construction = 64);
 
 CREATE TABLE IF NOT EXISTS skill_blocks (
     id TEXT PRIMARY KEY,
@@ -634,7 +634,7 @@ CREATE TABLE IF NOT EXISTS ast_nodes (
     stub_content TEXT NOT NULL,
     calls TEXT,
     embedding BYTEA,
-    embedding_vec vector(768),
+    embedding_vec vector,
     embedding_provider TEXT,
     updated_at TEXT DEFAULT to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
     -- FTS: pg_trgm for code symbols (replaces ast_nodes_fts)
@@ -649,7 +649,7 @@ CREATE INDEX IF NOT EXISTS idx_ast_exported ON ast_nodes(is_exported);
 CREATE INDEX IF NOT EXISTS idx_ast_provider ON ast_nodes(embedding_provider);
 CREATE INDEX IF NOT EXISTS idx_ast_fts ON ast_nodes USING GIN(fts_doc);
 CREATE INDEX IF NOT EXISTS idx_ast_trgm ON ast_nodes USING GIN(name gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_ast_embedding ON ast_nodes USING hnsw(embedding_vec vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX IF NOT EXISTS idx_ast_embedding ON ast_nodes USING hnsw((embedding_vec::vector(512)) vector_cosine_ops) WITH (m = 16, ef_construction = 64);
 
 CREATE TABLE IF NOT EXISTS ast_file_meta (
     repo TEXT NOT NULL,
