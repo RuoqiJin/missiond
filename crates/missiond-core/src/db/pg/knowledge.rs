@@ -203,12 +203,17 @@ impl KnowledgeStore for PgMissionStore {
             });
         }
 
-        // 3. Insert new
+        // 3. Insert new (ON CONFLICT guards against concurrent race on UNIQUE(category, key))
         let id = uuid::Uuid::new_v4().to_string();
         let kb_type = MissionDB::infer_kb_type(&input.category);
         sqlx::query(
             "INSERT INTO knowledge (id, category, key, summary, detail, source, confidence, access_count, created_at, updated_at, kb_type)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, $10)"
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, $10)
+             ON CONFLICT (category, key) DO UPDATE SET
+                summary = EXCLUDED.summary, detail = EXCLUDED.detail,
+                source = EXCLUDED.source, confidence = EXCLUDED.confidence,
+                updated_at = EXCLUDED.updated_at,
+                utility_score = GREATEST(knowledge.utility_score, 0.8)"
         )
         .bind(&id)
         .bind(&input.category)
