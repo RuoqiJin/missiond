@@ -31,12 +31,11 @@ impl PgMissionStore {
             .connect(database_url)
             .await?;
 
-        // Run migrations from SQL files at runtime.
-        // No compile-time DB connection needed (unlike sqlx::migrate!() macro).
-        let migrator = sqlx::migrate::Migrator::new(
-            std::path::Path::new("./migrations")
-        ).await?;
-        migrator.run(&pool).await?;
+        // Run embedded migrations (SQL baked into binary at compile time).
+        // Does NOT need a compile-time DB connection — only reads files.
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await?;
 
         Ok(Self { pool })
     }
