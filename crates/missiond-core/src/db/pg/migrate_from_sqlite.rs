@@ -193,7 +193,18 @@ async fn migrate_table(
         // Insert page into PostgreSQL
         for row in &page {
             let col_names: Vec<&str> = row.iter().map(|(n, _)| n.as_str()).collect();
-            let placeholders: Vec<String> = (1..=col_names.len()).map(|i| format!("${}", i)).collect();
+            // Build placeholders: use SQL NULL literal for null values to avoid
+            // sqlx sending typed-NULL (text OID) which PG rejects for integer columns.
+            let mut param_idx = 0usize;
+            let placeholders: Vec<String> = row.iter().map(|(_, val)| {
+                match val {
+                    SqliteValue::Null => "NULL".to_string(),
+                    _ => {
+                        param_idx += 1;
+                        format!("${}", param_idx)
+                    }
+                }
+            }).collect();
 
             let sql = format!(
                 "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING",
@@ -205,7 +216,7 @@ async fn migrate_table(
             let mut query = sqlx::query(&sql);
             for (_, val) in row {
                 query = match val {
-                    SqliteValue::Null => query.bind(None::<String>),
+                    SqliteValue::Null => continue, // Already handled as SQL NULL literal
                     SqliteValue::Integer(v) => query.bind(*v),
                     SqliteValue::Real(v) => query.bind(*v),
                     SqliteValue::Text(v) => query.bind(v.as_str()),

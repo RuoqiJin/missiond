@@ -286,7 +286,9 @@ CREATE TABLE IF NOT EXISTS conversations (
     session_timeline TEXT,
     timeline_built_at TEXT,
     exit_code INTEGER,
-    habit_scanned_at TEXT
+    habit_scanned_at TEXT,
+    rolling_summary TEXT,
+    last_summarized_msg_id BIGINT DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_conv_status ON conversations(status);
 CREATE INDEX IF NOT EXISTS idx_conv_memory_pending ON conversations(slot_id, memory_forwarded_at);
