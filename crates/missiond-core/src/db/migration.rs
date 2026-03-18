@@ -1664,9 +1664,27 @@ impl MissionDB {
             if !has_rolling_summary {
                 conn.execute_batch(
                     "ALTER TABLE conversations ADD COLUMN rolling_summary TEXT;
-                     ALTER TABLE conversations ADD COLUMN last_summarized_msg_id INTEGER DEFAULT 0;"
+                     ALTER TABLE conversations ADD COLUMN last_summarized_msg_id INTEGER DEFAULT 0;
+                     CREATE INDEX IF NOT EXISTS idx_conv_msg_session_id
+                       ON conversation_messages(session_id, id);"
                 )?;
-                tracing::info!("Migration: added rolling_summary + last_summarized_msg_id to conversations");
+                tracing::info!("Migration: added rolling_summary + last_summarized_msg_id + composite index");
+            }
+        }
+
+        // Ensure composite index exists even if columns were added in a previous run
+        {
+            let has_idx: bool = conn.query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name='idx_conv_msg_session_id'",
+                [],
+                |row| row.get(0),
+            )?;
+            if !has_idx {
+                conn.execute_batch(
+                    "CREATE INDEX IF NOT EXISTS idx_conv_msg_session_id
+                       ON conversation_messages(session_id, id);"
+                )?;
+                tracing::info!("Migration: added composite index (session_id, id) on conversation_messages");
             }
         }
 

@@ -33,12 +33,8 @@ pub(crate) async fn call_gemini_for_flow(state: &AppState, task_id: &str, prompt
     let mut messages = Vec::new();
     if let Some(ref summary) = summary_opt {
         messages.push(serde_json::json!({
-            "role": "user",
-            "content": format!("[对话历史摘要] 以下是之前对话的核心要点：\n{}", summary)
-        }));
-        messages.push(serde_json::json!({
-            "role": "assistant",
-            "content": "好的，我已了解之前的对话背景。"
+            "role": "system",
+            "content": format!("[对话历史摘要] 以下是之前对话的核心要点：\n\n{}", summary)
         }));
     }
     let prepended_count = messages.len() + active_history.len();
