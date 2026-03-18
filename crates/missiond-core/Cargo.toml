@@ -11,7 +11,9 @@ description = "Core library for missiond - PTY management, semantic terminal par
 readme = "../../README.md"
 
 [features]
-default = []
+default = ["sqlite"]
+sqlite = ["dep:rusqlite"]
+postgres = ["dep:sqlx"]
 embeddings = ["dep:fastembed"]
 code-context = ["dep:tree-sitter", "dep:tree-sitter-rust", "dep:tree-sitter-typescript", "dep:tree-sitter-python"]
 
@@ -63,7 +65,8 @@ image.workspace = true
 ab_glyph.workspace = true
 
 # Database
-rusqlite = { workspace = true }
+rusqlite = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
 
 # Async trait
 async-trait.workspace = true
@@ -84,6 +87,8 @@ futures-util = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 tempfile = "3.14"
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
 
 [lints]
 workspace = true
