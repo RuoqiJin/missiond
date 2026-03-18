@@ -1,40 +1,72 @@
-//! SQLite database operations for missiond
+//! Database operations for missiond.
 
 pub mod error;
-pub mod executor;
 pub mod traits;
-pub mod sqlite;
+pub mod shared;
+
 #[cfg(feature = "postgres")]
 pub mod pg;
+
+// SQLite backend — feature-gated, opt-in for migration tool only.
+#[cfg(feature = "sqlite")]
+pub mod executor;
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
+#[cfg(feature = "sqlite")]
 mod task;
+#[cfg(feature = "sqlite")]
 mod slot;
+#[cfg(feature = "sqlite")]
 mod board;
+#[cfg(feature = "sqlite")]
 mod question;
+#[cfg(feature = "sqlite")]
 pub(crate) mod knowledge;
+#[cfg(feature = "sqlite")]
 mod skill;
+#[cfg(feature = "sqlite")]
 mod conversation;
+#[cfg(feature = "sqlite")]
 mod audit;
+#[cfg(feature = "sqlite")]
 mod router_chat;
+#[cfg(feature = "sqlite")]
 mod incident;
+#[cfg(feature = "sqlite")]
 mod gemini_log;
+#[cfg(feature = "sqlite")]
 mod vision;
+#[cfg(feature = "sqlite")]
 pub mod ast;
+#[cfg(feature = "sqlite")]
 pub mod beacon;
+#[cfg(feature = "sqlite")]
 mod migration;
+#[cfg(feature = "sqlite")]
 pub(crate) mod timeline;
+#[cfg(feature = "sqlite")]
 mod dynamic_slot;
+#[cfg(feature = "sqlite")]
 mod narration;
+#[cfg(feature = "sqlite")]
 mod translation;
+#[cfg(feature = "sqlite")]
 pub(crate) mod backfill;
+#[cfg(feature = "sqlite")]
 mod watermark;
+#[cfg(feature = "sqlite")]
 pub mod message_feed;
 
-pub use backfill::BackfillPhaseStatus;
-pub use timeline::{TimelineRow, TimelineStats, LatencyStats};
+// Re-exports from shared (always available)
+pub use shared::{BackfillPhaseStatus, TimelineRow, TimelineStats, LatencyStats};
 
+#[cfg(feature = "sqlite")]
 use rusqlite::Connection;
+#[cfg(feature = "sqlite")]
 use error::DbResult;
+#[cfg(feature = "sqlite")]
 use std::path::Path;
+#[cfg(feature = "sqlite")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Extract parent session ID from a subagent's jsonl_path.
@@ -68,7 +100,7 @@ pub fn derive_conversation_type(slot_id: Option<&str>, session_id: &str) -> Stri
     }
 }
 
-/// SQLite database operations class
+#[cfg(feature = "sqlite")]
 pub struct MissionDB {
     conn: std::sync::Mutex<Connection>,
     /// Read-only connection for queries — avoids blocking on write Mutex (WAL concurrent reads)
@@ -77,6 +109,7 @@ pub struct MissionDB {
     fts_dirty: AtomicBool,
 }
 
+#[cfg(feature = "sqlite")]
 impl MissionDB {
     /// Create a new database connection
     pub fn new<P: AsRef<Path>>(db_path: P) -> DbResult<Self> {
@@ -176,7 +209,7 @@ impl MissionDB {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
     use crate::types::{Task, TaskStatus, TaskUpdate, InboxMessage, EventType};

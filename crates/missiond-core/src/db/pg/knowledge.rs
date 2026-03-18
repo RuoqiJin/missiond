@@ -3,8 +3,7 @@
 use async_trait::async_trait;
 use crate::db::error::DbResult;
 use crate::db::traits::KnowledgeStore;
-use crate::db::knowledge::token_jaccard_similarity;
-use crate::db::MissionDB;
+use crate::db::shared::{token_jaccard_similarity, infer_kb_type, contains_sensitive_data};
 use crate::types::*;
 use super::PgMissionStore;
 use std::collections::HashMap;
@@ -86,7 +85,7 @@ impl KnowledgeStore for PgMissionStore {
                     updated_at: now,
                     last_accessed_at: None,
                     linked_task_id: None,
-                    kb_type: MissionDB::infer_kb_type(&input.category).to_string(),
+                    kb_type: infer_kb_type(&input.category).to_string(),
                     context_snippet: None,
                     scope_task_id: None,
                     utility_score: 0.0,
@@ -99,7 +98,7 @@ impl KnowledgeStore for PgMissionStore {
 
         // Sensitive data detection
         let check_text = format!("{} {} {}", input.summary, detail_str.as_deref().unwrap_or(""), input.key);
-        if MissionDB::contains_sensitive_data_pub(&check_text) {
+        if contains_sensitive_data(&check_text) {
             confidence = confidence.min(0.5);
         }
 
@@ -205,7 +204,7 @@ impl KnowledgeStore for PgMissionStore {
 
         // 3. Insert new (ON CONFLICT guards against concurrent race on UNIQUE(category, key))
         let id = uuid::Uuid::new_v4().to_string();
-        let kb_type = MissionDB::infer_kb_type(&input.category);
+        let kb_type = infer_kb_type(&input.category);
         sqlx::query(
             "INSERT INTO knowledge (id, category, key, summary, detail, source, confidence, access_count, created_at, updated_at, kb_type)
              VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, $10)

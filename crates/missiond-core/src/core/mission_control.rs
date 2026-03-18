@@ -5,15 +5,26 @@
 use super::{
     Inbox, PermissionConfig, PermissionPolicy, PermissionRule, SlotManager,
 };
+#[cfg(feature = "sqlite")]
 use crate::db::MissionDB;
+#[cfg(feature = "sqlite")]
 use crate::types::{
     CreateTaskInput, EventType, InboxMessage, Slot, SlotConfig, SlotsConfig, Task, TaskStatus, TaskUpdate,
 };
+#[cfg(not(feature = "sqlite"))]
+use crate::types::{
+    CreateTaskInput, InboxMessage, Slot, SlotConfig, SlotsConfig, Task,
+};
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "sqlite")]
 use std::sync::Arc;
 use tokio::sync::RwLock;
+#[cfg(feature = "sqlite")]
 use tracing::{error, info};
+#[cfg(not(feature = "sqlite"))]
+use tracing::info;
+#[cfg(feature = "sqlite")]
 use uuid::Uuid;
 
 /// Execution mode
@@ -53,6 +64,7 @@ pub struct MissionControlOptions {
 /// Main coordinator for task queue, slot configuration, and inbox.
 /// Agent process lifecycle is managed by PTYManager (single source of truth).
 pub struct MissionControl {
+    #[cfg(feature = "sqlite")]
     db: Option<Arc<MissionDB>>,
     slot_manager: SlotManager,
     permission_policy: PermissionPolicy,
@@ -65,8 +77,9 @@ pub struct MissionControl {
 }
 
 impl MissionControl {
-    /// Create a new MissionControl.
-    /// When `db_path` is None (PG mode), SQLite is not opened at all.
+    /// Create a new MissionControl (SQLite mode).
+    /// When `db_path` is None, SQLite is not opened at all.
+    #[cfg(feature = "sqlite")]
     pub fn new(options: MissionControlOptions) -> Result<Self> {
         // Initialize database (optional — None in PG mode)
         let db = match &options.db_path {
@@ -102,6 +115,49 @@ impl MissionControl {
         let slots_config_path = options.slots_config_path.clone();
         let mc = Self {
             db,
+            slot_manager,
+            permission_policy,
+            inbox,
+            started: RwLock::new(false),
+            logs_dir,
+            default_mode: RwLock::new(default_mode),
+            slots_config_path: slots_config_path.clone(),
+        };
+
+        mc.load_slots_config(&slots_config_path)?;
+
+        info!("MissionControl initialized");
+        Ok(mc)
+    }
+
+    /// Create a new MissionControl (PG mode — no SQLite DB).
+    #[cfg(not(feature = "sqlite"))]
+    pub fn new(options: MissionControlOptions) -> Result<Self> {
+        // Logs directory
+        let logs_dir = options.logs_dir.unwrap_or_else(|| {
+            options.db_path.as_ref()
+                .and_then(|p| p.parent())
+                .unwrap_or_else(|| Path::new("."))
+                .join("logs")
+        });
+
+        let default_mode = options.default_mode.unwrap_or(ExecutionMode::Batch);
+
+        let slot_manager = SlotManager::new();
+        let inbox = Inbox::new();
+
+        // Load permission config
+        let permission_config_path = options.permission_config_path.unwrap_or_else(|| {
+            options.db_path.as_ref()
+                .and_then(|p| p.parent())
+                .unwrap_or_else(|| Path::new("."))
+                .join("config")
+                .join("permissions.yaml")
+        });
+        let permission_policy = PermissionPolicy::new(&permission_config_path);
+
+        let slots_config_path = options.slots_config_path.clone();
+        let mc = Self {
             slot_manager,
             permission_policy,
             inbox,
@@ -177,12 +233,14 @@ impl MissionControl {
 
     /// Get a reference to the database.
     /// Panics in PG mode — all callers should use `store` instead.
+    #[cfg(feature = "sqlite")]
     pub fn db(&self) -> &MissionDB {
         self.db.as_ref().expect("db() called in PG mode — use store instead")
     }
 
     /// Get a shared Arc to the database.
     /// Panics in PG mode — all callers should use `store` instead.
+    #[cfg(feature = "sqlite")]
     pub fn db_arc(&self) -> Arc<MissionDB> {
         Arc::clone(self.db.as_ref().expect("db_arc() called in PG mode — use store instead"))
     }
@@ -216,6 +274,7 @@ impl MissionControl {
     }
 
     /// Create a task (legacy — callers should use state::submit_task() instead)
+    #[cfg(feature = "sqlite")]
     fn create_task(&self, input: CreateTaskInput) -> Result<Task> {
         let db = self.db.as_ref().ok_or_else(|| anyhow!("create_task() called in PG mode — use submit_task()"))?;
         let now = chrono::Utc::now().timestamp_millis();
@@ -246,12 +305,24 @@ impl MissionControl {
         Ok(task)
     }
 
+    #[cfg(not(feature = "sqlite"))]
+    fn create_task(&self, _input: CreateTaskInput) -> Result<Task> {
+        Err(anyhow!("create_task() not available in PG mode — use submit_task()"))
+    }
+
     /// Get task status (legacy)
+    #[cfg(feature = "sqlite")]
     pub fn get_status(&self, task_id: &str) -> Option<Task> {
         self.db.as_ref()?.get_task(task_id).ok().flatten()
     }
 
+    #[cfg(not(feature = "sqlite"))]
+    pub fn get_status(&self, _task_id: &str) -> Option<Task> {
+        None
+    }
+
     /// Cancel a task (legacy — callers should use store directly)
+    #[cfg(feature = "sqlite")]
     pub async fn cancel(&self, task_id: &str) -> Result<bool> {
         let db = self.db.as_ref().ok_or_else(|| anyhow!("cancel() called in PG mode"))?;
         let task = match db.get_task(task_id).ok().flatten() {
@@ -276,6 +347,11 @@ impl MissionControl {
         }
 
         Ok(false)
+    }
+
+    #[cfg(not(feature = "sqlite"))]
+    pub async fn cancel(&self, _task_id: &str) -> Result<bool> {
+        Err(anyhow!("cancel() not available in PG mode"))
     }
 
     // ============ Inbox Operations ============
@@ -320,6 +396,7 @@ impl MissionControl {
     // ============ Statistics ============
 
     /// Get statistics
+    #[cfg(feature = "sqlite")]
     pub fn get_stats(&self) -> MissionStats {
         let slot_stats = self.slot_manager.get_stats();
         let task_count = |status: TaskStatus| -> usize {
@@ -343,6 +420,19 @@ impl MissionControl {
             inbox: InboxStats {
                 unread: self.inbox.get_unread_count(),
             },
+        }
+    }
+
+    #[cfg(not(feature = "sqlite"))]
+    pub fn get_stats(&self) -> MissionStats {
+        let slot_stats = self.slot_manager.get_stats();
+        MissionStats {
+            tasks: TaskStats { queued: 0, running: 0, done: 0, failed: 0 },
+            slots: SlotStats {
+                total: slot_stats.total,
+                by_role: slot_stats.by_role,
+            },
+            inbox: InboxStats { unread: 0 },
         }
     }
 
@@ -436,7 +526,7 @@ pub struct MissionStats {
     pub inbox: InboxStats,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
     use tempfile::tempdir;

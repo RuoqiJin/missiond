@@ -6,34 +6,7 @@
 use rusqlite::params;
 use super::error::DbResult;
 use super::MissionDB;
-
-/// A beacon (feature tag) with its node count.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct BeaconInfo {
-    pub id: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub node_count: usize,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-/// A beacon node (code symbol tagged with a feature).
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct BeaconNode {
-    pub beacon_id: String,
-    pub beacon_name: String,
-    pub repo: String,
-    pub file_path: String,
-    pub symbol_name: String,
-    pub annotation: Option<String>,
-    // Joined from ast_nodes (may be None if node was deleted)
-    pub signature: Option<String>,
-    pub stub_content: Option<String>,
-    pub start_line: Option<usize>,
-    pub end_line: Option<usize>,
-    pub node_type: Option<String>,
-}
+pub use super::shared::{BeaconInfo, BeaconNode};
 
 impl MissionDB {
     // ============ Beacon CRUD ============

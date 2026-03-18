@@ -11,11 +11,11 @@ use super::error::DbResult;
 use crate::types::*;
 use std::collections::HashMap;
 
-// Re-export types from sibling modules
-pub use super::timeline::{TimelineRow, TimelineStats, LatencyStats};
-pub use super::backfill::BackfillPhaseStatus;
-pub use super::beacon::{BeaconInfo, BeaconNode};
-pub use super::ast::{AstSyncResult, AstSearchHit, AstNodeRow, AstStats, ModuleAstSummary};
+// Re-export shared types (always available regardless of feature flags)
+pub use super::shared::{TimelineRow, TimelineStats, LatencyStats};
+pub use super::shared::BackfillPhaseStatus;
+pub use super::shared::{BeaconInfo, BeaconNode};
+pub use super::shared::{AstSyncResult, AstSearchHit, AstNodeRow, AstStats, ModuleAstSummary};
 pub use crate::ast::CodeNode;
 
 // ============================================================================

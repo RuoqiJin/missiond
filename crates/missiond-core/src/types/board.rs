@@ -30,12 +30,14 @@ impl AsRef<str> for TaskId {
     fn as_ref(&self) -> &str { &self.0 }
 }
 
+#[cfg(feature = "sqlite")]
 impl rusqlite::ToSql for TaskId {
     fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
         self.0.to_sql()
     }
 }
 
+#[cfg(feature = "sqlite")]
 impl rusqlite::types::FromSql for TaskId {
     fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
         String::column_result(value).map(TaskId)

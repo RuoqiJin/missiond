@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use tracing::{debug, info};
 
-use missiond_core::db::ast::AstSearchHit;
+use missiond_core::db::shared::AstSearchHit;
 use missiond_core::embedding;
 use crate::state::AppState;
 
@@ -133,7 +133,7 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
                         end_line: end,
                         is_exported: false,
                         docstring: bn.annotation.clone(),
-                        stub_content: stub.clone(),
+                        stub_content: Some(stub.clone()),
                         calls: Vec::new(),
                         rank: 0.0,
                     });
@@ -420,9 +420,10 @@ fn render_signature_only(hit: &AstSearchHit) -> String {
 
 /// Render a single node at full level (Tier 1).
 fn render_full(hit: &AstSearchHit) -> String {
+    let stub = hit.stub_content.as_deref().unwrap_or("");
     let mut out = format!("// lines: {}-{}\n", hit.start_line, hit.end_line);
-    out.push_str(&hit.stub_content);
-    if !hit.stub_content.ends_with('\n') {
+    out.push_str(stub);
+    if !stub.ends_with('\n') {
         out.push('\n');
     }
     out.push('\n');
@@ -431,7 +432,8 @@ fn render_full(hit: &AstSearchHit) -> String {
 
 /// Render a single node with struct/enum folding (Tier 2).
 fn render_folded(hit: &AstSearchHit) -> String {
-    if let Some(folded) = fold_structural_body(&hit.stub_content, &hit.node_type) {
+    let stub = hit.stub_content.as_deref().unwrap_or("");
+    if let Some(folded) = fold_structural_body(stub, &hit.node_type) {
         let mut out = format!("// lines: {}-{}\n", hit.start_line, hit.end_line);
         out.push_str(&folded);
         if !folded.ends_with('\n') {
@@ -496,11 +498,12 @@ fn render_code_context_tiered(
                     render_full(&r.hit)
                 }
                 RenderTier::Primary => {
-                    let est = estimate_tokens(&r.hit.stub_content);
+                    let stub_ref = r.hit.stub_content.as_deref().unwrap_or("");
+                    let est = estimate_tokens(stub_ref);
                     // Small node exemption (Gemini review: 4b)
-                    if r.hit.stub_content.len() < MIN_FOLDABLE_BYTES || remaining >= est {
+                    if stub_ref.len() < MIN_FOLDABLE_BYTES || remaining >= est {
                         // Try folding large structs/enums even at full budget
-                        if est > remaining && r.hit.stub_content.len() >= MIN_FOLDABLE_BYTES {
+                        if est > remaining && stub_ref.len() >= MIN_FOLDABLE_BYTES {
                             render_folded(&r.hit)
                         } else {
                             render_full(&r.hit)
@@ -585,7 +588,7 @@ mod tests {
                 end_line: 10,
                 is_exported: false,
                 docstring: None,
-                stub_content: "fn main() {\n    // Calls: run\n}".into(),
+                stub_content: Some("fn main() {\n    // Calls: run\n}".into()),
                 calls: vec!["run".into()],
                 rank: 0.0,
             },
@@ -600,7 +603,7 @@ mod tests {
                 end_line: 20,
                 is_exported: true,
                 docstring: Some("Run the app".into()),
-                stub_content: "/// Run the app\npub fn run() -> Result<()> {\n    // Calls: init\n}".into(),
+                stub_content: Some("/// Run the app\npub fn run() -> Result<()> {\n    // Calls: init\n}".into()),
                 calls: vec!["init".into()],
                 rank: 0.0,
             },
@@ -623,7 +626,7 @@ mod tests {
             id: String::new(), repo: String::new(), file_path: "a.rs".into(),
             name: String::new(), node_type: String::new(), signature: String::new(),
             start_line: 0, end_line: 0, is_exported: false, docstring: None,
-            stub_content: String::new(), calls: vec![], rank: 0.0,
+            stub_content: None, calls: vec![], rank: 0.0,
         };
         let mut scored = vec![
             ("1".into(), 1.0, AstSearchHit { id: "1".into(), file_path: "a.rs".into(), ..hit.clone() }),
@@ -645,7 +648,7 @@ mod tests {
             id: id.into(), repo: "test".into(), file_path: file.into(),
             name: name.into(), node_type: node_type.into(), signature: sig.into(),
             start_line: 1, end_line: 20, is_exported: true, docstring: None,
-            stub_content: stub.into(), calls: vec![], rank: 0.0,
+            stub_content: Some(stub.into()), calls: vec![], rank: 0.0,
         }
     }
 

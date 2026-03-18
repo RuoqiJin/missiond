@@ -2,40 +2,7 @@ use rusqlite::{params, OptionalExtension};
 use super::error::DbResult;
 use super::MissionDB;
 use crate::ast::CodeNode;
-
-/// Result of a file sync operation.
-pub struct AstSyncResult {
-    pub inserted: usize,
-    pub deleted: usize,
-}
-
-/// A stored AST node with repo/file context.
-#[derive(Debug, Clone)]
-pub struct AstNodeRow {
-    pub id: String,
-    pub repo: String,
-    pub file_path: String,
-    pub node: CodeNode,
-    pub embedding_provider: Option<String>,
-}
-
-/// AST FTS search result with rank score.
-#[derive(Debug, Clone)]
-pub struct AstSearchHit {
-    pub id: String,
-    pub repo: String,
-    pub file_path: String,
-    pub name: String,
-    pub node_type: String,
-    pub signature: String,
-    pub start_line: usize,
-    pub end_line: usize,
-    pub is_exported: bool,
-    pub docstring: Option<String>,
-    pub stub_content: String,
-    pub calls: Vec<String>,
-    pub rank: f64,
-}
+pub use super::shared::{AstSyncResult, AstNodeRow, AstSearchHit, AstStats, ModuleAstSummary};
 
 impl MissionDB {
     // ============ AST Code Context ============
@@ -571,27 +538,6 @@ fn aggregate_summary(
         files,
         file_docs,
     }
-}
-
-/// Stats for AST index.
-#[derive(Debug, Clone)]
-pub struct AstStats {
-    pub total_nodes: usize,
-    pub total_files: usize,
-    pub total_repos: usize,
-    pub embedded_nodes: usize,
-}
-
-/// Aggregated module summary from AST nodes, grouped by directory prefix.
-/// Used by Dynamic Topology Map (Step 4) for module-level navigation fallback.
-#[derive(Debug, Clone)]
-pub struct ModuleAstSummary {
-    pub module_path: String,
-    pub public_types: Vec<String>,
-    pub public_functions: Vec<String>,
-    pub total_nodes: usize,
-    pub files: Vec<String>,
-    pub file_docs: Vec<(String, String)>,
 }
 
 #[cfg(test)]

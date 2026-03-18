@@ -679,8 +679,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
 
             // 2. Board tasks — time-based filtering via static parse helpers
-            let since_iso = missiond_core::db::MissionDB::parse_since(&since).replace(' ', "T");
-            let until_iso = missiond_core::db::MissionDB::parse_until(&until).replace(' ', "T");
+            let since_iso = missiond_core::db::shared::parse_since(&since).replace(' ', "T");
+            let until_iso = missiond_core::db::shared::parse_until(&until).replace(' ', "T");
             let board_created = state.store.query_board_tasks_in_range("created_at", &since_iso, &until_iso).await
                 .unwrap_or_default();
             let board_completed = state.store.query_board_tasks_in_range_with_status("done", &since_iso, &until_iso).await
@@ -691,8 +691,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
             // 4. Git commits (graceful degradation)
             let git_commits = {
-                let git_since = missiond_core::db::MissionDB::parse_since(&since);
-                let git_until = missiond_core::db::MissionDB::parse_until(&until);
+                let git_since = missiond_core::db::shared::parse_since(&since);
+                let git_until = missiond_core::db::shared::parse_until(&until);
                 match std::process::Command::new("git")
                     .args(["log", "--oneline", &format!("--after={}", git_since), &format!("--before={}", git_until), "--all"])
                     .output()

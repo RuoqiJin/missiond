@@ -11,7 +11,7 @@ description = "Core library for missiond - PTY management, semantic terminal par
 readme = "../../README.md"
 
 [features]
-default = ["sqlite"]
+default = ["postgres"]
 sqlite = ["dep:rusqlite"]
 postgres = ["dep:sqlx"]
 embeddings = ["dep:fastembed"]
