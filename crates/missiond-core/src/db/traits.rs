@@ -560,6 +560,11 @@ pub trait ObservabilityStore: Send + Sync {
     async fn conversations_missing_summary_count(&self) -> DbResult<i64>;
     async fn conversations_needing_topic_vectors_count(&self, provider: &str) -> DbResult<i64>;
 
+    // -- watcher_cursors --
+    async fn load_watcher_cursors(&self) -> DbResult<HashMap<String, u64>>;
+    async fn upsert_watcher_cursors_batch(&self, cursors: &HashMap<String, u64>) -> DbResult<()>;
+    async fn delete_watcher_cursor(&self, file_path: &str) -> DbResult<()>;
+
     // -- router_chat.rs --
     async fn router_chat_get_or_create(&self, task_id: &str, model: &str) -> DbResult<String>;
     async fn router_chat_load_history(&self, conv_id: &str) -> DbResult<Vec<serde_json::Value>>;
