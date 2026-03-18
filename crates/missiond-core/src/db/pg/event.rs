@@ -119,6 +119,8 @@ impl EventStore for PgMissionStore {
                 has_tool_use: row.get::<bool, _>("has_tool_use"),
                 has_tool_result: row.get::<bool, _>("has_tool_result"),
                 token_count: row.get("token_count"),
+                seq: None,
+                role_display: None,
             }
         }).collect();
         Ok(results)

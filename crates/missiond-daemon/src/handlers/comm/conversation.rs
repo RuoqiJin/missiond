@@ -98,8 +98,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 msgs.iter().map(|m| {
                     serde_json::json!({
                         "id": m.id,
+                        "seq": m.seq,
                         "sessionId": m.session_id,
                         "role": m.role,
+                        "roleDisplay": m.role_display,
                         "content": m.content,
                         "rawContent": m.raw_content,
                         "messageUuid": m.message_uuid,
@@ -114,7 +116,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 msgs.iter().map(|m| {
                     serde_json::json!({
                         "id": m.id,
+                        "seq": m.seq,
                         "role": m.role,
+                        "roleDisplay": m.role_display,
                         "content": m.content,
                         "timestamp": m.timestamp,
                         "messageUuid": m.message_uuid,
