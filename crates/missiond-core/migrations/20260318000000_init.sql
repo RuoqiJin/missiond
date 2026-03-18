@@ -95,15 +95,15 @@ CREATE TABLE IF NOT EXISTS board_tasks (
     server TEXT,
     due_date TEXT,
     parent_id TEXT,
-    order_idx INTEGER NOT NULL DEFAULT 0,
+    order_idx BIGINT NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     assignee TEXT,
     auto_execute INTEGER NOT NULL DEFAULT 0,
     prompt_template TEXT,
     hidden INTEGER NOT NULL DEFAULT 0,
-    retry_count INTEGER NOT NULL DEFAULT 0,
-    max_retries INTEGER NOT NULL DEFAULT 2,
+    retry_count BIGINT NOT NULL DEFAULT 0,
+    max_retries BIGINT NOT NULL DEFAULT 2,
     claim_executor_id TEXT,
     claim_executor_type TEXT,
     claimed_at TEXT,
@@ -113,7 +113,7 @@ CREATE TABLE IF NOT EXISTS board_tasks (
     depends_on TEXT NOT NULL DEFAULT '[]',
     lease_expires_at TEXT,
     dedupe_key TEXT,
-    timeout_secs INTEGER,
+    timeout_secs BIGINT,
     context_intent TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_board_tasks_status ON board_tasks(status);
