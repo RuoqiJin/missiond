@@ -203,6 +203,32 @@ async fn main() -> Result<()> {
     #[cfg(unix)]
     ensure_config_permissions(&home);
 
+    // M3: SQLite → PostgreSQL one-time migration CLI
+    // Usage: MISSION_PG_URL=postgres://... missiond --migrate-sqlite-to-pg
+    #[cfg(feature = "postgres")]
+    if std::env::args().any(|a| a == "--migrate-sqlite-to-pg") {
+        let sqlite_path = db_path().to_string_lossy().to_string();
+        let pg_url = pg_url().ok_or_else(|| anyhow!("MISSION_PG_URL env var required for migration"))?;
+        info!(sqlite = %sqlite_path, pg = %pg_url, "Starting SQLite → PostgreSQL migration");
+
+        match missiond_core::db::pg::migrate_from_sqlite::migrate_sqlite_to_pg(&sqlite_path, &pg_url).await {
+            Ok((tables, rows)) => {
+                info!(tables, rows, "Migration complete");
+                // Post-migration: backfill pgvector embedding columns from BYTEA
+                match missiond_core::db::pg::migrate_from_sqlite::backfill_pg_embeddings(&pg_url).await {
+                    Ok(total) => info!(backfilled = total, "Embedding backfill complete"),
+                    Err(e) => warn!(error = %e, "Embedding backfill failed (non-fatal, can re-run)"),
+                }
+                println!("Migration OK: {} tables, {} rows", tables, rows);
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("Migration FAILED: {}", e);
+                return Err(anyhow!("Migration failed: {}", e));
+            }
+        }
+    }
+
     let db_path = db_path();
     let slots_path = slots_config_path();
     if !slots_path.exists() {
@@ -254,24 +280,60 @@ async fn main() -> Result<()> {
         }
     }
 
+    // M4: Create store early (before startup cleanup) — conditional PG/SQLite
+    let daemon_stats = Arc::new(daemon_stats::DaemonStats::new());
+    let db_stats_callback: std::sync::Arc<dyn Fn(u64) + Send + Sync> = {
+        let stats = Arc::clone(&daemon_stats);
+        std::sync::Arc::new(move |elapsed_us| {
+            stats.db_exec_runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            stats.db_exec_total_us.fetch_add(elapsed_us, std::sync::atomic::Ordering::Relaxed);
+            stats.db_exec_latency.record(elapsed_us);
+        })
+    };
+
+    let store: Arc<dyn missiond_core::db::traits::MissionStore> = {
+        #[cfg(feature = "postgres")]
+        if let Some(url) = pg_url() {
+            info!(url = %url, "Connecting to PostgreSQL...");
+            let pg_store = missiond_core::db::pg::PgMissionStore::connect(&url)
+                .await
+                .map_err(|e| anyhow!("PostgreSQL connection failed: {}", e))?;
+            info!("PostgreSQL store ready");
+            Arc::new(pg_store)
+        } else {
+            Arc::new(missiond_core::db::sqlite::SqliteMissionStore::with_callback(
+                mission.db_arc(), db_stats_callback,
+            ))
+        }
+
+        #[cfg(not(feature = "postgres"))]
+        Arc::new(missiond_core::db::sqlite::SqliteMissionStore::with_callback(
+            mission.db_arc(), db_stats_callback,
+        ))
+    };
+
     // Startup: clean orphan slot_tasks from previous daemon instance
-    match mission.db().cleanup_orphan_slot_tasks() {
+    match store.cleanup_orphan_slot_tasks().await {
         Ok(n) if n > 0 => info!(count = n, "Cleaned up orphan slot tasks from previous run"),
         Err(e) => warn!(error = %e, "Failed to cleanup orphan slot tasks"),
         _ => {}
     }
 
     // Phase 6.4: Recover stale running board tasks from previous daemon crash
-    // (deferred to after store creation — see below)
+    match store.recover_stale_running_tasks(0).await {
+        Ok(n) if n > 0 => info!(count = n, "Startup: recovered stale running board tasks"),
+        Err(e) => warn!(error = %e, "Failed to recover stale board tasks on startup"),
+        _ => {}
+    }
 
     // Phase 6.7: Terminate ALL active dynamic slots on daemon restart.
     // Dynamic slots are ephemeral — their PTY processes will be killed by the
     // orphan cleanup (pgrep MISSIOND_SLOT_ID) later in startup. Re-registering
     // them creates zombie slots (DB active, process dead). Clean slate is safer.
-    match mission.db().list_dynamic_slots(Some("active")) {
+    match store.list_dynamic_slots(Some("active")).await {
         Ok(active) => {
             for s in &active {
-                let _ = mission.db().terminate_dynamic_slot(&s.id, "daemon_restart");
+                let _ = store.terminate_dynamic_slot(&s.id, "daemon_restart").await;
             }
             if !active.is_empty() {
                 info!(count = active.len(), "Terminated active dynamic slots on startup (clean slate)");
@@ -342,7 +404,7 @@ async fn main() -> Result<()> {
         screenshot_broker: Some(Arc::clone(&screenshot_broker)),
         incident_tx: Some(incident_tx.clone()),
         frontend_events_tx: Some(frontend_events_tx.clone()),
-        db: Some(mission.db_arc()),
+        db: Some(Arc::clone(&store)),
         context_enricher: Arc::clone(&context_enricher_slot),
         tool_count: all_tools().len(),
     });
@@ -373,8 +435,8 @@ async fn main() -> Result<()> {
     // Skill Engine: ingest SKILL.md files into DB for FTS5 search
     // (deferred to after store creation — needs async trait access)
 
-    // Warm PTY session UUID cache from DB (activates slot_sessions table)
-    let existing_slot_sessions = mission.db().get_all_slot_sessions().unwrap_or_default();
+    // Warm PTY session UUID cache from store
+    let existing_slot_sessions = store.get_all_slot_sessions().await.unwrap_or_default();
     let pty_uuids: HashSet<String> = existing_slot_sessions
         .iter()
         .map(|(_, session_id)| session_id.clone())
@@ -384,33 +446,6 @@ async fn main() -> Result<()> {
     }
 
     let event_bus_instance = Arc::new(event_bus::EventBus::new(timeline_mpsc_tx));
-    let daemon_stats = Arc::new(daemon_stats::DaemonStats::new());
-
-    // Build shared stats callback for DB latency tracking
-    let db_stats_callback: std::sync::Arc<dyn Fn(u64) + Send + Sync> = {
-        let stats = Arc::clone(&daemon_stats);
-        std::sync::Arc::new(move |elapsed_us| {
-            stats.db_exec_runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            stats.db_exec_total_us.fetch_add(elapsed_us, std::sync::atomic::Ordering::Relaxed);
-            stats.db_exec_latency.record(elapsed_us);
-        })
-    };
-
-    // M1 Step 4: Trait-based DB store (dual-track with mission.db())
-    // Shares the same Arc<MissionDB> — no data consistency risk.
-    let store: Arc<dyn missiond_core::db::traits::MissionStore> = Arc::new(
-        missiond_core::db::sqlite::SqliteMissionStore::with_callback(
-            mission.db_arc(),
-            db_stats_callback,
-        )
-    );
-
-    // Phase 6.4 (deferred): Recover stale running board tasks from previous daemon crash
-    match store.recover_stale_running_tasks(0).await {
-        Ok(n) if n > 0 => info!(count = n, "Startup: recovered stale running board tasks"),
-        Err(e) => warn!(error = %e, "Failed to recover stale board tasks on startup"),
-        _ => {}
-    }
 
     // M1 Step 6: Skill ingest via async store (moved from pre-store section)
     let ingested = missiond_core::skill::ingest_skills(store.as_ref(), &skills_dir).await;
@@ -543,10 +578,15 @@ async fn main() -> Result<()> {
                         if config.provider == "gemini-cli" {
                             let cli_cfg = config.gemini_cli.unwrap_or_default();
                             info!(binary = %cli_cfg.binary, model = %cli_cfg.model, "LLM provider: gemini-cli");
+                            // API key pool: hot-reloads from llm.yaml on each call, no restart needed
+                            let initial_count = gemini_cli::resolve_apikey_pool().len();
+                            info!(count = initial_count, "Gemini API key pool: {} keys (hot-reload enabled)", initial_count);
+                            let api_key_pool = std::sync::Arc::new(gemini_cli::ApiKeyPool::new());
                             gemini_client::GeminiClient::with_cli(gemini_cli::GeminiCli::new(
                                 cli_cfg.binary,
                                 cli_cfg.model,
                                 std::time::Duration::from_secs(cli_cfg.timeout),
+                                Some(api_key_pool),
                             ), event_tx)
                         } else {
                             info!(provider = %config.provider, "LLM provider: HTTP router");
@@ -1097,9 +1137,9 @@ async fn main() -> Result<()> {
 
     // Timeline TTL cleanup on startup
     {
-        let db = state.mission.db_arc();
-        tokio::task::spawn_blocking(move || {
-            match db.cleanup_timeline_ttl(7) {
+        let store = Arc::clone(&state.store);
+        tokio::spawn(async move {
+            match store.cleanup_timeline_ttl(7).await {
                 Ok(deleted) if deleted > 0 => info!(deleted, "Timeline: cleaned up old entries (>7 days)"),
                 _ => {}
             }

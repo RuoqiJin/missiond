@@ -1360,7 +1360,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                                     rationale, entries_text
                                 )
                             };
-                            match state.mission.submit("memory", &prompt) {
+                            match crate::state::submit_task(state.store.as_ref(), "memory", &prompt).await {
                                 Ok(task_id) => Ok(format!("dispatched:task_id={}", task_id)),
                                 Err(e) => Err(format!("submit failed: {}", e)),
                             }

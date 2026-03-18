@@ -18,6 +18,7 @@ path = "src/main.rs"
 default = ["embeddings", "code-context"]
 embeddings = ["missiond-core/embeddings"]
 code-context = ["missiond-core/code-context"]
+postgres = ["missiond-core/postgres"]
 
 [dependencies]
 tokio = { workspace = true }

@@ -24,6 +24,7 @@ struct AskArgs {
     role: String,
     question: String,
     #[serde(rename = "timeoutMs", default)]
+    #[allow(dead_code)]
     timeout_ms: Option<u64>,
 }
 
@@ -80,7 +81,7 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
         .ok_or_else(|| anyhow!("prompt or question is required"))?;
     let target_slot = submit_args.slot_id;
 
-    let task_id = state.mission.submit(&role, &prompt)?;
+    let task_id = crate::state::submit_task(state.store.as_ref(), &role, &prompt).await?;
 
     // If slotId specified, store it on the task for autopilot fallback
     if let Some(ref target) = target_slot {
@@ -258,9 +259,8 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
 }
 
 async fn handle_ask(state: &AppState, args: Value) -> Result<ToolResult> {
-    let AskArgs { role, question, timeout_ms } = serde_json::from_value(args)?;
-    let timeout_ms = timeout_ms.unwrap_or(120_000);
-    let task_id = state.mission.ask_expert(&role, &question, timeout_ms).await?;
+    let AskArgs { role, question, timeout_ms: _ } = serde_json::from_value(args)?;
+    let task_id = crate::state::submit_task(state.store.as_ref(), &role, &question).await?;
     Ok(ToolResult::json(&serde_json::json!({
         "taskId": task_id,
         "hint": "Task created. Use mission_submit for PTY dispatch."
@@ -269,7 +269,7 @@ async fn handle_ask(state: &AppState, args: Value) -> Result<ToolResult> {
 
 async fn handle_status(state: &AppState, args: Value) -> Result<ToolResult> {
     let StatusArgs { task_id } = serde_json::from_value(args)?;
-    if let Some(task) = state.mission.get_status(&task_id) {
+    if let Some(task) = state.store.get_task(&task_id).await.ok().flatten() {
         Ok(ToolResult::json(&task))
     } else {
         Ok(ToolResult::error("Task not found"))
@@ -278,7 +278,21 @@ async fn handle_status(state: &AppState, args: Value) -> Result<ToolResult> {
 
 async fn handle_cancel(state: &AppState, args: Value) -> Result<ToolResult> {
     let CancelArgs { task_id } = serde_json::from_value(args)?;
-    let cancelled = state.mission.cancel(&task_id).await?;
+    // Cancel: update task status to Cancelled if currently Queued or Running
+    let cancelled = if let Ok(Some(task)) = state.store.get_task(&task_id).await {
+        if task.status == missiond_core::types::TaskStatus::Queued || task.status == missiond_core::types::TaskStatus::Running {
+            let now = chrono::Utc::now().timestamp_millis();
+            state.store.update_task(&task_id, &missiond_core::types::TaskUpdate {
+                status: Some(missiond_core::types::TaskStatus::Cancelled),
+                finished_at: Some(now),
+                ..Default::default()
+            }).await.is_ok()
+        } else {
+            false
+        }
+    } else {
+        false
+    };
     Ok(ToolResult::json(&serde_json::json!({ "cancelled": cancelled })))
 }
 

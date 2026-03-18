@@ -501,7 +501,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             );
 
             // Submit as a task to the slot
-            let submit_task_id = state.mission.submit("coder", &decompose_prompt)?;
+            let submit_task_id = crate::state::submit_task(state.store.as_ref(), "coder", &decompose_prompt).await?;
 
             // Store target slot
             let _ = state.store.update_task(
