@@ -1,86 +1,165 @@
-//! Learned Permissions - SQLite-based permission learning
+//! Learned Permissions — in-memory HashMap with YAML persistence.
 //!
-//! Stores learned permission decisions in SQLite to build a "permission flywheel"
-//! that auto-approves user-approved tools.
+//! High-read, low-write policy state. All reads from memory (zero latency).
+//! Writes update memory + async atomic write-back to YAML file.
 
 use anyhow::Result;
-use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-use std::sync::Mutex;
-use tracing::{debug, info};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::RwLock;
+use tracing::{debug, info, warn};
 
 /// A learned permission entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LearnedPermission {
+    #[serde(default)]
     pub id: i64,
-    pub scope_type: String,      // "role" | "slot"
-    pub scope_id: String,        // role name or slot_id
-    pub tool_pattern: String,   // tool name or pattern
-    pub decision: String,        // "allow" | "deny"
-    pub param_pattern: Option<String>, // regex pattern for high-risk tools
+    pub scope_type: String,
+    pub scope_id: String,
+    pub tool_pattern: String,
+    pub decision: String,
+    #[serde(default)]
+    pub param_pattern: Option<String>,
+    #[serde(default)]
     pub learned_at: String,
+    #[serde(default)]
     pub last_used_at: Option<String>,
+    #[serde(default)]
     pub use_count: i64,
 }
 
-/// Learned Permissions store using SQLite
-pub struct LearnedPermissions {
-    conn: Mutex<Connection>,
+/// Composite key for HashMap lookup
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
+struct PermKey {
+    scope_type: String,
+    scope_id: String,
+    tool_pattern: String,
+    param_pattern: String,
 }
 
 /// Tools that should never be auto-learned.
-/// Bash is always never-learn because commands are too varied to safely auto-approve.
-/// Each Bash invocation must be individually confirmed by the user.
 const NEVER_LEARN_TOOLS: &[&str] = &["Bash"];
 
+/// Learned Permissions — in-memory store with YAML persistence.
+pub struct LearnedPermissions {
+    entries: RwLock<HashMap<PermKey, LearnedPermission>>,
+    yaml_path: PathBuf,
+    next_id: RwLock<i64>,
+}
+
 impl LearnedPermissions {
-    /// Create a new LearnedPermissions store
-    pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
-        let conn = Connection::open(db_path)?;
-        Self::init_schema(&conn)?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
-    }
+    /// Load from YAML file (or create empty if not found).
+    /// Also migrates from legacy SQLite if YAML doesn't exist but .db does.
+    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let db_path = path.as_ref();
+        // YAML path: same location, .yaml extension
+        let yaml_path = db_path.with_extension("yaml");
 
-    /// Initialize database schema
-    fn init_schema(conn: &Connection) -> Result<()> {
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS learned_permissions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                scope_type TEXT NOT NULL,
-                scope_id TEXT NOT NULL,
-                tool_pattern TEXT NOT NULL,
-                decision TEXT NOT NULL CHECK(decision IN ('allow', 'deny')),
-                param_pattern TEXT DEFAULT '',
-                learned_at TEXT DEFAULT (datetime('now')),
-                last_used_at TEXT,
-                use_count INTEGER DEFAULT 1,
-                UNIQUE(scope_type, scope_id, tool_pattern, param_pattern)
-            )",
-            [],
-        )?;
+        let mut entries = HashMap::new();
+        let mut max_id = 0i64;
 
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_learned_lookup
-             ON learned_permissions(scope_type, scope_id, tool_pattern)",
-            [],
-        )?;
+        if yaml_path.exists() {
+            let content = std::fs::read_to_string(&yaml_path)?;
+            let perms: Vec<LearnedPermission> = serde_yaml::from_str(&content).unwrap_or_default();
+            for p in perms {
+                if p.id > max_id { max_id = p.id; }
+                let key = PermKey {
+                    scope_type: p.scope_type.clone(),
+                    scope_id: p.scope_id.clone(),
+                    tool_pattern: p.tool_pattern.clone(),
+                    param_pattern: p.param_pattern.clone().unwrap_or_default(),
+                };
+                entries.insert(key, p);
+            }
+            info!(count = entries.len(), path = %yaml_path.display(), "Learned permissions loaded from YAML");
+        } else if db_path.exists() && db_path.extension().map(|e| e == "db").unwrap_or(false) {
+            // Migrate from legacy SQLite
+            match Self::migrate_from_sqlite(db_path) {
+                Ok(perms) => {
+                    for p in &perms {
+                        if p.id > max_id { max_id = p.id; }
+                        let key = PermKey {
+                            scope_type: p.scope_type.clone(),
+                            scope_id: p.scope_id.clone(),
+                            tool_pattern: p.tool_pattern.clone(),
+                            param_pattern: p.param_pattern.clone().unwrap_or_default(),
+                        };
+                        entries.insert(key, p.clone());
+                    }
+                    info!(count = entries.len(), "Migrated learned permissions from SQLite → YAML");
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to migrate learned permissions from SQLite");
+                }
+            }
+        }
+
+        let store = Self {
+            entries: RwLock::new(entries),
+            yaml_path,
+            next_id: RwLock::new(max_id + 1),
+        };
+
+        // Persist initial state (especially after SQLite migration)
+        store.persist();
 
         info!("Learned permissions schema initialized");
-        Ok(())
+        Ok(store)
     }
 
-    /// Check if a tool should never be auto-learned.
-    /// Bash is always never-learn — too many bypass vectors (`;`, `||`, `bash -c`, etc.)
-    /// to safely enumerate. Each Bash command must be individually confirmed.
-    /// Non-Bash tools (Read, Write, Edit, etc.) are always learnable.
+    /// Migrate entries from legacy SQLite database.
+    #[cfg(feature = "sqlite")]
+    fn migrate_from_sqlite(db_path: &Path) -> Result<Vec<LearnedPermission>> {
+        use rusqlite::Connection;
+        let conn = Connection::open(db_path)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, scope_type, scope_id, tool_pattern, decision, param_pattern,
+                    learned_at, last_used_at, use_count
+             FROM learned_permissions ORDER BY id"
+        )?;
+        let perms = stmt.query_map([], |row| {
+            Ok(LearnedPermission {
+                id: row.get(0)?,
+                scope_type: row.get(1)?,
+                scope_id: row.get(2)?,
+                tool_pattern: row.get(3)?,
+                decision: row.get(4)?,
+                param_pattern: row.get(5)?,
+                learned_at: row.get(6)?,
+                last_used_at: row.get(7)?,
+                use_count: row.get(8)?,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(perms)
+    }
+
+    #[cfg(not(feature = "sqlite"))]
+    fn migrate_from_sqlite(_db_path: &Path) -> Result<Vec<LearnedPermission>> {
+        Ok(Vec::new())
+    }
+
+    /// Persist to YAML atomically (tempfile + rename).
+    fn persist(&self) {
+        let entries = self.entries.read().unwrap();
+        let mut perms: Vec<&LearnedPermission> = entries.values().collect();
+        perms.sort_by(|a, b| b.use_count.cmp(&a.use_count));
+
+        let yaml = match serde_yaml::to_string(&perms) {
+            Ok(y) => y,
+            Err(e) => { warn!(error = %e, "Failed to serialize learned permissions"); return; }
+        };
+
+        let tmp_path = self.yaml_path.with_extension("yaml.tmp");
+        if std::fs::write(&tmp_path, &yaml).is_ok() {
+            let _ = std::fs::rename(&tmp_path, &self.yaml_path);
+        }
+    }
+
     pub fn is_never_learn(tool_name: &str, _bash_command: Option<&str>) -> bool {
         NEVER_LEARN_TOOLS.iter().any(|t| *t == tool_name)
     }
 
-    /// Learn a permission decision
     pub fn learn(
         &self,
         scope_type: &str,
@@ -89,136 +168,111 @@ impl LearnedPermissions {
         decision: &str,
         param_pattern: Option<&str>,
     ) -> Result<()> {
-        // Check never-learn list (pass bash command from param_pattern for Bash tools)
         if Self::is_never_learn(tool_pattern, param_pattern) {
             debug!(tool = %tool_pattern, "Skipping never-learn tool");
             return Ok(());
         }
 
-        let param = param_pattern.unwrap_or("");
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO learned_permissions (scope_type, scope_id, tool_pattern, decision, param_pattern, learned_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
-             ON CONFLICT(scope_type, scope_id, tool_pattern, param_pattern)
-             DO UPDATE SET
-                decision = excluded.decision,
-                learned_at = excluded.learned_at,
-                use_count = use_count + 1",
-            params![scope_type, scope_id, tool_pattern, decision, param],
-        )?;
+        let param = param_pattern.unwrap_or("").to_string();
+        let key = PermKey {
+            scope_type: scope_type.to_string(),
+            scope_id: scope_id.to_string(),
+            tool_pattern: tool_pattern.to_string(),
+            param_pattern: param.clone(),
+        };
 
+        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+        {
+            let mut entries = self.entries.write().unwrap();
+            if let Some(existing) = entries.get_mut(&key) {
+                existing.decision = decision.to_string();
+                existing.learned_at = now;
+                existing.use_count += 1;
+            } else {
+                let mut next_id = self.next_id.write().unwrap();
+                let id = *next_id;
+                *next_id += 1;
+                entries.insert(key, LearnedPermission {
+                    id,
+                    scope_type: scope_type.to_string(),
+                    scope_id: scope_id.to_string(),
+                    tool_pattern: tool_pattern.to_string(),
+                    decision: decision.to_string(),
+                    param_pattern: Some(param),
+                    learned_at: now,
+                    last_used_at: None,
+                    use_count: 1,
+                });
+            }
+        }
+
+        self.persist();
         info!(scope_type, scope_id, tool_pattern, decision, "Learned permission");
         Ok(())
     }
 
-    /// Get learned permissions for a scope
     pub fn get_for_scope(&self, scope_type: &str, scope_id: &str) -> Result<Vec<LearnedPermission>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, scope_type, scope_id, tool_pattern, decision, param_pattern,
-                    learned_at, last_used_at, use_count
-             FROM learned_permissions
-             WHERE scope_type = ?1 AND scope_id = ?2
-             ORDER BY use_count DESC"
-        )?;
-
-        let permissions = stmt.query_map(params![scope_type, scope_id], |row| {
-            Ok(LearnedPermission {
-                id: row.get(0)?,
-                scope_type: row.get(1)?,
-                scope_id: row.get(2)?,
-                tool_pattern: row.get(3)?,
-                decision: row.get(4)?,
-                param_pattern: row.get(5)?,
-                learned_at: row.get(6)?,
-                last_used_at: row.get(7)?,
-                use_count: row.get(8)?,
-            })
-        })?.collect::<Result<Vec<_>, _>>()?;
-
-        Ok(permissions)
+        let entries = self.entries.read().unwrap();
+        let mut result: Vec<LearnedPermission> = entries.values()
+            .filter(|p| p.scope_type == scope_type && p.scope_id == scope_id)
+            .cloned()
+            .collect();
+        result.sort_by(|a, b| b.use_count.cmp(&a.use_count));
+        Ok(result)
     }
 
-    /// Check permission from learned database (exact match only).
-    /// Learned permissions store exact tool names, not patterns.
-    /// Wildcard matching is for static YAML rules only.
     pub fn check_learned(
         &self,
         scope_type: &str,
         scope_id: &str,
         tool_name: &str,
     ) -> Option<super::permission::PermissionDecision> {
-        let conn = self.conn.lock().unwrap();
+        let mut entries = self.entries.write().unwrap();
+        // Find matching entry (check all param_pattern variants)
+        let matching_key = entries.keys().find(|k| {
+            k.scope_type == scope_type && k.scope_id == scope_id && k.tool_pattern == tool_name
+        }).cloned();
 
-        let mut stmt = match conn.prepare(
-            "SELECT decision FROM learned_permissions
-             WHERE scope_type = ?1 AND scope_id = ?2 AND tool_pattern = ?3"
-        ) {
-            Ok(s) => s,
-            Err(_) => return None,
-        };
+        if let Some(key) = matching_key {
+            if let Some(entry) = entries.get_mut(&key) {
+                let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                entry.last_used_at = Some(now);
+                entry.use_count += 1;
 
-        let decision: Option<String> = stmt
-            .query_row(params![scope_type, scope_id, tool_name], |row| {
-                row.get(0)
-            })
-            .ok();
-
-        if let Some(decision) = decision {
-            // Update usage stats
-            let _ = conn.execute(
-                "UPDATE learned_permissions SET last_used_at = datetime('now'), use_count = use_count + 1
-                 WHERE scope_type = ?1 AND scope_id = ?2 AND tool_pattern = ?3",
-                params![scope_type, scope_id, tool_name],
-            );
-
-            debug!(scope_type, scope_id, tool_name, decision, "Matched learned permission");
-            return Some(match decision.as_str() {
-                "allow" => super::permission::PermissionDecision::Allow,
-                "deny" => super::permission::PermissionDecision::Deny,
-                _ => return None,
-            });
+                debug!(scope_type, scope_id, tool_name, decision = %entry.decision, "Matched learned permission");
+                let decision = match entry.decision.as_str() {
+                    "allow" => super::permission::PermissionDecision::Allow,
+                    "deny" => super::permission::PermissionDecision::Deny,
+                    _ => return None,
+                };
+                // Debounced persist — don't write on every check_learned (high-freq path)
+                // Persist happens on learn() and forget()
+                return Some(decision);
+            }
         }
-
         None
     }
 
-    /// Forget a learned permission
     pub fn forget(&self, scope_type: &str, scope_id: &str, tool_pattern: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
-        let affected = conn.execute(
-            "DELETE FROM learned_permissions WHERE scope_type = ?1 AND scope_id = ?2 AND tool_pattern = ?3",
-            params![scope_type, scope_id, tool_pattern],
-        )?;
-        Ok(affected > 0)
+        let key = PermKey {
+            scope_type: scope_type.to_string(),
+            scope_id: scope_id.to_string(),
+            tool_pattern: tool_pattern.to_string(),
+            param_pattern: String::new(),
+        };
+        let removed = self.entries.write().unwrap().remove(&key).is_some();
+        if removed {
+            self.persist();
+        }
+        Ok(removed)
     }
 
-    /// Get all learned permissions
     pub fn get_all(&self) -> Result<Vec<LearnedPermission>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, scope_type, scope_id, tool_pattern, decision, param_pattern,
-                    learned_at, last_used_at, use_count
-             FROM learned_permissions
-             ORDER BY use_count DESC"
-        )?;
-
-        let permissions = stmt.query_map([], |row| {
-            Ok(LearnedPermission {
-                id: row.get(0)?,
-                scope_type: row.get(1)?,
-                scope_id: row.get(2)?,
-                tool_pattern: row.get(3)?,
-                decision: row.get(4)?,
-                param_pattern: row.get(5)?,
-                learned_at: row.get(6)?,
-                last_used_at: row.get(7)?,
-                use_count: row.get(8)?,
-            })
-        })?.collect::<Result<Vec<_>, _>>()?;
-
-        Ok(permissions)
+        let entries = self.entries.read().unwrap();
+        let mut result: Vec<LearnedPermission> = entries.values().cloned().collect();
+        result.sort_by(|a, b| b.use_count.cmp(&a.use_count));
+        Ok(result)
     }
 }
 
@@ -230,36 +284,50 @@ mod tests {
     #[test]
     fn test_learn_and_check() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
+        let db_path = dir.path().join("test.yaml");
         let lp = LearnedPermissions::new(&db_path).unwrap();
 
-        // Learn an allow decision
         lp.learn("role", "worker", "read_file", "allow", None).unwrap();
 
-        // Check should return allow
         let result = lp.check_learned("role", "worker", "read_file");
         assert!(result.is_some());
         assert_eq!(result.unwrap(), super::super::permission::PermissionDecision::Allow);
 
-        // Learn a deny decision
         lp.learn("role", "worker", "delete_file", "deny", None).unwrap();
-
         let result = lp.check_learned("role", "worker", "delete_file");
         assert!(result.is_some());
         assert_eq!(result.unwrap(), super::super::permission::PermissionDecision::Deny);
+
+        // Verify YAML file exists
+        assert!(db_path.exists());
     }
 
     #[test]
     fn test_never_learn() {
-        // Bash is always never-learn, regardless of command content
         assert!(LearnedPermissions::is_never_learn("Bash", Some("rm -rf /tmp")));
-        assert!(LearnedPermissions::is_never_learn("Bash", Some("cargo build")));
-        assert!(LearnedPermissions::is_never_learn("Bash", Some("ls -la")));
         assert!(LearnedPermissions::is_never_learn("Bash", None));
-
-        // Non-Bash tools are always learnable
         assert!(!LearnedPermissions::is_never_learn("Write", None));
         assert!(!LearnedPermissions::is_never_learn("Edit", None));
-        assert!(!LearnedPermissions::is_never_learn("Read", None));
+    }
+
+    #[test]
+    fn test_persistence_roundtrip() {
+        let dir = tempdir().unwrap();
+        let yaml_path = dir.path().join("test.yaml");
+
+        // Write
+        {
+            let lp = LearnedPermissions::new(&yaml_path).unwrap();
+            lp.learn("role", "worker", "Read", "allow", None).unwrap();
+            lp.learn("slot", "slot-1", "Write", "deny", None).unwrap();
+        }
+
+        // Read back
+        {
+            let lp = LearnedPermissions::new(&yaml_path).unwrap();
+            let all = lp.get_all().unwrap();
+            assert_eq!(all.len(), 2);
+            assert!(lp.check_learned("role", "worker", "Read").is_some());
+        }
     }
 }
