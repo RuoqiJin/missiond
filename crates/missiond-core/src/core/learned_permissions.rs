@@ -46,6 +46,8 @@ pub struct LearnedPermissions {
     entries: RwLock<HashMap<PermKey, LearnedPermission>>,
     yaml_path: PathBuf,
     next_id: RwLock<i64>,
+    /// Mutex protecting file I/O to prevent concurrent persist() corruption.
+    file_lock: std::sync::Mutex<()>,
 }
 
 impl LearnedPermissions {
@@ -99,6 +101,7 @@ impl LearnedPermissions {
             entries: RwLock::new(entries),
             yaml_path,
             next_id: RwLock::new(max_id + 1),
+            file_lock: std::sync::Mutex::new(()),
         };
 
         // Persist initial state (especially after SQLite migration)
@@ -140,6 +143,7 @@ impl LearnedPermissions {
     }
 
     /// Persist to YAML atomically (tempfile + rename).
+    /// Protected by file_lock to prevent concurrent write corruption.
     fn persist(&self) {
         let entries = self.entries.read().unwrap();
         let mut perms: Vec<&LearnedPermission> = entries.values().collect();
@@ -149,7 +153,9 @@ impl LearnedPermissions {
             Ok(y) => y,
             Err(e) => { warn!(error = %e, "Failed to serialize learned permissions"); return; }
         };
+        drop(entries); // Release read lock before file I/O
 
+        let _guard = self.file_lock.lock().unwrap();
         let tmp_path = self.yaml_path.with_extension("yaml.tmp");
         if std::fs::write(&tmp_path, &yaml).is_ok() {
             let _ = std::fs::rename(&tmp_path, &self.yaml_path);
@@ -228,40 +234,50 @@ impl LearnedPermissions {
         scope_id: &str,
         tool_name: &str,
     ) -> Option<super::permission::PermissionDecision> {
-        let mut entries = self.entries.write().unwrap();
-        // Find matching entry (check all param_pattern variants)
-        let matching_key = entries.keys().find(|k| {
-            k.scope_type == scope_type && k.scope_id == scope_id && k.tool_pattern == tool_name
-        }).cloned();
+        // Fast path: read lock only (most calls won't match → zero write contention)
+        let decision_str = {
+            let entries = self.entries.read().unwrap();
+            entries.iter().find_map(|(k, v)| {
+                if k.scope_type == scope_type && k.scope_id == scope_id && k.tool_pattern == tool_name {
+                    Some((k.clone(), v.decision.clone()))
+                } else {
+                    None
+                }
+            })
+        };
 
-        if let Some(key) = matching_key {
-            if let Some(entry) = entries.get_mut(&key) {
-                let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-                entry.last_used_at = Some(now);
-                entry.use_count += 1;
-
-                debug!(scope_type, scope_id, tool_name, decision = %entry.decision, "Matched learned permission");
-                let decision = match entry.decision.as_str() {
-                    "allow" => super::permission::PermissionDecision::Allow,
-                    "deny" => super::permission::PermissionDecision::Deny,
-                    _ => return None,
-                };
-                // Debounced persist — don't write on every check_learned (high-freq path)
-                // Persist happens on learn() and forget()
-                return Some(decision);
+        if let Some((key, decision)) = decision_str {
+            // Slow path: write lock to update usage stats (only on match)
+            if let Ok(mut entries) = self.entries.write() {
+                if let Some(entry) = entries.get_mut(&key) {
+                    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                    entry.last_used_at = Some(now);
+                    entry.use_count += 1;
+                }
             }
+
+            debug!(scope_type, scope_id, tool_name, decision = %decision, "Matched learned permission");
+            return match decision.as_str() {
+                "allow" => Some(super::permission::PermissionDecision::Allow),
+                "deny" => Some(super::permission::PermissionDecision::Deny),
+                _ => None,
+            };
         }
         None
     }
 
     pub fn forget(&self, scope_type: &str, scope_id: &str, tool_pattern: &str) -> Result<bool> {
-        let key = PermKey {
-            scope_type: scope_type.to_string(),
-            scope_id: scope_id.to_string(),
-            tool_pattern: tool_pattern.to_string(),
-            param_pattern: String::new(),
-        };
-        let removed = self.entries.write().unwrap().remove(&key).is_some();
+        // Remove ALL entries matching this tool (regardless of param_pattern)
+        let mut entries = self.entries.write().unwrap();
+        let keys_to_remove: Vec<PermKey> = entries.keys()
+            .filter(|k| k.scope_type == scope_type && k.scope_id == scope_id && k.tool_pattern == tool_pattern)
+            .cloned()
+            .collect();
+        let removed = !keys_to_remove.is_empty();
+        for key in keys_to_remove {
+            entries.remove(&key);
+        }
+        drop(entries);
         if removed {
             self.persist();
         }
