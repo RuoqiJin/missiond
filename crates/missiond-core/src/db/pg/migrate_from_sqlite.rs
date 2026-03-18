@@ -301,7 +301,8 @@ async fn backfill_table_embeddings(
     let mut updated = 0usize;
     let mut cursor_values: Vec<String> = Vec::new();
 
-    let pk_select = pk_cols.join(", ");
+    // Cast all PK columns to text in SELECT so try_get::<String> works for INTEGER PKs
+    let pk_select = pk_cols.iter().map(|c| format!("{c}::text")).collect::<Vec<_>>().join(", ");
     let pk_order = pk_cols.join(", ");
 
     loop {
@@ -342,12 +343,13 @@ async fn backfill_table_embeddings(
 
         for row in &rows {
             use sqlx::Row;
-            // Extract PK values for cursor + WHERE clause
+            // Extract PK values for cursor — MUST update before any `continue`
             let mut pk_vals: Vec<String> = Vec::new();
             for (i, _col) in pk_cols.iter().enumerate() {
                 let val: String = row.try_get(i).unwrap_or_default();
                 pk_vals.push(val);
             }
+            cursor_values = pk_vals.clone(); // Always advance cursor to prevent infinite loop
 
             // Extract embedding blob (last column after PK columns)
             let blob: Vec<u8> = row.try_get(pk_cols.len()).unwrap_or_default();
@@ -384,7 +386,6 @@ async fn backfill_table_embeddings(
                     warn!(table, pk = ?pk_vals, error = %e, "Embedding update failed");
                 }
             }
-            cursor_values = pk_vals;
         }
 
         if (row_count as i64) < PAGE_SIZE {
