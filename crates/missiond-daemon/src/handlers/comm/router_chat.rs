@@ -681,9 +681,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 .join("\n\n");
             let new_cursor = to_compress.last().map(|(id, _, _)| *id).unwrap_or(cursor);
 
-            let sonnet = state.sonnet.as_ref()
-                .ok_or_else(|| anyhow!("SonnetGateway 未初始化，无法生成摘要"))?;
-
+            // Use Gemini (google one channel) for summarization — Gemini summarizes its own content best
             let system_prompt = "You are a conversation summarizer. Your job is to maintain a rolling summary of a conversation between a user and an AI assistant (Gemini). Keep technical details, decisions, task IDs, and established context. Drop irrelevant chit-chat. Output only the updated summary in the same language as the conversation (Chinese if the conversation is in Chinese). Be concise but comprehensive.";
 
             let user_prompt = if let Some(ref prev) = existing_summary {
@@ -698,13 +696,29 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 )
             };
 
-            use crate::minimax_client::ChatMessage;
-            let sonnet_msgs = vec![
-                ChatMessage { role: "system".to_string(), content: system_prompt.to_string() },
-                ChatMessage { role: "user".to_string(), content: user_prompt },
+            let compress_messages = vec![
+                serde_json::json!({"role": "system", "content": system_prompt}),
+                serde_json::json!({"role": "user", "content": user_prompt}),
             ];
 
-            let summary_result = sonnet.call_interactive(sonnet_msgs, Some(1024), "router_chat_compress").await;
+            let (base_url, jwt) = resolve_llm_credentials().await?;
+            let compress_url = format!("{}/v1/chat/completions", base_url);
+            let compress_body = serde_json::json!({
+                "model": "gemini-3.1-pro",
+                "messages": compress_messages,
+                "max_tokens": 2048,
+                "_channel": "google",  // Force google one channel for compression
+            });
+
+            let summary_result = REQUEST_CALLER.scope("router_chat_compress".to_string(), async {
+                state.gemini.send_with_timeout(&state.http_client, &compress_url, &jwt, &compress_body, None).await
+            }).await
+            .and_then(|resp| {
+                resp.pointer("/choices/0/message/content")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| anyhow!("Gemini compress: empty response"))
+            });
 
             match summary_result {
                 Ok(new_summary) => {
@@ -736,11 +750,11 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     }
                 }
                 Err(e) => {
-                    warn!(conv_id = %cid, error = %e, "Router chat compress: Sonnet summarization failed");
+                    warn!(conv_id = %cid, error = %e, "Router chat compress: Gemini summarization failed");
                     Ok(ToolResult::json(&serde_json::json!({
                         "conversation_id": cid,
                         "status": "error",
-                        "error": format!("Sonnet 摘要生成失败: {}", e),
+                        "error": format!("Gemini 摘要生成失败: {}", e),
                         "note": "原始消息未受影响，可重试",
                     })))
                 }

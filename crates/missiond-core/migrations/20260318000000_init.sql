@@ -319,6 +319,7 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
     ) STORED
 );
 CREATE INDEX IF NOT EXISTS idx_conv_msg_session ON conversation_messages(session_id);
+CREATE INDEX IF NOT EXISTS idx_conv_msg_session_id ON conversation_messages(session_id, id);
 CREATE INDEX IF NOT EXISTS idx_conv_msg_timestamp ON conversation_messages(timestamp);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_msg_uuid ON conversation_messages(message_uuid);
 CREATE INDEX IF NOT EXISTS idx_conv_msg_tool_name ON conversation_messages(tool_name);

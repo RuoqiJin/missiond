@@ -190,6 +190,8 @@ async fn ingest(
             has_tool_use,
             has_tool_result: has_tool_result_flag,
             token_count,
+            seq: None,
+            role_display: None,
         });
     }
 
@@ -254,11 +256,13 @@ async fn classify(
 }
 
 /// Apply rule-based labels to newly inserted messages (single batch write).
-/// Labels: role_mapped, has_code_change, has_mcp_call, has_tool_use, has_tool_result, has_image
+/// Labels: role_mapped, has_code_change, has_mcp_call, has_tool_use, has_tool_result, has_image,
+///         gemini_chat (send/receive), gemini_channel (apikey/google)
 async fn apply_rule_labels(state: &AppState, inserted_ids: &[i64]) {
     // Collect all labels first, then flush as a single batch (avoids N+1 auto-commit fsync).
     let mut role_labels: Vec<(i64, String)> = Vec::new();
-    let mut flag_labels: Vec<(i64, &'static str)> = Vec::new();
+    let mut flag_labels: Vec<(i64, &'static str, &'static str)> = Vec::new();
+    let mut string_labels: Vec<(i64, &'static str, String)> = Vec::new();
 
     for &msg_id in inserted_ids {
         let msg = match state.store.get_conversation_message_by_id(msg_id).await {
@@ -274,25 +278,41 @@ async fn apply_rule_labels(state: &AppState, inserted_ids: &[i64]) {
 
         if let Some(ref tn) = msg.tool_name {
             if tn.contains("Write") || tn.contains("Edit") {
-                flag_labels.push((msg_id, "has_code_change"));
+                flag_labels.push((msg_id, "has_code_change", "true"));
             }
             if tn.contains("mcp__") {
-                flag_labels.push((msg_id, "has_mcp_call"));
+                flag_labels.push((msg_id, "has_mcp_call", "true"));
+            }
+            // Gemini chat tagging
+            if tn.contains("mission_router_chat") {
+                if msg.has_tool_use {
+                    flag_labels.push((msg_id, "gemini_chat", "send"));
+                    let channel = extract_gemini_channel(&msg.raw_content);
+                    string_labels.push((msg_id, "gemini_channel", channel));
+                }
+                if msg.has_tool_result {
+                    flag_labels.push((msg_id, "gemini_chat", "receive"));
+                }
             }
         }
 
-        if msg.has_tool_result { flag_labels.push((msg_id, "has_tool_result")); }
-        if msg.has_tool_use   { flag_labels.push((msg_id, "has_tool_use")); }
-        if msg.has_image      { flag_labels.push((msg_id, "has_image")); }
+        if msg.has_tool_result { flag_labels.push((msg_id, "has_tool_result", "true")); }
+        if msg.has_tool_use   { flag_labels.push((msg_id, "has_tool_use", "true")); }
+        if msg.has_image      { flag_labels.push((msg_id, "has_image", "true")); }
     }
 
     // Build batch: Vec<(msg_id, label, value, source)>
-    let mut batch: Vec<(i64, &str, String, &str)> = Vec::with_capacity(role_labels.len() + flag_labels.len());
+    let mut batch: Vec<(i64, &str, String, &str)> = Vec::with_capacity(
+        role_labels.len() + flag_labels.len() + string_labels.len()
+    );
     for (msg_id, role) in &role_labels {
         batch.push((*msg_id, "role_mapped", role.clone(), "rule"));
     }
-    for (msg_id, label) in &flag_labels {
-        batch.push((*msg_id, label, "true".to_string(), "rule"));
+    for (msg_id, label, value) in &flag_labels {
+        batch.push((*msg_id, label, value.to_string(), "rule"));
+    }
+    for (msg_id, label, value) in &string_labels {
+        batch.push((*msg_id, label, value.clone(), "rule"));
     }
 
     if !batch.is_empty() {
@@ -309,6 +329,25 @@ async fn apply_rule_labels(state: &AppState, inserted_ids: &[i64]) {
             }
         }
     }
+}
+
+/// Extract Gemini channel from raw_content JSON (tool_use input).
+/// Returns "apikey" or "google" (default if unspecified).
+fn extract_gemini_channel(raw_content: &Option<String>) -> String {
+    #[derive(serde::Deserialize)]
+    struct ContentBlock {
+        #[serde(default)]
+        input: Option<serde_json::Value>,
+    }
+
+    raw_content.as_ref()
+        .and_then(|c| serde_json::from_str::<Vec<ContentBlock>>(c).ok())
+        .and_then(|blocks| {
+            blocks.iter().find_map(|b| {
+                b.input.as_ref()?.get("channel")?.as_str().map(String::from)
+            })
+        })
+        .unwrap_or_else(|| "google".to_string())
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -566,6 +605,8 @@ pub(crate) async fn handle_pty_text_complete(
         has_tool_use: false,
         has_tool_result: false,
         token_count: None,
+        seq: None,
+        role_display: None,
     };
 
     match state.store.insert_conversation_message(&conv_msg).await {

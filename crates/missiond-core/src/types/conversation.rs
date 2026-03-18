@@ -107,9 +107,32 @@ pub struct ConversationMessage {
     /// Token count from usage info
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_count: Option<i64>,
+    // ── Query-time computed fields (not persisted) ──
+    /// Sequential message number within session (ROW_NUMBER)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seq: Option<i64>,
+    /// Human-readable role display name (Rust match mapping)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_display: Option<String>,
 }
 
 fn is_false(v: &bool) -> bool { !v }
+
+/// Map DB role + flags to human-readable display name.
+pub fn role_display(role: &str, has_tool_use: bool) -> &'static str {
+    match (role, has_tool_use) {
+        ("user", _) => "用户",
+        ("assistant", true) => "工具调用",
+        ("assistant", false) => "AI助理",
+        ("tool_result", _) => "工具调用结果",
+        ("thinking", _) => "思考",
+        ("compact_summary", _) => "压缩摘要",
+        ("system", _) => "系统",
+        ("agent_user", _) => "代理用户",
+        ("agent_assistant", _) => "代理助理",
+        _ => "未知",
+    }
+}
 
 /// A non-dialog system event from JSONL (turn_duration, compact_boundary, hook_progress, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize)]

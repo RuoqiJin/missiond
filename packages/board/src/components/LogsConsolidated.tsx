@@ -4,12 +4,14 @@ import { useState, useEffect } from 'react';
 import { cn } from '@/lib/utils';
 import { Conversations } from './Conversations';
 import { CognitiveTimeline } from './timeline';
+import { TranscriptViewer } from './TranscriptViewer';
 
-type SubTab = 'sessions' | 'events';
+type SubTab = 'sessions' | 'events' | 'transcripts';
 
 const SUB_TABS: { key: SubTab; label: string }[] = [
   { key: 'sessions', label: 'Sessions' },
   { key: 'events', label: 'Events' },
+  { key: 'transcripts', label: 'Transcripts' },
 ];
 
 const STORAGE_KEY = 'board:logs:sub';
@@ -52,6 +54,9 @@ export function LogsConsolidated() {
       </div>
       <div className={cn('flex-1 min-h-0', subTab === 'events' ? 'flex flex-col' : 'hidden')}>
         <CognitiveTimeline />
+      </div>
+      <div className={cn('flex-1 min-h-0', subTab === 'transcripts' ? 'flex flex-col' : 'hidden')}>
+        <TranscriptViewer />
       </div>
     </div>
   );

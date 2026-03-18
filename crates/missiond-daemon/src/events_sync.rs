@@ -482,6 +482,8 @@ pub async fn handle_new_events(state: &AppState, session_id: String, events: Vec
                                             has_tool_use: false,
                                             has_tool_result: false,
                                             token_count: None,
+                                            seq: None,
+                                            role_display: None,
                                         },
                                     );
                                 }
@@ -919,6 +921,8 @@ pub async fn reconcile_conversation_messages(state: &crate::state::AppState, ses
             has_tool_use: false,
             has_tool_result: false,
             token_count: None,
+            seq: None,
+            role_display: None,
         });
     }).await;
 

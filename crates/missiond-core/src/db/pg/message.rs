@@ -91,7 +91,8 @@ impl MessageStore for PgMissionStore {
         let rows = if let Some(since) = since_id {
             sqlx::query(
                 "SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
-                        tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count
+                        tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count,
+                        ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY id) AS seq
                  FROM conversation_messages WHERE session_id = $1 AND id > $2 ORDER BY id ASC LIMIT $3"
             )
             .bind(session_id)
@@ -100,11 +101,12 @@ impl MessageStore for PgMissionStore {
             .fetch_all(&self.pool)
             .await?
         } else {
-            // Return last N messages (subquery to reverse order)
+            // Return last N messages (subquery to reverse order, preserving seq)
             sqlx::query(
                 "SELECT * FROM (
                     SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
-                           tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count
+                           tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count,
+                           ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY id) AS seq
                     FROM conversation_messages WHERE session_id = $1 ORDER BY id DESC LIMIT $2
                 ) sub ORDER BY id ASC"
             )
@@ -113,7 +115,7 @@ impl MessageStore for PgMissionStore {
             .fetch_all(&self.pool)
             .await?
         };
-        Ok(rows.iter().map(Self::row_to_conversation_message).collect())
+        Ok(rows.iter().map(Self::row_to_enriched_message).collect())
     }
 
     async fn get_messages_around(&self, message_id: i64, before: i64, after: i64) -> DbResult<Option<(String, Vec<ConversationMessage>)>> {

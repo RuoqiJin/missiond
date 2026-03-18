@@ -1233,6 +1233,8 @@ impl MissionDB {
             has_tool_use: row.get::<_, Option<bool>>("has_tool_use").unwrap_or(None).unwrap_or(false),
             has_tool_result: row.get::<_, Option<bool>>("has_tool_result").unwrap_or(None).unwrap_or(false),
             token_count: row.get("token_count").unwrap_or(None),
+            seq: None,
+            role_display: None,
         })
     }
 }

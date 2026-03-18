@@ -60,7 +60,19 @@ impl PgMissionStore {
             has_tool_use: row.get::<bool, _>("has_tool_use"),
             has_tool_result: row.get::<bool, _>("has_tool_result"),
             token_count: row.get("token_count"),
+            seq: None,
+            role_display: None,
         }
+    }
+
+    /// Extract a ConversationMessage with seq (ROW_NUMBER) from a PgRow.
+    pub(super) fn row_to_enriched_message(row: &sqlx::postgres::PgRow) -> ConversationMessage {
+        use sqlx::Row;
+        let mut msg = Self::row_to_conversation_message(row);
+        msg.seq = row.try_get::<i64, _>("seq").ok();
+        let has_tool_use = msg.has_tool_use;
+        msg.role_display = Some(crate::types::role_display(&msg.role, has_tool_use).to_string());
+        msg
     }
 
     /// Parse relative time strings (e.g. "30min", "2h", "7d") to absolute timestamps.
