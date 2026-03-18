@@ -339,12 +339,14 @@ impl SkillStore for PgMissionStore {
 
     async fn skill_set_topic_embedding(&self, topic: &str, embedding: &[f32], provider: &str) -> DbResult<()> {
         let bytes = crate::embedding::f32_vec_to_bytes(embedding);
+        let vec_str = format!("[{}]", embedding.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(","));
         sqlx::query(
-            "UPDATE skill_topics SET embedding = $1, embedding_provider = $2 WHERE topic = $3"
+            "UPDATE skill_topics SET embedding = $1, embedding_provider = $2, embedding_vec = $4::vector WHERE topic = $3"
         )
         .bind(&bytes)
         .bind(provider)
         .bind(topic)
+        .bind(&vec_str)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -938,8 +940,8 @@ impl SkillStore for PgMissionStore {
     }
 
     async fn ast_search(&self, query: &str, limit: usize) -> DbResult<Vec<AstSearchHit>> {
-        // PG: use plainto_tsquery on GENERATED tsvector column fts_doc
-        let rows = sqlx::query(
+        // PG: FTS first, then LIKE fallback for partial/camelCase matches
+        let mut rows = sqlx::query(
             "SELECT n.id, n.repo, n.file_path, n.name, n.node_type, n.signature,
                     n.start_line, n.end_line, n.is_exported, n.docstring, n.stub_content, n.calls,
                     ts_rank(n.fts_doc, plainto_tsquery('simple', $1)) AS rank
@@ -952,6 +954,24 @@ impl SkillStore for PgMissionStore {
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
+
+        // LIKE fallback for partial matches (camelCase, Chinese, substrings)
+        if rows.is_empty() {
+            let pattern = format!("%{}%", query);
+            rows = sqlx::query(
+                "SELECT n.id, n.repo, n.file_path, n.name, n.node_type, n.signature,
+                        n.start_line, n.end_line, n.is_exported, n.docstring, n.stub_content, n.calls,
+                        0.0::real AS rank
+                 FROM ast_nodes n
+                 WHERE n.name ILIKE $1 OR n.signature ILIKE $1
+                 ORDER BY n.name
+                 LIMIT $2"
+            )
+            .bind(&pattern)
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await?;
+        }
 
         Ok(rows.iter().map(|r| {
             use sqlx::Row;
@@ -1078,13 +1098,16 @@ impl SkillStore for PgMissionStore {
     }
 
     async fn ast_set_embedding(&self, node_id: &str, embedding: &[u8], provider: &str) -> DbResult<()> {
-        // Store as BYTEA (same as SQLite blob)
+        // Store BYTEA + pgvector embedding_vec for ANN search
+        let floats = crate::embedding::bytes_to_f32_vec(embedding);
+        let vec_str = format!("[{}]", floats.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(","));
         sqlx::query(
-            "UPDATE ast_nodes SET embedding = $1, embedding_provider = $2 WHERE id = $3"
+            "UPDATE ast_nodes SET embedding = $1, embedding_provider = $2, embedding_vec = $4::vector WHERE id = $3"
         )
         .bind(embedding)
         .bind(provider)
         .bind(node_id)
+        .bind(&vec_str)
         .execute(&self.pool)
         .await?;
         Ok(())

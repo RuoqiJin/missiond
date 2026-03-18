@@ -532,6 +532,8 @@ impl ConversationStore for PgMissionStore {
 
     async fn set_conversation_embedding(&self, id: &str, embedding: &[f32], provider: &str) -> DbResult<()> {
         let bytes = crate::embedding::f32_vec_to_bytes(embedding);
+        // Note: conversations table doesn't have embedding_vec column (no ANN search needed),
+        // only BYTEA blob for in-memory cosine similarity. This is consistent with SQLite.
         sqlx::query("UPDATE conversations SET embedding = $1, embedding_provider = $2 WHERE id = $3")
             .bind(&bytes)
             .bind(provider)
