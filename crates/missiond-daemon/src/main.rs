@@ -1018,10 +1018,10 @@ async fn main() -> Result<()> {
     // --- AST Sync Worker (P2 HCE) ---
     // Worker loop + startup full sync for all repos
     {
-        let mc = Arc::clone(&state.mission);
+        let ast_store = Arc::clone(&state.store);
         let etx = state.embedding_tx.clone();
         tokio::spawn(async move {
-            ast_sync_worker::run_ast_sync_worker(ast_sync_rx, mc, etx).await;
+            ast_sync_worker::run_ast_sync_worker(ast_sync_rx, ast_store, etx).await;
         });
 
         // Full sync at startup: trigger for all repos after delay
