@@ -4,6 +4,8 @@ pub mod error;
 pub mod executor;
 pub mod traits;
 pub mod sqlite;
+#[cfg(feature = "postgres")]
+pub mod pg;
 mod task;
 mod slot;
 mod board;
