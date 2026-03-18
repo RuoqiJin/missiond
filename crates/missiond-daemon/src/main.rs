@@ -379,8 +379,11 @@ async fn main() -> Result<()> {
         pty.init_slot(&pty_slot).await;
     }
 
-    // CC tasks watcher
-    let mut cc = CCTasksWatcher::new(CCTasksWatcherOptions::default());
+    // CC tasks watcher (with cursor persistence via store)
+    let mut cc = CCTasksWatcher::new(CCTasksWatcherOptions {
+        store: Some(Arc::clone(&store)),
+        ..Default::default()
+    });
     cc.start().await?;
     let cc_tasks = Arc::new(Mutex::new(cc));
 

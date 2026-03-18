@@ -1512,4 +1512,39 @@ impl ObservabilityStore for PgMissionStore {
         tx.commit().await?;
         Ok(restored)
     }
+
+    // ── watcher_cursors ──────────────────────────────────────────
+
+    async fn load_watcher_cursors(&self) -> DbResult<HashMap<String, u64>> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT file_path, byte_offset FROM watcher_cursors"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(p, o)| (p, o as u64)).collect())
+    }
+
+    async fn upsert_watcher_cursors_batch(&self, cursors: &HashMap<String, u64>) -> DbResult<()> {
+        for (path, offset) in cursors {
+            sqlx::query(
+                "INSERT INTO watcher_cursors (file_path, byte_offset, updated_at)
+                 VALUES ($1, $2, to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
+                 ON CONFLICT (file_path) DO UPDATE SET byte_offset = $2,
+                    updated_at = to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
+            )
+            .bind(path)
+            .bind(*offset as i64)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn delete_watcher_cursor(&self, file_path: &str) -> DbResult<()> {
+        sqlx::query("DELETE FROM watcher_cursors WHERE file_path = $1")
+            .bind(file_path)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }

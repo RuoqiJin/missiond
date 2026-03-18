@@ -9,8 +9,10 @@ use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, error, info, warn};
+
+use crate::db::traits::MissionStore;
 
 /// Watcher options
 pub struct CCTasksWatcherOptions {
@@ -20,6 +22,8 @@ pub struct CCTasksWatcherOptions {
     pub inactive_check_interval_ms: u64,
     /// Max recent changes to keep, default 50
     pub max_recent_changes: usize,
+    /// Store for cursor persistence (optional — without it, cursors are memory-only)
+    pub store: Option<Arc<dyn MissionStore>>,
 }
 
 impl Default for CCTasksWatcherOptions {
@@ -28,6 +32,7 @@ impl Default for CCTasksWatcherOptions {
             claude_home: None,
             inactive_check_interval_ms: 60000,
             max_recent_changes: 50,
+            store: None,
         }
     }
 }
@@ -65,6 +70,10 @@ pub struct CCTasksWatcher {
     event_tx: broadcast::Sender<WatcherEvent>,
     watcher: Option<RecommendedWatcher>,
     started: Arc<RwLock<bool>>,
+    /// Channel for async cursor persistence (batched writes to DB).
+    cursor_persist_tx: mpsc::UnboundedSender<(String, u64)>,
+    cursor_persist_rx: Option<mpsc::UnboundedReceiver<(String, u64)>>,
+    store: Option<Arc<dyn MissionStore>>,
 }
 
 impl CCTasksWatcher {
@@ -78,6 +87,7 @@ impl CCTasksWatcher {
         let projects_dir = claude_home.join("projects");
 
         let (event_tx, _) = broadcast::channel(4096);
+        let (cursor_persist_tx, cursor_persist_rx) = mpsc::unbounded_channel();
 
         Self {
             projects_dir,
@@ -89,6 +99,9 @@ impl CCTasksWatcher {
             event_tx,
             watcher: None,
             started: Arc::new(RwLock::new(false)),
+            cursor_persist_tx,
+            cursor_persist_rx: Some(cursor_persist_rx),
+            store: options.store,
         }
     }
 
@@ -108,6 +121,22 @@ impl CCTasksWatcher {
         }
 
         info!(projects_dir = ?self.projects_dir, "Starting CCTasksWatcher");
+
+        // Load persisted cursors from DB before scanning
+        if let Some(ref store) = self.store {
+            match store.load_watcher_cursors().await {
+                Ok(cursors) if !cursors.is_empty() => {
+                    let count = cursors.len();
+                    let mut positions = self.file_positions.write().await;
+                    for (path, offset) in cursors {
+                        positions.insert(path, offset);
+                    }
+                    info!(count, "Restored watcher cursors from DB");
+                }
+                Ok(_) => {}
+                Err(e) => warn!(error = %e, "Failed to load watcher cursors from DB"),
+            }
+        }
 
         // Initial scan
         self.scan_all_projects().await;
@@ -136,6 +165,7 @@ impl CCTasksWatcher {
         let event_tx = self.event_tx.clone();
         let projects_dir = self.projects_dir.clone();
         let started = self.started.clone();
+        let persist_tx = self.cursor_persist_tx.clone();
 
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
@@ -157,6 +187,7 @@ impl CCTasksWatcher {
                             &sessions,
                             &file_positions,
                             &event_tx,
+                            Some(&persist_tx),
                         )
                         .await;
                     } else if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
@@ -168,6 +199,7 @@ impl CCTasksWatcher {
                             &event_tx,
                             &projects_dir,
                             &file_positions,
+                            Some(&persist_tx),
                         )
                         .await;
                     }
@@ -183,6 +215,7 @@ impl CCTasksWatcher {
         let event_tx = self.event_tx.clone();
         let inactive_check_interval = self.inactive_check_interval_ms;
         let started = self.started.clone();
+        let persist_tx2 = self.cursor_persist_tx.clone();
         let projects_dir = self.projects_dir.clone();
 
         tokio::spawn(async move {
@@ -206,9 +239,18 @@ impl CCTasksWatcher {
                     max_recent_changes,
                     &event_tx,
                     &projects_dir,
+                    Some(&persist_tx2),
                 ).await;
             }
         });
+
+        // Spawn async cursor persistence task (micro-batch every 10s)
+        if let (Some(store), Some(rx)) = (self.store.clone(), self.cursor_persist_rx.take()) {
+            tokio::spawn(async move {
+                cursor_persist_loop(store, rx).await;
+            });
+            info!("Cursor persistence task started");
+        }
 
         info!("CCTasksWatcher started");
         Ok(())
@@ -259,6 +301,7 @@ impl CCTasksWatcher {
                 &self.sessions,
                 &self.file_positions,
                 &self.event_tx,
+                Some(&self.cursor_persist_tx),
             )
             .await;
         }
@@ -273,6 +316,7 @@ impl CCTasksWatcher {
         sessions: &Arc<RwLock<HashMap<String, CCSession>>>,
         file_positions: &Arc<RwLock<HashMap<String, u64>>>,
         _event_tx: &broadcast::Sender<WatcherEvent>,
+        persist_tx: Option<&mpsc::UnboundedSender<(String, u64)>>,
     ) {
         let index = match parse_sessions_index(index_path).await {
             Some(i) => i,
@@ -289,6 +333,9 @@ impl CCTasksWatcher {
                     .write()
                     .await
                     .insert(session.full_path.clone(), file_size);
+                if let Some(tx) = persist_tx {
+                    let _ = tx.send((session.full_path.clone(), file_size));
+                }
             }
 
             sessions.insert(session.session_id.clone(), session);
@@ -304,6 +351,7 @@ impl CCTasksWatcher {
         event_tx: &broadcast::Sender<WatcherEvent>,
         _projects_dir: &Path,
         file_positions: &Arc<RwLock<HashMap<String, u64>>>,
+        persist_tx: Option<&mpsc::UnboundedSender<(String, u64)>>,
     ) {
         let file_path_str = file_path.to_string_lossy().to_string();
 
@@ -327,6 +375,7 @@ impl CCTasksWatcher {
                         sessions,
                         file_positions,
                         event_tx,
+                        persist_tx,
                     )
                     .await;
                 }
@@ -372,6 +421,9 @@ impl CCTasksWatcher {
                                     .write()
                                     .await
                                     .insert(file_path_str.clone(), new_pos);
+                                if let Some(tx) = persist_tx {
+                                    let _ = tx.send((file_path_str.clone(), new_pos));
+                                }
 
                                 let mut messages: Vec<CCMessageLine> = Vec::new();
                                 let mut events: Vec<serde_json::Value> = Vec::new();
@@ -435,6 +487,9 @@ impl CCTasksWatcher {
                     .write()
                     .await
                     .insert(file_path_str.clone(), new_pos);
+                if let Some(tx) = persist_tx {
+                    let _ = tx.send((file_path_str.clone(), new_pos));
+                }
 
                 // Route by message type: conversation messages vs system events
                 let mut messages: Vec<CCMessageLine> = Vec::new();
@@ -587,6 +642,7 @@ impl CCTasksWatcher {
         max_recent_changes: usize,
         event_tx: &broadcast::Sender<WatcherEvent>,
         projects_dir: &Path,
+        persist_tx: Option<&mpsc::UnboundedSender<(String, u64)>>,
     ) {
         // Collect active session file paths (release read lock before processing)
         let paths: Vec<String> = {
@@ -619,6 +675,7 @@ impl CCTasksWatcher {
                     event_tx,
                     projects_dir,
                     file_positions,
+                    persist_tx,
                 ).await;
             }
         }
@@ -782,8 +839,48 @@ impl CCTasksWatcher {
                 &self.sessions,
                 &self.file_positions,
                 &self.event_tx,
+                None, // list_sessions doesn't need cursor persistence
             )
             .await;
         }
+    }
+}
+
+/// Background task: batches cursor updates and persists to DB every 10 seconds.
+async fn cursor_persist_loop(
+    store: Arc<dyn MissionStore>,
+    mut rx: mpsc::UnboundedReceiver<(String, u64)>,
+) {
+    let mut batch: HashMap<String, u64> = HashMap::new();
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            biased;
+            msg = rx.recv() => {
+                match msg {
+                    Some((path, offset)) => { batch.insert(path, offset); }
+                    None => break, // channel closed
+                }
+            }
+            _ = interval.tick() => {
+                if !batch.is_empty() {
+                    let count = batch.len();
+                    match store.upsert_watcher_cursors_batch(&batch).await {
+                        Ok(()) => {
+                            debug!(count, "Persisted watcher cursors");
+                            batch.clear();
+                        }
+                        Err(e) => warn!(error = %e, "Failed to persist watcher cursors"),
+                    }
+                }
+            }
+        }
+    }
+
+    // Flush remaining on shutdown
+    if !batch.is_empty() {
+        let _ = store.upsert_watcher_cursors_batch(&batch).await;
     }
 }

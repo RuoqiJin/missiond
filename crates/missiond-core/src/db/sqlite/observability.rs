@@ -341,4 +341,15 @@ impl ObservabilityStore for SqliteMissionStore {
         let conversation_id = conversation_id.to_owned();
         self.executor.run(move |db| db.router_chat_restore(&conversation_id)).await
     }
+
+    // ── watcher_cursors (no-op in SQLite mode) ───────────────────
+    async fn load_watcher_cursors(&self) -> DbResult<std::collections::HashMap<String, u64>> {
+        Ok(std::collections::HashMap::new())
+    }
+    async fn upsert_watcher_cursors_batch(&self, _cursors: &std::collections::HashMap<String, u64>) -> DbResult<()> {
+        Ok(())
+    }
+    async fn delete_watcher_cursor(&self, _file_path: &str) -> DbResult<()> {
+        Ok(())
+    }
 }
