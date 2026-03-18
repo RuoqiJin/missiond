@@ -18,12 +18,14 @@
 //! let resp = cli.call(&messages, None, None, None).await?;
 //! ```
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
 
@@ -34,12 +36,116 @@ const ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(900); // 15 minutes
 /// Tool execution (file reads, code search) can take much longer than text generation.
 const TOOL_EXEC_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
 
+// ===== API Key Pool =====
+
+/// A resolved API key entry with optional alias and default flag.
+#[derive(Clone, Debug)]
+pub(crate) struct ApiKeyEntry {
+    pub key: String,
+    pub alias: Option<String>,
+    pub is_default: bool,
+}
+
+/// Pool of Gemini API keys with blacklist-based rotation.
+/// When a key hits quota exhaustion, it's blacklisted until next 07:00 GMT+8.
+/// Keys are hot-reloaded from llm.yaml on every call — no restart needed to add/remove keys.
+pub(crate) struct ApiKeyPool {
+    blacklist: RwLock<HashMap<String, tokio::time::Instant>>,
+}
+
+impl ApiKeyPool {
+    pub fn new() -> Self {
+        Self { blacklist: RwLock::new(HashMap::new()) }
+    }
+
+    /// Returns the first non-blacklisted key. Default key is tried first, then others in order.
+    /// Returns error if no default is configured and no alias is specified.
+    pub async fn next_available_key(&self) -> Result<ApiKeyEntry> {
+        let entries = resolve_apikey_entries();
+        if entries.is_empty() {
+            return Err(anyhow!("gemini_api_keys 未配置"));
+        }
+        if !entries.iter().any(|e| e.is_default) {
+            return Err(anyhow!("gemini_api_keys 中未标记 default: true，无法确定默认 key"));
+        }
+        let bl = self.blacklist.read().await;
+        let now = tokio::time::Instant::now();
+        let is_available = |k: &str| bl.get(k).map(|exp| now >= *exp).unwrap_or(true);
+
+        // Default key first, then others in config order
+        let mut sorted = entries.clone();
+        sorted.sort_by_key(|e| if e.is_default { 0 } else { 1 });
+
+        sorted.into_iter()
+            .find(|e| is_available(&e.key))
+            .ok_or_else(|| {
+                let total = entries.len();
+                anyhow!("All {} Gemini API keys quota exhausted. Next reset ~07:00 GMT+8", total)
+            })
+    }
+
+    /// Get a specific key by alias. Returns error if alias not found.
+    pub async fn get_by_alias(&self, alias: &str) -> Result<ApiKeyEntry> {
+        let entries = resolve_apikey_entries();
+        let entry = entries.into_iter()
+            .find(|e| e.alias.as_deref() == Some(alias))
+            .ok_or_else(|| anyhow!("未知 API key 别名: '{}'. 可用别名: {}",
+                alias,
+                resolve_apikey_entries().iter()
+                    .filter_map(|e| e.alias.as_deref())
+                    .collect::<Vec<_>>().join(", ")
+            ))?;
+        // Check blacklist
+        let bl = self.blacklist.read().await;
+        let now = tokio::time::Instant::now();
+        if let Some(exp) = bl.get(&entry.key) {
+            if now < *exp {
+                return Err(anyhow!("API key '{}' quota exhausted until ~07:00 GMT+8", alias));
+            }
+        }
+        Ok(entry)
+    }
+
+    /// Mark a key as quota-exhausted until next 07:00 GMT+8.
+    pub async fn mark_exhausted(&self, key: &str, alias: Option<&str>) {
+        let ttl = duration_until_next_07_gmt8();
+        let expiry = tokio::time::Instant::now() + ttl;
+        let mut bl = self.blacklist.write().await;
+        bl.insert(key.to_string(), expiry);
+        info!(key = %mask_api_key(key), alias = alias.unwrap_or("unnamed"),
+              ttl_secs = ttl.as_secs(), "ApiKeyPool: key blacklisted until next 07:00 GMT+8");
+    }
+}
+
+impl std::fmt::Debug for ApiKeyPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiKeyPool").field("keys", &resolve_apikey_entries().len()).finish()
+    }
+}
+
+/// Calculate duration from now until next 07:00 GMT+8 (= 23:00 UTC previous day).
+fn duration_until_next_07_gmt8() -> Duration {
+    use chrono::{Utc, FixedOffset};
+    let tz = FixedOffset::east_opt(8 * 3600).unwrap();
+    let now = Utc::now().with_timezone(&tz);
+    let today_07 = now.date_naive().and_hms_opt(7, 0, 0).unwrap()
+        .and_local_timezone(tz).unwrap();
+    let target = if now.naive_local() < today_07.naive_local() {
+        today_07
+    } else {
+        today_07 + chrono::Duration::days(1)
+    };
+    let secs = (target - now).num_seconds().max(60) as u64;
+    Duration::from_secs(secs)
+}
+
 /// Gemini CLI subprocess wrapper.
 #[derive(Clone, Debug)]
 pub(crate) struct GeminiCli {
     binary: String,
     default_model: String,
     idle_timeout: Duration,
+    api_key_pool: Option<Arc<ApiKeyPool>>,
 }
 
 /// Response from a Gemini CLI invocation.
@@ -66,8 +172,8 @@ pub(crate) struct GeminiCliProgress {
 }
 
 impl GeminiCli {
-    pub fn new(binary: String, default_model: String, idle_timeout: Duration) -> Self {
-        Self { binary, default_model, idle_timeout }
+    pub fn new(binary: String, default_model: String, idle_timeout: Duration, api_key_pool: Option<Arc<ApiKeyPool>>) -> Self {
+        Self { binary, default_model, idle_timeout, api_key_pool }
     }
 
     /// Core method: convert messages to prompt, call CLI with stream-json, parse NDJSON events.
@@ -86,6 +192,7 @@ impl GeminiCli {
         idle_timeout_override: Option<Duration>,
         progress_tx: Option<mpsc::UnboundedSender<GeminiCliProgress>>,
         auth_override: Option<&str>,
+        api_key_alias: Option<&str>,
         working_dir: Option<&std::path::Path>,
     ) -> Result<GeminiCliResponse> {
         let model = model.unwrap_or(&self.default_model);
@@ -99,27 +206,91 @@ impl GeminiCli {
         info!(model, prompt_len = prompt.len(), idle_timeout_secs = idle_timeout.as_secs(),
               "Gemini CLI: calling (stream-json mode)");
 
+        // Determine resolved mode
+        let is_apikey_mode = match auth_override {
+            Some("apikey") => true,
+            Some("google") => false,
+            Some(other) => return Err(anyhow!("未知 channel: '{}', 支持 apikey/google", other)),
+            None => resolve_gemini_auth_config().mode == "apikey",
+        };
+
+        // If apikey mode + pool available → key selection/rotation
+        if is_apikey_mode {
+            if let Some(ref pool) = self.api_key_pool {
+                return if let Some(alias) = api_key_alias {
+                    // Pinned key: no rotation, fail fast if exhausted
+                    self.call_with_pinned_key(pool, alias, &prompt, model, idle_timeout, &progress_tx, working_dir).await
+                } else {
+                    // Pool rotation: default key first, failover to others
+                    self.call_with_key_rotation(pool, &prompt, model, idle_timeout, &progress_tx, working_dir).await
+                };
+            }
+        }
+
+        // Original single-key path (google mode or no pool)
         let is_override = auth_override.is_some();
         let auth_config = match auth_override {
             Some("apikey") => resolve_apikey_config()
                 .ok_or_else(|| anyhow!("channel='apikey' 但 llm.yaml 中未配置 gemini_api_key"))?,
             Some("google") => GeminiAuthConfig { mode: "google".to_string(), api_key: None },
-            Some(other) => return Err(anyhow!("未知 channel: '{}', 支持 apikey/google", other)),
             None => resolve_gemini_auth_config(),
+            _ => unreachable!(),
         };
-        info!(mode = %auth_config.mode, override = is_override, "Gemini CLI: using {} mode", auth_config.mode);
+        info!(mode = %auth_config.mode, r#override = is_override, "Gemini CLI: using {} mode", auth_config.mode);
 
-        let mut child = self.spawn_cli(&prompt, model, &auth_config, working_dir)?;
-        let (events, drained_stderr) = self.stream_events(&mut child, idle_timeout, &progress_tx).await?;
+        self.call_once(&auth_config, &prompt, model, idle_timeout, &progress_tx, working_dir).await
+    }
 
-        // Wait for process to fully exit
+    /// Pinned key: use exactly the specified alias, no rotation.
+    /// If the key is quota-exhausted, fail immediately.
+    async fn call_with_pinned_key(
+        &self,
+        pool: &ApiKeyPool,
+        alias: &str,
+        prompt: &str,
+        model: &str,
+        idle_timeout: Duration,
+        progress_tx: &Option<mpsc::UnboundedSender<GeminiCliProgress>>,
+        working_dir: Option<&std::path::Path>,
+    ) -> Result<GeminiCliResponse> {
+        let entry = pool.get_by_alias(alias).await?;
+        info!(alias = alias, key = %mask_api_key(&entry.key), "Gemini CLI: using pinned API key");
+
+        let auth = GeminiAuthConfig {
+            mode: "apikey".to_string(),
+            api_key: Some(entry.key.clone()),
+        };
+        let result = self.call_once(&auth, prompt, model, idle_timeout, progress_tx, working_dir).await;
+
+        // If quota exhausted, mark and return error (no rotation)
+        if let Err(ref e) = result {
+            let err_str = e.to_string();
+            if is_quota_exhausted(None, &err_str) {
+                pool.mark_exhausted(&entry.key, Some(alias)).await;
+            }
+        }
+        result
+    }
+
+    /// Single attempt: spawn CLI, stream events, check exit status.
+    async fn call_once(
+        &self,
+        auth_config: &GeminiAuthConfig,
+        prompt: &str,
+        model: &str,
+        idle_timeout: Duration,
+        progress_tx: &Option<mpsc::UnboundedSender<GeminiCliProgress>>,
+        working_dir: Option<&std::path::Path>,
+    ) -> Result<GeminiCliResponse> {
+        let mut child = self.spawn_cli(prompt, model, auth_config, working_dir)?;
+        let (events, drained_stderr) = self.stream_events(&mut child, idle_timeout, progress_tx).await?;
+
         let status = child.wait().await
             .map_err(|e| anyhow!("Gemini CLI process error: {}", e))?;
         if !status.success() {
             let exit_code = status.code();
             let stderr_msg: String = drained_stderr.chars().take(500).collect();
 
-            // Fail fast on auth errors — no silent fallback
             if auth_config.mode == "google" && is_auth_error(exit_code, &stderr_msg) {
                 return Err(anyhow!(
                     "Gemini CLI: OAuth auth failed (exit {}). Run `gemini` to re-authenticate or switch to apikey mode. stderr: {}",
@@ -131,6 +302,63 @@ impl GeminiCli {
         }
 
         parse_stream_events(&events, model)
+    }
+
+    /// Retry loop with API key rotation on quota exhaustion.
+    /// Default key is tried first, then others in config order. On quota error (no content produced),
+    /// marks the key as exhausted and tries the next.
+    async fn call_with_key_rotation(
+        &self,
+        pool: &ApiKeyPool,
+        prompt: &str,
+        model: &str,
+        idle_timeout: Duration,
+        progress_tx: &Option<mpsc::UnboundedSender<GeminiCliProgress>>,
+        working_dir: Option<&std::path::Path>,
+    ) -> Result<GeminiCliResponse> {
+        let mut attempted = 0usize;
+        loop {
+            let entry = pool.next_available_key().await?;
+            let alias_str = entry.alias.as_deref().unwrap_or("unnamed");
+
+            attempted += 1;
+            let auth = GeminiAuthConfig {
+                mode: "apikey".to_string(),
+                api_key: Some(entry.key.clone()),
+            };
+            info!(alias = alias_str, key = %mask_api_key(&entry.key), attempt = attempted,
+                  "Gemini CLI: trying API key from pool");
+
+            let mut child = self.spawn_cli(prompt, model, &auth, working_dir)?;
+            let (events, drained_stderr) = self.stream_events(&mut child, idle_timeout, progress_tx).await?;
+
+            let status = child.wait().await
+                .map_err(|e| anyhow!("Gemini CLI process error: {}", e))?;
+
+            if status.success() {
+                return parse_stream_events(&events, model);
+            }
+
+            let exit_code = status.code();
+            let stderr_msg: String = drained_stderr.chars().take(500).collect();
+
+            // Only rotate on quota exhaustion AND no content produced yet
+            let has_content = events.iter().any(|e| {
+                e.get("type").and_then(|t| t.as_str()) == Some("message")
+                    && matches!(e.get("role").and_then(|r| r.as_str()), Some("assistant") | Some("model"))
+                    && e.get("content").and_then(|c| c.as_str()).map(|s| !s.is_empty()).unwrap_or(false)
+            });
+
+            if !has_content && is_quota_exhausted(exit_code, &stderr_msg) {
+                warn!(alias = alias_str, key = %mask_api_key(&entry.key), exit_code = exit_code.unwrap_or(-1),
+                      "Gemini CLI: API key quota exhausted, rotating to next key");
+                pool.mark_exhausted(&entry.key, entry.alias.as_deref()).await;
+                continue;
+            }
+
+            // Non-quota error → fail fast
+            return Err(anyhow!("Gemini CLI exited with {}: {}", status, stderr_msg));
+        }
     }
 
     fn spawn_cli(&self, prompt: &str, model: &str, auth: &GeminiAuthConfig, working_dir: Option<&std::path::Path>) -> Result<tokio::process::Child> {
@@ -276,7 +504,7 @@ impl GeminiCli {
     #[allow(dead_code)]
     pub async fn prompt(&self, text: &str, model: Option<&str>) -> Result<String> {
         let messages = vec![serde_json::json!({"role": "user", "content": text})];
-        let resp = self.call(&messages, model, None, None, None, None, None).await?;
+        let resp = self.call(&messages, model, None, None, None, None, None, None).await?;
         Ok(resp.content)
     }
 }
@@ -601,4 +829,67 @@ fn is_auth_error(exit_code: Option<i32>, stderr: &str) -> bool {
         || lower.contains("authentication failed")
         || lower.contains("opening authentication page")
         || lower.contains("do you want to continue")
+}
+
+/// Detect quota/rate-limit exhaustion from exit code and stderr.
+/// Gemini CLI prints "TerminalQuotaError" or "exhausted your daily quota" on quota errors.
+fn is_quota_exhausted(_exit_code: Option<i32>, stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("terminalquotaerror")
+        || lower.contains("exhausted your daily quota")
+        || lower.contains("exhausted your capacity")
+        || lower.contains("resource_exhausted")
+}
+
+/// Read API key entries from llm.yaml. Supports both formats:
+/// - String array (legacy): `["AIza...", "AIzb..."]` → no alias, no default
+/// - Object array (new):    `[{key: "AIza...", alias: "foo", default: true}]`
+/// Mixed formats allowed in the same array for backward compatibility.
+/// Also merges singular `gemini_api_key` if not already present.
+pub(crate) fn resolve_apikey_entries() -> Vec<ApiKeyEntry> {
+    let llm_yaml = missiond_core::default_mission_home().join("llm.yaml");
+    let content = match std::fs::read_to_string(&llm_yaml) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let config: serde_yaml::Value = match serde_yaml::from_str(&content) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut entries = Vec::new();
+    let mut seen_keys = std::collections::HashSet::new();
+
+    // Read plural key array (supports mixed string/object items)
+    if let Some(arr) = config.get("gemini_api_keys").and_then(|v| v.as_sequence()) {
+        for item in arr {
+            if let Some(k) = item.as_str() {
+                // Legacy string format
+                if !k.is_empty() && seen_keys.insert(k.to_string()) {
+                    entries.push(ApiKeyEntry { key: k.to_string(), alias: None, is_default: false });
+                }
+            } else if let Some(k) = item.get("key").and_then(|v| v.as_str()) {
+                // Object format: {key, alias?, default?}
+                if !k.is_empty() && seen_keys.insert(k.to_string()) {
+                    let alias = item.get("alias").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let is_default = item.get("default").and_then(|v| v.as_bool()).unwrap_or(false);
+                    entries.push(ApiKeyEntry { key: k.to_string(), alias, is_default });
+                }
+            }
+        }
+    }
+
+    // Merge singular key if not already present
+    if let Some(k) = config.get("gemini_api_key").and_then(|v| v.as_str()) {
+        if !k.is_empty() && seen_keys.insert(k.to_string()) {
+            entries.push(ApiKeyEntry { key: k.to_string(), alias: None, is_default: false });
+        }
+    }
+
+    entries
+}
+
+/// Backward-compat wrapper: returns plain key list for startup logging.
+pub(crate) fn resolve_apikey_pool() -> Vec<String> {
+    resolve_apikey_entries().into_iter().map(|e| e.key).collect()
 }

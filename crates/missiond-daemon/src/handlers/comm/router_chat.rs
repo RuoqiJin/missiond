@@ -116,6 +116,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let channel = params.get("channel")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let api_key_alias = params.get("api_key_alias")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             let task_id = params.get("task_id").and_then(|v| v.as_str()).map(|s| s.to_string());
 
             // If task_id provided, load conversation context (rolling summary + active history)
@@ -406,9 +409,12 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 if search_enabled {
                     body["tools"] = serde_json::json!([{"type": "google_search"}]);
                 }
-                // Inject channel into body for GeminiClient CLI branch to extract
+                // Inject channel + alias into body for GeminiClient CLI branch to extract
                 if let Some(ref ch) = channel {
                     body["_channel"] = serde_json::json!(ch);
+                }
+                if let Some(ref alias) = api_key_alias {
+                    body["_api_key_alias"] = serde_json::json!(alias);
                 }
 
                 let total_chars: usize = messages.iter()
