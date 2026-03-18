@@ -61,6 +61,10 @@ impl crate::db::traits::MissionStore for PgMissionStore {
     }
 }
 
+// M2-6: SQLite → PostgreSQL data migration
+#[cfg(all(feature = "sqlite", feature = "postgres"))]
+pub mod migrate_from_sqlite;
+
 // Domain trait implementations — one file per trait:
 #[cfg(feature = "postgres")]
 mod vision;
