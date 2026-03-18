@@ -8,7 +8,7 @@
 use tracing::{debug, info};
 
 use missiond_core::db::traits::MissionStore;
-use missiond_core::db::ast::ModuleAstSummary;
+use missiond_core::db::shared::ModuleAstSummary;
 use missiond_core::types::KBRememberInput;
 
 /// KB category for module summaries.

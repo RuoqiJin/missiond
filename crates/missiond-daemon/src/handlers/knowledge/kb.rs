@@ -949,7 +949,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
             for e in &entries {
                 if e.category == "credential" { continue; }
-                let sanitized_summary = missiond_core::db::MissionDB::redact_sensitive(&e.summary);
+                let sanitized_summary = missiond_core::db::shared::redact_sensitive(&e.summary);
 
                 // Calculate age in days
                 let age_days = chrono::DateTime::parse_from_rfc3339(&e.updated_at)
@@ -971,7 +971,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                             serde_json::Value::String(s) => s.clone(),
                             other => other.to_string(),
                         };
-                        let sanitized_detail = missiond_core::db::MissionDB::redact_sensitive(&detail_str);
+                        let sanitized_detail = missiond_core::db::shared::redact_sensitive(&detail_str);
                         item["detail"] = serde_json::Value::String(sanitized_detail);
                     }
                 }

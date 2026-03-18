@@ -205,7 +205,7 @@ async fn main() -> Result<()> {
 
     // M3: SQLite → PostgreSQL one-time migration CLI
     // Usage: MISSION_PG_URL=postgres://... missiond --migrate-sqlite-to-pg
-    #[cfg(feature = "postgres")]
+    #[cfg(all(feature = "sqlite", feature = "postgres"))]
     if std::env::args().any(|a| a == "--migrate-sqlite-to-pg") {
         let sqlite_path = db_path().to_string_lossy().to_string();
         let pg_url = pg_url().ok_or_else(|| anyhow!("MISSION_PG_URL env var required for migration"))?;
@@ -295,17 +295,17 @@ async fn main() -> Result<()> {
 
     let store: Arc<dyn missiond_core::db::traits::MissionStore> = {
         #[cfg(feature = "postgres")]
-        if let Some(url) = pg_url() {
+        {
+            let url = pg_url().ok_or_else(|| anyhow!(
+                "MISSION_PG_URL required. PostgreSQL is the default backend."
+            ))?;
             info!(url = %url, "Connecting to PostgreSQL...");
             let pg_store = missiond_core::db::pg::PgMissionStore::connect(&url)
                 .await
                 .map_err(|e| anyhow!("PostgreSQL connection failed: {}", e))?;
             info!("PostgreSQL store ready");
+            let _ = db_stats_callback; // PG mode: latency tracked by sqlx instrumentation
             Arc::new(pg_store)
-        } else {
-            Arc::new(missiond_core::db::sqlite::SqliteMissionStore::with_callback(
-                mission.db_arc(), db_stats_callback,
-            ))
         }
 
         #[cfg(not(feature = "postgres"))]

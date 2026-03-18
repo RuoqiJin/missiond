@@ -15,10 +15,11 @@ name = "missiond"
 path = "src/main.rs"
 
 [features]
-default = ["embeddings", "code-context"]
+default = ["embeddings", "code-context", "postgres"]
 embeddings = ["missiond-core/embeddings"]
 code-context = ["missiond-core/code-context"]
 postgres = ["missiond-core/postgres"]
+sqlite = ["missiond-core/sqlite"]
 
 [dependencies]
 tokio = { workspace = true }

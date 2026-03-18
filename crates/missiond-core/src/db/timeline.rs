@@ -2,39 +2,7 @@
 
 use super::MissionDB;
 use super::error::DbResult;
-
-/// A row from the system_timeline table.
-#[derive(Debug, Clone)]
-pub struct TimelineRow {
-    pub seq: i64,
-    pub trace_id: Option<String>,
-    pub span_id: Option<String>,
-    pub parent_span_id: Option<String>,
-    pub event_type: String,
-    pub summary: Option<String>,
-    pub payload: String,
-    pub created_at: String,
-}
-
-/// Timeline statistics returned by query_timeline_stats.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct TimelineStats {
-    pub total_events: i64,
-    pub by_type: Vec<(String, i64)>,
-    pub traced_events: i64,
-    pub unique_traces: i64,
-    pub gemini_latency: Option<LatencyStats>,
-}
-
-/// Latency percentile statistics.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct LatencyStats {
-    pub count: i64,
-    pub avg_ms: i64,
-    pub p50_ms: i64,
-    pub p90_ms: i64,
-    pub p99_ms: i64,
-}
+pub use super::shared::{TimelineRow, TimelineStats, LatencyStats};
 
 impl MissionDB {
     // ── System Timeline (Phase 6) ──

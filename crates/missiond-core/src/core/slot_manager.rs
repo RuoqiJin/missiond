@@ -2,6 +2,7 @@
 //!
 //! Manages slot configurations. Process lifecycle is handled by PTYManager.
 
+#[cfg(feature = "sqlite")]
 use crate::db::MissionDB;
 use crate::types::{Slot, SlotConfig};
 use std::collections::{HashMap, HashSet};
@@ -13,16 +14,26 @@ use tracing::{debug, info};
 /// Manages workstation configurations (process lifecycle handled by PTYManager)
 pub struct SlotManager {
     slots: Arc<RwLock<HashMap<String, Slot>>>,
+    #[cfg(feature = "sqlite")]
     db: Option<Arc<MissionDB>>,
 }
 
 impl SlotManager {
-    /// Create a new SlotManager. `db` is optional — when None (PG mode),
+    /// Create a new SlotManager (SQLite mode). `db` is optional — when None,
     /// session persistence is skipped (handled by async store instead).
+    #[cfg(feature = "sqlite")]
     pub fn new(db: Option<Arc<MissionDB>>) -> Self {
         Self {
             slots: Arc::new(RwLock::new(HashMap::new())),
             db,
+        }
+    }
+
+    /// Create a new SlotManager (PG mode — no SQLite DB).
+    #[cfg(not(feature = "sqlite"))]
+    pub fn new() -> Self {
+        Self {
+            slots: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -35,8 +46,11 @@ impl SlotManager {
             config.apply_default_traits();
 
             // Restore session_id from database (if SQLite available)
+            #[cfg(feature = "sqlite")]
             let saved_session_id = self.db.as_ref()
                 .and_then(|db| db.get_slot_session(&config.id).ok().flatten());
+            #[cfg(not(feature = "sqlite"))]
+            let saved_session_id: Option<String> = None;
 
             let traits_desc = if config.traits.is_empty() {
                 String::new()
@@ -93,6 +107,7 @@ impl SlotManager {
 
         if let Some(slot) = slots.get_mut(slot_id) {
             slot.session_id = Some(session_id.to_string());
+            #[cfg(feature = "sqlite")]
             if let Some(ref db) = self.db {
                 let _ = db.set_slot_session(slot_id, session_id);
             }
@@ -106,6 +121,7 @@ impl SlotManager {
 
         if let Some(slot) = slots.get_mut(slot_id) {
             slot.session_id = None;
+            #[cfg(feature = "sqlite")]
             if let Some(ref db) = self.db {
                 db.clear_slot_session(slot_id);
             }
@@ -145,8 +161,11 @@ impl SlotManager {
                 }
             } else {
                 // New slot
+                #[cfg(feature = "sqlite")]
                 let saved_session_id = self.db.as_ref()
                     .and_then(|db| db.get_slot_session(&config.id).ok().flatten());
+                #[cfg(not(feature = "sqlite"))]
+                let saved_session_id: Option<String> = None;
                 let slot = Slot {
                     config: config.clone(),
                     session_id: saved_session_id,
@@ -175,6 +194,7 @@ impl SlotManager {
     pub fn unregister_dynamic_slot(&self, slot_id: &str) {
         let mut slots = self.slots.write().unwrap();
         if slots.remove(slot_id).is_some() {
+            #[cfg(feature = "sqlite")]
             if let Some(ref db) = self.db {
                 db.clear_slot_session(slot_id);
             }
@@ -219,7 +239,7 @@ impl SlotReloadResult {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
     use tempfile::tempdir;

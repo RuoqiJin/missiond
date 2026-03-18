@@ -1,19 +1,7 @@
 use super::MissionDB;
 use super::error::DbResult;
 use rusqlite::params;
-
-/// Status of a single backfill phase.
-#[derive(Debug, Clone)]
-pub struct BackfillPhaseStatus {
-    pub phase: String,
-    pub status: String,       // pending, running, completed
-    pub last_cursor: i64,
-    pub total_estimated: i64,
-    pub processed: i64,
-    pub failed: i64,
-    pub started_at: Option<String>,
-    pub completed_at: Option<String>,
-}
+pub use super::shared::BackfillPhaseStatus;
 
 impl MissionDB {
     // ============ Backfill Progress ============

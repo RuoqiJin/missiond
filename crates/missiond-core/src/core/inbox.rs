@@ -2,24 +2,36 @@
 //!
 //! Manages messages from completed tasks.
 
+#[cfg(feature = "sqlite")]
 use crate::db::MissionDB;
 use crate::types::InboxMessage;
+#[cfg(feature = "sqlite")]
 use std::sync::Arc;
+#[cfg(feature = "sqlite")]
 use tracing::{debug, info};
+#[cfg(feature = "sqlite")]
 use uuid::Uuid;
 
 /// Inbox Manager
 ///
 /// Manages the message inbox for task results.
 pub struct Inbox {
+    #[cfg(feature = "sqlite")]
     db: Option<Arc<MissionDB>>,
 }
 
 impl Inbox {
-    /// Create a new Inbox. `db` is optional — when None (PG mode),
+    /// Create a new Inbox (SQLite mode). `db` is optional — when None,
     /// all operations are no-ops (handled by async store instead).
+    #[cfg(feature = "sqlite")]
     pub fn new(db: Option<Arc<MissionDB>>) -> Self {
         Self { db }
+    }
+
+    /// Create a new Inbox (PG mode — no SQLite DB).
+    #[cfg(not(feature = "sqlite"))]
+    pub fn new() -> Self {
+        Self {}
     }
 
     /// Get messages
@@ -27,13 +39,20 @@ impl Inbox {
     /// # Arguments
     /// * `unread_only` - If true, only return unread messages
     /// * `limit` - Maximum number of messages to return
+    #[cfg(feature = "sqlite")]
     pub fn get_messages(&self, unread_only: bool, limit: usize) -> Vec<InboxMessage> {
         self.db.as_ref()
             .and_then(|db| db.get_inbox_messages(unread_only, limit as i64).ok())
             .unwrap_or_default()
     }
 
+    #[cfg(not(feature = "sqlite"))]
+    pub fn get_messages(&self, _unread_only: bool, _limit: usize) -> Vec<InboxMessage> {
+        Vec::new()
+    }
+
     /// Mark a message as read
+    #[cfg(feature = "sqlite")]
     pub fn mark_read(&self, message_id: &str) {
         if let Some(ref db) = self.db {
             let _ = db.mark_inbox_read(message_id);
@@ -41,7 +60,11 @@ impl Inbox {
         }
     }
 
+    #[cfg(not(feature = "sqlite"))]
+    pub fn mark_read(&self, _message_id: &str) {}
+
     /// Mark all messages as read
+    #[cfg(feature = "sqlite")]
     pub fn mark_all_read(&self) {
         let Some(ref db) = self.db else { return };
         let messages = db.get_inbox_messages(true, 10000).unwrap_or_default();
@@ -52,7 +75,11 @@ impl Inbox {
         info!(count = count, "All messages marked as read");
     }
 
+    #[cfg(not(feature = "sqlite"))]
+    pub fn mark_all_read(&self) {}
+
     /// Get unread message count
+    #[cfg(feature = "sqlite")]
     pub fn get_unread_count(&self) -> usize {
         self.db.as_ref()
             .and_then(|db| db.get_inbox_messages(true, 10000).ok())
@@ -60,7 +87,11 @@ impl Inbox {
             .unwrap_or(0)
     }
 
+    #[cfg(not(feature = "sqlite"))]
+    pub fn get_unread_count(&self) -> usize { 0 }
+
     /// Add a message to the inbox
+    #[cfg(feature = "sqlite")]
     pub fn add_message(&self, task_id: &str, from_role: &str, content: &str) {
         let Some(ref db) = self.db else { return };
         let msg = InboxMessage {
@@ -74,9 +105,12 @@ impl Inbox {
         let _ = db.insert_inbox_message(&msg);
         debug!(message_id = %msg.id, task_id = %task_id, "Message added to inbox");
     }
+
+    #[cfg(not(feature = "sqlite"))]
+    pub fn add_message(&self, _task_id: &str, _from_role: &str, _content: &str) {}
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
 

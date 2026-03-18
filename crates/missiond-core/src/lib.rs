@@ -36,8 +36,10 @@ pub use types::{
     SkillExecutionStat, SkillTopic, SkillVersion, Slot, SlotConfig, SlotsConfig, Task, TaskEvent, TaskStatus, TaskUpdate,
 };
 
-// Re-export database
+// Re-export database (SQLite only — feature-gated)
+#[cfg(feature = "sqlite")]
 pub use db::MissionDB;
+#[cfg(feature = "sqlite")]
 pub use db::executor::DbExecutor;
 
 // Re-export semantic parser types
