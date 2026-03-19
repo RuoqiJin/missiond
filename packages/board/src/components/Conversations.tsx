@@ -452,6 +452,9 @@ export function Conversations() {
   const [viewMode, setViewMode] = useState<'conversations' | 'workers' | 'gemini'>('conversations');
   const [showList, setShowList] = useState(true); // mobile: toggle list/detail
   const [expandedParents, setExpandedParents] = useState<Set<string>>(new Set());
+  const [hasMore, setHasMore] = useState(false); // whether more messages exist beyond loaded window
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [totalMessageCount, setTotalMessageCount] = useState(0);
 
   const fetchConversations = useCallback(async () => {
     setLoading(true);
@@ -477,27 +480,53 @@ export function Conversations() {
     setLoading(false);
   }, [statusFilter]);
 
+  const PAGE_SIZE = 500;
+
   const fetchMessages = useCallback(async (sessionId: string, withLabels?: boolean) => {
     setLoadingMessages(true);
     setSearchResults(null);
     try {
       const labelsParam = withLabels ? '&labels=1' : '';
-      const res = await fetch(`/api/conversations?sessionId=${encodeURIComponent(sessionId)}&tail=500${labelsParam}`);
+      // Load from beginning (sinceId=0) instead of tail
+      const res = await fetch(`/api/conversations?sessionId=${encodeURIComponent(sessionId)}&sinceId=0&tail=${PAGE_SIZE}${labelsParam}`);
       if (res.ok) {
         const data = await res.json();
-        setMessages(data.messages || []);
+        const msgs = data.messages || [];
+        setMessages(msgs);
         setEvents(data.events || []);
         setJsonlPath(data.conversation?.jsonlPath || null);
         setLabelsMap(data.labels || {});
+        const total = data.conversation?.messageCount || 0;
+        setTotalMessageCount(total);
+        setHasMore(msgs.length >= PAGE_SIZE);
       }
     } catch {
       setMessages([]);
       setEvents([]);
       setJsonlPath(null);
       setLabelsMap({});
+      setHasMore(false);
     }
     setLoadingMessages(false);
   }, []);
+
+  const loadMoreMessages = useCallback(async () => {
+    if (!selectedId || loadingMore || !hasMore || messages.length === 0) return;
+    setLoadingMore(true);
+    try {
+      const lastId = messages[messages.length - 1].id;
+      const res = await fetch(`/api/conversations?sessionId=${encodeURIComponent(selectedId)}&sinceId=${lastId}&tail=${PAGE_SIZE}`);
+      if (res.ok) {
+        const data = await res.json();
+        const newMsgs: ConversationMessage[] = data.messages || [];
+        if (newMsgs.length > 0) {
+          setMessages(prev => [...prev, ...newMsgs]);
+        }
+        setHasMore(newMsgs.length >= PAGE_SIZE);
+      }
+    } catch { /* ignore */ }
+    setLoadingMore(false);
+  }, [selectedId, loadingMore, hasMore, messages]);
 
   const handleSearch = useCallback(async () => {
     if (!search.trim()) {
@@ -984,6 +1013,17 @@ export function Conversations() {
                       )}
                     </div>
                   ))}
+                  {hasMore && (
+                    <div className="flex justify-center py-4">
+                      <button
+                        onClick={loadMoreMessages}
+                        disabled={loadingMore}
+                        className="px-4 py-2 text-sm text-neutral-400 bg-neutral-800/50 rounded-lg border border-neutral-700/50 hover:bg-neutral-700/50 hover:text-neutral-300 transition-colors disabled:opacity-50"
+                      >
+                        {loadingMore ? '加载中...' : `加载更多 (已显示 ${messages.length}${totalMessageCount > 0 ? ` / ${totalMessageCount}` : ''})`}
+                      </button>
+                    </div>
+                  )}
                 </>
               )}
             </div>

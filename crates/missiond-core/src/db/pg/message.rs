@@ -12,7 +12,7 @@ impl MessageStore for PgMissionStore {
     async fn insert_conversation_message(&self, msg: &ConversationMessage) -> DbResult<i64> {
         let row: (i64,) = sqlx::query_as(
             "INSERT INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10, $11, $12, $13, $14, $15, $16)
              ON CONFLICT DO NOTHING
              RETURNING id"
         )
@@ -46,7 +46,7 @@ impl MessageStore for PgMissionStore {
         for msg in messages {
             let row: Option<(i64,)> = sqlx::query_as(
                 "INSERT INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10, $11, $12, $13, $14, $15, $16)
                  ON CONFLICT DO NOTHING
                  RETURNING id"
             )
@@ -137,16 +137,16 @@ impl MessageStore for PgMissionStore {
     }
 
     async fn get_messages_around(&self, message_id: i64, before: i64, after: i64) -> DbResult<Option<(String, Vec<ConversationMessage>)>> {
-        // Resolve session_id from anchor message
-        let session_row: Option<(String,)> = sqlx::query_as(
-            "SELECT session_id FROM conversation_messages WHERE id = $1"
+        // Resolve session_id + timestamp from anchor message
+        let anchor_row: Option<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT session_id, timestamp FROM conversation_messages WHERE id = $1"
         )
         .bind(message_id)
         .fetch_optional(&self.pool)
         .await?;
 
-        let session_id = match session_row {
-            Some((sid,)) => sid,
+        let (session_id, anchor_ts) = match anchor_row {
+            Some(r) => r,
             None => return Ok(None),
         };
 
@@ -155,15 +155,15 @@ impl MessageStore for PgMissionStore {
                 SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
                        tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count
                 FROM conversation_messages
-                WHERE session_id = $1 AND id < $2
-                ORDER BY id DESC LIMIT $3
+                WHERE session_id = $1 AND (timestamp < $5 OR (timestamp = $5 AND id < $2))
+                ORDER BY timestamp DESC, id DESC LIMIT $3
             ),
             after_msgs AS (
                 SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
                        tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count
                 FROM conversation_messages
-                WHERE session_id = $1 AND id > $2
-                ORDER BY id ASC LIMIT $4
+                WHERE session_id = $1 AND (timestamp > $5 OR (timestamp = $5 AND id > $2))
+                ORDER BY timestamp ASC, id ASC LIMIT $4
             ),
             anchor AS (
                 SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
@@ -176,12 +176,13 @@ impl MessageStore for PgMissionStore {
                 SELECT * FROM anchor
                 UNION ALL
                 SELECT * FROM after_msgs
-            ) combined ORDER BY id ASC"
+            ) combined ORDER BY timestamp ASC, id ASC"
         )
         .bind(&session_id)
         .bind(message_id)
         .bind(before)
         .bind(after)
+        .bind(anchor_ts)
         .fetch_all(&self.pool)
         .await?;
 
@@ -257,7 +258,7 @@ impl MessageStore for PgMissionStore {
         }
         if let Some(ta) = time_after {
             param_idx += 1;
-            conditions.push(format!("m.timestamp >= ${}", param_idx));
+            conditions.push(format!("m.timestamp >= ${}::timestamptz", param_idx));
             bind_values.push(ta.to_string());
         }
 

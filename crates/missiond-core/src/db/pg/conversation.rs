@@ -65,7 +65,8 @@ impl PgMissionStore {
             message_uuid: row.get("message_uuid"),
             parent_uuid: row.get("parent_uuid"),
             model: row.get("model"),
-            timestamp: row.get("timestamp"),
+            timestamp: row.get::<chrono::DateTime<chrono::Utc>, _>("timestamp")
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             metadata: row.get("metadata"),
             tool_name: row.get("tool_name"),
             raw_role: row.get("raw_role"),
@@ -153,6 +154,20 @@ impl ConversationStore for PgMissionStore {
         .bind(&conv.conversation_type)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    async fn ensure_conversation_exists(&self, session_id: &str, project_path: &str, jsonl_path: &str) -> DbResult<()> {
+        sqlx::query(
+            "INSERT INTO conversations (id, project, source, jsonl_path, message_count, started_at, status, conversation_type)
+             VALUES ($1, $2, 'claude_cli', $3, 0, NOW(), 'active', 'user')
+             ON CONFLICT (id) DO NOTHING"
+        )
+            .bind(session_id)
+            .bind(project_path)
+            .bind(jsonl_path)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -397,7 +412,7 @@ impl ConversationStore for PgMissionStore {
             "SELECT COUNT(DISTINCT c.id) FROM conversations c
              JOIN conversation_messages m ON c.id = m.session_id
              WHERE c.conversation_type = 'user'
-               AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)
+               AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)::timestamptz
                AND m.role IN ('user', 'assistant')"
         )
         .fetch_one(&self.pool)
@@ -411,7 +426,7 @@ impl ConversationStore for PgMissionStore {
              FROM conversations c
              JOIN conversation_messages m ON c.id = m.session_id
              WHERE c.conversation_type = 'user'
-               AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)
+               AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)::timestamptz
                AND m.role IN ('user', 'assistant')
              GROUP BY c.id
              ORDER BY cnt DESC
@@ -789,7 +804,7 @@ impl ConversationStore for PgMissionStore {
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT c.id FROM conversations c
              WHERE c.status = 'active'
-               AND (SELECT MAX(m.timestamp) FROM conversation_messages m WHERE m.session_id = c.id) < $1"
+               AND (SELECT MAX(m.timestamp) FROM conversation_messages m WHERE m.session_id = c.id) < $1::timestamptz"
         )
         .bind(cutoff)
         .fetch_all(&self.pool)
@@ -966,10 +981,10 @@ impl ConversationStore for PgMissionStore {
              FROM conversation_messages m
              JOIN conversations c ON c.id = m.session_id
              WHERE c.conversation_type = 'user'
-               AND m.timestamp >= $1
-               AND m.timestamp > COALESCE(c.memory_forwarded_at, $1)
+               AND m.timestamp >= $1::timestamptz
+               AND m.timestamp > COALESCE(c.memory_forwarded_at, $1)::timestamptz
                AND m.role IN ('user', 'assistant')
-             ORDER BY c.started_at DESC, m.id ASC"
+             ORDER BY c.started_at DESC, m.timestamp ASC, m.id ASC"
         )
         .bind(today)
         .fetch_all(&self.pool)
@@ -1008,7 +1023,7 @@ impl ConversationStore for PgMissionStore {
              FROM conversation_messages m
              JOIN conversations c ON c.id = m.session_id
              WHERE c.conversation_type = 'user'
-               AND m.timestamp > COALESCE(c.user_voice_forwarded_at, c.started_at)
+               AND m.timestamp > COALESCE(c.user_voice_forwarded_at, c.started_at)::timestamptz
                AND m.role = 'user'
              ORDER BY m.timestamp ASC"
         )
@@ -1050,11 +1065,11 @@ impl ConversationStore for PgMissionStore {
                        m.parent_uuid, m.model, m.timestamp, m.metadata, m.tool_name,
                        m.raw_role, m.content_types, m.has_image, m.has_tool_use, m.has_tool_result, m.token_count,
                        COALESCE(c.project, '') as c_project,
-                       ROW_NUMBER() OVER(PARTITION BY m.session_id ORDER BY m.timestamp ASC) as rn
+                       ROW_NUMBER() OVER(PARTITION BY m.session_id ORDER BY m.timestamp ASC, m.id ASC) as rn
                 FROM conversation_messages m
                 JOIN conversations c ON c.id = m.session_id
                 WHERE c.conversation_type = 'user'
-                  AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)
+                  AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)::timestamptz
                   AND m.role IN ('user', 'assistant', 'tool_result')
             )
             SELECT id, session_id, role, content, raw_content, message_uuid,

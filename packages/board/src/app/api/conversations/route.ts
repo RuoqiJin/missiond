@@ -9,6 +9,7 @@ export async function GET(req: NextRequest) {
     // Get messages for a specific conversation
     if (sessionId) {
       const tail = req.nextUrl.searchParams.get('tail') || '200';
+      const sinceId = req.nextUrl.searchParams.get('sinceId');
       const includeLabels = req.nextUrl.searchParams.get('labels') === '1';
       // Fetch messages and events in parallel
       const [msgResult, eventsResult] = await Promise.all([
@@ -16,6 +17,7 @@ export async function GET(req: NextRequest) {
           sessionId,
           tail: Number(tail),
           includeRaw: true,
+          ...(sinceId != null && { sinceId: Number(sinceId) }),
           ...(includeLabels && { includeLabels: true }),
         }),
         callTool('mission_conversation_events', {

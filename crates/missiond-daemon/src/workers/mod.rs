@@ -14,6 +14,7 @@ pub mod pty_event_worker;
 pub mod retro_worker;
 pub mod arch_maintenance_worker;
 pub mod strategy_worker;
+pub mod reconcile_worker;
 pub mod registry;
 
 use std::future::Future;

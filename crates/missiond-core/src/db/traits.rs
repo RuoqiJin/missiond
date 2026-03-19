@@ -27,6 +27,9 @@ pub use crate::ast::CodeNode;
 pub trait ConversationStore: Send + Sync {
     // -- conversation.rs: session CRUD --
     async fn upsert_conversation(&self, conv: &Conversation) -> DbResult<()>;
+    /// Insert conversation record only if it doesn't exist (DO NOTHING on conflict).
+    /// Used by ReconcileWorker to avoid overwriting conversation_type/status/message_count.
+    async fn ensure_conversation_exists(&self, session_id: &str, project_path: &str, jsonl_path: &str) -> DbResult<()>;
     async fn get_conversation(&self, id: &str) -> DbResult<Option<Conversation>>;
     async fn list_conversations(&self, status: Option<&str>, limit: i64, conv_type: Option<&str>, task_id: Option<&str>, since: Option<&str>, until: Option<&str>, source: Option<&str>) -> DbResult<Vec<Conversation>>;
     async fn get_child_conversations(&self, parent_session_id: &str) -> DbResult<Vec<Conversation>>;
@@ -598,6 +601,11 @@ pub trait ObservabilityStore: Send + Sync {
     async fn load_watcher_cursors(&self) -> DbResult<HashMap<String, u64>>;
     async fn upsert_watcher_cursors_batch(&self, cursors: &HashMap<String, u64>) -> DbResult<()>;
     async fn delete_watcher_cursor(&self, file_path: &str) -> DbResult<()>;
+
+    // -- reconcile_watermarks --
+    async fn get_reconcile_watermark(&self, path: &str) -> DbResult<Option<i64>>;
+    async fn upsert_reconcile_watermark(&self, path: &str, size: i64) -> DbResult<()>;
+    async fn get_all_reconcile_watermarks(&self) -> DbResult<HashMap<String, i64>>;
 
     // -- router_chat.rs --
     async fn router_chat_get_or_create(&self, task_id: &str, model: &str) -> DbResult<String>;
