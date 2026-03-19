@@ -1,8 +1,8 @@
 //! Architecture Maintenance Worker — auto-updates YAML manifests when structural code changes land.
 //!
 //! Subscribes to `GitCommitDetected` events from the EventBus, filters for structural changes
-//! (new modules, trait changes, Cargo.toml edits, etc.), and calls Sonnet to update the
-//! corresponding `docs/architectures/*.yaml` manifest.
+//! (new modules, trait changes, Cargo.toml edits, etc.), and routes through
+//! SlotManager → persistent Claude Code (Sonnet) slot to update the YAML manifest.
 //!
 //! Design doc: `docs/designs/arch-maintenance-and-strategic-analysis.md`
 
@@ -12,12 +12,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-use serde_json::json;
 use tracing::{debug, info, warn};
 
 use crate::event_bus::{DaemonEvent, TimelineEvent};
-use crate::gemini_client::REQUEST_CALLER;
-use crate::embedding_worker::resolve_llm_credentials;
 use crate::state::AppState;
 
 use super::{BackgroundWorker, WorkerContext};
@@ -40,7 +37,7 @@ impl BackgroundWorker for ArchMaintenanceWorker {
 
     fn dependencies(&self) -> Vec<crate::control_tree::Dependency> {
         use crate::control_tree::{Dependency, CtlProvider};
-        vec![Dependency::Provider(CtlProvider::Gemini)]
+        vec![Dependency::Provider(CtlProvider::Sonnet)]
     }
 
     async fn run(self, state: Arc<AppState>, mut ctx: WorkerContext) {
@@ -374,37 +371,11 @@ async fn process_commit(state: &AppState, repo: &str, hash: &str) -> Result<bool
 - 输出纯 YAML，不要用 ```yaml 包裹"#
     );
 
-    let (base_url, jwt) = resolve_llm_credentials().await?;
-    let model = "claude-sonnet-4-6";
-    let url = format!("{}/v1/chat/completions", base_url);
-    let body = json!({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 16384,
-    });
-
-    // Use extended timeout (600s) — YAML manifests are ~8KB, Gemini needs time to
-    // generate the full output. Default 120s idle timeout causes frequent timeouts.
-    let result = REQUEST_CALLER
-        .scope("arch_maintenance".to_string(), async {
-            state
-                .gemini
-                .send_with_timeout(
-                    &state.http_client,
-                    &url,
-                    &jwt,
-                    &body,
-                    Some(Duration::from_secs(600)),
-                )
-                .await
-        })
+    // Route through SlotManager → persistent Claude Code (Sonnet) slot
+    let content = state
+        .slot_manager
+        .execute("arch_maintenance", &prompt)
         .await?;
-
-    let content = result
-        .pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("(empty response)")
-        .to_string();
 
     // 7. Parse response
     let content = strip_markdown_code_block(&content);

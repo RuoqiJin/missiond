@@ -17,6 +17,7 @@ use crate::minimax_gateway::MinimaxHandle;
 use crate::sonnet_gateway::SonnetHandle;
 use crate::prompts::PromptStore;
 use crate::slot_dispatch::SlotDispatchGuard;
+use crate::slot_orchestrator::AgentSlotManager;
 use crate::workers::WorkerRegistry;
 
 // --- Well-known slot IDs (shared across all daemon modules) ---
@@ -207,6 +208,8 @@ pub(crate) struct AppState {
     pub(crate) board_dispatch_notify: Arc<tokio::sync::Notify>,
     /// Gemini watch: background health probe active flag.
     pub(crate) gemini_watch_active: Arc<std::sync::atomic::AtomicBool>,
+    /// Unified slot orchestrator — routes task_type → engine sub-manager (Claude Code / Gemini CLI).
+    pub(crate) slot_manager: Arc<AgentSlotManager>,
     /// Gemini watch: abort handle for the background probe task.
     pub(crate) gemini_watch_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Gemini watch: attempt counter (for status reporting).

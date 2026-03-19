@@ -140,12 +140,18 @@ fn duration_until_next_07_gmt8() -> Duration {
 }
 
 /// Gemini CLI subprocess wrapper.
+///
+/// Supports two transport modes:
+/// - **Subprocess (NDJSON)**: `gemini -o stream-json -p "prompt"` — legacy, currently broken
+/// - **PTY**: `gemini --yolo -m model` in interactive terminal — active mode
 #[derive(Clone, Debug)]
 pub(crate) struct GeminiCli {
     binary: String,
     default_model: String,
     idle_timeout: Duration,
     api_key_pool: Option<Arc<ApiKeyPool>>,
+    /// PTY-based transport. When set, all calls route through PTY instead of subprocess.
+    pty_transport: Option<Arc<super::gemini_pty::GeminiPtyTransport>>,
 }
 
 /// Response from a Gemini CLI invocation.
@@ -173,7 +179,18 @@ pub(crate) struct GeminiCliProgress {
 
 impl GeminiCli {
     pub fn new(binary: String, default_model: String, idle_timeout: Duration, api_key_pool: Option<Arc<ApiKeyPool>>) -> Self {
-        Self { binary, default_model, idle_timeout, api_key_pool }
+        Self { binary, default_model, idle_timeout, api_key_pool, pty_transport: None }
+    }
+
+    /// Enable PTY transport mode. All subsequent calls route through PTY.
+    pub fn with_pty(mut self, transport: Arc<super::gemini_pty::GeminiPtyTransport>) -> Self {
+        self.pty_transport = Some(transport);
+        self
+    }
+
+    /// Check if PTY transport is enabled.
+    pub fn has_pty(&self) -> bool {
+        self.pty_transport.is_some()
     }
 
     /// Core method: convert messages to prompt, call CLI with stream-json, parse NDJSON events.
@@ -201,6 +218,17 @@ impl GeminiCli {
 
         if prompt.is_empty() {
             return Err(anyhow!("Empty prompt after message conversion"));
+        }
+
+        // PTY transport: bypass subprocess NDJSON entirely
+        if let Some(ref pty) = self.pty_transport {
+            info!(model, prompt_len = prompt.len(), idle_timeout_secs = idle_timeout.as_secs(),
+                  "Gemini CLI: calling via PTY transport");
+            let content = pty.call(&prompt, idle_timeout).await?;
+            return Ok(GeminiCliResponse {
+                content,
+                model: model.to_string(),
+            });
         }
 
         info!(model, prompt_len = prompt.len(), idle_timeout_secs = idle_timeout.as_secs(),
