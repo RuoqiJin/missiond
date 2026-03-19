@@ -51,5 +51,18 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
+        ToolDefinition::new(
+            "mission_daemon_update",
+            "一键更新 MissionD daemon。执行 cargo build → 替换二进制 → 重启进程。构建在前台同步执行，完成后通过 detached 脚本重启（MCP 返回后 2s 执行）。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "skip_build": {
+                        "type": "boolean",
+                        "description": "跳过 cargo build，直接用现有二进制重启 (默认 false)"
+                    }
+                }
+            }),
+        ),
     ]
 }

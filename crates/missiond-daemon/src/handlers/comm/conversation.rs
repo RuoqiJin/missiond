@@ -833,11 +833,19 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     })))
                 }
                 "backfill" => {
-                    let _ = state.embedding_tx.try_send(EmbeddingTask::BackfillAll);
+                    // Bypass backfill_enabled gate: explicit MCP trigger always runs.
+                    // Read resume cursor from DB to continue where last run left off.
+                    let cursor = state.store.backfill_get_phase("message_embeddings").await
+                        .ok().flatten().map(|s| s.last_cursor).unwrap_or(0);
+                    let _ = state.embedding_tx.try_send(EmbeddingTask::RunBackfillPhase {
+                        phase: crate::state::BackfillPhase::MessageEmbeddings,
+                        cursor,
+                    });
                     let msg_stats = state.store.message_embedding_stats().await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json_pretty(&serde_json::json!({
                         "status": "triggered",
+                        "resumeCursor": cursor,
                         "messageEmbeddings": msg_stats,
                     })))
                 }

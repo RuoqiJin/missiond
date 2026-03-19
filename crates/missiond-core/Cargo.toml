@@ -83,6 +83,7 @@ tree-sitter-python = { workspace = true, optional = true }
 # WebSocket
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
+libc = "0.2.183"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }

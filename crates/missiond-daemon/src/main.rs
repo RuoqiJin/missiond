@@ -508,11 +508,12 @@ async fn main() -> Result<()> {
 
     let state_cc_tasks = Arc::clone(&cc_tasks);
 
-    // SlotManager: pre-clone Arcs needed for initialization (moved into AppState below)
+    // Pre-clone Arcs needed for initialization (moved into AppState below)
     let slot_mgr_pty = Arc::clone(&pty);
     let slot_mgr_store = Arc::clone(&store);
     let slot_mgr_pty2 = Arc::clone(&pty);
     let slot_mgr_store2 = Arc::clone(&store);
+    let pty_for_gemini_transport = Arc::clone(&pty);
 
     let state = AppState {
         mission,
@@ -619,12 +620,17 @@ async fn main() -> Result<()> {
                             let initial_count = gemini_cli::resolve_apikey_pool().len();
                             info!(count = initial_count, "Gemini API key pool: {} keys (hot-reload enabled)", initial_count);
                             let api_key_pool = std::sync::Arc::new(gemini_cli::ApiKeyPool::new());
-                            // PTY transport: interactive terminal session replaces broken NDJSON subprocess
+                            // PTY transport: uses GeminiPtyDriver → PTYManager (unified)
                             let pty_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+                            let gemini_driver_for_transport = llm::gemini_driver::GeminiPtyDriver::new(pty_for_gemini_transport);
                             let pty_transport = std::sync::Arc::new(
-                                llm::gemini_pty::GeminiPtyTransport::new(pty_cwd),
+                                llm::gemini_pty::GeminiPtyTransport::new(
+                                    gemini_driver_for_transport,
+                                    "slot-gemini-router".to_string(),
+                                    pty_cwd,
+                                ),
                             );
-                            info!("Gemini PTY transport initialized");
+                            info!("Gemini PTY transport initialized (via GeminiPtyDriver → PTYManager)");
                             gemini_client::GeminiClient::with_cli(gemini_cli::GeminiCli::new(
                                 cli_cfg.binary,
                                 cli_cfg.model,
@@ -697,8 +703,9 @@ async fn main() -> Result<()> {
                 slot_mgr_pty,
                 slot_mgr_store,
             ));
+            let gemini_driver_for_slots = llm::gemini_driver::GeminiPtyDriver::new(slot_mgr_pty2);
             let gemini_mgr = Arc::new(slot_orchestrator::GeminiCliSlotManager::new(
-                slot_mgr_pty2,
+                gemini_driver_for_slots,
                 slot_mgr_store2,
             ));
             Arc::new(slot_orchestrator::AgentSlotManager::new(

@@ -29,7 +29,9 @@ pub trait ConversationStore: Send + Sync {
     async fn upsert_conversation(&self, conv: &Conversation) -> DbResult<()>;
     /// Insert conversation record only if it doesn't exist (DO NOTHING on conflict).
     /// Used by ReconcileWorker to avoid overwriting conversation_type/status/message_count.
-    async fn ensure_conversation_exists(&self, session_id: &str, project_path: &str, jsonl_path: &str) -> DbResult<()>;
+    async fn ensure_conversation_exists(&self, session_id: &str, project_path: &str, jsonl_path: &str, status: &str, conversation_type: &str) -> DbResult<()>;
+    /// Refresh message_count from actual rows in conversation_messages.
+    async fn refresh_conversation_message_count(&self, session_id: &str) -> DbResult<()>;
     async fn get_conversation(&self, id: &str) -> DbResult<Option<Conversation>>;
     async fn list_conversations(&self, status: Option<&str>, limit: i64, conv_type: Option<&str>, task_id: Option<&str>, since: Option<&str>, until: Option<&str>, source: Option<&str>) -> DbResult<Vec<Conversation>>;
     async fn get_child_conversations(&self, parent_session_id: &str) -> DbResult<Vec<Conversation>>;

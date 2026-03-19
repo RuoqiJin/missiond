@@ -13,8 +13,13 @@ impl ConversationStore for SqliteMissionStore {
         self.executor.run(move |db| db.upsert_conversation(&conv)).await
     }
 
-    async fn ensure_conversation_exists(&self, _session_id: &str, _project_path: &str, _jsonl_path: &str) -> DbResult<()> {
+    async fn ensure_conversation_exists(&self, _session_id: &str, _project_path: &str, _jsonl_path: &str, _status: &str, _conversation_type: &str) -> DbResult<()> {
         // SQLite stub — ReconcileWorker only runs with PG
+        Ok(())
+    }
+
+    async fn refresh_conversation_message_count(&self, _session_id: &str) -> DbResult<()> {
+        // SQLite stub
         Ok(())
     }
 
