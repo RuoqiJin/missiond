@@ -1,6 +1,7 @@
 pub mod gemini_client;
 pub mod gemini_cli;
 pub mod gemini_file_api;
+pub mod gemini_pty;
 pub mod minimax_client;
 pub mod minimax_gateway;
 pub mod sonnet_gateway;

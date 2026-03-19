@@ -24,6 +24,7 @@ mod event_bus;
 mod event_router;
 mod supervisor;
 mod slot_dispatch;
+mod slot_orchestrator;
 
 // ── Re-exports for backward-compatible `use crate::xxx` paths ──
 use llm::{gemini_client, gemini_cli, minimax_client, minimax_gateway, sonnet_gateway, codex_cli, llm_gate, llm_gateway, prompts};
@@ -388,7 +389,13 @@ async fn main() -> Result<()> {
     let cc_tasks = Arc::new(Mutex::new(cc));
 
     // Conversation logger: subscribe to watcher events (processed in main select loop)
+    // IMPORTANT: subscribe BEFORE run_startup_catchup() — catchup sends to broadcast channel,
+    // receivers must exist or messages are silently lost (root cause of startup data loss).
     let conv_logger_rx = cc_tasks.lock().await.subscribe();
+
+    // NOTE: run_startup_catchup() is deferred to AFTER ConversationLoggerWorker is spawned.
+    // Receiver exists (subscribe above) but Worker must be actively consuming before catchup
+    // sends messages — otherwise messages accumulate in broadcast buffer with no consumer.
     // PTY conversation logger: subscribe to manager events
     let pty_logger_rx = pty.subscribe();
 
@@ -500,6 +507,13 @@ async fn main() -> Result<()> {
     }
 
     let state_cc_tasks = Arc::clone(&cc_tasks);
+
+    // SlotManager: pre-clone Arcs needed for initialization (moved into AppState below)
+    let slot_mgr_pty = Arc::clone(&pty);
+    let slot_mgr_store = Arc::clone(&store);
+    let slot_mgr_pty2 = Arc::clone(&pty);
+    let slot_mgr_store2 = Arc::clone(&store);
+
     let state = AppState {
         mission,
         store,
@@ -600,17 +614,23 @@ async fn main() -> Result<()> {
                     if let Ok(config) = serde_yaml::from_str::<embedding_worker::LlmConfig>(&content) {
                         if config.provider == "gemini-cli" {
                             let cli_cfg = config.gemini_cli.unwrap_or_default();
-                            info!(binary = %cli_cfg.binary, model = %cli_cfg.model, "LLM provider: gemini-cli");
+                            info!(binary = %cli_cfg.binary, model = %cli_cfg.model, "LLM provider: gemini-cli (PTY transport)");
                             // API key pool: hot-reloads from llm.yaml on each call, no restart needed
                             let initial_count = gemini_cli::resolve_apikey_pool().len();
                             info!(count = initial_count, "Gemini API key pool: {} keys (hot-reload enabled)", initial_count);
                             let api_key_pool = std::sync::Arc::new(gemini_cli::ApiKeyPool::new());
+                            // PTY transport: interactive terminal session replaces broken NDJSON subprocess
+                            let pty_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+                            let pty_transport = std::sync::Arc::new(
+                                llm::gemini_pty::GeminiPtyTransport::new(pty_cwd),
+                            );
+                            info!("Gemini PTY transport initialized");
                             gemini_client::GeminiClient::with_cli(gemini_cli::GeminiCli::new(
                                 cli_cfg.binary,
                                 cli_cfg.model,
                                 std::time::Duration::from_secs(cli_cfg.timeout),
                                 Some(api_key_pool),
-                            ), event_tx)
+                            ).with_pty(pty_transport), event_tx)
                         } else {
                             info!(provider = %config.provider, "LLM provider: HTTP router");
                             gemini_client::GeminiClient::new(event_tx)
@@ -672,6 +692,20 @@ async fn main() -> Result<()> {
         control_manager: Arc::clone(&control_manager_arc),
         slot_dispatch: Arc::new(slot_dispatch::SlotDispatchGuard::new()),
         board_dispatch_notify: Arc::new(tokio::sync::Notify::new()),
+        slot_manager: {
+            let cc_mgr = Arc::new(slot_orchestrator::ClaudeCodeSlotManager::new(
+                slot_mgr_pty,
+                slot_mgr_store,
+            ));
+            let gemini_mgr = Arc::new(slot_orchestrator::GeminiCliSlotManager::new(
+                slot_mgr_pty2,
+                slot_mgr_store2,
+            ));
+            Arc::new(slot_orchestrator::AgentSlotManager::new(vec![
+                (missiond_core::types::CliEngine::ClaudeCode, cc_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>),
+                (missiond_core::types::CliEngine::Gemini, gemini_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>),
+            ]))
+        },
         gemini_watch_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         gemini_watch_handle: Arc::new(tokio::sync::Mutex::new(None)),
         gemini_watch_attempts: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -690,6 +724,42 @@ async fn main() -> Result<()> {
             ack_tx
         },
     };
+
+    // Register SlotManager task configs
+    {
+        use missiond_core::types::{CliEngine, Lifecycle};
+        state.slot_manager.register(slot_orchestrator::SlotTaskConfig {
+            task_type: "arch_maintenance".to_string(),
+            engine: CliEngine::ClaudeCode,
+            lifecycle: Lifecycle::Persistent,
+            slot_id: Some("slot-arch-maint".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            timeout: std::time::Duration::from_secs(600),
+            cwd: std::path::PathBuf::from("/Users/jinchen/Projects/missiond"),
+            skip_permissions: true,
+        }).await?;
+        state.slot_manager.register(slot_orchestrator::SlotTaskConfig {
+            task_type: "strategy_analyst".to_string(),
+            engine: CliEngine::Gemini,
+            lifecycle: Lifecycle::Persistent,
+            slot_id: Some("slot-gemini-strategy".to_string()),
+            model: None, // Uses GEMINI_MODEL constant in controller
+            timeout: std::time::Duration::from_secs(600),
+            cwd: std::path::PathBuf::from("/Users/jinchen/Projects/missiond"),
+            skip_permissions: true,
+        }).await?;
+        state.slot_manager.register(slot_orchestrator::SlotTaskConfig {
+            task_type: "gemini_router".to_string(),
+            engine: CliEngine::Gemini,
+            lifecycle: Lifecycle::Persistent,
+            slot_id: Some("slot-gemini-router".to_string()),
+            model: None,
+            timeout: std::time::Duration::from_secs(120),
+            cwd: std::path::PathBuf::from("/Users/jinchen/Projects/missiond"),
+            skip_permissions: true,
+        }).await?;
+        info!("SlotManager: 3 tasks registered (arch_maintenance, strategy_analyst, gemini_router)");
+    }
 
     // Late-bind context enricher for Jarvis chat completions
     {
@@ -1173,6 +1243,18 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     );
 
+    // Startup catchup: MUST run AFTER ConversationLoggerWorker is spawned.
+    // Worker is now actively consuming from broadcast channel, so catchup messages
+    // (anchor_check + gap recovery) will be processed instead of silently lost.
+    {
+        let catchup_cc = Arc::clone(&state.cc_tasks);
+        tokio::spawn(async move {
+            // Yield to let ConversationLoggerWorker's run_loop reach its first recv()
+            tokio::task::yield_now().await;
+            catchup_cc.lock().await.run_startup_catchup().await;
+        });
+    }
+
     // PTY manager event stream (state changes, confirm, exit, MCP errors)
     workers::spawn_worker(
         workers::pty_event_worker::PtyEventWorker { pty_rx: pty_logger_rx },
@@ -1192,6 +1274,13 @@ async fn main() -> Result<()> {
     );
 
     // Phase 3d: StrategyWorker removed — strategy analysis now event-driven via session_reflection_consumer
+
+    // Daily reconcile worker — JSONL-to-DB integrity checker (safety net for missed FSEvents)
+    workers::spawn_worker(
+        workers::reconcile_worker::ReconcileWorker,
+        Arc::new(state.clone()),
+        shutdown_rx.clone(),
+    );
 
     info!("All event handlers started (isolated tasks)");
 

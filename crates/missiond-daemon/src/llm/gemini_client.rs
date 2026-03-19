@@ -127,13 +127,18 @@ impl GeminiClient {
         }
     }
 
-    /// Create a CLI-mode client that routes through Gemini CLI subprocess.
+    /// Create a CLI-mode client that routes through Gemini CLI subprocess or PTY.
+    ///
+    /// Semaphore is 1 when PTY transport is active (PTY sessions are serial).
     pub fn with_cli(cli: GeminiCli, event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>) -> Self {
         // CLI mode: relax rate limit (Google One AI Pro has generous limits)
         let quota = Quota::per_minute(NonZeroU32::new(60).unwrap());
+        // PTY mode: 1 concurrent (spawn-per-call, serial queue)
+        // Subprocess mode: 3 concurrent (legacy, currently broken)
+        let concurrency = if cli.has_pty() { 1 } else { 3 };
         Self {
             rate_limiter: Arc::new(RateLimiter::direct(quota)),
-            semaphore: Arc::new(Semaphore::new(3)),
+            semaphore: Arc::new(Semaphore::new(concurrency)),
             cli: Some(Arc::new(cli)),
             event_tx,
             request_count: Arc::new(AtomicU64::new(0)),
@@ -186,8 +191,22 @@ impl GeminiClient {
             .unwrap_or(0);
 
         // 1. Acquire concurrency permit (measure queue wait)
+        //    PTY mode (semaphore=1): queue timeout prevents starvation.
+        //    A long-running request (strategy_analyst 600s) would otherwise block
+        //    user-facing requests (router_chat) indefinitely.
         let queue_start = Instant::now();
-        let permit = self.semaphore.clone().acquire_owned().await
+        let queue_timeout = if self.cli.as_ref().map_or(false, |c| c.has_pty()) {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(300) // HTTP mode: more generous
+        };
+        let permit = tokio::time::timeout(queue_timeout, self.semaphore.clone().acquire_owned())
+            .await
+            .map_err(|_| anyhow!(
+                "Gemini request queue timeout ({}s): another request is still processing. \
+                 Caller: {}, model: {}",
+                queue_timeout.as_secs(), caller, model
+            ))?
             .map_err(|_| anyhow!("Gemini semaphore closed"))?;
 
         // 2. Wait for RPM budget

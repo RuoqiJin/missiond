@@ -361,6 +361,10 @@ fn build_cli_command(
             // Working directory is set via CommandBuilder::cwd(), not CLI flag
             let mut parts = "gemini".to_string();
             parts.push_str(" --yolo");
+            if let Some(m) = model {
+                parts.push_str(&format!(" -m {}", m));
+                info!(model = %m, "Gemini CLI: model override");
+            }
             if let Some(mcp) = mcp_config {
                 info!(mcp_config = %mcp.display(), "MCP config ignored for Gemini CLI (not supported)");
             }

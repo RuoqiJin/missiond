@@ -15,8 +15,6 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::LazyLock;
-use std::time::Duration;
-
 use anyhow::{anyhow, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -24,8 +22,6 @@ use serde_json::json;
 use tracing::{debug, info, warn};
 
 use crate::event_bus::DaemonEvent;
-use crate::gemini_client::REQUEST_CALLER;
-use crate::embedding_worker::resolve_llm_credentials;
 use crate::state::AppState;
 
 /// Analysis version — bump to re-analyze all sessions with a new schema.
@@ -398,41 +394,20 @@ async fn analyze_session_stateless(
         "strategy_analyst: calling Gemini CLI with workspace"
     );
 
-    // 2. Short prompt — Gemini reads TASK.md and explores workspace with tools
-    let prompt = "Read TASK.md and follow the analysis workflow. Output only JSON.";
+    // 2. Build prompt with absolute workspace path (PTY session has fixed cwd)
+    let ws_path = workspace.path().display();
+    let prompt = format!(
+        "Read {ws_path}/TASK.md and follow the analysis workflow.\n\
+         IMPORTANT: All files referenced in TASK.md are in {ws_path}/. \
+         Use absolute paths (e.g. {ws_path}/state.json) when reading files.\n\
+         Output only JSON."
+    );
 
-    // 3. LLM call with workspace directory
-    let (base_url, jwt) = resolve_llm_credentials().await?;
-    let model = "gemini-3.1-pro";
-    let url = format!("{}/v1/chat/completions", base_url);
-    let body = json!({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 16384,
-        "_channel": "google",
-        "_workspace": workspace.path().to_string_lossy(),
-    });
-
-    let result = REQUEST_CALLER
-        .scope("strategy_analyst".to_string(), async {
-            state
-                .gemini
-                .send_with_timeout(
-                    &state.http_client,
-                    &url,
-                    &jwt,
-                    &body,
-                    Some(Duration::from_secs(600)),
-                )
-                .await
-        })
+    // 3. Route through SlotManager → GeminiCliSlotManager → persistent Gemini PTY
+    let content = state
+        .slot_manager
+        .execute("strategy_analyst", &prompt)
         .await?;
-
-    let content = result
-        .pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("{}")
-        .to_string();
 
     info!(
         session = %session_id,
