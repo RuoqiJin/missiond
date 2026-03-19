@@ -701,10 +701,13 @@ async fn main() -> Result<()> {
                 slot_mgr_pty2,
                 slot_mgr_store2,
             ));
-            Arc::new(slot_orchestrator::AgentSlotManager::new(vec![
-                (missiond_core::types::CliEngine::ClaudeCode, cc_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>),
-                (missiond_core::types::CliEngine::Gemini, gemini_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>),
-            ]))
+            Arc::new(slot_orchestrator::AgentSlotManager::new(
+                vec![
+                    (missiond_core::types::CliEngine::ClaudeCode, cc_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>),
+                    (missiond_core::types::CliEngine::Gemini, gemini_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>),
+                ],
+                Arc::clone(&control_manager_arc),
+            ))
         },
         gemini_watch_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         gemini_watch_handle: Arc::new(tokio::sync::Mutex::new(None)),
