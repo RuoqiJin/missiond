@@ -458,6 +458,15 @@ async fn emit(
                 state.last_msg_span.lock().unwrap()
                     .insert(session_id.to_string(), msg_span_id);
             }
+            // Real-time message-level embedding: pre-filter before clone (v2 hot-path optimization)
+            if !crate::workers::embedding_worker::should_skip_fast(&db_msg.role, db_msg.content.len()) {
+                let _ = state.embedding_tx.try_send(crate::state::EmbeddingTask::ProcessMessage {
+                    message_id: msg_id,
+                    session_id: session_id.to_string(),
+                    role: db_msg.role.clone(),
+                    content: db_msg.content.clone(),
+                });
+            }
             if content_chars > 300 {
                 state.briefing_notify.notify_one();
             }

@@ -79,6 +79,14 @@ pub trait ConversationStore: Send + Sync {
     async fn get_conversations_by_task_id(&self, task_id: &str) -> DbResult<Vec<Conversation>>;
     async fn reactivate_conversation(&self, id: &str) -> DbResult<usize>;
 
+    // -- message embeddings (independent table) --
+    async fn insert_message_embedding(&self, message_id: i64, session_id: &str, embedding_vec: &[f32], model_version: &str) -> DbResult<()>;
+    async fn insert_message_embedding_skip(&self, message_id: i64, skip_reason: &str) -> DbResult<()>;
+    async fn insert_message_embeddings_batch(&self, entries: &[(i64, &str, Vec<f32>, &str)]) -> DbResult<usize>;
+    async fn insert_message_embedding_skips_batch(&self, entries: &[(i64, &str)]) -> DbResult<usize>;
+    async fn messages_pending_embedding(&self, cursor: i64, limit: i64) -> DbResult<Vec<(i64, String, String, String)>>;
+    async fn message_embedding_stats(&self) -> DbResult<serde_json::Value>;
+
     // -- audit.rs: extraction watermarks --
     async fn get_pending_memory_messages(&self, today: &str) -> DbResult<Vec<(String, String, Vec<ConversationMessage>)>>;
     async fn update_memory_forwarded_at(&self, session_id: &str, timestamp: &str) -> DbResult<()>;
@@ -98,6 +106,8 @@ pub trait ConversationStore: Send + Sync {
 pub trait MessageStore: Send + Sync {
     async fn insert_conversation_message(&self, msg: &ConversationMessage) -> DbResult<i64>;
     async fn insert_conversation_messages_batch(&self, messages: &[ConversationMessage]) -> DbResult<Vec<i64>>;
+    /// Check which message UUIDs exist in the DB. Returns the set of existing UUIDs.
+    async fn check_message_uuids_exist(&self, uuids: &[&str]) -> DbResult<std::collections::HashSet<String>>;
     async fn get_conversation_message_by_id(&self, id: i64) -> DbResult<Option<ConversationMessage>>;
     async fn get_conversation_messages(&self, session_id: &str, since_id: Option<i64>, limit: i64) -> DbResult<Vec<ConversationMessage>>;
     async fn get_messages_around(&self, message_id: i64, before: i64, after: i64) -> DbResult<Option<(String, Vec<ConversationMessage>)>>;
@@ -107,6 +117,30 @@ pub trait MessageStore: Send + Sync {
     async fn get_session_fts_snippets(&self, session_id: &str, query: &str, limit: usize) -> DbResult<Vec<(String, String)>>;
     async fn search_conversation_sessions_fts_filtered(&self, query: &str, limit: i64, time_after: Option<&str>, project: Option<&str>) -> DbResult<Vec<(String, f64)>>;
     async fn get_first_user_message(&self, session_id: &str) -> DbResult<Option<String>>;
+
+    // -- pgvector hybrid search (P3: message-level embedding) --
+
+    /// Hybrid message search: HNSW Top-N + FTS → RRF merge (two-step CTE).
+    /// Returns (message_id, session_id, role, content, timestamp, rrf_score).
+    /// Falls back to empty on SQLite (no pgvector).
+    async fn hybrid_message_search(&self, query_vec: &[f32], query_text: &str, session_id: Option<&str>, limit: i64) -> DbResult<Vec<(i64, String, String, String, String, f64)>> {
+        let _ = (query_vec, query_text, session_id, limit);
+        Ok(vec![])
+    }
+
+    /// Session-internal semantic search: B-Tree filter + exact cosine distance.
+    /// Returns (message_id, role, content, timestamp, similarity).
+    async fn session_semantic_search(&self, query_vec: &[f32], session_id: &str, limit: i64) -> DbResult<Vec<(i64, String, String, String, f64)>> {
+        let _ = (query_vec, session_id, limit);
+        Ok(vec![])
+    }
+
+    /// Conversation-level semantic search via topic vectors HNSW.
+    /// Returns (session_id, max_similarity). No GROUP BY full table — HNSW recall then group.
+    async fn semantic_conversation_search(&self, query_vec: &[f32], limit: i64) -> DbResult<Vec<(String, f64)>> {
+        let _ = (query_vec, limit);
+        Ok(vec![])
+    }
 }
 
 // ============================================================================

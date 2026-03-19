@@ -169,8 +169,9 @@ pub(crate) struct AppState {
     pub(crate) embedding_service: Option<Arc<dyn missiond_core::embedding::EmbeddingProvider>>,
     /// In-memory embedding cache for policy:decision entries (id, vector).
     pub(crate) embedding_cache: missiond_core::embedding::EmbeddingCache,
-    /// In-memory multi-topic embedding cache for conversation search (session_id, [topic_vectors]).
-    /// MaxSim: search score = max(cosine(query, topic_i)) per session.
+    /// Removed in P3: conversation topic cache → pgvector HNSW replaces in-memory search.
+    /// Kept as placeholder to avoid churn in AppState construction sites.
+    #[allow(dead_code)]
     pub(crate) conversation_topic_cache: missiond_core::embedding::TopicCache,
     /// In-memory embedding cache for skill topics (topic_name, vector).
     pub(crate) skill_embedding_cache: missiond_core::embedding::EmbeddingCache,
@@ -229,6 +230,9 @@ pub(crate) struct AppState {
     pub(crate) job_store: Arc<tokio::sync::RwLock<HashMap<String, missiond_core::types::AsyncJob>>>,
     /// Embedding backfill enabled flag (from llm.yaml `backfill_enabled`).
     pub(crate) backfill_enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// Cursor ack channel: message_handler sends (jsonl_path, byte_offset) after successful INSERT.
+    /// Only ack'd cursors are persisted to DB — prevents data loss on crash.
+    pub(crate) cursor_ack_tx: tokio::sync::mpsc::UnboundedSender<(String, u64)>,
 }
 
 /// M4: Async task submission — replaces MissionControl::submit() to avoid split-brain.
@@ -283,6 +287,8 @@ pub(crate) enum EmbeddingTask {
     RunBackfillPhase { phase: BackfillPhase, cursor: i64 },
     /// Incremental: embed AST nodes after commit sync (P3 Holographic Context Engine).
     ProcessAstBatch(Vec<String>),
+    /// Incremental: embed a single message after ConversationMessageLogged event.
+    ProcessMessage { message_id: i64, session_id: String, role: String, content: String },
 }
 
 /// Backfill phases — processed in order, each yields between batches.
@@ -290,6 +296,7 @@ pub(crate) enum EmbeddingTask {
 pub(crate) enum BackfillPhase {
     KbStale, KbMissing, SkillStale, SkillMissing,
     ConvTopicVectors, ConvSummary, ConvRetry, AstNodes, Timeline,
+    MessageEmbeddings,
 }
 
 impl BackfillPhase {
@@ -299,6 +306,7 @@ impl BackfillPhase {
             Self::SkillStale => "skill_stale", Self::SkillMissing => "skill_missing",
             Self::ConvTopicVectors => "conv_topic_vectors", Self::ConvSummary => "conv_summary",
             Self::ConvRetry => "conv_retry", Self::AstNodes => "ast_nodes", Self::Timeline => "timeline",
+            Self::MessageEmbeddings => "message_embeddings",
         }
     }
     pub fn next(&self) -> Option<Self> {
@@ -306,13 +314,15 @@ impl BackfillPhase {
             Self::KbStale => Some(Self::KbMissing), Self::KbMissing => Some(Self::SkillStale),
             Self::SkillStale => Some(Self::SkillMissing), Self::SkillMissing => Some(Self::ConvTopicVectors),
             Self::ConvTopicVectors => Some(Self::ConvSummary), Self::ConvSummary => Some(Self::ConvRetry),
-            Self::ConvRetry => Some(Self::AstNodes), Self::AstNodes => Some(Self::Timeline), Self::Timeline => None,
+            Self::ConvRetry => Some(Self::AstNodes), Self::AstNodes => Some(Self::Timeline),
+            Self::Timeline => Some(Self::MessageEmbeddings), Self::MessageEmbeddings => None,
         }
     }
     pub fn first() -> Self { Self::KbStale }
     pub fn all() -> &'static [Self] {
         &[Self::KbStale, Self::KbMissing, Self::SkillStale, Self::SkillMissing,
-          Self::ConvTopicVectors, Self::ConvSummary, Self::ConvRetry, Self::AstNodes, Self::Timeline]
+          Self::ConvTopicVectors, Self::ConvSummary, Self::ConvRetry, Self::AstNodes, Self::Timeline,
+          Self::MessageEmbeddings]
     }
 }
 

@@ -156,6 +156,8 @@ pub fn hybrid_search(
 
 /// MaxSim search over topic cache: for each session, score = max(cosine(query, topic_i)).
 /// Returns (session_id, rank, max_similarity) sorted by similarity descending.
+/// DEPRECATED: P3 migrated conversation search to pgvector HNSW (DB-level).
+#[allow(dead_code)]
 pub fn maxsim_search(
     query_embedding: &[f32],
     cache: &[(String, Vec<Vec<f32>>)],

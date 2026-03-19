@@ -8,6 +8,42 @@ use std::path::PathBuf;
 use crate::helpers::char_boundary_at;
 use crate::helpers::default_mission_home;
 
+// ── Message-level embedding filter ──
+
+enum EmbedDecision {
+    Embed,
+    Skip(&'static str),
+}
+
+/// Determine if a message should be embedded or skipped.
+/// Design: docs/designs/message-level-embedding.md
+fn should_embed(role: &str, content: &str) -> EmbedDecision {
+    if role == "system" {
+        return EmbedDecision::Skip("system");
+    }
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return EmbedDecision::Skip("empty");
+    }
+    // Hard ceiling: prevent OOM on mega-paste / base64 blobs
+    if content.len() > 100_000 {
+        return EmbedDecision::Skip("too_long");
+    }
+    if role == "tool" && content.len() > 2000 {
+        return EmbedDecision::Skip("tool_noise");
+    }
+    if trimmed.chars().count() < 20 {
+        return EmbedDecision::Skip("too_short");
+    }
+    EmbedDecision::Embed
+}
+
+/// Quick pre-filter (no allocation) for the hot path in message_handler.
+/// Returns true if the message is definitely skippable without needing content.clone().
+pub(crate) fn should_skip_fast(role: &str, content_len: usize) -> bool {
+    role == "system" || content_len == 0 || content_len > 100_000
+}
+
 
 #[derive(serde::Deserialize)]
 pub(crate) struct LlmConfig {
@@ -427,12 +463,7 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
     // Also update old single-vec for backwards compat (first topic as representative)
     let _ = state.store.set_conversation_embedding(session_id, &topic_vectors[0].1, &provider_id).await;
 
-    // 7. Update TopicCache
-    let vecs_only: Vec<Vec<f32>> = topic_vectors.into_iter().map(|(_, v)| v).collect();
-    let mut cache = state.conversation_topic_cache.write().await;
-    cache.retain(|(id, _)| id != session_id);
-    cache.push((session_id.to_string(), vecs_only));
-
+    // TopicCache removed in P3 — pgvector HNSW replaces in-memory search
     info!(session = %session_id, topic_count = topics.len(), "Multi-topic embeddings generated");
 }
 
@@ -772,6 +803,26 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                         }
                     }
                 }
+                EmbeddingTask::ProcessMessage { message_id, session_id, role, content } => {
+                    match should_embed(&role, &content) {
+                        EmbedDecision::Embed => {
+                            if let Some(ref emb_svc) = state.embedding_service {
+                                let svc = Arc::clone(emb_svc);
+                                let text = content.clone();
+                                if let Ok(Ok(Some(vec))) = tokio::time::timeout(
+                                    std::time::Duration::from_secs(30),
+                                    tokio::task::spawn_blocking(move || svc.embed(&text)),
+                                ).await {
+                                    let _ = state.store.insert_message_embedding(message_id, &session_id, &vec, &provider_id).await;
+                                    debug!(msg_id = message_id, "Message embedding stored");
+                                }
+                            }
+                        }
+                        EmbedDecision::Skip(reason) => {
+                            let _ = state.store.insert_message_embedding_skip(message_id, reason).await;
+                        }
+                    }
+                }
                 EmbeddingTask::BackfillAll => {
                     backfill_start(&state, &provider_id).await;
                 }
@@ -851,6 +902,7 @@ async fn backfill_run_phase(state: &AppState, provider_id: &str, phase: Backfill
         BackfillPhase::ConvRetry => backfill_conv_retry(state, MAX_RETRIES, BATCH_SIZE).await,
         BackfillPhase::AstNodes => { let r = backfill_ast_nodes(state, provider_id).await; if r.3 { warm_ast_cache(state).await; } r }
         BackfillPhase::Timeline => backfill_timelines(state).await,
+        BackfillPhase::MessageEmbeddings => backfill_message_embeddings(state, provider_id, cursor, 200).await, // v2: larger batch, internally capped by 2MB
     };
 
     if batch_success > 0 || batch_failed > 0 {
@@ -872,6 +924,11 @@ async fn backfill_run_phase(state: &AppState, provider_id: &str, phase: Backfill
             info!("Full embedding backfill complete");
         }
     } else {
+        // Backoff on batch-level failure (e.g. Ollama down): avoid tight retry loop
+        if batch_success == 0 && batch_failed > 0 {
+            warn!(phase = phase.as_str(), failed = batch_failed, "Batch-level failure, backing off 5s");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
         backfill_enqueue(state, EmbeddingTask::RunBackfillPhase { phase, cursor: new_cursor }).await;
     }
 }
@@ -1053,5 +1110,125 @@ async fn warm_skill_cache(state: &AppState) {
 
 async fn warm_ast_cache(state: &AppState) {
     if let Ok(all) = state.store.ast_load_all_embeddings().await { let mut guard = state.ast_embedding_cache.write().await; *guard = all; info!(count = guard.len(), "AST embedding cache refreshed after backfill"); }
+}
+
+/// Backfill message-level embeddings (v2): batch embed + batch insert + failure tracking.
+///
+/// Architecture (docs/designs/message-embedding-arch-v2.md):
+/// 1. Cursor scan (no LEFT JOIN) — O(batch_size) not O(N)
+/// 2. should_embed() split → skips[] + embeddables[]
+/// 3. embed_batch() — single API/local call for entire batch
+/// 4. Batch INSERT via QueryBuilder
+/// 5. Failures → backfill_failures table (not lost by cursor advance)
+/// 6. Dynamic batch size capped by 2MB total content
+async fn backfill_message_embeddings(state: &AppState, provider_id: &str, cursor: i64, batch_size: i64) -> (i64, i64, i64, bool) {
+    let Some(ref emb_svc) = state.embedding_service else { return (0, 0, cursor, true) };
+    let batch = state.store.messages_pending_embedding(cursor, batch_size).await.unwrap_or_default();
+    if batch.is_empty() { return (0, 0, cursor, true); }
+    info!(count = batch.len(), cursor, "Message embedding backfill batch (v2)");
+
+    let mut max_id = cursor;
+
+    // Phase 1: Split into skips vs embeddables (with 2MB content cap)
+    let mut skips: Vec<(i64, &str)> = Vec::new();
+    let mut embed_ids: Vec<i64> = Vec::new();
+    let mut embed_sessions: Vec<&str> = Vec::new();
+    let mut embed_texts: Vec<String> = Vec::new();
+    let mut batch_bytes: usize = 0;
+    const MAX_BATCH_BYTES: usize = 2 * 1024 * 1024; // 2MB cap per Gemini ARB recommendation
+
+    for (msg_id, session_id, role, content) in &batch {
+        match should_embed(role, content) {
+            EmbedDecision::Skip(reason) => {
+                skips.push((*msg_id, reason));
+                max_id = max_id.max(*msg_id); // Only advance after confirmed processing
+            }
+            EmbedDecision::Embed => {
+                // Dynamic batch size: cap by total content bytes
+                if batch_bytes + content.len() > MAX_BATCH_BYTES && !embed_texts.is_empty() {
+                    // Don't add more — this message will be picked up next round
+                    // max_id NOT updated: cursor stays before this unprocessed message
+                    break;
+                }
+                batch_bytes += content.len();
+                embed_ids.push(*msg_id);
+                embed_sessions.push(session_id);
+                embed_texts.push(content.clone());
+                max_id = max_id.max(*msg_id); // Only advance after confirmed processing
+            }
+        }
+    }
+
+    // Phase 2: Batch insert skips
+    let skip_count = skips.len() as i64;
+    if !skips.is_empty() {
+        let _ = state.store.insert_message_embedding_skips_batch(&skips).await;
+    }
+
+    // Phase 3: Batch embed
+    let mut embed_success = 0i64;
+    let mut embed_failed = 0i64;
+    if !embed_texts.is_empty() {
+        let svc = Arc::clone(emb_svc);
+        let texts = embed_texts.clone();
+        let embed_result = tokio::time::timeout(
+            std::time::Duration::from_secs(60), // Longer timeout for batch (ARB rec)
+            tokio::task::spawn_blocking(move || svc.embed_batch(&texts)),
+        ).await;
+
+        match embed_result {
+            Ok(Ok(vectors)) => {
+                // Phase 4: Split results into successes and failures
+                let mut insert_entries: Vec<(i64, &str, Vec<f32>, &str)> = Vec::new();
+                for (i, maybe_vec) in vectors.into_iter().enumerate() {
+                    match maybe_vec {
+                        Some(vec) => {
+                            insert_entries.push((embed_ids[i], embed_sessions[i], vec, provider_id));
+                            embed_success += 1;
+                        }
+                        None => {
+                            // Individual failure → record for retry
+                            let _ = state.store.backfill_record_failure(
+                                &embed_ids[i].to_string(), "message_embeddings", "embed_returned_none"
+                            ).await;
+                            embed_failed += 1;
+                        }
+                    }
+                }
+                // Phase 5: Batch insert embeddings
+                if !insert_entries.is_empty() {
+                    let _ = state.store.insert_message_embeddings_batch(&insert_entries).await;
+                }
+            }
+            Ok(Err(e)) => {
+                // spawn_blocking panicked — record all as failures, RESET cursor
+                warn!(error = %e, "embed_batch spawn_blocking panicked");
+                for id in &embed_ids {
+                    let _ = state.store.backfill_record_failure(
+                        &id.to_string(), "message_embeddings", "spawn_panic"
+                    ).await;
+                }
+                embed_failed = embed_ids.len() as i64;
+                // Reset max_id: don't advance cursor past batch-level failures
+                max_id = cursor;
+            }
+            Err(_) => {
+                // Timeout — batch-level failure, RESET cursor for retry
+                warn!("embed_batch timed out (60s), recording failures");
+                for id in &embed_ids {
+                    let _ = state.store.backfill_record_failure(
+                        &id.to_string(), "message_embeddings", "batch_timeout_60s"
+                    ).await;
+                }
+                embed_failed = embed_ids.len() as i64;
+                // Reset max_id: don't advance cursor past batch-level failures
+                max_id = cursor;
+            }
+        }
+    }
+
+    let total_success = skip_count + embed_success;
+    let phase_done = batch.len() < batch_size as usize;
+    (total_success, embed_failed, max_id, phase_done)
 }
 

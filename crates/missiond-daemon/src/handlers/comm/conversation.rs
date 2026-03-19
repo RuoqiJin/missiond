@@ -87,8 +87,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 since_id: Option<i64>,
                 #[serde(default, deserialize_with = "lenient::option_bool", alias = "include_raw")]
                 include_raw: Option<bool>,
+                #[serde(default, deserialize_with = "lenient::option_bool", alias = "include_labels")]
+                include_labels: Option<bool>,
             }
-            let Args { session_id, tail, since_id, include_raw } = serde_json::from_value(args)?;
+            let Args { session_id, tail, since_id, include_raw, include_labels } = serde_json::from_value(args)?;
             let conv = state.store.get_conversation(&session_id).await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             let msgs = state.store.get_conversation_messages(&session_id, since_id, tail.unwrap_or(50)).await
@@ -109,6 +111,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                         "model": m.model,
                         "timestamp": m.timestamp,
                         "metadata": m.metadata,
+                        "toolName": m.tool_name,
                     })
                 }).collect()
             } else {
@@ -126,6 +129,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     })
                 }).collect()
             };
+            // Fetch labels if requested
+            let labels_map = if include_labels.unwrap_or(false) && !msgs.is_empty() {
+                let msg_ids: Vec<i64> = msgs.iter().map(|m| m.id).collect();
+                state.store.label_get_batch(&msg_ids).await.unwrap_or_default()
+            } else {
+                Default::default()
+            };
             // Include child (subagent) conversations summary
             let children = state.store.get_child_conversations(&session_id).await
                 .unwrap_or_default();
@@ -134,6 +144,18 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "messages": messages,
                 "count": messages.len(),
             });
+            if !labels_map.is_empty() {
+                // Convert HashMap<i64, Vec<(String, String)>> → JSON { "123": [["label", "value"], ...] }
+                let labels_json: serde_json::Map<String, Value> = labels_map.into_iter()
+                    .map(|(id, pairs)| {
+                        let arr: Vec<Value> = pairs.into_iter()
+                            .map(|(l, v)| serde_json::json!([l, v]))
+                            .collect();
+                        (id.to_string(), Value::Array(arr))
+                    })
+                    .collect();
+                result["labels"] = Value::Object(labels_json);
+            }
             if !children.is_empty() {
                 let child_summaries: Vec<serde_json::Value> = children.iter().map(|c| {
                     serde_json::json!({
@@ -187,9 +209,34 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     .to_rfc3339())
             });
 
-            // ── Path A: single-session message search (SQL-pushed filter) ──
+            // ── Path A: single-session search — semantic + FTS hybrid ──
             if let Some(ref sid) = session_id {
                 let lim = top_k as i64;
+                // Try pgvector semantic search within session first
+                let query_embedding = state.embedding_service.as_ref()
+                    .and_then(|svc| svc.embed(&query));
+                let semantic_results = if let Some(ref qe) = query_embedding {
+                    state.store.session_semantic_search(qe, sid, lim).await.unwrap_or_default()
+                } else {
+                    vec![]
+                };
+
+                if !semantic_results.is_empty() {
+                    // Return semantic results (exact cosine, no HNSW loss)
+                    let msgs_lite: Vec<serde_json::Value> = semantic_results.iter().map(|(id, role, content, ts, sim)| {
+                        serde_json::json!({
+                            "id": id, "sessionId": sid,
+                            "role": role, "content": content, "timestamp": ts,
+                            "similarity": sim,
+                        })
+                    }).collect();
+                    return Ok(ToolResult::json(&serde_json::json!({
+                        "results": msgs_lite, "count": msgs_lite.len(), "query": query,
+                        "mode": "single_session_semantic",
+                    })));
+                }
+
+                // Fallback: FTS-only
                 let msgs = state.store.search_messages_filtered(&query, Some(sid), None, None, time_after.as_deref(), lim).await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 let msgs_lite: Vec<serde_json::Value> = msgs.iter().map(|m| {
@@ -201,13 +248,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 }).collect();
                 return Ok(ToolResult::json(&serde_json::json!({
                     "results": msgs_lite, "count": msgs_lite.len(), "query": query,
-                    "mode": "single_session",
+                    "mode": "single_session_fts",
                 })));
             }
 
             // ── Path B: session-level search ──
 
-            // 1. FTS5 path (for hybrid + fts modes)
+            // 1. FTS path (for hybrid + fts modes)
             let fts_ranked: Vec<(String, usize)> = if mode != "semantic" {
                 let pool_limit = ((top_k + skip) * 3) as i64;
                 let fts_sessions = state.store.search_conversation_sessions_fts_filtered(
@@ -221,18 +268,20 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 Vec::new()
             };
 
-            // 2. Vector path: MaxSim over multi-topic cache (for hybrid + semantic modes)
+            // 2. Vector path: pgvector HNSW on topic vectors (replaces in-memory TopicCache)
             let vec_ranked: Vec<(String, usize, f32)> = if mode != "fts" {
                 let query_embedding = state.embedding_service.as_ref()
                     .and_then(|svc| svc.embed(&query));
-                let cache = state.conversation_topic_cache.read().await;
-                let result = if let Some(ref qe) = query_embedding {
-                    missiond_core::embedding::maxsim_search(qe, &cache, (top_k + skip) * 3)
+                if let Some(ref qe) = query_embedding {
+                    let db_results = state.store.semantic_conversation_search(qe, ((top_k + skip) * 3) as i64).await
+                        .unwrap_or_default();
+                    db_results.into_iter()
+                        .enumerate()
+                        .map(|(rank, (sid, sim))| (sid, rank, sim as f32))
+                        .collect()
                 } else {
                     Vec::new()
-                };
-                drop(cache);
-                result
+                }
             } else {
                 Vec::new()
             };
@@ -358,6 +407,36 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     .to_rfc3339())
             });
 
+            // Try hybrid search (pgvector + FTS) when embeddings available AND no extra filters.
+            // Hybrid CTE doesn't support role/tool_name/time_after filters; fall through to FTS if set.
+            let has_extra_filters = role.is_some() || tool_name.is_some() || time_after.is_some();
+            let query_embedding = if !has_extra_filters {
+                state.embedding_service.as_ref().and_then(|svc| svc.embed(&query))
+            } else {
+                None
+            };
+
+            if let Some(ref qe) = query_embedding {
+                let hybrid = state.store.hybrid_message_search(
+                    qe, &query, session_id.as_deref(), lim,
+                ).await.unwrap_or_default();
+
+                if !hybrid.is_empty() {
+                    let results: Vec<serde_json::Value> = hybrid.iter().map(|(id, sid, r, content, ts, score)| {
+                        serde_json::json!({
+                            "id": id, "sessionId": sid, "role": r,
+                            "content": content, "timestamp": ts, "rrfScore": score,
+                        })
+                    }).collect();
+                    return Ok(ToolResult::json(&serde_json::json!({
+                        "results": results, "count": results.len(), "query": query,
+                        "mode": "hybrid",
+                        "filters": { "sessionId": session_id },
+                    })));
+                }
+            }
+
+            // Fallback: FTS-only
             let msgs = state.store.search_messages_filtered(
                 &query,
                 session_id.as_deref(),
@@ -382,6 +461,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "results": results,
                 "count": results.len(),
                 "query": query,
+                "mode": "fts",
                 "filters": {
                     "sessionId": session_id,
                     "role": role,
@@ -517,7 +597,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let kb_cache_size = state.kb_search_cache.read().await.len();
             let policy_cache_size = state.embedding_cache.read().await.len();
             let skill_cache_size = state.skill_embedding_cache.read().await.len();
-            let conv_cache_size = state.conversation_topic_cache.read().await.len();
+            let conv_cache_size = 0usize; // TopicCache removed in P3 — pgvector replaces in-memory
             let ast_cache_size = state.ast_embedding_cache.read().await.len();
             let provider = state.embedding_service.as_ref()
                 .map(|svc| svc.provider_id())
@@ -731,6 +811,38 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "timeline": timeline_stats,
                 "git": git_commits,
             })))
+        }
+
+        // ===== Consolidated: Embedding Ops =====
+        "mission_embedding_ops" => {
+            #[derive(Deserialize)]
+            struct Args {
+                action: String,
+            }
+            let Args { action } = serde_json::from_value(args)?;
+            match action.as_str() {
+                "stats" => {
+                    let msg_stats = state.store.message_embedding_stats().await
+                        .map_err(|e| anyhow!("DB error: {}", e))?;
+                    let provider = state.embedding_service.as_ref()
+                        .map(|svc| svc.provider_id())
+                        .unwrap_or("none");
+                    Ok(ToolResult::json_pretty(&serde_json::json!({
+                        "messageEmbeddings": msg_stats,
+                        "currentProvider": provider,
+                    })))
+                }
+                "backfill" => {
+                    let _ = state.embedding_tx.try_send(EmbeddingTask::BackfillAll);
+                    let msg_stats = state.store.message_embedding_stats().await
+                        .map_err(|e| anyhow!("DB error: {}", e))?;
+                    Ok(ToolResult::json_pretty(&serde_json::json!({
+                        "status": "triggered",
+                        "messageEmbeddings": msg_stats,
+                    })))
+                }
+                other => Err(anyhow!("Unknown embedding_ops action: {other}")),
+            }
         }
 
         _ => Err(anyhow!("Unknown conversation tool: {name}")),
