@@ -49,6 +49,11 @@ impl BackgroundWorker for ReconcileWorker {
     }
 }
 
+/// Run reconciliation immediately (called from MCP tool or daily timer).
+pub(crate) async fn run_reconciliation_now(state: &AppState) {
+    run_reconciliation(state).await;
+}
+
 async fn run_reconciliation(state: &AppState) {
     info!("Reconcile: starting daily scan");
     let start = chrono::Utc::now();
