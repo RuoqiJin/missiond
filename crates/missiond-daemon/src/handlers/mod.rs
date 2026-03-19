@@ -96,6 +96,7 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         n if n.starts_with("mission_minimax_") || n.starts_with("mission_sonnet_") => minimax::handle(state, n, args).await,
         n if n.starts_with("mission_conversation_") || n == "mission_agent_trajectory"
             || n == "mission_trigger_backfill" || n == "mission_embedding_stats"
+            || n == "mission_embedding_ops"
             || n == "mission_habit_scan" || n == "mission_token_stats"
             || n == "mission_session_narrations"
             || n == "mission_activity_report"

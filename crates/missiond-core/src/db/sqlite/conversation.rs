@@ -220,6 +220,27 @@ impl ConversationStore for SqliteMissionStore {
         self.executor.run(move |db| db.reactivate_conversation(&id)).await
     }
 
+    // -- message embeddings (independent table) — not supported on SQLite, PG only --
+
+    async fn insert_message_embedding(&self, _message_id: i64, _session_id: &str, _embedding_vec: &[f32], _model_version: &str) -> DbResult<()> {
+        Ok(()) // No-op on SQLite
+    }
+    async fn insert_message_embedding_skip(&self, _message_id: i64, _skip_reason: &str) -> DbResult<()> {
+        Ok(())
+    }
+    async fn insert_message_embeddings_batch(&self, _entries: &[(i64, &str, Vec<f32>, &str)]) -> DbResult<usize> {
+        Ok(0)
+    }
+    async fn insert_message_embedding_skips_batch(&self, _entries: &[(i64, &str)]) -> DbResult<usize> {
+        Ok(0)
+    }
+    async fn messages_pending_embedding(&self, _cursor: i64, _limit: i64) -> DbResult<Vec<(i64, String, String, String)>> {
+        Ok(vec![])
+    }
+    async fn message_embedding_stats(&self) -> DbResult<serde_json::Value> {
+        Ok(serde_json::json!({"error": "SQLite backend does not support message embeddings"}))
+    }
+
     // -- audit.rs: extraction watermarks --
 
     async fn get_pending_memory_messages(&self, today: &str) -> DbResult<Vec<(String, String, Vec<ConversationMessage>)>> {

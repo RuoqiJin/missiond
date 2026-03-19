@@ -6,6 +6,20 @@ use crate::db::traits::ConversationStore;
 use crate::types::*;
 use super::PgMissionStore;
 
+/// Zero-allocation pgvector literal serializer.
+/// Pre-allocates a single String for 512-dim halfvec (~7KB) instead of 513 heap allocs.
+fn vec_to_pg_literal(v: &[f32]) -> String {
+    use std::fmt::Write;
+    let mut buf = String::with_capacity(v.len() * 14 + 2);
+    buf.push('[');
+    for (i, f) in v.iter().enumerate() {
+        if i > 0 { buf.push(','); }
+        let _ = write!(buf, "{}", f);
+    }
+    buf.push(']');
+    buf
+}
+
 #[cfg(feature = "postgres")]
 impl PgMissionStore {
     /// Extract a Conversation from a sqlx::PgRow.
@@ -826,6 +840,119 @@ impl ConversationStore for PgMissionStore {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() as usize)
+    }
+
+    // -- message embeddings (independent table) --
+
+    async fn insert_message_embedding(&self, message_id: i64, session_id: &str, embedding_vec: &[f32], model_version: &str) -> DbResult<()> {
+        let vec_str = vec_to_pg_literal(embedding_vec);
+        sqlx::query(
+            "INSERT INTO message_embeddings (message_id, session_id, embedding_vec, model_version)
+             VALUES ($1, $2, $3::halfvec(512), $4)
+             ON CONFLICT (message_id) DO NOTHING"
+        )
+        .bind(message_id)
+        .bind(session_id)
+        .bind(&vec_str)
+        .bind(model_version)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn insert_message_embedding_skip(&self, message_id: i64, skip_reason: &str) -> DbResult<()> {
+        sqlx::query(
+            "INSERT INTO message_embedding_skips (message_id, skip_reason)
+             VALUES ($1, $2)
+             ON CONFLICT (message_id) DO NOTHING"
+        )
+        .bind(message_id)
+        .bind(skip_reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn insert_message_embeddings_batch(&self, entries: &[(i64, &str, Vec<f32>, &str)]) -> DbResult<usize> {
+        if entries.is_empty() { return Ok(0); }
+        // Use sqlx::QueryBuilder for safe dynamic VALUES batch insert
+        let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
+            "INSERT INTO message_embeddings (message_id, session_id, embedding_vec, model_version) "
+        );
+        qb.push_values(entries, |mut b, (msg_id, sid, vec_data, model_ver)| {
+            b.push_bind(*msg_id);
+            b.push_bind(*sid);
+            // halfvec literal — cannot use native bind, push as raw SQL cast
+            let lit = vec_to_pg_literal(vec_data);
+            b.push(format!("'{}'::halfvec(512)", lit));
+            b.push_bind(*model_ver);
+        });
+        qb.push(" ON CONFLICT (message_id) DO NOTHING");
+        let result = qb.build().execute(&self.pool).await?;
+        Ok(result.rows_affected() as usize)
+    }
+
+    async fn insert_message_embedding_skips_batch(&self, entries: &[(i64, &str)]) -> DbResult<usize> {
+        if entries.is_empty() { return Ok(0); }
+        let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
+            "INSERT INTO message_embedding_skips (message_id, skip_reason) "
+        );
+        qb.push_values(entries, |mut b, (msg_id, reason)| {
+            b.push_bind(*msg_id);
+            b.push_bind(*reason);
+        });
+        qb.push(" ON CONFLICT (message_id) DO NOTHING");
+        let result = qb.build().execute(&self.pool).await?;
+        Ok(result.rows_affected() as usize)
+    }
+
+    async fn messages_pending_embedding(&self, cursor: i64, limit: i64) -> DbResult<Vec<(i64, String, String, String)>> {
+        // v2: pure cursor scan — no LEFT JOIN, O(batch_size) not O(N)
+        let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
+            "SELECT cm.id, cm.session_id, cm.role, cm.content
+             FROM conversation_messages cm
+             WHERE cm.id > $1
+             ORDER BY cm.id ASC LIMIT $2"
+        )
+        .bind(cursor)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn message_embedding_stats(&self) -> DbResult<serde_json::Value> {
+        let (total_msgs,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM conversation_messages")
+            .fetch_one(&self.pool).await?;
+        let (embedded,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM message_embeddings")
+            .fetch_one(&self.pool).await?;
+        let (skipped,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM message_embedding_skips")
+            .fetch_one(&self.pool).await?;
+        let pending = total_msgs - embedded - skipped;
+
+        let skip_dist: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT skip_reason, COUNT(*) FROM message_embedding_skips GROUP BY skip_reason ORDER BY 2 DESC"
+        ).fetch_all(&self.pool).await?;
+
+        let model_dist: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT model_version, COUNT(*) FROM message_embeddings GROUP BY model_version ORDER BY 2 DESC"
+        ).fetch_all(&self.pool).await?;
+
+        let coverage = if total_msgs > 0 {
+            format!("{:.1}%", (embedded + skipped) as f64 / total_msgs as f64 * 100.0)
+        } else {
+            "N/A".to_string()
+        };
+
+        Ok(serde_json::json!({
+            "totalMessages": total_msgs,
+            "embedded": embedded,
+            "skipped": skipped,
+            "pending": pending,
+            "coverage": coverage,
+            "skipReasons": skip_dist.into_iter().map(|(r, c)| serde_json::json!({"reason": r, "count": c})).collect::<Vec<_>>(),
+            "modelVersions": model_dist.into_iter().map(|(m, c)| serde_json::json!({"model": m, "count": c})).collect::<Vec<_>>(),
+        }))
     }
 
     // -- extraction watermarks --

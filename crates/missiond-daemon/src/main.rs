@@ -499,6 +499,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    let state_cc_tasks = Arc::clone(&cc_tasks);
     let state = AppState {
         mission,
         store,
@@ -675,6 +676,19 @@ async fn main() -> Result<()> {
         gemini_watch_handle: Arc::new(tokio::sync::Mutex::new(None)),
         gemini_watch_attempts: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         gemini_watch_started_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        cursor_ack_tx: {
+            // Ack-based cursor: message_handler acks after PG INSERT → cursor_persist_loop persists.
+            // This eliminates the data loss window where cursor advances before messages reach PG.
+            let (ack_tx, mut ack_rx) = tokio::sync::mpsc::unbounded_channel::<(String, u64)>();
+            let cc_tasks_ref = Arc::clone(&state_cc_tasks);
+            tokio::spawn(async move {
+                while let Some((path, offset)) = ack_rx.recv().await {
+                    let watcher = cc_tasks_ref.lock().await;
+                    watcher.persist_cursor_ack(&path, offset);
+                }
+            });
+            ack_tx
+        },
     };
 
     // Late-bind context enricher for Jarvis chat completions
@@ -837,54 +851,11 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Warm conversation embedding cache (one-shot)
+    // Warm embedding caches (one-shot) — TopicCache removed in P3 (pgvector replaces in-memory)
     {
         let conv_state = state.clone();
         tokio::spawn(async move {
-            let provider_id = conv_state.embedding_service.as_ref()
-                .map(|svc| svc.provider_id().to_string())
-                .unwrap_or_else(|| missiond_core::embedding::FASTEMBED_PROVIDER_ID.to_string());
-
-            // Load multi-topic vectors first, then backfill from old single-vec embeddings
-            let mut topic_map: std::collections::HashMap<String, Vec<Vec<f32>>> =
-                std::collections::HashMap::new();
-
-            // Phase 1: Load from conversation_topic_vectors table
-            match conv_state.store.load_conversation_topic_vectors(&provider_id).await {
-                Ok(all) => {
-                    for (sid, vecs) in all {
-                        topic_map.insert(sid, vecs);
-                    }
-                    info!(count = topic_map.len(), "Topic vectors loaded");
-                }
-                Err(e) => warn!(error = %e, "Failed to load topic vectors"),
-            }
-
-            // Phase 2: Backfill from old single-embedding (wrap as 1-topic)
-            match conv_state.store.load_conversation_embeddings(&provider_id).await {
-                Ok(all) => {
-                    let mut backfilled = 0;
-                    for (sid, vec) in all {
-                        if !topic_map.contains_key(&sid) {
-                            topic_map.insert(sid, vec![vec]);
-                            backfilled += 1;
-                        }
-                    }
-                    if backfilled > 0 {
-                        info!(backfilled, "Old single-vec embeddings loaded as fallback");
-                    }
-                }
-                Err(e) => warn!(error = %e, "Failed to load old conversation embeddings"),
-            }
-
-            // Populate cache
-            {
-                let mut guard = conv_state.conversation_topic_cache.write().await;
-                *guard = topic_map.into_iter().collect();
-                info!(count = guard.len(), "Conversation topic cache warmed");
-            }
-
-            // Skill topic embedding cache
+            // Skill topic embedding cache (still in-memory, not migrated to pgvector)
             match conv_state.store.skill_load_topic_embeddings().await {
                 Ok(all) => {
                     let mut guard = conv_state.skill_embedding_cache.write().await;

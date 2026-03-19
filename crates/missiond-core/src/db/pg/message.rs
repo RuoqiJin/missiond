@@ -75,6 +75,24 @@ impl MessageStore for PgMissionStore {
         Ok(inserted_ids)
     }
 
+    async fn check_message_uuids_exist(&self, uuids: &[&str]) -> DbResult<std::collections::HashSet<String>> {
+        if uuids.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+        // Build parameterized IN clause
+        let placeholders: Vec<String> = (1..=uuids.len()).map(|i| format!("${}", i)).collect();
+        let sql = format!(
+            "SELECT message_uuid FROM conversation_messages WHERE message_uuid IN ({})",
+            placeholders.join(", ")
+        );
+        let mut query = sqlx::query_scalar::<_, String>(&sql);
+        for uuid in uuids {
+            query = query.bind(uuid);
+        }
+        let rows = query.fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().collect())
+    }
+
     async fn get_conversation_message_by_id(&self, id: i64) -> DbResult<Option<ConversationMessage>> {
         let row = sqlx::query(
             "SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
@@ -92,8 +110,8 @@ impl MessageStore for PgMissionStore {
             sqlx::query(
                 "SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
                         tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count,
-                        ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY id) AS seq
-                 FROM conversation_messages WHERE session_id = $1 AND id > $2 ORDER BY id ASC LIMIT $3"
+                        ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY timestamp, id) AS seq
+                 FROM conversation_messages WHERE session_id = $1 AND id > $2 ORDER BY timestamp ASC, id ASC LIMIT $3"
             )
             .bind(session_id)
             .bind(since)
@@ -106,9 +124,9 @@ impl MessageStore for PgMissionStore {
                 "SELECT * FROM (
                     SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
                            tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count,
-                           ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY id) AS seq
-                    FROM conversation_messages WHERE session_id = $1 ORDER BY id DESC LIMIT $2
-                ) sub ORDER BY id ASC"
+                           ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY timestamp, id) AS seq
+                    FROM conversation_messages WHERE session_id = $1 ORDER BY timestamp DESC, id DESC LIMIT $2
+                ) sub ORDER BY timestamp ASC, id ASC"
             )
             .bind(session_id)
             .bind(limit)
@@ -463,4 +481,158 @@ impl MessageStore for PgMissionStore {
         .await?;
         Ok(row.map(|r| r.0))
     }
+
+    // -- pgvector hybrid search (P3: message-level embedding) --
+
+    async fn hybrid_message_search(&self, query_vec: &[f32], query_text: &str, session_id: Option<&str>, limit: i64) -> DbResult<Vec<(i64, String, String, String, String, f64)>> {
+        let vec_lit = vec_to_pg_literal(query_vec);
+        let pool_size = limit * 3; // recall pool
+
+        // Session-scoped: B-Tree exact distance (NOT HNSW — anti-pattern with WHERE filter)
+        if let Some(sid) = session_id {
+            let sql = format!(
+                "WITH vec_top AS (
+                    SELECT me.message_id,
+                           (me.embedding_vec <=> '{vec}'::halfvec) AS distance
+                    FROM message_embeddings me
+                    WHERE me.session_id = $3
+                    ORDER BY distance
+                    LIMIT {pool}
+                ),
+                vec_ranked AS (
+                    SELECT message_id, ROW_NUMBER() OVER (ORDER BY distance) AS vec_rank
+                    FROM vec_top
+                ),
+                fts_top AS (
+                    SELECT id AS message_id,
+                           ts_rank(fts_content, plainto_tsquery('simple', $1)) AS score
+                    FROM conversation_messages
+                    WHERE fts_content @@ plainto_tsquery('simple', $1)
+                      AND session_id = $3
+                    ORDER BY score DESC
+                    LIMIT {pool}
+                ),
+                fts_ranked AS (
+                    SELECT message_id, ROW_NUMBER() OVER (ORDER BY score DESC) AS fts_rank
+                    FROM fts_top
+                )
+                SELECT cm.id, cm.session_id, cm.role, cm.content, cm.timestamp,
+                       (COALESCE(0.6 / (60.0 + v.vec_rank), 0) + COALESCE(0.4 / (60.0 + f.fts_rank), 0))::float8 AS rrf_score
+                FROM vec_ranked v
+                FULL OUTER JOIN fts_ranked f ON v.message_id = f.message_id
+                JOIN conversation_messages cm ON cm.id = COALESCE(v.message_id, f.message_id)
+                ORDER BY rrf_score DESC
+                LIMIT $2",
+                vec = vec_lit, pool = pool_size
+            );
+            let rows = sqlx::query_as::<_, (i64, String, String, String, String, f64)>(&sql)
+                .bind(query_text)
+                .bind(limit)
+                .bind(sid)
+                .fetch_all(&self.pool)
+                .await?;
+            return Ok(rows);
+        }
+
+        // Global: HNSW recall → RRF fusion with FTS (two-step CTE)
+        let sql = format!(
+            "WITH vec_top AS (
+                SELECT me.message_id, me.embedding_vec <=> '{vec}'::halfvec AS distance
+                FROM message_embeddings me
+                ORDER BY me.embedding_vec <=> '{vec}'::halfvec
+                LIMIT {pool}
+            ),
+            vec_ranked AS (
+                SELECT message_id, ROW_NUMBER() OVER (ORDER BY distance) AS vec_rank
+                FROM vec_top
+            ),
+            fts_top AS (
+                SELECT id AS message_id,
+                       ts_rank(fts_content, plainto_tsquery('simple', $1)) AS score
+                FROM conversation_messages
+                WHERE fts_content @@ plainto_tsquery('simple', $1)
+                ORDER BY score DESC
+                LIMIT {pool}
+            ),
+            fts_ranked AS (
+                SELECT message_id, ROW_NUMBER() OVER (ORDER BY score DESC) AS fts_rank
+                FROM fts_top
+            )
+            SELECT cm.id, cm.session_id, cm.role, cm.content, cm.timestamp,
+                   (COALESCE(0.6 / (60.0 + v.vec_rank), 0) + COALESCE(0.4 / (60.0 + f.fts_rank), 0))::float8 AS rrf_score
+            FROM vec_ranked v
+            FULL OUTER JOIN fts_ranked f ON v.message_id = f.message_id
+            JOIN conversation_messages cm ON cm.id = COALESCE(v.message_id, f.message_id)
+            ORDER BY rrf_score DESC
+            LIMIT $2",
+            vec = vec_lit, pool = pool_size
+        );
+        let rows = sqlx::query_as::<_, (i64, String, String, String, String, f64)>(&sql)
+            .bind(query_text)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
+    async fn session_semantic_search(&self, query_vec: &[f32], session_id: &str, limit: i64) -> DbResult<Vec<(i64, String, String, String, f64)>> {
+        let vec_lit = vec_to_pg_literal(query_vec);
+        // B-Tree filter on session_id → exact cosine distance (no HNSW needed)
+        let sql = format!(
+            "SELECT cm.id, cm.role, cm.content, cm.timestamp,
+                    (1.0 - (me.embedding_vec <=> '{vec}'::halfvec))::float8 AS similarity
+             FROM message_embeddings me
+             JOIN conversation_messages cm ON cm.id = me.message_id
+             WHERE me.session_id = $1
+             ORDER BY me.embedding_vec <=> '{vec}'::halfvec
+             LIMIT $2",
+            vec = vec_lit
+        );
+        let rows = sqlx::query_as::<_, (i64, String, String, String, f64)>(&sql)
+            .bind(session_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
+    async fn semantic_conversation_search(&self, query_vec: &[f32], limit: i64) -> DbResult<Vec<(String, f64)>> {
+        let vec_lit = vec_to_pg_literal(query_vec);
+        // HNSW recall Top-N topics → group by session_id (small set, safe to GROUP BY)
+        let pool_size = limit * 5;
+        let sql = format!(
+            "WITH top_topics AS (
+                SELECT session_id,
+                       (1.0 - (embedding_vec <=> '{vec}'::vector))::float8 AS similarity
+                FROM conversation_topic_vectors
+                WHERE embedding_vec IS NOT NULL
+                ORDER BY embedding_vec <=> '{vec}'::vector
+                LIMIT {pool}
+            )
+            SELECT session_id, MAX(similarity)::float8 AS max_sim
+            FROM top_topics
+            GROUP BY session_id
+            ORDER BY max_sim DESC
+            LIMIT $1",
+            vec = vec_lit, pool = pool_size
+        );
+        let rows = sqlx::query_as::<_, (String, f64)>(&sql)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+}
+
+/// Zero-allocation pgvector literal serializer (shared with conversation.rs).
+fn vec_to_pg_literal(v: &[f32]) -> String {
+    use std::fmt::Write;
+    let mut buf = String::with_capacity(v.len() * 14 + 2);
+    buf.push('[');
+    for (i, f) in v.iter().enumerate() {
+        if i > 0 { buf.push(','); }
+        let _ = write!(buf, "{}", f);
+    }
+    buf.push(']');
+    buf
 }
