@@ -101,7 +101,8 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
             || n == "mission_session_narrations"
             || n == "mission_activity_report"
             || n == "mission_message_search"
-            || n == "mission_context_around" => conversation::handle(state, n, args).await,
+            || n == "mission_context_around"
+            => conversation::handle(state, n, args).await,
         "mission_retrospective" | "mission_retrospective_list" | "mission_retrospective_backfill"
             => retrospective::handle(state, name, args).await,
 

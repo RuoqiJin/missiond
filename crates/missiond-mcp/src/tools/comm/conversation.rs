@@ -180,6 +180,21 @@ pub fn definitions() -> Vec<ToolDefinition> {
             }),
         ),
 
+        // ===== Reconcile: JSONL-to-DB integrity check =====
+        ToolDefinition::new(
+            "mission_conversation_reconcile",
+            "JSONL-DB 对账。不传 sessionId 触发全量后台扫描；传 sessionId 立即对账单个会话。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "sessionId": {
+                        "type": "string",
+                        "description": "可选。指定会话 ID 立即对账。不传则触发全量后台扫描"
+                    }
+                }
+            }),
+        ),
+
         // ===== Consolidated: Retrospective Manage =====
         ToolDefinition::new(
             "mission_retrospective_manage",

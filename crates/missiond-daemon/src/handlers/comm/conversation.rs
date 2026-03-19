@@ -845,6 +845,32 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
         }
 
+        // ===== Reconcile: trigger JSONL-to-DB integrity check =====
+        "mission_conversation_reconcile" => {
+            let session_id = args.get("sessionId").or_else(|| args.get("session_id"))
+                .and_then(|v| v.as_str());
+
+            if let Some(sid) = session_id {
+                // Single-session reconcile
+                let conv = state.store.get_conversation(sid).await
+                    .map_err(|e| anyhow!("DB error: {e}"))?;
+                match conv.and_then(|c| c.jsonl_path) {
+                    Some(path) => {
+                        crate::events_sync::reconcile_conversation_messages(state, sid, &path).await;
+                        Ok(ToolResult::text(format!("Reconciled session {sid}")))
+                    }
+                    None => Ok(ToolResult::error(format!("Session {sid} has no jsonl_path")))
+                }
+            } else {
+                // Full reconcile (trigger immediately, don't wait for daily timer)
+                let state_clone = state.clone();
+                tokio::spawn(async move {
+                    crate::workers::reconcile_worker::run_reconciliation_now(&state_clone).await;
+                });
+                Ok(ToolResult::text("Full reconciliation triggered in background"))
+            }
+        }
+
         _ => Err(anyhow!("Unknown conversation tool: {name}")),
     }
 }
