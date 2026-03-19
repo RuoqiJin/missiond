@@ -51,6 +51,8 @@ pub enum WatcherEvent {
         project_path: String,
         jsonl_path: String,
         messages: Vec<CCMessageLine>,
+        /// Byte offset after this read — consumer must ack to persist cursor.
+        read_end_offset: u64,
     },
     /// New system events detected in a JSONL file (progress, system, queue-operation, etc.)
     NewEvents {
@@ -140,6 +142,12 @@ impl CCTasksWatcher {
 
         // Initial scan
         self.scan_all_projects().await;
+
+        // Catch up any gaps between DB cursors and current file sizes
+        self.catchup_from_cursors().await;
+
+        // Anchor check: detect JSONL files whose first message was never ingested
+        self.anchor_check().await;
 
         // Setup file watcher
         let (tx, mut rx) = tokio::sync::mpsc::channel(100);
@@ -310,6 +318,112 @@ impl CCTasksWatcher {
         info!(session_count, "Initial scan complete");
     }
 
+    /// Catch up gaps between DB-restored cursors and current file sizes.
+    /// Called once at startup after scan_all_projects(), before the file watcher starts.
+    /// This ensures any messages written while the daemon was down are ingested.
+    async fn catchup_from_cursors(&self) {
+        let positions: Vec<(String, u64)> = self.file_positions.read().await
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+
+        let mut caught_up = 0usize;
+        for (path, cursor_pos) in &positions {
+            let file_size = get_file_size(Path::new(path)).await;
+            if file_size > *cursor_pos {
+                let gap_bytes = file_size - cursor_pos;
+                info!(
+                    path = %path,
+                    cursor = cursor_pos,
+                    file_size = file_size,
+                    gap_bytes = gap_bytes,
+                    "Startup catchup: detected gap"
+                );
+                Self::check_session_for_changes_static(
+                    Path::new(path),
+                    &self.sessions,
+                    &self.recent_changes,
+                    self.max_recent_changes,
+                    &self.event_tx,
+                    &self.projects_dir,
+                    &self.file_positions,
+                    Some(&self.cursor_persist_tx),
+                ).await;
+                caught_up += 1;
+            }
+        }
+
+        if caught_up > 0 {
+            info!(caught_up, "Startup catchup complete");
+        }
+    }
+
+    /// Anchor check: read the first user message UUID from each JSONL file,
+    /// batch-check against DB. If missing → reset cursor to 0 for automatic backfill.
+    /// O(N) cost where N = number of JSONL files with cursors.
+    async fn anchor_check(&self) {
+        let store = match &self.store {
+            Some(s) => s,
+            None => return,
+        };
+
+        let positions: Vec<(String, u64)> = self.file_positions.read().await
+            .iter()
+            .filter(|(_, &offset)| offset > 0) // Only check files that have been partially read
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+
+        if positions.is_empty() { return; }
+
+        // Read first user message UUID from each JSONL (only first 64KB for efficiency)
+        let mut anchors: Vec<(String, String)> = Vec::new(); // (file_path, uuid)
+        for (path, _) in &positions {
+            // Read only the head of the file to find the first user message
+            if let Ok(bytes) = tokio::fs::read(Path::new(path)).await {
+                let head = &bytes[..bytes.len().min(65536)]; // First 64KB
+                let content = String::from_utf8_lossy(head);
+                for line in content.lines().take(30) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                        if val.get("type").and_then(|t| t.as_str()) == Some("user") {
+                            if let Some(uuid) = val.get("uuid").and_then(|u| u.as_str()) {
+                                anchors.push((path.clone(), uuid.to_string()));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if anchors.is_empty() { return; }
+
+        // Batch check which UUIDs exist in DB
+        let uuids: Vec<&str> = anchors.iter().map(|(_, u)| u.as_str()).collect();
+        let existing = match store.check_message_uuids_exist(&uuids).await {
+            Ok(set) => set,
+            Err(e) => {
+                warn!(error = %e, "Anchor check: failed to query DB");
+                return;
+            }
+        };
+
+        // Reset cursor for files whose anchor is missing
+        let mut reset_count = 0usize;
+        for (path, uuid) in &anchors {
+            if !existing.contains(uuid.as_str()) {
+                info!(path = %path, uuid = %uuid, "Anchor check: first user message missing, resetting cursor to 0");
+                self.file_positions.write().await.insert(path.clone(), 0);
+                reset_count += 1;
+            }
+        }
+
+        if reset_count > 0 {
+            info!(reset_count, "Anchor check: reset cursors for files with missing first message");
+            // The main catchup_from_cursors has already run, but these newly reset files
+            // will be caught by the regular FSEvent/rescan cycle
+        }
+    }
+
     /// Load sessions from a project's sessions-index.json (static version)
     async fn load_project_sessions_static(
         index_path: &Path,
@@ -328,13 +442,20 @@ impl CCTasksWatcher {
             let mut sessions = sessions.write().await;
 
             if !sessions.contains_key(&session.session_id) {
-                let file_size = get_file_size(Path::new(&session.full_path)).await;
-                file_positions
-                    .write()
-                    .await
-                    .insert(session.full_path.clone(), file_size);
-                if let Some(tx) = persist_tx {
-                    let _ = tx.send((session.full_path.clone(), file_size));
+                // Only set position to file_size if no cursor was restored from DB.
+                // Restored cursors indicate a previous read position that may be behind
+                // the current file size — that gap will be caught up during startup.
+                let has_cursor = file_positions.read().await
+                    .contains_key(&session.full_path);
+                if !has_cursor {
+                    let file_size = get_file_size(Path::new(&session.full_path)).await;
+                    file_positions
+                        .write()
+                        .await
+                        .insert(session.full_path.clone(), file_size);
+                    if let Some(tx) = persist_tx {
+                        let _ = tx.send((session.full_path.clone(), file_size));
+                    }
                 }
             }
 
@@ -417,13 +538,12 @@ impl CCTasksWatcher {
                             read_new_lines_raw(file_path, from_pos).await
                         {
                             if new_pos > from_pos {
+                                // Advance in-memory position to avoid re-reading on next FSEvent.
+                                // DB cursor is NOT advanced here — only on consumer Ack.
                                 file_positions
                                     .write()
                                     .await
                                     .insert(file_path_str.clone(), new_pos);
-                                if let Some(tx) = persist_tx {
-                                    let _ = tx.send((file_path_str.clone(), new_pos));
-                                }
 
                                 let mut messages: Vec<CCMessageLine> = Vec::new();
                                 let mut events: Vec<serde_json::Value> = Vec::new();
@@ -458,13 +578,21 @@ impl CCTasksWatcher {
                                         events,
                                     });
                                 }
-                                if !messages.is_empty() {
+                                let has_messages = !messages.is_empty();
+                                if has_messages {
                                     let _ = event_tx.send(WatcherEvent::NewMessages {
                                         session_id,
                                         project_path,
                                         jsonl_path: file_path_str.clone(),
                                         messages,
+                                        read_end_offset: new_pos,
                                     });
+                                }
+                                // No messages in this read — persist cursor immediately (events are best-effort)
+                                if !has_messages {
+                                    if let Some(tx) = persist_tx {
+                                        let _ = tx.send((file_path_str.clone(), new_pos));
+                                    }
                                 }
                             }
                         }
@@ -483,13 +611,12 @@ impl CCTasksWatcher {
 
         if let Ok((raw_lines, new_pos)) = read_new_lines_raw(file_path, from_pos).await {
             if new_pos > from_pos {
+                // Advance in-memory position to avoid re-reading on next FSEvent.
+                // DB cursor is NOT advanced here — only on consumer Ack.
                 file_positions
                     .write()
                     .await
                     .insert(file_path_str.clone(), new_pos);
-                if let Some(tx) = persist_tx {
-                    let _ = tx.send((file_path_str.clone(), new_pos));
-                }
 
                 // Route by message type: conversation messages vs system events
                 let mut messages: Vec<CCMessageLine> = Vec::new();
@@ -527,13 +654,21 @@ impl CCTasksWatcher {
                         events,
                     });
                 }
-                if !messages.is_empty() {
+                let has_messages = !messages.is_empty();
+                if has_messages {
                     let _ = event_tx.send(WatcherEvent::NewMessages {
                         session_id: session.session_id.clone(),
                         project_path: session.project_path.clone(),
                         jsonl_path: file_path_str.clone(),
                         messages,
+                        read_end_offset: new_pos,
                     });
+                }
+                // No messages in this read — persist cursor immediately (events are best-effort)
+                if !has_messages {
+                    if let Some(tx) = persist_tx {
+                        let _ = tx.send((file_path_str.clone(), new_pos));
+                    }
                 }
             }
         }
@@ -792,6 +927,12 @@ impl CCTasksWatcher {
         }
     }
 
+    /// Persist a cursor ack — called by the ack loop after message_handler confirms PG INSERT.
+    /// This is the ONLY path that feeds cursor_persist_tx for message reads.
+    pub fn persist_cursor_ack(&self, file_path: &str, offset: u64) {
+        let _ = self.cursor_persist_tx.send((file_path.to_string(), offset));
+    }
+
     /// Get recent task changes
     pub async fn get_recent_changes(&self, limit: usize) -> Vec<CCTaskChangeEvent> {
         self.recent_changes
@@ -846,13 +987,13 @@ impl CCTasksWatcher {
     }
 }
 
-/// Background task: batches cursor updates and persists to DB every 10 seconds.
+/// Background task: batches cursor updates and persists to DB every 2 seconds.
 async fn cursor_persist_loop(
     store: Arc<dyn MissionStore>,
     mut rx: mpsc::UnboundedReceiver<(String, u64)>,
 ) {
     let mut batch: HashMap<String, u64> = HashMap::new();
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
