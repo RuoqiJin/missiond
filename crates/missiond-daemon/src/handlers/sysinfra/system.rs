@@ -12,6 +12,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     match name {
         "mission_sys_logs" => sys_logs(args).await,
         "mission_sys_config" => sys_config(state, args).await,
+        "mission_daemon_update" => daemon_update(args).await,
         _ => Ok(ToolResult::error(format!("Unknown system tool: {}", name))),
     }
 }
@@ -222,6 +223,183 @@ async fn sys_logs(args: Value) -> Result<ToolResult> {
             log_path,
             result.join("\n")
         )))
+    }
+}
+
+// ── daemon_update: one-click build + restart ──
+
+/// Launchd service label for MissionD daemon.
+const LAUNCHD_LABEL: &str = "com.missiond.daemon";
+
+async fn daemon_update(args: Value) -> Result<ToolResult> {
+    use std::process::Command;
+    use tracing::info;
+
+    let skip_build = args.get("skip_build")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let home = missiond_core::ipc::default_mission_home();
+    let binary_dest = home.join("missiond");
+
+    // Resolve workspace root from compile-time CARGO_MANIFEST_DIR
+    // env!() is evaluated at compile time — always correct for this binary.
+    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent().and_then(|p| p.parent())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    // cargo build output is `missiond` (binary name from Cargo.toml)
+    let build_target = project_root.join("target/release/missiond");
+
+    // Step 1: Build (unless skip_build)
+    if !skip_build {
+        info!("daemon_update: starting cargo build --release");
+        let project_root_clone = project_root.clone();
+        let build_output = tokio::task::spawn_blocking(move || {
+            Command::new("cargo")
+                .args(["build", "--release", "--package", "missiond-daemon"])
+                .current_dir(&project_root_clone)
+                .output()
+        }).await??;
+
+        if !build_output.status.success() {
+            let stderr = String::from_utf8_lossy(&build_output.stderr);
+            return Ok(ToolResult::error(format!(
+                "cargo build failed (exit {})\n{}",
+                build_output.status, stderr
+            )));
+        }
+        info!("daemon_update: build succeeded");
+    }
+
+    // Step 2: Verify new binary exists
+    if !build_target.exists() {
+        return Ok(ToolResult::error(format!(
+            "Built binary not found at {}",
+            build_target.display()
+        )));
+    }
+
+    // Step 3: Replace binary via atomic rename (temp file → rename).
+    // CRITICAL: std::fs::copy() on a running binary causes SIGBUS on macOS
+    // because the executable is memory-mapped. We must copy to a temp file
+    // first, then atomically rename to avoid corrupting the running process.
+    let tmp_dest = binary_dest.with_extension("tmp");
+    if let Err(e) = std::fs::copy(&build_target, &tmp_dest) {
+        return Ok(ToolResult::error(format!(
+            "Failed to copy binary to temp: {} → {}: {}",
+            build_target.display(), tmp_dest.display(), e
+        )));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp_dest,
+            std::fs::Permissions::from_mode(0o755));
+    }
+
+    // Atomic rename: old inode stays mapped in running process, new inode takes the path
+    if let Err(e) = std::fs::rename(&tmp_dest, &binary_dest) {
+        let _ = std::fs::remove_file(&tmp_dest);
+        return Ok(ToolResult::error(format!(
+            "Failed to rename binary: {} → {}: {}",
+            tmp_dest.display(), binary_dest.display(), e
+        )));
+    }
+
+    info!("daemon_update: binary replaced at {}", binary_dest.display());
+
+    // Step 4: Restart via launchd or fallback to manual restart
+    let current_pid = std::process::id();
+    let uid = unsafe { libc::getuid() };
+    let kickstart_target = format!("gui/{}/{}", uid, LAUNCHD_LABEL);
+
+    // Check if launchd service exists
+    let launchd_check = Command::new("launchctl")
+        .args(["print", &kickstart_target])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    let use_launchd = launchd_check.map(|s| s.success()).unwrap_or(false);
+
+    if use_launchd {
+        // Defer kickstart via tokio::spawn so the MCP response is sent first.
+        // Without this, kickstart -k sends SIGTERM immediately, killing the
+        // daemon before the JSON-RPC response reaches Claude Code.
+        let kickstart_target_owned = kickstart_target.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            info!("daemon_update: executing launchctl kickstart -k");
+            let _ = Command::new("launchctl")
+                .args(["kickstart", "-k", &kickstart_target_owned])
+                .status();
+        });
+
+        Ok(ToolResult::text(format!(
+            "Build succeeded. Daemon will restart in 2 seconds via launchd.\n\
+             - Binary: {} → {}\n\
+             - Method: launchctl kickstart -k {}\n\
+             - Old PID: {}\n\
+             - Reconnect MCP after restart.",
+            build_target.display(), binary_dest.display(),
+            kickstart_target, current_pid,
+        )))
+    } else {
+        // Fallback: detached bash script for non-launchd environments
+        info!("daemon_update: launchd service not found, using script fallback");
+        let socket_path = home.join("missiond.sock");
+        let log_dir = home.join("logs");
+
+        let script = format!(r#"#!/bin/bash
+# MissionD daemon update script (auto-generated, non-launchd fallback)
+sleep 2
+kill -TERM {pid} 2>/dev/null
+sleep 3
+kill -9 {pid} 2>/dev/null
+sleep 1
+rm -f "{sock}"
+nohup "{dest}" > "{log_dir}/missiond.log" 2>&1 &
+echo "MissionD restarted (new PID: $!)"
+"#,
+            pid = current_pid,
+            dest = binary_dest.display(),
+            sock = socket_path.display(),
+            log_dir = log_dir.display(),
+        );
+
+        let script_path = std::env::temp_dir().join("missiond-update.sh");
+        tokio::fs::write(&script_path, &script).await?;
+
+        let mut cmd = Command::new("bash");
+        cmd.arg(&script_path);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        match cmd.spawn() {
+            Ok(_) => {
+                Ok(ToolResult::text(format!(
+                    "Build succeeded. Restart script launched (no launchd).\n\
+                     - Binary: {} → {}\n\
+                     - Old PID: {}\n\
+                     - Daemon will restart in ~2 seconds. Reconnect MCP.",
+                    build_target.display(), binary_dest.display(), current_pid,
+                )))
+            }
+            Err(e) => Ok(ToolResult::error(format!(
+                "Failed to launch restart script: {}", e
+            ))),
+        }
     }
 }
 

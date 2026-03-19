@@ -58,7 +58,7 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         "mission_infra_query" | "mission_infra_ops"
             => infra::handle(state, name, args).await,
         "mission_worker" | "mission_control" => worker::handle(state, name, args).await,
-        "mission_sys_logs" | "mission_sys_config"
+        "mission_sys_logs" | "mission_sys_config" | "mission_daemon_update"
             => system::handle(state, name, args).await,
         "mission_compute_slot"
             => compute_slot::handle(state, name, args).await,

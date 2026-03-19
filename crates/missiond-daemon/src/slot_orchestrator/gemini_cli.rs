@@ -15,8 +15,9 @@ use tokio::sync::{Mutex, Semaphore};
 use tracing::{info, warn};
 
 use missiond_core::db::traits::MissionStore;
-use missiond_core::pty::PTYManager;
 use missiond_core::types::{CliEngine, Lifecycle};
+
+use crate::llm::gemini_driver::GeminiPtyDriver;
 
 use super::controller::EngineController;
 use super::gemini_controller::GeminiCliController;
@@ -34,9 +35,9 @@ pub struct GeminiCliSlotManager {
 }
 
 impl GeminiCliSlotManager {
-    pub fn new(pty: Arc<PTYManager>, store: Arc<dyn MissionStore>) -> Self {
+    pub fn new(driver: GeminiPtyDriver, store: Arc<dyn MissionStore>) -> Self {
         Self {
-            controller: GeminiCliController::new(pty, store),
+            controller: GeminiCliController::new(driver, store),
             persistent_locks: DashMap::new(),
             ephemeral_semaphore: Arc::new(Semaphore::new(EPHEMERAL_CAPACITY)),
         }

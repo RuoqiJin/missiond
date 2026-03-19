@@ -826,6 +826,18 @@ impl PTYManager {
         }
     }
 
+    /// Get the current screen text for a slot (rendered virtual terminal content).
+    /// Returns None if slot not found.
+    pub async fn get_screen_text(&self, slot_id: &str) -> Option<String> {
+        let sessions = self.sessions.read().await;
+        if let Some(session) = sessions.get(slot_id) {
+            let session = session.read().await;
+            Some(session.get_screen_text().await)
+        } else {
+            None
+        }
+    }
+
     /// Kill a session
     pub async fn kill(&self, slot_id: &str) -> Result<()> {
         // Remove from auto-restart

@@ -157,15 +157,27 @@ impl ConversationStore for PgMissionStore {
         Ok(())
     }
 
-    async fn ensure_conversation_exists(&self, session_id: &str, project_path: &str, jsonl_path: &str) -> DbResult<()> {
+    async fn ensure_conversation_exists(&self, session_id: &str, project_path: &str, jsonl_path: &str, status: &str, conversation_type: &str) -> DbResult<()> {
         sqlx::query(
             "INSERT INTO conversations (id, project, source, jsonl_path, message_count, started_at, status, conversation_type)
-             VALUES ($1, $2, 'claude_cli', $3, 0, NOW(), 'active', 'user')
+             VALUES ($1, $2, 'claude_cli', $3, 0, NOW(), $4, $5)
              ON CONFLICT (id) DO NOTHING"
         )
             .bind(session_id)
             .bind(project_path)
             .bind(jsonl_path)
+            .bind(status)
+            .bind(conversation_type)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn refresh_conversation_message_count(&self, session_id: &str) -> DbResult<()> {
+        sqlx::query(
+            "UPDATE conversations SET message_count = (SELECT COUNT(*) FROM conversation_messages WHERE session_id = $1) WHERE id = $1"
+        )
+            .bind(session_id)
             .execute(&self.pool)
             .await?;
         Ok(())

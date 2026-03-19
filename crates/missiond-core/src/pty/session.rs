@@ -1728,6 +1728,23 @@ impl PTYSession {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
+
+        // SIGKILL the child process BEFORE dropping the writer.
+        // Without this, child.wait() (in spawn_blocking) blocks forever,
+        // preventing tokio runtime shutdown → daemon stuck in UE state.
+        let pid_opt = *self.pty_pid.read().await;
+        if let Some(pid) = pid_opt {
+            #[cfg(unix)]
+            {
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL); }
+                info!(pid, "PTY child SIGKILL sent");
+            }
+            #[cfg(not(unix))]
+            {
+                info!(pid, "PTY child kill (non-unix, relying on writer drop)");
+            }
+        }
+
         *self.pty_writer.lock().await = None;
         info!("PTY session killed");
     }
