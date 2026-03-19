@@ -112,7 +112,20 @@ impl CCTasksWatcher {
         self.event_tx.subscribe()
     }
 
-    /// Start watching Claude Code sessions
+    /// Run startup catchup: anchor check + gap recovery.
+    /// MUST be called AFTER broadcast receivers are created (via subscribe()),
+    /// otherwise catchup messages are sent to a channel with no receivers and silently lost.
+    pub async fn run_startup_catchup(&self) {
+        // Anchor check first: detect JSONL files whose first message was never ingested
+        self.anchor_check().await;
+        // Catch up any gaps between DB cursors and current file sizes
+        self.catchup_from_cursors().await;
+    }
+
+    /// Start watching Claude Code sessions.
+    /// NOTE: This only loads cursors, scans projects, and starts the file watcher.
+    /// Call `run_startup_catchup()` AFTER broadcast receivers are created to ensure
+    /// catchup messages are consumed (see: startup message loss root cause).
     pub async fn start(&mut self) -> anyhow::Result<()> {
         {
             let mut started = self.started.write().await;
@@ -140,14 +153,8 @@ impl CCTasksWatcher {
             }
         }
 
-        // Initial scan
+        // Initial scan (registers sessions + file_positions, no channel messages)
         self.scan_all_projects().await;
-
-        // Catch up any gaps between DB cursors and current file sizes
-        self.catchup_from_cursors().await;
-
-        // Anchor check: detect JSONL files whose first message was never ingested
-        self.anchor_check().await;
 
         // Setup file watcher
         let (tx, mut rx) = tokio::sync::mpsc::channel(100);
@@ -196,6 +203,7 @@ impl CCTasksWatcher {
                             &file_positions,
                             &event_tx,
                             Some(&persist_tx),
+                            true, // update_positions: set cursor to file_size, ReconcileWorker handles history
                         )
                         .await;
                     } else if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
@@ -310,6 +318,7 @@ impl CCTasksWatcher {
                 &self.file_positions,
                 &self.event_tx,
                 Some(&self.cursor_persist_tx),
+                true, // update_positions: set cursor to file_size
             )
             .await;
         }
@@ -375,15 +384,21 @@ impl CCTasksWatcher {
 
         if positions.is_empty() { return; }
 
-        // Read first user message UUID from each JSONL (only first 64KB for efficiency)
+        // Read first user message UUID from each JSONL via streaming line reader.
+        // Cannot use fixed-size buffer: some JSONL lines are multi-MB (e.g. image content).
         let mut anchors: Vec<(String, String)> = Vec::new(); // (file_path, uuid)
         for (path, _) in &positions {
-            // Read only the head of the file to find the first user message
-            if let Ok(bytes) = tokio::fs::read(Path::new(path)).await {
-                let head = &bytes[..bytes.len().min(65536)]; // First 64KB
-                let content = String::from_utf8_lossy(head);
-                for line in content.lines().take(30) {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            if let Ok(file) = tokio::fs::File::open(Path::new(path)).await {
+                let reader = BufReader::new(file);
+                let mut lines = reader.lines();
+                let mut checked = 0usize;
+                while let Ok(Some(line)) = lines.next_line().await {
+                    checked += 1;
+                    if checked > 30 { break; } // Don't scan too deep
+                    // Fast pre-check before full JSON parse: line must contain "user"
+                    if !line.contains("\"type\":\"user\"") { continue; }
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
                         if val.get("type").and_then(|t| t.as_str()) == Some("user") {
                             if let Some(uuid) = val.get("uuid").and_then(|u| u.as_str()) {
                                 anchors.push((path.clone(), uuid.to_string()));
@@ -424,13 +439,17 @@ impl CCTasksWatcher {
         }
     }
 
-    /// Load sessions from a project's sessions-index.json (static version)
+    /// Load sessions from a project's sessions-index.json (static version).
+    /// `update_positions`: whether to set file_positions for new sessions.
+    ///   - true: sets cursor to file_size (skip existing content; ReconcileWorker handles history)
+    ///   - false: read-only mode (API queries — must not mutate watcher state)
     async fn load_project_sessions_static(
         index_path: &Path,
         sessions: &Arc<RwLock<HashMap<String, CCSession>>>,
         file_positions: &Arc<RwLock<HashMap<String, u64>>>,
         _event_tx: &broadcast::Sender<WatcherEvent>,
         persist_tx: Option<&mpsc::UnboundedSender<(String, u64)>>,
+        update_positions: bool,
     ) {
         let index = match parse_sessions_index(index_path).await {
             Some(i) => i,
@@ -442,19 +461,21 @@ impl CCTasksWatcher {
             let mut sessions = sessions.write().await;
 
             if !sessions.contains_key(&session.session_id) {
-                // Only set position to file_size if no cursor was restored from DB.
-                // Restored cursors indicate a previous read position that may be behind
-                // the current file size — that gap will be caught up during startup.
-                let has_cursor = file_positions.read().await
-                    .contains_key(&session.full_path);
-                if !has_cursor {
-                    let file_size = get_file_size(Path::new(&session.full_path)).await;
-                    file_positions
-                        .write()
-                        .await
-                        .insert(session.full_path.clone(), file_size);
-                    if let Some(tx) = persist_tx {
-                        let _ = tx.send((session.full_path.clone(), file_size));
+                if update_positions {
+                    let has_cursor = file_positions.read().await
+                        .contains_key(&session.full_path);
+                    if !has_cursor {
+                        // Set cursor to file_size: only accept future writes.
+                        // Historical content before this point is handled by ReconcileWorker
+                        // (daily background scan with ON CONFLICT DO NOTHING dedup).
+                        // This avoids the race where setting cursor=0 causes duplicate
+                        // full-file reads when concurrent FS events arrive.
+                        let file_size = get_file_size(Path::new(&session.full_path)).await;
+                        file_positions.write().await
+                            .insert(session.full_path.clone(), file_size);
+                        if let Some(tx) = persist_tx {
+                            let _ = tx.send((session.full_path.clone(), file_size));
+                        }
                     }
                 }
             }
@@ -497,6 +518,7 @@ impl CCTasksWatcher {
                         file_positions,
                         event_tx,
                         persist_tx,
+                        false, // runtime: don't skip new files
                     )
                     .await;
                 }
@@ -980,7 +1002,8 @@ impl CCTasksWatcher {
                 &self.sessions,
                 &self.file_positions,
                 &self.event_tx,
-                None, // list_sessions doesn't need cursor persistence
+                None,
+                false, // read-only: API query must not mutate watcher state
             )
             .await;
         }

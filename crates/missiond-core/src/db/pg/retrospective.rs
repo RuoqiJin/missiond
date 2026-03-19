@@ -306,7 +306,8 @@ impl RetrospectiveStore for PgMissionStore {
                 message_uuid: row.get("message_uuid"),
                 parent_uuid: row.get("parent_uuid"),
                 model: row.get("model"),
-                timestamp: row.get("timestamp"),
+                timestamp: row.get::<chrono::DateTime<chrono::Utc>, _>("timestamp")
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 metadata: row.get("metadata"),
                 tool_name: row.get("tool_name"),
                 raw_role: row.get("raw_role"),

@@ -4,7 +4,7 @@
 //!         backfill progress, and router chat sessions.
 
 use async_trait::async_trait;
-use sqlx::Column;
+use sqlx::{Column, Row};
 use crate::db::error::DbResult;
 use crate::db::traits::{ObservabilityStore, BackfillPhaseStatus};
 use crate::types::*;
@@ -1233,10 +1233,10 @@ impl ObservabilityStore for PgMissionStore {
 
         // By day (last 30 days)
         let day_rows = sqlx::query(
-            "SELECT DATE(m.timestamp::timestamp) AS day, COUNT(*) AS msg_count, SUM(LENGTH(m.content)) AS chars
+            "SELECT DATE(m.timestamp) AS day, COUNT(*) AS msg_count, SUM(LENGTH(m.content)) AS chars
              FROM conversation_messages m
              INNER JOIN conversations c ON c.id = m.session_id
-             WHERE c.chat_type = 'router_chat' AND m.timestamp >= to_char(NOW() AT TIME ZONE 'UTC' - INTERVAL '30 days', 'YYYY-MM-DD')
+             WHERE c.chat_type = 'router_chat' AND m.timestamp >= (NOW() - INTERVAL '30 days')
              GROUP BY day ORDER BY day DESC"
         )
         .fetch_all(&self.pool)
@@ -1546,5 +1546,42 @@ impl ObservabilityStore for PgMissionStore {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    // -- reconcile_watermarks --
+
+    async fn get_reconcile_watermark(&self, path: &str) -> DbResult<Option<i64>> {
+        let row = sqlx::query("SELECT last_reconciled_size FROM reconcile_watermarks WHERE jsonl_path = $1")
+            .bind(path)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.get::<i64, _>("last_reconciled_size")))
+    }
+
+    async fn upsert_reconcile_watermark(&self, path: &str, size: i64) -> DbResult<()> {
+        sqlx::query(
+            "INSERT INTO reconcile_watermarks (jsonl_path, last_reconciled_size, last_reconciled_at)
+             VALUES ($1, $2, NOW())
+             ON CONFLICT (jsonl_path) DO UPDATE SET last_reconciled_size = $2, last_reconciled_at = NOW()"
+        )
+            .bind(path)
+            .bind(size)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn get_all_reconcile_watermarks(&self) -> DbResult<HashMap<String, i64>> {
+        let rows = sqlx::query("SELECT jsonl_path, last_reconciled_size FROM reconcile_watermarks")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut map = HashMap::new();
+        for row in rows {
+            map.insert(
+                row.get::<String, _>("jsonl_path"),
+                row.get::<i64, _>("last_reconciled_size"),
+            );
+        }
+        Ok(map)
     }
 }
