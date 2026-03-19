@@ -8,11 +8,21 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
 
 use missiond_core::types::CliEngine;
 
+use crate::control_tree::{ControlManager, CtlProvider};
 use super::types::{EngineSlotManager, EngineStatus, SlotTaskConfig, SlotTaskRequest};
+
+/// Map CliEngine → CtlProvider for pause checks.
+fn engine_to_provider(engine: CliEngine) -> CtlProvider {
+    match engine {
+        CliEngine::ClaudeCode => CtlProvider::Sonnet, // Claude Code slots use Sonnet model
+        CliEngine::Gemini => CtlProvider::Gemini,
+        CliEngine::Codex => CtlProvider::Codex,
+    }
+}
 
 /// Top-level slot orchestrator. Routes tasks to engine-specific sub-managers.
 pub struct AgentSlotManager {
@@ -20,13 +30,19 @@ pub struct AgentSlotManager {
     registry: RwLock<HashMap<String, SlotTaskConfig>>,
     /// engine → sub-manager
     managers: HashMap<CliEngine, Arc<dyn EngineSlotManager>>,
+    /// ControlTree for pause checks.
+    control: Arc<ControlManager>,
 }
 
 impl AgentSlotManager {
-    pub fn new(managers: Vec<(CliEngine, Arc<dyn EngineSlotManager>)>) -> Self {
+    pub fn new(
+        managers: Vec<(CliEngine, Arc<dyn EngineSlotManager>)>,
+        control: Arc<ControlManager>,
+    ) -> Self {
         Self {
             registry: RwLock::new(HashMap::new()),
             managers: managers.into_iter().collect(),
+            control,
         }
     }
 
@@ -70,6 +86,21 @@ impl AgentSlotManager {
             .get(task_type)
             .cloned()
             .ok_or_else(|| anyhow!("Task not registered: {}", task_type))?;
+
+        // ControlTree pause check: respect provider-level and global pause.
+        let provider = engine_to_provider(config.engine);
+        if self.control.current().is_provider_paused(provider) {
+            warn!(
+                task_type,
+                provider = provider.as_str(),
+                "SlotManager: task blocked — provider paused"
+            );
+            return Err(anyhow!(
+                "Provider {} is paused (task: {})",
+                provider.as_str(),
+                task_type
+            ));
+        }
 
         let manager = self
             .managers

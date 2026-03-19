@@ -717,33 +717,6 @@ impl PTYManager {
     }
 
     /// Execute a task
-    pub async fn execute_task(
-        &self,
-        slot: &Slot,
-        task_id: &str,
-        prompt: &str,
-    ) -> Result<PTYExecuteResult> {
-        // Set current task
-        {
-            let mut agent_info = self.agent_info.write().await;
-            if let Some(info) = agent_info.get_mut(&slot.id) {
-                info.current_task_id = Some(task_id.to_string());
-            }
-        }
-
-        let result = self.send(&slot.id, prompt, 300_000).await;
-
-        // Clear current task
-        {
-            let mut agent_info = self.agent_info.write().await;
-            if let Some(info) = agent_info.get_mut(&slot.id) {
-                info.current_task_id = None;
-            }
-        }
-
-        result
-    }
-
     /// Send confirmation response
     pub async fn confirm(&self, slot_id: &str, response: ConfirmResponse) -> Result<()> {
         let session = {
