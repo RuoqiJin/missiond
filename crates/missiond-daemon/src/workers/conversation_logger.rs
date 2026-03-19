@@ -33,8 +33,10 @@ impl super::BackgroundWorker for ConversationLoggerWorker {
 async fn run_loop(s: &AppState, rx: &mut broadcast::Receiver<WatcherEvent>) {
     loop {
         match rx.recv().await {
-            Ok(WatcherEvent::NewMessages { session_id, project_path, jsonl_path, messages }) => {
-                handle_new_messages_event(s, session_id, project_path, jsonl_path, messages).await;
+            Ok(WatcherEvent::NewMessages { session_id, project_path, jsonl_path, messages, read_end_offset }) => {
+                handle_new_messages_event(s, session_id, project_path, jsonl_path.clone(), messages).await;
+                // Ack: cursor is safe to persist — messages have been written to PG
+                let _ = s.cursor_ack_tx.send((jsonl_path, read_end_offset));
             }
             Ok(WatcherEvent::NewEvents { session_id, events }) => {
                 events_sync::handle_new_events(s, session_id, events).await;
