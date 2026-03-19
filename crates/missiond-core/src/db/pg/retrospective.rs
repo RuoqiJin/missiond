@@ -46,9 +46,9 @@ impl RetrospectiveStore for PgMissionStore {
             "SELECT c.id, c.message_count,
                     COALESCE((SELECT COUNT(*) FROM conversation_tool_calls tc WHERE tc.session_id = c.id), 0) as tool_count,
                     COALESCE(
-                        (SELECT 100.0 * SUM(CASE WHEN tc2.status='error' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)
+                        (SELECT (100.0 * SUM(CASE WHEN tc2.status='error' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0))::float8
                          FROM conversation_tool_calls tc2 WHERE tc2.session_id = c.id), 0
-                    ) as error_rate
+                    )::float8 as error_rate
              FROM conversations c
              WHERE c.status = 'completed'
                AND c.conversation_type = 'user'
@@ -85,9 +85,9 @@ impl RetrospectiveStore for PgMissionStore {
             "SELECT c.id, c.message_count,
                     COALESCE((SELECT COUNT(*) FROM conversation_tool_calls tc WHERE tc.session_id = c.id), 0) as tool_count,
                     COALESCE(
-                        (SELECT 100.0 * SUM(CASE WHEN tc2.status='error' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)
+                        (SELECT (100.0 * SUM(CASE WHEN tc2.status='error' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0))::float8
                          FROM conversation_tool_calls tc2 WHERE tc2.session_id = c.id), 0
-                    ) as error_rate
+                    )::float8 as error_rate
              FROM conversations c
              WHERE c.conversation_type = 'user'
                AND (c.slot_id IS NULL OR (
@@ -102,9 +102,9 @@ impl RetrospectiveStore for PgMissionStore {
             "SELECT c.id, c.message_count,
                     COALESCE((SELECT COUNT(*) FROM conversation_tool_calls tc WHERE tc.session_id = c.id), 0) as tool_count,
                     COALESCE(
-                        (SELECT 100.0 * SUM(CASE WHEN tc2.status='error' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)
+                        (SELECT (100.0 * SUM(CASE WHEN tc2.status='error' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0))::float8
                          FROM conversation_tool_calls tc2 WHERE tc2.session_id = c.id), 0
-                    ) as error_rate
+                    )::float8 as error_rate
              FROM conversations c
              WHERE c.conversation_type = 'user'
                AND (c.slot_id IS NULL OR (
