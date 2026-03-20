@@ -609,6 +609,10 @@ pub trait ObservabilityStore: Send + Sync {
     async fn upsert_reconcile_watermark(&self, path: &str, size: i64) -> DbResult<()>;
     async fn get_all_reconcile_watermarks(&self) -> DbResult<HashMap<String, i64>>;
 
+    // -- gemini_cli_watermarks --
+    async fn load_gemini_cursors(&self) -> DbResult<HashMap<String, i64>>;
+    async fn save_gemini_cursor(&self, file_path: &str, session_id: &str, msg_count: i64) -> DbResult<()>;
+
     // -- router_chat.rs --
     async fn router_chat_get_or_create(&self, task_id: &str, model: &str) -> DbResult<String>;
     async fn router_chat_load_history(&self, conv_id: &str) -> DbResult<Vec<serde_json::Value>>;

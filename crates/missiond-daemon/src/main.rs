@@ -42,7 +42,7 @@ use missiond_core::{
     MissionControl, MissionControlOptions, PermissionPolicy, LearnedPermissions,
     PTYManager, PTYWebSocketServer, WSServerOptions, SkillIndex, InfraConfig,
 };
-use missiond_core::{CCTasksWatcher, CCTasksWatcherOptions};
+use missiond_core::{CCTasksWatcher, CCTasksWatcherOptions, GeminiCliWatcher, GeminiCliWatcherOptions};
 use missiond_mcp::tools::{ToolResult, all_tools};
 use serde_json::Value;
 use tokio::io::BufReader;
@@ -386,7 +386,19 @@ async fn main() -> Result<()> {
         ..Default::default()
     });
     cc.start().await?;
+
+    // Gemini CLI watcher: shares the same broadcast channel as CC watcher
+    let mut gemini_watcher = GeminiCliWatcher::new(GeminiCliWatcherOptions {
+        gemini_home: None,
+        event_tx: cc.event_sender(),
+        store: Some(Arc::clone(&store)),
+    });
+    if let Err(e) = gemini_watcher.start().await {
+        warn!(error = %e, "Failed to start GeminiCliWatcher (non-fatal)");
+    }
+
     let cc_tasks = Arc::new(Mutex::new(cc));
+    let gemini_tasks = Arc::new(Mutex::new(gemini_watcher));
 
     // Conversation logger: subscribe to watcher events (processed in main select loop)
     // IMPORTANT: subscribe BEFORE run_startup_catchup() — catchup sends to broadcast channel,
@@ -553,25 +565,7 @@ async fn main() -> Result<()> {
         slow_slot_busy_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         claude_md_hash: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         last_supervisor_patrol_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-        // P1 fix (Gemini audit): ControlTree is the single source of truth.
-        // Legacy AtomicBools are hydrated from the restored ControlTree to
-        // prevent split-brain on startup (ControlTree says paused but legacy says running).
-        memory_paused: Arc::new(std::sync::atomic::AtomicBool::new(
-            home.join("memory_paused").exists()
-                || control_tree_snapshot.domains.get(&control_tree::CtlDomain::Memory).copied().unwrap_or(false)
-        )),
-        memory_paused_at: Arc::new(std::sync::atomic::AtomicI64::new({
-            let flag = home.join("memory_paused");
-            if flag.exists() {
-                std::fs::read_to_string(&flag).ok()
-                    .and_then(|s| s.trim().parse::<i64>().ok())
-                    .unwrap_or_else(|| chrono::Utc::now().timestamp())
-            } else if control_tree_snapshot.domains.get(&control_tree::CtlDomain::Memory).copied().unwrap_or(false) {
-                chrono::Utc::now().timestamp()
-            } else {
-                0
-            }
-        })),
+        // memory_paused / memory_paused_at removed — ControlTree is the single source of truth.
         global_paused: Arc::new(std::sync::atomic::AtomicBool::new(
             home.join("global_paused").exists()
                 || control_tree_snapshot.global_paused
@@ -723,12 +717,21 @@ async fn main() -> Result<()> {
         cursor_ack_tx: {
             // Ack-based cursor: message_handler acks after PG INSERT → cursor_persist_loop persists.
             // This eliminates the data loss window where cursor advances before messages reach PG.
+            // Ack routing: .json → GeminiCliWatcher, .jsonl → CCTasksWatcher (prevents cross-talk).
             let (ack_tx, mut ack_rx) = tokio::sync::mpsc::unbounded_channel::<(String, u64)>();
             let cc_tasks_ref = Arc::clone(&state_cc_tasks);
+            let gemini_tasks_ref = Arc::clone(&gemini_tasks);
             tokio::spawn(async move {
                 while let Some((path, offset)) = ack_rx.recv().await {
-                    let watcher = cc_tasks_ref.lock().await;
-                    watcher.persist_cursor_ack(&path, offset);
+                    if path.ends_with(".json") {
+                        // Gemini CLI session file → route to GeminiCliWatcher
+                        let watcher = gemini_tasks_ref.lock().await;
+                        watcher.persist_cursor_ack(&path, offset);
+                    } else {
+                        // JSONL file → route to CCTasksWatcher
+                        let watcher = cc_tasks_ref.lock().await;
+                        watcher.persist_cursor_ack(&path, offset);
+                    }
                 }
             });
             ack_tx
@@ -743,6 +746,7 @@ async fn main() -> Result<()> {
             engine: CliEngine::ClaudeCode,
             lifecycle: Lifecycle::Persistent,
             slot_id: Some("slot-arch-maint".to_string()),
+            role: Some("arch-maint".to_string()),
             model: Some("claude-sonnet-4-6".to_string()),
             timeout: std::time::Duration::from_secs(600),
             cwd: std::path::PathBuf::from("/Users/jinchen/Projects/missiond"),
@@ -753,6 +757,7 @@ async fn main() -> Result<()> {
             engine: CliEngine::Gemini,
             lifecycle: Lifecycle::Persistent,
             slot_id: Some("slot-gemini-strategy".to_string()),
+            role: Some("strategy".to_string()),
             model: None, // Uses GEMINI_MODEL constant in controller
             timeout: std::time::Duration::from_secs(600),
             cwd: std::path::PathBuf::from("/Users/jinchen/Projects/missiond"),
@@ -763,6 +768,7 @@ async fn main() -> Result<()> {
             engine: CliEngine::Gemini,
             lifecycle: Lifecycle::Persistent,
             slot_id: Some("slot-gemini-router".to_string()),
+            role: Some("gemini-router".to_string()),
             model: None,
             timeout: std::time::Duration::from_secs(120),
             cwd: std::path::PathBuf::from("/Users/jinchen/Projects/missiond"),
@@ -1177,9 +1183,8 @@ async fn main() -> Result<()> {
                 let publish_count = s.event_bus.publish_count.load(
                     std::sync::atomic::Ordering::Relaxed,
                 );
-                let memory_paused = s.memory_paused.load(
-                    std::sync::atomic::Ordering::Relaxed,
-                );
+                let memory_paused = s.control_manager.current()
+                    .is_domain_paused(crate::control_tree::CtlDomain::Memory);
                 let fast_lane = {
                     let es = s.extraction_state.read().await;
                     serde_json::json!({ "phase": format!("{:?}", es.phase), "type": es.active_type })
@@ -1258,10 +1263,12 @@ async fn main() -> Result<()> {
     // (anchor_check + gap recovery) will be processed instead of silently lost.
     {
         let catchup_cc = Arc::clone(&state.cc_tasks);
+        let catchup_gemini = Arc::clone(&gemini_tasks);
         tokio::spawn(async move {
             // Yield to let ConversationLoggerWorker's run_loop reach its first recv()
             tokio::task::yield_now().await;
             catchup_cc.lock().await.run_startup_catchup().await;
+            catchup_gemini.lock().await.run_startup_catchup().await;
         });
     }
 

@@ -12,6 +12,7 @@
 pub mod ast;
 pub mod cc_tasks;
 pub mod core;
+pub mod gemini_cli;
 pub mod db;
 pub mod embedding;
 pub mod ipc;
@@ -65,6 +66,9 @@ pub use cc_tasks::{
     CCTaskStatus, CCTasksOverview, CCTasksWatcher, CCTasksWatcherOptions, TasksByStatus,
     WatcherEvent,
 };
+
+// Re-export Gemini CLI types
+pub use gemini_cli::{GeminiCliWatcher, GeminiCliWatcherOptions};
 
 // Re-export WebSocket types
 pub use ws::{PTYWebSocketServer, WSServerOptions, ContextEnricherFn, ContextEnricherSlot, ContextEnrichResult};
