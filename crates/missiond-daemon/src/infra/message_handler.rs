@@ -21,29 +21,21 @@ pub(crate) async fn handle_new_messages(
     project_path: String,
     jsonl_path: String,
     messages: Vec<missiond_core::CCMessageLine>,
-    is_pty: bool,
+    route: &crate::infra::ingestion_router::IngestionRoute,
 ) {
-    // Determine slot_id if this session belongs to a PTY slot
-    let slot_id = if is_pty {
-        state.store.get_slot_for_session(&session_id).await.unwrap_or(None)
-    } else {
-        None
-    };
+    // All routing decisions come from the IngestionRoute (the "waybill").
+    // This handler is a "blind executor" — it does not make classification decisions.
+    let source = route.source.as_str();
+    let slot_id = route.slot_id.as_deref();
     let is_slot_session = slot_id.is_some();
-    let source = if is_pty { "pty_jsonl" } else { "claude_cli" };
-
-    // Extract parent session ID for subagent conversations
-    let parent_session_id = if session_id.starts_with("agent-") {
-        missiond_core::db::extract_parent_session_id(&jsonl_path)
-    } else {
-        None
-    };
+    let is_pty = route.is_pty;
+    let parent_session_id = route.parent_session_id.as_deref();
 
     // ── Layer 1: Ingestor ──
     let ingest_result = ingest(
         state, &session_id, &project_path, &jsonl_path, &messages,
-        source, slot_id.as_deref(), parent_session_id.as_deref(),
-        is_slot_session,
+        source, slot_id, parent_session_id,
+        is_slot_session, &route.conversation_type,
     ).await;
     let IngestResult { inserted_ids, inserted_uuids, uuid_to_id } = match ingest_result {
         Some(r) if !r.inserted_ids.is_empty() => r,
@@ -56,7 +48,7 @@ pub(crate) async fn handle_new_messages(
     // ── Layer 3: Emitter (timeline events + token ledger) ──
     emit(
         state, &session_id, &inserted_ids, &inserted_uuids, &uuid_to_id, &messages,
-        is_pty, slot_id.as_deref(), parent_session_id.as_deref(),
+        is_pty, slot_id, parent_session_id,
     ).await;
 }
 
@@ -85,6 +77,7 @@ async fn ingest(
     slot_id: Option<&str>,
     parent_session_id: Option<&str>,
     is_slot_session: bool,
+    conversation_type: &str,
 ) -> Option<IngestResult> {
     // Ensure conversation exists; re-activate if completed
     let existing_conv = state.store.get_conversation(session_id).await.unwrap_or(None);
@@ -119,8 +112,11 @@ async fn ingest(
             analysis_version: 0,
             analysis_retries: 0,
             deep_analyzed_message_id: 0,
-            chat_type: None,
-            conversation_type: missiond_core::db::derive_conversation_type(slot_id, session_id),
+            chat_type: match source {
+                "claude_code" | "pty_jsonl" => None, // default "pty"
+                other => Some(other.to_string()),    // "gemini_cli", "codex_cli", etc.
+            },
+            conversation_type: conversation_type.to_string(),
             updated_at: None,
             llm_summary: None,
             embedding_provider: None,

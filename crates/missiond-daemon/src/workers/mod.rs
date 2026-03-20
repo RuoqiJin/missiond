@@ -15,6 +15,9 @@ pub mod retro_worker;
 pub mod arch_maintenance_worker;
 pub mod strategy_worker;
 pub mod reconcile_worker;
+pub mod gemini_reconcile_worker;
+pub mod conversation_organizer;
+pub mod tagger_chunker;
 pub mod registry;
 
 use std::future::Future;

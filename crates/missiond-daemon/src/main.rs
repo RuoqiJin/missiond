@@ -501,6 +501,7 @@ async fn main() -> Result<()> {
             .and_then(|content| serde_yaml::from_str(&content).ok())
     };
     let backfill_enabled = llm_config_parsed.as_ref().map(|c| c.backfill_enabled).unwrap_or(false);
+    let intent_analyst_enabled = llm_config_parsed.as_ref().map(|c| c.intent_analyst_enabled).unwrap_or(false);
 
     // P1 fix (Gemini audit): initialize ControlManager early so its restored
     // state can hydrate legacy AtomicBools during AppState construction.
@@ -526,6 +527,8 @@ async fn main() -> Result<()> {
     let slot_mgr_pty2 = Arc::clone(&pty);
     let slot_mgr_store2 = Arc::clone(&store);
     let pty_for_gemini_transport = Arc::clone(&pty);
+    let pending_spawns_for_slot: Arc<tokio::sync::RwLock<Vec<(String, String, tokio::time::Instant)>>> =
+        Arc::new(tokio::sync::RwLock::new(Vec::new()));
 
     let state = AppState {
         mission,
@@ -590,6 +593,9 @@ async fn main() -> Result<()> {
         config_file_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         job_store: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         backfill_enabled: Arc::new(std::sync::atomic::AtomicBool::new(backfill_enabled)),
+        intent_analyst_enabled,
+        proactive_cooldowns: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        pending_slot_spawns: Arc::clone(&pending_spawns_for_slot),
         slot_current_model: Arc::new(std::sync::Mutex::new(HashMap::new())),
         screenshot_broker: Arc::clone(&screenshot_broker),
         jarvis_trace: ws_server.jarvis_trace_store().clone(),
@@ -696,6 +702,7 @@ async fn main() -> Result<()> {
             let cc_mgr = Arc::new(slot_orchestrator::ClaudeCodeSlotManager::new(
                 slot_mgr_pty,
                 slot_mgr_store,
+                Arc::clone(&pending_spawns_for_slot),
             ));
             let gemini_driver_for_slots = llm::gemini_driver::GeminiPtyDriver::new(slot_mgr_pty2);
             let gemini_mgr = Arc::new(slot_orchestrator::GeminiCliSlotManager::new(
@@ -1295,6 +1302,33 @@ async fn main() -> Result<()> {
     // Daily reconcile worker — JSONL-to-DB integrity checker (safety net for missed FSEvents)
     workers::spawn_worker(
         workers::reconcile_worker::ReconcileWorker,
+        Arc::new(state.clone()),
+        shutdown_rx.clone(),
+    );
+
+    // Gemini CLI reconcile worker — ~/.gemini/tmp/*/chats/*.json integrity checker
+    workers::spawn_worker(
+        workers::gemini_reconcile_worker::GeminiReconcileWorker,
+        Arc::new(state.clone()),
+        shutdown_rx.clone(),
+    );
+
+    // Conversation Organizer — Stage 2 of Cognitive Pipeline
+    // Repairs parent links, splices compaction fragments, emits SessionOrganized
+    workers::spawn_worker(
+        workers::conversation_organizer::ConversationOrganizerWorker {
+            timeline_rx: timeline_broadcast_tx.subscribe(),
+        },
+        Arc::new(state.clone()),
+        shutdown_rx.clone(),
+    );
+
+    // Tagger & Chunker — Stage 3 of Cognitive Pipeline
+    // Extracts structured Turns from flat messages, applies noise labels
+    workers::spawn_worker(
+        workers::tagger_chunker::TaggerChunkerWorker {
+            timeline_rx: timeline_broadcast_tx.subscribe(),
+        },
         Arc::new(state.clone()),
         shutdown_rx.clone(),
     );

@@ -133,10 +133,8 @@ pub(crate) struct AppState {
     // Notify fields removed — replaced by EventBus (Phase 2 S3/S4)
     /// Last supervisor patrol timestamp (epoch secs). 0 = never run.
     pub(crate) last_supervisor_patrol_at: Arc<std::sync::atomic::AtomicI64>,
-    /// Pause switch for memory extraction tasks (realtime, deep_analysis, sync, GC).
-    pub(crate) memory_paused: Arc<std::sync::atomic::AtomicBool>,
-    /// Epoch secs when memory was paused. 0 = not paused. Used for TTL auto-resume.
-    pub(crate) memory_paused_at: Arc<std::sync::atomic::AtomicI64>,
+    // memory_paused / memory_paused_at removed — ControlTree is the single source of truth.
+    // Use state.control_manager.current().is_domain_paused(CtlDomain::Memory) instead.
     /// Pause switch for ALL autopilot tasks (board tasks, submit tasks).
     pub(crate) global_paused: Arc<std::sync::atomic::AtomicBool>,
     /// Epoch secs when global pause was activated. 0 = not paused.
@@ -233,6 +231,15 @@ pub(crate) struct AppState {
     pub(crate) job_store: Arc<tokio::sync::RwLock<HashMap<String, missiond_core::types::AsyncJob>>>,
     /// Embedding backfill enabled flag (from llm.yaml `backfill_enabled`).
     pub(crate) backfill_enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// Intent Analyst enabled flag (from llm.yaml `intent_analyst_enabled`). Default: false.
+    pub(crate) intent_analyst_enabled: bool,
+    /// Phase 7: Last proactive trigger timestamps (epoch secs) per key.
+    /// Key format: "{trigger_type}:{session_id}" for per-session cooldown.
+    pub(crate) proactive_cooldowns: Arc<std::sync::Mutex<HashMap<String, i64>>>,
+    /// Expectation tickets: slot spawns awaiting session_id discovery.
+    /// Key: project_path, Value: (slot_id, spawn_timestamp).
+    /// IngestionRouter claims these when a new session appears in the matching project.
+    pub(crate) pending_slot_spawns: Arc<tokio::sync::RwLock<Vec<(String, String, tokio::time::Instant)>>>,
     /// Cursor ack channel: message_handler sends (jsonl_path, byte_offset) after successful INSERT.
     /// Only ack'd cursors are persisted to DB — prevents data loss on crash.
     pub(crate) cursor_ack_tx: tokio::sync::mpsc::UnboundedSender<(String, u64)>,
@@ -278,8 +285,10 @@ pub(crate) async fn submit_task(
 /// Event-driven embedding tasks — the Worker sleeps until triggered.
 #[derive(Debug, Clone)]
 pub(crate) enum EmbeddingTask {
-    /// Generate summary + embedding for a single completed session.
+    /// Generate summary + embedding for a single completed session (legacy, reroutes to ProcessTurns if turns exist).
     ProcessSession(String),
+    /// Per-turn embedding: process turns for a session after TurnExtracted event. Zero LLM.
+    ProcessTurns { session_id: String },
     /// Incremental: embed a single KB entry after remember/update.
     ProcessKBEntry(String),
     /// Incremental: embed a single Skill topic after upsert.

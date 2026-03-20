@@ -34,7 +34,7 @@ pub(crate) async fn register_slot_session(
     store: &Arc<dyn MissionStore>,
     slot_id: &str,
     session_id: &str,
-    is_ephemeral: bool,
+    _is_ephemeral: bool,
 ) {
     // 1. Map slot_id → session_id in slot_sessions table
     if let Err(e) = store.set_slot_session(slot_id, session_id).await {
@@ -42,18 +42,16 @@ pub(crate) async fn register_slot_session(
         return;
     }
 
-    // 2. Ensure conversation record exists with agent tag
-    let conversation_type = if is_ephemeral {
-        "agent-ephemeral"
-    } else {
-        "agent-persistent"
-    };
+    // 2. Ensure conversation record exists — use derive_conversation_type (single source of truth)
+    let conversation_type = missiond_core::db::derive_conversation_type(
+        Some(slot_id), session_id,
+    );
 
     let conv = Conversation {
         id: session_id.to_string(),
         project: None,
         slot_id: Some(slot_id.to_string()),
-        source: "pty".to_string(),
+        source: "pty_jsonl".to_string(),
         model: None,
         git_branch: None,
         jsonl_path: None,
@@ -68,7 +66,7 @@ pub(crate) async fn register_slot_session(
         analysis_retries: 0,
         deep_analyzed_message_id: 0,
         chat_type: Some("pty".to_string()),
-        conversation_type: conversation_type.to_string(),
+        conversation_type: conversation_type.clone(),
         updated_at: None,
         llm_summary: None,
         embedding_provider: None,

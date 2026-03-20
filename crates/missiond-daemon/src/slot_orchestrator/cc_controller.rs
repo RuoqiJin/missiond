@@ -31,14 +31,19 @@ const DB_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Max DB poll attempts (200ms × 25 = 5s).
 const DB_POLL_MAX: usize = 25;
 
+/// Expectation tickets for pending slot spawns.
+/// Shared with IngestionRouter for late-binding session discovery.
+pub type PendingSpawns = Arc<tokio::sync::RwLock<Vec<(String, String, tokio::time::Instant)>>>;
+
 pub struct ClaudeCodeController {
     pty: Arc<PTYManager>,
     store: Arc<dyn MissionStore>,
+    pending_spawns: PendingSpawns,
 }
 
 impl ClaudeCodeController {
-    pub fn new(pty: Arc<PTYManager>, store: Arc<dyn MissionStore>) -> Self {
-        Self { pty, store }
+    pub fn new(pty: Arc<PTYManager>, store: Arc<dyn MissionStore>, pending_spawns: PendingSpawns) -> Self {
+        Self { pty, store, pending_spawns }
     }
 
     /// Wait for a slot to reach Idle state (event-driven).
@@ -153,20 +158,25 @@ impl EngineController for ClaudeCodeController {
             )
             .await?;
 
-        // Wait briefly for JSONL session to appear
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        let session_id = self
-            .store
-            .get_slot_session(slot_id)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| format!("pty-{}", slot_id));
+        // Register expectation ticket: IngestionRouter will claim this when JSONL appears.
+        // No more 3s blind wait — the Router does late-binding when it sees the real session_id.
+        let project_path = req.cwd.to_string_lossy().to_string();
+        self.pending_spawns.write().await.push((
+            project_path.clone(),
+            slot_id.to_string(),
+            tokio::time::Instant::now(),
+        ));
 
-        register_slot_session(&self.store, slot_id, &session_id, is_ephemeral).await;
+        // Also try immediate registration if session is already known (fast-spawn case)
+        if let Ok(Some(session_id)) = self.store.get_slot_session(slot_id).await {
+            register_slot_session(&self.store, slot_id, &session_id, is_ephemeral).await;
+            info!(slot_id, session_id = %session_id, "ClaudeCodeCtrl: spawned + immediately registered");
+            return Ok(session_id);
+        }
 
-        info!(slot_id, session_id = %session_id, "ClaudeCodeCtrl: spawned and registered");
-        Ok(session_id)
+        let placeholder = format!("pending-{}", slot_id);
+        info!(slot_id, project = %project_path, "ClaudeCodeCtrl: spawned, expectation ticket issued");
+        Ok(placeholder)
     }
 
     async fn ask(
