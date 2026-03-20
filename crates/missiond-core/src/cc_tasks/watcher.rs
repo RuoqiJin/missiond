@@ -53,6 +53,9 @@ pub enum WatcherEvent {
         messages: Vec<CCMessageLine>,
         /// Byte offset after this read — consumer must ack to persist cursor.
         read_end_offset: u64,
+        /// Origin CLI: "claude_code", "gemini_cli", "codex_cli", etc.
+        /// Used to set conversation.source and chat_type accurately.
+        source: String,
     },
     /// New system events detected in a JSONL file (progress, system, queue-operation, etc.)
     NewEvents {
@@ -613,6 +616,7 @@ impl CCTasksWatcher {
                                         jsonl_path: file_path_str.clone(),
                                         messages,
                                         read_end_offset: new_pos,
+                                        source: "claude_code".to_string(),
                                     });
                                 }
                                 // No messages in this read — persist cursor immediately (events are best-effort)
@@ -689,6 +693,7 @@ impl CCTasksWatcher {
                         jsonl_path: file_path_str.clone(),
                         messages,
                         read_end_offset: new_pos,
+                        source: "claude_code".to_string(),
                     });
                 }
                 // No messages in this read — persist cursor immediately (events are best-effort)

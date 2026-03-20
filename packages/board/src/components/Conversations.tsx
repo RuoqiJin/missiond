@@ -405,6 +405,13 @@ function ConversationListItem({
 }
 
 function GeminiListItem({ conv, active, onClick }: { conv: Conversation; active: boolean; onClick: () => void }) {
+  // Derive display label: taskId for router_chat, project name for gemini_cli
+  const label = conv.taskId
+    ? conv.taskId.slice(0, 8)
+    : conv.project
+      ? conv.project.split('/').filter(Boolean).pop() || 'gemini'
+      : 'gemini';
+  const sourceTag = conv.source === 'gemini_cli' ? 'CLI' : 'Chat';
   return (
     <button
       onClick={onClick}
@@ -418,14 +425,16 @@ function GeminiListItem({ conv, active, onClick }: { conv: Conversation; active:
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 min-w-0">
           <Sparkles className="w-3 h-3 text-indigo-400 flex-shrink-0" />
-          {conv.taskId && (
-            <span className="text-[11px] font-mono text-indigo-300/80 truncate max-w-[120px]">
-              {conv.taskId.slice(0, 8)}
-            </span>
-          )}
+          <span className="text-[11px] font-mono text-indigo-300/80 truncate max-w-[120px]">
+            {label}
+          </span>
           <span className="text-[10px] font-mono text-neutral-600">{conv.model || 'gemini'}</span>
+          <span className="text-[9px] px-1 rounded bg-neutral-800 text-neutral-500">{sourceTag}</span>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
+          {conv.messageCount > 0 && (
+            <span className="text-[10px] text-neutral-600">{conv.messageCount} 条</span>
+          )}
           <span className={cn('text-[10px]', conv.status === 'active' ? 'text-green-500/70' : 'text-neutral-600')}>
             {conv.status === 'active' ? '进行中' : '已完成'}
           </span>
@@ -598,16 +607,20 @@ export function Conversations() {
     return groups;
   }, [messages, events]);
 
+  const isGeminiSource = useCallback((source: string) => {
+    return source === 'router_chat' || source === 'gemini_cli';
+  }, []);
+
   const filterByTab = useCallback((c: Conversation, tab: typeof viewMode) => {
     if (tab === 'conversations') {
-      return c.conversationType === 'user' && c.source !== 'router_chat';
+      return c.conversationType === 'user' && !isGeminiSource(c.source);
     }
     if (tab === 'gemini') {
-      return c.source === 'router_chat';
+      return isGeminiSource(c.source);
     }
-    // workers: catch-all for non-user non-router_chat
-    return c.conversationType !== 'user' && c.source !== 'router_chat';
-  }, []);
+    // workers: catch-all for non-user non-gemini
+    return c.conversationType !== 'user' && !isGeminiSource(c.source);
+  }, [isGeminiSource]);
 
   const counts = useMemo(() => {
     const filtered = conversations.filter((c) => filterByTab(c, viewMode));
@@ -923,7 +936,7 @@ export function Conversations() {
                 <div className="flex items-center justify-center py-12">
                   <div className="max-w-sm text-center space-y-3">
                     <Sparkles className="w-8 h-8 text-indigo-400/50 mx-auto" />
-                    <div className="text-sm text-neutral-400 font-medium">Gemini 审核会话</div>
+                    <div className="text-sm text-neutral-400 font-medium">Gemini Router Chat</div>
                     <div className="text-xs text-neutral-600 space-y-1">
                       {selectedConv.taskId && (
                         <div>Task: <span className="font-mono text-indigo-300/70">{selectedConv.taskId}</span></div>
@@ -932,7 +945,7 @@ export function Conversations() {
                       <div>{new Date(selectedConv.startedAt).toLocaleString('zh-CN')}</div>
                     </div>
                     <p className="text-[11px] text-neutral-600 border border-neutral-800 rounded px-3 py-2">
-                      消息通过 Router Chat 传输，未存储在对话日志中。
+                      消息已归档或通过滚动摘要压缩。
                     </p>
                     {selectedConv.taskId && (
                       <button

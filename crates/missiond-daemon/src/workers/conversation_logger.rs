@@ -1,7 +1,7 @@
 //! Conversation Logger Worker — processes Claude Code JSONL watcher events.
 //!
 //! Handles three event types from the CCTasksWatcher broadcast:
-//! - NewMessages: compaction detection, progress tracking, message ingestion
+//! - NewMessages: routing via IngestionRouter + progress tracking + message ingestion
 //! - NewEvents: system event sync
 //! - SessionInactive: session completion, timeline building, embedding triggers
 
@@ -13,8 +13,8 @@ use missiond_core::WatcherEvent;
 use missiond_core::cc_tasks::CCMessageLine;
 
 use crate::events_sync;
+use crate::infra::ingestion_router;
 use crate::infra::message_handler::handle_new_messages;
-use crate::infra::session_util::detect_compaction;
 use crate::state::{AppState, CurrentToolInfo, EmbeddingTask, SlotProgress, MEMORY_SLOW_SLOT_ID};
 
 pub(crate) struct ConversationLoggerWorker {
@@ -33,8 +33,8 @@ impl super::BackgroundWorker for ConversationLoggerWorker {
 async fn run_loop(s: &AppState, rx: &mut broadcast::Receiver<WatcherEvent>) {
     loop {
         match rx.recv().await {
-            Ok(WatcherEvent::NewMessages { session_id, project_path, jsonl_path, messages, read_end_offset }) => {
-                handle_new_messages_event(s, session_id, project_path, jsonl_path.clone(), messages).await;
+            Ok(WatcherEvent::NewMessages { session_id, project_path, jsonl_path, messages, read_end_offset, source }) => {
+                handle_new_messages_event(s, session_id, project_path, jsonl_path.clone(), messages, source).await;
                 // Ack: cursor is safe to persist — messages have been written to PG
                 let _ = s.cursor_ack_tx.send((jsonl_path, read_end_offset));
             }
@@ -60,41 +60,25 @@ async fn handle_new_messages_event(
     project_path: String,
     jsonl_path: String,
     messages: Vec<CCMessageLine>,
+    event_source: String,
 ) {
-    let mut is_pty = s.pty_session_uuids.read().await.contains(&session_id);
+    // ── Step 1: IngestionRouter classifies the batch (sole decision point) ──
+    let (route, compaction) = ingestion_router::classify(
+        s, &session_id, &event_source, &jsonl_path, &project_path,
+    ).await;
 
-    // Compaction detection
-    let mut compaction_task_id: Option<String> = None;
-    if !is_pty {
-        if let Some((slot_id, old_uuid, old_task_id)) = detect_compaction(s, &session_id, &project_path).await {
-            info!(
-                slot_id = %slot_id,
-                old_session = %old_uuid,
-                new_session = %session_id,
-                "Compaction detected: session replaced by context compaction"
-            );
-            let _ = s.store.mark_conversation_compacted(&old_uuid).await;
-            let _ = s.store.set_slot_session(&slot_id, &session_id).await;
-            s.pty_session_uuids.write().await.remove(&old_uuid);
-            s.pty_session_uuids.write().await.insert(session_id.clone());
-            compaction_task_id = old_task_id;
-            is_pty = true;
-
-            // Inherit session→task bindings across compaction (Gemini P0: prevent binding chain break)
-            inherit_task_bindings(s, &old_uuid, &session_id);
-
-            // Fix A: 补齐 compacted session 的向量/摘要
-            // handle_session_inactive() 跳过 compacted session，此处显式补发
-            let _ = s.embedding_tx.try_send(EmbeddingTask::ProcessSession(old_uuid.clone()));
-            info!(old_session = %old_uuid, "Compaction: queued embedding for compacted session");
-        }
+    // ── Step 2: Compaction side-effects (binding inheritance + embedding queue) ──
+    if let Some(ref old_sid) = compaction.old_session_id {
+        inherit_task_bindings(s, old_sid, &session_id);
+        let _ = s.embedding_tx.try_send(EmbeddingTask::ProcessSession(old_sid.clone()));
+        info!(old_session = %old_sid, "Compaction: queued embedding for compacted session");
     }
 
-    // Progress tracking
-    if is_pty {
-        if let Ok(Some(slot_id)) = s.store.get_slot_for_session(&session_id).await {
+    // ── Step 3: Progress tracking for PTY slots ──
+    if route.is_pty {
+        if let Some(ref slot_id) = route.slot_id {
             let mut progress = s.slot_progress.write().await;
-            let sp = progress.entry(slot_id).or_default();
+            let sp = progress.entry(slot_id.clone()).or_default();
             if sp.session_id != session_id {
                 *sp = SlotProgress { session_id: session_id.clone(), ..Default::default() };
             }
@@ -131,12 +115,14 @@ async fn handle_new_messages_event(
         }
     }
 
+    // ── Step 4: Hand off to message_handler with the pre-computed route ──
     let db_messages: Vec<_> = messages.into_iter()
         .filter(|m| m.message_type != "tool_use")
         .collect();
-    handle_new_messages(s, session_id.clone(), project_path, jsonl_path, db_messages, is_pty).await;
+    handle_new_messages(s, session_id.clone(), project_path, jsonl_path, db_messages, &route).await;
 
-    if let Some(tid) = compaction_task_id {
+    // ── Step 5: Compaction task inheritance ──
+    if let Some(tid) = compaction.task_id {
         let _ = s.store.set_conversation_task_id(&session_id, &tid).await;
     }
 }

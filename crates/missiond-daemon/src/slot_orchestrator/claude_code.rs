@@ -18,7 +18,7 @@ use missiond_core::db::traits::MissionStore;
 use missiond_core::pty::PTYManager;
 use missiond_core::types::{CliEngine, Lifecycle};
 
-use super::cc_controller::ClaudeCodeController;
+use super::cc_controller::{ClaudeCodeController, PendingSpawns};
 use super::controller::EngineController;
 use super::types::{EngineSlotManager, EngineStatus, SlotTaskRequest};
 
@@ -34,9 +34,9 @@ pub struct ClaudeCodeSlotManager {
 }
 
 impl ClaudeCodeSlotManager {
-    pub fn new(pty: Arc<PTYManager>, store: Arc<dyn MissionStore>) -> Self {
+    pub fn new(pty: Arc<PTYManager>, store: Arc<dyn MissionStore>, pending_spawns: PendingSpawns) -> Self {
         Self {
-            controller: ClaudeCodeController::new(pty, store),
+            controller: ClaudeCodeController::new(pty, store, pending_spawns),
             persistent_locks: DashMap::new(),
             ephemeral_semaphore: Arc::new(Semaphore::new(EPHEMERAL_CAPACITY)),
         }

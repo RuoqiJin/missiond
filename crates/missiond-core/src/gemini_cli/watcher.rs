@@ -237,6 +237,7 @@ impl GeminiCliWatcher {
                         jsonl_path: key.clone(),
                         messages: cc_lines,
                         read_end_offset: session.messages.len() as u64,
+                        source: "gemini_cli".to_string(),
                     });
                     caught_up += new_msgs.len();
                 }
@@ -326,6 +327,7 @@ async fn process_file_change(
             jsonl_path: key.clone(),
             messages: cc_lines,
             read_end_offset: total as u64,
+            source: "gemini_cli".to_string(),
         });
     }
 
