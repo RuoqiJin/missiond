@@ -352,4 +352,12 @@ impl ObservabilityStore for SqliteMissionStore {
     async fn delete_watcher_cursor(&self, _file_path: &str) -> DbResult<()> {
         Ok(())
     }
+
+    // ── gemini_cli_watermarks (no-op in SQLite mode) ──────────
+    async fn load_gemini_cursors(&self) -> DbResult<std::collections::HashMap<String, i64>> {
+        Ok(std::collections::HashMap::new())
+    }
+    async fn save_gemini_cursor(&self, _file_path: &str, _session_id: &str, _msg_count: i64) -> DbResult<()> {
+        Ok(())
+    }
 }

@@ -1584,4 +1584,32 @@ impl ObservabilityStore for PgMissionStore {
         }
         Ok(map)
     }
+
+    // ── gemini_cli_watermarks ──────────────────────────────────
+
+    async fn load_gemini_cursors(&self) -> DbResult<HashMap<String, i64>> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT session_file, last_msg_count FROM gemini_cli_watermarks"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().collect())
+    }
+
+    async fn save_gemini_cursor(&self, file_path: &str, session_id: &str, msg_count: i64) -> DbResult<()> {
+        sqlx::query(
+            "INSERT INTO gemini_cli_watermarks (session_file, session_id, last_msg_count, last_reconciled_at)
+             VALUES ($1, $2, $3, NOW())
+             ON CONFLICT (session_file) DO UPDATE SET
+                last_msg_count = $3,
+                session_id = $2,
+                last_reconciled_at = NOW()"
+        )
+        .bind(file_path)
+        .bind(session_id)
+        .bind(msg_count)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }

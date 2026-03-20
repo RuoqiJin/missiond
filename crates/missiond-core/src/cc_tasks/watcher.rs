@@ -112,6 +112,11 @@ impl CCTasksWatcher {
         self.event_tx.subscribe()
     }
 
+    /// Get a clone of the event sender (for sharing with GeminiCliWatcher).
+    pub fn event_sender(&self) -> broadcast::Sender<WatcherEvent> {
+        self.event_tx.clone()
+    }
+
     /// Run startup catchup: anchor check + gap recovery.
     /// MUST be called AFTER broadcast receivers are created (via subscribe()),
     /// otherwise catchup messages are sent to a channel with no receivers and silently lost.
