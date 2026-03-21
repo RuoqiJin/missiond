@@ -206,11 +206,11 @@ pub(crate) async fn capture_slot_session_uuid(
             // Retroactive fix: if conversation already exists with slot_id=None, tag it
             if let Ok(Some(conv)) = store.get_conversation(&session_uuid).await {
                 if conv.slot_id.is_none() {
-                    let mut updated = conv;
+                    let mut updated = conv.clone();
                     updated.slot_id = Some(slot_id.to_string());
                     updated.source = "pty_jsonl".to_string();
                     updated.conversation_type =
-                        missiond_core::db::derive_conversation_type(Some(slot_id), &session_uuid);
+                        missiond_core::db::derive_conversation_type(Some(slot_id), &session_uuid, &conv.source);
                     let _ = store.upsert_conversation(&updated).await;
                     info!(session = %session_uuid, slot_id = %slot_id, "Retroactively tagged conversation with slot_id and conversation_type");
                 }

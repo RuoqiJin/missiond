@@ -157,6 +157,7 @@ async fn run_gemini_reconciliation(state: &AppState) {
             let conv_type = missiond_core::db::derive_conversation_type(
                 slot_id.as_deref(),
                 &session.session_id,
+                "gemini_cli",
             );
 
             // Ensure conversation exists (with correct source/chat_type for Gemini CLI)

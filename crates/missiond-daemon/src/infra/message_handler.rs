@@ -740,6 +740,7 @@ pub(crate) async fn handle_pty_text_complete(
             conversation_type: missiond_core::db::derive_conversation_type(
                 Some(&slot_id),
                 &session_id,
+                "claude_code",
             ),
             updated_at: None,
             llm_summary: None,
