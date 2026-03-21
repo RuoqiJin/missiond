@@ -7,6 +7,7 @@ pub enum ConversationTypeFilter {
     Worker,
     Jarvis,
     System, // 组合：Meta + Worker (不含 Jarvis)
+    Gemini, // 组合：gemini_chat + router_chat
     Subagent,
     Compaction,
     All,
@@ -23,6 +24,7 @@ impl ConversationTypeFilter {
             Self::Worker => format!(" AND {}conversation_type = 'worker'", prefix),
             Self::Jarvis => format!(" AND {}conversation_type = 'jarvis'", prefix),
             Self::System => format!(" AND {}conversation_type IN ('meta', 'worker')", prefix),
+            Self::Gemini => format!(" AND {}conversation_type IN ('gemini_chat', 'router_chat')", prefix),
             Self::Subagent => format!(" AND {}conversation_type = 'subagent'", prefix),
             Self::Compaction => format!(" AND {}conversation_type = 'compaction'", prefix),
             Self::Custom(s) => format!(" AND {}conversation_type = '{}'", prefix, s.replace('\'', "''")),
@@ -37,6 +39,7 @@ impl ConversationTypeFilter {
             "worker" => Self::Worker,
             "jarvis" => Self::Jarvis,
             "system" => Self::System, // <-- 系统大盘视图：只有 meta 和 worker
+            "gemini" => Self::Gemini,
             "subagent" => Self::Subagent,
             "compaction" => Self::Compaction,
             _ => Self::Custom(s.to_string()),
