@@ -657,16 +657,19 @@ impl PTYManager {
             s.cwd.to_string_lossy().into_owned()
         };
 
-        {
-            let s = session.read().await;
-            s.send_fire_and_forget(message).await?;
-        }
-        
+        // Emit MessageSent BEFORE writing to PTY: the watcher FSEvent fires
+        // the instant Claude Code writes to JSONL, which can happen before
+        // send returns. The expectation ticket must exist before then.
         let _ = self.event_tx.send(ManagerEvent::MessageSent {
             slot_id: slot_id.to_string(),
             project_path: Some(cwd),
             prompt: message.to_string(),
         });
+
+        {
+            let s = session.read().await;
+            s.send_fire_and_forget(message).await?;
+        }
 
         info!(slot_id = slot_id, message_len = message.len(), "Message sent (fire-and-forget)");
         Ok(())
@@ -700,18 +703,19 @@ impl PTYManager {
             s.cwd.to_string_lossy().into_owned()
         };
 
+        // Emit MessageSent BEFORE writing to PTY (same rationale as fire-and-forget)
+        let _ = self.event_tx.send(ManagerEvent::MessageSent {
+            slot_id: slot_id.to_string(),
+            project_path: Some(cwd),
+            prompt: message.to_string(),
+        });
+
         let start = std::time::Instant::now();
 
         let response = {
             let s = session.read().await;
             s.send(message, timeout_ms).await?
         };
-
-        let _ = self.event_tx.send(ManagerEvent::MessageSent {
-            slot_id: slot_id.to_string(),
-            project_path: Some(cwd),
-            prompt: message.to_string(),
-        });
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
