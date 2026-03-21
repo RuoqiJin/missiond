@@ -31,16 +31,28 @@ const DB_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Max DB poll attempts (200ms × 25 = 5s).
 const DB_POLL_MAX: usize = 25;
 
+use std::collections::HashSet;
+use tokio::sync::RwLock;
+
 /// Expectation tickets for pending slot spawns.
 /// Shared with IngestionRouter for late-binding session discovery.
 pub struct ClaudeCodeController {
     pty: Arc<PTYManager>,
     store: Arc<dyn MissionStore>,
+    pty_session_uuids: Arc<RwLock<HashSet<String>>>,
 }
 
 impl ClaudeCodeController {
-    pub fn new(pty: Arc<PTYManager>, store: Arc<dyn MissionStore>) -> Self {
-        Self { pty, store }
+    pub fn new(
+        pty: Arc<PTYManager>,
+        store: Arc<dyn MissionStore>,
+        pty_session_uuids: Arc<RwLock<HashSet<String>>>,
+    ) -> Self {
+        Self {
+            pty,
+            store,
+            pty_session_uuids,
+        }
     }
 
     /// Wait for a slot to reach Idle state (event-driven).
@@ -140,20 +152,22 @@ impl EngineController for ClaudeCodeController {
 
         self.pty.init_slot(&pty_slot).await;
 
-        self.pty
-            .spawn(
-                &pty_slot,
-                PTYSpawnOptions {
-                    auto_restart: !is_ephemeral,
-                    wait_for_idle: true,
-                    timeout_secs: Some(120),
-                    mcp_config: None,
-                    dangerously_skip_permissions: req.skip_permissions,
-                    model: req.model.clone(),
-                    extra_env: HashMap::new(),
-                },
-            )
-            .await?;
+        crate::slot_orchestrator::spawner::spawn_tracked_slot(
+            &self.pty,
+            &self.store,
+            &self.pty_session_uuids,
+            &pty_slot,
+            PTYSpawnOptions {
+                auto_restart: !is_ephemeral,
+                wait_for_idle: true,
+                timeout_secs: Some(120),
+                mcp_config: None,
+                dangerously_skip_permissions: req.skip_permissions,
+                model: req.model.clone(),
+                extra_env: HashMap::new(),
+            },
+            None, // Pass the custom environment from the request if it had one
+        ).await?;
 
         // Also try immediate registration if session is already known (fast-spawn case)
         if let Ok(Some(session_id)) = self.store.get_slot_session(slot_id).await {

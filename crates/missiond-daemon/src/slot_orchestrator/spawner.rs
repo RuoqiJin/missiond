@@ -1,0 +1,47 @@
+use std::collections::{HashMap, HashSet};
+use anyhow::Result;
+use missiond_core::pty::{PTYManager, PTYAgentInfo};
+use missiond_core::{PTYSlot, PTYSpawnOptions};
+use missiond_core::db::traits::MissionStore;
+use tokio::sync::RwLock;
+use std::sync::Arc;
+use crate::context::slot_env::{build_slot_tracking_env, capture_slot_session_uuid};
+
+/// A unified spawner for tracked slot PTY processes.
+/// This ensures that the session tracking environment and UUID capture
+/// are always correctly applied, preventing orphaned sessions.
+pub async fn spawn_tracked_slot(
+    pty: &Arc<PTYManager>,
+    store: &Arc<dyn MissionStore>,
+    pty_session_uuids: &Arc<RwLock<HashSet<String>>>,
+    pty_slot: &PTYSlot,
+    mut options: PTYSpawnOptions,
+    original_slot_env: Option<&HashMap<String, String>>,
+) -> Result<PTYAgentInfo> {
+    // 1. Automatically build tracking environment and session file path
+    let (tracking_env, session_file) = build_slot_tracking_env(&pty_slot.id, original_slot_env).await;
+
+    // 2. Merge tracking variables into options
+    options.extra_env.extend(tracking_env);
+
+    let wait_for_idle = options.wait_for_idle;
+
+    // 3. Execute underlying PTY spawn
+    let spawn_result = pty.spawn(pty_slot, options).await?;
+
+    // 4. Handle UUID capture based on whether we waited for idle
+    if wait_for_idle {
+        // The process has reached idle, so the hook should have written the file
+        capture_slot_session_uuid(store, pty_session_uuids, &pty_slot.id, &session_file).await;
+    } else {
+        // Spawning asynchronously, poll for the UUID in a background task
+        let store_clone = Arc::clone(store);
+        let uuids_clone = Arc::clone(pty_session_uuids);
+        let slot_id = pty_slot.id.clone();
+        tokio::spawn(async move {
+            capture_slot_session_uuid(&store_clone, &uuids_clone, &slot_id, &session_file).await;
+        });
+    }
+
+    Ok(spawn_result)
+}

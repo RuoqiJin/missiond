@@ -41,18 +41,23 @@ pub(crate) async fn ensure_memory_slot_by_id(state: &AppState, slot_id: &str) ->
     };
     let slot_env = slot.config.env.as_ref();
     let mcp_config = slot.config.mcp_config.map(PathBuf::from);
-    let (extra_env, session_file) = build_slot_tracking_env(slot_id, slot_env).await;
-    match state.pty.spawn(&pty_slot, PTYSpawnOptions {
-        auto_restart: true,
-        wait_for_idle: true,
-        timeout_secs: Some(120),
-        mcp_config,
-        dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
-        model: slot.config.model.clone(),
-        extra_env,
-    }).await {
+    match crate::slot_orchestrator::spawner::spawn_tracked_slot(
+        &state.pty,
+        &state.store,
+        &state.pty_session_uuids,
+        &pty_slot,
+        PTYSpawnOptions {
+            auto_restart: true,
+            wait_for_idle: true,
+            timeout_secs: Some(120),
+            mcp_config,
+            dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+            model: slot.config.model.clone(),
+            extra_env: std::collections::HashMap::new(),
+        },
+        slot_env
+    ).await {
         Ok(_) => {
-            capture_slot_session_uuid(state, slot_id, &session_file).await;
             info!(slot_id, "Memory slot spawned (auto_restart=true)");
             true
         }

@@ -501,27 +501,30 @@ pub(crate) async fn ensure_autopilot_pty(state: &AppState, task: &missiond_core:
         cwd: slot.config.cwd.as_deref().map(PathBuf::from),
         engine: slot.config.engine,
     };
-    let slot_env = slot.config.env.as_ref();
     let mcp_config = slot.config.mcp_config.clone().map(PathBuf::from);
-    let (mut extra_env, session_file) = build_slot_tracking_env(slot_id, slot_env).await;
-
-    // Merge task-level env overrides (model routing etc.) — task_env wins over slot defaults
+    let mut final_slot_env = slot.config.env.clone().unwrap_or_default();
     for (k, v) in &task_env {
         info!(task_id = %task.id, slot_id, key = %k, value = %v, "Autopilot: LLM route override");
-        extra_env.insert(k.clone(), v.clone());
+        final_slot_env.insert(k.clone(), v.clone());
     }
 
-    match state.pty.spawn(&pty_slot, PTYSpawnOptions {
-        auto_restart: false,
-        wait_for_idle: true,
-        timeout_secs: Some(120),
-        mcp_config,
-        dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
-        model: slot.config.model.clone(),
-        extra_env,
-    }).await {
+    match crate::slot_orchestrator::spawner::spawn_tracked_slot(
+        &state.pty,
+        &state.store,
+        &state.pty_session_uuids,
+        &pty_slot,
+        PTYSpawnOptions {
+            auto_restart: false,
+            wait_for_idle: true,
+            timeout_secs: Some(120),
+            mcp_config,
+            dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+            model: slot.config.model.clone(),
+            extra_env: HashMap::new(),
+        },
+        Some(&final_slot_env)
+    ).await {
         Ok(_) => {
-            capture_slot_session_uuid(state, slot_id, &session_file).await;
             // Record current model for future env-change detection
             if let Some(model) = task_env.get("ANTHROPIC_MODEL") {
                 state.slot_current_model.lock().unwrap().insert(slot_id.to_string(), model.clone());

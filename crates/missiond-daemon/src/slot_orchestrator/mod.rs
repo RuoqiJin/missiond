@@ -16,6 +16,7 @@ pub mod claude_code;
 pub mod controller;
 pub mod gemini_cli;
 pub mod gemini_controller;
+pub mod spawner;
 pub mod types;
 
 pub use agent::AgentSlotManager;

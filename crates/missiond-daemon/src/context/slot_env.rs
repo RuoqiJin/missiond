@@ -149,10 +149,16 @@ pub(crate) async fn resolve_cmd_value(raw_value: &str, cmd_str: &str) -> String 
     }
 }
 
+use missiond_core::db::traits::MissionStore;
+use std::collections::HashSet;
+use tokio::sync::RwLock;
+use std::sync::Arc;
+
 /// After a PTY spawn with wait_for_idle, read the session UUID
 /// written by the SessionStart hook and register it in DB + cache.
 pub(crate) async fn capture_slot_session_uuid(
-    state: &AppState,
+    store: &Arc<dyn MissionStore>,
+    pty_session_uuids: &Arc<RwLock<HashSet<String>>>,
     slot_id: &str,
     session_file: &Path,
 ) {
@@ -189,15 +195,15 @@ pub(crate) async fn capture_slot_session_uuid(
             );
 
             // Persist in DB (activates the previously-orphaned slot_sessions table)
-            if let Err(e) = state.store.set_slot_session(slot_id, &session_uuid).await {
+            if let Err(e) = store.set_slot_session(slot_id, &session_uuid).await {
                 warn!(slot_id = %slot_id, error = %e, "Failed to persist slot session mapping");
             }
 
             // Update in-memory cache
-            state.pty_session_uuids.write().await.insert(session_uuid.clone());
+            pty_session_uuids.write().await.insert(session_uuid.clone());
 
             // Retroactive fix: if conversation already exists with slot_id=None, tag it
-            if let Ok(Some(conv)) = state.store.get_conversation(&session_uuid).await {
+            if let Ok(Some(conv)) = store.get_conversation(&session_uuid).await {
                 if conv.slot_id.is_none() {
                     let mut updated = conv;
                     updated.slot_id = Some(slot_id.to_string());
@@ -205,7 +211,7 @@ pub(crate) async fn capture_slot_session_uuid(
                     updated.conversation_type = missiond_core::db::derive_conversation_type(
                         Some(slot_id), &session_uuid
                     );
-                    let _ = state.store.upsert_conversation(&updated).await;
+                    let _ = store.upsert_conversation(&updated).await;
                     info!(session = %session_uuid, slot_id = %slot_id, "Retroactively tagged conversation with slot_id and conversation_type");
                 }
             }
