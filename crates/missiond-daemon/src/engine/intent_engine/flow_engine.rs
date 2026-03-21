@@ -521,7 +521,7 @@ pub(crate) async fn ensure_autopilot_pty(state: &AppState, task: &missiond_core:
         extra_env,
     }).await {
         Ok(_) => {
-            capture_slot_session_uuid(state, slot_id, &session_file).await;
+            capture_slot_session_uuid(state, slot_id, &session_file, slot.config.cwd.as_deref()).await;
             // Record current model for future env-change detection
             if let Some(model) = task_env.get("ANTHROPIC_MODEL") {
                 state.slot_current_model.lock().unwrap().insert(slot_id.to_string(), model.clone());
