@@ -1,10 +1,10 @@
 use anyhow::{anyhow, Result};
+use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use missiond_mcp::tools::ToolResult;
 
-use crate::state::AppState;
 use crate::lenient;
+use crate::state::AppState;
 use crate::state::EmbeddingTask;
 
 #[derive(Deserialize)]
@@ -20,7 +20,10 @@ struct ContextBuildArgs {
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     // Consolidated tools
     if name == "mission_skill_query" {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("list");
         return match action {
             "list" => handle_inner(state, "mission_skill_list", args).await,
             "search" => handle_inner(state, "mission_skill_search", args).await,
@@ -31,7 +34,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         };
     }
     if name == "mission_skill_context" {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("build");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("build");
         return match action {
             "build" => handle_inner(state, "mission_context_build", args).await,
             "resolve" => handle_inner(state, "mission_context_resolve", args).await,
@@ -39,7 +45,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         };
     }
     if name == "mission_skill_mutate" {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("upsert");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("upsert");
         return match action {
             "upsert" => handle_inner(state, "mission_skill_upsert", args).await,
             "record" => handle_inner(state, "mission_skill_record", args).await,
@@ -74,17 +83,26 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let SkillSearchArgs { query } = serde_json::from_value(args)?;
 
             // Collect all topic-level scores: (topic, name_bonus, fts_rank, vec_rank, cosine_sim, meta)
-            let mut topic_scores: std::collections::HashMap<String, (f64, Option<usize>, Option<usize>, Option<f32>, Value)> = std::collections::HashMap::new();
+            let mut topic_scores: std::collections::HashMap<
+                String,
+                (f64, Option<usize>, Option<usize>, Option<f32>, Value),
+            > = std::collections::HashMap::new();
 
             // 1. Name/aka exact match → bonus +0.3
             for s in state.skills.search(&query).iter().take(10) {
                 topic_scores.entry(s.name.clone()).or_insert_with(|| {
-                    (0.3, None, None, None, serde_json::json!({
-                        "name": s.name,
-                        "description": s.description,
-                        "aka": s.aka,
-                        "path": s.path,
-                    }))
+                    (
+                        0.3,
+                        None,
+                        None,
+                        None,
+                        serde_json::json!({
+                            "name": s.name,
+                            "description": s.description,
+                            "aka": s.aka,
+                            "path": s.path,
+                        }),
+                    )
                 });
             }
 
@@ -92,15 +110,23 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             if let Ok(fts_results) = state.store.skill_search_fts(&query).await {
                 for (rank, r) in fts_results.iter().take(20).enumerate() {
                     let entry = topic_scores.entry(r.topic.clone()).or_insert_with(|| {
-                        (0.0, None, None, None, serde_json::json!({
-                            "name": r.topic,
-                            "description": r.description,
-                            "path": r.file_path,
-                            "matched_section": r.section_title,
-                            "snippet": r.snippet,
-                        }))
+                        (
+                            0.0,
+                            None,
+                            None,
+                            None,
+                            serde_json::json!({
+                                "name": r.topic,
+                                "description": r.description,
+                                "path": r.file_path,
+                                "matched_section": r.section_title,
+                                "snippet": r.snippet,
+                            }),
+                        )
                     });
-                    if entry.1.is_none() { entry.1 = Some(rank); }
+                    if entry.1.is_none() {
+                        entry.1 = Some(rank);
+                    }
                 }
             }
 
@@ -109,16 +135,31 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 let cache_guard = state.skill_embedding_cache.read().await;
                 if !cache_guard.is_empty() {
                     if let Some(query_vec) = emb_svc.embed(&query) {
-                        let mut sims: Vec<(usize, f32)> = cache_guard.iter().enumerate()
-                            .map(|(i, (_, vec))| (i, missiond_core::embedding::cosine_similarity(&query_vec, vec)))
+                        let mut sims: Vec<(usize, f32)> = cache_guard
+                            .iter()
+                            .enumerate()
+                            .map(|(i, (_, vec))| {
+                                (
+                                    i,
+                                    missiond_core::embedding::cosine_similarity(&query_vec, vec),
+                                )
+                            })
                             .collect();
-                        sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        sims.sort_by(|a, b| {
+                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
                         for (rank, (idx, sim)) in sims.iter().take(10).enumerate() {
                             let topic = &cache_guard[*idx].0;
                             let entry = topic_scores.entry(topic.clone()).or_insert_with(|| {
-                                (0.0, None, None, None, serde_json::json!({
-                                    "name": topic,
-                                }))
+                                (
+                                    0.0,
+                                    None,
+                                    None,
+                                    None,
+                                    serde_json::json!({
+                                        "name": topic,
+                                    }),
+                                )
                             });
                             entry.2 = Some(rank);
                             entry.3 = Some(*sim);
@@ -128,20 +169,35 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             }
 
             // 4. Calculate final scores: name_bonus + rrf(fts, vec, k=60)
-            let mut scored: Vec<(String, f64, Value)> = topic_scores.into_iter().map(|(topic, (bonus, fts_rank, vec_rank, cosine_sim, mut meta))| {
-                let rrf = missiond_core::embedding::rrf_score(fts_rank, vec_rank, 60);
-                let final_score = bonus + rrf;
-                meta.as_object_mut().map(|obj| {
-                    obj.insert("score".to_string(), serde_json::json!(format!("{:.4}", final_score)));
-                    if let Some(sim) = cosine_sim {
-                        obj.insert("cosine_sim".to_string(), serde_json::json!(format!("{:.3}", sim)));
-                    }
-                });
-                (topic, final_score, meta)
-            }).collect();
+            let mut scored: Vec<(String, f64, Value)> = topic_scores
+                .into_iter()
+                .map(
+                    |(topic, (bonus, fts_rank, vec_rank, cosine_sim, mut meta))| {
+                        let rrf = missiond_core::embedding::rrf_score(fts_rank, vec_rank, 60);
+                        let final_score = bonus + rrf;
+                        meta.as_object_mut().map(|obj| {
+                            obj.insert(
+                                "score".to_string(),
+                                serde_json::json!(format!("{:.4}", final_score)),
+                            );
+                            if let Some(sim) = cosine_sim {
+                                obj.insert(
+                                    "cosine_sim".to_string(),
+                                    serde_json::json!(format!("{:.3}", sim)),
+                                );
+                            }
+                        });
+                        (topic, final_score, meta)
+                    },
+                )
+                .collect();
             scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-            let results: Vec<Value> = scored.iter().take(10).map(|(_, _, meta)| meta.clone()).collect();
+            let results: Vec<Value> = scored
+                .iter()
+                .take(10)
+                .map(|(_, _, meta)| meta.clone())
+                .collect();
 
             // Track hits
             for (topic, _, _) in scored.iter().take(5) {
@@ -161,7 +217,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 entries.sort_by(|a, b| {
                     let score_a = a.confidence * (a.access_count as f64 + 1.0).ln();
                     let score_b = b.confidence * (b.access_count as f64 + 1.0).ln();
-                    score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+                    score_b
+                        .partial_cmp(&score_a)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 });
 
                 // Token budget: ~800 chars instead of fixed top-5
@@ -170,7 +228,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 for entry in &entries {
                     let line = format!("- [{}] {}: {}\n", entry.category, entry.key, entry.summary);
                     budget -= line.len() as i32;
-                    if budget < 0 { break; }
+                    if budget < 0 {
+                        break;
+                    }
                     kb_block.push_str(&line);
                 }
                 if !kb_block.is_empty() {
@@ -212,7 +272,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let mut skill_results: Vec<Value> = Vec::new();
 
             for topic_name in &primary_topics {
-                if !seen.insert(topic_name.clone()) { continue; }
+                if !seen.insert(topic_name.clone()) {
+                    continue;
+                }
                 all_skill_names.push(topic_name.clone());
 
                 if let Ok(Some(topic)) = state.store.skill_topic_get(topic_name).await {
@@ -230,7 +292,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                             for dep_name in &req.skills {
                                 if seen.insert(dep_name.clone()) {
                                     all_skill_names.push(dep_name.clone());
-                                    if let Ok(Some(dep_topic)) = state.store.skill_topic_get(dep_name).await {
+                                    if let Ok(Some(dep_topic)) =
+                                        state.store.skill_topic_get(dep_name).await
+                                    {
                                         skill_results.push(json!({
                                             "name": dep_topic.topic,
                                             "path": dep_topic.file_path,
@@ -239,10 +303,18 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                                         }));
                                         // Layer 2 dependencies (no further recursion)
                                         if let Some(ref drj) = dep_topic.requires_json {
-                                            if let Ok(dreq) = serde_json::from_str::<missiond_core::SkillRequires>(drj) {
+                                            if let Ok(dreq) = serde_json::from_str::<
+                                                missiond_core::SkillRequires,
+                                            >(
+                                                drj
+                                            ) {
                                                 for dep2_name in &dreq.skills {
                                                     if seen.insert(dep2_name.clone()) {
-                                                        if let Ok(Some(dep2)) = state.store.skill_topic_get(dep2_name).await {
+                                                        if let Ok(Some(dep2)) = state
+                                                            .store
+                                                            .skill_topic_get(dep2_name)
+                                                            .await
+                                                        {
                                                             skill_results.push(json!({
                                                                 "name": dep2.topic,
                                                                 "path": dep2.file_path,
@@ -327,13 +399,16 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     let query_lower = args.query.to_lowercase();
                     for task in tasks.iter().take(100) {
                         if task.title.to_lowercase().contains(&query_lower)
-                            || task.description.to_lowercase().contains(&query_lower) {
+                            || task.description.to_lowercase().contains(&query_lower)
+                        {
                             board_results.push(json!({
                                 "id": task.id,
                                 "title": task.title,
                                 "status": task.status,
                             }));
-                            if board_results.len() >= 5 { break; }
+                            if board_results.len() >= 5 {
+                                break;
+                            }
                         }
                     }
                 }
@@ -361,44 +436,85 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let args: SkillUpsertArgs = serde_json::from_value(args)?;
 
             // Ensure topic exists
-            if state.store.skill_topic_get(&args.topic).await.map_err(|e| anyhow!("DB: {}", e))?.is_none() {
+            if state
+                .store
+                .skill_topic_get(&args.topic)
+                .await
+                .map_err(|e| anyhow!("DB: {}", e))?
+                .is_none()
+            {
                 // Auto-create topic with default path
                 let skills_dir = dirs::home_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
                     .join(".claude/skills");
                 let file_path = skills_dir.join(&args.topic).join("SKILL.md");
-                state.store.skill_topic_upsert(
-                    &args.topic, None, None, None,
-                    &file_path.to_string_lossy(), None, None,
-                ).await.map_err(|e| anyhow!("DB: {}", e))?;
+                state
+                    .store
+                    .skill_topic_upsert(
+                        &args.topic,
+                        None,
+                        None,
+                        None,
+                        &file_path.to_string_lossy(),
+                        None,
+                        None,
+                    )
+                    .await
+                    .map_err(|e| anyhow!("DB: {}", e))?;
             }
 
             // Find existing block with same title, or create new
-            let blocks = state.store.skill_blocks_for_topic(&args.topic).await
+            let blocks = state
+                .store
+                .skill_blocks_for_topic(&args.topic)
+                .await
                 .map_err(|e| anyhow!("DB: {}", e))?;
-            let existing = blocks.iter().find(|b| b.title.as_deref() == Some(&args.section_title));
+            let existing = blocks
+                .iter()
+                .find(|b| b.title.as_deref() == Some(&args.section_title));
 
             let action;
             if let Some(block) = existing {
-                state.store.skill_block_update(&block.id, &args.content).await
+                state
+                    .store
+                    .skill_block_update(&block.id, &args.content)
+                    .await
                     .map_err(|e| anyhow!("DB: {}", e))?;
                 action = "updated";
             } else {
                 let sort = args.sort_order.unwrap_or(blocks.len() as i32);
-                state.store.skill_block_insert(&args.topic, "section", Some(&args.section_title), &args.content, sort).await
+                state
+                    .store
+                    .skill_block_insert(
+                        &args.topic,
+                        "section",
+                        Some(&args.section_title),
+                        &args.content,
+                        sort,
+                    )
+                    .await
                     .map_err(|e| anyhow!("DB: {}", e))?;
                 action = "created";
             }
 
             // Materialize to file
-            let materialize_result = missiond_core::skill::materialize_topic(state.store.as_ref(), &args.topic).await;
+            let materialize_result =
+                missiond_core::skill::materialize_topic(state.store.as_ref(), &args.topic).await;
 
             // Trigger incremental embedding update
-            let _ = state.embedding_tx.try_send(EmbeddingTask::ProcessSkillTopic(args.topic.clone()));
+            let _ = state
+                .embedding_tx
+                .try_send(EmbeddingTask::ProcessSkillTopic(args.topic.clone()));
 
             match materialize_result {
-                Ok(_) => Ok(ToolResult::text(format!("Section '{}' {} in topic '{}', file regenerated", args.section_title, action, args.topic))),
-                Err(e) => Ok(ToolResult::text(format!("Section {} but materialize failed: {}", action, e))),
+                Ok(_) => Ok(ToolResult::text(format!(
+                    "Section '{}' {} in topic '{}', file regenerated",
+                    args.section_title, action, args.topic
+                ))),
+                Err(e) => Ok(ToolResult::text(format!(
+                    "Section {} but materialize failed: {}",
+                    action, e
+                ))),
             }
         }
         "mission_skill_record" => {
@@ -410,31 +526,58 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let args: SkillRecordArgs = serde_json::from_value(args)?;
 
             // Ensure topic exists
-            if state.store.skill_topic_get(&args.topic).await.map_err(|e| anyhow!("DB: {}", e))?.is_none() {
+            if state
+                .store
+                .skill_topic_get(&args.topic)
+                .await
+                .map_err(|e| anyhow!("DB: {}", e))?
+                .is_none()
+            {
                 let skills_dir = dirs::home_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
                     .join(".claude/skills");
                 let file_path = skills_dir.join(&args.topic).join("SKILL.md");
-                state.store.skill_topic_upsert(
-                    &args.topic, None, None, None,
-                    &file_path.to_string_lossy(), None, None,
-                ).await.map_err(|e| anyhow!("DB: {}", e))?;
+                state
+                    .store
+                    .skill_topic_upsert(
+                        &args.topic,
+                        None,
+                        None,
+                        None,
+                        &file_path.to_string_lossy(),
+                        None,
+                        None,
+                    )
+                    .await
+                    .map_err(|e| anyhow!("DB: {}", e))?;
             }
 
-            state.store.skill_block_insert(&args.topic, "fragment", None, &args.content, 0).await
+            state
+                .store
+                .skill_block_insert(&args.topic, "fragment", None, &args.content, 0)
+                .await
                 .map_err(|e| anyhow!("DB: {}", e))?;
 
-            let topic_meta = state.store.skill_topic_get(&args.topic).await
+            let topic_meta = state
+                .store
+                .skill_topic_get(&args.topic)
+                .await
                 .map_err(|e| anyhow!("DB: {}", e))?;
             let frag_count = topic_meta.map(|t| t.fragment_count).unwrap_or(0);
 
             // Materialize
-            let _ = missiond_core::skill::materialize_topic(state.store.as_ref(), &args.topic).await;
+            let _ =
+                missiond_core::skill::materialize_topic(state.store.as_ref(), &args.topic).await;
 
             // Trigger incremental embedding update
-            let _ = state.embedding_tx.try_send(EmbeddingTask::ProcessSkillTopic(args.topic.clone()));
+            let _ = state
+                .embedding_tx
+                .try_send(EmbeddingTask::ProcessSkillTopic(args.topic.clone()));
 
-            let mut msg = format!("Fragment recorded for '{}' ({} fragments)", args.topic, frag_count);
+            let mut msg = format!(
+                "Fragment recorded for '{}' ({} fragments)",
+                args.topic, frag_count
+            );
             if frag_count >= 5 {
                 msg.push_str(". Recommend running mission_skill_optimize to consolidate.");
             }
@@ -445,11 +588,15 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             struct SkillRenderArgs {
                 topic: Option<String>,
             }
-            let args: SkillRenderArgs = serde_json::from_value(args)
-                .unwrap_or(SkillRenderArgs { topic: None });
+            let args: SkillRenderArgs =
+                serde_json::from_value(args).unwrap_or(SkillRenderArgs { topic: None });
             if let Some(topic) = args.topic {
                 match missiond_core::skill::materialize_topic(state.store.as_ref(), &topic).await {
-                    Ok(output) => Ok(ToolResult::text(format!("Rendered '{}' ({} lines)", topic, output.lines().count()))),
+                    Ok(output) => Ok(ToolResult::text(format!(
+                        "Rendered '{}' ({} lines)",
+                        topic,
+                        output.lines().count()
+                    ))),
                     Err(e) => Ok(ToolResult::error(format!("Render failed: {}", e))),
                 }
             } else {
@@ -460,7 +607,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             }
         }
         "mission_skill_topics" => {
-            let topics = state.store.skill_topic_list().await
+            let topics = state
+                .store
+                .skill_topic_list()
+                .await
                 .map_err(|e| anyhow!("DB: {}", e))?;
             Ok(ToolResult::json_pretty(&topics))
         }
@@ -477,9 +627,15 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             }
             let args: SkillExecArgs = serde_json::from_value(args)?;
 
-            match state.execute_workflow(&args.skill, &args.action, args.dry_run, args.params, 0).await {
+            match state
+                .execute_workflow(&args.skill, &args.action, args.dry_run, args.params, 0)
+                .await
+            {
                 Ok(result) => Ok(ToolResult::json_pretty(&result)),
-                Err(e) => Ok(ToolResult::error(format!("Workflow execution failed: {}", e))),
+                Err(e) => Ok(ToolResult::error(format!(
+                    "Workflow execution failed: {}",
+                    e
+                ))),
             }
         }
         "mission_skill_actions" => {
@@ -487,29 +643,42 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             struct SkillActionsArgs {
                 skill: Option<String>,
             }
-            let args: SkillActionsArgs = serde_json::from_value(args)
-                .unwrap_or(SkillActionsArgs { skill: None });
+            let args: SkillActionsArgs =
+                serde_json::from_value(args).unwrap_or(SkillActionsArgs { skill: None });
 
             let topics = if let Some(ref name) = args.skill {
-                state.store.skill_topic_get(name).await
+                state
+                    .store
+                    .skill_topic_get(name)
+                    .await
                     .map_err(|e| anyhow!("DB: {}", e))?
-                    .into_iter().collect::<Vec<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
             } else {
-                state.store.skill_topic_list().await
+                state
+                    .store
+                    .skill_topic_list()
+                    .await
                     .map_err(|e| anyhow!("DB: {}", e))?
             };
 
             let mut all_actions: Vec<Value> = Vec::new();
             for topic in &topics {
                 if let Some(ref json_str) = topic.actions_json {
-                    if let Ok(actions) = serde_json::from_str::<Vec<missiond_core::SkillAction>>(json_str) {
+                    if let Ok(actions) =
+                        serde_json::from_str::<Vec<missiond_core::SkillAction>>(json_str)
+                    {
                         // Also count workflow steps from file
-                        let step_counts = if let Ok(content) = std::fs::read_to_string(&topic.file_path) {
-                            let workflows = missiond_core::parse_workflow_blocks(&content);
-                            workflows.iter().map(|w| (w.id.clone(), w.steps.len())).collect::<std::collections::HashMap<_, _>>()
-                        } else {
-                            std::collections::HashMap::new()
-                        };
+                        let step_counts =
+                            if let Ok(content) = std::fs::read_to_string(&topic.file_path) {
+                                let workflows = missiond_core::parse_workflow_blocks(&content);
+                                workflows
+                                    .iter()
+                                    .map(|w| (w.id.clone(), w.steps.len()))
+                                    .collect::<std::collections::HashMap<_, _>>()
+                            } else {
+                                std::collections::HashMap::new()
+                            };
 
                         for action in actions {
                             all_actions.push(serde_json::json!({
@@ -533,9 +702,11 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             struct StatsArgs {
                 skill: Option<String>,
             }
-            let args: StatsArgs = serde_json::from_value(args)
-                .unwrap_or(StatsArgs { skill: None });
-            let stats = state.store.skill_execution_stats(args.skill.as_deref()).await
+            let args: StatsArgs = serde_json::from_value(args).unwrap_or(StatsArgs { skill: None });
+            let stats = state
+                .store
+                .skill_execution_stats(args.skill.as_deref())
+                .await
                 .map_err(|e| anyhow!("DB: {}", e))?;
             Ok(ToolResult::json_pretty(&stats))
         }
@@ -552,42 +723,63 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
             if let Some(vid) = args.version_id {
                 // Rollback to specific version
-                let version = state.store.skill_version_get(vid).await
+                let version = state
+                    .store
+                    .skill_version_get(vid)
+                    .await
                     .map_err(|e| anyhow!("DB: {}", e))?
                     .ok_or_else(|| anyhow!("Version {} not found", vid))?;
                 if version.topic != args.skill {
-                    return Ok(ToolResult::error(format!("Version {} belongs to '{}', not '{}'", vid, version.topic, args.skill)));
+                    return Ok(ToolResult::error(format!(
+                        "Version {} belongs to '{}', not '{}'",
+                        vid, version.topic, args.skill
+                    )));
                 }
-                let topic = state.store.skill_topic_get(&args.skill).await
+                let topic = state
+                    .store
+                    .skill_topic_get(&args.skill)
+                    .await
                     .map_err(|e| anyhow!("DB: {}", e))?
                     .ok_or_else(|| anyhow!("Skill '{}' not found", args.skill))?;
                 std::fs::write(&topic.file_path, &version.content)
                     .map_err(|e| anyhow!("Write error: {}", e))?;
                 // Re-ingest the skill
-                let skills_dir = std::path::Path::new(&topic.file_path).parent()
+                let skills_dir = std::path::Path::new(&topic.file_path)
+                    .parent()
                     .and_then(|p| p.parent())
                     .unwrap_or(std::path::Path::new("."));
                 missiond_core::skill::ingest_skills(state.store.as_ref(), skills_dir).await;
-                Ok(ToolResult::text(format!("Rolled back '{}' to version {} ({})", args.skill, vid, version.created_at)))
+                Ok(ToolResult::text(format!(
+                    "Rolled back '{}' to version {} ({})",
+                    args.skill, vid, version.created_at
+                )))
             } else {
                 // List available versions
-                let versions = state.store.skill_version_list(&args.skill, 10).await
+                let versions = state
+                    .store
+                    .skill_version_list(&args.skill, 10)
+                    .await
                     .map_err(|e| anyhow!("DB: {}", e))?;
                 if versions.is_empty() {
-                    return Ok(ToolResult::text(format!("No version history for '{}'", args.skill)));
+                    return Ok(ToolResult::text(format!(
+                        "No version history for '{}'",
+                        args.skill
+                    )));
                 }
-                let list: Vec<Value> = versions.iter().map(|v| {
-                    serde_json::json!({
-                        "version_id": v.id,
-                        "checksum": v.checksum,
-                        "created_at": v.created_at,
-                        "content_lines": v.content.lines().count(),
+                let list: Vec<Value> = versions
+                    .iter()
+                    .map(|v| {
+                        serde_json::json!({
+                            "version_id": v.id,
+                            "checksum": v.checksum,
+                            "created_at": v.created_at,
+                            "content_lines": v.content.lines().count(),
+                        })
                     })
-                }).collect();
+                    .collect();
                 Ok(ToolResult::json_pretty(&list))
             }
         }
-
 
         _ => Err(anyhow!("Unknown skill tool: {name}")),
     }

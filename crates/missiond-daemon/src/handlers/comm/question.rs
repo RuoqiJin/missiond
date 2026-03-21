@@ -1,12 +1,12 @@
 use anyhow::{anyhow, Result};
+use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::info;
-use missiond_mcp::tools::ToolResult;
 
-use crate::state::AppState;
 use crate::event_bus::{DaemonEvent, TraceContext};
 use crate::gemini_client::REQUEST_SESSION_ID;
+use crate::state::AppState;
 
 #[derive(Deserialize)]
 struct QuestionCreateArgs {
@@ -54,7 +54,10 @@ struct QuestionIdArgs {
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     // Consolidated tools
     if name == "mission_question" {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("list");
         return match action {
             "create" => handle_inner(state, "mission_question_create", args).await,
             "list" => handle_inner(state, "mission_question_list", args).await,
@@ -65,23 +68,37 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         };
     }
     if name == "mission_llm_trace" {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("gemini_trace");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("gemini_trace");
         return match action {
-            "gemini_trace" => crate::handlers::misc::handle(state, "mission_gemini_trace", args).await,
-            "gemini_stats" => crate::handlers::misc::handle(state, "mission_gemini_stats", args).await,
+            "gemini_trace" => {
+                crate::handlers::misc::handle(state, "mission_gemini_trace", args).await
+            }
+            "gemini_stats" => {
+                crate::handlers::misc::handle(state, "mission_gemini_stats", args).await
+            }
             "gemini_watch" => {
                 // Map watch_action to the action field expected by the handler
                 let mut args = args;
                 if let Some(wa) = args.get("watch_action").cloned() {
-                    args.as_object_mut().map(|m| m.insert("action".to_string(), wa));
+                    args.as_object_mut()
+                        .map(|m| m.insert("action".to_string(), wa));
                 }
                 crate::handlers::misc::handle(state, "mission_gemini_watch", args).await
             }
             // TODO: DEPRECATED — use independent mission_gemini_auth tool instead.
             // Kept for Claude Code MCP client compatibility (doesn't auto-discover new tool names).
-            "gemini_auth" => crate::handlers::misc::handle(state, "mission_gemini_auth", args).await,
-            "jarvis_logs" => crate::handlers::misc::handle(state, "mission_jarvis_logs", args).await,
-            "jarvis_trace" => crate::handlers::misc::handle(state, "mission_jarvis_trace", args).await,
+            "gemini_auth" => {
+                crate::handlers::misc::handle(state, "mission_gemini_auth", args).await
+            }
+            "jarvis_logs" => {
+                crate::handlers::misc::handle(state, "mission_jarvis_logs", args).await
+            }
+            "jarvis_trace" => {
+                crate::handlers::misc::handle(state, "mission_jarvis_trace", args).await
+            }
             _ => Ok(ToolResult::error(format!("Unknown action: {}", action))),
         };
     }
@@ -89,7 +106,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         return crate::handlers::misc::handle(state, "mission_gemini_auth", args).await;
     }
     if name == "mission_incident" {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("list");
         return match action {
             "test" => crate::handlers::misc::handle(state, "mission_incident_test", args).await,
             "list" => crate::handlers::misc::handle(state, "mission_incident_list", args).await,
@@ -134,16 +154,23 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 options: args.options,
                 decision_type: args.decision_type,
             };
-            let q = state.store
-                .create_agent_question(&input).await
+            let q = state
+                .store
+                .create_agent_question(&input)
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             // Signal Decision Engine if target=master
             if q.target == "master" {
                 state.event_bus.publish_traced(
-                    DaemonEvent::QuestionCreated { question_id: q.id.clone() },
+                    DaemonEvent::QuestionCreated {
+                        question_id: q.id.clone(),
+                    },
                     TraceContext {
                         trace_id: q.task_id.clone(),
-                        summary: Some(format!("Question: {}", q.question.chars().take(80).collect::<String>())),
+                        summary: Some(format!(
+                            "Question: {}",
+                            q.question.chars().take(80).collect::<String>()
+                        )),
                         ..Default::default()
                     },
                 );
@@ -152,17 +179,28 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             Ok(ToolResult::json_pretty(&q))
         }
         "mission_question_list" => {
-            let QuestionListArgs { status, target, limit } =
-                serde_json::from_value(args).unwrap_or(QuestionListArgs { status: None, target: None, limit: None });
-            let questions = state.store
-                .list_agent_questions(status.as_deref(), target.as_deref(), limit).await
+            let QuestionListArgs {
+                status,
+                target,
+                limit,
+            } = serde_json::from_value(args).unwrap_or(QuestionListArgs {
+                status: None,
+                target: None,
+                limit: None,
+            });
+            let questions = state
+                .store
+                .list_agent_questions(status.as_deref(), target.as_deref(), limit)
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&questions))
         }
         "mission_question_get" => {
             let QuestionIdArgs { id } = serde_json::from_value(args)?;
-            match state.store
-                .get_agent_question(&id).await
+            match state
+                .store
+                .get_agent_question(&id)
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?
             {
                 Some(q) => Ok(ToolResult::json_pretty(&q)),
@@ -171,13 +209,17 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         }
         "mission_question_answer" => {
             let QuestionAnswerArgs { id, answer } = serde_json::from_value(args)?;
-            match state.store
-                .answer_agent_question(&id, &answer).await
+            match state
+                .store
+                .answer_agent_question(&id, &answer)
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?
             {
                 Some(q) => {
                     // Signal scheduler for instant slot recovery after question answered
-                    state.event_bus.publish(DaemonEvent::TaskCompleted { task_id: String::new() });
+                    state.event_bus.publish(DaemonEvent::TaskCompleted {
+                        task_id: String::new(),
+                    });
                     state.event_bus.publish_traced(
                         DaemonEvent::QuestionResolved {
                             question_id: id.clone(),
@@ -196,8 +238,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         }
         "mission_question_dismiss" => {
             let QuestionIdArgs { id } = serde_json::from_value(args)?;
-            match state.store
-                .dismiss_agent_question(&id).await
+            match state
+                .store
+                .dismiss_agent_question(&id)
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?
             {
                 Some(q) => {
@@ -220,13 +264,15 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
         "mission_decision_stats" => {
             let hours = args.get("hours").and_then(|v| v.as_i64()).unwrap_or(24);
-            let stats = state.store.decision_stats(hours).await
+            let stats = state
+                .store
+                .decision_stats(hours)
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&stats))
         }
 
         // ── AIOps Incidents ──
-
         _ => Err(anyhow!("Unknown question tool: {name}")),
     }
 }

@@ -1,10 +1,10 @@
 use anyhow::Result;
+use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
-use missiond_mcp::tools::ToolResult;
 
 use crate::codex_cli::set_codex_disabled;
-use crate::control_tree::{CtlProvider, CtlDomain};
+use crate::control_tree::{CtlDomain, CtlProvider};
 use crate::llm_gate::{self, LlmProvider};
 use crate::state::AppState;
 use crate::workers::registry::WorkerState;
@@ -17,14 +17,19 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
     // Consolidated tool: mission_worker
     if name == "mission_worker" {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("list");
         return match action {
             "list" => list_workers(state),
             "control" => {
                 // Remap control_action to action for the inner handler
                 let mut inner_args = args.clone();
                 if let Some(ca) = args.get("control_action").cloned() {
-                    inner_args.as_object_mut().map(|m| m.insert("action".to_string(), ca));
+                    inner_args
+                        .as_object_mut()
+                        .map(|m| m.insert("action".to_string(), ca));
                 }
                 worker_control(state, inner_args)
             }
@@ -41,9 +46,18 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 // ── mission_control handler ─────────────────────────────────────────
 
 async fn handle_control(state: &AppState, args: Value) -> Result<ToolResult> {
-    let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("status");
-    let target_type = args.get("target_type").and_then(|v| v.as_str()).unwrap_or("global");
-    let target_name = args.get("target_name").and_then(|v| v.as_str()).unwrap_or("");
+    let action = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("status");
+    let target_type = args
+        .get("target_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("global");
+    let target_name = args
+        .get("target_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     // Status: return full tree
     if action == "status" {
@@ -54,7 +68,12 @@ async fn handle_control(state: &AppState, args: Value) -> Result<ToolResult> {
     let paused = match action {
         "pause" => true,
         "resume" => false,
-        _ => return Ok(ToolResult::error(format!("Unknown action: {}. Use pause/resume/status", action))),
+        _ => {
+            return Ok(ToolResult::error(format!(
+                "Unknown action: {}. Use pause/resume/status",
+                action
+            )))
+        }
     };
 
     let mgr = &state.control_manager;
@@ -63,19 +82,27 @@ async fn handle_control(state: &AppState, args: Value) -> Result<ToolResult> {
         "global" => {
             mgr.set_global_paused(paused);
             // Sync to legacy global_paused for backward compat
-            state.global_paused.store(paused, std::sync::atomic::Ordering::Relaxed);
+            state
+                .global_paused
+                .store(paused, std::sync::atomic::Ordering::Relaxed);
             if paused {
                 let now = chrono::Utc::now().timestamp();
-                state.global_paused_at.store(now, std::sync::atomic::Ordering::Relaxed);
+                state
+                    .global_paused_at
+                    .store(now, std::sync::atomic::Ordering::Relaxed);
             } else {
-                state.global_paused_at.store(0, std::sync::atomic::Ordering::Relaxed);
+                state
+                    .global_paused_at
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
             }
         }
         "provider" => {
-            let provider = CtlProvider::from_str(target_name)
-                .ok_or_else(|| anyhow::anyhow!(
-                    "Unknown provider: '{}'. Available: gemini, sonnet, codex, opus", target_name
-                ))?;
+            let provider = CtlProvider::from_str(target_name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unknown provider: '{}'. Available: gemini, sonnet, codex, opus",
+                    target_name
+                )
+            })?;
             mgr.set_provider(provider, paused);
             // Sync to legacy llm_gate for backward compat
             if let Some(legacy) = provider.to_llm_provider() {
@@ -83,27 +110,37 @@ async fn handle_control(state: &AppState, args: Value) -> Result<ToolResult> {
             }
         }
         "domain" => {
-            let domain = CtlDomain::from_str(target_name)
-                .ok_or_else(|| anyhow::anyhow!(
-                    "Unknown domain: '{}'. Available: memory, flow, board, strategy", target_name
-                ))?;
+            let domain = CtlDomain::from_str(target_name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unknown domain: '{}'. Available: memory, flow, board, strategy",
+                    target_name
+                )
+            })?;
             mgr.set_domain(domain, paused);
             // Legacy sync removed: ControlTree is now the single source of truth.
             // autopilot_tick syncs ControlTree → legacy AtomicBools each tick.
         }
         "worker" => {
             if target_name.is_empty() {
-                return Ok(ToolResult::error("target_name is required for worker control"));
+                return Ok(ToolResult::error(
+                    "target_name is required for worker control",
+                ));
             }
             mgr.set_worker(target_name, paused);
             // Also set legacy per-worker state
             if let Some(h) = state.worker_registry.get(target_name) {
-                h.set_state(if paused { WorkerState::Paused } else { WorkerState::Running });
+                h.set_state(if paused {
+                    WorkerState::Paused
+                } else {
+                    WorkerState::Running
+                });
             }
         }
         "slot_role" => {
             if target_name.is_empty() {
-                return Ok(ToolResult::error("target_name is required for slot_role control"));
+                return Ok(ToolResult::error(
+                    "target_name is required for slot_role control",
+                ));
             }
             mgr.set_slot_role(target_name, paused);
             // Phase 2: actively kill running PTY sessions for this role
@@ -125,9 +162,12 @@ async fn handle_control(state: &AppState, args: Value) -> Result<ToolResult> {
                 }
             }
         }
-        _ => return Ok(ToolResult::error(format!(
-            "Unknown target_type: '{}'. Use: global, provider, domain, worker, slot_role", target_type
-        ))),
+        _ => {
+            return Ok(ToolResult::error(format!(
+                "Unknown target_type: '{}'. Use: global, provider, domain, worker, slot_role",
+                target_type
+            )))
+        }
     }
 
     // Return updated state tree
@@ -176,11 +216,16 @@ fn worker_control(state: &AppState, args: Value) -> Result<ToolResult> {
     let handle = match state.worker_registry.get(&args.target) {
         Some(h) => h,
         None => {
-            let known: Vec<_> = state.worker_registry.list_all()
-                .iter().map(|w| w.name.clone()).collect();
+            let known: Vec<_> = state
+                .worker_registry
+                .list_all()
+                .iter()
+                .map(|w| w.name.clone())
+                .collect();
             return Ok(ToolResult::error(format!(
                 "Worker '{}' not found. Known: {} | LLM gates: codex, gemini, sonnet",
-                args.target, known.join(", ")
+                args.target,
+                known.join(", ")
             )));
         }
     };
@@ -192,9 +237,15 @@ fn worker_control(state: &AppState, args: Value) -> Result<ToolResult> {
         }
         "resume" => {
             handle.set_state(WorkerState::Running);
-            Ok(ToolResult::text(format!("Worker '{}' resumed", args.target)))
+            Ok(ToolResult::text(format!(
+                "Worker '{}' resumed",
+                args.target
+            )))
         }
-        _ => Ok(ToolResult::error(format!("Unknown action: '{}'. Use 'pause' or 'resume'", args.action))),
+        _ => Ok(ToolResult::error(format!(
+            "Unknown action: '{}'. Use 'pause' or 'resume'",
+            args.action
+        ))),
     }
 }
 
@@ -212,7 +263,10 @@ fn llm_gate_control(provider: LlmProvider, action: &str) -> Result<ToolResult> {
         }
         "resume" | "enable" => {
             llm_gate::set_disabled(provider, false);
-            Ok(ToolResult::text(format!("▶️ {} 闸口已开启，API 调用恢复正常。", name)))
+            Ok(ToolResult::text(format!(
+                "▶️ {} 闸口已开启，API 调用恢复正常。",
+                name
+            )))
         }
         "status" => {
             let disabled = llm_gate::is_disabled(provider);
@@ -222,7 +276,9 @@ fn llm_gate_control(provider: LlmProvider, action: &str) -> Result<ToolResult> {
                 "status": if disabled { "closed" } else { "open" },
             })))
         }
-        _ => Ok(ToolResult::error("Unknown action. Use 'pause'/'disable', 'resume'/'enable', or 'status'")),
+        _ => Ok(ToolResult::error(
+            "Unknown action. Use 'pause'/'disable', 'resume'/'enable', or 'status'",
+        )),
     }
 }
 
@@ -250,13 +306,19 @@ fn codex_gate_control(state: &AppState, action: &str) -> Result<ToolResult> {
             if let Some(h) = state.worker_registry.get("step_narrator") {
                 h.set_state(WorkerState::Running);
             }
-            Ok(ToolResult::text("▶️ Codex/GPT-5.4 闸口已开启。vision_worker 和 step_narrator 已恢复运行。"))
+            Ok(ToolResult::text(
+                "▶️ Codex/GPT-5.4 闸口已开启。vision_worker 和 step_narrator 已恢复运行。",
+            ))
         }
         "status" => {
             let disabled = crate::codex_cli::is_codex_disabled();
-            let vision_state = state.worker_registry.get("vision_worker")
+            let vision_state = state
+                .worker_registry
+                .get("vision_worker")
                 .map(|h| format!("{:?}", h.current_state()));
-            let narrator_state = state.worker_registry.get("step_narrator")
+            let narrator_state = state
+                .worker_registry
+                .get("step_narrator")
                 .map(|h| format!("{:?}", h.current_state()));
             Ok(ToolResult::json_pretty(&serde_json::json!({
                 "model": "codex",
@@ -266,6 +328,8 @@ fn codex_gate_control(state: &AppState, action: &str) -> Result<ToolResult> {
                 "step_narrator": narrator_state,
             })))
         }
-        _ => Ok(ToolResult::error("Unknown action. Use 'pause'/'disable', 'resume'/'enable', or 'status'")),
+        _ => Ok(ToolResult::error(
+            "Unknown action. Use 'pause'/'disable', 'resume'/'enable', or 'status'",
+        )),
     }
 }

@@ -22,7 +22,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-use governor::{Quota, RateLimiter, clock::DefaultClock, state::{InMemoryState, NotKeyed}};
+use governor::{
+    clock::DefaultClock,
+    state::{InMemoryState, NotKeyed},
+    Quota, RateLimiter,
+};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, Semaphore};
@@ -94,11 +98,15 @@ impl Drop for RequestGuard<'_> {
         if !self.completed {
             let err: Result<CodexCliResponse> = Err(anyhow!("request cancelled (future dropped)"));
             self.cli.emit_completed(
-                &self.request_id, &self.caller, &self.model,
-                self.prompt_chars, &err,
+                &self.request_id,
+                &self.caller,
+                &self.model,
+                self.prompt_chars,
+                &err,
                 self.api_start.elapsed().as_millis() as u64,
                 self.queue_wait_ms,
-                self.image_hash.as_deref(), &self.span_id,
+                self.image_hash.as_deref(),
+                &self.span_id,
             );
         }
     }
@@ -112,7 +120,11 @@ impl CodexCli {
         event_tx: mpsc::UnboundedSender<TimelineEntry>,
     ) -> Self {
         let quota = Quota::per_minute(NonZeroU32::new(CODEX_RPM).unwrap());
-        info!(rpm = CODEX_RPM, concurrency = CODEX_MAX_CONCURRENT, "Codex CLI: rate limiter initialized");
+        info!(
+            rpm = CODEX_RPM,
+            concurrency = CODEX_MAX_CONCURRENT,
+            "Codex CLI: rate limiter initialized"
+        );
         Self {
             binary,
             default_model,
@@ -140,7 +152,9 @@ impl CodexCli {
         // Persistent kill switch: skip all Codex calls when disabled
         if is_codex_disabled() {
             info!(caller, "Codex CLI disabled via flag file, skipping call");
-            return Err(anyhow!("Codex CLI is disabled (codex_disabled flag is set)"));
+            return Err(anyhow!(
+                "Codex CLI is disabled (codex_disabled flag is set)"
+            ));
         }
 
         let model = model.unwrap_or(&self.default_model);
@@ -155,14 +169,27 @@ impl CodexCli {
 
         // 1. Rate limiting: semaphore (concurrency) → governor (RPM)
         let queue_start = Instant::now();
-        let _permit = self.semaphore.clone().acquire_owned().await
+        let _permit = self
+            .semaphore
+            .clone()
+            .acquire_owned()
+            .await
             .map_err(|_| anyhow!("Codex semaphore closed"))?;
         self.rate_limiter.until_ready().await;
         let queue_wait = queue_start.elapsed();
         let queue_wait_ms = queue_wait.as_millis() as u64;
 
         // 2. Emit started event AFTER acquiring permit (queue wait excluded from API time)
-        self.emit_started(&request_id, caller, model, prompt, has_image, image_hash, &span_id, queue_wait_ms);
+        self.emit_started(
+            &request_id,
+            caller,
+            model,
+            prompt,
+            has_image,
+            image_hash,
+            &span_id,
+            queue_wait_ms,
+        );
 
         let api_start = Instant::now();
 
@@ -187,7 +214,17 @@ impl CodexCli {
         // 5. Normal completion — disarm guard
         let mut guard = guard;
         guard.completed = true;
-        self.emit_completed(&request_id, caller, model, prompt.len(), &result, duration_ms, queue_wait_ms, image_hash, &span_id);
+        self.emit_completed(
+            &request_id,
+            caller,
+            model,
+            prompt.len(),
+            &result,
+            duration_ms,
+            queue_wait_ms,
+            image_hash,
+            &span_id,
+        );
 
         result
     }
@@ -200,8 +237,12 @@ impl CodexCli {
         image_path: Option<&Path>,
         idle_timeout: Duration,
     ) -> Result<CodexCliResponse> {
-        info!(model, prompt_len = prompt.len(), has_image = image_path.is_some(),
-              "Codex CLI: calling");
+        info!(
+            model,
+            prompt_len = prompt.len(),
+            has_image = image_path.is_some(),
+            "Codex CLI: calling"
+        );
 
         let mut cmd = tokio::process::Command::new(&self.binary);
         cmd.kill_on_drop(true); // Cancel safety: kill orphan process when future is dropped
@@ -219,10 +260,13 @@ impl CodexCli {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
-        let mut child = cmd.spawn()
+        let mut child = cmd
+            .spawn()
             .map_err(|e| anyhow!("Failed to spawn codex CLI '{}': {}", self.binary, e))?;
 
-        let stdout = child.stdout.take()
+        let stdout = child
+            .stdout
+            .take()
             .ok_or_else(|| anyhow!("Failed to capture stdout"))?;
         let mut lines = BufReader::new(stdout).lines();
 
@@ -231,7 +275,8 @@ impl CodexCli {
 
         let stream_result: Result<(), String> = async {
             loop {
-                let remaining = absolute_deadline.saturating_duration_since(tokio::time::Instant::now());
+                let remaining =
+                    absolute_deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
                     return Err("absolute timeout (5min)".to_string());
                 }
@@ -239,7 +284,9 @@ impl CodexCli {
 
                 match tokio::time::timeout(effective_timeout, lines.next_line()).await {
                     Ok(Ok(Some(line))) => {
-                        if line.trim().is_empty() { continue; }
+                        if line.trim().is_empty() {
+                            continue;
+                        }
                         match serde_json::from_str::<Value>(&line) {
                             Ok(event) => events.push(event),
                             Err(e) => {
@@ -250,10 +297,16 @@ impl CodexCli {
                     }
                     Ok(Ok(None)) => return Ok(()),
                     Ok(Err(e)) => return Err(format!("IO error: {}", e)),
-                    Err(_) => return Err(format!("idle timeout ({}s no output)", idle_timeout.as_secs())),
+                    Err(_) => {
+                        return Err(format!(
+                            "idle timeout ({}s no output)",
+                            idle_timeout.as_secs()
+                        ))
+                    }
                 }
             }
-        }.await;
+        }
+        .await;
 
         if let Err(ref reason) = stream_result {
             warn!(reason, "Codex CLI: killing process");
@@ -262,7 +315,9 @@ impl CodexCli {
             return Err(anyhow!("Codex CLI timed out: {}", reason));
         }
 
-        let status = child.wait().await
+        let status = child
+            .wait()
+            .await
             .map_err(|e| anyhow!("Codex CLI process error: {}", e))?;
         if !status.success() {
             let stderr_msg = if let Some(mut stderr) = child.stderr.take() {
@@ -271,7 +326,8 @@ impl CodexCli {
                 let _ = tokio::time::timeout(
                     Duration::from_secs(2),
                     tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut buf),
-                ).await;
+                )
+                .await;
                 buf.chars().take(500).collect::<String>()
             } else {
                 String::new()
@@ -282,7 +338,17 @@ impl CodexCli {
         parse_codex_events(&events, model)
     }
 
-    fn emit_started(&self, request_id: &str, caller: &str, model: &str, prompt: &str, has_image: bool, image_hash: Option<&str>, span_id: &str, queue_wait_ms: u64) {
+    fn emit_started(
+        &self,
+        request_id: &str,
+        caller: &str,
+        model: &str,
+        prompt: &str,
+        has_image: bool,
+        image_hash: Option<&str>,
+        span_id: &str,
+        queue_wait_ms: u64,
+    ) {
         let parent = current_parent_span_id();
         let event = DaemonEvent::CliRequestStarted {
             engine: missiond_core::CliEngine::Codex,
@@ -303,7 +369,14 @@ impl CodexCli {
             trace_id: Some("codex".to_string()),
             span_id: span_id.to_string(),
             parent_span_id: parent,
-            summary: Some(format!("{} → {} ({}ch{}, q:{}ms)", caller, model, prompt.len(), if has_image { " +img" } else { "" }, queue_wait_ms)),
+            summary: Some(format!(
+                "{} → {} ({}ch{}, q:{}ms)",
+                caller,
+                model,
+                prompt.len(),
+                if has_image { " +img" } else { "" },
+                queue_wait_ms
+            )),
         };
         let _ = self.event_tx.send(entry);
     }
@@ -320,23 +393,28 @@ impl CodexCli {
         image_hash: Option<&str>,
         span_id: &str,
     ) {
-        let (status, response_chars, error_msg, response_text, input_tokens, output_tokens) = match result {
-            Ok(resp) => (
-                "ok".to_string(),
-                resp.content.len(),
-                None,
-                Some(resp.content.clone()),
-                resp.input_tokens,
-                resp.output_tokens,
-            ),
-            Err(e) => {
-                let msg = e.to_string();
-                let s = if msg.contains("timed out") { "timeout" }
-                    else if msg.contains("cancelled") { "cancelled" }
-                    else { "error" };
-                (s.to_string(), 0, Some(msg), None, 0, 0)
-            }
-        };
+        let (status, response_chars, error_msg, response_text, input_tokens, output_tokens) =
+            match result {
+                Ok(resp) => (
+                    "ok".to_string(),
+                    resp.content.len(),
+                    None,
+                    Some(resp.content.clone()),
+                    resp.input_tokens,
+                    resp.output_tokens,
+                ),
+                Err(e) => {
+                    let msg = e.to_string();
+                    let s = if msg.contains("timed out") {
+                        "timeout"
+                    } else if msg.contains("cancelled") {
+                        "cancelled"
+                    } else {
+                        "error"
+                    };
+                    (s.to_string(), 0, Some(msg), None, 0, 0)
+                }
+            };
 
         info!(request_id, caller, model, prompt_chars, response_chars,
               duration_ms, queue_wait_ms, status = %status, "codex_request");
@@ -366,7 +444,10 @@ impl CodexCli {
             trace_id: Some("codex".to_string()),
             span_id: span_id.to_string(),
             parent_span_id: parent,
-            summary: Some(format!("{} → {} ({}ms, q:{}ms)", caller, model, duration_ms, queue_wait_ms)),
+            summary: Some(format!(
+                "{} → {} ({}ms, q:{}ms)",
+                caller, model, duration_ms, queue_wait_ms
+            )),
         };
         let _ = self.event_tx.send(entry);
     }
@@ -394,8 +475,14 @@ fn parse_codex_events(events: &[Value], requested_model: &str) -> Result<CodexCl
             }
             "turn.completed" => {
                 if let Some(usage) = event.get("usage") {
-                    input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                    output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    input_tokens = usage
+                        .get("input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    output_tokens = usage
+                        .get("output_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                 }
             }
             _ => {}
@@ -407,7 +494,10 @@ fn parse_codex_events(events: &[Value], requested_model: &str) -> Result<CodexCl
     }
 
     let content = content_parts.join("\n");
-    info!(content_len = content.len(), input_tokens, output_tokens, "Codex CLI: complete");
+    info!(
+        content_len = content.len(),
+        input_tokens, output_tokens, "Codex CLI: complete"
+    );
 
     Ok(CodexCliResponse {
         content,

@@ -386,9 +386,13 @@ impl MissionDB {
         };
         let type_clause = match conv_type {
             Some("all") => String::new(),
+            Some("user") => " AND conversation_type = 'user'".to_string(),
             Some("meta") => " AND conversation_type = 'meta'".to_string(),
             Some("worker") => " AND conversation_type = 'worker'".to_string(),
-            Some("system") => " AND conversation_type IN ('meta', 'worker', 'jarvis')".to_string(),
+            Some("jarvis") => " AND conversation_type = 'jarvis'".to_string(),
+            Some("subagent") => " AND conversation_type = 'subagent'".to_string(),
+            Some("compaction") => " AND conversation_type = 'compaction'".to_string(),
+            Some("system") => " AND conversation_type IN ('meta', 'worker')".to_string(),
             _ => " AND conversation_type IN ('user', 'worker')".to_string(),
         };
 
@@ -484,7 +488,7 @@ impl MissionDB {
     pub fn get_conversation_message_by_id(&self, id: i64) -> DbResult<Option<ConversationMessage>> {
         let conn = self.read_conn();
         let result = conn.query_row(
-            "SELECT * FROM conversation_messages WHERE id = ?1",
+            "SELECT id, session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = id AND l.label = 'semantic_role'), role) as role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count FROM conversation_messages WHERE id = ?1",
             params![id],
             |row| Self::row_to_conversation_message(row),
         );
@@ -505,14 +509,14 @@ impl MissionDB {
         let mut msgs = Vec::new();
         if let Some(since) = since_id {
             let mut stmt = conn.prepare(
-                "SELECT * FROM conversation_messages WHERE session_id = ?1 AND id > ?2 ORDER BY id ASC LIMIT ?3"
+                "SELECT id, session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = id AND l.label = 'semantic_role'), role) as role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count FROM conversation_messages WHERE session_id = ?1 AND id > ?2 ORDER BY id ASC LIMIT ?3"
             )?;
             let rows = stmt.query_map(params![session_id, since, limit], |row| Self::row_to_conversation_message(row))?;
             for m in rows { msgs.push(m?); }
         } else {
             // Return last N messages
             let mut stmt = conn.prepare(
-                "SELECT * FROM (SELECT * FROM conversation_messages WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2) ORDER BY id ASC"
+                "SELECT * FROM (SELECT id, session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = id AND l.label = 'semantic_role'), role) as role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count FROM conversation_messages WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2) ORDER BY id ASC"
             )?;
             let rows = stmt.query_map(params![session_id, limit], |row| Self::row_to_conversation_message(row))?;
             for m in rows { msgs.push(m?); }
@@ -544,17 +548,17 @@ impl MissionDB {
 
         let sql = "\
             WITH before_msgs AS (
-                SELECT * FROM conversation_messages
+                SELECT id, session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = id AND l.label = 'semantic_role'), role) as role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count FROM conversation_messages
                 WHERE session_id = ?1 AND id < ?2
                 ORDER BY id DESC LIMIT ?3
             ),
             after_msgs AS (
-                SELECT * FROM conversation_messages
+                SELECT id, session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = id AND l.label = 'semantic_role'), role) as role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count FROM conversation_messages
                 WHERE session_id = ?1 AND id > ?2
                 ORDER BY id ASC LIMIT ?4
             ),
             anchor AS (
-                SELECT * FROM conversation_messages WHERE id = ?2
+                SELECT id, session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = id AND l.label = 'semantic_role'), role) as role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count FROM conversation_messages WHERE id = ?2
             )
             SELECT * FROM (
                 SELECT * FROM before_msgs
@@ -582,7 +586,7 @@ impl MissionDB {
 
         // Exclude meta/compaction conversations from search results
         let fts_sql =
-            "SELECT m.* FROM conversation_messages m
+            "SELECT m.id, m.session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = m.id AND l.label = 'semantic_role'), m.role) as role, m.content, m.raw_content, m.message_uuid, m.parent_uuid, m.model, m.timestamp, m.metadata, m.tool_name, m.raw_role, m.content_types, m.has_image, m.has_tool_use, m.has_tool_result, m.token_count FROM conversation_messages m
              JOIN conversation_msg_fts f ON m.id = f.rowid
              JOIN conversations c ON m.session_id = c.id
              WHERE conversation_msg_fts MATCH ?1
@@ -613,7 +617,7 @@ impl MissionDB {
         // Phase 3: LIKE fallback for Chinese substrings
         let pattern = format!("%{}%", query);
         let mut stmt = conn.prepare(
-            "SELECT m.* FROM conversation_messages m
+            "SELECT m.id, m.session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = m.id AND l.label = 'semantic_role'), m.role) as role, m.content, m.raw_content, m.message_uuid, m.parent_uuid, m.model, m.timestamp, m.metadata, m.tool_name, m.raw_role, m.content_types, m.has_image, m.has_tool_use, m.has_tool_result, m.token_count FROM conversation_messages m
              JOIN conversations c ON m.session_id = c.id
              WHERE m.content LIKE ?1
                AND c.conversation_type NOT IN ('meta', 'compaction')
@@ -671,7 +675,7 @@ impl MissionDB {
         let where_clause = extra_conds.join(" AND ");
 
         let fts_sql = format!(
-            "SELECT m.* FROM conversation_messages m
+            "SELECT m.id, m.session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = m.id AND l.label = 'semantic_role'), m.role) as role, m.content, m.raw_content, m.message_uuid, m.parent_uuid, m.model, m.timestamp, m.metadata, m.tool_name, m.raw_role, m.content_types, m.has_image, m.has_tool_use, m.has_tool_result, m.token_count FROM conversation_messages m
              JOIN conversation_msg_fts f ON m.id = f.rowid
              JOIN conversations c ON m.session_id = c.id
              WHERE conversation_msg_fts MATCH ?1
@@ -681,7 +685,7 @@ impl MissionDB {
         );
 
         let like_sql = format!(
-            "SELECT m.* FROM conversation_messages m
+            "SELECT m.id, m.session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = m.id AND l.label = 'semantic_role'), m.role) as role, m.content, m.raw_content, m.message_uuid, m.parent_uuid, m.model, m.timestamp, m.metadata, m.tool_name, m.raw_role, m.content_types, m.has_image, m.has_tool_use, m.has_tool_result, m.token_count FROM conversation_messages m
              JOIN conversations c ON m.session_id = c.id
              WHERE m.content LIKE ?1
                AND {where_clause}

@@ -48,7 +48,12 @@ impl EngineController for GeminiCliController {
         info!(slot_id, is_ephemeral, "GeminiCtrl: spawning via driver");
 
         self.driver
-            .ensure_spawned(slot_id, Path::new(&req.cwd), is_ephemeral, req.model.as_deref())
+            .ensure_spawned(
+                slot_id,
+                Path::new(&req.cwd),
+                is_ephemeral,
+                req.model.as_deref(),
+            )
             .await?;
 
         // Gemini has no JSONL — use synthetic session_id
@@ -59,12 +64,7 @@ impl EngineController for GeminiCliController {
         Ok(session_id)
     }
 
-    async fn ask(
-        &self,
-        slot_id: &str,
-        prompt: &str,
-        timeout: Duration,
-    ) -> Result<String> {
+    async fn ask(&self, slot_id: &str, prompt: &str, timeout: Duration) -> Result<String> {
         self.driver.ask(slot_id, prompt, timeout).await
     }
 

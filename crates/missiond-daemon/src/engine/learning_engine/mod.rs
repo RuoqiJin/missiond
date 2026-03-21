@@ -4,15 +4,15 @@
 //!       + decision_harvest (policy generalization) + timeline_analyst (pattern detection)
 
 pub mod decision_engine;
-pub mod extraction;
 pub mod decision_harvest;
-pub mod timeline_analyst;
-pub mod idle_explorer;
+pub mod extraction;
 pub mod historical_scanner;
+pub mod idle_explorer;
 pub mod intent_analyst;
+pub mod timeline_analyst;
 
-use tracing::info;
 use crate::state::AppState;
+use tracing::info;
 
 /// Learning Engine periodic tick — called from autopilot_tick.
 ///
@@ -31,12 +31,23 @@ pub(crate) async fn learning_tick(state: &AppState) {
     // Decision Engine: checkpoint harvester (every 24h, tasks with ≥3 unharvested decisions)
     {
         let now = chrono::Utc::now().timestamp();
-        let last = state.store.daemon_state_get("last_decision_harvest_at").await.unwrap_or(None).unwrap_or(0);
+        let last = state
+            .store
+            .daemon_state_get("last_decision_harvest_at")
+            .await
+            .unwrap_or(None)
+            .unwrap_or(0);
         if now - last > 86400 {
-            let _ = state.store.daemon_state_set("last_decision_harvest_at", now).await;
+            let _ = state
+                .store
+                .daemon_state_set("last_decision_harvest_at", now)
+                .await;
             if let Ok(tasks) = state.store.find_tasks_with_unharvested_decisions(3).await {
                 for (task_id, task_title, count) in &tasks {
-                    info!(task_id, count, "Decision harvester checkpoint: incremental harvest");
+                    info!(
+                        task_id,
+                        count, "Decision harvester checkpoint: incremental harvest"
+                    );
                     let state_clone = state.clone();
                     let tid = task_id.clone();
                     let tt = task_title.clone();
@@ -54,9 +65,17 @@ pub(crate) async fn learning_tick(state: &AppState) {
     // Co-occurrence cache refresh (every 6h) for preemptive context prefetching
     {
         let now = chrono::Utc::now().timestamp();
-        let last = state.store.daemon_state_get("last_cooccurrence_refresh").await.unwrap_or(None).unwrap_or(0);
+        let last = state
+            .store
+            .daemon_state_get("last_cooccurrence_refresh")
+            .await
+            .unwrap_or(None)
+            .unwrap_or(0);
         if now - last > 6 * 3600 {
-            let _ = state.store.daemon_state_set("last_cooccurrence_refresh", now).await;
+            let _ = state
+                .store
+                .daemon_state_set("last_cooccurrence_refresh", now)
+                .await;
             if let Ok(matrix) = state.store.kb_compute_cooccurrence(168, 3).await {
                 let count = matrix.len();
                 *state.kb_cooccurrence_cache.write().await = matrix;

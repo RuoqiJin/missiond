@@ -4,10 +4,10 @@
 //! All events flow through MPSC → Timeline Writer → SQLite → broadcast<TimelineEvent>.
 //! This guarantees: persistent storage, global monotonic seq, causal ordering.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use missiond_core::CliEngine;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 use tracing::debug;
 
@@ -113,15 +113,9 @@ pub(crate) enum DaemonEvent {
         content_preview: String,
     },
     /// A board task was claimed by a slot/session.
-    BoardTaskClaimed {
-        task_id: String,
-        slot_id: String,
-    },
+    BoardTaskClaimed { task_id: String, slot_id: String },
     /// A board task was deleted.
-    BoardTaskDeleted {
-        task_id: String,
-        title: String,
-    },
+    BoardTaskDeleted { task_id: String, title: String },
     /// Board task fields updated (title, category, priority, etc.).
     BoardTaskUpdated {
         task_id: String,
@@ -214,16 +208,11 @@ pub(crate) enum DaemonEvent {
 
     // ===== Vision Worker =====
     /// A message with image content was inserted, needs async vision processing.
-    ImageMessageInserted {
-        message_id: i64,
-        session_id: String,
-    },
+    ImageMessageInserted { message_id: i64, session_id: String },
 
     // ===== Briefing Worker =====
     /// Briefing worker found pending entries and started processing.
-    BriefingBatchStarted {
-        pending_count: usize,
-    },
+    BriefingBatchStarted { pending_count: usize },
     /// A timeline entry's summary was updated by the briefing worker.
     /// Frontend uses target_seq + summary to do in-place cache update.
     BriefingSummaryGenerated {
@@ -403,17 +392,23 @@ pub(crate) enum DaemonEvent {
     SessionOrganized { session_id: String },
     /// S3 Chunker extracted turns from a session.
     /// Consumer: future S4 Embedder (per-turn) + Intent Analyst.
-    TurnExtracted { session_id: String, turn_count: usize },
+    TurnExtracted {
+        session_id: String,
+        turn_count: usize,
+    },
     /// Phase 6: Intent Analyst analyzed turns for a session.
     /// Consumer: Phase 7 Consciousness layer (autopilot evaluate_user_state).
-    IntentAnalyzed { session_id: String, intent_type: String },
+    IntentAnalyzed {
+        session_id: String,
+        intent_type: String,
+    },
 
     // ===== Phase 7: Consciousness — Proactive Push =====
     /// MissionD proactively pushed context to Jarvis conversation.
     /// Frontend: refetch Jarvis conversation to show the injected message.
     JarvisProactivePush {
         conversation_id: String,
-        trigger_reason: String,     // "user_stuck" | "direction_shift" | "scope_creep"
+        trigger_reason: String, // "user_stuck" | "direction_shift" | "scope_creep"
         summary: String,
     },
 }
@@ -454,14 +449,12 @@ impl DaemonEvent {
             Self::InsightGenerated { .. } => "insight_generated",
             Self::GitCommitDetected { .. } => "git_commit",
             Self::SlotTaskDispatched { .. } => "slot_task_dispatched",
-            Self::ConversationMessageLogged { ref role, .. } => {
-                match role.as_str() {
-                    "user" => "user_message",
-                    "system" => "system_message",
-                    "thinking" => "thinking_message",
-                    _ => "assistant_message",
-                }
-            }
+            Self::ConversationMessageLogged { ref role, .. } => match role.as_str() {
+                "user" => "user_message",
+                "system" => "system_message",
+                "thinking" => "thinking_message",
+                _ => "assistant_message",
+            },
             Self::CodexRequestStarted { .. } => "codex_request_started",
             Self::CodexRequestCompleted { .. } => "codex_request_completed",
             Self::ImageMessageInserted { .. } => "image_message_inserted",
@@ -496,33 +489,34 @@ impl DaemonEvent {
     /// but they don't create DB rows. This prevents internal worker telemetry
     /// from inflating the timeline table.
     pub fn is_ephemeral(&self) -> bool {
-        matches!(self,
+        matches!(
+            self,
             Self::BriefingBatchStarted { .. }
-            | Self::BriefingSummaryGenerated { .. }
-            | Self::WorkerLlmCall { .. }
-            | Self::ImageMessageInserted { .. }
-            | Self::TranslationStarted { .. }
-            | Self::NarrationBatchCompleted { .. }
-            | Self::SessionOrganized { .. }
-            | Self::TurnExtracted { .. }
-            | Self::IntentAnalyzed { .. }
+                | Self::BriefingSummaryGenerated { .. }
+                | Self::WorkerLlmCall { .. }
+                | Self::ImageMessageInserted { .. }
+                | Self::TranslationStarted { .. }
+                | Self::NarrationBatchCompleted { .. }
+                | Self::SessionOrganized { .. }
+                | Self::TurnExtracted { .. }
+                | Self::IntentAnalyzed { .. }
         )
     }
 
     /// Build frontend-compatible JSON payload (without seq/ts envelope).
     pub fn to_frontend_payload(&self) -> serde_json::Value {
         match self {
-            Self::SlotBecameIdle { slot_id } =>
-                json!({ "slot_id": slot_id, "new_state": "Idle" }),
-            Self::TaskCreated { task_id } =>
-                json!({ "task_id": task_id, "action": "created" }),
-            Self::TaskCompleted { task_id } =>
-                json!({ "task_id": task_id, "action": "completed" }),
-            Self::QuestionCreated { question_id } =>
-                json!({ "question_id": question_id }),
+            Self::SlotBecameIdle { slot_id } => json!({ "slot_id": slot_id, "new_state": "Idle" }),
+            Self::TaskCreated { task_id } => json!({ "task_id": task_id, "action": "created" }),
+            Self::TaskCompleted { task_id } => json!({ "task_id": task_id, "action": "completed" }),
+            Self::QuestionCreated { question_id } => json!({ "question_id": question_id }),
             Self::GeminiRequestStarted {
-                request_id, caller, session_id, model,
-                prompt_chars, ..
+                request_id,
+                caller,
+                session_id,
+                model,
+                prompt_chars,
+                ..
             } => json!({
                 "request_id": request_id,
                 "caller": caller,
@@ -531,9 +525,19 @@ impl DaemonEvent {
                 "prompt_chars": prompt_chars,
             }),
             Self::GeminiRequestCompleted {
-                request_id, caller, session_id, api_mode, model,
-                prompt_chars, response_chars, queue_wait_ms,
-                duration_ms, retry_count, status, error_msg, ..
+                request_id,
+                caller,
+                session_id,
+                api_mode,
+                model,
+                prompt_chars,
+                response_chars,
+                queue_wait_ms,
+                duration_ms,
+                retry_count,
+                status,
+                error_msg,
+                ..
             } => json!({
                 "caller": caller,
                 "model": model,
@@ -549,8 +553,13 @@ impl DaemonEvent {
                 "retry_count": retry_count,
             }),
             Self::GeminiToolActivity {
-                request_id, tool_seq, activity, tool_name,
-                input_preview, result_preview, is_error,
+                request_id,
+                tool_seq,
+                activity,
+                tool_name,
+                input_preview,
+                result_preview,
+                is_error,
             } => json!({
                 "request_id": request_id,
                 "tool_seq": tool_seq,
@@ -560,36 +569,103 @@ impl DaemonEvent {
                 "result_preview": result_preview,
                 "is_error": is_error,
             }),
-            Self::DecisionResolved { question_id, tier, duration_ms } =>
-                json!({ "question_id": question_id, "tier": tier, "duration_ms": duration_ms }),
-            Self::QuestionResolved { question_id, resolution } =>
-                json!({ "question_id": question_id, "resolution": resolution }),
-            Self::MemoryPhaseChanged { slot_id, phase, active_type } =>
-                json!({ "slot_id": slot_id, "phase": phase, "active_type": active_type }),
-            Self::BoardTaskCreated { task_id, title, category } =>
-                json!({ "task_id": task_id, "title": title, "category": category, "action": "created" }),
-            Self::BoardTaskStatusChanged { task_id, old_status, new_status } =>
-                json!({ "task_id": task_id, "old_status": old_status, "new_status": new_status, "action": "status_changed" }),
-            Self::BoardTaskNoteAdded { task_id, note_id, content_preview } =>
-                json!({ "task_id": task_id, "note_id": note_id, "content_preview": content_preview, "action": "note_added" }),
-            Self::BoardTaskClaimed { task_id, slot_id } =>
-                json!({ "task_id": task_id, "slot_id": slot_id, "action": "claimed" }),
-            Self::BoardTaskDeleted { task_id, title } =>
-                json!({ "task_id": task_id, "title": title, "action": "deleted" }),
-            Self::BoardTaskUpdated { task_id, status, category } =>
-                json!({ "task_id": task_id, "status": status, "category": category, "action": "updated" }),
-            Self::SlotStateChanged { slot_id, new_state, prev_state } =>
-                json!({ "slot_id": slot_id, "new_state": new_state, "prev_state": prev_state }),
-            Self::InsightGenerated { category, priority, title } =>
-                json!({ "category": category, "priority": priority, "title": title }),
-            Self::GitCommitDetected { repo, hash, short_hash, author, message, committed_at } =>
-                json!({ "repo": repo, "hash": hash, "short_hash": short_hash, "author": author, "message": message, "committed_at": committed_at }),
-            Self::SlotTaskDispatched { slot_id, task_id, purpose, prompt_chars, preview, cited_kb_ids } =>
-                json!({ "slot_id": slot_id, "task_id": task_id, "purpose": purpose, "prompt_chars": prompt_chars, "preview": preview, "cited_kb_ids": cited_kb_ids }),
-            Self::ConversationMessageLogged { message_id, session_id, parent_session_id, slot_id, role, content_chars, preview } =>
-                json!({ "message_id": message_id, "session_id": session_id, "parent_session_id": parent_session_id, "slot_id": slot_id, "role": role, "content_chars": content_chars, "preview": preview }),
+            Self::DecisionResolved {
+                question_id,
+                tier,
+                duration_ms,
+            } => json!({ "question_id": question_id, "tier": tier, "duration_ms": duration_ms }),
+            Self::QuestionResolved {
+                question_id,
+                resolution,
+            } => json!({ "question_id": question_id, "resolution": resolution }),
+            Self::MemoryPhaseChanged {
+                slot_id,
+                phase,
+                active_type,
+            } => json!({ "slot_id": slot_id, "phase": phase, "active_type": active_type }),
+            Self::BoardTaskCreated {
+                task_id,
+                title,
+                category,
+            } => {
+                json!({ "task_id": task_id, "title": title, "category": category, "action": "created" })
+            }
+            Self::BoardTaskStatusChanged {
+                task_id,
+                old_status,
+                new_status,
+            } => {
+                json!({ "task_id": task_id, "old_status": old_status, "new_status": new_status, "action": "status_changed" })
+            }
+            Self::BoardTaskNoteAdded {
+                task_id,
+                note_id,
+                content_preview,
+            } => {
+                json!({ "task_id": task_id, "note_id": note_id, "content_preview": content_preview, "action": "note_added" })
+            }
+            Self::BoardTaskClaimed { task_id, slot_id } => {
+                json!({ "task_id": task_id, "slot_id": slot_id, "action": "claimed" })
+            }
+            Self::BoardTaskDeleted { task_id, title } => {
+                json!({ "task_id": task_id, "title": title, "action": "deleted" })
+            }
+            Self::BoardTaskUpdated {
+                task_id,
+                status,
+                category,
+            } => {
+                json!({ "task_id": task_id, "status": status, "category": category, "action": "updated" })
+            }
+            Self::SlotStateChanged {
+                slot_id,
+                new_state,
+                prev_state,
+            } => json!({ "slot_id": slot_id, "new_state": new_state, "prev_state": prev_state }),
+            Self::InsightGenerated {
+                category,
+                priority,
+                title,
+            } => json!({ "category": category, "priority": priority, "title": title }),
+            Self::GitCommitDetected {
+                repo,
+                hash,
+                short_hash,
+                author,
+                message,
+                committed_at,
+            } => {
+                json!({ "repo": repo, "hash": hash, "short_hash": short_hash, "author": author, "message": message, "committed_at": committed_at })
+            }
+            Self::SlotTaskDispatched {
+                slot_id,
+                task_id,
+                purpose,
+                prompt_chars,
+                preview,
+                cited_kb_ids,
+            } => {
+                json!({ "slot_id": slot_id, "task_id": task_id, "purpose": purpose, "prompt_chars": prompt_chars, "preview": preview, "cited_kb_ids": cited_kb_ids })
+            }
+            Self::ConversationMessageLogged {
+                message_id,
+                session_id,
+                parent_session_id,
+                slot_id,
+                role,
+                content_chars,
+                preview,
+            } => {
+                json!({ "message_id": message_id, "session_id": session_id, "parent_session_id": parent_session_id, "slot_id": slot_id, "role": role, "content_chars": content_chars, "preview": preview })
+            }
             Self::CodexRequestStarted {
-                request_id, caller, model, prompt_chars, has_image, image_hash, ..
+                request_id,
+                caller,
+                model,
+                prompt_chars,
+                has_image,
+                image_hash,
+                ..
             } => json!({
                 "request_id": request_id,
                 "caller": caller,
@@ -599,8 +675,18 @@ impl DaemonEvent {
                 "image_hash": image_hash,
             }),
             Self::CodexRequestCompleted {
-                request_id, caller, model, prompt_chars, response_chars,
-                duration_ms, status, error_msg, input_tokens, output_tokens, image_hash, ..
+                request_id,
+                caller,
+                model,
+                prompt_chars,
+                response_chars,
+                duration_ms,
+                status,
+                error_msg,
+                input_tokens,
+                output_tokens,
+                image_hash,
+                ..
             } => json!({
                 "request_id": request_id,
                 "caller": caller,
@@ -615,8 +701,13 @@ impl DaemonEvent {
                 "image_hash": image_hash,
             }),
             Self::ToolCompleted {
-                session_id, slot_id, tool_name, status,
-                is_error, input_summary, output_summary,
+                session_id,
+                slot_id,
+                tool_name,
+                status,
+                is_error,
+                input_summary,
+                output_summary,
             } => json!({
                 "session_id": session_id,
                 "slot_id": slot_id,
@@ -626,29 +717,74 @@ impl DaemonEvent {
                 "input_summary": input_summary,
                 "output_summary": output_summary,
             }),
-            Self::ImageMessageInserted { message_id, session_id } =>
-                json!({ "message_id": message_id, "session_id": session_id }),
-            Self::BriefingBatchStarted { pending_count } =>
-                json!({ "pending_count": pending_count }),
-            Self::BriefingSummaryGenerated { target_seq, summary, method } =>
-                json!({ "target_seq": target_seq, "summary": summary, "method": method }),
-            Self::TranslationStarted { message_id, slot_id, content_chars } =>
-                json!({ "message_id": message_id, "slot_id": slot_id, "content_chars": content_chars }),
-            Self::TranslationCompleted { message_id, slot_id, preview, duration_ms } =>
-                json!({ "message_id": message_id, "slot_id": slot_id, "preview": preview, "duration_ms": duration_ms }),
-            Self::TranslationFailed { message_id, slot_id, error } =>
-                json!({ "message_id": message_id, "slot_id": slot_id, "error": error }),
-            Self::NarrationSessionStarted { session_id, total_messages, already_narrated } =>
-                json!({ "session_id": session_id, "total_messages": total_messages, "already_narrated": already_narrated }),
-            Self::NarrationBatchCompleted { session_id, batch_index, processed_count, total_messages, duration_ms } =>
-                json!({ "session_id": session_id, "batch_index": batch_index, "processed_count": processed_count, "total_messages": total_messages, "duration_ms": duration_ms }),
-            Self::NarrationSessionCompleted { session_id, total_narrated } =>
-                json!({ "session_id": session_id, "total_narrated": total_narrated }),
-            Self::NarrationFailed { session_id, batch_index, error, will_retry } =>
-                json!({ "session_id": session_id, "batch_index": batch_index, "error": error, "will_retry": will_retry }),
+            Self::ImageMessageInserted {
+                message_id,
+                session_id,
+            } => json!({ "message_id": message_id, "session_id": session_id }),
+            Self::BriefingBatchStarted { pending_count } => {
+                json!({ "pending_count": pending_count })
+            }
+            Self::BriefingSummaryGenerated {
+                target_seq,
+                summary,
+                method,
+            } => json!({ "target_seq": target_seq, "summary": summary, "method": method }),
+            Self::TranslationStarted {
+                message_id,
+                slot_id,
+                content_chars,
+            } => {
+                json!({ "message_id": message_id, "slot_id": slot_id, "content_chars": content_chars })
+            }
+            Self::TranslationCompleted {
+                message_id,
+                slot_id,
+                preview,
+                duration_ms,
+            } => {
+                json!({ "message_id": message_id, "slot_id": slot_id, "preview": preview, "duration_ms": duration_ms })
+            }
+            Self::TranslationFailed {
+                message_id,
+                slot_id,
+                error,
+            } => json!({ "message_id": message_id, "slot_id": slot_id, "error": error }),
+            Self::NarrationSessionStarted {
+                session_id,
+                total_messages,
+                already_narrated,
+            } => {
+                json!({ "session_id": session_id, "total_messages": total_messages, "already_narrated": already_narrated })
+            }
+            Self::NarrationBatchCompleted {
+                session_id,
+                batch_index,
+                processed_count,
+                total_messages,
+                duration_ms,
+            } => {
+                json!({ "session_id": session_id, "batch_index": batch_index, "processed_count": processed_count, "total_messages": total_messages, "duration_ms": duration_ms })
+            }
+            Self::NarrationSessionCompleted {
+                session_id,
+                total_narrated,
+            } => json!({ "session_id": session_id, "total_narrated": total_narrated }),
+            Self::NarrationFailed {
+                session_id,
+                batch_index,
+                error,
+                will_retry,
+            } => {
+                json!({ "session_id": session_id, "batch_index": batch_index, "error": error, "will_retry": will_retry })
+            }
             Self::WorkerLlmCall {
-                caller, task_id, status, prompt_chars,
-                response_chars, duration_ms, queue_wait_ms,
+                caller,
+                task_id,
+                status,
+                prompt_chars,
+                response_chars,
+                duration_ms,
+                queue_wait_ms,
             } => json!({
                 "caller": caller,
                 "task_id": task_id,
@@ -658,11 +794,19 @@ impl DaemonEvent {
                 "duration_ms": duration_ms,
                 "queue_wait_ms": queue_wait_ms,
             }),
-            Self::JarvisTaskCompleted { conversation_id, task_id } =>
-                json!({ "conversation_id": conversation_id, "task_id": task_id }),
+            Self::JarvisTaskCompleted {
+                conversation_id,
+                task_id,
+            } => json!({ "conversation_id": conversation_id, "task_id": task_id }),
             Self::CliRequestStarted {
-                engine, request_id, caller, session_id, model,
-                prompt_chars, extra, ..
+                engine,
+                request_id,
+                caller,
+                session_id,
+                model,
+                prompt_chars,
+                extra,
+                ..
             } => {
                 let mut v = json!({
                     "engine": engine.to_string(),
@@ -680,9 +824,18 @@ impl DaemonEvent {
                 v
             }
             Self::CliRequestCompleted {
-                engine, request_id, caller, session_id, model,
-                prompt_chars, response_chars, duration_ms,
-                status, error_msg, extra, ..
+                engine,
+                request_id,
+                caller,
+                session_id,
+                model,
+                prompt_chars,
+                response_chars,
+                duration_ms,
+                status,
+                error_msg,
+                extra,
+                ..
             } => {
                 let mut v = json!({
                     "engine": engine.to_string(),
@@ -704,8 +857,14 @@ impl DaemonEvent {
                 v
             }
             Self::CliToolActivity {
-                engine, request_id, tool_seq, activity, tool_name,
-                input_preview, result_preview, is_error,
+                engine,
+                request_id,
+                tool_seq,
+                activity,
+                tool_name,
+                input_preview,
+                result_preview,
+                is_error,
             } => json!({
                 "engine": engine.to_string(),
                 "request_id": request_id,
@@ -720,20 +879,40 @@ impl DaemonEvent {
                 "path": path,
                 "kind": kind,
             }),
-            Self::SessionCompleted { session_id, slot_id, message_count, duration_secs, status } =>
-                json!({ "session_id": session_id, "slot_id": slot_id, "message_count": message_count, "duration_secs": duration_secs, "status": status }),
-            Self::DeepAnalysisCompleted { session_id, kb_entries_created } =>
-                json!({ "session_id": session_id, "kb_entries_created": kb_entries_created }),
-            Self::KBBatchMutated { count, categories, action } =>
-                json!({ "count": count, "categories": categories, "action": action }),
-            Self::SessionOrganized { session_id } =>
-                json!({ "session_id": session_id }),
-            Self::TurnExtracted { session_id, turn_count } =>
-                json!({ "session_id": session_id, "turn_count": turn_count }),
-            Self::IntentAnalyzed { session_id, intent_type } =>
-                json!({ "session_id": session_id, "intent_type": intent_type }),
-            Self::JarvisProactivePush { conversation_id, trigger_reason, summary } =>
-                json!({ "conversation_id": conversation_id, "trigger_reason": trigger_reason, "summary": summary }),
+            Self::SessionCompleted {
+                session_id,
+                slot_id,
+                message_count,
+                duration_secs,
+                status,
+            } => {
+                json!({ "session_id": session_id, "slot_id": slot_id, "message_count": message_count, "duration_secs": duration_secs, "status": status })
+            }
+            Self::DeepAnalysisCompleted {
+                session_id,
+                kb_entries_created,
+            } => json!({ "session_id": session_id, "kb_entries_created": kb_entries_created }),
+            Self::KBBatchMutated {
+                count,
+                categories,
+                action,
+            } => json!({ "count": count, "categories": categories, "action": action }),
+            Self::SessionOrganized { session_id } => json!({ "session_id": session_id }),
+            Self::TurnExtracted {
+                session_id,
+                turn_count,
+            } => json!({ "session_id": session_id, "turn_count": turn_count }),
+            Self::IntentAnalyzed {
+                session_id,
+                intent_type,
+            } => json!({ "session_id": session_id, "intent_type": intent_type }),
+            Self::JarvisProactivePush {
+                conversation_id,
+                trigger_reason,
+                summary,
+            } => {
+                json!({ "conversation_id": conversation_id, "trigger_reason": trigger_reason, "summary": summary })
+            }
         }
     }
 }
@@ -822,7 +1001,10 @@ pub(crate) struct EventBus {
 
 impl EventBus {
     pub fn new(tx: mpsc::UnboundedSender<TimelineEntry>) -> Self {
-        Self { tx, publish_count: AtomicU64::new(0) }
+        Self {
+            tx,
+            publish_count: AtomicU64::new(0),
+        }
     }
 
     // @beacon: eventbus
@@ -848,7 +1030,9 @@ impl EventBus {
         let entry = TimelineEntry {
             event,
             trace_id: ctx.trace_id,
-            span_id: ctx.span_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            span_id: ctx
+                .span_id
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             parent_span_id: ctx.parent_span_id,
             summary: ctx.summary,
         };

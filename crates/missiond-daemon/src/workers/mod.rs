@@ -1,24 +1,24 @@
 // Background workers — each implements BackgroundWorker trait.
 // Spawned via spawn_worker() in main.rs with unified lifecycle management.
-pub mod embedding_worker;
-pub mod vision_worker;
-pub mod step_narrator;
-pub mod translation_worker;
+pub mod arch_maintenance_worker;
+pub mod ast_sync_worker;
 pub mod briefing_worker;
 pub mod code_prefetch;
-pub mod experience_harvester;
-pub mod ast_sync_worker;
-pub mod gemini_logger;
 pub mod conversation_logger;
-pub mod pty_event_worker;
-pub mod retro_worker;
-pub mod arch_maintenance_worker;
-pub mod strategy_worker;
-pub mod reconcile_worker;
-pub mod gemini_reconcile_worker;
 pub mod conversation_organizer;
-pub mod tagger_chunker;
+pub mod embedding_worker;
+pub mod experience_harvester;
+pub mod gemini_logger;
+pub mod gemini_reconcile_worker;
+pub mod pty_event_worker;
+pub mod reconcile_worker;
 pub mod registry;
+pub mod retro_worker;
+pub mod step_narrator;
+pub mod strategy_worker;
+pub mod tagger_chunker;
+pub mod translation_worker;
+pub mod vision_worker;
 
 use std::future::Future;
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use tracing::info;
 
 use crate::control_tree::Dependency;
 use crate::state::AppState;
-pub use registry::{WorkerRegistry, WorkerContext};
+pub use registry::{WorkerContext, WorkerRegistry};
 
 /// Unified lifecycle trait for background workers.
 ///
@@ -44,7 +44,9 @@ pub(crate) trait BackgroundWorker: Send + 'static {
 
     /// ControlTree dependencies for cascade pause evaluation.
     /// Override to declare LLM provider / domain dependencies.
-    fn dependencies(&self) -> Vec<Dependency> { Vec::new() }
+    fn dependencies(&self) -> Vec<Dependency> {
+        Vec::new()
+    }
 
     /// Run the worker's main loop. This future runs until natural completion
     /// or is cancelled by the shutdown signal in `spawn_worker`.
@@ -65,7 +67,9 @@ pub(crate) fn spawn_worker<W: BackgroundWorker>(
     let name = worker.name();
     let deps = worker.dependencies();
     let tree_rx = state.control_manager.subscribe();
-    let ctx = state.worker_registry.register_with_deps(name, deps, tree_rx);
+    let ctx = state
+        .worker_registry
+        .register_with_deps(name, deps, tree_rx);
     tokio::spawn(async move {
         tokio::select! {
             biased;

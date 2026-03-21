@@ -22,7 +22,7 @@ use anyhow::Result;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
-use crate::event_bus::{DaemonEvent, TraceContext, TimelineEvent};
+use crate::event_bus::{DaemonEvent, TimelineEvent, TraceContext};
 use crate::minimax_client::ChatMessage;
 use crate::state::AppState;
 
@@ -62,14 +62,12 @@ struct ThinkingTraceCtx {
 
 /// Translate a single thinking message via MinimaxGateway (P2: translation priority).
 /// `ctx` carries the source thinking_message's trace context for causal linking.
-async fn translate_message(
-    state: &AppState,
-    ctx: &ThinkingTraceCtx,
-    content: &str,
-) -> Result<()> {
+async fn translate_message(state: &AppState, ctx: &ThinkingTraceCtx, content: &str) -> Result<()> {
     let content_chars = content.len();
 
-    let sonnet = state.sonnet.as_ref()
+    let sonnet = state
+        .sonnet
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Sonnet gateway not available"))?;
 
     // Single span_id for the entire translation lifecycle (Started + Completed/Failed)
@@ -108,25 +106,30 @@ async fn translate_message(
     // Use higher max_tokens for translation (output ~ input length)
     let max_tokens = ((content_chars / 2) as u32 + 500).min(8192);
     // Pass trace context to SonnetGateway for WorkerLlmCall linking
-    let result = sonnet.call_translation(
-        messages,
-        Some(max_tokens),
-        None,
-        ctx.trace_id.clone(),
-        Some(translation_span_id.clone()), // WorkerLlmCall's parent = translation span
-    ).await;
+    let result = sonnet
+        .call_translation(
+            messages,
+            Some(max_tokens),
+            None,
+            ctx.trace_id.clone(),
+            Some(translation_span_id.clone()), // WorkerLlmCall's parent = translation span
+        )
+        .await;
 
     let duration_ms = start.elapsed().as_millis() as u64;
 
     match result {
         Ok(translation) if !translation.is_empty() => {
             // Store in DB
-            state.store.insert_translation(
-                ctx.message_id,
-                &translation,
-                "MiniMax-M2.5-highspeed",
-                duration_ms,
-            ).await?;
+            state
+                .store
+                .insert_translation(
+                    ctx.message_id,
+                    &translation,
+                    "MiniMax-M2.5-highspeed",
+                    duration_ms,
+                )
+                .await?;
 
             // Preview: first ~80 chars
             let preview: String = translation.chars().take(80).collect();
@@ -141,7 +144,12 @@ async fn translate_message(
                 trace_ctx(),
             );
 
-            info!(message_id = ctx.message_id, duration_ms, chars = translation.len(), "Translation completed");
+            info!(
+                message_id = ctx.message_id,
+                duration_ms,
+                chars = translation.len(),
+                "Translation completed"
+            );
             Ok(())
         }
         Ok(_) => {
@@ -154,7 +162,10 @@ async fn translate_message(
                 },
                 trace_ctx(),
             );
-            warn!(message_id = ctx.message_id, "Translation: empty response from MiniMax");
+            warn!(
+                message_id = ctx.message_id,
+                "Translation: empty response from MiniMax"
+            );
             Err(anyhow::anyhow!(err))
         }
         Err(e) => {
@@ -191,10 +202,12 @@ pub(crate) struct TranslationWorker {
 }
 
 impl super::BackgroundWorker for TranslationWorker {
-    fn name(&self) -> &'static str { "translation_worker" }
+    fn name(&self) -> &'static str {
+        "translation_worker"
+    }
 
     fn dependencies(&self) -> Vec<crate::control_tree::Dependency> {
-        use crate::control_tree::{Dependency, CtlProvider};
+        use crate::control_tree::{CtlProvider, Dependency};
         vec![Dependency::Provider(CtlProvider::Sonnet)]
     }
 
@@ -279,7 +292,10 @@ async fn process_single(state: &AppState, ctx: ThinkingTraceCtx) -> bool {
     // Check if already translated
     match state.store.has_translation(ctx.message_id).await {
         Ok(true) => {
-            debug!(message_id = ctx.message_id, "Translation: already exists, skipping");
+            debug!(
+                message_id = ctx.message_id,
+                "Translation: already exists, skipping"
+            );
             return true;
         }
         Err(e) => {
@@ -290,10 +306,17 @@ async fn process_single(state: &AppState, ctx: ThinkingTraceCtx) -> bool {
     }
 
     // Fetch full content
-    let content = match state.store.get_conversation_message_by_id(ctx.message_id).await {
+    let content = match state
+        .store
+        .get_conversation_message_by_id(ctx.message_id)
+        .await
+    {
         Ok(Some(msg)) => msg.content,
         Ok(None) => {
-            debug!(message_id = ctx.message_id, "Translation: message not found");
+            debug!(
+                message_id = ctx.message_id,
+                "Translation: message not found"
+            );
             return true; // Not a failure — message just doesn't exist
         }
         Err(e) => {
@@ -304,7 +327,11 @@ async fn process_single(state: &AppState, ctx: ThinkingTraceCtx) -> bool {
 
     // Skip very short thinking blocks (< 50 chars not worth translating)
     if content.len() < 50 {
-        debug!(message_id = ctx.message_id, len = content.len(), "Translation: too short, skipping");
+        debug!(
+            message_id = ctx.message_id,
+            len = content.len(),
+            "Translation: too short, skipping"
+        );
         return true;
     }
 
@@ -320,14 +347,11 @@ async fn process_single(state: &AppState, ctx: ThinkingTraceCtx) -> bool {
 /// Poll DB for thinking messages that don't have translations yet.
 async fn poll_pending(state: &AppState, consecutive_failures: &mut u32) {
     // Find thinking_message timeline entries from the last 24h that lack translations
-    let rows = match state.store.query_timeline_filtered(
-        Some("thinking_message"),
-        None,
-        None,
-        None,
-        50,
-        0,
-    ).await {
+    let rows = match state
+        .store
+        .query_timeline_filtered(Some("thinking_message"), None, None, None, 50, 0)
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "Translation poll: DB query failed");
@@ -374,6 +398,10 @@ async fn poll_pending(state: &AppState, consecutive_failures: &mut u32) {
     }
 
     if translated > 0 {
-        info!(translated, total_checked = rows.len(), "Translation poll: batch completed");
+        info!(
+            translated,
+            total_checked = rows.len(),
+            "Translation poll: batch completed"
+        );
     }
 }

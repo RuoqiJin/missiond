@@ -1,15 +1,18 @@
 use anyhow::{anyhow, Result};
+use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use missiond_mcp::tools::ToolResult;
 
-use crate::state::AppState;
 use crate::lenient;
+use crate::state::AppState;
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     // Consolidated tool: mission_timeline
     if name == "mission_timeline" {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("query");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("query");
         return match action {
             "query" => handle_inner(state, "mission_timeline_query", args).await,
             "trace" => handle_inner(state, "mission_timeline_trace", args).await,
@@ -37,19 +40,28 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 offset: Option<i64>,
             }
             let args: Args = serde_json::from_value(args).unwrap_or(Args {
-                event_type: None, trace_id: None, since: None, until: None, limit: None, offset: None,
+                event_type: None,
+                trace_id: None,
+                since: None,
+                until: None,
+                limit: None,
+                offset: None,
             });
             let limit = args.limit.unwrap_or(50).min(200);
             let offset = args.offset.unwrap_or(0);
 
-            let rows = state.store.query_timeline_filtered(
-                args.event_type.as_deref(),
-                args.trace_id.as_deref(),
-                args.since.as_deref(),
-                args.until.as_deref(),
-                limit,
-                offset,
-            ).await.map_err(|e| anyhow!("DB error: {}", e))?;
+            let rows = state
+                .store
+                .query_timeline_filtered(
+                    args.event_type.as_deref(),
+                    args.trace_id.as_deref(),
+                    args.since.as_deref(),
+                    args.until.as_deref(),
+                    limit,
+                    offset,
+                )
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
 
             let events: Vec<Value> = rows.iter().map(timeline_row_to_json).collect();
             Ok(ToolResult::json(&json!({
@@ -74,12 +86,11 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let per_type_limit = args.per_type_limit.unwrap_or(80);
             let type_limits = args.type_limits.unwrap_or_default();
 
-            let rows = state.store.query_timeline_stratified(
-                &args.since,
-                &args.until,
-                per_type_limit,
-                &type_limits,
-            ).await.map_err(|e| anyhow!("DB error: {}", e))?;
+            let rows = state
+                .store
+                .query_timeline_stratified(&args.since, &args.until, per_type_limit, &type_limits)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
 
             let events: Vec<Value> = rows.iter().map(timeline_row_to_json).collect();
             Ok(ToolResult::json(&json!({
@@ -96,7 +107,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             }
             let Args { trace_id } = serde_json::from_value(args)?;
 
-            let rows = state.store.query_timeline_by_trace(&trace_id).await
+            let rows = state
+                .store
+                .query_timeline_by_trace(&trace_id)
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
 
             if rows.is_empty() {
@@ -118,9 +132,11 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         let caller = payload.get("caller").and_then(|v| v.as_str());
                         let session_id = payload.get("session_id").and_then(|v| v.as_str());
                         if let Some(session_id) = session_id {
-                            if let Ok(gemini_rows) = state.store.gemini_log_query(
-                                caller, Some(session_id), None, 1,
-                            ).await {
+                            if let Ok(gemini_rows) = state
+                                .store
+                                .gemini_log_query(caller, Some(session_id), None, 1)
+                                .await
+                            {
                                 if let Some(gemini_detail) = gemini_rows.first() {
                                     ev["gemini_detail"] = gemini_detail.clone();
                                 }
@@ -148,12 +164,16 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 since: Option<String>,
                 until: Option<String>,
             }
-            let args: Args = serde_json::from_value(args).unwrap_or(Args { since: None, until: None });
+            let args: Args = serde_json::from_value(args).unwrap_or(Args {
+                since: None,
+                until: None,
+            });
 
-            let stats = state.store.query_timeline_stats(
-                args.since.as_deref(),
-                args.until.as_deref(),
-            ).await.map_err(|e| anyhow!("DB error: {}", e))?;
+            let stats = state
+                .store
+                .query_timeline_stats(args.since.as_deref(), args.until.as_deref())
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
 
             Ok(ToolResult::json_pretty(&stats))
         }
@@ -170,12 +190,16 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let args: Args = serde_json::from_value(args)?;
             let limit = args.limit.unwrap_or(20).min(100);
 
-            let rows = state.store.query_timeline_search(
-                &args.keyword,
-                args.since.as_deref(),
-                args.until.as_deref(),
-                limit,
-            ).await.map_err(|e| anyhow!("DB error: {}", e))?;
+            let rows = state
+                .store
+                .query_timeline_search(
+                    &args.keyword,
+                    args.since.as_deref(),
+                    args.until.as_deref(),
+                    limit,
+                )
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
 
             let events: Vec<Value> = rows.iter().map(timeline_row_to_json).collect();
             Ok(ToolResult::json(&json!({
@@ -190,7 +214,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 }
 
 fn timeline_row_to_json(row: &missiond_core::db::TimelineRow) -> Value {
-    let payload: Value = serde_json::from_str(&row.payload).unwrap_or(Value::String(row.payload.clone()));
+    let payload: Value =
+        serde_json::from_str(&row.payload).unwrap_or(Value::String(row.payload.clone()));
     json!({
         "seq": row.seq,
         "event_type": row.event_type,

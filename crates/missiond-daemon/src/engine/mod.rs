@@ -12,5 +12,5 @@ pub use intent_engine::autopilot;
 pub use intent_engine::flow_engine;
 pub use intent_engine::memory_scheduler;
 pub use learning_engine::decision_engine;
-pub use learning_engine::extraction;
 pub use learning_engine::decision_harvest;
+pub use learning_engine::extraction;

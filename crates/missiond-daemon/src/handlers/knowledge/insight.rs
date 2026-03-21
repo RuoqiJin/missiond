@@ -1,6 +1,6 @@
 use anyhow::Result;
-use serde_json::Value;
 use missiond_mcp::tools::ToolResult;
+use serde_json::Value;
 
 use crate::state::AppState;
 
@@ -13,7 +13,11 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
     // Read strategic-state from KB
     let entry = match state.store.kb_get("strategic-state").await {
         Ok(Some(e)) => e,
-        Ok(None) => return Ok(ToolResult::text("尚无战略分析数据。StrategyWorker 需要分析至少一个完成的会话后才会生成。")),
+        Ok(None) => {
+            return Ok(ToolResult::text(
+                "尚无战略分析数据。StrategyWorker 需要分析至少一个完成的会话后才会生成。",
+            ))
+        }
         Err(e) => return Ok(ToolResult::error(format!("KB 读取失败: {}", e))),
     };
 
@@ -30,9 +34,18 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
 fn render_report(state: &Value, section: &str) -> String {
     let mut out = String::from("# MissionD 战略认知报告\n\n");
 
-    let snapshot_at = state.get("snapshot_at").and_then(|v| v.as_str()).unwrap_or("未知");
-    let last_session = state.get("last_session").and_then(|v| v.as_str()).unwrap_or("未知");
-    out.push_str(&format!("*更新时间: {} | 上次分析会话: {}*\n\n", snapshot_at, last_session));
+    let snapshot_at = state
+        .get("snapshot_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("未知");
+    let last_session = state
+        .get("last_session")
+        .and_then(|v| v.as_str())
+        .unwrap_or("未知");
+    out.push_str(&format!(
+        "*更新时间: {} | 上次分析会话: {}*\n\n",
+        snapshot_at, last_session
+    ));
 
     if section == "all" || section == "profile" {
         render_profile(&mut out, state);
@@ -64,7 +77,13 @@ fn render_profile(out: &mut String, state: &Value) {
         for p in profiles {
             let trait_ = p.get("trait").and_then(|v| v.as_str()).unwrap_or("?");
             let confidence = p.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let bar = if confidence >= 0.9 { "●●●" } else if confidence >= 0.7 { "●●○" } else { "●○○" };
+            let bar = if confidence >= 0.9 {
+                "●●●"
+            } else if confidence >= 0.7 {
+                "●●○"
+            } else {
+                "●○○"
+            };
             out.push_str(&format!("- {} [{}]\n", trait_, bar));
         }
     } else {
@@ -104,7 +123,10 @@ fn render_trajectory(out: &mut String, state: &Value) {
 
 fn render_patterns(out: &mut String, state: &Value) {
     out.push_str("## 协作模式\n");
-    if let Some(patterns) = state.get("collaboration_patterns").and_then(|v| v.as_array()) {
+    if let Some(patterns) = state
+        .get("collaboration_patterns")
+        .and_then(|v| v.as_array())
+    {
         if patterns.is_empty() {
             out.push_str("（暂无数据）\n\n");
             return;
@@ -141,7 +163,10 @@ fn render_proposals(out: &mut String, state: &Value) {
         for p in proposals {
             let action = p.get("action").and_then(|v| v.as_str()).unwrap_or("?");
             let occ = p.get("occurrences").and_then(|v| v.as_i64()).unwrap_or(0);
-            let status = p.get("status").and_then(|v| v.as_str()).unwrap_or("proposed");
+            let status = p
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("proposed");
             let status_icon = match status {
                 "automated" => "🤖 已自动化",
                 "skill_generated" => "📋 已生成Skill",
@@ -164,7 +189,10 @@ fn render_friction(out: &mut String, state: &Value) {
         }
         for f in frictions {
             let issue = f.get("issue").and_then(|v| v.as_str()).unwrap_or("?");
-            let severity = f.get("severity").and_then(|v| v.as_str()).unwrap_or("medium");
+            let severity = f
+                .get("severity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("medium");
             let freq = f.get("frequency").and_then(|v| v.as_i64()).unwrap_or(0);
             let icon = match severity {
                 "high" => "🔴",

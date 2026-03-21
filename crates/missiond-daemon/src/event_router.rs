@@ -17,12 +17,14 @@ use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::watch;
 
+use crate::decision_engine::process_pending_master_questions;
 use crate::event_bus::{DaemonEvent, TimelineEvent};
 use crate::experience_harvester;
+use crate::extraction::{
+    check_deep_analysis, check_kb_consolidation, check_kb_reflection, check_realtime_extraction,
+};
+use crate::memory_scheduler::{dispatch_queued_submit_tasks, schedule_memory_tasks};
 use crate::state::{AppState, MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
-use crate::memory_scheduler::{schedule_memory_tasks, dispatch_queued_submit_tasks};
-use crate::decision_engine::process_pending_master_questions;
-use crate::extraction::{check_realtime_extraction, check_deep_analysis, check_kb_consolidation, check_kb_reflection};
 use crate::workers::{retro_worker, strategy_worker};
 
 /// Exponential backoff for Lagged recovery: 100ms → 200ms → … → 2000ms cap.
@@ -38,8 +40,11 @@ fn lagged_backoff(consecutive_lags: u32) -> Duration {
         (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .subsec_nanos() as u64) % (jitter_range * 2)
-    } else { 0 };
+            .subsec_nanos() as u64)
+            % (jitter_range * 2)
+    } else {
+        0
+    };
     let with_jitter = capped.saturating_sub(jitter_range).saturating_add(jitter);
     Duration::from_millis(with_jitter)
 }
@@ -60,12 +65,20 @@ pub(crate) fn start_event_consumers(
     spawn_kb_consolidation_consumer(state, timeline_tx, shutdown_rx.clone());
     spawn_sweeper(state);
     // Phase 6: Intent Analyst — deep intent analysis from conversation turns
-    crate::engine::learning_engine::intent_analyst::spawn_intent_consumer(state, timeline_tx, shutdown_rx);
+    crate::engine::learning_engine::intent_analyst::spawn_intent_consumer(
+        state,
+        timeline_tx,
+        shutdown_rx,
+    );
 }
 
 /// Extraction lane: SlotBecameIdle → schedule_memory_tasks.
 /// Trailing-edge debounce: 500ms window, fires after window expires.
-fn spawn_extraction_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>, shutdown_rx: watch::Receiver<bool>) {
+fn spawn_extraction_consumer(
+    state: &AppState,
+    timeline_tx: &broadcast::Sender<TimelineEvent>,
+    shutdown_rx: watch::Receiver<bool>,
+) {
     let s = state.clone();
     let mut rx = timeline_tx.subscribe();
     let mut shutdown = shutdown_rx;
@@ -93,12 +106,20 @@ fn spawn_extraction_consumer(state: &AppState, timeline_tx: &broadcast::Sender<T
                 }
                 // Trailing edge fire
                 consecutive_lags = 0;
-                s.stats.events_consumed_extraction.fetch_add(1, Ordering::Relaxed);
-                if !s.control_manager.current().is_domain_paused(crate::control_tree::CtlDomain::Memory) {
+                s.stats
+                    .events_consumed_extraction
+                    .fetch_add(1, Ordering::Relaxed);
+                if !s
+                    .control_manager
+                    .current()
+                    .is_domain_paused(crate::control_tree::CtlDomain::Memory)
+                {
                     schedule_memory_tasks(&s).await;
                 }
                 pending = false;
-                if *shutdown.borrow() { return; }
+                if *shutdown.borrow() {
+                    return;
+                }
             } else {
                 tokio::select! {
                     biased;
@@ -138,7 +159,11 @@ fn spawn_extraction_consumer(state: &AppState, timeline_tx: &broadcast::Sender<T
 
 /// Submit dispatcher: TaskCreated/TaskCompleted → dispatch.
 /// Trailing-edge debounce: 100ms window.
-fn spawn_submit_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>, shutdown_rx: watch::Receiver<bool>) {
+fn spawn_submit_consumer(
+    state: &AppState,
+    timeline_tx: &broadcast::Sender<TimelineEvent>,
+    shutdown_rx: watch::Receiver<bool>,
+) {
     let s = state.clone();
     let mut rx = timeline_tx.subscribe();
     let mut shutdown = shutdown_rx;
@@ -151,8 +176,7 @@ fn spawn_submit_consumer(state: &AppState, timeline_tx: &broadcast::Sender<Timel
                 loop {
                     match tokio::time::timeout_at(deadline, rx.recv()).await {
                         Ok(Ok(te)) => match &te.event {
-                            DaemonEvent::TaskCreated { .. }
-                            | DaemonEvent::TaskCompleted { .. } => {
+                            DaemonEvent::TaskCreated { .. } | DaemonEvent::TaskCompleted { .. } => {
                                 // Absorb
                             }
                             _ => {}
@@ -163,13 +187,21 @@ fn spawn_submit_consumer(state: &AppState, timeline_tx: &broadcast::Sender<Timel
                     }
                 }
                 consecutive_lags = 0;
-                s.stats.events_consumed_submit.fetch_add(1, Ordering::Relaxed);
+                s.stats
+                    .events_consumed_submit
+                    .fetch_add(1, Ordering::Relaxed);
                 dispatch_queued_submit_tasks(&s).await;
-                if !s.control_manager.current().is_domain_paused(crate::control_tree::CtlDomain::Memory) {
+                if !s
+                    .control_manager
+                    .current()
+                    .is_domain_paused(crate::control_tree::CtlDomain::Memory)
+                {
                     schedule_memory_tasks(&s).await;
                 }
                 pending = false;
-                if *shutdown.borrow() { return; }
+                if *shutdown.borrow() {
+                    return;
+                }
             } else {
                 tokio::select! {
                     biased;
@@ -204,7 +236,11 @@ fn spawn_submit_consumer(state: &AppState, timeline_tx: &broadcast::Sender<Timel
 
 /// Decision engine: QuestionCreated → process.
 /// Trailing-edge debounce: 100ms window.
-fn spawn_decision_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>, shutdown_rx: watch::Receiver<bool>) {
+fn spawn_decision_consumer(
+    state: &AppState,
+    timeline_tx: &broadcast::Sender<TimelineEvent>,
+    shutdown_rx: watch::Receiver<bool>,
+) {
     let s = state.clone();
     let mut rx = timeline_tx.subscribe();
     let mut shutdown = shutdown_rx;
@@ -226,10 +262,14 @@ fn spawn_decision_consumer(state: &AppState, timeline_tx: &broadcast::Sender<Tim
                     }
                 }
                 consecutive_lags = 0;
-                s.stats.events_consumed_decision.fetch_add(1, Ordering::Relaxed);
+                s.stats
+                    .events_consumed_decision
+                    .fetch_add(1, Ordering::Relaxed);
                 process_pending_master_questions(&s).await;
                 pending = false;
-                if *shutdown.borrow() { return; }
+                if *shutdown.borrow() {
+                    return;
+                }
             } else {
                 tokio::select! {
                     biased;
@@ -263,7 +303,11 @@ fn spawn_decision_consumer(state: &AppState, timeline_tx: &broadcast::Sender<Tim
 
 /// Experience Harvest: NarrationSessionCompleted → harvest_session.
 /// No debounce — fires once per session completion, already infrequent.
-fn spawn_harvest_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>, shutdown_rx: watch::Receiver<bool>) {
+fn spawn_harvest_consumer(
+    state: &AppState,
+    timeline_tx: &broadcast::Sender<TimelineEvent>,
+    shutdown_rx: watch::Receiver<bool>,
+) {
     let s = state.clone();
     let mut rx = timeline_tx.subscribe();
     let mut shutdown = shutdown_rx;
@@ -296,35 +340,52 @@ fn spawn_harvest_consumer(state: &AppState, timeline_tx: &broadcast::Sender<Time
 
 /// Realtime extraction: ConversationMessageLogged → check_realtime_extraction().
 /// Trailing-edge debounce: 3s window, then dispatches extraction.
-fn spawn_realtime_extraction_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>, shutdown_rx: watch::Receiver<bool>) {
+fn spawn_realtime_extraction_consumer(
+    state: &AppState,
+    timeline_tx: &broadcast::Sender<TimelineEvent>,
+    shutdown_rx: watch::Receiver<bool>,
+) {
     let s = state.clone();
     let mut rx = timeline_tx.subscribe();
     let mut shutdown = shutdown_rx;
     tokio::spawn(async move {
-        let mut pending_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut pending_sessions: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         loop {
             if !pending_sessions.is_empty() {
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
                 loop {
                     match tokio::time::timeout_at(deadline, rx.recv()).await {
                         Ok(Ok(te)) => {
-                            if let DaemonEvent::ConversationMessageLogged { ref session_id, ref slot_id, .. } = te.event {
+                            if let DaemonEvent::ConversationMessageLogged {
+                                ref session_id,
+                                ref slot_id,
+                                ..
+                            } = te.event
+                            {
                                 if slot_id.is_some() {
                                     pending_sessions.insert(session_id.clone());
                                 }
                             }
                         }
                         Ok(Err(RecvError::Lagged(n))) => {
-                            s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
+                            s.stats
+                                .events_lagged_total_skipped
+                                .fetch_add(n, Ordering::Relaxed);
                         }
                         Ok(Err(RecvError::Closed)) => return,
                         Err(_) => break,
                     }
                 }
                 // Gemini ARB: tokio::spawn to avoid blocking broadcast receiver
-                tracing::debug!(sessions = pending_sessions.len(), "realtime_extraction: debounce fired");
+                tracing::debug!(
+                    sessions = pending_sessions.len(),
+                    "realtime_extraction: debounce fired"
+                );
                 let sc = s.clone();
-                tokio::spawn(async move { check_realtime_extraction(&sc).await; });
+                tokio::spawn(async move {
+                    check_realtime_extraction(&sc).await;
+                });
                 pending_sessions.clear();
                 if *shutdown.borrow() {
                     tracing::info!("realtime_extraction_consumer: shutdown after flush");
@@ -359,26 +420,38 @@ fn spawn_realtime_extraction_consumer(state: &AppState, timeline_tx: &broadcast:
 
 /// Session reflection: SessionCompleted → deep analysis + retrospective.
 /// Trailing-edge debounce: 5s window. Replaces Strategy Worker + Retro Worker polling.
-fn spawn_session_reflection_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>, shutdown_rx: watch::Receiver<bool>) {
+fn spawn_session_reflection_consumer(
+    state: &AppState,
+    timeline_tx: &broadcast::Sender<TimelineEvent>,
+    shutdown_rx: watch::Receiver<bool>,
+) {
     let s = state.clone();
     let mut rx = timeline_tx.subscribe();
     let mut shutdown = shutdown_rx;
     tokio::spawn(async move {
-        let mut pending_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut pending_sessions: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         loop {
             if !pending_sessions.is_empty() {
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
                 loop {
                     match tokio::time::timeout_at(deadline, rx.recv()).await {
                         Ok(Ok(te)) => {
-                            if let DaemonEvent::SessionCompleted { ref session_id, ref status, .. } = te.event {
+                            if let DaemonEvent::SessionCompleted {
+                                ref session_id,
+                                ref status,
+                                ..
+                            } = te.event
+                            {
                                 if matches!(status, crate::event_bus::SessionEndStatus::Success) {
                                     pending_sessions.insert(session_id.clone());
                                 }
                             }
                         }
                         Ok(Err(RecvError::Lagged(n))) => {
-                            s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
+                            s.stats
+                                .events_lagged_total_skipped
+                                .fetch_add(n, Ordering::Relaxed);
                         }
                         Ok(Err(RecvError::Closed)) => return,
                         Err(_) => break,
@@ -386,12 +459,17 @@ fn spawn_session_reflection_consumer(state: &AppState, timeline_tx: &broadcast::
                 }
                 // Gemini ARB: check pause guards + tokio::spawn to avoid blocking receiver
                 let _tree = s.control_manager.current();
-                if _tree.is_domain_paused(crate::control_tree::CtlDomain::Memory) || _tree.global_paused {
+                if _tree.is_domain_paused(crate::control_tree::CtlDomain::Memory)
+                    || _tree.global_paused
+                {
                     tracing::debug!("session_reflection: paused, skipping dispatch");
                     pending_sessions.clear();
                     continue;
                 }
-                tracing::info!(sessions = pending_sessions.len(), "session_reflection: debounce fired, dispatching analysis");
+                tracing::info!(
+                    sessions = pending_sessions.len(),
+                    "session_reflection: debounce fired, dispatching analysis"
+                );
                 let sc = s.clone();
                 tokio::spawn(async move {
                     // Gemini ARB: unified trigger — strategy + deep analysis + retro
@@ -435,7 +513,11 @@ fn spawn_session_reflection_consumer(state: &AppState, timeline_tx: &broadcast::
 
 /// KB consolidation: DeepAnalysisCompleted → accumulate N → trigger consolidation.
 /// Counter accumulation, fires check_kb_consolidation at threshold.
-fn spawn_kb_consolidation_consumer(state: &AppState, timeline_tx: &broadcast::Sender<TimelineEvent>, shutdown_rx: watch::Receiver<bool>) {
+fn spawn_kb_consolidation_consumer(
+    state: &AppState,
+    timeline_tx: &broadcast::Sender<TimelineEvent>,
+    shutdown_rx: watch::Receiver<bool>,
+) {
     let s = state.clone();
     let mut rx = timeline_tx.subscribe();
     let mut shutdown = shutdown_rx;
@@ -535,8 +617,11 @@ mod tests {
     fn backoff_first_lag_is_200ms() {
         // consecutive_lags=1: 100 * 2^1 = 200ms ±25% → 150..250
         let d = lagged_backoff(1);
-        assert!(d.as_millis() >= 150 && d.as_millis() <= 250,
-            "first lag backoff should be ~200ms, got {}ms", d.as_millis());
+        assert!(
+            d.as_millis() >= 150 && d.as_millis() <= 250,
+            "first lag backoff should be ~200ms, got {}ms",
+            d.as_millis()
+        );
     }
 
     #[test]
@@ -546,21 +631,33 @@ mod tests {
             let raw = (100u64 * (1u64 << lag.min(5))).min(2000);
             let lower = raw * 3 / 4;
             let upper = raw * 5 / 4;
-            assert!(d.as_millis() >= lower as u128 && d.as_millis() <= upper as u128,
-                "lag={}: expected {}ms±25%, got {}ms", lag, raw, d.as_millis());
+            assert!(
+                d.as_millis() >= lower as u128 && d.as_millis() <= upper as u128,
+                "lag={}: expected {}ms±25%, got {}ms",
+                lag,
+                raw,
+                d.as_millis()
+            );
         }
     }
 
     #[test]
     fn backoff_caps_at_2000ms() {
         let d = lagged_backoff(10);
-        assert!(d.as_millis() <= 2500, "should cap at ~2000ms, got {}ms", d.as_millis());
+        assert!(
+            d.as_millis() <= 2500,
+            "should cap at ~2000ms, got {}ms",
+            d.as_millis()
+        );
     }
 
     #[test]
     fn backoff_zero_consecutive() {
         let d = lagged_backoff(0);
-        assert!(d.as_millis() >= 75 && d.as_millis() <= 125,
-            "zero consecutive should be ~100ms, got {}ms", d.as_millis());
+        assert!(
+            d.as_millis() >= 75 && d.as_millis() <= 125,
+            "zero consecutive should be ~100ms, got {}ms",
+            d.as_millis()
+        );
     }
 }

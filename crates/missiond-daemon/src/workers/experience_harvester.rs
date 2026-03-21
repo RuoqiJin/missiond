@@ -41,18 +41,16 @@ struct ExplorationPath {
 /// Gemini review: lower threshold for sessions with writes (even 1-2 reads
 /// establish a real need→code mapping). Pure-read sessions need more evidence.
 fn is_worthy_exploration(tool_calls: &[ToolCallRecord]) -> bool {
-    let reads = tool_calls.iter()
-        .filter(|t| t.tool_name == "Read")
-        .count();
-    let searches = tool_calls.iter()
+    let reads = tool_calls.iter().filter(|t| t.tool_name == "Read").count();
+    let searches = tool_calls
+        .iter()
         .filter(|t| t.tool_name == "Grep" || t.tool_name == "Glob")
         .count();
-    let writes = tool_calls.iter()
+    let writes = tool_calls
+        .iter()
         .filter(|t| t.tool_name == "Edit" || t.tool_name == "Write")
         .count();
-    let errors = tool_calls.iter()
-        .filter(|t| t.status == "error")
-        .count();
+    let errors = tool_calls.iter().filter(|t| t.status == "error").count();
 
     // Reject sessions dominated by errors (likely hallucination/dead loop)
     if errors > tool_calls.len() / 2 {
@@ -151,7 +149,9 @@ impl NodeCandidate {
     /// Gemini review: struct/trait > fn, modified files > read-only.
     fn priority(&self) -> u32 {
         let mut score = 0u32;
-        if self.is_from_modified { score += 100; }
+        if self.is_from_modified {
+            score += 100;
+        }
         match self.node_type.as_str() {
             "struct" | "enum" | "trait" => score += 30,
             "function" | "method" if self.is_exported => score += 20,
@@ -172,7 +172,9 @@ async fn resolve_ast_candidates_async(
     exploration: &ExplorationPath,
 ) -> Vec<NodeCandidate> {
     let mut candidates = Vec::new();
-    let modified_set: HashSet<&str> = exploration.files_modified.iter()
+    let modified_set: HashSet<&str> = exploration
+        .files_modified
+        .iter()
         .map(|s| s.as_str())
         .collect();
 
@@ -180,7 +182,11 @@ async fn resolve_ast_candidates_async(
     for file_path in &exploration.files_modified {
         // Strip project prefix to get repo-relative path
         let rel_path = strip_project_prefix(file_path);
-        if let Ok(nodes) = state.store.ast_get_file_nodes(DEFAULT_REPO, &rel_path).await {
+        if let Ok(nodes) = state
+            .store
+            .ast_get_file_nodes(DEFAULT_REPO, &rel_path)
+            .await
+        {
             for node in &nodes {
                 candidates.push(NodeCandidate {
                     name: node.node.name.clone(),
@@ -207,12 +213,14 @@ async fn resolve_ast_candidates_async(
             continue; // Already processed
         }
         let rel_path = strip_project_prefix(file_path);
-        if let Ok(nodes) = state.store.ast_get_file_nodes(DEFAULT_REPO, &rel_path).await {
+        if let Ok(nodes) = state
+            .store
+            .ast_get_file_nodes(DEFAULT_REPO, &rel_path)
+            .await
+        {
             for node in &nodes {
-                let dominated_type = matches!(
-                    node.node.node_type.as_str(),
-                    "struct" | "enum" | "trait"
-                );
+                let dominated_type =
+                    matches!(node.node.node_type.as_str(), "struct" | "enum" | "trait");
                 if node.node.is_exported || dominated_type {
                     candidates.push(NodeCandidate {
                         name: node.node.name.clone(),
@@ -235,10 +243,7 @@ async fn resolve_ast_candidates_async(
 /// Strip project root prefix to get repo-relative path.
 fn strip_project_prefix(path: &str) -> String {
     // Common prefixes in this project
-    for prefix in &[
-        "<REPO_ROOT>/",
-        "missiond/",
-    ] {
+    for prefix in &["<REPO_ROOT>/", "missiond/"] {
         if let Some(stripped) = path.strip_prefix(prefix) {
             return stripped.to_string();
         }
@@ -277,7 +282,11 @@ fn slugify_intent(intent: &str) -> String {
 /// Called from event_router when NarrationSessionCompleted fires.
 pub(crate) async fn harvest_session(state: &crate::state::AppState, session_id: &str) {
     // 1. Get tool calls for this session
-    let tool_calls = match state.store.get_tool_calls_by_session(session_id, None, 500).await {
+    let tool_calls = match state
+        .store
+        .get_tool_calls_by_session(session_id, None, 500)
+        .await
+    {
         Ok(tc) => tc,
         Err(e) => {
             debug!(session = %session_id, error = %e, "Failed to get tool calls for harvest");
@@ -300,7 +309,8 @@ pub(crate) async fn harvest_session(state: &crate::state::AppState, session_id: 
     }
 
     // 3. Extract query intent from first user message context
-    let query_intent = tool_calls.first()
+    let query_intent = tool_calls
+        .first()
         .and_then(|tc| tc.input_summary.clone())
         .unwrap_or_else(|| session_id[..8.min(session_id.len())].to_string());
 
@@ -337,11 +347,22 @@ pub(crate) async fn harvest_session(state: &crate::state::AppState, session_id: 
     let desc = format!(
         "Auto-harvested from session {}. Modified: {:?}. Read: {} files. Patterns: {:?}",
         &session_id[..8.min(session_id.len())],
-        exploration.files_modified.iter().take(3).collect::<Vec<_>>(),
+        exploration
+            .files_modified
+            .iter()
+            .take(3)
+            .collect::<Vec<_>>(),
         exploration.files_read.len(),
-        exploration.patterns_searched.iter().take(3).collect::<Vec<_>>(),
+        exploration
+            .patterns_searched
+            .iter()
+            .take(3)
+            .collect::<Vec<_>>(),
     );
-    let _ = state.store.beacon_set_description(&beacon_name, &desc).await;
+    let _ = state
+        .store
+        .beacon_set_description(&beacon_name, &desc)
+        .await;
 
     // 7. Link nodes
     let mut linked = 0usize;
@@ -351,19 +372,28 @@ pub(crate) async fn harvest_session(state: &crate::state::AppState, session_id: 
         } else {
             Some("read-context")
         };
-        if state.store.beacon_node_upsert(
-            &beacon_id,
-            DEFAULT_REPO,
-            &candidate.file_path,
-            &candidate.name,
-            annotation,
-        ).await.is_ok() {
+        if state
+            .store
+            .beacon_node_upsert(
+                &beacon_id,
+                DEFAULT_REPO,
+                &candidate.file_path,
+                &candidate.name,
+                annotation,
+            )
+            .await
+            .is_ok()
+        {
             linked += 1;
         }
     }
 
     // Track harvest frequency for skill synthesis
-    let harvest_count = state.store.beacon_increment_harvest(&beacon_name).await.unwrap_or(0);
+    let harvest_count = state
+        .store
+        .beacon_increment_harvest(&beacon_name)
+        .await
+        .unwrap_or(0);
 
     info!(
         beacon = %beacon_name,
@@ -393,8 +423,16 @@ pub(crate) async fn harvest_session(state: &crate::state::AppState, session_id: 
             beacon = beacon_name,
             count = harvest_count,
             files_read = exploration.files_read.iter().take(5).collect::<Vec<_>>(),
-            files_modified = exploration.files_modified.iter().take(5).collect::<Vec<_>>(),
-            patterns = exploration.patterns_searched.iter().take(5).collect::<Vec<_>>(),
+            files_modified = exploration
+                .files_modified
+                .iter()
+                .take(5)
+                .collect::<Vec<_>>(),
+            patterns = exploration
+                .patterns_searched
+                .iter()
+                .take(5)
+                .collect::<Vec<_>>(),
         );
         let input = missiond_core::types::CreateBoardTaskInput {
             title,
@@ -416,7 +454,9 @@ pub(crate) async fn harvest_session(state: &crate::state::AppState, session_id: 
             context_intent: None,
         };
         match state.store.create_board_task(&input).await {
-            Ok(task) => info!(task_id = %task.id, beacon = %beacon_name, "Skill synthesis triggered"),
+            Ok(task) => {
+                info!(task_id = %task.id, beacon = %beacon_name, "Skill synthesis triggered")
+            }
             Err(e) => debug!(error = %e, "Skill synthesis task creation failed (may be deduped)"),
         }
     }
@@ -429,11 +469,17 @@ mod tests {
     #[test]
     fn test_is_worthy_with_writes() {
         let make_tc = |name: &str| ToolCallRecord {
-            id: String::new(), session_id: String::new(), message_id: None,
+            id: String::new(),
+            session_id: String::new(),
+            message_id: None,
             tool_name: name.to_string(),
-            input_summary: None, raw_input: None, output_summary: None,
-            raw_output: None, status: "success".to_string(),
-            duration_ms: None, timestamp: String::new(),
+            input_summary: None,
+            raw_input: None,
+            output_summary: None,
+            raw_output: None,
+            status: "success".to_string(),
+            duration_ms: None,
+            timestamp: String::new(),
         };
         // 2 reads + 1 write = worthy
         let calls = vec![make_tc("Read"), make_tc("Read"), make_tc("Edit")];
@@ -447,11 +493,17 @@ mod tests {
     #[test]
     fn test_is_worthy_pure_investigation() {
         let make_tc = |name: &str| ToolCallRecord {
-            id: String::new(), session_id: String::new(), message_id: None,
+            id: String::new(),
+            session_id: String::new(),
+            message_id: None,
             tool_name: name.to_string(),
-            input_summary: None, raw_input: None, output_summary: None,
-            raw_output: None, status: "success".to_string(),
-            duration_ms: None, timestamp: String::new(),
+            input_summary: None,
+            raw_input: None,
+            output_summary: None,
+            raw_output: None,
+            status: "success".to_string(),
+            duration_ms: None,
+            timestamp: String::new(),
         };
         // 8 reads, no writes = worthy
         let calls: Vec<_> = (0..8).map(|_| make_tc("Read")).collect();
@@ -466,11 +518,17 @@ mod tests {
     fn test_is_worthy_rejects_error_dominated() {
         let calls = vec![
             ToolCallRecord {
-                id: String::new(), session_id: String::new(), message_id: None,
+                id: String::new(),
+                session_id: String::new(),
+                message_id: None,
                 tool_name: "Read".to_string(),
-                input_summary: None, raw_input: None, output_summary: None,
-                raw_output: None, status: "error".to_string(),
-                duration_ms: None, timestamp: String::new(),
+                input_summary: None,
+                raw_input: None,
+                output_summary: None,
+                raw_output: None,
+                status: "error".to_string(),
+                duration_ms: None,
+                timestamp: String::new(),
             };
             10
         ];
@@ -492,10 +550,17 @@ mod tests {
 
     #[test]
     fn test_slugify_intent() {
-        assert_eq!(slugify_intent("Fix JWT token refresh"), "harvest-fix-jwt-token-refresh");
+        assert_eq!(
+            slugify_intent("Fix JWT token refresh"),
+            "harvest-fix-jwt-token-refresh"
+        );
         // Chinese chars become dashes, collapsed
         let slug = slugify_intent("修复 auth 问题");
-        assert!(slug.starts_with("harvest-"), "Should start with harvest-: {}", slug);
+        assert!(
+            slug.starts_with("harvest-"),
+            "Should start with harvest-: {}",
+            slug
+        );
         assert!(slug.contains("auth"), "Should contain 'auth': {}", slug);
         assert_eq!(slugify_intent(""), "harvest");
     }
@@ -503,12 +568,18 @@ mod tests {
     #[test]
     fn test_node_candidate_priority() {
         let modified_struct = NodeCandidate {
-            name: "Foo".into(), file_path: "a.rs".into(),
-            node_type: "struct".into(), is_exported: true, is_from_modified: true,
+            name: "Foo".into(),
+            file_path: "a.rs".into(),
+            node_type: "struct".into(),
+            is_exported: true,
+            is_from_modified: true,
         };
         let read_fn = NodeCandidate {
-            name: "bar".into(), file_path: "b.rs".into(),
-            node_type: "function".into(), is_exported: true, is_from_modified: false,
+            name: "bar".into(),
+            file_path: "b.rs".into(),
+            node_type: "function".into(),
+            is_exported: true,
+            is_from_modified: false,
         };
         assert!(modified_struct.priority() > read_fn.priority());
     }

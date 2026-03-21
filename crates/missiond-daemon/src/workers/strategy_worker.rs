@@ -12,13 +12,13 @@
 //!
 //! Design doc: `docs/designs/arch-maintenance-and-strategic-analysis.md`
 
-use std::collections::HashMap;
-use std::io::Write;
-use std::sync::LazyLock;
 use anyhow::{anyhow, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
+use std::io::Write;
+use std::sync::LazyLock;
 use tracing::{debug, info, warn};
 
 use crate::event_bus::DaemonEvent;
@@ -30,8 +30,7 @@ const STRATEGY_ANALYSIS_VERSION: i32 = 2; // v2: workspace-based agentic analysi
 const MAX_ANALYSIS_RETRIES: i32 = 3;
 /// Max chars per JSONL content field — prevents grep single-line explosion.
 const MAX_CONTENT_CHARS: usize = 5000;
-static RE_ANSI: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap());
+static RE_ANSI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap());
 static RE_BASE64: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"data:[a-zA-Z/]+;base64,[A-Za-z0-9+/=]{100,}").unwrap());
 
@@ -40,13 +39,24 @@ static RE_BASE64: LazyLock<Regex> =
 pub(crate) async fn run_pending_analysis(state: &AppState) {
     // Kill switch: daemon_state key "strategy_analyst_enabled" (default: enabled)
     // Set to 0 to disable: INSERT OR REPLACE INTO daemon_state(key,value) VALUES('strategy_analyst_enabled','0')
-    if state.store.daemon_state_get("strategy_analyst_enabled").await.unwrap_or(None).map(|v| v == 0).unwrap_or(false) {
+    if state
+        .store
+        .daemon_state_get("strategy_analyst_enabled")
+        .await
+        .unwrap_or(None)
+        .map(|v| v == 0)
+        .unwrap_or(false)
+    {
         debug!("strategy_analyst: disabled via flag, skipping");
         return;
     }
 
     // Use existing deep analysis infrastructure to find pending sessions
-    let pending = match state.store.get_pending_deep_analysis(STRATEGY_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES).await {
+    let pending = match state
+        .store
+        .get_pending_deep_analysis(STRATEGY_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES)
+        .await
+    {
         Ok(p) => p,
         Err(e) => {
             warn!(error = %e, "strategy_analyst: failed to query pending sessions");
@@ -58,7 +68,10 @@ pub(crate) async fn run_pending_analysis(state: &AppState) {
         return;
     }
 
-    info!(count = pending.len(), "strategy_analyst: found pending sessions");
+    info!(
+        count = pending.len(),
+        "strategy_analyst: found pending sessions"
+    );
 
     for conv in pending {
         let session_id = &conv.id;
@@ -78,19 +91,29 @@ pub(crate) async fn run_pending_analysis(state: &AppState) {
                 // Mark analysis complete or update checkpoint
                 if conv.status == "active" {
                     // Active session: update watermark for incremental
-                    if let Err(e) = state.store.update_deep_checkpoint(session_id, analyzed_up_to).await {
+                    if let Err(e) = state
+                        .store
+                        .update_deep_checkpoint(session_id, analyzed_up_to)
+                        .await
+                    {
                         warn!(error = %e, "strategy_analyst: failed to update checkpoint");
                     }
                 } else {
                     // Completed/compacted: mark fully analyzed
-                    if let Err(e) = state.store.mark_analysis_complete(session_id, STRATEGY_ANALYSIS_VERSION).await {
+                    if let Err(e) = state
+                        .store
+                        .mark_analysis_complete(session_id, STRATEGY_ANALYSIS_VERSION)
+                        .await
+                    {
                         warn!(error = %e, "strategy_analyst: failed to mark complete");
                     }
                     // Phase 3: Emit DeepAnalysisCompleted for KB consolidation consumer
-                    state.event_bus.publish(crate::event_bus::DaemonEvent::DeepAnalysisCompleted {
-                        session_id: session_id.to_string(),
-                        kb_entries_created: 0, // exact count not tracked here; consumer uses as trigger
-                    });
+                    state
+                        .event_bus
+                        .publish(crate::event_bus::DaemonEvent::DeepAnalysisCompleted {
+                            session_id: session_id.to_string(),
+                            kb_entries_created: 0, // exact count not tracked here; consumer uses as trigger
+                        });
                 }
                 // (WorkerContext stats removed — consumer-driven now)
             }
@@ -174,7 +197,10 @@ async fn prepare_workspace(
     session_id: &str,
     since_id: Option<i64>,
 ) -> Result<(tempfile::TempDir, i64)> {
-    let messages = state.store.get_conversation_messages(session_id, since_id, 50000).await?;
+    let messages = state
+        .store
+        .get_conversation_messages(session_id, since_id, 50000)
+        .await?;
     if messages.is_empty() {
         return Err(anyhow!("No messages found for session {}", session_id));
     }
@@ -184,7 +210,10 @@ async fn prepare_workspace(
     let base = missiond_core::default_mission_home().join("tmp");
     std::fs::create_dir_all(&base)?;
     let workspace = tempfile::Builder::new()
-        .prefix(&format!("strategy-{}-", &session_id[..8.min(session_id.len())]))
+        .prefix(&format!(
+            "strategy-{}-",
+            &session_id[..8.min(session_id.len())]
+        ))
         .tempdir_in(&base)
         .map_err(|e| anyhow!("Failed to create strategy workspace: {}", e))?;
 
@@ -205,9 +234,7 @@ async fn prepare_workspace(
     drop(file); // flush before metadata read
 
     // Write meta.json
-    let byte_size = std::fs::metadata(&jsonl_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let byte_size = std::fs::metadata(&jsonl_path).map(|m| m.len()).unwrap_or(0);
     let meta = json!({
         "session_id": session_id,
         "message_count": messages.len(),
@@ -220,8 +247,10 @@ async fn prepare_workspace(
     )?;
 
     // Write state.json (current strategic state from KB)
-    let state_json = state.store
-        .kb_get("strategic-state").await?
+    let state_json = state
+        .store
+        .kb_get("strategic-state")
+        .await?
         .and_then(|e| e.detail.map(|d| d.to_string()))
         .unwrap_or_else(|| "{}".to_string());
     std::fs::write(workspace.path().join("state.json"), &state_json)?;
@@ -341,10 +370,7 @@ fn truncate_tool_output(content: &str) -> String {
             result.push('\n');
         }
     } else {
-        result.push_str(&format!(
-            "\n[... {} 行正常输出折叠 ...]\n",
-            middle.len()
-        ));
+        result.push_str(&format!("\n[... {} 行正常输出折叠 ...]\n", middle.len()));
     }
     result.push_str(&tail.join("\n"));
     result
@@ -473,7 +499,9 @@ struct UserTrait {
     source: Option<String>,
 }
 
-fn default_confidence() -> f64 { 0.8 }
+fn default_confidence() -> f64 {
+    0.8
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct DevTrajectory {
@@ -551,30 +579,37 @@ async fn apply_strategic_output(
             .collect::<Vec<_>>(),
     });
 
-    state.store.kb_remember(&missiond_core::types::KBRememberInput {
-        category: "memory:architecture".to_string(),
-        key: "strategic-state".to_string(),
-        summary: "Strategic analysis state — user profile, dev trajectory, patterns".to_string(),
-        detail: Some(updated_state),
-        source: Some("strategy_analyst".to_string()),
-        confidence: Some(1.0),
-    }).await?;
+    state
+        .store
+        .kb_remember(&missiond_core::types::KBRememberInput {
+            category: "memory:architecture".to_string(),
+            key: "strategic-state".to_string(),
+            summary: "Strategic analysis state — user profile, dev trajectory, patterns"
+                .to_string(),
+            detail: Some(updated_state),
+            source: Some("strategy_analyst".to_string()),
+            confidence: Some(1.0),
+        })
+        .await?;
 
     // 2. Write individual user preferences to KB
     for pref in &output.user_profile {
         if pref.confidence >= 0.7 {
             let key = format!("strategic-pref-{}", slug(&pref.trait_));
-            state.store.kb_remember(&missiond_core::types::KBRememberInput {
-                category: "preference".to_string(),
-                key,
-                summary: pref.trait_.clone(),
-                detail: Some(json!({
-                    "confidence": pref.confidence,
-                    "source": pref.source,
-                })),
-                source: Some("strategy_analyst".to_string()),
-                confidence: Some(pref.confidence),
-            }).await?;
+            state
+                .store
+                .kb_remember(&missiond_core::types::KBRememberInput {
+                    category: "preference".to_string(),
+                    key,
+                    summary: pref.trait_.clone(),
+                    detail: Some(json!({
+                        "confidence": pref.confidence,
+                        "source": pref.source,
+                    })),
+                    source: Some("strategy_analyst".to_string()),
+                    confidence: Some(pref.confidence),
+                })
+                .await?;
         }
     }
 
@@ -586,42 +621,48 @@ async fn apply_strategic_output(
             // Phase 2b: High-confidence workflow → auto-dispatch to Agent for Skill generation
             let dedupe = format!("strategy-skill-gen-{}", slug(&proposal.action));
             let skill_slug = slug(&proposal.action);
-            state.store.create_board_task(&missiond_core::types::CreateBoardTaskInput {
-                title: format!("自动生成 Skill: {}", truncate(&proposal.action, 50)),
-                description: Some(format!(
-                    "战略分析发现此操作出现 {} 次，已达自动化阈值。\n\n\
+            state
+                .store
+                .create_board_task(&missiond_core::types::CreateBoardTaskInput {
+                    title: format!("自动生成 Skill: {}", truncate(&proposal.action, 50)),
+                    description: Some(format!(
+                        "战略分析发现此操作出现 {} 次，已达自动化阈值。\n\n\
                     请创建 Skill 文件 `~/.claude/skills/{}/SKILL.md`：\n\
                     1. 分析此工作流涉及的代码路径和工具\n\
                     2. 编写 frontmatter (name, description, allowed-tools)\n\
                     3. 编写 INDEX 表和关键章节\n\
                     4. 工作流描述: {}\n\n\
                     来源: session {}",
-                    proposal.occurrences, skill_slug, proposal.action, session_id
-                )),
-                category: Some("dev".to_string()),
-                priority: Some("medium".to_string()),
-                assignee: Some("slot-memory-slow".to_string()),
-                auto_execute: Some(true),
-                dedupe_key: Some(dedupe),
-                project: Some("missiond".to_string()),
-                ..Default::default()
-            }).await?;
+                        proposal.occurrences, skill_slug, proposal.action, session_id
+                    )),
+                    category: Some("dev".to_string()),
+                    priority: Some("medium".to_string()),
+                    assignee: Some("slot-memory-slow".to_string()),
+                    auto_execute: Some(true),
+                    dedupe_key: Some(dedupe),
+                    project: Some("missiond".to_string()),
+                    ..Default::default()
+                })
+                .await?;
             info!(action = %proposal.action, occurrences = proposal.occurrences,
                 "strategy_analyst: auto-dispatching Skill generation task");
         } else if proposal.occurrences >= 3 {
             // Phase 2a: Moderate frequency → human review
             let dedupe = format!("strategy-workflow-{}", slug(&proposal.action));
-            state.store.create_board_task(&missiond_core::types::CreateBoardTaskInput {
-                title: format!("工作流自动化: {}", proposal.action),
-                description: Some(format!(
+            state
+                .store
+                .create_board_task(&missiond_core::types::CreateBoardTaskInput {
+                    title: format!("工作流自动化: {}", proposal.action),
+                    description: Some(format!(
                     "战略分析发现此操作出现 {} 次，建议固化为 Skill 或自动化。\n来源: session {}",
                     proposal.occurrences, session_id
                 )),
-                category: Some("dev".to_string()),
-                priority: Some("medium".to_string()),
-                dedupe_key: Some(dedupe),
-                ..Default::default()
-            }).await?;
+                    category: Some("dev".to_string()),
+                    priority: Some("medium".to_string()),
+                    dedupe_key: Some(dedupe),
+                    ..Default::default()
+                })
+                .await?;
         }
     }
 
@@ -646,18 +687,21 @@ async fn apply_strategic_output(
     for friction in &output.friction_points {
         if friction.frequency >= 2 {
             let key = format!("strategy-friction-{}", slug(&friction.issue));
-            state.store.kb_remember(&missiond_core::types::KBRememberInput {
-                category: "memory:debug".to_string(),
-                key,
-                summary: format!("摩擦点({}次): {}", friction.frequency, friction.issue),
-                detail: Some(json!({
-                    "frequency": friction.frequency,
-                    "severity": friction.severity,
-                    "source_session": session_id,
-                })),
-                source: Some("strategy_analyst".to_string()),
-                confidence: Some(0.8),
-            }).await?;
+            state
+                .store
+                .kb_remember(&missiond_core::types::KBRememberInput {
+                    category: "memory:debug".to_string(),
+                    key,
+                    summary: format!("摩擦点({}次): {}", friction.frequency, friction.issue),
+                    detail: Some(json!({
+                        "frequency": friction.frequency,
+                        "severity": friction.severity,
+                        "source_session": session_id,
+                    })),
+                    source: Some("strategy_analyst".to_string()),
+                    confidence: Some(0.8),
+                })
+                .await?;
         }
     }
 

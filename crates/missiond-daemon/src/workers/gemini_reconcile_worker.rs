@@ -38,7 +38,9 @@ const ACTIVE_THRESHOLD_SECS: u64 = 3600;
 pub(crate) struct GeminiReconcileWorker;
 
 impl BackgroundWorker for GeminiReconcileWorker {
-    fn name(&self) -> &'static str { "gemini_reconcile" }
+    fn name(&self) -> &'static str {
+        "gemini_reconcile"
+    }
 
     async fn run(self, state: Arc<AppState>, mut ctx: WorkerContext) {
         tokio::time::sleep(std::time::Duration::from_secs(INITIAL_DELAY_SECS)).await;
@@ -108,9 +110,7 @@ async fn run_gemini_reconciliation(state: &AppState) {
             if files_processed % PROGRESS_LOG_INTERVAL == 0 {
                 info!(
                     progress = format!("{}/{}", files_processed, total_files),
-                    files_reconciled,
-                    messages_recovered,
-                    "Gemini reconcile: progress"
+                    files_reconciled, messages_recovered, "Gemini reconcile: progress"
                 );
             }
 
@@ -137,17 +137,27 @@ async fn run_gemini_reconciliation(state: &AppState) {
 
             if cc_lines.is_empty() {
                 // Update watermark even if no convertible messages (e.g., all "info" type)
-                let _ = state.store.upsert_reconcile_watermark(&watermark_key, current_count).await;
+                let _ = state
+                    .store
+                    .upsert_reconcile_watermark(&watermark_key, current_count)
+                    .await;
                 files_skipped += 1;
                 continue;
             }
 
             // Determine status from file modification time
             let status = infer_status(file).await;
-            
+
             // Determine slot_id and conversation_type using the central logic
-            let slot_id = state.store.get_slot_for_session(&session.session_id).await.unwrap_or(None);
-            let conv_type = missiond_core::db::derive_conversation_type(slot_id.as_deref(), &session.session_id);
+            let slot_id = state
+                .store
+                .get_slot_for_session(&session.session_id)
+                .await
+                .unwrap_or(None);
+            let conv_type = missiond_core::db::derive_conversation_type(
+                slot_id.as_deref(),
+                &session.session_id,
+            );
 
             // Ensure conversation exists (with correct source/chat_type for Gemini CLI)
             ensure_gemini_conversation(
@@ -157,19 +167,27 @@ async fn run_gemini_reconciliation(state: &AppState) {
                 &file_key,
                 &status,
                 &conv_type,
-            ).await;
+            )
+            .await;
 
             // Build message batch (reuses the same pipeline as message_handler)
             let mut batch: Vec<missiond_core::types::ConversationMessage> = Vec::new();
             for msg in &cc_lines {
                 let text_content = events_sync::extract_text_content(&msg.message.content);
-                let content_types: Vec<&str> = msg.message.content.as_array()
-                    .map(|arr| arr.iter()
-                        .filter_map(|b| b.get("type").and_then(|t| t.as_str()))
-                        .collect())
+                let content_types: Vec<&str> = msg
+                    .message
+                    .content
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|b| b.get("type").and_then(|t| t.as_str()))
+                            .collect()
+                    })
                     .unwrap_or_default();
-                let is_tool_result = !content_types.is_empty() && content_types.iter().all(|t| *t == "tool_result");
-                let is_thinking = !content_types.is_empty() && content_types.iter().all(|t| *t == "thinking");
+                let is_tool_result =
+                    !content_types.is_empty() && content_types.iter().all(|t| *t == "tool_result");
+                let is_thinking =
+                    !content_types.is_empty() && content_types.iter().all(|t| *t == "thinking");
 
                 if text_content.is_empty() && !is_tool_result {
                     continue;
@@ -234,12 +252,19 @@ async fn run_gemini_reconciliation(state: &AppState) {
             }
 
             // Update watermark
-            if let Err(e) = state.store.upsert_reconcile_watermark(&watermark_key, current_count).await {
+            if let Err(e) = state
+                .store
+                .upsert_reconcile_watermark(&watermark_key, current_count)
+                .await
+            {
                 warn!(path = %file_key, error = %e, "Gemini reconcile: failed to update watermark");
             }
 
             // Refresh message count
-            let _ = state.store.refresh_conversation_message_count(&session.session_id).await;
+            let _ = state
+                .store
+                .refresh_conversation_message_count(&session.session_id)
+                .await;
 
             files_reconciled += 1;
             tokio::task::yield_now().await;
@@ -305,7 +330,9 @@ async fn ensure_gemini_conversation(
 
 /// Infer conversation status from file modification time.
 async fn infer_status(path: &Path) -> String {
-    let modified = tokio::fs::metadata(path).await.ok()
+    let modified = tokio::fs::metadata(path)
+        .await
+        .ok()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.elapsed().ok())
         .map(|d| d.as_secs())

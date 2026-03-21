@@ -58,7 +58,9 @@ fn now_epoch() -> i64 {
 
 impl WorkerRegistry {
     pub fn new() -> Self {
-        Self { workers: Mutex::new(HashMap::new()) }
+        Self {
+            workers: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Register a worker with ControlTree dependencies.
@@ -77,7 +79,10 @@ impl WorkerRegistry {
             tasks_failed: AtomicU64::new(0),
             last_active_at: AtomicI64::new(now_epoch()),
         });
-        self.workers.lock().unwrap().insert(name.to_string(), Arc::clone(&handle));
+        self.workers
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), Arc::clone(&handle));
         WorkerContext {
             name: name.to_string(),
             deps,
@@ -100,13 +105,16 @@ impl WorkerRegistry {
     /// List all workers and their stats.
     pub fn list_all(&self) -> Vec<WorkerInfo> {
         let map = self.workers.lock().unwrap();
-        let mut out: Vec<_> = map.values().map(|h| WorkerInfo {
-            name: h.name.clone(),
-            state: *h.state_tx.borrow(),
-            tasks_processed: h.tasks_processed.load(Ordering::Relaxed),
-            tasks_failed: h.tasks_failed.load(Ordering::Relaxed),
-            last_active_at: h.last_active_at.load(Ordering::Relaxed),
-        }).collect();
+        let mut out: Vec<_> = map
+            .values()
+            .map(|h| WorkerInfo {
+                name: h.name.clone(),
+                state: *h.state_tx.borrow(),
+                tasks_processed: h.tasks_processed.load(Ordering::Relaxed),
+                tasks_failed: h.tasks_failed.load(Ordering::Relaxed),
+                last_active_at: h.last_active_at.load(Ordering::Relaxed),
+            })
+            .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
     }
@@ -200,13 +208,17 @@ impl WorkerContext {
     /// Record a successful task completion.
     pub fn record_success(&self) {
         self.handle.tasks_processed.fetch_add(1, Ordering::Relaxed);
-        self.handle.last_active_at.store(now_epoch(), Ordering::Relaxed);
+        self.handle
+            .last_active_at
+            .store(now_epoch(), Ordering::Relaxed);
     }
 
     /// Record a failed task.
     pub fn record_failure(&self) {
         self.handle.tasks_failed.fetch_add(1, Ordering::Relaxed);
-        self.handle.last_active_at.store(now_epoch(), Ordering::Relaxed);
+        self.handle
+            .last_active_at
+            .store(now_epoch(), Ordering::Relaxed);
     }
 
     /// Check if currently paused (non-blocking).

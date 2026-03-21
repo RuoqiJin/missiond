@@ -86,3 +86,4 @@ pub use skill::{
     ContextHook, SkillAction, SkillIndex, SkillMeta, SkillRequires, WorkflowBlock, WorkflowResult,
     WorkflowStep, WorkflowStepPreview, WorkflowStepResult, parse_workflow_blocks, resolve_vars,
 };
+pub mod services;

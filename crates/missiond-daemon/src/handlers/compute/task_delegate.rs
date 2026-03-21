@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
-use serde_json::{json, Value};
-use missiond_mcp::tools::{ToolResult, ToolError, error_codes};
-use missiond_core::types::CreateBoardTaskInput;
 use missiond_core::pty::SessionState;
+use missiond_core::types::CreateBoardTaskInput;
+use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
+use serde_json::{json, Value};
 
 use crate::slot_dispatch::SlotAcquireGuard;
 use crate::state::AppState;
@@ -21,43 +21,62 @@ const EXCLUDED_ROLES: &[&str] = &["jarvis", "memory", "supervisor", "decision"];
 const VALID_INTENTS: &[&str] = &["code", "ops", "research", "general"];
 
 /// Phase 6.3: Context injection size limits.
-const MAX_ENTRY_CHARS: usize = 500;     // Per KB/Skill entry
-const MAX_CONTEXT_CHARS: usize = 2000;  // Total context block
+const MAX_ENTRY_CHARS: usize = 500; // Per KB/Skill entry
+const MAX_CONTEXT_CHARS: usize = 2000; // Total context block
 const MAX_DESCRIPTION_CHARS: usize = 16000; // Final description
 
 pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result<ToolResult> {
     let objective = match args.get("objective").and_then(|v| v.as_str()) {
         Some(o) if !o.trim().is_empty() => o.trim(),
-        _ => return Ok(ToolResult::structured_error(
-            ToolError::new(error_codes::MISSING_PARAM, "'objective' is required and must be non-empty"),
-        )),
+        _ => {
+            return Ok(ToolResult::structured_error(ToolError::new(
+                error_codes::MISSING_PARAM,
+                "'objective' is required and must be non-empty",
+            )))
+        }
     };
 
     // Phase 6.2: Strict intent whitelist — fail-fast on unknown intent
     let intent = match args.get("intent").and_then(|v| v.as_str()) {
         Some(i) if VALID_INTENTS.contains(&i) => i,
-        Some(i) => return Ok(ToolResult::structured_error(
-            ToolError::new(error_codes::INVALID_PARAM,
-                &format!("Invalid intent '{}'. Valid: {:?}", i, VALID_INTENTS))
-        )),
+        Some(i) => {
+            return Ok(ToolResult::structured_error(ToolError::new(
+                error_codes::INVALID_PARAM,
+                &format!("Invalid intent '{}'. Valid: {:?}", i, VALID_INTENTS),
+            )))
+        }
         None => "general",
     };
 
-    let priority = args.get("priority").and_then(|v| v.as_str()).unwrap_or("medium");
-    let timeout_secs = args.get("timeout_secs")
+    let priority = args
+        .get("priority")
+        .and_then(|v| v.as_str())
+        .unwrap_or("medium");
+    let timeout_secs = args
+        .get("timeout_secs")
         .and_then(|v| v.as_i64())
         .unwrap_or(DEFAULT_TIMEOUT_SECS)
         .min(MAX_TIMEOUT_SECS)
         .max(60); // min 1 minute
 
-    let depends_on: Vec<String> = args.get("depends_on")
+    let depends_on: Vec<String> = args
+        .get("depends_on")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
-    let context_hints: Vec<String> = args.get("context_hints")
+    let context_hints: Vec<String> = args
+        .get("context_hints")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     let cwd = args.get("cwd").and_then(|v| v.as_str());
@@ -72,7 +91,10 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
 
     // Phase 6.1: Find idle slot with RAII guard (atomic check+reserve)
     let guard = find_and_reserve_slot(state, template).await;
-    let assignee = guard.as_ref().map(|g| g.slot_id().to_string()).unwrap_or_default();
+    let assignee = guard
+        .as_ref()
+        .map(|g| g.slot_id().to_string())
+        .unwrap_or_default();
 
     // 2. If no idle slot, try auto-provision dynamic slot
     let (assignee, provisioned) = if !assignee.is_empty() {
@@ -109,8 +131,16 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
     if description.len() > MAX_DESCRIPTION_CHARS {
         let original_len = description.len();
         let end = crate::helpers::char_boundary_at(&description, MAX_DESCRIPTION_CHARS);
-        description = format!("{}...(truncated from {} bytes)", &description[..end], original_len);
-        tracing::warn!(original_len, "task_delegate: description truncated to {}B", MAX_DESCRIPTION_CHARS);
+        description = format!(
+            "{}...(truncated from {} bytes)",
+            &description[..end],
+            original_len
+        );
+        tracing::warn!(
+            original_len,
+            "task_delegate: description truncated to {}B",
+            MAX_DESCRIPTION_CHARS
+        );
     }
 
     // 4. Create BoardTask
@@ -119,15 +149,26 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         description: Some(description),
         priority: Some(priority.to_string()),
         category: Some("dev".to_string()),
-        assignee: if assignee.is_empty() { None } else { Some(assignee.clone()) },
+        assignee: if assignee.is_empty() {
+            None
+        } else {
+            Some(assignee.clone())
+        },
         auto_execute: Some(true),
-        depends_on: if depends_on.is_empty() { None } else { Some(depends_on) },
+        depends_on: if depends_on.is_empty() {
+            None
+        } else {
+            Some(depends_on)
+        },
         timeout_secs: Some(timeout_secs),
         context_intent: Some(intent.to_string()),
         ..Default::default()
     };
 
-    let task_id = state.store.create_board_task(&input).await
+    let task_id = state
+        .store
+        .create_board_task(&input)
+        .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
     // 5. Trigger immediate dispatch (don't wait 60s autopilot tick)
@@ -147,7 +188,10 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
 
 /// Phase 6.1: Find an idle slot and atomically reserve it via RAII guard.
 /// Returns a SlotAcquireGuard that auto-releases on drop.
-async fn find_and_reserve_slot<'a>(state: &'a AppState, template: &str) -> Option<SlotAcquireGuard<'a>> {
+async fn find_and_reserve_slot<'a>(
+    state: &'a AppState,
+    template: &str,
+) -> Option<SlotAcquireGuard<'a>> {
     let target_role = match template {
         "coder" | "researcher" => "coder",
         "ops" => "operator",
@@ -187,7 +231,10 @@ async fn auto_provision_slot(
     cwd: Option<&str>,
 ) -> Result<String> {
     // Check quota
-    let active = state.store.count_active_dynamic_slots().await
+    let active = state
+        .store
+        .count_active_dynamic_slots()
+        .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
     if active >= 5 {
         return Err(anyhow!("Dynamic slot quota full ({}/5)", active));
@@ -214,8 +261,10 @@ async fn auto_provision_slot(
     if let Some(missiond_mcp::tools::ToolContent::Text { text }) = result.content.first() {
         if let Ok(parsed) = serde_json::from_str::<Value>(text) {
             if parsed.get("job_id").is_some() {
-                return Err(anyhow!("Slot spawning async (job_id: {}), task will be picked up by autopilot",
-                    parsed["job_id"].as_str().unwrap_or("unknown")));
+                return Err(anyhow!(
+                    "Slot spawning async (job_id: {}), task will be picked up by autopilot",
+                    parsed["job_id"].as_str().unwrap_or("unknown")
+                ));
             }
         }
     }
@@ -234,7 +283,9 @@ async fn build_context(state: &AppState, keywords: &str) -> Result<String> {
             let summary = truncate_str(&entry.summary, MAX_ENTRY_CHARS);
             let line = format!("- [KB:{}] {}", entry.key, summary);
             total_len += line.len();
-            if total_len > MAX_CONTEXT_CHARS { break; }
+            if total_len > MAX_CONTEXT_CHARS {
+                break;
+            }
             parts.push(line);
         }
     }
@@ -247,7 +298,9 @@ async fn build_context(state: &AppState, keywords: &str) -> Result<String> {
             let desc = truncate_str(desc, MAX_ENTRY_CHARS);
             let line = format!("- [Skill:{}] {}", skill.name, desc);
             total_len += line.len();
-            if total_len > MAX_CONTEXT_CHARS { break; }
+            if total_len > MAX_CONTEXT_CHARS {
+                break;
+            }
             parts.push(line);
         }
     }

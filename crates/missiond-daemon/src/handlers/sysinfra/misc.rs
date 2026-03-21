@@ -1,16 +1,20 @@
 use anyhow::{anyhow, Result};
+use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::{info, warn};
-use missiond_mcp::tools::ToolResult;
 
-use crate::state::AppState;
-use crate::lenient;
 use crate::helpers::ws_port;
+use crate::lenient;
+use crate::state::AppState;
 
 #[derive(Deserialize)]
 struct InboxArgs {
-    #[serde(rename = "unreadOnly", default, deserialize_with = "lenient::option_bool")]
+    #[serde(
+        rename = "unreadOnly",
+        default,
+        deserialize_with = "lenient::option_bool"
+    )]
     unread_only: Option<bool>,
     #[serde(default)]
     limit: Option<usize>,
@@ -21,13 +25,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         // ===== Info =====
         "mission_slots" => Ok(ToolResult::json(&state.mission.list_slots())),
         "mission_inbox" => {
-            let InboxArgs {
-                unread_only,
-                limit,
-            } = serde_json::from_value(args).unwrap_or(InboxArgs {
-                unread_only: None,
-                limit: None,
-            });
+            let InboxArgs { unread_only, limit } =
+                serde_json::from_value(args).unwrap_or(InboxArgs {
+                    unread_only: None,
+                    limit: None,
+                });
             let messages = state
                 .store
                 .get_inbox_messages(unread_only.unwrap_or(true), limit.unwrap_or(10) as i64)
@@ -37,7 +39,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
         "mission_pause" => {
             use std::sync::atomic::Ordering;
-            let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("status");
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("status");
             let home = crate::helpers::default_mission_home();
             let flag = home.join("global_paused");
 
@@ -48,7 +53,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     state.global_paused_at.store(now, Ordering::Relaxed);
                     let _ = std::fs::write(&flag, now.to_string());
                     warn!("Global pause activated via MCP tool");
-                    Ok(ToolResult::text("✅ 全局暂停已激活。所有工位任务分派已停止。"))
+                    Ok(ToolResult::text(
+                        "✅ 全局暂停已激活。所有工位任务分派已停止。",
+                    ))
                 }
                 "resume" => {
                     state.global_paused.store(false, Ordering::Relaxed);
@@ -61,10 +68,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     let paused = state.control_manager.current().global_paused;
                     let since = state.global_paused_at.load(Ordering::Relaxed);
                     let msg = if paused {
-                        format!("⏸ 当前处于全局暂停状态 (始于 {})", 
+                        format!(
+                            "⏸ 当前处于全局暂停状态 (始于 {})",
                             chrono::DateTime::from_timestamp(since, 0)
                                 .map(|dt| dt.to_rfc3339())
-                                .unwrap_or_else(|| "未知时间".to_string()))
+                                .unwrap_or_else(|| "未知时间".to_string())
+                        )
                     } else {
                         "🟢 当前工作正常，未暂停。".to_string()
                     };
@@ -88,7 +97,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .collect();
 
             // Memory extraction state (read from ControlTree)
-            let memory_paused = state.control_manager.current()
+            let memory_paused = state
+                .control_manager
+                .current()
                 .is_domain_paused(crate::control_tree::CtlDomain::Memory);
             let fast_lane = {
                 let es = state.extraction_state.read().await;
@@ -136,13 +147,20 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let args: SubmitPhaseArgs = serde_json::from_value(args)?;
 
             // Get the task
-            let task = state.store.get_board_task(&args.task_id).await
+            let task = state
+                .store
+                .get_board_task(&args.task_id)
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?
                 .ok_or_else(|| anyhow!("Task not found: {}", args.task_id))?;
 
             // Verify task has a flow phase
-            let phase_str = task.flow_phase.as_deref()
-                .ok_or_else(|| anyhow!("Task {} is not a flow task (flow_phase is null)", args.task_id))?;
+            let phase_str = task.flow_phase.as_deref().ok_or_else(|| {
+                anyhow!(
+                    "Task {} is not a flow task (flow_phase is null)",
+                    args.task_id
+                )
+            })?;
 
             let phase = missiond_core::types::EngineeringPhase::from_str(phase_str)
                 .ok_or_else(|| anyhow!("Unknown flow phase: {}", phase_str))?;
@@ -153,10 +171,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 missiond_core::types::EngineeringPhase::Plan => "execution_plan",
                 missiond_core::types::EngineeringPhase::Execute => "execution_result",
                 missiond_core::types::EngineeringPhase::Finalize => "commit_hash",
-                other => return Ok(ToolResult::text(format!(
+                other => {
+                    return Ok(ToolResult::text(format!(
                     "Error: Phase '{}' is a daemon phase or Done — cannot submit artifacts for it.",
                     other.display_name()
-                ))),
+                )))
+                }
             };
 
             if args.artifact_type != expected_artifact {
@@ -168,7 +188,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
 
             // Load existing flow context
-            let mut ctx: missiond_core::types::FlowContext = task.flow_context
+            let mut ctx: missiond_core::types::FlowContext = task
+                .flow_context
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok())
                 .unwrap_or_default();
@@ -183,7 +204,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
 
             // Advance to next phase
-            let next_phase = phase.next().unwrap_or(missiond_core::types::EngineeringPhase::Done);
+            let next_phase = phase
+                .next()
+                .unwrap_or(missiond_core::types::EngineeringPhase::Done);
             let next_phase_str = next_phase.as_str().to_string();
             let ctx_json = serde_json::to_string(&ctx)?;
 
@@ -193,7 +216,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 flow_context: Some(ctx_json),
                 ..Default::default()
             };
-            state.store.update_board_task(task.id.as_str(), &update).await
+            state
+                .store
+                .update_board_task(task.id.as_str(), &update)
+                .await
                 .map_err(|e| anyhow!("DB error updating flow: {}", e))?;
 
             // Write progress note
@@ -214,7 +240,15 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             // Hard intercept: Plan → Execute transition requires risk review
             if phase == missiond_core::types::EngineeringPhase::Plan {
                 let plan_summary = if args.content.len() > 500 {
-                    format!("{}...", &args.content[..args.content.char_indices().nth(500).map(|(i,_)| i).unwrap_or(args.content.len())])
+                    format!(
+                        "{}...",
+                        &args.content[..args
+                            .content
+                            .char_indices()
+                            .nth(500)
+                            .map(|(i, _)| i)
+                            .unwrap_or(args.content.len())]
+                    )
                 } else {
                     args.content.clone()
                 };
@@ -231,7 +265,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 match state.store.create_agent_question(&q_input).await {
                     Ok(q) => {
                         info!(task_id = %task.id, question_id = %q.id, "Hard intercept: Plan→Execute risk review created");
-                        state.event_bus.publish(crate::event_bus::DaemonEvent::QuestionCreated { question_id: q.id.clone() });
+                        state
+                            .event_bus
+                            .publish(crate::event_bus::DaemonEvent::QuestionCreated {
+                                question_id: q.id.clone(),
+                            });
                     }
                     Err(e) => warn!(error = %e, "Failed to create hard intercept question"),
                 }
@@ -240,8 +278,17 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             // Soft intercept: if slot flagged uncertainty, create question for Decision Engine
             if let Some(ref concern) = args.requires_master_decision {
                 let q_input = missiond_core::types::CreateAgentQuestionInput {
-                    question: format!("[Flow {} → {}] {}", phase.display_name(), next_phase.display_name(), concern),
-                    context: Some(format!("Slot flagged uncertainty during phase transition. Artifact: {} ({} chars)", args.artifact_type, args.content.len())),
+                    question: format!(
+                        "[Flow {} → {}] {}",
+                        phase.display_name(),
+                        next_phase.display_name(),
+                        concern
+                    ),
+                    context: Some(format!(
+                        "Slot flagged uncertainty during phase transition. Artifact: {} ({} chars)",
+                        args.artifact_type,
+                        args.content.len()
+                    )),
                     task_id: Some(task.id.to_string()),
                     slot_id: None,
                     session_id: None,
@@ -252,7 +299,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 match state.store.create_agent_question(&q_input).await {
                     Ok(q) => {
                         info!(task_id = %task.id, question_id = %q.id, "Soft intercept: created master decision question");
-                        state.event_bus.publish(crate::event_bus::DaemonEvent::QuestionCreated { question_id: q.id.clone() });
+                        state
+                            .event_bus
+                            .publish(crate::event_bus::DaemonEvent::QuestionCreated {
+                                question_id: q.id.clone(),
+                            });
                     }
                     Err(e) => warn!(error = %e, "Failed to create soft intercept question"),
                 }
@@ -283,18 +334,22 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
             let args: SlotHistoryArgs = serde_json::from_value(args)?;
             if args.stats.unwrap_or(false) {
-                let stats = state.store
-                    .slot_task_stats(args.slot_id.as_deref()).await
+                let stats = state
+                    .store
+                    .slot_task_stats(args.slot_id.as_deref())
+                    .await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 Ok(ToolResult::json_pretty(&stats))
             } else {
-                let tasks = state.store
+                let tasks = state
+                    .store
                     .list_slot_tasks(
                         args.slot_id.as_deref(),
                         args.task_type.as_deref(),
                         args.status.as_deref(),
                         args.limit.unwrap_or(20),
-                    ).await
+                    )
+                    .await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 Ok(ToolResult::json_pretty(&tasks))
             }
@@ -302,21 +357,34 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
         // ===== Agent Questions (Pending Decisions) =====
         "mission_incident_test" => {
-            let severity_str = args.get("severity").and_then(|v| v.as_str()).unwrap_or("warning");
+            let severity_str = args
+                .get("severity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("warning");
             let severity = match severity_str {
                 "critical" => missiond_core::types::IncidentSeverity::Critical,
                 "high" => missiond_core::types::IncidentSeverity::High,
                 _ => missiond_core::types::IncidentSeverity::Warning,
             };
-            let source_str = args.get("source").and_then(|v| v.as_str()).unwrap_or("manual");
+            let source_str = args
+                .get("source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("manual");
             let source = match source_str {
                 "health_check" => missiond_core::types::IncidentSource::HealthCheck,
                 "deploy_center" => missiond_core::types::IncidentSource::DeployCenter,
                 "sentry" => missiond_core::types::IncidentSource::Sentry,
                 _ => missiond_core::types::IncidentSource::Manual,
             };
-            let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("Test incident").to_string();
-            let server_id = args.get("server_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let title = args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Test incident")
+                .to_string();
+            let server_id = args
+                .get("server_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
 
             let incident = missiond_core::types::MissionIncident {
                 id: format!("inc-{}", uuid::Uuid::new_v4()),
@@ -344,7 +412,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_incident_list" => {
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as i64;
             let limit = limit.min(100);
-            let incidents = state.store.list_incidents(limit).await
+            let incidents = state
+                .store
+                .list_incidents(limit)
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&incidents))
         }
@@ -360,20 +431,25 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
             // Look up server from infra registry
             let server = state.infra.read().unwrap().get(target).cloned();
-            let server_info = server.as_ref().map(|s| {
-                json!({ "id": s.id, "host": s.host, "roles": s.roles })
-            });
+            let server_info = server
+                .as_ref()
+                .map(|s| json!({ "id": s.id, "host": s.host, "roles": s.roles }));
 
             match action {
                 "status" => {
                     // Quick connectivity check via TCP probe
-                    let host = server.as_ref().and_then(|s| s.host.as_deref()).unwrap_or(target);
+                    let host = server
+                        .as_ref()
+                        .and_then(|s| s.host.as_deref())
+                        .unwrap_or(target);
                     let port: u16 = 22; // default SSH port
                     let addr = format!("{}:{}", host, port);
                     let reachable = tokio::time::timeout(
                         std::time::Duration::from_secs(3),
                         tokio::net::TcpStream::connect(&addr),
-                    ).await.is_ok();
+                    )
+                    .await
+                    .is_ok();
                     Ok(ToolResult::json_pretty(&json!({
                         "target": target,
                         "action": "status",
@@ -403,7 +479,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                         "server": server_info,
                     })))
                 }
-                _ => Ok(ToolResult::error(format!("Unknown action: {}. Use wake/suspend/status", action))),
+                _ => Ok(ToolResult::error(format!(
+                    "Unknown action: {}. Use wake/suspend/status",
+                    action
+                ))),
             }
         }
 
@@ -411,7 +490,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_jarvis_logs" => {
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
             let limit = limit.min(100);
-            let status_filter = args.get("status").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let status_filter = args
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             let mut traces = state.jarvis_trace.list_traces(limit).await;
             if let Some(ref sf) = status_filter {
                 traces.retain(|t| t.status.to_string() == *sf);
@@ -435,26 +517,35 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         // Single source of truth: llm.yaml gemini_auth_mode
         // settings.json is synced as a side-effect for CLI compatibility
         "mission_gemini_auth" => {
-            let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("status");
+            let mode = args
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("status");
             let llm_yaml_path = missiond_core::default_mission_home().join("llm.yaml");
 
             // Read llm.yaml
-            let llm_content = tokio::fs::read_to_string(&llm_yaml_path).await
+            let llm_content = tokio::fs::read_to_string(&llm_yaml_path)
+                .await
                 .map_err(|e| anyhow!("Failed to read llm.yaml: {}", e))?;
             let llm_config: serde_yaml::Value = serde_yaml::from_str(&llm_content)
                 .map_err(|e| anyhow!("Failed to parse llm.yaml: {}", e))?;
 
-            let current_mode = llm_config.get("gemini_auth_mode")
+            let current_mode = llm_config
+                .get("gemini_auth_mode")
                 .and_then(|v| v.as_str())
                 .unwrap_or("apikey");
 
             if mode == "status" {
                 let key_preview = if current_mode == "apikey" {
-                    llm_config.get("gemini_api_key")
+                    llm_config
+                        .get("gemini_api_key")
                         .and_then(|k| k.as_str())
                         .map(|k| {
-                            if k.len() <= 12 { "***".to_string() }
-                            else { format!("{}...{}", &k[..6], &k[k.len() - 4..]) }
+                            if k.len() <= 12 {
+                                "***".to_string()
+                            } else {
+                                format!("{}...{}", &k[..6], &k[k.len() - 4..])
+                            }
                         })
                 } else {
                     None
@@ -466,7 +557,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
 
             if mode != "apikey" && mode != "google" {
-                return Ok(ToolResult::error(format!("Unknown mode: {}. Use: apikey, google, status", mode)));
+                return Ok(ToolResult::error(format!(
+                    "Unknown mode: {}. Use: apikey, google, status",
+                    mode
+                )));
             }
 
             if mode == current_mode {
@@ -490,24 +584,33 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     &format!("provider: gemini-cli\ngemini_auth_mode: {}", mode),
                 )
             };
-            tokio::fs::write(&llm_yaml_path, &new_content).await
+            tokio::fs::write(&llm_yaml_path, &new_content)
+                .await
                 .map_err(|e| anyhow!("Failed to write llm.yaml: {}", e))?;
             // Ensure restrictive permissions (contains API key)
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&llm_yaml_path, std::fs::Permissions::from_mode(0o600));
+                let _ = std::fs::set_permissions(
+                    &llm_yaml_path,
+                    std::fs::Permissions::from_mode(0o600),
+                );
             }
 
             // Sync to settings.json (side-effect for CLI compatibility)
-            let selected_type = if mode == "apikey" { "gemini-api-key" } else { "oauth-personal" };
-            let settings_path = dirs::home_dir()
-                .map(|h| h.join(".gemini/settings.json"));
+            let selected_type = if mode == "apikey" {
+                "gemini-api-key"
+            } else {
+                "oauth-personal"
+            };
+            let settings_path = dirs::home_dir().map(|h| h.join(".gemini/settings.json"));
             if let Some(ref path) = settings_path {
                 if let Ok(content) = tokio::fs::read_to_string(path).await {
                     if let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&content) {
                         if let Some(auth) = settings.pointer_mut("/security/auth") {
-                            auth.as_object_mut().map(|m| m.insert("selectedType".to_string(), json!(selected_type)));
+                            auth.as_object_mut().map(|m| {
+                                m.insert("selectedType".to_string(), json!(selected_type))
+                            });
                         }
                         if let Ok(json) = serde_json::to_string_pretty(&settings) {
                             let _ = tokio::fs::write(path, json).await;
@@ -532,7 +635,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let status = args_val.get("status").and_then(|v| v.as_str());
             let limit = args_val.get("limit").and_then(|v| v.as_i64()).unwrap_or(20);
 
-            let rows = state.store.gemini_log_query(caller, session_id, status, limit).await
+            let rows = state
+                .store
+                .gemini_log_query(caller, session_id, status, limit)
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&serde_json::json!({
                 "count": rows.len(),
@@ -541,16 +647,26 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         }
 
         "mission_gemini_stats" => {
-            let stats = state.store.gemini_log_stats().await
+            let stats = state
+                .store
+                .gemini_log_stats()
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&stats))
         }
 
         "mission_gemini_content" => {
             let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
-            let request_id = args_val.get("request_id").and_then(|v| v.as_str())
+            let request_id = args_val
+                .get("request_id")
+                .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("missing request_id"))?;
-            match state.store.gemini_log_get_content(request_id).await.map_err(|e| anyhow!("DB error: {}", e))? {
+            match state
+                .store
+                .gemini_log_get_content(request_id)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?
+            {
                 Some(content) => Ok(ToolResult::json_pretty(&content)),
                 None => Ok(ToolResult::error("Request not found")),
             }
@@ -559,7 +675,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         // ===== Gemini Watch (health probe) =====
         "mission_gemini_watch" => {
             let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
-            let action = args_val.get("action").and_then(|v| v.as_str()).unwrap_or("status");
+            let action = args_val
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("status");
             gemini_watch(state, action).await
         }
 
@@ -576,15 +695,16 @@ async fn gemini_watch(state: &AppState, action: &str) -> Result<ToolResult> {
             if state.gemini_watch_active.load(Ordering::Relaxed) {
                 let attempts = state.gemini_watch_attempts.load(Ordering::Relaxed);
                 return Ok(ToolResult::text(format!(
-                    "监测已在运行中 (第 {} 次探测)", attempts
+                    "监测已在运行中 (第 {} 次探测)",
+                    attempts
                 )));
             }
 
             state.gemini_watch_active.store(true, Ordering::Relaxed);
             state.gemini_watch_attempts.store(0, Ordering::Relaxed);
-            state.gemini_watch_started_at.store(
-                chrono::Utc::now().timestamp(), Ordering::Relaxed,
-            );
+            state
+                .gemini_watch_started_at
+                .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
 
             let st = state.clone();
             let handle = tokio::spawn(async move {
@@ -626,7 +746,9 @@ async fn gemini_watch(state: &AppState, action: &str) -> Result<ToolResult> {
             })))
         }
 
-        _ => Ok(ToolResult::error("Unknown action. Use: start, stop, status")),
+        _ => Ok(ToolResult::error(
+            "Unknown action. Use: start, stop, status",
+        )),
     }
 }
 
@@ -653,7 +775,8 @@ async fn gemini_watch_loop(state: AppState) {
                 .output()
                 .await;
             output
-        }).await;
+        })
+        .await;
 
         let ok = match result {
             Ok(Ok(output)) if output.status.success() => {
@@ -697,7 +820,10 @@ async fn gemini_watch_loop(state: AppState) {
             break;
         }
 
-        info!(attempt, "Gemini watch: ❌ still unavailable, waiting 10 min...");
+        info!(
+            attempt,
+            "Gemini watch: ❌ still unavailable, waiting 10 min..."
+        );
         // Wait 10 minutes before next probe (interruptible via abort)
         tokio::time::sleep(Duration::from_secs(600)).await;
     }

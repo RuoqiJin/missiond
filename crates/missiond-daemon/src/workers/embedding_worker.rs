@@ -1,12 +1,11 @@
-
 use anyhow::{anyhow, Result};
 use tracing::{debug, info, warn};
 
-use crate::state::{AppState, BackfillPhase, EmbeddingTask};
-use std::sync::Arc;
-use std::path::PathBuf;
 use crate::helpers::char_boundary_at;
 use crate::helpers::default_mission_home;
+use crate::state::{AppState, BackfillPhase, EmbeddingTask};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 // ── Message-level embedding filter ──
 
@@ -43,7 +42,6 @@ fn should_embed(role: &str, content: &str) -> EmbedDecision {
 pub(crate) fn should_skip_fast(role: &str, content_len: usize) -> bool {
     role == "system" || content_len == 0 || content_len > 100_000
 }
-
 
 #[derive(serde::Deserialize)]
 pub(crate) struct LlmConfig {
@@ -93,9 +91,15 @@ impl Default for GeminiCliConfig {
 }
 
 impl GeminiCliConfig {
-    fn default_binary() -> String { "gemini".to_string() }
-    fn default_model() -> String { "gemini-3.1-pro-preview".to_string() }
-    fn default_timeout() -> u64 { 120 }
+    fn default_binary() -> String {
+        "gemini".to_string()
+    }
+    fn default_model() -> String {
+        "gemini-3.1-pro-preview".to_string()
+    }
+    fn default_timeout() -> u64 {
+        120
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -119,10 +123,13 @@ impl Default for LlmAuth {
 }
 
 impl LlmConfig {
-    fn default_provider() -> String { "xjp-router".to_string() }
-    fn default_model() -> String { "gpt-4o".to_string() }
+    fn default_provider() -> String {
+        "xjp-router".to_string()
+    }
+    fn default_model() -> String {
+        "gpt-4o".to_string()
+    }
 }
-
 
 // ── Ollama Embedding Provider ────────────────────────────────────────────
 
@@ -142,13 +149,14 @@ impl OllamaProvider {
     /// Try to connect to Ollama and verify the embedding model is available.
     /// Returns None if Ollama is unreachable or the model is missing.
     async fn try_new(client: &reqwest::Client) -> Option<Self> {
-        let base_url = std::env::var("OLLAMA_HOST")
-            .unwrap_or_else(|_| "http://localhost:11434".to_string());
+        let base_url =
+            std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string());
         let model = std::env::var("MISSIOND_EMBEDDING_MODEL")
             .unwrap_or_else(|_| "qwen3-embedding".to_string());
 
         // Health check: verify Ollama is reachable
-        let health = client.get(format!("{}/api/tags", base_url))
+        let health = client
+            .get(format!("{}/api/tags", base_url))
             .timeout(std::time::Duration::from_secs(3))
             .send()
             .await
@@ -183,7 +191,8 @@ impl OllamaProvider {
         model: &str,
         text: &str,
     ) -> Option<Vec<f32>> {
-        let resp = client.post(format!("{}/api/embed", base_url))
+        let resp = client
+            .post(format!("{}/api/embed", base_url))
             .json(&serde_json::json!({
                 "model": model,
                 "input": text,
@@ -203,7 +212,11 @@ impl OllamaProvider {
         data.get("embeddings")
             .and_then(|e| e.get(0))
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect()
+            })
     }
 
     /// Batch embedding via Ollama /api/embed (supports array input).
@@ -213,7 +226,8 @@ impl OllamaProvider {
         model: &str,
         texts: &[String],
     ) -> Vec<Option<Vec<f32>>> {
-        let resp = client.post(format!("{}/api/embed", base_url))
+        let resp = client
+            .post(format!("{}/api/embed", base_url))
             .json(&serde_json::json!({
                 "model": model,
                 "input": texts,
@@ -226,11 +240,16 @@ impl OllamaProvider {
             Ok(r) if r.status().is_success() => {
                 if let Ok(data) = r.json::<serde_json::Value>().await {
                     if let Some(embeddings) = data.get("embeddings").and_then(|e| e.as_array()) {
-                        return embeddings.iter().map(|emb| {
-                            emb.as_array().map(|arr| {
-                                arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect()
+                        return embeddings
+                            .iter()
+                            .map(|emb| {
+                                emb.as_array().map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_f64().map(|f| f as f32))
+                                        .collect()
+                                })
                             })
-                        }).collect();
+                            .collect();
                     }
                 }
                 texts.iter().map(|_| None).collect()
@@ -255,9 +274,8 @@ impl missiond_core::embedding::EmbeddingProvider for OllamaProvider {
         let model = self.model.clone();
         let text = text.to_string();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(
-                Self::embed_one(&client, &base_url, &model, &text)
-            )
+            tokio::runtime::Handle::current()
+                .block_on(Self::embed_one(&client, &base_url, &model, &text))
         })
     }
 
@@ -270,9 +288,8 @@ impl missiond_core::embedding::EmbeddingProvider for OllamaProvider {
         let model = self.model.clone();
         let texts = texts.to_vec();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(
-                Self::embed_many(&client, &base_url, &model, &texts)
-            )
+            tokio::runtime::Handle::current()
+                .block_on(Self::embed_many(&client, &base_url, &model, &texts))
         })
     }
 }
@@ -312,9 +329,7 @@ pub(crate) async fn init_embedding_provider(
 pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_id: &str) {
     // 0. Skip memory/agent slot conversations (content is AI thinking/tool_call, not user topics)
     if let Ok(Some(conv)) = state.store.get_conversation(session_id).await {
-        if conv.conversation_type == "memory"
-            || conv.slot_id.as_deref() == Some("slot-memory")
-        {
+        if conv.conversation_type == "memory" || conv.slot_id.as_deref() == Some("slot-memory") {
             debug!(session = %session_id, "Skipping memory slot conversation for embedding");
             return;
         }
@@ -322,7 +337,11 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
 
     // 1. Fetch messages
     debug!(session = %session_id, "Topic pipeline: fetching messages");
-    let messages = match state.store.get_conversation_messages(session_id, None, 200).await {
+    let messages = match state
+        .store
+        .get_conversation_messages(session_id, None, 200)
+        .await
+    {
         Ok(msgs) if !msgs.is_empty() => msgs,
         Ok(_) => {
             debug!(session = %session_id, "No messages for topic extraction");
@@ -342,19 +361,31 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
                 if !timeline.is_empty() {
                     conv_text.push_str("=== 会话历史阶段摘要 ===\n");
                     let fragments: Vec<&serde_json::Value> = if timeline.len() > 10 {
-                        let mut selected: Vec<&serde_json::Value> = timeline.iter().take(3).collect();
+                        let mut selected: Vec<&serde_json::Value> =
+                            timeline.iter().take(3).collect();
                         let mid = timeline.len() / 2;
                         if mid > 3 && mid < timeline.len() - 3 {
                             selected.push(&timeline[mid - 1]);
                             selected.push(&timeline[mid]);
                         }
-                        selected.extend(timeline.iter().rev().take(3).collect::<Vec<_>>().into_iter().rev());
+                        selected.extend(
+                            timeline
+                                .iter()
+                                .rev()
+                                .take(3)
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev(),
+                        );
                         selected
                     } else {
                         timeline.iter().collect()
                     };
                     for entry in &fragments {
-                        let idx = entry.get("shard_index").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let idx = entry
+                            .get("shard_index")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
                         if let Some(summary) = entry.get("summary").and_then(|v| v.as_str()) {
                             let truncated = if summary.len() > 1200 {
                                 &summary[..char_boundary_at(summary, 1200)]
@@ -366,14 +397,25 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
                     }
                     conv_text.push_str("=== 最近消息 ===\n");
                     true
-                } else { false }
-            } else { false }
-        } else { false }
-    } else { false };
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
 
     // Fetch briefing summaries: semantic summaries are much more information-dense
     // than raw content, improving topic extraction quality while reducing token usage.
-    let briefing_map = state.store.get_briefing_summaries_for_session(session_id).await
+    let briefing_map = state
+        .store
+        .get_briefing_summaries_for_session(session_id)
+        .await
         .unwrap_or_default();
 
     let msg_budget = if has_timeline { 4000 } else { 8000 };
@@ -416,13 +458,18 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
     let combined_summary = if topics.len() == 1 {
         topics[0].as_str().to_string()
     } else {
-        topics.iter()
+        topics
+            .iter()
             .enumerate()
             .map(|(i, t)| format!("{}. {}", i + 1, t.as_str()))
             .collect::<Vec<_>>()
             .join("\n")
     };
-    if let Err(e) = state.store.set_conversation_summary(session_id, &combined_summary).await {
+    if let Err(e) = state
+        .store
+        .set_conversation_summary(session_id, &combined_summary)
+        .await
+    {
         warn!(session = %session_id, error = %e, "Failed to store summary");
         return;
     }
@@ -460,12 +507,19 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
     }
 
     // 6. Store topic vectors to DB
-    if let Err(e) = state.store.set_conversation_topic_vectors(session_id, &topic_vectors, &provider_id).await {
+    if let Err(e) = state
+        .store
+        .set_conversation_topic_vectors(session_id, &topic_vectors, &provider_id)
+        .await
+    {
         warn!(session = %session_id, error = %e, "Failed to store topic vectors");
         return;
     }
     // Also update old single-vec for backwards compat (first topic as representative)
-    let _ = state.store.set_conversation_embedding(session_id, &topic_vectors[0].1, &provider_id).await;
+    let _ = state
+        .store
+        .set_conversation_embedding(session_id, &topic_vectors[0].1, &provider_id)
+        .await;
 
     // TopicCache removed in P3 — pgvector HNSW replaces in-memory search
     info!(session = %session_id, topic_count = topics.len(), "Multi-topic embeddings generated");
@@ -480,16 +534,26 @@ async fn process_turns_for_session(
     session_id: &str,
     provider_id: &str,
 ) -> Result<()> {
-    let embedding_service = state.embedding_service.as_ref()
+    let embedding_service = state
+        .embedding_service
+        .as_ref()
         .ok_or_else(|| anyhow!("No embedding service"))?;
 
     // 1. Query turns that lack topic_vectors
-    let pending = state.store.turns_pending_embedding(session_id, provider_id).await
+    let pending = state
+        .store
+        .turns_pending_embedding(session_id, provider_id)
+        .await
         .map_err(|e| anyhow!("turns_pending_embedding: {}", e))?;
-    if pending.is_empty() { return Ok(()); }
+    if pending.is_empty() {
+        return Ok(());
+    }
 
     // 2. Preload all messages for this session (single DB query)
-    let all_messages = state.store.get_conversation_messages(session_id, None, 5000).await
+    let all_messages = state
+        .store
+        .get_conversation_messages(session_id, None, 5000)
+        .await
         .map_err(|e| anyhow!("get_conversation_messages: {}", e))?;
 
     let mut topic_vectors: Vec<(String, i32, Vec<f32>)> = Vec::new();
@@ -497,13 +561,16 @@ async fn process_turns_for_session(
 
     for turn in &pending {
         // 3. Slice messages for this turn's range
-        let turn_messages: Vec<_> = all_messages.iter()
+        let turn_messages: Vec<_> = all_messages
+            .iter()
             .filter(|m| m.id >= turn.start_message_id && m.id <= turn.end_message_id)
             .collect();
 
         // 4. Build embedding text
         let text = build_turn_embedding_text(turn, &turn_messages);
-        if text.trim().len() < 20 { continue; }  // Skip empty turns (e.g., preamble)
+        if text.trim().len() < 20 {
+            continue;
+        } // Skip empty turns (e.g., preamble)
 
         // 5. Generate embedding vector
         let svc = Arc::clone(embedding_service);
@@ -511,7 +578,9 @@ async fn process_turns_for_session(
         match tokio::task::spawn_blocking(move || svc.embed(&t)).await {
             Ok(Some(vec)) => {
                 // topic = user_content truncated to 200 chars (for display)
-                let topic = turn.user_content.as_ref()
+                let topic = turn
+                    .user_content
+                    .as_ref()
                     .map(|s| {
                         if s.chars().count() > 200 {
                             s.chars().take(200).collect::<String>()
@@ -532,20 +601,27 @@ async fn process_turns_for_session(
         }
     }
 
-    if topic_vectors.is_empty() { return Ok(()); }
+    if topic_vectors.is_empty() {
+        return Ok(());
+    }
 
     // 6. Batch write to conversation_topic_vectors (ON CONFLICT DO UPDATE)
-    let stored = state.store.set_conversation_turn_vectors(session_id, &topic_vectors, provider_id).await
+    let stored = state
+        .store
+        .set_conversation_turn_vectors(session_id, &topic_vectors, provider_id)
+        .await
         .map_err(|e| anyhow!("set_conversation_turn_vectors: {}", e))?;
 
     // 7. Update conversation_turns.topic
-    let refs: Vec<(i64, &str)> = topic_updates.iter()
+    let refs: Vec<(i64, &str)> = topic_updates
+        .iter()
         .map(|(id, t)| (*id, t.as_str()))
         .collect();
     let _ = state.store.update_turn_topics_batch(&refs).await;
 
     // 8. Update llm_summary (concatenate turn topics, hard cap 3000 chars)
-    let summary = topic_vectors.iter()
+    let summary = topic_vectors
+        .iter()
         .map(|(topic, idx, _)| format!("T{}: {}", idx, topic))
         .collect::<Vec<_>>()
         .join("\n");
@@ -554,10 +630,16 @@ async fn process_turns_for_session(
     } else {
         summary
     };
-    let _ = state.store.set_conversation_summary(session_id, &final_summary).await;
+    let _ = state
+        .store
+        .set_conversation_summary(session_id, &final_summary)
+        .await;
 
     // 9. Also update single-vec for backwards compat (first turn as representative)
-    let _ = state.store.set_conversation_embedding(session_id, &topic_vectors[0].2, provider_id).await;
+    let _ = state
+        .store
+        .set_conversation_embedding(session_id, &topic_vectors[0].2, provider_id)
+        .await;
 
     info!(session = %session_id, count = stored, "Per-turn embeddings stored");
     Ok(())
@@ -590,7 +672,9 @@ fn build_turn_embedding_text(
     }
 
     // 3. AI final response (last assistant message that is NOT a tool_use)
-    if let Some(final_reply) = messages.iter().rev()
+    if let Some(final_reply) = messages
+        .iter()
+        .rev()
         .find(|m| m.role == "assistant" && !m.has_tool_use)
     {
         let reply = if final_reply.content.len() > 1500 {
@@ -630,7 +714,10 @@ fn topic_extraction_prompt(max_topics: usize) -> String {
 
 /// Known LLM pollution tags (NOT generic XML — avoids false positives on <vector>, <div> etc.)
 static LLM_TAG_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"</?(?:invoke|think|thought|search|boltAction|minimax:tool_call|parameter)\b[^>]*>").unwrap()
+    regex::Regex::new(
+        r"</?(?:invoke|think|thought|search|boltAction|minimax:tool_call|parameter)\b[^>]*>",
+    )
+    .unwrap()
 });
 
 // ─── Topic Value Object ───────────────────────────────────────────────
@@ -661,13 +748,22 @@ impl Topic {
         }
 
         // Content blacklist: tool output / thinking leaks
-        if t.contains("[Tool:") || t.contains("[Tool：") { return None; }
-        if t.starts_with("[A]") || t.starts_with("[R]") || t.starts_with("[T]") { return None; }
-        if t.contains('\n') { return None; }
-        if LLM_TAG_RE.is_match(t) { return None; }
+        if t.contains("[Tool:") || t.contains("[Tool：") {
+            return None;
+        }
+        if t.starts_with("[A]") || t.starts_with("[R]") || t.starts_with("[T]") {
+            return None;
+        }
+        if t.contains('\n') {
+            return None;
+        }
+        if LLM_TAG_RE.is_match(t) {
+            return None;
+        }
 
         // Sanitize: strip leading list markers "1. ", "- ", "* "
-        let cleaned = t.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-' || c == '*')
+        let cleaned = t
+            .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-' || c == '*')
             .trim_start();
 
         // Truncate overlong (tolerance zone: 150–200 chars get trimmed, >200 already rejected)
@@ -718,12 +814,17 @@ fn parse_and_validate_topics(raw: &str, max_topics: usize) -> Option<Vec<Topic>>
         }
     };
 
-    let valid: Vec<Topic> = raw_topics.into_iter()
+    let valid: Vec<Topic> = raw_topics
+        .into_iter()
         .filter_map(|t| Topic::try_new(&t))
         .take(max_topics)
         .collect();
 
-    if valid.is_empty() { None } else { Some(valid) }
+    if valid.is_empty() {
+        None
+    } else {
+        Some(valid)
+    }
 }
 
 /// Extract structured topics from conversation via Sonnet.
@@ -738,14 +839,23 @@ async fn extract_conv_topics_llm(
 
     // Direct HTTP to Router — no fallback, fast fail
     match crate::llm_gateway::call_sonnet_stateless(
-        state, &system_prompt, conv_text, 1024, "embedding_topics",
-    ).await {
+        state,
+        &system_prompt,
+        conv_text,
+        1024,
+        "embedding_topics",
+    )
+    .await
+    {
         Ok(content) => {
             if let Some(topics) = parse_and_validate_topics(&content, max_topics) {
                 info!(count = topics.len(), "Topic extraction OK (Sonnet)");
                 return Some(topics);
             }
-            warn!(raw_preview = &content[..char_boundary_at(&content, 300)], "Sonnet returned content but topic validation failed");
+            warn!(
+                raw_preview = &content[..char_boundary_at(&content, 300)],
+                "Sonnet returned content but topic validation failed"
+            );
             None
         }
         Err(e) => {
@@ -767,16 +877,15 @@ pub(crate) async fn resolve_llm_credentials() -> Result<(String, String)> {
     // 1. Try llm.yaml in mission home
     let llm_yaml = default_mission_home().join("llm.yaml");
     if llm_yaml.exists() {
-        let content = tokio::fs::read_to_string(&llm_yaml).await
+        let content = tokio::fs::read_to_string(&llm_yaml)
+            .await
             .map_err(|e| anyhow!("Failed to read {}: {}", llm_yaml.display(), e))?;
         let config: LlmConfig = serde_yaml::from_str(&content)
             .map_err(|e| anyhow!("Failed to parse {}: {}", llm_yaml.display(), e))?;
 
         let token = match &config.auth {
-            LlmAuth::BearerEnv { env } => {
-                std::env::var(env)
-                    .map_err(|_| anyhow!("Env var '{}' not set (required by llm.yaml)", env))?
-            }
+            LlmAuth::BearerEnv { env } => std::env::var(env)
+                .map_err(|_| anyhow!("Env var '{}' not set (required by llm.yaml)", env))?,
             LlmAuth::BearerFile { path, key } => {
                 let expanded = if path.starts_with("~/") {
                     dirs::home_dir()
@@ -785,7 +894,8 @@ pub(crate) async fn resolve_llm_credentials() -> Result<(String, String)> {
                 } else {
                     PathBuf::from(path)
                 };
-                let file_content = tokio::fs::read_to_string(&expanded).await
+                let file_content = tokio::fs::read_to_string(&expanded)
+                    .await
                     .map_err(|e| anyhow!("Failed to read {}: {}", expanded.display(), e))?;
                 let json: serde_json::Value = serde_json::from_str(&file_content)
                     .map_err(|e| anyhow!("Failed to parse {}: {}", expanded.display(), e))?;
@@ -808,14 +918,19 @@ pub(crate) async fn resolve_llm_credentials() -> Result<(String, String)> {
         .join("credentials.json");
 
     if cred_path.exists() {
-        let cred_content = tokio::fs::read_to_string(&cred_path).await
+        let cred_content = tokio::fs::read_to_string(&cred_path)
+            .await
             .map_err(|e| anyhow!("Failed to read credentials: {}", e))?;
         let creds: serde_json::Value = serde_json::from_str(&cred_content)
             .map_err(|e| anyhow!("Failed to parse credentials: {}", e))?;
-        let jwt = creds.get("jwt_token")
+        let jwt = creds
+            .get("jwt_token")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("No jwt_token in credentials.json. Configure LLM credentials first."))?;
-        let base_url = creds.get("auth_url")
+            .ok_or_else(|| {
+                anyhow!("No jwt_token in credentials.json. Configure LLM credentials first.")
+            })?;
+        let base_url = creds
+            .get("auth_url")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
 
@@ -827,7 +942,9 @@ pub(crate) async fn resolve_llm_credentials() -> Result<(String, String)> {
         return Ok((base_url.to_string(), jwt.to_string()));
     }
 
-    Err(anyhow!("No LLM credentials found. Create llm.yaml in mission home or ~/.xjp/credentials.json."))
+    Err(anyhow!(
+        "No LLM credentials found. Create llm.yaml in mission home or ~/.xjp/credentials.json."
+    ))
 }
 
 // ── Embedding Loop Worker (BackgroundWorker) ──────────────────────────────
@@ -837,11 +954,16 @@ pub(crate) struct EmbeddingLoopWorker {
 }
 
 impl super::BackgroundWorker for EmbeddingLoopWorker {
-    fn name(&self) -> &'static str { "embedding" }
+    fn name(&self) -> &'static str {
+        "embedding"
+    }
 
     fn dependencies(&self) -> Vec<crate::control_tree::Dependency> {
-        use crate::control_tree::{Dependency, CtlProvider, CtlDomain};
-        vec![Dependency::Provider(CtlProvider::Sonnet), Dependency::Domain(CtlDomain::Memory)]
+        use crate::control_tree::{CtlDomain, CtlProvider, Dependency};
+        vec![
+            Dependency::Provider(CtlProvider::Sonnet),
+            Dependency::Domain(CtlDomain::Memory),
+        ]
     }
 
     async fn run(self, state: Arc<AppState>, mut ctx: super::WorkerContext) {
@@ -860,16 +982,24 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                     None => break,
                 },
             };
-            let provider_id = state.embedding_service.as_ref()
+            let provider_id = state
+                .embedding_service
+                .as_ref()
                 .map(|svc| svc.provider_id().to_string())
                 .unwrap_or_else(|| missiond_core::embedding::FASTEMBED_PROVIDER_ID.to_string());
 
             match task {
                 EmbeddingTask::ProcessSession(session_id) => {
                     // Legacy: reroute to per-turn if turns exist, otherwise use old session-level flow
-                    if let Ok(turns) = state.store.turns_pending_embedding(&session_id, &provider_id).await {
+                    if let Ok(turns) = state
+                        .store
+                        .turns_pending_embedding(&session_id, &provider_id)
+                        .await
+                    {
                         if !turns.is_empty() {
-                            if let Err(e) = process_turns_for_session(&state, &session_id, &provider_id).await {
+                            if let Err(e) =
+                                process_turns_for_session(&state, &session_id, &provider_id).await
+                            {
                                 warn!(session = %session_id, error = %e, "Per-turn embedding failed");
                             }
                         } else {
@@ -877,29 +1007,39 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                             if tokio::time::timeout(
                                 std::time::Duration::from_secs(60),
                                 generate_and_store_conv_embedding(&state, &session_id),
-                            ).await.is_err() {
+                            )
+                            .await
+                            .is_err()
+                            {
                                 warn!(session = %session_id, "Embedding generation timed out (60s)");
                             }
                         }
                     }
                 }
                 EmbeddingTask::ProcessTurns { session_id } => {
-                    if let Err(e) = process_turns_for_session(&state, &session_id, &provider_id).await {
+                    if let Err(e) =
+                        process_turns_for_session(&state, &session_id, &provider_id).await
+                    {
                         warn!(session = %session_id, error = %e, "Per-turn embedding failed");
                     }
                 }
                 EmbeddingTask::ProcessKBEntry(id) => {
                     if let Some(ref emb_svc) = state.embedding_service {
                         if let Ok(Some(entry)) = state.store.kb_get_by_id(&id).await {
-                            let detail_text = entry.detail.as_ref()
+                            let detail_text = entry
+                                .detail
+                                .as_ref()
                                 .map(|d| serde_json::to_string(d).unwrap_or_default())
                                 .unwrap_or_default();
-                            let embed_text = format!("知识条目：{}\n详情：{}", entry.summary, detail_text);
+                            let embed_text =
+                                format!("知识条目：{}\n详情：{}", entry.summary, detail_text);
                             let svc = Arc::clone(emb_svc);
                             if let Ok(Ok(Some(vec))) = tokio::time::timeout(
                                 std::time::Duration::from_secs(30),
                                 tokio::task::spawn_blocking(move || svc.embed(&embed_text)),
-                            ).await {
+                            )
+                            .await
+                            {
                                 let _ = state.store.kb_set_embedding(&id, &vec, &provider_id).await;
                                 if entry.category.starts_with("policy:decision") {
                                     let mut guard = state.embedding_cache.write().await;
@@ -919,7 +1059,9 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                 EmbeddingTask::ProcessSkillTopic(topic) => {
                     if let Some(ref emb_svc) = state.embedding_service {
                         if let Ok(missing) = state.store.skill_topics_missing_embedding(1).await {
-                            let embed_text = if let Some((_, text)) = missing.iter().find(|(t, _)| t == &topic) {
+                            let embed_text = if let Some((_, text)) =
+                                missing.iter().find(|(t, _)| t == &topic)
+                            {
                                 text.clone()
                             } else {
                                 format!("技能主题：{}", topic)
@@ -928,8 +1070,13 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                             if let Ok(Ok(Some(vec))) = tokio::time::timeout(
                                 std::time::Duration::from_secs(30),
                                 tokio::task::spawn_blocking(move || svc.embed(&embed_text)),
-                            ).await {
-                                let _ = state.store.skill_set_topic_embedding(&topic, &vec, &provider_id).await;
+                            )
+                            .await
+                            {
+                                let _ = state
+                                    .store
+                                    .skill_set_topic_embedding(&topic, &vec, &provider_id)
+                                    .await;
                                 let mut cache = state.skill_embedding_cache.write().await;
                                 cache.retain(|(t, _)| t != &topic);
                                 cache.push((topic.clone(), vec));
@@ -948,9 +1095,14 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                                 if let Ok(Ok(Some(vec))) = tokio::time::timeout(
                                     std::time::Duration::from_secs(30),
                                     tokio::task::spawn_blocking(move || svc.embed(&embed_text)),
-                                ).await {
+                                )
+                                .await
+                                {
                                     let bytes = missiond_core::embedding::f32_vec_to_bytes(&vec);
-                                    let _ = state.store.ast_set_embedding(node_id, &bytes, &provider_id).await;
+                                    let _ = state
+                                        .store
+                                        .ast_set_embedding(node_id, &bytes, &provider_id)
+                                        .await;
                                     let mut guard = state.ast_embedding_cache.write().await;
                                     guard.retain(|(eid, _)| eid != node_id);
                                     guard.push((node_id.clone(), vec));
@@ -959,30 +1111,50 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                             }
                         }
                         if embedded > 0 {
-                            debug!(count = embedded, total = node_ids.len(), "AST batch embedding completed");
+                            debug!(
+                                count = embedded,
+                                total = node_ids.len(),
+                                "AST batch embedding completed"
+                            );
                         }
                     }
                 }
-                EmbeddingTask::ProcessMessage { message_id, session_id, role, content } => {
-                    match should_embed(&role, &content) {
-                        EmbedDecision::Embed => {
-                            if let Some(ref emb_svc) = state.embedding_service {
-                                let svc = Arc::clone(emb_svc);
-                                let text = content.clone();
-                                if let Ok(Ok(Some(vec))) = tokio::time::timeout(
-                                    std::time::Duration::from_secs(30),
-                                    tokio::task::spawn_blocking(move || svc.embed(&text)),
-                                ).await {
-                                    let _ = state.store.insert_message_embedding(message_id, &session_id, &vec, &provider_id).await;
-                                    debug!(msg_id = message_id, "Message embedding stored");
-                                }
+                EmbeddingTask::ProcessMessage {
+                    message_id,
+                    session_id,
+                    role,
+                    content,
+                } => match should_embed(&role, &content) {
+                    EmbedDecision::Embed => {
+                        if let Some(ref emb_svc) = state.embedding_service {
+                            let svc = Arc::clone(emb_svc);
+                            let text = content.clone();
+                            if let Ok(Ok(Some(vec))) = tokio::time::timeout(
+                                std::time::Duration::from_secs(30),
+                                tokio::task::spawn_blocking(move || svc.embed(&text)),
+                            )
+                            .await
+                            {
+                                let _ = state
+                                    .store
+                                    .insert_message_embedding(
+                                        message_id,
+                                        &session_id,
+                                        &vec,
+                                        &provider_id,
+                                    )
+                                    .await;
+                                debug!(msg_id = message_id, "Message embedding stored");
                             }
                         }
-                        EmbedDecision::Skip(reason) => {
-                            let _ = state.store.insert_message_embedding_skip(message_id, reason).await;
-                        }
                     }
-                }
+                    EmbedDecision::Skip(reason) => {
+                        let _ = state
+                            .store
+                            .insert_message_embedding_skip(message_id, reason)
+                            .await;
+                    }
+                },
                 EmbeddingTask::BackfillAll => {
                     backfill_start(&state, &provider_id).await;
                 }
@@ -998,7 +1170,10 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
 /// Backfill entry point: determine resume phase from DB, then kick off first batch.
 /// Gated by `llm.yaml` → `backfill_enabled: true`. Skips silently when disabled.
 async fn backfill_start(state: &AppState, provider_id: &str) {
-    if !state.backfill_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+    if !state
+        .backfill_enabled
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
         debug!("Backfill: disabled by config (backfill_enabled: false)");
         return;
     }
@@ -1009,7 +1184,12 @@ async fn backfill_start(state: &AppState, provider_id: &str) {
             match state.store.backfill_get_phase(phase.as_str()).await {
                 Ok(Some(status)) if status.status == "completed" => continue,
                 Ok(Some(status)) => {
-                    info!(phase = phase.as_str(), cursor = status.last_cursor, processed = status.processed, "Backfill: resuming");
+                    info!(
+                        phase = phase.as_str(),
+                        cursor = status.last_cursor,
+                        processed = status.processed,
+                        "Backfill: resuming"
+                    );
                     break 'find *phase;
                 }
                 _ => break 'find *phase,
@@ -1018,15 +1198,43 @@ async fn backfill_start(state: &AppState, provider_id: &str) {
         BackfillPhase::first()
     };
 
-    info!(phase = resume_phase.as_str(), "Backfill: starting from phase");
+    info!(
+        phase = resume_phase.as_str(),
+        "Backfill: starting from phase"
+    );
     let total = match resume_phase {
-        BackfillPhase::ConvSummary => state.store.conversations_missing_summary_count().await.unwrap_or(0),
-        BackfillPhase::ConvTopicVectors => state.store.conversations_needing_topic_vectors_count(provider_id).await.unwrap_or(0),
+        BackfillPhase::ConvSummary => state
+            .store
+            .conversations_missing_summary_count()
+            .await
+            .unwrap_or(0),
+        BackfillPhase::ConvTopicVectors => state
+            .store
+            .conversations_needing_topic_vectors_count(provider_id)
+            .await
+            .unwrap_or(0),
         _ => 0,
     };
-    let _ = state.store.backfill_start_phase(resume_phase.as_str(), total).await;
-    let cursor = state.store.backfill_get_phase(resume_phase.as_str()).await.ok().flatten().map(|s| s.last_cursor).unwrap_or(0);
-    backfill_enqueue(state, EmbeddingTask::RunBackfillPhase { phase: resume_phase, cursor }).await;
+    let _ = state
+        .store
+        .backfill_start_phase(resume_phase.as_str(), total)
+        .await;
+    let cursor = state
+        .store
+        .backfill_get_phase(resume_phase.as_str())
+        .await
+        .ok()
+        .flatten()
+        .map(|s| s.last_cursor)
+        .unwrap_or(0);
+    backfill_enqueue(
+        state,
+        EmbeddingTask::RunBackfillPhase {
+            phase: resume_phase,
+            cursor,
+        },
+    )
+    .await;
 }
 
 /// Enqueue a backfill task with retry on channel full (prevents silent task loss).
@@ -1048,25 +1256,55 @@ async fn backfill_enqueue(state: &AppState, task: EmbeddingTask) {
 }
 
 /// Run one batch of a backfill phase, then re-enqueue next batch (yield pattern).
-async fn backfill_run_phase(state: &AppState, provider_id: &str, phase: BackfillPhase, cursor: i64) {
+async fn backfill_run_phase(
+    state: &AppState,
+    provider_id: &str,
+    phase: BackfillPhase,
+    cursor: i64,
+) {
     const BATCH_SIZE: i64 = 20;
     const MAX_RETRIES: i64 = 3;
 
     let (batch_success, batch_failed, new_cursor, phase_done) = match phase {
         BackfillPhase::KbStale => backfill_kb_stale(state, provider_id).await,
-        BackfillPhase::KbMissing => { let r = backfill_kb_missing(state, provider_id).await; if r.3 { warm_kb_caches(state).await; } r }
+        BackfillPhase::KbMissing => {
+            let r = backfill_kb_missing(state, provider_id).await;
+            if r.3 {
+                warm_kb_caches(state).await;
+            }
+            r
+        }
         BackfillPhase::SkillStale => backfill_skill_stale(state, provider_id).await,
-        BackfillPhase::SkillMissing => { let r = backfill_skill_missing(state, provider_id).await; if r.3 { warm_skill_cache(state).await; } r }
-        BackfillPhase::ConvTopicVectors => backfill_conv_topic_vectors(state, provider_id, cursor, BATCH_SIZE).await,
+        BackfillPhase::SkillMissing => {
+            let r = backfill_skill_missing(state, provider_id).await;
+            if r.3 {
+                warm_skill_cache(state).await;
+            }
+            r
+        }
+        BackfillPhase::ConvTopicVectors => {
+            backfill_conv_topic_vectors(state, provider_id, cursor, BATCH_SIZE).await
+        }
         BackfillPhase::ConvSummary => backfill_conv_summary(state, cursor, BATCH_SIZE).await,
         BackfillPhase::ConvRetry => backfill_conv_retry(state, MAX_RETRIES, BATCH_SIZE).await,
-        BackfillPhase::AstNodes => { let r = backfill_ast_nodes(state, provider_id).await; if r.3 { warm_ast_cache(state).await; } r }
+        BackfillPhase::AstNodes => {
+            let r = backfill_ast_nodes(state, provider_id).await;
+            if r.3 {
+                warm_ast_cache(state).await;
+            }
+            r
+        }
         BackfillPhase::Timeline => backfill_timelines(state).await,
-        BackfillPhase::MessageEmbeddings => backfill_message_embeddings(state, provider_id, cursor, 200).await, // v2: larger batch, internally capped by 2MB
+        BackfillPhase::MessageEmbeddings => {
+            backfill_message_embeddings(state, provider_id, cursor, 200).await
+        } // v2: larger batch, internally capped by 2MB
     };
 
     if batch_success > 0 || batch_failed > 0 {
-        let _ = state.store.backfill_update_progress(phase.as_str(), new_cursor, batch_success, batch_failed).await;
+        let _ = state
+            .store
+            .backfill_update_progress(phase.as_str(), new_cursor, batch_success, batch_failed)
+            .await;
     }
 
     if phase_done {
@@ -1074,138 +1312,342 @@ async fn backfill_run_phase(state: &AppState, provider_id: &str, phase: Backfill
         info!(phase = phase.as_str(), "Backfill phase completed");
         if let Some(next) = phase.next() {
             let total = match next {
-                BackfillPhase::ConvSummary => state.store.conversations_missing_summary_count().await.unwrap_or(0),
-                BackfillPhase::ConvTopicVectors => state.store.conversations_needing_topic_vectors_count(provider_id).await.unwrap_or(0),
+                BackfillPhase::ConvSummary => state
+                    .store
+                    .conversations_missing_summary_count()
+                    .await
+                    .unwrap_or(0),
+                BackfillPhase::ConvTopicVectors => state
+                    .store
+                    .conversations_needing_topic_vectors_count(provider_id)
+                    .await
+                    .unwrap_or(0),
                 _ => 0,
             };
             let _ = state.store.backfill_start_phase(next.as_str(), total).await;
-            backfill_enqueue(state, EmbeddingTask::RunBackfillPhase { phase: next, cursor: 0 }).await;
+            backfill_enqueue(
+                state,
+                EmbeddingTask::RunBackfillPhase {
+                    phase: next,
+                    cursor: 0,
+                },
+            )
+            .await;
         } else {
             info!("Full embedding backfill complete");
         }
     } else {
         // Backoff on batch-level failure (e.g. Ollama down): avoid tight retry loop
         if batch_success == 0 && batch_failed > 0 {
-            warn!(phase = phase.as_str(), failed = batch_failed, "Batch-level failure, backing off 5s");
+            warn!(
+                phase = phase.as_str(),
+                failed = batch_failed,
+                "Batch-level failure, backing off 5s"
+            );
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
-        backfill_enqueue(state, EmbeddingTask::RunBackfillPhase { phase, cursor: new_cursor }).await;
+        backfill_enqueue(
+            state,
+            EmbeddingTask::RunBackfillPhase {
+                phase,
+                cursor: new_cursor,
+            },
+        )
+        .await;
     }
 }
 
 // ── Phase implementations (each returns: success, failed, new_cursor, phase_done) ──
 
 async fn backfill_kb_stale(state: &AppState, provider_id: &str) -> (i64, i64, i64, bool) {
-    let Some(ref emb_svc) = state.embedding_service else { return (0, 0, 0, true) };
-    let stale = state.store.kb_entries_stale_embedding(provider_id, 20).await.unwrap_or_default();
-    if stale.is_empty() { return (0, 0, 0, true); }
+    let Some(ref emb_svc) = state.embedding_service else {
+        return (0, 0, 0, true);
+    };
+    let stale = state
+        .store
+        .kb_entries_stale_embedding(provider_id, 20)
+        .await
+        .unwrap_or_default();
+    if stale.is_empty() {
+        return (0, 0, 0, true);
+    }
     info!(count = stale.len(), "KB stale re-embedding");
     let mut success = 0i64;
     for (id, summary, detail) in &stale {
         let embed_text = format!("知识条目：{}\n详情：{}", summary, detail);
         let svc = Arc::clone(emb_svc);
-        if let Ok(Ok(Some(vec))) = tokio::time::timeout(std::time::Duration::from_secs(30), tokio::task::spawn_blocking(move || svc.embed(&embed_text))).await {
-            let _ = state.store.kb_set_embedding(id, &vec, provider_id).await; success += 1;
+        if let Ok(Ok(Some(vec))) = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tokio::task::spawn_blocking(move || svc.embed(&embed_text)),
+        )
+        .await
+        {
+            let _ = state.store.kb_set_embedding(id, &vec, provider_id).await;
+            success += 1;
         }
     }
     (success, 0, 0, stale.len() < 20)
 }
 
 async fn backfill_kb_missing(state: &AppState, provider_id: &str) -> (i64, i64, i64, bool) {
-    let Some(ref emb_svc) = state.embedding_service else { return (0, 0, 0, true) };
-    let missing = state.store.kb_entries_missing_embedding(None).await.unwrap_or_default();
-    if missing.is_empty() { return (0, 0, 0, true); }
+    let Some(ref emb_svc) = state.embedding_service else {
+        return (0, 0, 0, true);
+    };
+    let missing = state
+        .store
+        .kb_entries_missing_embedding(None)
+        .await
+        .unwrap_or_default();
+    if missing.is_empty() {
+        return (0, 0, 0, true);
+    }
     info!(count = missing.len(), "KB missing embedding backfill");
     let mut success = 0i64;
     for (id, summary, detail) in &missing {
         let embed_text = format!("知识条目：{}\n详情：{}", summary, detail);
         let svc = Arc::clone(emb_svc);
-        if let Ok(Ok(Some(vec))) = tokio::time::timeout(std::time::Duration::from_secs(30), tokio::task::spawn_blocking(move || svc.embed(&embed_text))).await {
-            let _ = state.store.kb_set_embedding(id, &vec, provider_id).await; success += 1;
+        if let Ok(Ok(Some(vec))) = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tokio::task::spawn_blocking(move || svc.embed(&embed_text)),
+        )
+        .await
+        {
+            let _ = state.store.kb_set_embedding(id, &vec, provider_id).await;
+            success += 1;
         }
     }
     (success, 0, 0, missing.len() < 20)
 }
 
 async fn backfill_skill_stale(state: &AppState, provider_id: &str) -> (i64, i64, i64, bool) {
-    let Some(ref emb_svc) = state.embedding_service else { return (0, 0, 0, true) };
-    let stale = state.store.skill_topics_stale_embedding(provider_id, 20).await.unwrap_or_default();
-    if stale.is_empty() { return (0, 0, 0, true); }
+    let Some(ref emb_svc) = state.embedding_service else {
+        return (0, 0, 0, true);
+    };
+    let stale = state
+        .store
+        .skill_topics_stale_embedding(provider_id, 20)
+        .await
+        .unwrap_or_default();
+    if stale.is_empty() {
+        return (0, 0, 0, true);
+    }
     info!(count = stale.len(), "Skill stale re-embedding");
     let mut success = 0i64;
     for (topic, embed_text) in &stale {
-        let svc = Arc::clone(emb_svc); let text = embed_text.clone();
-        if let Ok(Ok(Some(vec))) = tokio::time::timeout(std::time::Duration::from_secs(30), tokio::task::spawn_blocking(move || svc.embed(&text))).await {
-            let _ = state.store.skill_set_topic_embedding(topic, &vec, provider_id).await; success += 1;
+        let svc = Arc::clone(emb_svc);
+        let text = embed_text.clone();
+        if let Ok(Ok(Some(vec))) = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tokio::task::spawn_blocking(move || svc.embed(&text)),
+        )
+        .await
+        {
+            let _ = state
+                .store
+                .skill_set_topic_embedding(topic, &vec, provider_id)
+                .await;
+            success += 1;
         }
     }
     (success, 0, 0, stale.len() < 20)
 }
 
 async fn backfill_skill_missing(state: &AppState, provider_id: &str) -> (i64, i64, i64, bool) {
-    let Some(ref emb_svc) = state.embedding_service else { return (0, 0, 0, true) };
-    let missing = state.store.skill_topics_missing_embedding(20).await.unwrap_or_default();
-    if missing.is_empty() { return (0, 0, 0, true); }
+    let Some(ref emb_svc) = state.embedding_service else {
+        return (0, 0, 0, true);
+    };
+    let missing = state
+        .store
+        .skill_topics_missing_embedding(20)
+        .await
+        .unwrap_or_default();
+    if missing.is_empty() {
+        return (0, 0, 0, true);
+    }
     info!(count = missing.len(), "Skill missing embedding backfill");
     let mut success = 0i64;
     for (topic, embed_text) in &missing {
-        let svc = Arc::clone(emb_svc); let text = embed_text.clone();
-        if let Ok(Ok(Some(vec))) = tokio::time::timeout(std::time::Duration::from_secs(30), tokio::task::spawn_blocking(move || svc.embed(&text))).await {
-            let _ = state.store.skill_set_topic_embedding(topic, &vec, provider_id).await; success += 1;
+        let svc = Arc::clone(emb_svc);
+        let text = embed_text.clone();
+        if let Ok(Ok(Some(vec))) = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tokio::task::spawn_blocking(move || svc.embed(&text)),
+        )
+        .await
+        {
+            let _ = state
+                .store
+                .skill_set_topic_embedding(topic, &vec, provider_id)
+                .await;
+            success += 1;
         }
     }
     (success, 0, 0, missing.len() < 20)
 }
 
-async fn backfill_conv_topic_vectors(state: &AppState, provider_id: &str, cursor: i64, batch_size: i64) -> (i64, i64, i64, bool) {
-    let batch = state.store.conversations_needing_topic_vectors_cursor(provider_id, cursor, batch_size).await.unwrap_or_default();
-    if batch.is_empty() { return (0, 0, cursor, true); }
-    info!(count = batch.len(), cursor, "Conv topic vector backfill batch");
-    let mut success = 0i64; let mut failed = 0i64; let mut max_rowid = cursor;
+async fn backfill_conv_topic_vectors(
+    state: &AppState,
+    provider_id: &str,
+    cursor: i64,
+    batch_size: i64,
+) -> (i64, i64, i64, bool) {
+    let batch = state
+        .store
+        .conversations_needing_topic_vectors_cursor(provider_id, cursor, batch_size)
+        .await
+        .unwrap_or_default();
+    if batch.is_empty() {
+        return (0, 0, cursor, true);
+    }
+    info!(
+        count = batch.len(),
+        cursor, "Conv topic vector backfill batch"
+    );
+    let mut success = 0i64;
+    let mut failed = 0i64;
+    let mut max_rowid = cursor;
     for (rowid, session_id) in &batch {
         max_rowid = max_rowid.max(*rowid);
-        match tokio::time::timeout(std::time::Duration::from_secs(90), generate_and_store_conv_embedding(state, session_id)).await {
-            Ok(()) => { success += 1; let _ = state.store.backfill_clear_failure(session_id, "conv_topic_vectors").await; }
-            Err(_) => { warn!(session = %session_id, "Topic vector backfill timed out"); let _ = state.store.backfill_record_failure(session_id, "conv_topic_vectors", "timeout_90s").await; failed += 1; }
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(90),
+            generate_and_store_conv_embedding(state, session_id),
+        )
+        .await
+        {
+            Ok(()) => {
+                success += 1;
+                let _ = state
+                    .store
+                    .backfill_clear_failure(session_id, "conv_topic_vectors")
+                    .await;
+            }
+            Err(_) => {
+                warn!(session = %session_id, "Topic vector backfill timed out");
+                let _ = state
+                    .store
+                    .backfill_record_failure(session_id, "conv_topic_vectors", "timeout_90s")
+                    .await;
+                failed += 1;
+            }
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-    (success, failed, max_rowid, batch.len() < batch_size as usize)
+    (
+        success,
+        failed,
+        max_rowid,
+        batch.len() < batch_size as usize,
+    )
 }
 
-async fn backfill_conv_summary(state: &AppState, cursor: i64, batch_size: i64) -> (i64, i64, i64, bool) {
-    let batch = state.store.conversations_missing_summary_cursor(cursor, batch_size).await.unwrap_or_default();
-    if batch.is_empty() { return (0, 0, cursor, true); }
+async fn backfill_conv_summary(
+    state: &AppState,
+    cursor: i64,
+    batch_size: i64,
+) -> (i64, i64, i64, bool) {
+    let batch = state
+        .store
+        .conversations_missing_summary_cursor(cursor, batch_size)
+        .await
+        .unwrap_or_default();
+    if batch.is_empty() {
+        return (0, 0, cursor, true);
+    }
     info!(count = batch.len(), cursor, "Conv summary backfill batch");
-    let mut success = 0i64; let mut failed = 0i64; let mut max_rowid = cursor;
+    let mut success = 0i64;
+    let mut failed = 0i64;
+    let mut max_rowid = cursor;
     for (idx, (rowid, session_id)) in batch.iter().enumerate() {
         max_rowid = max_rowid.max(*rowid);
         info!(session = %session_id, idx = idx + 1, total = batch.len(), "Processing session");
-        match tokio::time::timeout(std::time::Duration::from_secs(90), generate_and_store_conv_embedding(state, session_id)).await {
-            Ok(()) => { info!(session = %session_id, idx = idx + 1, "Session done"); success += 1; let _ = state.store.backfill_clear_failure(session_id, "conv_summary").await; }
-            Err(_) => { warn!(session = %session_id, idx = idx + 1, "Conv embedding timed out (90s)"); let _ = state.store.backfill_record_failure(session_id, "conv_summary", "timeout_90s").await; failed += 1; }
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(90),
+            generate_and_store_conv_embedding(state, session_id),
+        )
+        .await
+        {
+            Ok(()) => {
+                info!(session = %session_id, idx = idx + 1, "Session done");
+                success += 1;
+                let _ = state
+                    .store
+                    .backfill_clear_failure(session_id, "conv_summary")
+                    .await;
+            }
+            Err(_) => {
+                warn!(session = %session_id, idx = idx + 1, "Conv embedding timed out (90s)");
+                let _ = state
+                    .store
+                    .backfill_record_failure(session_id, "conv_summary", "timeout_90s")
+                    .await;
+                failed += 1;
+            }
         }
     }
-    (success, failed, max_rowid, batch.len() < batch_size as usize)
+    (
+        success,
+        failed,
+        max_rowid,
+        batch.len() < batch_size as usize,
+    )
 }
 
-async fn backfill_conv_retry(state: &AppState, max_retries: i64, batch_size: i64) -> (i64, i64, i64, bool) {
-    let mut total_success = 0i64; let mut total_failed = 0i64; let mut has_work = false;
+async fn backfill_conv_retry(
+    state: &AppState,
+    max_retries: i64,
+    batch_size: i64,
+) -> (i64, i64, i64, bool) {
+    let mut total_success = 0i64;
+    let mut total_failed = 0i64;
+    let mut has_work = false;
     let mut has_cooling = false;
     for phase_name in &["conv_summary", "conv_topic_vectors"] {
-        let retryable = state.store.backfill_retryable_failures(phase_name, max_retries, batch_size).await.unwrap_or_default();
+        let retryable = state
+            .store
+            .backfill_retryable_failures(phase_name, max_retries, batch_size)
+            .await
+            .unwrap_or_default();
         if retryable.is_empty() {
             // Check if failures exist but are in cooldown (updated_at within last 5 min)
-            let all_remaining = state.store.backfill_retryable_failures_no_cooldown(phase_name, max_retries).await.unwrap_or(0);
-            if all_remaining > 0 { has_cooling = true; }
+            let all_remaining = state
+                .store
+                .backfill_retryable_failures_no_cooldown(phase_name, max_retries)
+                .await
+                .unwrap_or(0);
+            if all_remaining > 0 {
+                has_cooling = true;
+            }
             continue;
         }
         has_work = true;
-        info!(count = retryable.len(), phase = *phase_name, "Retrying failed sessions");
+        info!(
+            count = retryable.len(),
+            phase = *phase_name,
+            "Retrying failed sessions"
+        );
         for session_id in &retryable {
-            match tokio::time::timeout(std::time::Duration::from_secs(120), generate_and_store_conv_embedding(state, session_id)).await {
-                Ok(()) => { info!(session = %session_id, "Retry succeeded"); let _ = state.store.backfill_clear_failure(session_id, phase_name).await; total_success += 1; }
-                Err(_) => { warn!(session = %session_id, "Retry timed out"); let _ = state.store.backfill_record_failure(session_id, phase_name, "retry_timeout_120s").await; total_failed += 1; }
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                generate_and_store_conv_embedding(state, session_id),
+            )
+            .await
+            {
+                Ok(()) => {
+                    info!(session = %session_id, "Retry succeeded");
+                    let _ = state
+                        .store
+                        .backfill_clear_failure(session_id, phase_name)
+                        .await;
+                    total_success += 1;
+                }
+                Err(_) => {
+                    warn!(session = %session_id, "Retry timed out");
+                    let _ = state
+                        .store
+                        .backfill_record_failure(session_id, phase_name, "retry_timeout_120s")
+                        .await;
+                    total_failed += 1;
+                }
             }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
@@ -1216,18 +1658,35 @@ async fn backfill_conv_retry(state: &AppState, max_retries: i64, batch_size: i64
 }
 
 async fn backfill_ast_nodes(state: &AppState, provider_id: &str) -> (i64, i64, i64, bool) {
-    let Some(ref emb_svc) = state.embedding_service else { return (0, 0, 0, true) };
-    let missing = state.store.ast_find_unembedded(20).await.unwrap_or_default();
-    if missing.is_empty() { return (0, 0, 0, true); }
+    let Some(ref emb_svc) = state.embedding_service else {
+        return (0, 0, 0, true);
+    };
+    let missing = state
+        .store
+        .ast_find_unembedded(20)
+        .await
+        .unwrap_or_default();
+    if missing.is_empty() {
+        return (0, 0, 0, true);
+    }
     info!(count = missing.len(), "AST embedding backfill batch");
     let mut success = 0i64;
     for (node_id, _repo, file_path) in &missing {
         if let Ok(Some(node_row)) = state.store.ast_get_node(node_id).await {
             let embed_text = node_row.node.embedding_text(file_path);
             let svc = Arc::clone(emb_svc);
-            if let Ok(Ok(Some(vec))) = tokio::time::timeout(std::time::Duration::from_secs(30), tokio::task::spawn_blocking(move || svc.embed(&embed_text))).await {
+            if let Ok(Ok(Some(vec))) = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                tokio::task::spawn_blocking(move || svc.embed(&embed_text)),
+            )
+            .await
+            {
                 let bytes = missiond_core::embedding::f32_vec_to_bytes(&vec);
-                let _ = state.store.ast_set_embedding(node_id, &bytes, provider_id).await; success += 1;
+                let _ = state
+                    .store
+                    .ast_set_embedding(node_id, &bytes, provider_id)
+                    .await;
+                success += 1;
             }
         }
     }
@@ -1235,41 +1694,100 @@ async fn backfill_ast_nodes(state: &AppState, provider_id: &str) -> (i64, i64, i
 }
 
 async fn backfill_timelines(state: &AppState) -> (i64, i64, i64, bool) {
-    let needing = state.store.conversations_needing_timeline(50).await.unwrap_or_default();
-    if needing.is_empty() { return (0, 0, 0, true); }
-    info!(count = needing.len(), "Building session timelines for compaction parents");
+    let needing = state
+        .store
+        .conversations_needing_timeline(50)
+        .await
+        .unwrap_or_default();
+    if needing.is_empty() {
+        return (0, 0, 0, true);
+    }
+    info!(
+        count = needing.len(),
+        "Building session timelines for compaction parents"
+    );
     let mut success = 0i64;
     for parent_id in &needing {
         let fragments = match state.store.get_compaction_fragments(parent_id).await {
-            Ok(f) => f, Err(e) => { warn!(parent = %parent_id, error = %e, "Failed to get compaction fragments"); continue; }
+            Ok(f) => f,
+            Err(e) => {
+                warn!(parent = %parent_id, error = %e, "Failed to get compaction fragments");
+                continue;
+            }
         };
-        if fragments.is_empty() { continue; }
+        if fragments.is_empty() {
+            continue;
+        }
         let mut timeline_entries = Vec::new();
         for (idx, (frag_id, started_at, msg_count)) in fragments.iter().enumerate() {
-            let summary = state.store.get_last_assistant_content(frag_id).await.unwrap_or(None);
+            let summary = state
+                .store
+                .get_last_assistant_content(frag_id)
+                .await
+                .unwrap_or(None);
             let summary_tokens = summary.as_ref().map(|s| s.len() / 4).unwrap_or(0);
             timeline_entries.push(serde_json::json!({ "fragment_id": frag_id, "shard_index": idx, "started_at": started_at, "message_count": msg_count, "summary_tokens": summary_tokens, "summary": summary, "segment_embedding_id": null }));
         }
-        let timeline_json = serde_json::to_string(&timeline_entries).unwrap_or_else(|_| "[]".to_string());
-        match state.store.set_session_timeline(parent_id, &timeline_json).await {
-            Ok(true) => { let _ = state.store.clear_conversation_summary(parent_id).await; info!(parent = %parent_id, fragments = fragments.len(), "Session timeline built"); success += 1; }
-            Ok(false) => {} Err(e) => { warn!(parent = %parent_id, error = %e, "Failed to set session timeline"); }
+        let timeline_json =
+            serde_json::to_string(&timeline_entries).unwrap_or_else(|_| "[]".to_string());
+        match state
+            .store
+            .set_session_timeline(parent_id, &timeline_json)
+            .await
+        {
+            Ok(true) => {
+                let _ = state.store.clear_conversation_summary(parent_id).await;
+                info!(parent = %parent_id, fragments = fragments.len(), "Session timeline built");
+                success += 1;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                warn!(parent = %parent_id, error = %e, "Failed to set session timeline");
+            }
         }
     }
     (success, 0, 0, needing.len() < 50)
 }
 
 async fn warm_kb_caches(state: &AppState) {
-    if let Ok(all) = state.store.kb_load_embeddings("policy:decision").await { let mut guard = state.embedding_cache.write().await; *guard = all; info!(count = guard.len(), "KB policy cache refreshed after backfill"); }
-    if let Ok(all) = state.store.kb_load_all_embeddings().await { let mut guard = state.kb_search_cache.write().await; *guard = all; info!(count = guard.len(), "KB search cache refreshed after backfill"); }
+    if let Ok(all) = state.store.kb_load_embeddings("policy:decision").await {
+        let mut guard = state.embedding_cache.write().await;
+        *guard = all;
+        info!(
+            count = guard.len(),
+            "KB policy cache refreshed after backfill"
+        );
+    }
+    if let Ok(all) = state.store.kb_load_all_embeddings().await {
+        let mut guard = state.kb_search_cache.write().await;
+        *guard = all;
+        info!(
+            count = guard.len(),
+            "KB search cache refreshed after backfill"
+        );
+    }
 }
 
 async fn warm_skill_cache(state: &AppState) {
-    if let Ok(all) = state.store.skill_load_topic_embeddings().await { let mut guard = state.skill_embedding_cache.write().await; *guard = all; info!(count = guard.len(), "Skill embedding cache refreshed after backfill"); }
+    if let Ok(all) = state.store.skill_load_topic_embeddings().await {
+        let mut guard = state.skill_embedding_cache.write().await;
+        *guard = all;
+        info!(
+            count = guard.len(),
+            "Skill embedding cache refreshed after backfill"
+        );
+    }
 }
 
 async fn warm_ast_cache(state: &AppState) {
-    if let Ok(all) = state.store.ast_load_all_embeddings().await { let mut guard = state.ast_embedding_cache.write().await; *guard = all; info!(count = guard.len(), "AST embedding cache refreshed after backfill"); }
+    if let Ok(all) = state.store.ast_load_all_embeddings().await {
+        let mut guard = state.ast_embedding_cache.write().await;
+        *guard = all;
+        info!(
+            count = guard.len(),
+            "AST embedding cache refreshed after backfill"
+        );
+    }
 }
 
 /// Backfill message-level embeddings (v2): batch embed + batch insert + failure tracking.
@@ -1281,11 +1799,27 @@ async fn warm_ast_cache(state: &AppState) {
 /// 4. Batch INSERT via QueryBuilder
 /// 5. Failures → backfill_failures table (not lost by cursor advance)
 /// 6. Dynamic batch size capped by 2MB total content
-async fn backfill_message_embeddings(state: &AppState, provider_id: &str, cursor: i64, batch_size: i64) -> (i64, i64, i64, bool) {
-    let Some(ref emb_svc) = state.embedding_service else { return (0, 0, cursor, true) };
-    let batch = state.store.messages_pending_embedding(cursor, batch_size).await.unwrap_or_default();
-    if batch.is_empty() { return (0, 0, cursor, true); }
-    info!(count = batch.len(), cursor, "Message embedding backfill batch (v2)");
+async fn backfill_message_embeddings(
+    state: &AppState,
+    provider_id: &str,
+    cursor: i64,
+    batch_size: i64,
+) -> (i64, i64, i64, bool) {
+    let Some(ref emb_svc) = state.embedding_service else {
+        return (0, 0, cursor, true);
+    };
+    let batch = state
+        .store
+        .messages_pending_embedding(cursor, batch_size)
+        .await
+        .unwrap_or_default();
+    if batch.is_empty() {
+        return (0, 0, cursor, true);
+    }
+    info!(
+        count = batch.len(),
+        cursor, "Message embedding backfill batch (v2)"
+    );
 
     let mut max_id = cursor;
 
@@ -1322,7 +1856,10 @@ async fn backfill_message_embeddings(state: &AppState, provider_id: &str, cursor
     // Phase 2: Batch insert skips
     let skip_count = skips.len() as i64;
     if !skips.is_empty() {
-        let _ = state.store.insert_message_embedding_skips_batch(&skips).await;
+        let _ = state
+            .store
+            .insert_message_embedding_skips_batch(&skips)
+            .await;
     }
 
     // Phase 3: Batch embed
@@ -1334,7 +1871,8 @@ async fn backfill_message_embeddings(state: &AppState, provider_id: &str, cursor
         let embed_result = tokio::time::timeout(
             std::time::Duration::from_secs(60), // Longer timeout for batch (ARB rec)
             tokio::task::spawn_blocking(move || svc.embed_batch(&texts)),
-        ).await;
+        )
+        .await;
 
         match embed_result {
             Ok(Ok(vectors)) => {
@@ -1343,30 +1881,48 @@ async fn backfill_message_embeddings(state: &AppState, provider_id: &str, cursor
                 for (i, maybe_vec) in vectors.into_iter().enumerate() {
                     match maybe_vec {
                         Some(vec) => {
-                            insert_entries.push((embed_ids[i], embed_sessions[i], vec, provider_id));
+                            insert_entries.push((
+                                embed_ids[i],
+                                embed_sessions[i],
+                                vec,
+                                provider_id,
+                            ));
                             embed_success += 1;
                         }
                         None => {
                             // Individual failure → record for retry
-                            let _ = state.store.backfill_record_failure(
-                                &embed_ids[i].to_string(), "message_embeddings", "embed_returned_none"
-                            ).await;
+                            let _ = state
+                                .store
+                                .backfill_record_failure(
+                                    &embed_ids[i].to_string(),
+                                    "message_embeddings",
+                                    "embed_returned_none",
+                                )
+                                .await;
                             embed_failed += 1;
                         }
                     }
                 }
                 // Phase 5: Batch insert embeddings
                 if !insert_entries.is_empty() {
-                    let _ = state.store.insert_message_embeddings_batch(&insert_entries).await;
+                    let _ = state
+                        .store
+                        .insert_message_embeddings_batch(&insert_entries)
+                        .await;
                 }
             }
             Ok(Err(e)) => {
                 // spawn_blocking panicked — record all as failures, RESET cursor
                 warn!(error = %e, "embed_batch spawn_blocking panicked");
                 for id in &embed_ids {
-                    let _ = state.store.backfill_record_failure(
-                        &id.to_string(), "message_embeddings", "spawn_panic"
-                    ).await;
+                    let _ = state
+                        .store
+                        .backfill_record_failure(
+                            &id.to_string(),
+                            "message_embeddings",
+                            "spawn_panic",
+                        )
+                        .await;
                 }
                 embed_failed = embed_ids.len() as i64;
                 // Reset max_id: don't advance cursor past batch-level failures
@@ -1376,9 +1932,14 @@ async fn backfill_message_embeddings(state: &AppState, provider_id: &str, cursor
                 // Timeout — batch-level failure, RESET cursor for retry
                 warn!("embed_batch timed out (60s), recording failures");
                 for id in &embed_ids {
-                    let _ = state.store.backfill_record_failure(
-                        &id.to_string(), "message_embeddings", "batch_timeout_60s"
-                    ).await;
+                    let _ = state
+                        .store
+                        .backfill_record_failure(
+                            &id.to_string(),
+                            "message_embeddings",
+                            "batch_timeout_60s",
+                        )
+                        .await;
                 }
                 embed_failed = embed_ids.len() as i64;
                 // Reset max_id: don't advance cursor past batch-level failures
@@ -1391,4 +1952,3 @@ async fn backfill_message_embeddings(state: &AppState, provider_id: &str, cursor
     let phase_done = batch.len() < batch_size as usize;
     (total_success, embed_failed, max_id, phase_done)
 }
-

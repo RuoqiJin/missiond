@@ -14,12 +14,16 @@
 //! via EventBus for persistent logging. Caller identity flows through `task_local!`.
 
 use std::num::NonZeroU32;
-use std::sync::{Arc, Mutex as StdMutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-use governor::{Quota, RateLimiter, clock::DefaultClock, state::{InMemoryState, NotKeyed}};
+use governor::{
+    clock::DefaultClock,
+    state::{InMemoryState, NotKeyed},
+    Quota, RateLimiter,
+};
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
@@ -47,7 +51,9 @@ pub(crate) fn current_session_id() -> Option<String> {
 
 /// Read caller identity from task-local context.
 fn current_caller() -> String {
-    REQUEST_CALLER.try_with(|c| c.clone()).unwrap_or_else(|_| "unknown".to_string())
+    REQUEST_CALLER
+        .try_with(|c| c.clone())
+        .unwrap_or_else(|_| "unknown".to_string())
 }
 
 /// Read parent span ID from task-local context (returns None if not set).
@@ -55,7 +61,6 @@ fn current_caller() -> String {
 pub(crate) fn current_parent_span_id() -> Option<String> {
     PARENT_SPAN_ID.try_with(|id| id.clone()).ok()
 }
-
 
 /// Shared Gemini rate limiter + retry client.
 /// Stored in `AppState` and used by all Gemini call sites.
@@ -93,9 +98,17 @@ impl Drop for RequestGuard<'_> {
         if !self.completed {
             let err: Result<serde_json::Value> = Err(anyhow!("request cancelled (future dropped)"));
             self.client.emit_completed_event(
-                &self.request_id, &self.caller, self.session_id.clone(),
-                &self.api_mode, &self.model, self.prompt_chars,
-                &err, self.queue_wait, self.api_start.elapsed(), 0, &self.span_id,
+                &self.request_id,
+                &self.caller,
+                self.session_id.clone(),
+                &self.api_mode,
+                &self.model,
+                self.prompt_chars,
+                &err,
+                self.queue_wait,
+                self.api_start.elapsed(),
+                0,
+                &self.span_id,
             );
         }
     }
@@ -105,9 +118,17 @@ impl RequestGuard<'_> {
     fn complete(mut self, result: &Result<serde_json::Value>, retry_count: u32) {
         self.completed = true;
         self.client.emit_completed_event(
-            &self.request_id, &self.caller, self.session_id.clone(),
-            &self.api_mode, &self.model, self.prompt_chars,
-            result, self.queue_wait, self.api_start.elapsed(), retry_count, &self.span_id,
+            &self.request_id,
+            &self.caller,
+            self.session_id.clone(),
+            &self.api_mode,
+            &self.model,
+            self.prompt_chars,
+            result,
+            self.queue_wait,
+            self.api_start.elapsed(),
+            retry_count,
+            &self.span_id,
         );
     }
 }
@@ -130,7 +151,10 @@ impl GeminiClient {
     /// Create a CLI-mode client that routes through Gemini CLI subprocess or PTY.
     ///
     /// Semaphore is 1 when PTY transport is active (PTY sessions are serial).
-    pub fn with_cli(cli: GeminiCli, event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>) -> Self {
+    pub fn with_cli(
+        cli: GeminiCli,
+        event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>,
+    ) -> Self {
         // CLI mode: relax rate limit (Google One AI Pro has generous limits)
         let quota = Quota::per_minute(NonZeroU32::new(60).unwrap());
         // PTY mode: 1 concurrent (spawn-per-call, serial queue)
@@ -163,7 +187,8 @@ impl GeminiClient {
         jwt: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value> {
-        self.send_with_timeout(http_client, url, jwt, body, None).await
+        self.send_with_timeout(http_client, url, jwt, body, None)
+            .await
     }
 
     /// Send a request with optional idle timeout override (CLI mode only).
@@ -181,13 +206,20 @@ impl GeminiClient {
         let request_id = uuid::Uuid::new_v4().to_string();
         let caller = current_caller();
         let session_id = current_session_id();
-        let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-        let prompt_chars: usize = body.get("messages")
+        let model = body
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let prompt_chars: usize = body
+            .get("messages")
             .and_then(|v| v.as_array())
-            .map(|msgs| msgs.iter()
-                .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
-                .map(|s| s.len())
-                .sum())
+            .map(|msgs| {
+                msgs.iter()
+                    .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+                    .map(|s| s.len())
+                    .sum()
+            })
             .unwrap_or(0);
 
         // 1. Acquire concurrency permit (measure queue wait)
@@ -202,11 +234,15 @@ impl GeminiClient {
         };
         let permit = tokio::time::timeout(queue_timeout, self.semaphore.clone().acquire_owned())
             .await
-            .map_err(|_| anyhow!(
-                "Gemini request queue timeout ({}s): another request is still processing. \
+            .map_err(|_| {
+                anyhow!(
+                    "Gemini request queue timeout ({}s): another request is still processing. \
                  Caller: {}, model: {}",
-                queue_timeout.as_secs(), caller, model
-            ))?
+                    queue_timeout.as_secs(),
+                    caller,
+                    model
+                )
+            })?
             .map_err(|_| anyhow!("Gemini semaphore closed"))?;
 
         // 2. Wait for RPM budget
@@ -216,7 +252,13 @@ impl GeminiClient {
         // 2b. Emit "request started" event with prompt preview
         let span_id = uuid::Uuid::new_v4().to_string();
         self.emit_started_event(
-            &request_id, &caller, session_id.clone(), &model, prompt_chars, body, &span_id,
+            &request_id,
+            &caller,
+            session_id.clone(),
+            &model,
+            prompt_chars,
+            body,
+            &span_id,
         );
 
         // 3. Drop guard — guarantees GeminiRequestCompleted on any exit path,
@@ -245,35 +287,46 @@ impl GeminiClient {
 
         let result: Result<serde_json::Value> = async move {
             if let Some(cli) = &self.cli {
-                let messages = body.get("messages").and_then(|v| v.as_array())
+                let messages = body
+                    .get("messages")
+                    .and_then(|v| v.as_array())
                     .ok_or_else(|| anyhow!("CLI mode: missing 'messages' in body"))?;
-                let max_tokens = body.get("max_tokens").and_then(|v| v.as_u64()).map(|n| n as u32);
+                let max_tokens = body
+                    .get("max_tokens")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
 
                 // Extract per-call channel override (injected by router_chat handler)
-                let auth_override = body.get("_channel")
+                let auth_override = body
+                    .get("_channel")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
                 // Extract per-call API key alias (injected by router_chat handler)
-                let api_key_alias = body.get("_api_key_alias")
+                let api_key_alias = body
+                    .get("_api_key_alias")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
                 // Extract optional working directory (for file-based agentic workflows)
-                let workspace_path = body.get("_workspace")
+                let workspace_path = body
+                    .get("_workspace")
                     .and_then(|v| v.as_str())
                     .map(std::path::PathBuf::from);
 
                 // Whitelist: only these models are allowed via CLI. Others fall back to default.
                 // Note: flash-lite is NOT supported by Gemini CLI (ModelNotFoundError).
-                let cli_model = body.get("model").and_then(|v| v.as_str())
+                let cli_model = body
+                    .get("model")
+                    .and_then(|v| v.as_str())
                     .and_then(|m| match m {
                         "gemini-3.1-pro-preview" => Some(m),
                         _ => None,
                     });
 
                 // Create progress channel to emit real-time tool activity events
-                let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<GeminiCliProgress>();
+                let (progress_tx, mut progress_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<GeminiCliProgress>();
 
                 // Spawn forwarder: converts GeminiCliProgress → DaemonEvent::CliToolActivity
                 // Also collects tool calls for inclusion in the response.
@@ -320,8 +373,16 @@ impl GeminiClient {
                             is_error: prog.is_error,
                         };
                         let summary = match prog.activity.as_str() {
-                            "tool_use" => format!("#{} → {}", prog.tool_seq, prog.tool_name.as_deref().unwrap_or("?")),
-                            _ => format!("#{} ← {}", prog.tool_seq, if prog.is_error { "error" } else { "ok" }),
+                            "tool_use" => format!(
+                                "#{} → {}",
+                                prog.tool_seq,
+                                prog.tool_name.as_deref().unwrap_or("?")
+                            ),
+                            _ => format!(
+                                "#{} ← {}",
+                                prog.tool_seq,
+                                if prog.is_error { "error" } else { "ok" }
+                            ),
                         };
                         let entry = TimelineEntry {
                             event,
@@ -334,14 +395,26 @@ impl GeminiClient {
                     }
                 });
 
-                let resp = cli.call(messages, cli_model, max_tokens, idle_timeout_override, Some(progress_tx), auth_override.as_deref(), api_key_alias.as_deref(), workspace_path.as_deref()).await;
+                let resp = cli
+                    .call(
+                        messages,
+                        cli_model,
+                        max_tokens,
+                        idle_timeout_override,
+                        Some(progress_tx),
+                        auth_override.as_deref(),
+                        api_key_alias.as_deref(),
+                        workspace_path.as_deref(),
+                    )
+                    .await;
                 drop(permit);
                 // Drop the sender side is implicit (cli.call finished), wait for forwarder to drain
                 let _ = forwarder.await;
                 let resp = resp?;
 
                 // Extract collected tool calls from forwarder
-                let tool_calls = collected_tools.lock()
+                let tool_calls = collected_tools
+                    .lock()
                     .map(|v| v.clone())
                     .unwrap_or_default();
 
@@ -354,7 +427,8 @@ impl GeminiClient {
                 }
                 Ok(result)
             } else {
-                let resp = http_client.post(url)
+                let resp = http_client
+                    .post(url)
                     .header("Content-Type", "application/json")
                     .header("Authorization", format!("Bearer {}", jwt))
                     .json(body)
@@ -367,7 +441,9 @@ impl GeminiClient {
                     drop(permit);
                     warn!(body = %err_body, "Gemini 429 RESOURCE_EXHAUSTED, starting retry");
                     self.retry_count.fetch_add(1, Ordering::Relaxed);
-                    return self.retry_with_backoff(http_client, url, jwt, body, 3).await;
+                    return self
+                        .retry_with_backoff(http_client, url, jwt, body, 3)
+                        .await;
                 }
 
                 drop(permit);
@@ -379,10 +455,12 @@ impl GeminiClient {
                     return Err(anyhow!("Router returned {}: {}", status, err_body));
                 }
 
-                resp.json().await
+                resp.json()
+                    .await
                     .map_err(|e| anyhow!("Failed to parse Gemini response: {}", e))
             }
-        }.await;
+        }
+        .await;
 
         // 5. Normal completion — emit real result (disarms guard drop)
         guard.complete(&result, 0);
@@ -424,9 +502,13 @@ impl GeminiClient {
         span_id: &str,
     ) {
         // Extract full last-user-message text for DB storage (no truncation)
-        let prompt_text = body.get("messages")
+        let prompt_text = body
+            .get("messages")
             .and_then(|v| v.as_array())
-            .and_then(|msgs| msgs.iter().rfind(|m| m.get("role").and_then(|r| r.as_str()) == Some("user")))
+            .and_then(|msgs| {
+                msgs.iter()
+                    .rfind(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+            })
             .and_then(|m| m.get("content").and_then(|c| c.as_str()))
             .map(|s| s.to_string());
 
@@ -447,7 +529,10 @@ impl GeminiClient {
             trace_id,
             span_id: span_id.to_string(),
             parent_span_id: parent,
-            summary: Some(format!("{} → {} (prompt {}ch)", caller, model, prompt_chars)),
+            summary: Some(format!(
+                "{} → {} (prompt {}ch)",
+                caller, model, prompt_chars
+            )),
         };
         let _ = self.event_tx.send(entry);
     }
@@ -469,14 +554,24 @@ impl GeminiClient {
     ) {
         let (status, response_chars, error_msg, response_text) = match result {
             Ok(v) => {
-                let content = v.pointer("/choices/0/message/content")
+                let content = v
+                    .pointer("/choices/0/message/content")
                     .and_then(|c| c.as_str())
                     .unwrap_or("");
-                ("ok".to_string(), content.len(), None, Some(content.to_string()))
+                (
+                    "ok".to_string(),
+                    content.len(),
+                    None,
+                    Some(content.to_string()),
+                )
             }
             Err(e) => {
                 let msg = e.to_string();
-                let status = if msg.contains("timed out") { "timeout" } else { "error" };
+                let status = if msg.contains("timed out") {
+                    "timeout"
+                } else {
+                    "error"
+                };
                 (status.to_string(), 0, Some(msg), None)
             }
         };
@@ -522,7 +617,12 @@ impl GeminiClient {
             trace_id,
             span_id: span_id.to_string(),
             parent_span_id: parent,
-            summary: Some(format!("{} → {} ({}ms)", caller, model, api_duration.as_millis())),
+            summary: Some(format!(
+                "{} → {} ({}ms)",
+                caller,
+                model,
+                api_duration.as_millis()
+            )),
         };
         let _ = self.event_tx.send(entry);
     }
@@ -537,15 +637,24 @@ impl GeminiClient {
     ) -> Result<serde_json::Value> {
         for attempt in 1..=max_retries {
             let delay = Duration::from_secs(2u64.pow(attempt)); // 2s, 4s, 8s
-            info!(attempt, max_retries, delay_secs = delay.as_secs(), "Gemini 429 retry backoff");
+            info!(
+                attempt,
+                max_retries,
+                delay_secs = delay.as_secs(),
+                "Gemini 429 retry backoff"
+            );
             tokio::time::sleep(delay).await;
 
             // Re-acquire permit + rate limit for each retry
-            let permit = self.semaphore.acquire().await
+            let permit = self
+                .semaphore
+                .acquire()
+                .await
                 .map_err(|_| anyhow!("Gemini semaphore closed"))?;
             self.rate_limiter.until_ready().await;
 
-            let resp = http_client.post(url)
+            let resp = http_client
+                .post(url)
                 .header("Content-Type", "application/json")
                 .header("Authorization", format!("Bearer {}", jwt))
                 .json(body)
@@ -562,7 +671,11 @@ impl GeminiClient {
                 }
                 self.error_count.fetch_add(1, Ordering::Relaxed);
                 let err_body = resp.text().await.unwrap_or_default();
-                return Err(anyhow!("Gemini 429 after {} retries: {}", max_retries, err_body));
+                return Err(anyhow!(
+                    "Gemini 429 after {} retries: {}",
+                    max_retries,
+                    err_body
+                ));
             }
 
             drop(permit);
@@ -574,7 +687,9 @@ impl GeminiClient {
                 return Err(anyhow!("Router returned {}: {}", status, err_body));
             }
 
-            return resp.json().await
+            return resp
+                .json()
+                .await
                 .map_err(|e| anyhow!("Failed to parse Gemini response: {}", e));
         }
         unreachable!()

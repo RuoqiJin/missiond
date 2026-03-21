@@ -1,26 +1,34 @@
 use anyhow::{anyhow, Result};
+use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::info;
-use missiond_mcp::tools::ToolResult;
 
-use crate::state::AppState;
-use crate::slot_env::capture_slot_session_uuid;
 use crate::helpers::default_mission_home;
-use std::path::PathBuf;
-use missiond_core::PTYSpawnOptions;
 use crate::lenient;
 use crate::slot_env::build_slot_tracking_env;
+use crate::slot_env::capture_slot_session_uuid;
+use crate::state::AppState;
+use missiond_core::PTYSpawnOptions;
+use std::path::PathBuf;
 
 #[derive(Deserialize)]
 struct PTYSpawnArgs {
     #[serde(rename = "slotId")]
     slot_id: String,
-    #[serde(rename = "waitForIdle", default, deserialize_with = "lenient::option_bool")]
+    #[serde(
+        rename = "waitForIdle",
+        default,
+        deserialize_with = "lenient::option_bool"
+    )]
     wait_for_idle: Option<bool>,
     #[serde(rename = "timeoutSecs", default)]
     timeout_secs: Option<u64>,
-    #[serde(rename = "autoRestart", default, deserialize_with = "lenient::option_bool")]
+    #[serde(
+        rename = "autoRestart",
+        default,
+        deserialize_with = "lenient::option_bool"
+    )]
     auto_restart: Option<bool>,
     #[serde(rename = "mcpConfigPath", default)]
     mcp_config_path: Option<String>,
@@ -31,7 +39,11 @@ struct PTYSendArgs {
     #[serde(rename = "slotId")]
     slot_id: String,
     message: String,
-    #[serde(rename = "waitForResponse", default, deserialize_with = "lenient::option_bool")]
+    #[serde(
+        rename = "waitForResponse",
+        default,
+        deserialize_with = "lenient::option_bool"
+    )]
     wait_for_response: Option<bool>,
     #[serde(rename = "timeoutMs", default)]
     timeout_ms: Option<u64>,
@@ -91,7 +103,10 @@ struct PTYScreenshotArgs {
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     // Consolidated tools
     if name == "mission_pty_read" {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("screen");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("screen");
         return match action {
             "screen" => handle_inner(state, "mission_pty_screen", args).await,
             "history" => handle_inner(state, "mission_pty_history", args).await,
@@ -100,7 +115,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         };
     }
     if name == "mission_pty_signal" {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("kill");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("kill");
         return match action {
             "kill" => handle_inner(state, "mission_pty_kill", args).await,
             "interrupt" => handle_inner(state, "mission_pty_interrupt", args).await,
@@ -151,11 +169,14 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     wait_for_idle: wait,
                     timeout_secs,
                     mcp_config,
-                    dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+                    dangerously_skip_permissions: slot
+                        .config
+                        .dangerously_skip_permissions
+                        .unwrap_or(false),
                     model: slot.config.model.clone(),
                     extra_env: std::collections::HashMap::new(),
                 },
-                slot.config.env.as_ref()
+                slot.config.env.as_ref(),
             )
             .await?;
 
@@ -199,11 +220,23 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let PTYKillArgs { slot_id } = serde_json::from_value(args)?;
             state.pty.kill(&slot_id).await?;
             // Clear from compact restart pending set (slot is being rebuilt)
-            state.pending_compact_restart.lock().unwrap().remove(&slot_id);
+            state
+                .pending_compact_restart
+                .lock()
+                .unwrap()
+                .remove(&slot_id);
             // Requeue any Running submit tasks assigned to this slot
-            let requeued = state.store.requeue_running_tasks_for_slot(&slot_id).await.unwrap_or(0);
+            let requeued = state
+                .store
+                .requeue_running_tasks_for_slot(&slot_id)
+                .await
+                .unwrap_or(0);
             // Release any board task claims held by this slot
-            let claims_released = state.store.release_board_claims_by_executor(&slot_id).await.unwrap_or(0);
+            let claims_released = state
+                .store
+                .release_board_claims_by_executor(&slot_id)
+                .await
+                .unwrap_or(0);
             Ok(ToolResult::json(
                 &serde_json::json!({ "success": true, "slotId": slot_id, "requeuedTasks": requeued, "claimsReleased": claims_released }),
             ))
@@ -223,22 +256,25 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             Ok(ToolResult::json(&history))
         }
         "mission_pty_status" => {
-            let PTYStatusArgs { slot_id } = serde_json::from_value(args).unwrap_or(PTYStatusArgs {
-                slot_id: None,
-            });
+            let PTYStatusArgs { slot_id } =
+                serde_json::from_value(args).unwrap_or(PTYStatusArgs { slot_id: None });
             if let Some(slot_id) = slot_id {
                 let status = state.pty.get_status(&slot_id).await;
                 match status {
                     Some(info) => {
                         let mut obj = serde_json::to_value(&info).unwrap_or_default();
                         // Enrich with session_uuid and JSONL activity
-                        if let Ok(Some(session_uuid)) = state.store.get_slot_session(&slot_id).await {
+                        if let Ok(Some(session_uuid)) = state.store.get_slot_session(&slot_id).await
+                        {
                             obj["sessionId"] = json!(session_uuid);
-                            if let Ok(Some(conv)) = state.store.get_conversation(&session_uuid).await {
+                            if let Ok(Some(conv)) =
+                                state.store.get_conversation(&session_uuid).await
+                            {
                                 if let Some(ref jsonl_path) = conv.jsonl_path {
                                     if let Ok(metadata) = std::fs::metadata(jsonl_path) {
                                         if let Ok(modified) = metadata.modified() {
-                                            let secs_ago = modified.elapsed().unwrap_or_default().as_secs();
+                                            let secs_ago =
+                                                modified.elapsed().unwrap_or_default().as_secs();
                                             obj["lastActivitySecsAgo"] = json!(secs_ago);
                                         }
                                     }
@@ -261,7 +297,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                                 // Truncate to 2KB for status response
                                 let truncated = if resp.len() > 2048 {
                                     let mut end = 2048;
-                                    while end > 0 && !resp.is_char_boundary(end) { end -= 1; }
+                                    while end > 0 && !resp.is_char_boundary(end) {
+                                        end -= 1;
+                                    }
                                     format!("{}...(truncated)", &resp[..end])
                                 } else {
                                     resp.clone()
@@ -343,7 +381,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     if let Some(learned) = state.permission.learned() {
                         let decision = if is_approval { "allow" } else { "deny" };
                         if let Some(status) = state.pty.get_status(&slot_id).await {
-                            if let Err(e) = learned.learn("role", &status.role, &tool.name, decision, None) {
+                            if let Err(e) =
+                                learned.learn("role", &status.role, &tool.name, decision, None)
+                            {
                                 tracing::warn!(error = %e, "Failed to record learned permission");
                             } else {
                                 tracing::info!(
@@ -379,10 +419,19 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             // Find JSONL path from slot→session DB mapping
             let jsonl_path = match state.store.get_all_slot_sessions().await.ok() {
                 Some(sessions) => {
-                    if let Some((_, session_uuid)) = sessions.into_iter().find(|(sid, _)| sid == &slot_id) {
-                        state.store.get_conversation(&session_uuid).await.ok().flatten()
+                    if let Some((_, session_uuid)) =
+                        sessions.into_iter().find(|(sid, _)| sid == &slot_id)
+                    {
+                        state
+                            .store
+                            .get_conversation(&session_uuid)
+                            .await
+                            .ok()
+                            .flatten()
                             .and_then(|c| c.jsonl_path)
-                    } else { None }
+                    } else {
+                        None
+                    }
                 }
                 None => None,
             };
@@ -396,7 +445,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let hint = if let Some(ref jp) = jsonl_path {
                 format!("Get-Content -Path \"{}\" -Wait -Tail 50", jp)
             } else {
-                format!("Get-Content -Path \"{}\" -Wait -Tail 50", status.log_file.display())
+                format!(
+                    "Get-Content -Path \"{}\" -Wait -Tail 50",
+                    status.log_file.display()
+                )
             };
 
             Ok(ToolResult::json(&serde_json::json!({
@@ -416,10 +468,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let (request_id, rx) = state.screenshot_broker.request(&slot_id).await;
             let _ = &request_id; // request is already broadcast by broker
 
-            let browser_result = tokio::time::timeout(
-                state.screenshot_broker.timeout,
-                rx,
-            ).await;
+            let browser_result = tokio::time::timeout(state.screenshot_broker.timeout, rx).await;
 
             let (path, source) = match browser_result {
                 Ok(Ok(Ok(result))) => {
@@ -443,7 +492,6 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 "hint": "Use the Read tool to view this PNG image"
             })))
         }
-
 
         _ => Err(anyhow!("Unknown pty tool: {name}")),
     }

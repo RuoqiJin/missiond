@@ -6,8 +6,8 @@
 //! Safety: exploration tasks are auto_execute=true but READ-ONLY analysis.
 //! Any modification suggestions become auto_execute=false follow-up tasks.
 
-use tracing::{info, debug, warn};
 use crate::state::AppState;
+use tracing::{debug, info, warn};
 
 /// Cadence: minimum interval between exploration runs (2 hours).
 const EXPLORE_INTERVAL_SECS: i64 = 2 * 3600;
@@ -20,8 +20,10 @@ const EXPLORE_INTERVAL_SECS: i64 = 2 * 3600;
 pub(crate) async fn check_idle_exploration(state: &AppState) {
     // Gate 1: cadence — at least 2h since last exploration
     let now = chrono::Utc::now().timestamp();
-    let last = state.store
-        .daemon_state_get("last_idle_explore_at").await
+    let last = state
+        .store
+        .daemon_state_get("last_idle_explore_at")
+        .await
         .unwrap_or(None)
         .unwrap_or(0);
     if now - last < EXPLORE_INTERVAL_SECS {
@@ -39,7 +41,10 @@ pub(crate) async fn check_idle_exploration(state: &AppState) {
     // Gate 3: no pending explore tasks already (prevent flooding)
     match state.store.count_tasks_by_category("explore").await {
         Ok(n) if n > 0 => {
-            debug!(pending = n, "Idle explorer: existing explore task pending, skipping");
+            debug!(
+                pending = n,
+                "Idle explorer: existing explore task pending, skipping"
+            );
             return;
         }
         Err(e) => {
@@ -50,9 +55,16 @@ pub(crate) async fn check_idle_exploration(state: &AppState) {
     }
 
     // Gate 4: no high/medium priority work in progress
-    match state.store.count_open_tasks_by_priority(&["high", "medium"]).await {
+    match state
+        .store
+        .count_open_tasks_by_priority(&["high", "medium"])
+        .await
+    {
         Ok(n) if n > 0 => {
-            debug!(active_work = n, "Idle explorer: active work tasks exist, skipping");
+            debug!(
+                active_work = n,
+                "Idle explorer: active work tasks exist, skipping"
+            );
             return;
         }
         Err(e) => {
@@ -71,8 +83,10 @@ pub(crate) async fn check_idle_exploration(state: &AppState) {
     let assignee = assignee.unwrap();
 
     // Round-robin through exploration types
-    let explore_idx = state.store
-        .daemon_state_get("idle_explore_idx").await
+    let explore_idx = state
+        .store
+        .daemon_state_get("idle_explore_idx")
+        .await
         .unwrap_or(None)
         .unwrap_or(0);
 
@@ -89,12 +103,24 @@ pub(crate) async fn check_idle_exploration(state: &AppState) {
     };
 
     if task_created {
-        let _ = state.store.daemon_state_set("last_idle_explore_at", now).await;
-        let _ = state.store.daemon_state_set("idle_explore_idx", explore_idx + 1).await;
+        let _ = state
+            .store
+            .daemon_state_set("last_idle_explore_at", now)
+            .await;
+        let _ = state
+            .store
+            .daemon_state_set("idle_explore_idx", explore_idx + 1)
+            .await;
         info!(explore_type = explore_idx % 6, assignee = %assignee, "Idle explorer: created exploration task");
     } else {
-        let _ = state.store.daemon_state_set("idle_explore_idx", explore_idx + 1).await;
-        debug!(explore_type = explore_idx % 6, "Idle explorer: no issues found for this type, advancing");
+        let _ = state
+            .store
+            .daemon_state_set("idle_explore_idx", explore_idx + 1)
+            .await;
+        debug!(
+            explore_type = explore_idx % 6,
+            "Idle explorer: no issues found for this type, advancing"
+        );
     }
 }
 
@@ -133,9 +159,15 @@ async fn explore_kb_consistency(state: &AppState, assignee: &str) -> bool {
         return false;
     }
 
-    let keys: Vec<String> = entries.iter().map(|e| {
-        format!("- `{}` (confidence: {:.2}, category: {})", e.key, e.confidence, e.category)
-    }).collect();
+    let keys: Vec<String> = entries
+        .iter()
+        .map(|e| {
+            format!(
+                "- `{}` (confidence: {:.2}, category: {})",
+                e.key, e.confidence, e.category
+            )
+        })
+        .collect();
     let keys_list = keys.join("\n");
 
     let description = format!(
@@ -150,7 +182,13 @@ async fn explore_kb_consistency(state: &AppState, assignee: &str) -> bool {
         entries.len(), keys_list,
     );
 
-    create_explore_task(state, "Explore: KB Consistency Review", &description, assignee).await
+    create_explore_task(
+        state,
+        "Explore: KB Consistency Review",
+        &description,
+        assignee,
+    )
+    .await
 }
 
 /// Explore 1: stale dependencies — check Cargo.toml for outdated crates.
@@ -173,7 +211,13 @@ async fn explore_stale_dependencies(state: &AppState, assignee: &str) -> bool {
         (auto_execute=false, priority=low) listing the recommended updates."
         .to_string();
 
-    create_explore_task(state, "Explore: Dependency Staleness Check", &description, assignee).await
+    create_explore_task(
+        state,
+        "Explore: Dependency Staleness Check",
+        &description,
+        assignee,
+    )
+    .await
 }
 
 /// Explore 2: unharvested beacons — find feature beacons that haven't been analyzed.
@@ -184,7 +228,8 @@ async fn explore_unharvested_beacons(state: &AppState, assignee: &str) -> bool {
     };
 
     // Filter to beacons with nodes but no description (never reviewed)
-    let unreviewed: Vec<_> = beacons.iter()
+    let unreviewed: Vec<_> = beacons
+        .iter()
         .filter(|b| b.node_count > 0 && b.description.is_none())
         .take(5)
         .collect();
@@ -193,9 +238,10 @@ async fn explore_unharvested_beacons(state: &AppState, assignee: &str) -> bool {
         return false;
     }
 
-    let beacon_list: Vec<String> = unreviewed.iter().map(|b| {
-        format!("- `{}` ({} nodes)", b.name, b.node_count)
-    }).collect();
+    let beacon_list: Vec<String> = unreviewed
+        .iter()
+        .map(|b| format!("- `{}` ({} nodes)", b.name, b.node_count))
+        .collect();
     let beacons_str = beacon_list.join("\n");
 
     let description = format!(
@@ -207,10 +253,17 @@ async fn explore_unharvested_beacons(state: &AppState, assignee: &str) -> bool {
         2. Read the relevant source files to understand the feature\n\
         3. Use `mission_beacon_annotate` to add a concise description\n\n\
         Report your findings as a Board note on this task when done.",
-        unreviewed.len(), beacons_str,
+        unreviewed.len(),
+        beacons_str,
     );
 
-    create_explore_task(state, "Explore: Beacon Feature Review", &description, assignee).await
+    create_explore_task(
+        state,
+        "Explore: Beacon Feature Review",
+        &description,
+        assignee,
+    )
+    .await
 }
 
 /// Explore 3: KB duplicate detection — find KB entries with similar keys.
@@ -235,7 +288,8 @@ async fn explore_kb_duplicates(state: &AppState, assignee: &str) -> bool {
     };
 
     // Find categories with high density (>10 entries) — most likely to have duplicates
-    let dense_cats: Vec<_> = categories.iter()
+    let dense_cats: Vec<_> = categories
+        .iter()
         .filter(|(_, &count)| count > 10)
         .map(|(cat, count)| format!("- `{}`: {} entries", cat, count))
         .collect();
@@ -259,7 +313,13 @@ async fn explore_kb_duplicates(state: &AppState, assignee: &str) -> bool {
         total, cats_str,
     );
 
-    create_explore_task(state, "Explore: KB Duplicate Detection", &description, assignee).await
+    create_explore_task(
+        state,
+        "Explore: KB Duplicate Detection",
+        &description,
+        assignee,
+    )
+    .await
 }
 
 /// Explore 4: Skill Synthesis — cluster high-confidence, high-access KB entries
@@ -274,15 +334,16 @@ async fn explore_skill_synthesis(state: &AppState, assignee: &str) -> bool {
     // Find high-quality entries with composite trigger:
     // confidence >= 0.85 AND confidence * ln(access_count + 1) >= 1.15
     // High-weight categories (architecture/policy) only need cluster >= 3
-    let candidates: Vec<_> = entries.iter()
+    let candidates: Vec<_> = entries
+        .iter()
         .filter(|e| e.kb_type == "rule" || e.kb_type == "fact")
         .filter(|e| {
-            e.confidence >= 0.85
-                && e.confidence * ((e.access_count as f64) + 1.0).ln() >= 1.15
+            e.confidence >= 0.85 && e.confidence * ((e.access_count as f64) + 1.0).ln() >= 1.15
         })
         // Time window: only recently active entries (accessed in last 30 days)
         .filter(|e| {
-            e.last_accessed_at.as_ref()
+            e.last_accessed_at
+                .as_ref()
                 .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
                 .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_days() <= 30)
                 .unwrap_or(false)
@@ -294,16 +355,24 @@ async fn explore_skill_synthesis(state: &AppState, assignee: &str) -> bool {
     }
 
     // Group by category prefix to find clusters
-    let mut clusters: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut clusters: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
     for e in &candidates {
-        let prefix = e.category.split(':').next().unwrap_or(&e.category).to_string();
-        clusters.entry(prefix).or_default().push(
-            format!("- `{}` [{}] (conf={:.2}, access={}): {}", e.key, e.category, e.confidence, e.access_count, e.summary)
-        );
+        let prefix = e
+            .category
+            .split(':')
+            .next()
+            .unwrap_or(&e.category)
+            .to_string();
+        clusters.entry(prefix).or_default().push(format!(
+            "- `{}` [{}] (conf={:.2}, access={}): {}",
+            e.key, e.category, e.confidence, e.access_count, e.summary
+        ));
     }
 
     // Dynamic cluster size: architecture/policy need >= 3, others >= 5
-    let best_cluster = clusters.iter()
+    let best_cluster = clusters
+        .iter()
         .filter(|(prefix, entries)| {
             let min_size = match prefix.as_str() {
                 "architecture" | "policy" | "preference" => 3,
@@ -320,13 +389,23 @@ async fn explore_skill_synthesis(state: &AppState, assignee: &str) -> bool {
 
     // Reentry guard: skip clusters synthesized within last 7 days
     let lock_key = format!("skill_synth_{}", cluster_name);
-    let last_synth = state.store.daemon_state_get(&lock_key).await.unwrap_or(None).unwrap_or(0);
+    let last_synth = state
+        .store
+        .daemon_state_get(&lock_key)
+        .await
+        .unwrap_or(None)
+        .unwrap_or(0);
     if now - last_synth < 7 * 86400 {
         debug!(cluster = %cluster_name, days_ago = (now - last_synth) / 86400, "Skill synthesis: cluster recently synthesized, skipping");
         return false;
     }
 
-    let entries_str = cluster_entries.iter().take(20).cloned().collect::<Vec<_>>().join("\n");
+    let entries_str = cluster_entries
+        .iter()
+        .take(20)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let description = format!(
         "## Skill Synthesis Task\n\n\
@@ -353,7 +432,13 @@ async fn explore_skill_synthesis(state: &AppState, assignee: &str) -> bool {
     // Set reentry lock BEFORE creating task (cleared on failure by autopilot event listener)
     let _ = state.store.daemon_state_set(&lock_key, now).await;
 
-    create_explore_task(state, &format!("Explore: Skill Synthesis — {}", cluster_name), &description, assignee).await
+    create_explore_task(
+        state,
+        &format!("Explore: Skill Synthesis — {}", cluster_name),
+        &description,
+        assignee,
+    )
+    .await
 }
 
 /// Helper: create an exploration Board task.
@@ -385,13 +470,13 @@ async fn create_explore_task(
 
     match state.store.create_board_task(&input).await {
         Ok(task) => {
-            state.event_bus.publish(
-                crate::event_bus::DaemonEvent::BoardTaskStatusChanged {
+            state
+                .event_bus
+                .publish(crate::event_bus::DaemonEvent::BoardTaskStatusChanged {
                     task_id: task.id.to_string(),
                     old_status: String::new(),
                     new_status: "open".to_string(),
-                },
-            );
+                });
             info!(task_id = %task.id, title = %title, "Idle explorer: created exploration task");
             true
         }
@@ -408,9 +493,17 @@ async fn explore_memory_consolidation(state: &AppState, assignee: &str) -> bool 
     let now = chrono::Utc::now().timestamp();
 
     // Reentry guard: 7-day cooldown
-    let last_run = state.store.daemon_state_get("last_consolidation_at").await.unwrap_or(None).unwrap_or(0);
+    let last_run = state
+        .store
+        .daemon_state_get("last_consolidation_at")
+        .await
+        .unwrap_or(None)
+        .unwrap_or(0);
     if now - last_run < 7 * 86400 {
-        debug!(days_ago = (now - last_run) / 86400, "Memory consolidation: recently run, skipping");
+        debug!(
+            days_ago = (now - last_run) / 86400,
+            "Memory consolidation: recently run, skipping"
+        );
         return false;
     }
 
@@ -420,13 +513,17 @@ async fn explore_memory_consolidation(state: &AppState, assignee: &str) -> bool 
     };
 
     // Group by category, find categories with many similar entries
-    let mut by_category: std::collections::HashMap<String, Vec<&missiond_core::types::KnowledgeEntry>> = std::collections::HashMap::new();
+    let mut by_category: std::collections::HashMap<
+        String,
+        Vec<&missiond_core::types::KnowledgeEntry>,
+    > = std::collections::HashMap::new();
     for e in &entries {
         by_category.entry(e.category.clone()).or_default().push(e);
     }
 
     // Find consolidation candidates: categories with ≥8 entries
-    let mut candidates: Vec<(String, usize)> = by_category.iter()
+    let mut candidates: Vec<(String, usize)> = by_category
+        .iter()
         .filter(|(cat, items)| {
             // Skip categories that should not be consolidated
             !cat.starts_with("infra") && !cat.starts_with("credential") && items.len() >= 8
@@ -441,7 +538,8 @@ async fn explore_memory_consolidation(state: &AppState, assignee: &str) -> bool 
 
     // Pick the densest category for consolidation
     let (target_cat, count) = &candidates[0];
-    let sample_entries: Vec<String> = by_category[target_cat].iter()
+    let sample_entries: Vec<String> = by_category[target_cat]
+        .iter()
         .take(15)
         .map(|e| format!("- `{}` (conf={:.2}): {}", e.key, e.confidence, e.summary))
         .collect();
@@ -469,8 +567,17 @@ async fn explore_memory_consolidation(state: &AppState, assignee: &str) -> bool 
         target_cat, count, sample_str, target_cat
     );
 
-    let _ = state.store.daemon_state_set("last_consolidation_at", now).await;
-    create_explore_task(state, &format!("Explore: Memory Consolidation — {}", target_cat), &description, assignee).await
+    let _ = state
+        .store
+        .daemon_state_set("last_consolidation_at", now)
+        .await;
+    create_explore_task(
+        state,
+        &format!("Explore: Memory Consolidation — {}", target_cat),
+        &description,
+        assignee,
+    )
+    .await
 }
 
 /// Explore 6: Stale State Verification — verify state-type KB entries that
@@ -484,11 +591,18 @@ async fn explore_stale_state_verification(state: &AppState, assignee: &str) -> b
         return false;
     }
 
-    let keys_list: Vec<String> = entries.iter().map(|e| {
-        format!("- `{}` [{}] (conf={:.2}, last_access={})",
-            e.key, e.category, e.confidence,
-            e.last_accessed_at.as_deref().unwrap_or("never"))
-    }).collect();
+    let keys_list: Vec<String> = entries
+        .iter()
+        .map(|e| {
+            format!(
+                "- `{}` [{}] (conf={:.2}, last_access={})",
+                e.key,
+                e.category,
+                e.confidence,
+                e.last_accessed_at.as_deref().unwrap_or("never")
+            )
+        })
+        .collect();
     let keys_str = keys_list.join("\n");
 
     let description = format!(
@@ -510,7 +624,13 @@ async fn explore_stale_state_verification(state: &AppState, assignee: &str) -> b
         entries.len(), keys_str,
     );
 
-    create_explore_task(state, "Explore: Stale State Verification", &description, assignee).await
+    create_explore_task(
+        state,
+        "Explore: Stale State Verification",
+        &description,
+        assignee,
+    )
+    .await
 }
 
 /// Explore 7: Shadow Replay — verify that KB mutations haven't broken
@@ -525,10 +645,17 @@ async fn explore_shadow_replay(state: &AppState, assignee: &str) -> bool {
         return false;
     }
 
-    let snapshot_list: Vec<String> = snapshots.iter().map(|(task_id, _prompt, kb_ids, created)| {
-        format!("- task `{}` (created: {}, cited KBs: {})",
-            &task_id[..8.min(task_id.len())], created, kb_ids)
-    }).collect();
+    let snapshot_list: Vec<String> = snapshots
+        .iter()
+        .map(|(task_id, _prompt, kb_ids, created)| {
+            format!(
+                "- task `{}` (created: {}, cited KBs: {})",
+                &task_id[..8.min(task_id.len())],
+                created,
+                kb_ids
+            )
+        })
+        .collect();
     let list_str = snapshot_list.join("\n");
 
     let first_prompt_preview: String = snapshots[0].1.chars().take(500).collect();
@@ -549,8 +676,16 @@ async fn explore_shadow_replay(state: &AppState, assignee: &str) -> bool {
         6. If entry was DELETED → note it but take no action\n\n\
         **This is a READ-ONLY analysis task.** Do not re-execute any tasks.\n\
         Report findings as a Board note.",
-        snapshots.len(), list_str, first_prompt_preview
+        snapshots.len(),
+        list_str,
+        first_prompt_preview
     );
 
-    create_explore_task(state, "Explore: Shadow Replay Verification", &description, assignee).await
+    create_explore_task(
+        state,
+        "Explore: Shadow Replay Verification",
+        &description,
+        assignee,
+    )
+    .await
 }

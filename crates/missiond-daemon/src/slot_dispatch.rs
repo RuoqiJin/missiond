@@ -63,7 +63,10 @@ impl SlotDispatchGuard {
     /// Returns None if the slot is already locked.
     pub fn try_acquire_guard(&self, slot_id: &str) -> Option<SlotAcquireGuard<'_>> {
         if self.try_acquire(slot_id) {
-            Some(SlotAcquireGuard { dispatch: self, slot_id: slot_id.to_string() })
+            Some(SlotAcquireGuard {
+                dispatch: self,
+                slot_id: slot_id.to_string(),
+            })
         } else {
             None
         }
@@ -78,7 +81,9 @@ pub(crate) struct SlotAcquireGuard<'a> {
 }
 
 impl<'a> SlotAcquireGuard<'a> {
-    pub fn slot_id(&self) -> &str { &self.slot_id }
+    pub fn slot_id(&self) -> &str {
+        &self.slot_id
+    }
 }
 
 impl Drop for SlotAcquireGuard<'_> {

@@ -24,7 +24,8 @@ pub(crate) async fn check_timeline_analysis(state: &AppState) {
     let now = chrono::Utc::now().timestamp();
     let last = state
         .store
-        .daemon_state_get("last_timeline_analysis_at").await
+        .daemon_state_get("last_timeline_analysis_at")
+        .await
         .unwrap_or(None)
         .unwrap_or(0);
     if now - last < ANALYSIS_INTERVAL_SECS {
@@ -38,7 +39,8 @@ pub(crate) async fn check_timeline_analysis(state: &AppState) {
             info!(insights = count, "Timeline Analyst: analysis complete");
             let _ = state
                 .store
-                .daemon_state_set("last_timeline_analysis_at", now).await;
+                .daemon_state_set("last_timeline_analysis_at", now)
+                .await;
         }
         Err(e) => {
             warn!(
@@ -68,8 +70,10 @@ struct AnalysisData {
 
 async fn collect_analysis_data(state: &AppState) -> Result<AnalysisData> {
     // 1. Timeline stats (12h window)
-    let stats = state.store
-        .query_timeline_stats(Some("12h"), None).await
+    let stats = state
+        .store
+        .query_timeline_stats(Some("12h"), None)
+        .await
         .map_err(|e| anyhow::anyhow!("timeline stats: {}", e))?;
 
     let (p50, p90, p99) = match &stats.gemini_latency {
@@ -78,12 +82,15 @@ async fn collect_analysis_data(state: &AppState) -> Result<AnalysisData> {
     };
 
     // 2. Error events (LIMIT 20 — Gemini review: strict limits)
-    let error_events = state.store
-        .query_timeline_search("error", Some("12h"), None, 20).await
+    let error_events = state
+        .store
+        .query_timeline_search("error", Some("12h"), None, 20)
+        .await
         .unwrap_or_default();
 
     // 3. Slow Gemini requests (>60s, from recent gemini events, max 50 → filter → take 20)
-    let all_gemini = state.store
+    let all_gemini = state
+        .store
         .query_timeline_filtered(
             Some("gemini_request_completed"),
             None,
@@ -91,7 +98,8 @@ async fn collect_analysis_data(state: &AppState) -> Result<AnalysisData> {
             None,
             50,
             0,
-        ).await
+        )
+        .await
         .unwrap_or_default();
 
     let slow_gemini: Vec<TimelineRow> = all_gemini
@@ -369,16 +377,18 @@ async fn execute_insights(state: &AppState, insights: &[Insight]) -> usize {
             }
             "update_kb" => {
                 let key = slug(&insight.title);
-                match state.store.kb_remember(
-                    &missiond_core::types::KBRememberInput {
+                match state
+                    .store
+                    .kb_remember(&missiond_core::types::KBRememberInput {
                         category: "ops:insight".to_string(),
                         key: format!("ops-insight-{}", key),
                         summary: insight.description.clone(),
                         detail: None,
                         source: Some("timeline-analyst".to_string()),
                         confidence: Some(0.7),
-                    },
-                ).await {
+                    })
+                    .await
+                {
                     Ok(result) => {
                         info!(
                             action = %result.action,
@@ -411,9 +421,7 @@ async fn should_create_task(state: &AppState, title: &str) -> bool {
     let cutoff = (chrono::Utc::now() - chrono::TimeDelta::hours(48)).to_rfc3339();
     match state.store.list_board_tasks(Some("open"), false).await {
         Ok(tasks) => !tasks.iter().any(|t| {
-            t.title.starts_with("[Proactive]")
-                && t.created_at > cutoff
-                && t.title.contains(title)
+            t.title.starts_with("[Proactive]") && t.created_at > cutoff && t.title.contains(title)
         }),
         Err(_) => true, // DB error → allow creation
     }

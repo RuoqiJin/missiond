@@ -230,7 +230,7 @@ impl MessageFeedBuilder {
 
         // Data query
         let limit_clause = format!("ORDER BY m.id ASC LIMIT ?{}", param_idx);
-        let sql = format!("SELECT m.* {} {} {}", from_clause, where_clause, limit_clause);
+        let sql = format!("SELECT m.id, m.session_id, COALESCE((SELECT value FROM message_labels ml2 WHERE ml2.message_id = m.id AND ml2.label = 'semantic_role'), m.role) as role, m.content, m.raw_content, m.message_uuid, m.parent_uuid, m.model, m.timestamp, m.metadata, m.tool_name, m.raw_role, m.content_types, m.has_image, m.has_tool_use, m.has_tool_result, m.token_count {} {} {}", from_clause, where_clause, limit_clause);
         param_values.push(Box::new(self.limit));
         let params_ref: Vec<&dyn rusqlite::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
 

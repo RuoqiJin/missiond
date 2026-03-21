@@ -7,9 +7,9 @@
 //! Model: MiniMax-M2.5-highspeed (~100 TPS)
 //! Auth: Bearer token from `xjp secret get minimax/api-key-domestic`
 
-use std::time::Duration;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tracing::warn;
 
 const API_URL: &str = "https://api.minimaxi.com/v1/chat/completions";
@@ -69,7 +69,8 @@ impl MiniMaxClient {
             messages,
         };
 
-        let resp = self.http
+        let resp = self
+            .http
             .post(API_URL)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
@@ -84,10 +85,14 @@ impl MiniMaxClient {
             return Err(anyhow!("MiniMax API error {}: {}", status, body));
         }
 
-        let data: ChatResponse = resp.json().await
+        let data: ChatResponse = resp
+            .json()
+            .await
             .map_err(|e| anyhow!("MiniMax response parse error: {}", e))?;
 
-        let content = data.choices.first()
+        let content = data
+            .choices
+            .first()
             .map(|c| c.message.content.clone())
             .unwrap_or_default();
 
@@ -135,11 +140,17 @@ pub(crate) fn load_api_key() -> Option<String> {
             let json_str = String::from_utf8_lossy(&output.stdout);
             // Parse JSON: {"key": "...", "namespace": "...", "value": "sk-cp-..."}
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                v.get("value").and_then(|v| v.as_str()).map(|s| s.to_string())
+                v.get("value")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
             } else {
                 // Fallback: raw string
                 let trimmed = json_str.trim().to_string();
-                if trimmed.starts_with("sk-") { Some(trimmed) } else { None }
+                if trimmed.starts_with("sk-") {
+                    Some(trimmed)
+                } else {
+                    None
+                }
             }
         }
         Ok(output) => {
@@ -164,10 +175,7 @@ mod tests {
             strip_think_tags("<think>\nsome reasoning\n</think>\nThe answer is 42."),
             "The answer is 42."
         );
-        assert_eq!(
-            strip_think_tags("<think>a</think>B<think>c</think>D"),
-            "BD"
-        );
+        assert_eq!(strip_think_tags("<think>a</think>B<think>c</think>D"), "BD");
         assert_eq!(strip_think_tags("<think>unclosed"), "");
     }
 }

@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use missiond_core::{
-    CorePermissionDecision, MissionControl, PermissionPolicy,
-    PTYManager, SkillIndex, InfraConfig, CCTasksWatcher,
-};
 use missiond_core::db::traits::MissionStore;
+use missiond_core::{
+    CCTasksWatcher, CorePermissionDecision, InfraConfig, MissionControl, PTYManager,
+    PermissionPolicy, SkillIndex,
+};
 use tokio::sync::Mutex;
 
 use crate::control_tree::ControlManager;
@@ -14,17 +14,16 @@ use crate::event_bus::EventBus;
 use crate::gemini_client::GeminiClient;
 use crate::mcp_client::McpProcessClient;
 use crate::minimax_gateway::MinimaxHandle;
-use crate::sonnet_gateway::SonnetHandle;
 use crate::prompts::PromptStore;
 use crate::slot_dispatch::SlotDispatchGuard;
 use crate::slot_orchestrator::AgentSlotManager;
+use crate::sonnet_gateway::SonnetHandle;
 use crate::workers::WorkerRegistry;
 
 // --- Well-known slot IDs (shared across all daemon modules) ---
-pub(crate) const MEMORY_SLOT_ID: &str = "slot-memory";           // Fast lane (realtime)
-pub(crate) const MEMORY_SLOW_SLOT_ID: &str = "slot-memory-slow";  // Slow lane (deep + consolidation)
-pub(crate) const SUPERVISOR_SLOT_ID: &str = "slot-supervisor";    // Supervisor (Opus patrol)
-
+pub(crate) const MEMORY_SLOT_ID: &str = "slot-memory"; // Fast lane (realtime)
+pub(crate) const MEMORY_SLOW_SLOT_ID: &str = "slot-memory-slow"; // Slow lane (deep + consolidation)
+pub(crate) const SUPERVISOR_SLOT_ID: &str = "slot-supervisor"; // Supervisor (Opus patrol)
 
 /// Extraction phase state machine. Replaces rigid 120s cooldown with
 /// event-driven completion detection.
@@ -95,7 +94,6 @@ pub(crate) struct CurrentToolInfo {
     pub(crate) started_at: String,
 }
 
-
 /// Implicit session→task binding: recorded when Claude Code queries/updates a Board task.
 /// Used by auto-progress extraction to determine which tasks a session was working on.
 #[derive(Debug, Clone)]
@@ -140,7 +138,7 @@ pub(crate) struct AppState {
     /// Epoch secs when global pause was activated. 0 = not paused.
     pub(crate) global_paused_at: Arc<std::sync::atomic::AtomicI64>,
     /// Per-slot consecutive failure count for autopilot throttling.
-    pub(crate) slot_fail_counts: Arc<std::sync::Mutex<HashMap<String, (i32, i64)>>>,  // (count, last_fail_at)
+    pub(crate) slot_fail_counts: Arc<std::sync::Mutex<HashMap<String, (i32, i64)>>>, // (count, last_fail_at)
     /// Per-slot current model (ANTHROPIC_MODEL) for env-change detection.
     pub(crate) slot_current_model: Arc<std::sync::Mutex<HashMap<String, String>>>,
     /// Screenshot broker for browser-based PTY screenshots.
@@ -224,9 +222,11 @@ pub(crate) struct AppState {
     pub(crate) pending_compact_restart: Arc<std::sync::Mutex<HashSet<String>>>,
     /// Implicit session→task bindings: when Claude Code queries/updates a Board task,
     /// auto-record which session is working on which tasks (for auto-progress extraction).
-    pub(crate) session_task_bindings: Arc<std::sync::Mutex<HashMap<String, Vec<SessionTaskBinding>>>>,
+    pub(crate) session_task_bindings:
+        Arc<std::sync::Mutex<HashMap<String, Vec<SessionTaskBinding>>>>,
     /// Per-file async lock for sys_config patch operations (prevents TOCTOU races).
-    pub(crate) config_file_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    pub(crate) config_file_locks:
+        Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// In-memory async job store — tracks long-running operations.
     pub(crate) job_store: Arc<tokio::sync::RwLock<HashMap<String, missiond_core::types::AsyncJob>>>,
     /// Embedding backfill enabled flag (from llm.yaml `backfill_enabled`).
@@ -239,7 +239,8 @@ pub(crate) struct AppState {
     /// Expectation tickets: slot spawns awaiting session_id discovery.
     /// Key: project_path, Value: (slot_id, prompt, spawn_timestamp).
     /// IngestionRouter claims these when a new session appears in the matching project.
-    pub(crate) pending_slot_spawns: Arc<tokio::sync::RwLock<Vec<(String, String, String, tokio::time::Instant)>>>,
+    pub(crate) pending_slot_spawns:
+        Arc<tokio::sync::RwLock<Vec<(String, String, String, tokio::time::Instant)>>>,
     /// Cursor ack channel: message_handler sends (jsonl_path, byte_offset) after successful INSERT.
     /// Only ack'd cursors are persisted to DB — prevents data loss on crash.
     pub(crate) cursor_ack_tx: tokio::sync::mpsc::UnboundedSender<(String, u64)>,
@@ -253,7 +254,7 @@ pub(crate) async fn submit_task(
     role: &str,
     prompt: &str,
 ) -> anyhow::Result<String> {
-    use missiond_core::types::{Task, TaskStatus, EventType};
+    use missiond_core::types::{EventType, Task, TaskStatus};
 
     let now = chrono::Utc::now().timestamp_millis();
     let task = Task {
@@ -270,11 +271,16 @@ pub(crate) async fn submit_task(
         finished_at: None,
     };
 
-    store.insert_task(&task).await
+    store
+        .insert_task(&task)
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to create task: {}", e))?;
 
     let data = serde_json::json!({ "role": role });
-    if let Err(e) = store.insert_event(&task.id, EventType::TaskCreated, Some(&data), now).await {
+    if let Err(e) = store
+        .insert_event(&task.id, EventType::TaskCreated, Some(&data), now)
+        .await
+    {
         tracing::error!(task_id = %task.id, error = %e, "Failed to persist task event");
     }
 
@@ -300,41 +306,74 @@ pub(crate) enum EmbeddingTask {
     /// Incremental: embed AST nodes after commit sync (P3 Holographic Context Engine).
     ProcessAstBatch(Vec<String>),
     /// Incremental: embed a single message after ConversationMessageLogged event.
-    ProcessMessage { message_id: i64, session_id: String, role: String, content: String },
+    ProcessMessage {
+        message_id: i64,
+        session_id: String,
+        role: String,
+        content: String,
+    },
 }
 
 /// Backfill phases — processed in order, each yields between batches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BackfillPhase {
-    KbStale, KbMissing, SkillStale, SkillMissing,
-    ConvTopicVectors, ConvSummary, ConvRetry, AstNodes, Timeline,
+    KbStale,
+    KbMissing,
+    SkillStale,
+    SkillMissing,
+    ConvTopicVectors,
+    ConvSummary,
+    ConvRetry,
+    AstNodes,
+    Timeline,
     MessageEmbeddings,
 }
 
 impl BackfillPhase {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::KbStale => "kb_stale", Self::KbMissing => "kb_missing",
-            Self::SkillStale => "skill_stale", Self::SkillMissing => "skill_missing",
-            Self::ConvTopicVectors => "conv_topic_vectors", Self::ConvSummary => "conv_summary",
-            Self::ConvRetry => "conv_retry", Self::AstNodes => "ast_nodes", Self::Timeline => "timeline",
+            Self::KbStale => "kb_stale",
+            Self::KbMissing => "kb_missing",
+            Self::SkillStale => "skill_stale",
+            Self::SkillMissing => "skill_missing",
+            Self::ConvTopicVectors => "conv_topic_vectors",
+            Self::ConvSummary => "conv_summary",
+            Self::ConvRetry => "conv_retry",
+            Self::AstNodes => "ast_nodes",
+            Self::Timeline => "timeline",
             Self::MessageEmbeddings => "message_embeddings",
         }
     }
     pub fn next(&self) -> Option<Self> {
         match self {
-            Self::KbStale => Some(Self::KbMissing), Self::KbMissing => Some(Self::SkillStale),
-            Self::SkillStale => Some(Self::SkillMissing), Self::SkillMissing => Some(Self::ConvTopicVectors),
-            Self::ConvTopicVectors => Some(Self::ConvSummary), Self::ConvSummary => Some(Self::ConvRetry),
-            Self::ConvRetry => Some(Self::AstNodes), Self::AstNodes => Some(Self::Timeline),
-            Self::Timeline => Some(Self::MessageEmbeddings), Self::MessageEmbeddings => None,
+            Self::KbStale => Some(Self::KbMissing),
+            Self::KbMissing => Some(Self::SkillStale),
+            Self::SkillStale => Some(Self::SkillMissing),
+            Self::SkillMissing => Some(Self::ConvTopicVectors),
+            Self::ConvTopicVectors => Some(Self::ConvSummary),
+            Self::ConvSummary => Some(Self::ConvRetry),
+            Self::ConvRetry => Some(Self::AstNodes),
+            Self::AstNodes => Some(Self::Timeline),
+            Self::Timeline => Some(Self::MessageEmbeddings),
+            Self::MessageEmbeddings => None,
         }
     }
-    pub fn first() -> Self { Self::KbStale }
+    pub fn first() -> Self {
+        Self::KbStale
+    }
     pub fn all() -> &'static [Self] {
-        &[Self::KbStale, Self::KbMissing, Self::SkillStale, Self::SkillMissing,
-          Self::ConvTopicVectors, Self::ConvSummary, Self::ConvRetry, Self::AstNodes, Self::Timeline,
-          Self::MessageEmbeddings]
+        &[
+            Self::KbStale,
+            Self::KbMissing,
+            Self::SkillStale,
+            Self::SkillMissing,
+            Self::ConvTopicVectors,
+            Self::ConvSummary,
+            Self::ConvRetry,
+            Self::AstNodes,
+            Self::Timeline,
+            Self::MessageEmbeddings,
+        ]
     }
 }
 
@@ -356,4 +395,3 @@ impl missiond_core::PTYPermissionPolicy for PermissionAdapter {
         }
     }
 }
-

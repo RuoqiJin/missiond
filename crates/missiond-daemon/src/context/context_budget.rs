@@ -23,7 +23,10 @@ pub(crate) struct ContextBudgetResult {
 /// 2. Drop middle messages, insert a note about omitted context
 /// 3. Progressively reduce N until within budget
 /// 4. If even 2 messages exceed budget, truncate the longest message
-pub(crate) fn apply_context_budget(messages: &mut Vec<Value>, max_bytes: usize) -> ContextBudgetResult {
+pub(crate) fn apply_context_budget(
+    messages: &mut Vec<Value>,
+    max_bytes: usize,
+) -> ContextBudgetResult {
     let calc_size = |msgs: &[Value]| -> usize {
         msgs.iter()
             .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
@@ -33,7 +36,10 @@ pub(crate) fn apply_context_budget(messages: &mut Vec<Value>, max_bytes: usize) 
 
     let total_bytes = calc_size(messages);
     if total_bytes <= max_bytes {
-        return ContextBudgetResult { trimmed: false, note: None };
+        return ContextBudgetResult {
+            trimmed: false,
+            note: None,
+        };
     }
 
     let original_count = messages.len();
@@ -87,14 +93,22 @@ pub(crate) fn apply_context_budget(messages: &mut Vec<Value>, max_bytes: usize) 
                 dropped
             );
             *messages = candidate;
-            return ContextBudgetResult { trimmed: true, note: Some(note) };
+            return ContextBudgetResult {
+                trimmed: true,
+                note: Some(note),
+            };
         }
 
         if keep_tail <= 1 {
             // Even first + last message exceeds budget; truncate the longest
-            let longest_idx = candidate.iter().enumerate()
+            let longest_idx = candidate
+                .iter()
+                .enumerate()
                 .max_by_key(|(_, m)| {
-                    m.get("content").and_then(|c| c.as_str()).map(|s| s.len()).unwrap_or(0)
+                    m.get("content")
+                        .and_then(|c| c.as_str())
+                        .map(|s| s.len())
+                        .unwrap_or(0)
                 })
                 .map(|(i, _)| i)
                 .unwrap_or(0);
@@ -105,7 +119,10 @@ pub(crate) fn apply_context_budget(messages: &mut Vec<Value>, max_bytes: usize) 
                 max_bytes as f64 / 1_048_576.0,
             );
             *messages = candidate;
-            return ContextBudgetResult { trimmed: true, note: Some(note) };
+            return ContextBudgetResult {
+                trimmed: true,
+                note: Some(note),
+            };
         }
 
         keep_tail -= 1;
@@ -114,7 +131,11 @@ pub(crate) fn apply_context_budget(messages: &mut Vec<Value>, max_bytes: usize) 
 
 /// Truncate a single message's content to fit within max_bytes (char-safe).
 pub(crate) fn truncate_message_content(msg: &mut Value, max_bytes: usize) {
-    if let Some(content) = msg.get("content").and_then(|c| c.as_str()).map(String::from) {
+    if let Some(content) = msg
+        .get("content")
+        .and_then(|c| c.as_str())
+        .map(String::from)
+    {
         if content.len() > max_bytes {
             // Use char_indices for safe UTF-8 truncation
             let target_chars = max_bytes / 3; // conservative: assume ~3 bytes per char average
@@ -161,6 +182,12 @@ pub(crate) fn format_tool_call_trace(md: &mut String, tc: &missiond_core::types:
     let output_display = tc
         .output_summary
         .as_deref()
-        .unwrap_or(if tc.status == "pending" { "awaiting result" } else { "N/A" });
-    md.push_str(&format!("  └─ Output: [{status_icon}] {output_display}\n\n"));
+        .unwrap_or(if tc.status == "pending" {
+            "awaiting result"
+        } else {
+            "N/A"
+        });
+    md.push_str(&format!(
+        "  └─ Output: [{status_icon}] {output_display}\n\n"
+    ));
 }

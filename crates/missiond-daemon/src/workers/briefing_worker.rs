@@ -48,7 +48,6 @@ async fn process_entry(
     event_type: &str,
     payload: &str,
 ) -> Result<ProcessResult> {
-
     // Thinking messages: static rule, no LLM call needed
     if event_type == "thinking_message" {
         let preview = serde_json::from_str::<serde_json::Value>(payload)
@@ -57,7 +56,8 @@ async fn process_entry(
         let summary = match preview {
             Some(p) if !p.is_empty() => {
                 // Take first sentence or first 80 chars
-                let first_sentence_end = p.find('。')
+                let first_sentence_end = p
+                    .find('。')
                     .or_else(|| p.find('.'))
                     .map(|i| i + 1)
                     .unwrap_or(p.len().min(80));
@@ -67,9 +67,13 @@ async fn process_entry(
             _ => "[思考] ...".to_string(),
         };
         state.store.update_timeline_summary(seq, &summary).await?;
-        state.event_bus.publish(DaemonEvent::BriefingSummaryGenerated {
-            target_seq: seq, summary: summary.clone(), method: "static_rule".into(),
-        });
+        state
+            .event_bus
+            .publish(DaemonEvent::BriefingSummaryGenerated {
+                target_seq: seq,
+                summary: summary.clone(),
+                method: "static_rule".into(),
+            });
         debug!(seq, "Briefing: thinking message — static rule");
         return Ok(ProcessResult::Local);
     }
@@ -85,22 +89,28 @@ async fn process_entry(
         // to match forever (WHERE summary = preview), creating infinite loop.
         let briefed = format!("⚙ {}", preview);
         state.store.update_timeline_summary(seq, &briefed).await?;
-        state.event_bus.publish(DaemonEvent::BriefingSummaryGenerated {
-            target_seq: seq, summary: briefed.clone(), method: "tool_skip".into(),
-        });
+        state
+            .event_bus
+            .publish(DaemonEvent::BriefingSummaryGenerated {
+                target_seq: seq,
+                summary: briefed.clone(),
+                method: "tool_skip".into(),
+            });
         debug!(seq, preview = %preview, "Briefing: tool-only message, marked as briefed");
         return Ok(ProcessResult::Local);
     }
 
     // Extract message_id from payload to fetch full content
-    let payload_json: serde_json::Value = serde_json::from_str(payload)
-        .unwrap_or(serde_json::Value::Null);
+    let payload_json: serde_json::Value =
+        serde_json::from_str(payload).unwrap_or(serde_json::Value::Null);
 
-    let message_id = payload_json.get("message_id")
-        .and_then(|v| v.as_i64());
+    let message_id = payload_json.get("message_id").and_then(|v| v.as_i64());
 
     let full_content = if let Some(msg_id) = message_id {
-        state.store.get_conversation_message_by_id(msg_id).await
+        state
+            .store
+            .get_conversation_message_by_id(msg_id)
+            .await
             .ok()
             .flatten()
             .map(|m| m.content)
@@ -114,8 +124,14 @@ async fn process_entry(
             // Mark as skipped to prevent infinite re-selection.
             // Without this, entries with content_chars > 300 in payload but
             // actual content < 300 (or not found) stay in the pending queue forever.
-            state.store.update_timeline_summary(seq, "<skipped>").await?;
-            debug!(seq, "Briefing: content too short or not found, marked skipped");
+            state
+                .store
+                .update_timeline_summary(seq, "<skipped>")
+                .await?;
+            debug!(
+                seq,
+                "Briefing: content too short or not found, marked skipped"
+            );
             return Ok(ProcessResult::Skipped);
         }
     };
@@ -144,7 +160,9 @@ async fn process_entry(
         _ => 100,
     };
 
-    let sonnet = state.sonnet.as_ref()
+    let sonnet = state
+        .sonnet
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Sonnet gateway not available"))?;
 
     let messages = vec![ChatMessage {
@@ -162,10 +180,19 @@ async fn process_entry(
     let summary = truncate_at_boundary(&summary, max_chars + 30);
 
     state.store.update_timeline_summary(seq, &summary).await?;
-    state.event_bus.publish(DaemonEvent::BriefingSummaryGenerated {
-        target_seq: seq, summary: summary.clone(), method: "sonnet".into(),
-    });
-    info!(seq, chars = summary.len(), event_type, "Briefing: summary updated");
+    state
+        .event_bus
+        .publish(DaemonEvent::BriefingSummaryGenerated {
+            target_seq: seq,
+            summary: summary.clone(),
+            method: "sonnet".into(),
+        });
+    info!(
+        seq,
+        chars = summary.len(),
+        event_type,
+        "Briefing: summary updated"
+    );
 
     Ok(ProcessResult::Llm)
 }
@@ -225,10 +252,12 @@ fn truncate_at_boundary(text: &str, max_chars: usize) -> String {
 pub(crate) struct BriefingWorker;
 
 impl super::BackgroundWorker for BriefingWorker {
-    fn name(&self) -> &'static str { "briefing_worker" }
+    fn name(&self) -> &'static str {
+        "briefing_worker"
+    }
 
     fn dependencies(&self) -> Vec<crate::control_tree::Dependency> {
-        use crate::control_tree::{Dependency, CtlProvider};
+        use crate::control_tree::{CtlProvider, Dependency};
         vec![Dependency::Provider(CtlProvider::Sonnet)]
     }
 
@@ -245,7 +274,11 @@ impl super::BackgroundWorker for BriefingWorker {
             ctx.wait_if_paused().await;
 
             // Gemini ARB: check DB first — historical backlog may exist after restart
-            let pending = match state.store.find_timeline_needing_briefing(MIN_CONTENT_CHARS, BATCH_SIZE).await {
+            let pending = match state
+                .store
+                .find_timeline_needing_briefing(MIN_CONTENT_CHARS, BATCH_SIZE)
+                .await
+            {
                 Ok(p) => p,
                 Err(e) => {
                     warn!(error = %e, "Briefing worker: DB query failed");
@@ -288,7 +321,10 @@ impl super::BackgroundWorker for BriefingWorker {
             }
 
             if processed > 0 {
-                info!(processed, llm_calls, batch_size, "Briefing worker: batch completed");
+                info!(
+                    processed,
+                    llm_calls, batch_size, "Briefing worker: batch completed"
+                );
             }
         }
     }

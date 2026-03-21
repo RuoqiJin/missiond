@@ -28,7 +28,6 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
-
 /// Absolute safety cap: kill process no matter what after this duration.
 const ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(900); // 15 minutes
 
@@ -55,7 +54,9 @@ pub(crate) struct ApiKeyPool {
 
 impl ApiKeyPool {
     pub fn new() -> Self {
-        Self { blacklist: RwLock::new(HashMap::new()) }
+        Self {
+            blacklist: RwLock::new(HashMap::new()),
+        }
     }
 
     /// Returns the first non-blacklisted key. Default key is tried first, then others in order.
@@ -66,7 +67,9 @@ impl ApiKeyPool {
             return Err(anyhow!("gemini_api_keys 未配置"));
         }
         if !entries.iter().any(|e| e.is_default) {
-            return Err(anyhow!("gemini_api_keys 中未标记 default: true，无法确定默认 key"));
+            return Err(anyhow!(
+                "gemini_api_keys 中未标记 default: true，无法确定默认 key"
+            ));
         }
         let bl = self.blacklist.read().await;
         let now = tokio::time::Instant::now();
@@ -76,31 +79,44 @@ impl ApiKeyPool {
         let mut sorted = entries.clone();
         sorted.sort_by_key(|e| if e.is_default { 0 } else { 1 });
 
-        sorted.into_iter()
+        sorted
+            .into_iter()
             .find(|e| is_available(&e.key))
             .ok_or_else(|| {
                 let total = entries.len();
-                anyhow!("All {} Gemini API keys quota exhausted. Next reset ~07:00 GMT+8", total)
+                anyhow!(
+                    "All {} Gemini API keys quota exhausted. Next reset ~07:00 GMT+8",
+                    total
+                )
             })
     }
 
     /// Get a specific key by alias. Returns error if alias not found.
     pub async fn get_by_alias(&self, alias: &str) -> Result<ApiKeyEntry> {
         let entries = resolve_apikey_entries();
-        let entry = entries.into_iter()
+        let entry = entries
+            .into_iter()
             .find(|e| e.alias.as_deref() == Some(alias))
-            .ok_or_else(|| anyhow!("未知 API key 别名: '{}'. 可用别名: {}",
-                alias,
-                resolve_apikey_entries().iter()
-                    .filter_map(|e| e.alias.as_deref())
-                    .collect::<Vec<_>>().join(", ")
-            ))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "未知 API key 别名: '{}'. 可用别名: {}",
+                    alias,
+                    resolve_apikey_entries()
+                        .iter()
+                        .filter_map(|e| e.alias.as_deref())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
         // Check blacklist
         let bl = self.blacklist.read().await;
         let now = tokio::time::Instant::now();
         if let Some(exp) = bl.get(&entry.key) {
             if now < *exp {
-                return Err(anyhow!("API key '{}' quota exhausted until ~07:00 GMT+8", alias));
+                return Err(anyhow!(
+                    "API key '{}' quota exhausted until ~07:00 GMT+8",
+                    alias
+                ));
             }
         }
         Ok(entry)
@@ -119,17 +135,23 @@ impl ApiKeyPool {
 
 impl std::fmt::Debug for ApiKeyPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ApiKeyPool").field("keys", &resolve_apikey_entries().len()).finish()
+        f.debug_struct("ApiKeyPool")
+            .field("keys", &resolve_apikey_entries().len())
+            .finish()
     }
 }
 
 /// Calculate duration from now until next 07:00 GMT+8 (= 23:00 UTC previous day).
 fn duration_until_next_07_gmt8() -> Duration {
-    use chrono::{Utc, FixedOffset};
+    use chrono::{FixedOffset, Utc};
     let tz = FixedOffset::east_opt(8 * 3600).unwrap();
     let now = Utc::now().with_timezone(&tz);
-    let today_07 = now.date_naive().and_hms_opt(7, 0, 0).unwrap()
-        .and_local_timezone(tz).unwrap();
+    let today_07 = now
+        .date_naive()
+        .and_hms_opt(7, 0, 0)
+        .unwrap()
+        .and_local_timezone(tz)
+        .unwrap();
     let target = if now.naive_local() < today_07.naive_local() {
         today_07
     } else {
@@ -178,8 +200,19 @@ pub(crate) struct GeminiCliProgress {
 }
 
 impl GeminiCli {
-    pub fn new(binary: String, default_model: String, idle_timeout: Duration, api_key_pool: Option<Arc<ApiKeyPool>>) -> Self {
-        Self { binary, default_model, idle_timeout, api_key_pool, pty_transport: None }
+    pub fn new(
+        binary: String,
+        default_model: String,
+        idle_timeout: Duration,
+        api_key_pool: Option<Arc<ApiKeyPool>>,
+    ) -> Self {
+        Self {
+            binary,
+            default_model,
+            idle_timeout,
+            api_key_pool,
+            pty_transport: None,
+        }
     }
 
     /// Enable PTY transport mode. All subsequent calls route through PTY.
@@ -222,8 +255,12 @@ impl GeminiCli {
 
         // PTY transport: bypass subprocess NDJSON entirely
         if let Some(ref pty) = self.pty_transport {
-            info!(model, prompt_len = prompt.len(), idle_timeout_secs = idle_timeout.as_secs(),
-                  "Gemini CLI: calling via PTY transport");
+            info!(
+                model,
+                prompt_len = prompt.len(),
+                idle_timeout_secs = idle_timeout.as_secs(),
+                "Gemini CLI: calling via PTY transport"
+            );
             let content = pty.call(&prompt, idle_timeout).await?;
             return Ok(GeminiCliResponse {
                 content,
@@ -231,8 +268,12 @@ impl GeminiCli {
             });
         }
 
-        info!(model, prompt_len = prompt.len(), idle_timeout_secs = idle_timeout.as_secs(),
-              "Gemini CLI: calling (stream-json mode)");
+        info!(
+            model,
+            prompt_len = prompt.len(),
+            idle_timeout_secs = idle_timeout.as_secs(),
+            "Gemini CLI: calling (stream-json mode)"
+        );
 
         // Determine resolved mode
         let is_apikey_mode = match auth_override {
@@ -247,10 +288,27 @@ impl GeminiCli {
             if let Some(ref pool) = self.api_key_pool {
                 return if let Some(alias) = api_key_alias {
                     // Pinned key: no rotation, fail fast if exhausted
-                    self.call_with_pinned_key(pool, alias, &prompt, model, idle_timeout, &progress_tx, working_dir).await
+                    self.call_with_pinned_key(
+                        pool,
+                        alias,
+                        &prompt,
+                        model,
+                        idle_timeout,
+                        &progress_tx,
+                        working_dir,
+                    )
+                    .await
                 } else {
                     // Pool rotation: default key first, failover to others
-                    self.call_with_key_rotation(pool, &prompt, model, idle_timeout, &progress_tx, working_dir).await
+                    self.call_with_key_rotation(
+                        pool,
+                        &prompt,
+                        model,
+                        idle_timeout,
+                        &progress_tx,
+                        working_dir,
+                    )
+                    .await
                 };
             }
         }
@@ -260,13 +318,24 @@ impl GeminiCli {
         let auth_config = match auth_override {
             Some("apikey") => resolve_apikey_config()
                 .ok_or_else(|| anyhow!("channel='apikey' 但 llm.yaml 中未配置 gemini_api_key"))?,
-            Some("google") => GeminiAuthConfig { mode: "google".to_string(), api_key: None },
+            Some("google") => GeminiAuthConfig {
+                mode: "google".to_string(),
+                api_key: None,
+            },
             None => resolve_gemini_auth_config(),
             _ => unreachable!(),
         };
         info!(mode = %auth_config.mode, r#override = is_override, "Gemini CLI: using {} mode", auth_config.mode);
 
-        self.call_once(&auth_config, &prompt, model, idle_timeout, &progress_tx, working_dir).await
+        self.call_once(
+            &auth_config,
+            &prompt,
+            model,
+            idle_timeout,
+            &progress_tx,
+            working_dir,
+        )
+        .await
     }
 
     /// Pinned key: use exactly the specified alias, no rotation.
@@ -288,7 +357,9 @@ impl GeminiCli {
             mode: "apikey".to_string(),
             api_key: Some(entry.key.clone()),
         };
-        let result = self.call_once(&auth, prompt, model, idle_timeout, progress_tx, working_dir).await;
+        let result = self
+            .call_once(&auth, prompt, model, idle_timeout, progress_tx, working_dir)
+            .await;
 
         // If quota exhausted, mark and return error (no rotation)
         if let Err(ref e) = result {
@@ -311,9 +382,13 @@ impl GeminiCli {
         working_dir: Option<&std::path::Path>,
     ) -> Result<GeminiCliResponse> {
         let mut child = self.spawn_cli(prompt, model, auth_config, working_dir)?;
-        let (events, drained_stderr) = self.stream_events(&mut child, idle_timeout, progress_tx).await?;
+        let (events, drained_stderr) = self
+            .stream_events(&mut child, idle_timeout, progress_tx)
+            .await?;
 
-        let status = child.wait().await
+        let status = child
+            .wait()
+            .await
             .map_err(|e| anyhow!("Gemini CLI process error: {}", e))?;
         if !status.success() {
             let exit_code = status.code();
@@ -358,9 +433,13 @@ impl GeminiCli {
                   "Gemini CLI: trying API key from pool");
 
             let mut child = self.spawn_cli(prompt, model, &auth, working_dir)?;
-            let (events, drained_stderr) = self.stream_events(&mut child, idle_timeout, progress_tx).await?;
+            let (events, drained_stderr) = self
+                .stream_events(&mut child, idle_timeout, progress_tx)
+                .await?;
 
-            let status = child.wait().await
+            let status = child
+                .wait()
+                .await
                 .map_err(|e| anyhow!("Gemini CLI process error: {}", e))?;
 
             if status.success() {
@@ -373,14 +452,21 @@ impl GeminiCli {
             // Only rotate on quota exhaustion AND no content produced yet
             let has_content = events.iter().any(|e| {
                 e.get("type").and_then(|t| t.as_str()) == Some("message")
-                    && matches!(e.get("role").and_then(|r| r.as_str()), Some("assistant") | Some("model"))
-                    && e.get("content").and_then(|c| c.as_str()).map(|s| !s.is_empty()).unwrap_or(false)
+                    && matches!(
+                        e.get("role").and_then(|r| r.as_str()),
+                        Some("assistant") | Some("model")
+                    )
+                    && e.get("content")
+                        .and_then(|c| c.as_str())
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false)
             });
 
             if !has_content && is_quota_exhausted(exit_code, &stderr_msg) {
                 warn!(alias = alias_str, key = %mask_api_key(&entry.key), exit_code = exit_code.unwrap_or(-1),
                       "Gemini CLI: API key quota exhausted, rotating to next key");
-                pool.mark_exhausted(&entry.key, entry.alias.as_deref()).await;
+                pool.mark_exhausted(&entry.key, entry.alias.as_deref())
+                    .await;
                 continue;
             }
 
@@ -389,13 +475,19 @@ impl GeminiCli {
         }
     }
 
-    fn spawn_cli(&self, prompt: &str, model: &str, auth: &GeminiAuthConfig, working_dir: Option<&std::path::Path>) -> Result<tokio::process::Child> {
+    fn spawn_cli(
+        &self,
+        prompt: &str,
+        model: &str,
+        auth: &GeminiAuthConfig,
+        working_dir: Option<&std::path::Path>,
+    ) -> Result<tokio::process::Child> {
         let mut cmd = tokio::process::Command::new(&self.binary);
         cmd.args(["-p", prompt, "-m", model, "-o", "stream-json", "--yolo"])
-            .stdin(std::process::Stdio::null())  // Prevent interactive prompts from hanging
+            .stdin(std::process::Stdio::null()) // Prevent interactive prompts from hanging
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);  // Cancel safety: kill orphan process when future is dropped
+            .kill_on_drop(true); // Cancel safety: kill orphan process when future is dropped
 
         // Set working directory for file-based agentic workflows (e.g. strategy_analyst workspace)
         if let Some(dir) = working_dir {
@@ -434,7 +526,9 @@ impl GeminiCli {
         idle_timeout: Duration,
         progress_tx: &Option<mpsc::UnboundedSender<GeminiCliProgress>>,
     ) -> Result<(Vec<Value>, String)> {
-        let stdout = child.stdout.take()
+        let stdout = child
+            .stdout
+            .take()
             .ok_or_else(|| anyhow!("Failed to capture stdout"))?;
 
         // P0 fix: concurrently drain stderr to prevent 64KB pipe buffer deadlock.
@@ -460,19 +554,27 @@ impl GeminiCli {
 
         let stream_result: Result<(), String> = async {
             loop {
-                let remaining = absolute_deadline.saturating_duration_since(tokio::time::Instant::now());
+                let remaining =
+                    absolute_deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
                     return Err("absolute timeout (15min)".to_string());
                 }
-                let current_idle = if awaiting_tool_result { TOOL_EXEC_TIMEOUT } else { idle_timeout };
+                let current_idle = if awaiting_tool_result {
+                    TOOL_EXEC_TIMEOUT
+                } else {
+                    idle_timeout
+                };
                 let effective_timeout = current_idle.min(remaining);
 
                 match tokio::time::timeout(effective_timeout, lines.next_line()).await {
                     Ok(Ok(Some(line))) => {
-                        if line.trim().is_empty() { continue; }
+                        if line.trim().is_empty() {
+                            continue;
+                        }
                         match serde_json::from_str::<Value>(&line) {
                             Ok(event) => {
-                                let event_type = event.get("type")
+                                let event_type = event
+                                    .get("type")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("unknown");
                                 match event_type {
@@ -480,14 +582,17 @@ impl GeminiCli {
                                         awaiting_tool_result = true;
                                         tool_seq += 1;
                                         if let Some(ref tx) = progress_tx {
-                                            let _ = tx.send(extract_tool_use_progress(&event, tool_seq));
+                                            let _ = tx
+                                                .send(extract_tool_use_progress(&event, tool_seq));
                                         }
                                     }
                                     "tool_result" => {
                                         awaiting_tool_result = false;
                                         tool_seq += 1;
                                         if let Some(ref tx) = progress_tx {
-                                            let _ = tx.send(extract_tool_result_progress(&event, tool_seq));
+                                            let _ = tx.send(extract_tool_result_progress(
+                                                &event, tool_seq,
+                                            ));
                                         }
                                     }
                                     _ => {}
@@ -507,22 +612,39 @@ impl GeminiCli {
                     Ok(Ok(None)) => return Ok(()),
                     Ok(Err(e)) => return Err(format!("IO error: {}", e)),
                     Err(_) => {
-                        let mode = if awaiting_tool_result { "tool_exec" } else { "idle" };
-                        return Err(format!("{} timeout ({}s no output)", mode, effective_timeout.as_secs()));
+                        let mode = if awaiting_tool_result {
+                            "tool_exec"
+                        } else {
+                            "idle"
+                        };
+                        return Err(format!(
+                            "{} timeout ({}s no output)",
+                            mode,
+                            effective_timeout.as_secs()
+                        ));
                     }
                 }
             }
-        }.await;
+        }
+        .await;
 
         // Collect drained stderr (best-effort, don't fail on join error)
         let drained_stderr = stderr_handle.await.unwrap_or_default();
 
         if let Err(ref reason) = stream_result {
-            warn!(reason, stderr_len = drained_stderr.len(), "Gemini CLI: killing process");
+            warn!(
+                reason,
+                stderr_len = drained_stderr.len(),
+                "Gemini CLI: killing process"
+            );
             let _ = child.kill().await;
             let _ = child.wait().await;
             let stderr_preview: String = drained_stderr.chars().take(500).collect();
-            return Err(anyhow!("Gemini CLI timed out: {}. stderr: {}", reason, stderr_preview));
+            return Err(anyhow!(
+                "Gemini CLI timed out: {}. stderr: {}",
+                reason,
+                stderr_preview
+            ));
         }
 
         Ok((events, drained_stderr))
@@ -532,7 +654,9 @@ impl GeminiCli {
     #[allow(dead_code)]
     pub async fn prompt(&self, text: &str, model: Option<&str>) -> Result<String> {
         let messages = vec![serde_json::json!({"role": "user", "content": text})];
-        let resp = self.call(&messages, model, None, None, None, None, None, None).await?;
+        let resp = self
+            .call(&messages, model, None, None, None, None, None, None)
+            .await?;
         Ok(resp.content)
     }
 }
@@ -546,7 +670,9 @@ fn messages_to_prompt(messages: &[Value]) -> String {
     for msg in messages {
         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
         let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
-        if content.is_empty() { continue; }
+        if content.is_empty() {
+            continue;
+        }
         let label = match role {
             "system" => "System",
             "assistant" => "Assistant",
@@ -591,13 +717,18 @@ fn parse_stream_events(events: &[Value], requested_model: &str) -> Result<Gemini
                 }
             }
             "error" => {
-                let msg = event.get("message").and_then(|v| v.as_str())
+                let msg = event
+                    .get("message")
+                    .and_then(|v| v.as_str())
                     .or_else(|| event.get("error").and_then(|v| v.as_str()))
                     .unwrap_or("unknown error");
                 return Err(anyhow!("Gemini CLI error event: {}", msg));
             }
             "result" => {
-                let status = event.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let status = event
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 if status != "success" {
                     return Err(anyhow!("Gemini CLI result status: {}", status));
                 }
@@ -609,13 +740,20 @@ fn parse_stream_events(events: &[Value], requested_model: &str) -> Result<Gemini
     }
 
     if content_parts.is_empty() {
-        return Err(anyhow!("Gemini CLI: no assistant content in {} events", events.len()));
+        return Err(anyhow!(
+            "Gemini CLI: no assistant content in {} events",
+            events.len()
+        ));
     }
 
     // stream-json emits incremental delta chunks — concatenate all to get full response.
     let content = content_parts.join("");
 
-    info!(content_len = content.len(), events = events.len(), "Gemini CLI: stream complete");
+    info!(
+        content_len = content.len(),
+        events = events.len(),
+        "Gemini CLI: stream complete"
+    );
 
     Ok(GeminiCliResponse { content, model })
 }
@@ -638,12 +776,14 @@ fn truncate(s: &str, max: usize) -> String {
 /// ```
 fn extract_tool_use_progress(event: &Value, tool_seq: u32) -> GeminiCliProgress {
     // Gemini CLI uses "tool_name"; fallback to "name" for forward compat
-    let tool_name = event.get("tool_name")
+    let tool_name = event
+        .get("tool_name")
         .or_else(|| event.get("name"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     // Gemini CLI uses "parameters"; fallback to "input" for forward compat
-    let input_preview = event.get("parameters")
+    let input_preview = event
+        .get("parameters")
         .or_else(|| event.get("input"))
         .map(|v| {
             if let Some(s) = v.as_str() {
@@ -670,13 +810,15 @@ fn extract_tool_use_progress(event: &Value, tool_seq: u32) -> GeminiCliProgress 
 /// ```
 fn extract_tool_result_progress(event: &Value, tool_seq: u32) -> GeminiCliProgress {
     // Gemini CLI uses "status" string; fallback to "is_error" bool
-    let is_error = event.get("status")
+    let is_error = event
+        .get("status")
         .and_then(|v| v.as_str())
         .map(|s| s != "success")
         .or_else(|| event.get("is_error").and_then(|v| v.as_bool()))
         .unwrap_or(false);
     // Gemini CLI uses "output"; fallback to "result"/"content" for forward compat
-    let result_preview = event.get("output")
+    let result_preview = event
+        .get("output")
         .or_else(|| event.get("result"))
         .or_else(|| event.get("content"))
         .map(|v| {
@@ -687,7 +829,8 @@ fn extract_tool_result_progress(event: &Value, tool_seq: u32) -> GeminiCliProgre
             }
         });
     // Gemini CLI tool_result includes tool_id but not tool_name; extract from tool_id prefix
-    let tool_name = event.get("tool_id")
+    let tool_name = event
+        .get("tool_id")
         .and_then(|v| v.as_str())
         .and_then(|id| id.split('_').next())
         .filter(|name| !name.is_empty())
@@ -706,7 +849,7 @@ fn extract_tool_result_progress(event: &Value, tool_seq: u32) -> GeminiCliProgre
 
 /// Resolved auth configuration for a Gemini CLI subprocess.
 struct GeminiAuthConfig {
-    mode: String,       // "apikey" or "google"
+    mode: String, // "apikey" or "google"
     api_key: Option<String>,
 }
 
@@ -715,21 +858,40 @@ struct GeminiAuthConfig {
 /// Also detects split-brain between llm.yaml and settings.json, auto-syncing if diverged.
 fn resolve_gemini_auth_config() -> GeminiAuthConfig {
     let llm_yaml = missiond_core::default_mission_home().join("llm.yaml");
-    let llm_config = std::fs::read_to_string(&llm_yaml).ok()
+    let llm_config = std::fs::read_to_string(&llm_yaml)
+        .ok()
         .and_then(|c| serde_yaml::from_str::<serde_yaml::Value>(&c).ok());
 
-    let api_key = llm_config.as_ref()
-        .and_then(|c| c.get("gemini_api_key").and_then(|v| v.as_str()).map(|s| s.to_string()));
+    let api_key = llm_config.as_ref().and_then(|c| {
+        c.get("gemini_api_key")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    });
 
     // Mode: llm.yaml gemini_auth_mode > settings.json selectedType > default apikey
-    let mode = llm_config.as_ref()
-        .and_then(|c| c.get("gemini_auth_mode").and_then(|v| v.as_str()).map(|s| s.to_string()))
+    let mode = llm_config
+        .as_ref()
+        .and_then(|c| {
+            c.get("gemini_auth_mode")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .unwrap_or_else(|| {
             dirs::home_dir()
                 .and_then(|h| std::fs::read_to_string(h.join(".gemini/settings.json")).ok())
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .and_then(|v| v.pointer("/security/auth/selectedType").and_then(|t| t.as_str()).map(|s| s.to_string()))
-                .map(|t| if t == "oauth-personal" { "google".to_string() } else { "apikey".to_string() })
+                .and_then(|v| {
+                    v.pointer("/security/auth/selectedType")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())
+                })
+                .map(|t| {
+                    if t == "oauth-personal" {
+                        "google".to_string()
+                    } else {
+                        "apikey".to_string()
+                    }
+                })
                 .unwrap_or_else(|| "apikey".to_string())
         });
 
@@ -767,8 +929,14 @@ fn resolve_apikey_config() -> Option<GeminiAuthConfig> {
     let llm_yaml = missiond_core::default_mission_home().join("llm.yaml");
     let content = std::fs::read_to_string(&llm_yaml).ok()?;
     let config: serde_yaml::Value = serde_yaml::from_str(&content).ok()?;
-    let key = config.get("gemini_api_key").and_then(|v| v.as_str())?.to_string();
-    Some(GeminiAuthConfig { mode: "apikey".to_string(), api_key: Some(key) })
+    let key = config
+        .get("gemini_api_key")
+        .and_then(|v| v.as_str())?
+        .to_string();
+    Some(GeminiAuthConfig {
+        mode: "apikey".to_string(),
+        api_key: Some(key),
+    })
 }
 
 /// Create/maintain a shadow home directory for Gemini CLI auth isolation.
@@ -819,7 +987,11 @@ fn ensure_auth_home(channel: &str, selected_type: &str, symlink_oauth: bool) -> 
 
     // Symlink OAuth credential files (only needed for google mode)
     if symlink_oauth {
-        for file in &["oauth_creds.json", "google_accounts.json", "google_account_id"] {
+        for file in &[
+            "oauth_creds.json",
+            "google_accounts.json",
+            "google_account_id",
+        ] {
             let src = real_gemini_dir.join(file);
             let dst = shadow_gemini_dir.join(file);
             if src.exists() {
@@ -894,14 +1066,28 @@ pub(crate) fn resolve_apikey_entries() -> Vec<ApiKeyEntry> {
             if let Some(k) = item.as_str() {
                 // Legacy string format
                 if !k.is_empty() && seen_keys.insert(k.to_string()) {
-                    entries.push(ApiKeyEntry { key: k.to_string(), alias: None, is_default: false });
+                    entries.push(ApiKeyEntry {
+                        key: k.to_string(),
+                        alias: None,
+                        is_default: false,
+                    });
                 }
             } else if let Some(k) = item.get("key").and_then(|v| v.as_str()) {
                 // Object format: {key, alias?, default?}
                 if !k.is_empty() && seen_keys.insert(k.to_string()) {
-                    let alias = item.get("alias").and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let is_default = item.get("default").and_then(|v| v.as_bool()).unwrap_or(false);
-                    entries.push(ApiKeyEntry { key: k.to_string(), alias, is_default });
+                    let alias = item
+                        .get("alias")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let is_default = item
+                        .get("default")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    entries.push(ApiKeyEntry {
+                        key: k.to_string(),
+                        alias,
+                        is_default,
+                    });
                 }
             }
         }
@@ -910,7 +1096,11 @@ pub(crate) fn resolve_apikey_entries() -> Vec<ApiKeyEntry> {
     // Merge singular key if not already present
     if let Some(k) = config.get("gemini_api_key").and_then(|v| v.as_str()) {
         if !k.is_empty() && seen_keys.insert(k.to_string()) {
-            entries.push(ApiKeyEntry { key: k.to_string(), alias: None, is_default: false });
+            entries.push(ApiKeyEntry {
+                key: k.to_string(),
+                alias: None,
+                is_default: false,
+            });
         }
     }
 
@@ -919,5 +1109,8 @@ pub(crate) fn resolve_apikey_entries() -> Vec<ApiKeyEntry> {
 
 /// Backward-compat wrapper: returns plain key list for startup logging.
 pub(crate) fn resolve_apikey_pool() -> Vec<String> {
-    resolve_apikey_entries().into_iter().map(|e| e.key).collect()
+    resolve_apikey_entries()
+        .into_iter()
+        .map(|e| e.key)
+        .collect()
 }

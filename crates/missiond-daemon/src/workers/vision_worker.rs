@@ -8,12 +8,12 @@
 //! passed to `codex exec --json -i <file>` for native vision support.
 //! SHA-256 hash dedup ensures each unique image is only processed once.
 
+use anyhow::Result;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use anyhow::Result;
-use sha2::{Sha256, Digest};
-use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use crate::codex_cli::CodexCli;
@@ -66,7 +66,10 @@ fn image_cache_dir() -> std::path::PathBuf {
 }
 
 /// Write base64-encoded image to persistent cache, return (path, hash).
-fn write_image_to_cache(base64_data: &str, media_type: &str) -> Result<(std::path::PathBuf, String)> {
+fn write_image_to_cache(
+    base64_data: &str,
+    media_type: &str,
+) -> Result<(std::path::PathBuf, String)> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD.decode(base64_data)?;
     let hash = format!("{:x}", Sha256::digest(base64_data.as_bytes()));
@@ -82,7 +85,12 @@ fn write_image_to_cache(base64_data: &str, media_type: &str) -> Result<(std::pat
 }
 
 /// Process a single message: extract images, get descriptions, update content.
-async fn process_message(codex: &CodexCli, state: &AppState, message_id: i64, session_id: &str) -> Result<bool> {
+async fn process_message(
+    codex: &CodexCli,
+    state: &AppState,
+    message_id: i64,
+    session_id: &str,
+) -> Result<bool> {
     // 1. Get raw_content
     let raw_content = match state.store.get_message_raw_content(message_id).await? {
         Some(rc) => rc,
@@ -94,12 +102,11 @@ async fn process_message(codex: &CodexCli, state: &AppState, message_id: i64, se
 
     let blocks = match &raw {
         Value::Array(arr) => arr.clone(),
-        Value::Object(obj) => {
-            obj.get("content")
-                .and_then(|c| c.as_array())
-                .cloned()
-                .unwrap_or_default()
-        }
+        Value::Object(obj) => obj
+            .get("content")
+            .and_then(|c| c.as_array())
+            .cloned()
+            .unwrap_or_default(),
         _ => return Ok(false),
     };
 
@@ -131,14 +138,19 @@ async fn process_message(codex: &CodexCli, state: &AppState, message_id: i64, se
                     let hash = format!("{:x}", Sha256::digest(data.as_bytes()));
 
                     // Check cache first
-                    let description = if let Ok(Some(cached)) = state.store.get_image_description(&hash).await {
+                    let description = if let Ok(Some(cached)) =
+                        state.store.get_image_description(&hash).await
+                    {
                         debug!(hash = %&hash[..12], "Vision: cache hit");
                         cached
                     } else {
                         match call_codex_vision(codex, data, media_type, &hash).await {
                             Ok(desc) => {
                                 let desc = truncate_description(&desc);
-                                let _ = state.store.save_image_description(&hash, media_type, &desc).await;
+                                let _ = state
+                                    .store
+                                    .save_image_description(&hash, media_type, &desc)
+                                    .await;
                                 info!(hash = %&hash[..12], chars = desc.len(), "Vision: described image");
                                 desc
                             }
@@ -169,7 +181,10 @@ async fn process_message(codex: &CodexCli, state: &AppState, message_id: i64, se
 
     // 4. Update content column
     let new_content = new_parts.join("\n");
-    state.store.update_message_content(message_id, &new_content).await?;
+    state
+        .store
+        .update_message_content(message_id, &new_content)
+        .await?;
     debug!(message_id, session = %session_id, "Vision: content updated");
 
     Ok(true)
@@ -177,10 +192,24 @@ async fn process_message(codex: &CodexCli, state: &AppState, message_id: i64, se
 
 /// Call Codex CLI (GPT-5.4 Vision) to describe an image.
 /// Writes image to persistent cache, passes via `-i` flag.
-async fn call_codex_vision(codex: &CodexCli, base64_data: &str, media_type: &str, image_hash: &str) -> Result<String> {
+async fn call_codex_vision(
+    codex: &CodexCli,
+    base64_data: &str,
+    media_type: &str,
+    image_hash: &str,
+) -> Result<String> {
     let (img_path, _) = write_image_to_cache(base64_data, media_type)?;
 
-    let resp = codex.call(VISION_PROMPT, "vision_worker", None, Some(&img_path), None, Some(image_hash)).await?;
+    let resp = codex
+        .call(
+            VISION_PROMPT,
+            "vision_worker",
+            None,
+            Some(&img_path),
+            None,
+            Some(image_hash),
+        )
+        .await?;
     if resp.content.is_empty() {
         anyhow::bail!("Empty response from Codex Vision");
     }
@@ -208,10 +237,12 @@ async fn mark_vision_permanently_failed(state: &AppState, message_id: i64) {
 pub(crate) struct VisionWorker;
 
 impl super::BackgroundWorker for VisionWorker {
-    fn name(&self) -> &'static str { "vision_worker" }
+    fn name(&self) -> &'static str {
+        "vision_worker"
+    }
 
     fn dependencies(&self) -> Vec<crate::control_tree::Dependency> {
-        use crate::control_tree::{Dependency, CtlProvider};
+        use crate::control_tree::{CtlProvider, Dependency};
         vec![Dependency::Provider(CtlProvider::Codex)]
     }
 
@@ -223,13 +254,20 @@ impl super::BackgroundWorker for VisionWorker {
             state.event_bus.sender(),
         );
 
-        info!("Vision worker started (codex/gpt-5.4, poll interval: {}s)", IDLE_INTERVAL_SECS);
+        info!(
+            "Vision worker started (codex/gpt-5.4, poll interval: {}s)",
+            IDLE_INTERVAL_SECS
+        );
         let mut attempt_counts: HashMap<i64, u32> = HashMap::new();
 
         loop {
             ctx.wait_if_paused().await;
             // Find unprocessed image messages
-            let pending = match state.store.find_unprocessed_image_messages(BATCH_SIZE).await {
+            let pending = match state
+                .store
+                .find_unprocessed_image_messages(BATCH_SIZE)
+                .await
+            {
                 Ok(p) => p,
                 Err(e) => {
                     warn!(error = %e, "Vision worker: DB query failed");
@@ -251,7 +289,11 @@ impl super::BackgroundWorker for VisionWorker {
                 *attempts += 1;
 
                 if *attempts > MAX_RETRIES {
-                    warn!(message_id = msg_id, attempts = *attempts, "Vision worker: max retries exceeded");
+                    warn!(
+                        message_id = msg_id,
+                        attempts = *attempts,
+                        "Vision worker: max retries exceeded"
+                    );
                     mark_vision_permanently_failed(&state, msg_id).await;
                     attempt_counts.remove(&msg_id);
                     continue;

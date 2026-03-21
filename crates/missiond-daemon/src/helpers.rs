@@ -33,7 +33,9 @@ pub(crate) fn slots_config_path() -> PathBuf {
 /// PostgreSQL connection URL (e.g. `postgres://user:pass@host:5432/missiond`).
 /// When set, daemon uses PgMissionStore instead of SqliteMissionStore.
 pub(crate) fn pg_url() -> Option<String> {
-    std::env::var("MISSION_PG_URL").ok().filter(|s| !s.is_empty())
+    std::env::var("MISSION_PG_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 pub(crate) fn ws_port() -> u16 {
@@ -78,11 +80,7 @@ pub(crate) fn ensure_config_permissions(home: &Path) {
                     old_mode = format!("{:o}", mode),
                     "Config file too permissive, fixing to 600"
                 );
-                std::fs::set_permissions(
-                    &path,
-                    std::fs::Permissions::from_mode(0o600),
-                )
-                .ok();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
             }
         }
     }

@@ -8,8 +8,8 @@
 
 use tracing::info;
 
-use crate::state::AppState;
 use crate::infra::session_util::detect_compaction;
+use crate::state::AppState;
 
 /// Routing result — the "waybill" attached to every incoming message batch.
 /// Downstream handlers (message_handler, etc.) use this directly without
@@ -57,7 +57,8 @@ pub(crate) async fn classify(
     // cache path), which is NOT the real project path. This causes detect_compaction and
     // claim_pending_spawn to fail on strict path comparison. The message payload always
     // carries the real cwd, so we use it as the single source of truth.
-    let resolved_project = messages.first()
+    let resolved_project = messages
+        .first()
         .map(|m| m.cwd.as_str())
         .filter(|cwd| !cwd.is_empty())
         .unwrap_or(project_path);
@@ -77,7 +78,11 @@ pub(crate) async fn classify(
             );
             let _ = state.store.set_slot_session(&slot_id, session_id).await;
             let _ = state.store.cleanup_pty_placeholder(&slot_id).await;
-            state.pty_session_uuids.write().await.insert(session_id.to_string());
+            state
+                .pty_session_uuids
+                .write()
+                .await
+                .insert(session_id.to_string());
             is_pty = true;
         }
     }
@@ -86,7 +91,9 @@ pub(crate) async fn classify(
     // (context compaction creates a new session_id for the same slot).
     // Only applies to Claude Code sessions — Gemini CLI has no compaction mechanism.
     if !is_pty && event_source == "claude_code" {
-        if let Some((slot_id, old_uuid, old_task_id)) = detect_compaction(state, session_id, jsonl_path).await {
+        if let Some((slot_id, old_uuid, old_task_id)) =
+            detect_compaction(state, session_id, jsonl_path).await
+        {
             info!(
                 slot_id = %slot_id,
                 old_session = %old_uuid,
@@ -97,7 +104,11 @@ pub(crate) async fn classify(
             let _ = state.store.set_slot_session(&slot_id, session_id).await;
             let _ = state.store.cleanup_pty_placeholder(&slot_id).await;
             state.pty_session_uuids.write().await.remove(&old_uuid);
-            state.pty_session_uuids.write().await.insert(session_id.to_string());
+            state
+                .pty_session_uuids
+                .write()
+                .await
+                .insert(session_id.to_string());
             is_pty = true;
 
             compaction.task_id = old_task_id;
@@ -107,7 +118,11 @@ pub(crate) async fn classify(
 
     // Resolve slot_id from registry
     let slot_id = if is_pty {
-        state.store.get_slot_for_session(session_id).await.unwrap_or(None)
+        state
+            .store
+            .get_slot_for_session(session_id)
+            .await
+            .unwrap_or(None)
     } else {
         None
     };
@@ -120,18 +135,18 @@ pub(crate) async fn classify(
     };
 
     // Determine conversation_type via the central brain
-    let conversation_type = missiond_core::db::derive_conversation_type(
-        slot_id.as_deref(), session_id,
-    );
+    let conversation_type =
+        missiond_core::db::derive_conversation_type(slot_id.as_deref(), session_id);
 
     // Extract parent session ID: compaction inherits from predecessor,
     // subagent extracts from JSONL path structure.
-    let parent_session_id = compaction.old_session_id.clone()
-        .or_else(|| if session_id.starts_with("agent-") {
+    let parent_session_id = compaction.old_session_id.clone().or_else(|| {
+        if session_id.starts_with("agent-") {
             missiond_core::db::extract_parent_session_id(jsonl_path)
         } else {
             None
-        });
+        }
+    });
 
     // Determine chat_type for non-standard sources
     let route = IngestionRoute {
@@ -147,21 +162,29 @@ pub(crate) async fn classify(
 
 /// Claim a pending slot spawn expectation ticket.
 /// Matches by project path and prompt content within a 30-second window. Consumes the ticket on match.
-async fn claim_pending_spawn(state: &AppState, project_path: &str, messages: &[missiond_core::CCMessageLine]) -> Option<String> {
+async fn claim_pending_spawn(
+    state: &AppState,
+    project_path: &str,
+    messages: &[missiond_core::CCMessageLine],
+) -> Option<String> {
     let now = tokio::time::Instant::now();
     let max_age = std::time::Duration::from_secs(30);
 
     let mut spawns = state.pending_slot_spawns.write().await;
 
     // Extract the first user message content from the JSONL batch
-    let first_user_msg = messages.iter()
+    let first_user_msg = messages
+        .iter()
         .find(|m| m.message.role == "user")
-        .and_then(|m| m.message.content.as_str().or_else(|| {
-            // Claude Code sometimes wraps content in an array of blocks
-            m.message.content.as_array().and_then(|arr| {
-                arr.first().and_then(|b| b.get("text").and_then(|t| t.as_str()))
+        .and_then(|m| {
+            m.message.content.as_str().or_else(|| {
+                // Claude Code sometimes wraps content in an array of blocks
+                m.message.content.as_array().and_then(|arr| {
+                    arr.first()
+                        .and_then(|b| b.get("text").and_then(|t| t.as_str()))
+                })
             })
-        }))
+        })
         .unwrap_or("");
 
     // Find matching ticket: project path match, within time window, and prompt matches.
@@ -173,8 +196,7 @@ async fn claim_pending_spawn(state: &AppState, project_path: &str, messages: &[m
         if now.duration_since(*ts) >= max_age {
             return false;
         }
-        let path_match = path == project_path
-            || project_path.starts_with(&format!("{}/", path));
+        let path_match = path == project_path || project_path.starts_with(&format!("{}/", path));
         if !path_match {
             return false;
         }

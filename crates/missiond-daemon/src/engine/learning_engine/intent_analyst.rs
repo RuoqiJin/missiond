@@ -15,7 +15,7 @@ use anyhow::Result;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::watch;
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
 use crate::event_bus::{DaemonEvent, TimelineEvent};
 use crate::helpers::char_boundary_at;
@@ -23,9 +23,9 @@ use crate::minimax_client::ChatMessage;
 use crate::state::AppState;
 use missiond_core::types::ConversationTurn;
 
-const DEBOUNCE_SECS: u64 = 300;       // 5 minutes
-const MAX_ACCUMULATION: usize = 5;     // fire after 5 unseen turns
-const MIN_TURNS_FOR_ANALYSIS: usize = 2;  // need >=2 turns to detect patterns
+const DEBOUNCE_SECS: u64 = 300; // 5 minutes
+const MAX_ACCUMULATION: usize = 5; // fire after 5 unseen turns
+const MIN_TURNS_FOR_ANALYSIS: usize = 2; // need >=2 turns to detect patterns
 
 /// Spawn the Intent Analyst consumer. Listens to TurnExtracted events,
 /// accumulates per-session, fires analysis on debounce timeout or accumulation threshold.
@@ -45,7 +45,10 @@ pub(crate) fn spawn_intent_consumer(
     let shutdown = shutdown_rx;
 
     tokio::spawn(async move {
-        info!("IntentAnalyst consumer started (debounce={}s, max_accum={})", DEBOUNCE_SECS, MAX_ACCUMULATION);
+        info!(
+            "IntentAnalyst consumer started (debounce={}s, max_accum={})",
+            DEBOUNCE_SECS, MAX_ACCUMULATION
+        );
 
         // (last_event_time, accumulated_turn_count)
         let mut pending: HashMap<String, (Instant, usize)> = HashMap::new();
@@ -55,11 +58,16 @@ pub(crate) fn spawn_intent_consumer(
             // Drain TurnExtracted events with 30s poll interval
             match tokio::time::timeout(Duration::from_secs(30), rx.recv()).await {
                 Ok(Ok(te)) => {
-                    if let DaemonEvent::TurnExtracted { ref session_id, turn_count } = te.event {
-                        let entry = pending.entry(session_id.clone())
+                    if let DaemonEvent::TurnExtracted {
+                        ref session_id,
+                        turn_count,
+                    } = te.event
+                    {
+                        let entry = pending
+                            .entry(session_id.clone())
                             .or_insert_with(|| (Instant::now(), 0));
-                        entry.0 = Instant::now();  // trailing-edge update
-                        entry.1 += turn_count;      // accumulate turn count
+                        entry.0 = Instant::now(); // trailing-edge update
+                        entry.1 += turn_count; // accumulate turn count
                     }
                 }
                 Ok(Err(RecvError::Lagged(n))) => {
@@ -74,7 +82,8 @@ pub(crate) fn spawn_intent_consumer(
 
             // Check: debounce timeout OR max accumulation
             let now = Instant::now();
-            let expired: Vec<String> = pending.iter()
+            let expired: Vec<String> = pending
+                .iter()
                 .filter(|(_, (ts, count))| {
                     now.duration_since(*ts) >= debounce_window || *count >= MAX_ACCUMULATION
                 })
@@ -85,7 +94,10 @@ pub(crate) fn spawn_intent_consumer(
                 pending.remove(&session_id);
 
                 // ControlTree gate: check Sonnet provider
-                if s.control_manager.current().is_provider_paused(crate::control_tree::CtlProvider::Sonnet) {
+                if s.control_manager
+                    .current()
+                    .is_provider_paused(crate::control_tree::CtlProvider::Sonnet)
+                {
                     debug!(session = %session_id, "IntentAnalyst: Sonnet gate closed, skipping");
                     continue;
                 }
@@ -112,7 +124,9 @@ pub(crate) fn spawn_intent_consumer(
 
 /// Startup backfill: process completed sessions that have turns but no intents.
 pub(crate) async fn intent_startup_backfill(state: &AppState) {
-    if !state.intent_analyst_enabled { return; }
+    if !state.intent_analyst_enabled {
+        return;
+    }
 
     let sessions = match state.store.sessions_pending_intent_analysis(50).await {
         Ok(s) => s,
@@ -122,7 +136,9 @@ pub(crate) async fn intent_startup_backfill(state: &AppState) {
         }
     };
 
-    if sessions.is_empty() { return; }
+    if sessions.is_empty() {
+        return;
+    }
 
     let total = sessions.len();
     let mut success = 0usize;
@@ -140,15 +156,23 @@ pub(crate) async fn intent_startup_backfill(state: &AppState) {
 /// Core analysis: fetch uncovered turns, call Sonnet, write intents.
 async fn process_session_intents(state: &AppState, session_id: &str) -> Result<usize> {
     // 1. Incremental cursor: get max turn_range_end already analyzed
-    let covered_end = state.store.get_intent_coverage(session_id).await
+    let covered_end = state
+        .store
+        .get_intent_coverage(session_id)
+        .await
         .map_err(|e| anyhow::anyhow!("get_intent_coverage: {}", e))?
         .unwrap_or(-1);
 
     // 2. Fetch uncovered turns
-    let mut turns = state.store.get_turns_after(session_id, covered_end).await
+    let mut turns = state
+        .store
+        .get_turns_after(session_id, covered_end)
+        .await
         .map_err(|e| anyhow::anyhow!("get_turns_after: {}", e))?;
 
-    if turns.len() < MIN_TURNS_FOR_ANALYSIS { return Ok(0); }
+    if turns.len() < MIN_TURNS_FOR_ANALYSIS {
+        return Ok(0);
+    }
 
     // Gemini audit fix: forward pagination — only analyze the next 15 turns per batch.
     // Without this, a 50-turn session would trigger build_analysis_context's reverse truncation,
@@ -162,7 +186,9 @@ async fn process_session_intents(state: &AppState, session_id: &str) -> Result<u
 
     // 3. Build analysis context
     let context = build_analysis_context(&turns);
-    if context.trim().is_empty() { return Ok(0); }
+    if context.trim().is_empty() {
+        return Ok(0);
+    }
 
     // 4. Call Sonnet via P4 intent channel
     let sonnet = match &state.sonnet {
@@ -172,34 +198,49 @@ async fn process_session_intents(state: &AppState, session_id: &str) -> Result<u
 
     let system = intent_analysis_prompt();
     let messages = vec![
-        ChatMessage { role: "system".to_string(), content: system },
-        ChatMessage { role: "user".to_string(), content: context },
+        ChatMessage {
+            role: "system".to_string(),
+            content: system,
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: context,
+        },
     ];
 
-    let raw = sonnet.call_intent(messages, Some(1024), None).await
+    let raw = sonnet
+        .call_intent(messages, Some(1024), None)
+        .await
         .map_err(|e| anyhow::anyhow!("Sonnet intent call failed: {}", e))?;
 
     // 5. Parse response
     let intents = parse_intent_response(&raw, &turns)?;
-    if intents.is_empty() { return Ok(0); }
+    if intents.is_empty() {
+        return Ok(0);
+    }
 
     // 6. Write to DB and update back-references
     let mut count = 0usize;
     for intent in &intents {
-        let id = state.store.insert_user_intent(
-            session_id,
-            intent.turn_start,
-            intent.turn_end,
-            &intent.intent_type,
-            intent.confidence,
-            Some(&intent.summary),
-            None,
-            None,
-        ).await.map_err(|e| anyhow::anyhow!("insert_user_intent: {}", e))?;
+        let id = state
+            .store
+            .insert_user_intent(
+                session_id,
+                intent.turn_start,
+                intent.turn_end,
+                &intent.intent_type,
+                intent.confidence,
+                Some(&intent.summary),
+                None,
+                None,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("insert_user_intent: {}", e))?;
 
-        let _ = state.store.update_turns_intent_group(
-            session_id, intent.turn_start, intent.turn_end, id,
-        ).await;
+        let _ = state
+            .store
+            .update_turns_intent_group(session_id, intent.turn_start, intent.turn_end, id)
+            .await;
 
         // Emit event
         state.event_bus.publish(DaemonEvent::IntentAnalyzed {
@@ -247,7 +288,9 @@ fn build_analysis_context(turns: &[ConversationTurn]) -> String {
                 if turn.has_code_change { "是" } else { "否" },
                 if turn.has_mcp_call { "是" } else { "否" },
             );
-            if trimmed.len() + entry.len() > 6000 { break; }
+            if trimmed.len() + entry.len() > 6000 {
+                break;
+            }
             trimmed.insert_str(0, &entry);
         }
         return trimmed;
@@ -272,7 +315,8 @@ fn intent_analysis_prompt() -> String {
      2. summary 中文，一句话，包含具体技术细节\n\
      3. 相邻的 normal_progress turns 可合并为一条\n\
      4. 输出纯 JSON，无 markdown fence\n\
-     5. turn_start 和 turn_end 必须在输入 Turn 范围内".to_string()
+     5. turn_start 和 turn_end 必须在输入 Turn 范围内"
+        .to_string()
 }
 
 #[derive(Debug)]
@@ -296,26 +340,59 @@ fn parse_intent_response(raw: &str, turns: &[ConversationTurn]) -> Result<Vec<Pa
         json_str
     };
 
-    let items: Vec<serde_json::Value> = serde_json::from_str(json_str)
-        .map_err(|e| anyhow::anyhow!("Intent JSON parse failed: {} (raw: {})", e, &json_str[..char_boundary_at(json_str, 200)]))?;
+    let items: Vec<serde_json::Value> = serde_json::from_str(json_str).map_err(|e| {
+        anyhow::anyhow!(
+            "Intent JSON parse failed: {} (raw: {})",
+            e,
+            &json_str[..char_boundary_at(json_str, 200)]
+        )
+    })?;
 
-    let valid_types = ["normal_progress", "stuck_retry", "architecture_explore", "refactor_shift", "scope_creep"];
+    let valid_types = [
+        "normal_progress",
+        "stuck_retry",
+        "architecture_explore",
+        "refactor_shift",
+        "scope_creep",
+    ];
     let min_idx = turns.first().map(|t| t.turn_idx).unwrap_or(0);
     let max_idx = turns.last().map(|t| t.turn_idx).unwrap_or(0);
 
     let mut result = Vec::new();
     for item in &items {
-        let turn_start = item.get("turn_start").and_then(|v| v.as_i64()).unwrap_or(-1) as i32;
+        let turn_start = item
+            .get("turn_start")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(-1) as i32;
         let turn_end = item.get("turn_end").and_then(|v| v.as_i64()).unwrap_or(-1) as i32;
-        let intent_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let confidence = item.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
-        let summary = item.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let intent_type = item
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let confidence = item
+            .get("confidence")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.5) as f32;
+        let summary = item
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         // Validate
-        if turn_start < min_idx || turn_end > max_idx || turn_start > turn_end { continue; }
-        if !valid_types.contains(&intent_type.as_str()) { continue; }
-        if summary.is_empty() { continue; }
-        if confidence < 0.0 || confidence > 1.0 { continue; }
+        if turn_start < min_idx || turn_end > max_idx || turn_start > turn_end {
+            continue;
+        }
+        if !valid_types.contains(&intent_type.as_str()) {
+            continue;
+        }
+        if summary.is_empty() {
+            continue;
+        }
+        if confidence < 0.0 || confidence > 1.0 {
+            continue;
+        }
 
         result.push(ParsedIntent {
             turn_start,
@@ -335,9 +412,7 @@ mod tests {
 
     #[test]
     fn test_parse_intent_response_basic() {
-        let turns = vec![
-            make_turn(0), make_turn(1), make_turn(2), make_turn(3),
-        ];
+        let turns = vec![make_turn(0), make_turn(1), make_turn(2), make_turn(3)];
         let raw = r#"[
             {"turn_start": 0, "turn_end": 1, "type": "normal_progress", "confidence": 0.9, "summary": "正常推进部署配置"},
             {"turn_start": 2, "turn_end": 3, "type": "stuck_retry", "confidence": 0.8, "summary": "反复修复CORS跨域错误"}

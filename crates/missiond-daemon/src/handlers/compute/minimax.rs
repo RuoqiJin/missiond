@@ -3,8 +3,8 @@
 //! Legacy name `mission_minimax_process` preserved for backward compatibility.
 
 use anyhow::Result;
-use serde_json::Value;
 use missiond_mcp::tools::ToolResult;
+use serde_json::Value;
 use tracing::info;
 
 use crate::minimax_client::ChatMessage;
@@ -24,7 +24,10 @@ async fn handle_process(state: &AppState, args: Value) -> Result<ToolResult> {
     };
 
     let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
-    let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("summarize");
+    let task = args
+        .get("task")
+        .and_then(|v| v.as_str())
+        .unwrap_or("summarize");
 
     if text.is_empty() {
         return Ok(ToolResult::error("'text' is required"));
@@ -41,10 +44,15 @@ async fn handle_process(state: &AppState, args: Value) -> Result<ToolResult> {
                 role: "user".to_string(),
                 content: prompt,
             }];
-            sonnet.call_interactive(messages, Some(500), "sonnet_process").await
+            sonnet
+                .call_interactive(messages, Some(500), "sonnet_process")
+                .await
         }
         "translate" => {
-            let target_lang = args.get("targetLang").and_then(|v| v.as_str()).unwrap_or("en");
+            let target_lang = args
+                .get("targetLang")
+                .and_then(|v| v.as_str())
+                .unwrap_or("en");
             let prompt = format!(
                 "请将以下内容翻译成{}。直接输出翻译结果，不要前缀或解释。\n\n{}",
                 target_lang, text
@@ -53,7 +61,9 @@ async fn handle_process(state: &AppState, args: Value) -> Result<ToolResult> {
                 role: "user".to_string(),
                 content: prompt,
             }];
-            sonnet.call_interactive(messages, None, "sonnet_process").await
+            sonnet
+                .call_interactive(messages, None, "sonnet_process")
+                .await
         }
         "custom" => {
             let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
@@ -64,14 +74,21 @@ async fn handle_process(state: &AppState, args: Value) -> Result<ToolResult> {
                 role: "user".to_string(),
                 content: format!("{}\n\n{}", prompt, text),
             }];
-            sonnet.call_interactive(messages, None, "sonnet_process").await
+            sonnet
+                .call_interactive(messages, None, "sonnet_process")
+                .await
         }
         _ => return Ok(ToolResult::error(format!("Unknown task type: {}", task))),
     };
 
     match result {
         Ok(content) => {
-            info!(task, input_chars = text.len(), output_chars = content.len(), "Sonnet process completed");
+            info!(
+                task,
+                input_chars = text.len(),
+                output_chars = content.len(),
+                "Sonnet process completed"
+            );
             Ok(ToolResult::text(content))
         }
         Err(e) => Ok(ToolResult::error(format!("Sonnet API error: {}", e))),

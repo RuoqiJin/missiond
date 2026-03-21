@@ -95,7 +95,7 @@ impl MissionDB {
     pub fn fetch_narration_batch(&self, session_id: &str, after_id: i64, batch_size: i64) -> DbResult<Vec<ConversationMessage>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
-            "SELECT * FROM conversation_messages
+            "SELECT id, session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = id AND l.label = 'semantic_role'), role) as role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count FROM conversation_messages
              WHERE session_id = ?1 AND id > ?2 AND role IN ('user', 'assistant')
              ORDER BY id ASC LIMIT ?3"
         )?;

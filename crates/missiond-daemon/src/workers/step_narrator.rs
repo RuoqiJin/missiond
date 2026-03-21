@@ -72,10 +72,12 @@ struct NarrationEntry {
 pub(crate) struct StepNarratorWorker;
 
 impl super::BackgroundWorker for StepNarratorWorker {
-    fn name(&self) -> &'static str { "step_narrator" }
+    fn name(&self) -> &'static str {
+        "step_narrator"
+    }
 
     fn dependencies(&self) -> Vec<crate::control_tree::Dependency> {
-        use crate::control_tree::{Dependency, CtlProvider};
+        use crate::control_tree::{CtlProvider, Dependency};
         vec![Dependency::Provider(CtlProvider::Codex)]
     }
 
@@ -102,13 +104,19 @@ impl super::BackgroundWorker for StepNarratorWorker {
 
 async fn process_pending(state: &AppState, codex: &CodexCli) -> anyhow::Result<()> {
     // Discover sessions with unnarrated messages
-    let pending = state.store.get_sessions_needing_narration(MIN_UNNARRATED).await
+    let pending = state
+        .store
+        .get_sessions_needing_narration(MIN_UNNARRATED)
+        .await
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
     if pending.is_empty() {
         return Ok(());
     }
 
-    info!(sessions = pending.len(), "Step Narrator: found sessions needing narration");
+    info!(
+        sessions = pending.len(),
+        "Step Narrator: found sessions needing narration"
+    );
 
     // Process one session at a time (strict serial)
     for (session_id, _unnarrated_count) in pending {
@@ -121,13 +129,19 @@ async fn process_pending(state: &AppState, codex: &CodexCli) -> anyhow::Result<(
 }
 
 /// Process a single session: iterate batches until all messages are narrated.
-async fn process_session(state: &AppState, codex: &CodexCli, session_id: &str) -> anyhow::Result<()> {
+async fn process_session(
+    state: &AppState,
+    codex: &CodexCli,
+    session_id: &str,
+) -> anyhow::Result<()> {
     let short_id = &session_id[..8.min(session_id.len())];
 
     // Get or create cursor
-    let (last_processed_id, batch_index, status, _retry_count, total_messages) =
-        state.store.get_or_create_narration_cursor(session_id).await
-            .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
+    let (last_processed_id, batch_index, status, _retry_count, total_messages) = state
+        .store
+        .get_or_create_narration_cursor(session_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
 
     if status == "error" {
         info!(session = %short_id, "Step Narrator: skipping errored session");
@@ -135,7 +149,10 @@ async fn process_session(state: &AppState, codex: &CodexCli, session_id: &str) -
     }
 
     // Count already narrated
-    let narrations = state.store.get_narrations_for_session(session_id).await
+    let narrations = state
+        .store
+        .get_narrations_for_session(session_id)
+        .await
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
     let already_narrated = narrations.len();
 
@@ -163,7 +180,10 @@ async fn process_session(state: &AppState, codex: &CodexCli, session_id: &str) -
 
     loop {
         // Fetch next batch
-        let batch = state.store.fetch_narration_batch(session_id, current_cursor, BATCH_SIZE).await
+        let batch = state
+            .store
+            .fetch_narration_batch(session_id, current_cursor, BATCH_SIZE)
+            .await
             .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
         if batch.is_empty() {
             break; // All messages processed
@@ -176,7 +196,10 @@ async fn process_session(state: &AppState, codex: &CodexCli, session_id: &str) -
               "Step Narrator: processing batch");
 
         // Mark cursor as processing
-        state.store.mark_narration_cursor_processing(session_id).await
+        state
+            .store
+            .mark_narration_cursor_processing(session_id)
+            .await
             .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
 
         // Build prompt with context
@@ -185,25 +208,41 @@ async fn process_session(state: &AppState, codex: &CodexCli, session_id: &str) -
         let batch_start = Instant::now();
 
         // Call GPT-5.4
-        match codex.call(
-            &prompt,
-            "step_narrator",
-            None,
-            None,
-            Some(Duration::from_secs(180)),
-            None,
-        ).await {
+        match codex
+            .call(
+                &prompt,
+                "step_narrator",
+                None,
+                None,
+                Some(Duration::from_secs(180)),
+                None,
+            )
+            .await
+        {
             Ok(resp) => {
                 let duration_ms = batch_start.elapsed().as_millis() as u64;
 
                 // Parse response
                 match parse_narration_response(&resp.content) {
                     Ok(parsed) => {
-                        let narration_batch: Vec<(i64, &str, &str, &str, &str)> = parsed.narrations.iter()
-                            .map(|n| (n.message_id, session_id, n.step_title.as_str(), n.step_intent.as_str(), n.step_result.as_str()))
+                        let narration_batch: Vec<(i64, &str, &str, &str, &str)> = parsed
+                            .narrations
+                            .iter()
+                            .map(|n| {
+                                (
+                                    n.message_id,
+                                    session_id,
+                                    n.step_title.as_str(),
+                                    n.step_intent.as_str(),
+                                    n.step_result.as_str(),
+                                )
+                            })
                             .collect();
 
-                        let count = state.store.commit_narration_batch(session_id, batch_last_id, &narration_batch).await
+                        let count = state
+                            .store
+                            .commit_narration_batch(session_id, batch_last_id, &narration_batch)
+                            .await
                             .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
                         session_narrated_count += count;
 
@@ -228,7 +267,10 @@ async fn process_session(state: &AppState, codex: &CodexCli, session_id: &str) -
                     Err(e) => {
                         warn!(session = %short_id, batch = current_batch_index, error = %e,
                               "Step Narrator: failed to parse response");
-                        let permanently_failed = state.store.mark_narration_cursor_failed(session_id, MAX_RETRIES).await
+                        let permanently_failed = state
+                            .store
+                            .mark_narration_cursor_failed(session_id, MAX_RETRIES)
+                            .await
                             .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
                         state.event_bus.publish_traced(
                             DaemonEvent::NarrationFailed {
@@ -247,7 +289,10 @@ async fn process_session(state: &AppState, codex: &CodexCli, session_id: &str) -
                 let duration_ms = batch_start.elapsed().as_millis() as u64;
                 warn!(session = %short_id, batch = current_batch_index, error = %e, duration_ms,
                       "Step Narrator: codex call failed");
-                let permanently_failed = state.store.mark_narration_cursor_failed(session_id, MAX_RETRIES).await
+                let permanently_failed = state
+                    .store
+                    .mark_narration_cursor_failed(session_id, MAX_RETRIES)
+                    .await
                     .map_err(|e2| anyhow::anyhow!("DB error: {}", e2))?;
                 state.event_bus.publish_traced(
                     DaemonEvent::NarrationFailed {
@@ -295,15 +340,24 @@ async fn build_batch_prompt(
     parts.push(NARRATOR_SYSTEM_PROMPT.to_string());
 
     // Batch context header
-    parts.push(format!("\n\n--- 这是第 {} 批（每批最多 {} 条消息）---\n",
-        batch_index + 1, BATCH_SIZE));
+    parts.push(format!(
+        "\n\n--- 这是第 {} 批（每批最多 {} 条消息）---\n",
+        batch_index + 1,
+        BATCH_SIZE
+    ));
 
     // Previous context (for batch_index > 0)
     if batch_index > 0 {
         parts.push("<previous_context>\n".to_string());
-        if let Ok(Some((last_msg_id, title, intent, result))) = state.store.get_last_narration(session_id).await {
+        if let Ok(Some((last_msg_id, title, intent, result))) =
+            state.store.get_last_narration(session_id).await
+        {
             // Get the actual message content for anchoring
-            if let Ok(Some(msg)) = state.store.get_conversation_message_by_id(last_msg_id).await {
+            if let Ok(Some(msg)) = state
+                .store
+                .get_conversation_message_by_id(last_msg_id)
+                .await
+            {
                 parts.push(format!(
                     "上一批最后一条消息 [MSG_ID:{}] [{}]：\n{}\n\n该消息的解说：\n- step_title: {}\n- step_intent: {}\n- step_result: {}\n",
                     msg.id, msg.role, msg.content, title, intent, result
@@ -317,7 +371,10 @@ async fn build_batch_prompt(
         }
         parts.push("</previous_context>\n\n".to_string());
     } else {
-        parts.push("<previous_context>\n这是会话的开头，没有前置上下文。\n</previous_context>\n\n".to_string());
+        parts.push(
+            "<previous_context>\n这是会话的开头，没有前置上下文。\n</previous_context>\n\n"
+                .to_string(),
+        );
     }
 
     // Current batch messages (原文，不压缩)
@@ -335,10 +392,7 @@ async fn build_batch_prompt(
     parts.push("</conversation>\n".to_string());
 
     // Instruction
-    parts.push(format!(
-        "\n请为以下 message_id 生成解说：{:?}",
-        msg_ids
-    ));
+    parts.push(format!("\n请为以下 message_id 生成解说：{:?}", msg_ids));
 
     Ok(parts.join(""))
 }
@@ -356,6 +410,10 @@ fn parse_narration_response(content: &str) -> anyhow::Result<NarrationResponse> 
         content
     };
 
-    serde_json::from_str(json_str)
-        .map_err(|e| anyhow::anyhow!("Failed to parse GPT narration: {e}\nRaw: {}", &json_str[..200.min(json_str.len())]))
+    serde_json::from_str(json_str).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse GPT narration: {e}\nRaw: {}",
+            &json_str[..200.min(json_str.len())]
+        )
+    })
 }

@@ -1,18 +1,22 @@
 use anyhow::{anyhow, Result};
+use missiond_core::PTYSpawnOptions;
+use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
-use missiond_mcp::tools::ToolResult;
-use missiond_core::PTYSpawnOptions;
 
-use crate::state::AppState;
 use crate::lenient;
 use crate::slot_env;
+use crate::state::AppState;
 
 #[derive(Deserialize)]
 struct SpawnArgs {
     #[serde(rename = "slotId")]
     slot_id: String,
-    #[serde(rename = "autoRestart", default, deserialize_with = "lenient::option_bool")]
+    #[serde(
+        rename = "autoRestart",
+        default,
+        deserialize_with = "lenient::option_bool"
+    )]
     auto_restart: Option<bool>,
 }
 
@@ -26,14 +30,21 @@ struct KillArgs {
 struct RestartArgs {
     #[serde(rename = "slotId")]
     slot_id: String,
-    #[serde(rename = "autoRestart", default, deserialize_with = "lenient::option_bool")]
+    #[serde(
+        rename = "autoRestart",
+        default,
+        deserialize_with = "lenient::option_bool"
+    )]
     auto_restart: Option<bool>,
 }
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     // Consolidated tool: mission_agent with action parameter
     if name == "mission_agent" {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("list");
         return match action {
             "spawn" => handle_inner(state, "mission_spawn", args).await,
             "kill" => handle_inner(state, "mission_kill", args).await,
@@ -82,8 +93,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     model: slot.config.model.clone(),
                     extra_env: std::collections::HashMap::new(),
                 },
-                slot.config.env.as_ref()
-            ).await?;
+                slot.config.env.as_ref(),
+            )
+            .await?;
             Ok(ToolResult::json(&info))
         }
         "mission_kill" => {
@@ -130,8 +142,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     model: slot.config.model.clone(),
                     extra_env: std::collections::HashMap::new(),
                 },
-                slot.config.env.as_ref()
-            ).await?;
+                slot.config.env.as_ref(),
+            )
+            .await?;
             Ok(ToolResult::json(&info))
         }
         "mission_agents" => {

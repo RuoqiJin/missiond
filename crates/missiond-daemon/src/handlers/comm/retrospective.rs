@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
+use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use missiond_mcp::tools::ToolResult;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::state::AppState;
@@ -30,11 +30,16 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 /// Core analysis logic — called by both the MCP handler and retro_worker.
 /// Factored out of `handle()` to break circular Send dependency
 /// (handle → handle_backfill → spawn(backfill) → analyze_session → handle).
-pub(crate) async fn run_analysis(state: &AppState, session_id: &str, depth: &str) -> Result<ToolResult> {
-
+pub(crate) async fn run_analysis(
+    state: &AppState,
+    session_id: &str,
+    depth: &str,
+) -> Result<ToolResult> {
     // 1. Session meta
-    let (total_calls, total_duration, unique_tools, compact_count) = state.store
-        .get_retrospective_meta(&session_id).await
+    let (total_calls, total_duration, unique_tools, compact_count) = state
+        .store
+        .get_retrospective_meta(&session_id)
+        .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
     if total_calls == 0 {
@@ -55,8 +60,10 @@ pub(crate) async fn run_analysis(state: &AppState, session_id: &str, depth: &str
     }
 
     // 2. Top tools
-    let top_tools = state.store
-        .get_retrospective_tool_stats(&session_id, 15).await
+    let top_tools = state
+        .store
+        .get_retrospective_tool_stats(&session_id, 15)
+        .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
     let top_tools_json: Vec<Value> = top_tools
         .iter()
@@ -72,8 +79,10 @@ pub(crate) async fn run_analysis(state: &AppState, session_id: &str, depth: &str
         .collect();
 
     // 3. Time black holes (top turn durations from events)
-    let events = state.store
-        .get_conversation_events(&session_id, Some("turn_duration"), 500).await
+    let events = state
+        .store
+        .get_conversation_events(&session_id, Some("turn_duration"), 500)
+        .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
     let mut durations: Vec<(f64, String, String)> = events
         .iter()
@@ -100,8 +109,10 @@ pub(crate) async fn run_analysis(state: &AppState, session_id: &str, depth: &str
         .collect();
 
     // 4. Consecutive repeat patterns (Gaps-and-Islands)
-    let repeats = state.store
-        .get_retrospective_repeat_patterns(&session_id, 3).await
+    let repeats = state
+        .store
+        .get_retrospective_repeat_patterns(&session_id, 3)
+        .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
     let repeat_patterns: Vec<Value> = repeats
         .iter()
@@ -116,14 +127,18 @@ pub(crate) async fn run_analysis(state: &AppState, session_id: &str, depth: &str
         .collect();
 
     // 5. N-Gram alternating patterns (Rust-side sliding window)
-    let tool_seq = state.store
-        .get_tool_name_sequence(&session_id).await
+    let tool_seq = state
+        .store
+        .get_tool_name_sequence(&session_id)
+        .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
     let ngram_patterns = detect_ngram_patterns(&tool_seq, 3);
 
     // 6. High error rate tools
-    let high_error = state.store
-        .get_retrospective_high_error_tools(&session_id, 10.0).await
+    let high_error = state
+        .store
+        .get_retrospective_high_error_tools(&session_id, 10.0)
+        .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
     let high_error_json: Vec<Value> = high_error
         .iter()
@@ -137,8 +152,16 @@ pub(crate) async fn run_analysis(state: &AppState, session_id: &str, depth: &str
         .collect();
 
     // 7. Session outcome
-    let conv_info = state.store.get_conversation(&session_id).await.ok().flatten();
-    let session_status = conv_info.as_ref().map(|c| c.status.as_str()).unwrap_or("unknown");
+    let conv_info = state
+        .store
+        .get_conversation(&session_id)
+        .await
+        .ok()
+        .flatten();
+    let session_status = conv_info
+        .as_ref()
+        .map(|c| c.status.as_str())
+        .unwrap_or("unknown");
 
     // 8. Waste score: repeat calls / total calls
     let total_repeat_calls: i64 = repeats.iter().map(|(_, streak, _, _)| streak).sum();
@@ -287,7 +310,9 @@ fn build_error_type_distribution(calls: &[(String, String, String, String)]) -> 
     let mut business: Vec<(&str, &str)> = Vec::new();
 
     for (tool_name, _input, output, status) in calls {
-        if status != "error" { continue; }
+        if status != "error" {
+            continue;
+        }
         let etype = classify_error_type(output);
         let bucket = match etype {
             "system_error" => &mut system,
@@ -298,21 +323,31 @@ fn build_error_type_distribution(calls: &[(String, String, String, String)]) -> 
     }
 
     let summarize = |items: &[(&str, &str)]| -> Value {
-        if items.is_empty() { return json!(null); }
+        if items.is_empty() {
+            return json!(null);
+        }
         let mut tool_counts: HashMap<&str, u32> = HashMap::new();
         for (tool, _) in items {
             *tool_counts.entry(tool).or_default() += 1;
         }
-        let samples: Vec<Value> = items.iter().take(3).map(|(tool, output)| {
-            json!({ "tool": tool, "sample": safe_truncate(output, 100) })
-        }).collect();
+        let samples: Vec<Value> = items
+            .iter()
+            .take(3)
+            .map(|(tool, output)| json!({ "tool": tool, "sample": safe_truncate(output, 100) }))
+            .collect();
         json!({ "count": items.len(), "tools": tool_counts, "samples": samples })
     };
 
     let mut result = json!({});
-    if !system.is_empty() { result["system_error"] = summarize(&system); }
-    if !client.is_empty() { result["client_error"] = summarize(&client); }
-    if !business.is_empty() { result["business_error"] = summarize(&business); }
+    if !system.is_empty() {
+        result["system_error"] = summarize(&system);
+    }
+    if !client.is_empty() {
+        result["client_error"] = summarize(&client);
+    }
+    if !business.is_empty() {
+        result["business_error"] = summarize(&business);
+    }
     result
 }
 
@@ -327,12 +362,16 @@ struct DetailedAnalysis {
 
 /// Build detailed analysis: file heatmap, server map, error recovery chains
 async fn run_detailed_analysis(state: &AppState, session_id: &str) -> Result<DetailedAnalysis> {
-    let tool_calls = state.store
-        .get_tool_calls_for_detailed_analysis(session_id).await
+    let tool_calls = state
+        .store
+        .get_tool_calls_for_detailed_analysis(session_id)
+        .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
-    let timeline = state.store
-        .get_tool_calls_with_status_timeline(session_id).await
+    let timeline = state
+        .store
+        .get_tool_calls_with_status_timeline(session_id)
+        .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
     let file_heatmap = build_file_heatmap(&tool_calls);
@@ -513,7 +552,13 @@ fn build_error_recovery_chains(timeline: &[(String, String, String, String)]) ->
                 "timestamp": rts,
             }));
             // Resolution: same tool succeeds, or a different fix tool succeeds
-            if rs == "success" && (rt == &error_tool || rt == "Edit" || rt == "Write" || rt == "edit" || rt == "write") {
+            if rs == "success"
+                && (rt == &error_tool
+                    || rt == "Edit"
+                    || rt == "Write"
+                    || rt == "edit"
+                    || rt == "write")
+            {
                 resolved = true;
                 break;
             }
@@ -573,7 +618,10 @@ fn extract_file_path(input: &str) -> Option<String> {
     if let Some(idx) = input.find("file_path:") {
         let rest = &input[idx + 10..];
         let rest = rest.trim_start();
-        let end = rest.find(',').or_else(|| rest.find('}')).unwrap_or(rest.len());
+        let end = rest
+            .find(',')
+            .or_else(|| rest.find('}'))
+            .unwrap_or(rest.len());
         let path = rest[..end].trim().trim_matches('"');
         if !path.is_empty() && path.starts_with('/') {
             return Some(path.to_string());
@@ -583,7 +631,10 @@ fn extract_file_path(input: &str) -> Option<String> {
     if let Some(idx) = input.find("path:") {
         let rest = &input[idx + 5..];
         let rest = rest.trim_start();
-        let end = rest.find(',').or_else(|| rest.find('}')).unwrap_or(rest.len());
+        let end = rest
+            .find(',')
+            .or_else(|| rest.find('}'))
+            .unwrap_or(rest.len());
         let path = rest[..end].trim().trim_matches('"');
         if !path.is_empty() && path.starts_with('/') {
             return Some(path.to_string());
@@ -598,7 +649,10 @@ fn extract_field(input: &str, field: &str) -> Option<String> {
     if let Some(idx) = input.find(&pattern) {
         let rest = &input[idx + pattern.len()..];
         let rest = rest.trim_start();
-        let end = rest.find(',').or_else(|| rest.find('}')).unwrap_or(rest.len());
+        let end = rest
+            .find(',')
+            .or_else(|| rest.find('}'))
+            .unwrap_or(rest.len());
         let val = rest[..end].trim().trim_matches('"').trim();
         if !val.is_empty() {
             return Some(val.to_string());
@@ -627,7 +681,8 @@ fn classify_command(cmd: &str) -> &'static str {
         "http"
     } else if cmd_lower.contains("git") {
         "git"
-    } else if cmd_lower.contains("cargo") || cmd_lower.contains("npm") || cmd_lower.contains("make") {
+    } else if cmd_lower.contains("cargo") || cmd_lower.contains("npm") || cmd_lower.contains("make")
+    {
         "build"
     } else if cmd_lower.contains("cat") || cmd_lower.contains("ls") || cmd_lower.contains("find") {
         "inspect"
@@ -643,8 +698,10 @@ fn classify_command(cmd: &str) -> &'static str {
 /// Full analysis: compose prompt from aggregated data + Gemini
 async fn run_full_analysis(state: &AppState, session_id: &str, stats: &Value) -> Result<Value> {
     // Get mission objective (first user message)
-    let objective = state.store
-        .get_first_user_message(session_id).await
+    let objective = state
+        .store
+        .get_first_user_message(session_id)
+        .await
         .ok()
         .flatten()
         .map(|msg| {
@@ -676,33 +733,49 @@ async fn run_full_analysis(state: &AppState, session_id: &str, stats: &Value) ->
     }
 
     // Get board task if linked
-    let conv = state.store.get_conversation(session_id).await.ok().flatten();
+    let conv = state
+        .store
+        .get_conversation(session_id)
+        .await
+        .ok()
+        .flatten();
     let task_title = if let Some(tid) = conv.as_ref().and_then(|c| c.task_id.as_deref()) {
-        state.store.get_board_task(tid).await.ok().flatten().map(|t| t.title).unwrap_or_default()
+        state
+            .store
+            .get_board_task(tid)
+            .await
+            .ok()
+            .flatten()
+            .map(|t| t.title)
+            .unwrap_or_default()
     } else {
         String::new()
     };
 
     // Build detailed sections for prompt (if available)
-    let file_heatmap_str = stats.get("fileHeatmap")
+    let file_heatmap_str = stats
+        .get("fileHeatmap")
         .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
         .filter(|s| s != "[]" && s != "null")
         .map(|s| format!("\n### 文件热力图（操作频次/Churn 比）\n{s}\n"))
         .unwrap_or_default();
 
-    let server_map_str = stats.get("serverMap")
+    let server_map_str = stats
+        .get("serverMap")
         .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
         .filter(|s| s != "[]" && s != "null")
         .map(|s| format!("\n### 服务器操作分布\n{s}\n"))
         .unwrap_or_default();
 
-    let error_chains_str = stats.get("errorRecoveryChains")
+    let error_chains_str = stats
+        .get("errorRecoveryChains")
         .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
         .filter(|s| s != "[]" && s != "null")
         .map(|s| format!("\n### 错误恢复链（策略分类）\n{s}\n"))
         .unwrap_or_default();
 
-    let error_type_str = stats.get("errorTypeDistribution")
+    let error_type_str = stats
+        .get("errorTypeDistribution")
         .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
         .filter(|s| s != "{}" && s != "null")
         .map(|s| format!("\n### 错误类型分布（system/client/business）\n{s}\n"))
@@ -746,7 +819,11 @@ async fn run_full_analysis(state: &AppState, session_id: &str, stats: &Value) ->
 6. 对 MissionD 基建的改进建议
 
 返回 JSON: {{"findings": ["..."], "recommendations": ["..."], "automatable": ["..."]}}"#,
-        task_title = if task_title.is_empty() { "(无关联任务)" } else { &task_title },
+        task_title = if task_title.is_empty() {
+            "(无关联任务)"
+        } else {
+            &task_title
+        },
         objective = objective,
         total_calls = stats["meta"]["totalCalls"],
         total_dur_min = stats["meta"]["totalDurationMs"].as_i64().unwrap_or(0) as f64 / 60000.0,
@@ -770,7 +847,9 @@ async fn run_full_analysis(state: &AppState, session_id: &str, stats: &Value) ->
     let chat_result = super::router_chat::handle(state, "mission_router_chat", chat_args).await?;
 
     // Extract response text from ToolResult
-    let response_text = chat_result.content.first()
+    let response_text = chat_result
+        .content
+        .first()
         .map(|c| match c {
             missiond_mcp::tools::ToolContent::Text { text } => text.as_str(),
         })
@@ -829,20 +908,26 @@ async fn handle_list(state: &AppState, args: Value) -> Result<ToolResult> {
         .and_then(|a| a.limit)
         .unwrap_or(10);
 
-    let results = state.store.list_retrospective_results(limit).await
+    let results = state
+        .store
+        .list_retrospective_results(limit)
+        .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
-    let items: Vec<Value> = results.iter().map(|(sid, trigger, stats, full, created)| {
-        // Parse quick_stats to extract key metrics for summary
-        let stats_val: Value = serde_json::from_str(stats).unwrap_or_default();
-        json!({
-            "sessionId": sid,
-            "trigger": trigger,
-            "createdAt": created,
-            "hasFull": full.is_some(),
-            "meta": stats_val.get("meta"),
+    let items: Vec<Value> = results
+        .iter()
+        .map(|(sid, trigger, stats, full, created)| {
+            // Parse quick_stats to extract key metrics for summary
+            let stats_val: Value = serde_json::from_str(stats).unwrap_or_default();
+            json!({
+                "sessionId": sid,
+                "trigger": trigger,
+                "createdAt": created,
+                "hasFull": full.is_some(),
+                "meta": stats_val.get("meta"),
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(ToolResult::json_pretty(&json!({
         "results": items,
@@ -859,13 +944,17 @@ async fn handle_backfill(state: &AppState, args: Value) -> Result<ToolResult> {
     let Args { since } = serde_json::from_value(args)?;
 
     // Count sessions first (before spawning)
-    let count = state.store
-        .get_sessions_for_retro_backfill(&since, false).await
+    let count = state
+        .store
+        .get_sessions_for_retro_backfill(&since, false)
+        .await
         .map(|v| v.len())
         .unwrap_or(0);
 
     if count == 0 {
-        return Ok(ToolResult::text("没有需要回填的会话（全部已有复盘结果或无符合条件的会话）。"));
+        return Ok(ToolResult::text(
+            "没有需要回填的会话（全部已有复盘结果或无符合条件的会话）。",
+        ));
     }
 
     let msg = format!(

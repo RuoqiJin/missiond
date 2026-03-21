@@ -1,13 +1,13 @@
 use anyhow::{anyhow, Result};
+use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::{info, warn};
-use missiond_mcp::tools::ToolResult;
 
-use crate::state::AppState;
-use crate::slot_env::capture_slot_session_uuid;
 use crate::lenient;
 use crate::slot_env::build_slot_tracking_env;
+use crate::slot_env::capture_slot_session_uuid;
+use crate::state::AppState;
 use missiond_core::PTYSpawnOptions;
 
 #[derive(Deserialize)]
@@ -44,7 +44,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     // Consolidated tool dispatch
     match name {
         "mission_task_submit" => {
-            let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("async");
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("async");
             match action {
                 "async" => handle_submit(state, args).await,
                 "sync" => handle_ask(state, args).await,
@@ -52,7 +55,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
         }
         "mission_task_query" => {
-            let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("list");
             match action {
                 "status" => handle_status(state, args).await,
                 "list" => handle_task_list(state, args).await,
@@ -77,7 +83,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
     let submit_args: SubmitArgs = serde_json::from_value(args)?;
     let role = submit_args.role;
-    let prompt = submit_args.prompt.or(submit_args.question)
+    let prompt = submit_args
+        .prompt
+        .or(submit_args.question)
         .ok_or_else(|| anyhow!("prompt or question is required"))?;
     let target_slot = submit_args.slot_id;
 
@@ -85,13 +93,16 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
 
     // If slotId specified, store it on the task for autopilot fallback
     if let Some(ref target) = target_slot {
-        let _ = state.store.update_task(
-            &task_id,
-            &missiond_core::types::TaskUpdate {
-                slot_id: Some(target.clone()),
-                ..Default::default()
-            },
-        ).await;
+        let _ = state
+            .store
+            .update_task(
+                &task_id,
+                &missiond_core::types::TaskUpdate {
+                    slot_id: Some(target.clone()),
+                    ..Default::default()
+                },
+            )
+            .await;
     }
 
     // Try immediate dispatch
@@ -102,7 +113,8 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
     let candidates: Vec<&str> = if let Some(ref target) = target_slot {
         vec![target.as_str()]
     } else {
-        slots.iter()
+        slots
+            .iter()
             .filter(|s| s.config.role == role)
             .map(|s| s.config.id.as_str())
             .collect()
@@ -115,39 +127,60 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
         }
         let sent = if let Some(status) = state.pty.get_status(candidate_id).await {
             if status.state == missiond_core::pty::SessionState::Idle {
-                state.pty.send_fire_and_forget(candidate_id, &prompt).await.ok().is_some()
-            } else { false }
-        } else { false };
+                state
+                    .pty
+                    .send_fire_and_forget(candidate_id, &prompt)
+                    .await
+                    .ok()
+                    .is_some()
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         state.slot_dispatch.release(candidate_id);
 
         if sent {
             let now = chrono::Utc::now().timestamp_millis();
-            let slot_session = state.store.get_slot_session(candidate_id).await.ok().flatten();
-            let _ = state.store.update_task(
-                &task_id,
-                &missiond_core::types::TaskUpdate {
-                    status: Some(missiond_core::types::TaskStatus::Running),
-                    slot_id: Some(candidate_id.to_string()),
-                    session_id: slot_session,
-                    started_at: Some(now),
-                    ..Default::default()
-                },
-            ).await;
+            let slot_session = state
+                .store
+                .get_slot_session(candidate_id)
+                .await
+                .ok()
+                .flatten();
+            let _ = state
+                .store
+                .update_task(
+                    &task_id,
+                    &missiond_core::types::TaskUpdate {
+                        status: Some(missiond_core::types::TaskStatus::Running),
+                        slot_id: Some(candidate_id.to_string()),
+                        session_id: slot_session,
+                        started_at: Some(now),
+                        ..Default::default()
+                    },
+                )
+                .await;
             let preview = if prompt.len() > 200 {
                 let mut end = 200;
-                while end > 0 && !prompt.is_char_boundary(end) { end -= 1; }
+                while end > 0 && !prompt.is_char_boundary(end) {
+                    end -= 1;
+                }
                 format!("{}...", &prompt[..end])
-            } else { prompt.clone() };
-            state.event_bus.publish(
-                crate::event_bus::DaemonEvent::SlotTaskDispatched {
+            } else {
+                prompt.clone()
+            };
+            state
+                .event_bus
+                .publish(crate::event_bus::DaemonEvent::SlotTaskDispatched {
                     slot_id: candidate_id.to_string(),
                     task_id: Some(task_id.clone()),
                     purpose: "submit".to_string(),
                     prompt_chars: prompt.len(),
                     preview,
                     cited_kb_ids: vec![],
-                },
-            );
+                });
             dispatched_to = Some(candidate_id.to_string());
             info!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: dispatched to idle slot");
             break;
@@ -172,7 +205,10 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
 
             let slot = match slots.iter().find(|s| s.config.id == *candidate_id) {
                 Some(s) => s,
-                None => { state.slot_dispatch.release(candidate_id); continue; }
+                None => {
+                    state.slot_dispatch.release(candidate_id);
+                    continue;
+                }
             };
 
             let pty_slot = missiond_core::PTYSlot {
@@ -193,15 +229,25 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
                     wait_for_idle: true,
                     timeout_secs: Some(30),
                     mcp_config,
-                    dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+                    dangerously_skip_permissions: slot
+                        .config
+                        .dangerously_skip_permissions
+                        .unwrap_or(false),
                     model: slot.config.model.clone(),
                     extra_env: std::collections::HashMap::new(),
                 },
-                slot.config.env.as_ref()
-            ).await.is_ok();
+                slot.config.env.as_ref(),
+            )
+            .await
+            .is_ok();
 
             let sent = if spawn_ok {
-                state.pty.send_fire_and_forget(candidate_id, &prompt).await.ok().is_some()
+                state
+                    .pty
+                    .send_fire_and_forget(candidate_id, &prompt)
+                    .await
+                    .ok()
+                    .is_some()
             } else {
                 warn!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: auto-spawn failed");
                 false
@@ -210,32 +256,44 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
 
             if sent {
                 let now = chrono::Utc::now().timestamp_millis();
-                let slot_session = state.store.get_slot_session(candidate_id).await.ok().flatten();
-                let _ = state.store.update_task(
-                    &task_id,
-                    &missiond_core::types::TaskUpdate {
-                        status: Some(missiond_core::types::TaskStatus::Running),
-                        slot_id: Some(candidate_id.to_string()),
-                        session_id: slot_session,
-                        started_at: Some(now),
-                        ..Default::default()
-                    },
-                ).await;
+                let slot_session = state
+                    .store
+                    .get_slot_session(candidate_id)
+                    .await
+                    .ok()
+                    .flatten();
+                let _ = state
+                    .store
+                    .update_task(
+                        &task_id,
+                        &missiond_core::types::TaskUpdate {
+                            status: Some(missiond_core::types::TaskStatus::Running),
+                            slot_id: Some(candidate_id.to_string()),
+                            session_id: slot_session,
+                            started_at: Some(now),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
                 let preview = if prompt.len() > 200 {
                     let mut end = 200;
-                    while end > 0 && !prompt.is_char_boundary(end) { end -= 1; }
+                    while end > 0 && !prompt.is_char_boundary(end) {
+                        end -= 1;
+                    }
                     format!("{}...", &prompt[..end])
-                } else { prompt.clone() };
-                state.event_bus.publish(
-                    crate::event_bus::DaemonEvent::SlotTaskDispatched {
+                } else {
+                    prompt.clone()
+                };
+                state
+                    .event_bus
+                    .publish(crate::event_bus::DaemonEvent::SlotTaskDispatched {
                         slot_id: candidate_id.to_string(),
                         task_id: Some(task_id.clone()),
                         purpose: "submit".to_string(),
                         prompt_chars: prompt.len(),
                         preview,
                         cited_kb_ids: vec![],
-                    },
-                );
+                    });
                 dispatched_to = Some(candidate_id.to_string());
                 info!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: spawned + dispatched");
                 break;
@@ -249,9 +307,12 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
         result["slotId"] = serde_json::json!(slot_id);
     } else {
         result["dispatched"] = serde_json::json!(false);
-        result["hint"] = serde_json::json!("No idle slot found, task queued for autopilot dispatch");
+        result["hint"] =
+            serde_json::json!("No idle slot found, task queued for autopilot dispatch");
         state.event_bus.publish_traced(
-            crate::event_bus::DaemonEvent::TaskCreated { task_id: task_id.clone() },
+            crate::event_bus::DaemonEvent::TaskCreated {
+                task_id: task_id.clone(),
+            },
             crate::event_bus::TraceContext {
                 trace_id: Some(task_id.clone()),
                 summary: Some("Submit task queued for autopilot".to_string()),
@@ -263,7 +324,11 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
 }
 
 async fn handle_ask(state: &AppState, args: Value) -> Result<ToolResult> {
-    let AskArgs { role, question, timeout_ms: _ } = serde_json::from_value(args)?;
+    let AskArgs {
+        role,
+        question,
+        timeout_ms: _,
+    } = serde_json::from_value(args)?;
     let task_id = crate::state::submit_task(state.store.as_ref(), &role, &question).await?;
     Ok(ToolResult::json(&serde_json::json!({
         "taskId": task_id,
@@ -284,20 +349,31 @@ async fn handle_cancel(state: &AppState, args: Value) -> Result<ToolResult> {
     let CancelArgs { task_id } = serde_json::from_value(args)?;
     // Cancel: update task status to Cancelled if currently Queued or Running
     let cancelled = if let Ok(Some(task)) = state.store.get_task(&task_id).await {
-        if task.status == missiond_core::types::TaskStatus::Queued || task.status == missiond_core::types::TaskStatus::Running {
+        if task.status == missiond_core::types::TaskStatus::Queued
+            || task.status == missiond_core::types::TaskStatus::Running
+        {
             let now = chrono::Utc::now().timestamp_millis();
-            state.store.update_task(&task_id, &missiond_core::types::TaskUpdate {
-                status: Some(missiond_core::types::TaskStatus::Cancelled),
-                finished_at: Some(now),
-                ..Default::default()
-            }).await.is_ok()
+            state
+                .store
+                .update_task(
+                    &task_id,
+                    &missiond_core::types::TaskUpdate {
+                        status: Some(missiond_core::types::TaskStatus::Cancelled),
+                        finished_at: Some(now),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .is_ok()
         } else {
             false
         }
     } else {
         false
     };
-    Ok(ToolResult::json(&serde_json::json!({ "cancelled": cancelled })))
+    Ok(ToolResult::json(
+        &serde_json::json!({ "cancelled": cancelled }),
+    ))
 }
 
 async fn handle_task_list(state: &AppState, args: Value) -> Result<ToolResult> {
@@ -307,13 +383,19 @@ async fn handle_task_list(state: &AppState, args: Value) -> Result<ToolResult> {
         #[serde(default, deserialize_with = "lenient::option_i64")]
         limit: Option<i64>,
     }
-    let args: Args = serde_json::from_value(args).unwrap_or(Args { status: None, limit: None });
+    let args: Args = serde_json::from_value(args).unwrap_or(Args {
+        status: None,
+        limit: None,
+    });
     let limit = args.limit.unwrap_or(20);
     let tasks = if let Some(ref status_str) = args.status {
         if let Some(status) = missiond_core::types::TaskStatus::from_str(status_str) {
             state.store.get_tasks_by_status(status).await?
         } else {
-            return Ok(ToolResult::error(format!("Invalid status: {}. Use: queued, running, done, failed", status_str)));
+            return Ok(ToolResult::error(format!(
+                "Invalid status: {}. Use: queued, running, done, failed",
+                status_str
+            )));
         }
     } else {
         state.store.get_all_tasks(limit).await?
@@ -331,11 +413,16 @@ async fn handle_task_ack(state: &AppState, args: Value) -> Result<ToolResult> {
 async fn handle_task_track(state: &AppState, args: Value) -> Result<ToolResult> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct Args { task_id: String }
+    struct Args {
+        task_id: String,
+    }
     let Args { task_id } = serde_json::from_value(args)?;
 
     // 1. Task status
-    let task = state.store.get_task(&task_id).await
+    let task = state
+        .store
+        .get_task(&task_id)
+        .await
         .map_err(|e| anyhow!("DB error: {}", e))?
         .ok_or_else(|| anyhow!("Task not found: {}", task_id))?;
     let mut result = serde_json::json!({
@@ -366,7 +453,8 @@ async fn handle_task_track(state: &AppState, args: Value) -> Result<ToolResult> 
                     if let Some(ref jp) = conv.jsonl_path {
                         if let Ok(md) = std::fs::metadata(jp) {
                             if let Ok(m) = md.modified() {
-                                slot_obj["lastActivitySecsAgo"] = json!(m.elapsed().unwrap_or_default().as_secs());
+                                slot_obj["lastActivitySecsAgo"] =
+                                    json!(m.elapsed().unwrap_or_default().as_secs());
                             }
                         }
                     }
@@ -387,7 +475,9 @@ async fn handle_task_track(state: &AppState, args: Value) -> Result<ToolResult> 
                 if let Some(resp) = responses.get(slot_id) {
                     let truncated = if resp.len() > 2048 {
                         let mut end = 2048;
-                        while end > 0 && !resp.is_char_boundary(end) { end -= 1; }
+                        while end > 0 && !resp.is_char_boundary(end) {
+                            end -= 1;
+                        }
                         format!("{}...(truncated)", &resp[..end])
                     } else {
                         resp.clone()

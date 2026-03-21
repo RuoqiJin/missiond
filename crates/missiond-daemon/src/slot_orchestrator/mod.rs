@@ -24,9 +24,9 @@ pub use claude_code::ClaudeCodeSlotManager;
 pub use gemini_cli::GeminiCliSlotManager;
 pub use types::{EngineSlotManager, EngineStatus, SlotTaskConfig, SlotTaskRequest};
 
-use std::sync::Arc;
 use missiond_core::db::traits::MissionStore;
 use missiond_core::types::Conversation;
+use std::sync::Arc;
 use tracing::info;
 
 /// Register a slot's session in DB for log categorization.
@@ -42,14 +42,12 @@ pub(crate) async fn register_slot_session(
         tracing::warn!(slot_id, session_id, "Failed to set slot session: {}", e);
         return;
     }
-    
+
     // 1.5. Clean up any leftover PTY placeholder conversation
     let _ = store.cleanup_pty_placeholder(slot_id).await;
 
     // 2. Ensure conversation record exists — use derive_conversation_type (single source of truth)
-    let conversation_type = missiond_core::db::derive_conversation_type(
-        Some(slot_id), session_id,
-    );
+    let conversation_type = missiond_core::db::derive_conversation_type(Some(slot_id), session_id);
 
     let conv = Conversation {
         id: session_id.to_string(),

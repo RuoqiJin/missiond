@@ -127,7 +127,10 @@ pub(crate) fn set_disabled(provider: LlmProvider, disabled: bool) {
 
 /// Return status of all gates.
 pub(crate) fn all_status() -> Vec<(LlmProvider, bool)> {
-    LlmProvider::ALL.iter().map(|&p| (p, is_disabled(p))).collect()
+    LlmProvider::ALL
+        .iter()
+        .map(|&p| (p, is_disabled(p)))
+        .collect()
 }
 
 // ── File helpers (cold path only) ─────────────────────────────────────

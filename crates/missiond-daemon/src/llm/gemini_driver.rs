@@ -80,7 +80,11 @@ impl GeminiPtyDriver {
         store: Arc<dyn MissionStore>,
         pty_session_uuids: Arc<RwLock<HashSet<String>>>,
     ) -> Self {
-        Self { pty, store, pty_session_uuids }
+        Self {
+            pty,
+            store,
+            pty_session_uuids,
+        }
     }
 
     /// Expose PTYManager for is_running/is_available checks.
@@ -213,12 +217,7 @@ impl GeminiPtyDriver {
     /// - Strict Thinking → TextComplete state machine
     /// - RAII temp file cleanup (TempFileGuard)
     /// - Broadcast lag recovery
-    pub async fn ask(
-        &self,
-        slot_id: &str,
-        prompt: &str,
-        timeout: Duration,
-    ) -> Result<String> {
+    pub async fn ask(&self, slot_id: &str, prompt: &str, timeout: Duration) -> Result<String> {
         // 1. Handle large prompts: write to temp file
         let (message, temp_file) = if prompt.len() >= FILE_MODE_THRESHOLD {
             let (msg, path) = Self::prepare_file_prompt(prompt)?;
@@ -237,7 +236,11 @@ impl GeminiPtyDriver {
         // 3. Send prompt
         self.pty.send_fire_and_forget(slot_id, &message).await?;
 
-        info!(slot_id, prompt_len = prompt.len(), "GeminiDriver: prompt sent");
+        info!(
+            slot_id,
+            prompt_len = prompt.len(),
+            "GeminiDriver: prompt sent"
+        );
 
         // 4. Event-driven state machine
         let deadline = tokio::time::Instant::now() + timeout;
@@ -263,8 +266,7 @@ impl GeminiPtyDriver {
                 }
 
                 Ok(Ok(ManagerEvent::TextComplete {
-                    slot_id: ref id,
-                    ..
+                    slot_id: ref id, ..
                 })) if id == slot_id && saw_thinking => {
                     // TextComplete is just a signal that the turn is done.
                     // Don't use its content — IncrementalExtractor mangles React Ink
@@ -328,11 +330,7 @@ impl GeminiPtyDriver {
     /// Used instead of TextComplete.content because IncrementalExtractor
     /// mangles React Ink's in-place redraws (captures only ▀▀▀ borders).
     async fn extract_from_screen(&self, slot_id: &str) -> String {
-        let screen = self
-            .pty
-            .get_screen_text(slot_id)
-            .await
-            .unwrap_or_default();
+        let screen = self.pty.get_screen_text(slot_id).await.unwrap_or_default();
 
         Self::sanitize_tui_output(&screen)
     }
@@ -351,7 +349,30 @@ impl GeminiPtyDriver {
                 // Skip lines that are purely box-drawing / block elements
                 let stripped: String = trimmed
                     .chars()
-                    .filter(|c| !matches!(c, '▀' | '▄' | '█' | '╭' | '╮' | '╰' | '╯' | '│' | '─' | '├' | '┤' | '┬' | '┴' | '┼' | '┌' | '┐' | '└' | '┘' | '╌' | '╍'))
+                    .filter(|c| {
+                        !matches!(
+                            c,
+                            '▀' | '▄'
+                                | '█'
+                                | '╭'
+                                | '╮'
+                                | '╰'
+                                | '╯'
+                                | '│'
+                                | '─'
+                                | '├'
+                                | '┤'
+                                | '┬'
+                                | '┴'
+                                | '┼'
+                                | '┌'
+                                | '┐'
+                                | '└'
+                                | '┘'
+                                | '╌'
+                                | '╍'
+                        )
+                    })
                     .collect();
                 if stripped.trim().is_empty() {
                     return false;
@@ -410,11 +431,9 @@ impl GeminiPtyDriver {
     /// Write prompt to temp file for @file mode. Returns (message_to_send, temp_path).
     fn prepare_file_prompt(prompt: &str) -> Result<(String, PathBuf)> {
         let dir = std::env::temp_dir().join("missiond-gemini-prompts");
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| anyhow!("Failed to create prompt dir: {}", e))?;
+        std::fs::create_dir_all(&dir).map_err(|e| anyhow!("Failed to create prompt dir: {}", e))?;
         let path = dir.join(format!("{}.md", uuid::Uuid::new_v4().simple()));
-        std::fs::write(&path, prompt)
-            .map_err(|e| anyhow!("Failed to write prompt file: {}", e))?;
+        std::fs::write(&path, prompt).map_err(|e| anyhow!("Failed to write prompt file: {}", e))?;
         Ok((format!("@{}", path.display()), path))
     }
 }

@@ -6,32 +6,40 @@
 //! - Expose an IPC JSON-RPC endpoint for MCP proxy processes
 
 // ── Subdirectory modules ──
+mod context;
+mod engine;
+mod infra;
 mod llm;
 mod workers;
-mod engine;
-mod context;
-mod infra;
 
 // ── Root-level modules ──
 #[allow(dead_code)]
 mod control_tree;
-mod events_sync;
-mod lenient;
-mod state;
-mod helpers;
-mod handlers;
 mod event_bus;
 mod event_router;
-mod supervisor;
+mod events_sync;
+mod handlers;
+mod helpers;
+mod lenient;
 mod slot_dispatch;
 mod slot_orchestrator;
+mod state;
+mod supervisor;
 
 // ── Re-exports for backward-compatible `use crate::xxx` paths ──
-use llm::{gemini_client, gemini_cli, minimax_client, minimax_gateway, sonnet_gateway, codex_cli, llm_gate, llm_gateway, prompts};
-use workers::{embedding_worker, vision_worker, step_narrator, translation_worker, briefing_worker, code_prefetch, experience_harvester, ast_sync_worker};
-use engine::{autopilot, decision_engine, decision_harvest, flow_engine, extraction, memory_scheduler};
-use context::{slot_env, context_pipeline, claude_md_sync, topology_map, context_budget};
-use infra::{ipc_handler, aiops, mcp_client, daemon_stats, git_watcher};
+use context::{claude_md_sync, context_budget, context_pipeline, slot_env, topology_map};
+use engine::{
+    autopilot, decision_engine, decision_harvest, extraction, flow_engine, memory_scheduler,
+};
+use infra::{aiops, daemon_stats, git_watcher, ipc_handler, mcp_client};
+use llm::{
+    codex_cli, gemini_cli, gemini_client, llm_gate, llm_gateway, minimax_client, minimax_gateway,
+    prompts, sonnet_gateway,
+};
+use workers::{
+    ast_sync_worker, briefing_worker, code_prefetch, embedding_worker, experience_harvester,
+    step_narrator, translation_worker, vision_worker,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -39,24 +47,26 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use missiond_core::{
-    MissionControl, MissionControlOptions, PermissionPolicy, LearnedPermissions,
-    PTYManager, PTYWebSocketServer, WSServerOptions, SkillIndex, InfraConfig,
+    CCTasksWatcher, CCTasksWatcherOptions, GeminiCliWatcher, GeminiCliWatcherOptions,
 };
-use missiond_core::{CCTasksWatcher, CCTasksWatcherOptions, GeminiCliWatcher, GeminiCliWatcherOptions};
-use missiond_mcp::tools::{ToolResult, all_tools};
+use missiond_core::{
+    InfraConfig, LearnedPermissions, MissionControl, MissionControlOptions, PTYManager,
+    PTYWebSocketServer, PermissionPolicy, SkillIndex, WSServerOptions,
+};
+use missiond_mcp::tools::{all_tools, ToolResult};
 use serde_json::Value;
 use tokio::io::BufReader;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, error, info, warn};
 
 // Re-imports from extracted modules
-use state::*;
-use mcp_client::McpProcessClient;
-use helpers::*;
-use ipc_handler::{handle_ipc_connection, bind_ipc_listener};
-use embedding_worker::init_embedding_provider;
+use aiops::{health_scan, process_incident};
 use autopilot::autopilot_tick;
-use aiops::{process_incident, health_scan};
+use embedding_worker::init_embedding_provider;
+use helpers::*;
+use ipc_handler::{bind_ipc_listener, handle_ipc_connection};
+use mcp_client::McpProcessClient;
+use state::*;
 
 impl AppState {
     pub(crate) async fn call_tool(&self, name: &str, args: Value) -> ToolResult {
@@ -128,7 +138,14 @@ async fn run_timeline_writer(
             continue;
         }
 
-        let db_entries: Vec<(Option<String>, String, Option<String>, String, Option<String>, String)> = persistent
+        let db_entries: Vec<(
+            Option<String>,
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+            String,
+        )> = persistent
             .iter()
             .map(|entry| {
                 let payload_json = entry.event.to_frontend_payload().to_string();
@@ -146,7 +163,14 @@ async fn run_timeline_writer(
         let params: Vec<(Option<&str>, &str, Option<&str>, &str, Option<&str>, &str)> = db_entries
             .iter()
             .map(|(t, s, p, e, sum, pay)| {
-                (t.as_deref(), s.as_str(), p.as_deref(), e.as_str(), sum.as_deref(), pay.as_str())
+                (
+                    t.as_deref(),
+                    s.as_str(),
+                    p.as_deref(),
+                    e.as_str(),
+                    sum.as_deref(),
+                    pay.as_str(),
+                )
             })
             .collect();
 
@@ -191,10 +215,7 @@ async fn main() -> Result<()> {
 
     tracing_subscriber::registry()
         .with(log_filter())
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stderr),
-        )
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(non_blocking)
@@ -212,7 +233,10 @@ async fn main() -> Result<()> {
         } else {
             "unknown panic".to_string()
         };
-        let location = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_default();
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_default();
         eprintln!("PANIC at {}: {}", location, payload);
         tracing::error!(location = %location, "DAEMON PANIC: {}", payload);
     }));
@@ -226,16 +250,26 @@ async fn main() -> Result<()> {
     #[cfg(all(feature = "sqlite", feature = "postgres"))]
     if std::env::args().any(|a| a == "--migrate-sqlite-to-pg") {
         let sqlite_path = db_path().to_string_lossy().to_string();
-        let pg_url = pg_url().ok_or_else(|| anyhow!("MISSION_PG_URL env var required for migration"))?;
+        let pg_url =
+            pg_url().ok_or_else(|| anyhow!("MISSION_PG_URL env var required for migration"))?;
         info!(sqlite = %sqlite_path, pg = %pg_url, "Starting SQLite → PostgreSQL migration");
 
-        match missiond_core::db::pg::migrate_from_sqlite::migrate_sqlite_to_pg(&sqlite_path, &pg_url).await {
+        match missiond_core::db::pg::migrate_from_sqlite::migrate_sqlite_to_pg(
+            &sqlite_path,
+            &pg_url,
+        )
+        .await
+        {
             Ok((tables, rows)) => {
                 info!(tables, rows, "Migration complete");
                 // Post-migration: backfill pgvector embedding columns from BYTEA
-                match missiond_core::db::pg::migrate_from_sqlite::backfill_pg_embeddings(&pg_url).await {
+                match missiond_core::db::pg::migrate_from_sqlite::backfill_pg_embeddings(&pg_url)
+                    .await
+                {
                     Ok(total) => info!(backfilled = total, "Embedding backfill complete"),
-                    Err(e) => warn!(error = %e, "Embedding backfill failed (non-fatal, can re-run)"),
+                    Err(e) => {
+                        warn!(error = %e, "Embedding backfill failed (non-fatal, can re-run)")
+                    }
                 }
                 println!("Migration OK: {} tables, {} rows", tables, rows);
                 return Ok(());
@@ -276,10 +310,17 @@ async fn main() -> Result<()> {
             None
         }
     };
-    let permission = Arc::new(PermissionPolicy::new_with_learned(&permission_config_path, learned.clone()));
+    let permission = Arc::new(PermissionPolicy::new_with_learned(
+        &permission_config_path,
+        learned.clone(),
+    ));
 
     // In PG mode (MISSION_PG_URL set), skip SQLite entirely
-    let mc_db_path = if pg_url().is_some() { None } else { Some(db_path.clone()) };
+    let mc_db_path = if pg_url().is_some() {
+        None
+    } else {
+        Some(db_path.clone())
+    };
     let mission = Arc::new(MissionControl::new(MissionControlOptions {
         db_path: mc_db_path,
         slots_config_path: slots_path.clone(),
@@ -305,8 +346,12 @@ async fn main() -> Result<()> {
     let db_stats_callback: std::sync::Arc<dyn Fn(u64) + Send + Sync> = {
         let stats = Arc::clone(&daemon_stats);
         std::sync::Arc::new(move |elapsed_us| {
-            stats.db_exec_runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            stats.db_exec_total_us.fetch_add(elapsed_us, std::sync::atomic::Ordering::Relaxed);
+            stats
+                .db_exec_runs
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            stats
+                .db_exec_total_us
+                .fetch_add(elapsed_us, std::sync::atomic::Ordering::Relaxed);
             stats.db_exec_latency.record(elapsed_us);
         })
     };
@@ -314,9 +359,9 @@ async fn main() -> Result<()> {
     let store: Arc<dyn missiond_core::db::traits::MissionStore> = {
         #[cfg(feature = "postgres")]
         {
-            let url = pg_url().ok_or_else(|| anyhow!(
-                "MISSION_PG_URL required. PostgreSQL is the default backend."
-            ))?;
+            let url = pg_url().ok_or_else(|| {
+                anyhow!("MISSION_PG_URL required. PostgreSQL is the default backend.")
+            })?;
             info!(url = %url, "Connecting to PostgreSQL...");
             let pg_store = missiond_core::db::pg::PgMissionStore::connect(&url)
                 .await
@@ -328,9 +373,12 @@ async fn main() -> Result<()> {
         }
 
         #[cfg(not(feature = "postgres"))]
-        Arc::new(missiond_core::db::sqlite::SqliteMissionStore::with_callback(
-            mission.db_arc(), db_stats_callback,
-        ))
+        Arc::new(
+            missiond_core::db::sqlite::SqliteMissionStore::with_callback(
+                mission.db_arc(),
+                db_stats_callback,
+            ),
+        )
     };
 
     // Startup: clean orphan slot_tasks from previous daemon instance
@@ -357,7 +405,10 @@ async fn main() -> Result<()> {
                 let _ = store.terminate_dynamic_slot(&s.id, "daemon_restart").await;
             }
             if !active.is_empty() {
-                info!(count = active.len(), "Terminated active dynamic slots on startup (clean slate)");
+                info!(
+                    count = active.len(),
+                    "Terminated active dynamic slots on startup (clean slate)"
+                );
             }
         }
         Err(e) => warn!(error = %e, "Failed to cleanup dynamic slots on startup"),
@@ -414,7 +465,8 @@ async fn main() -> Result<()> {
 
     // AIOps: incident event bus (capacity 500, try_send only — "宁丢不阻塞")
     // Increased from 100 to handle MCP error burst scenarios without losing incidents.
-    let (incident_tx, incident_rx) = tokio::sync::mpsc::channel::<missiond_core::types::MissionIncident>(500);
+    let (incident_tx, incident_rx) =
+        tokio::sync::mpsc::channel::<missiond_core::types::MissionIncident>(500);
 
     // Embedding worker channel: event-driven, 0 CPU when idle
     let (embedding_tx, embedding_rx) = tokio::sync::mpsc::channel::<EmbeddingTask>(256);
@@ -423,13 +475,13 @@ async fn main() -> Result<()> {
     let (ast_sync_tx, ast_sync_rx) = tokio::sync::mpsc::channel::<ast_sync_worker::AstSyncTask>(64);
 
     // Screenshot broker (coordinates browser-based PTY screenshots)
-    let screenshot_broker = missiond_core::ws::ScreenshotBroker::new(
-        std::time::Duration::from_secs(5),
-    );
+    let screenshot_broker =
+        missiond_core::ws::ScreenshotBroker::new(std::time::Duration::from_secs(5));
 
     // Phase 6: Timeline architecture
     // MPSC for event ingestion, broadcast<TimelineEvent> for fan-out to consumers + WS
-    let (timeline_mpsc_tx, timeline_mpsc_rx) = tokio::sync::mpsc::unbounded_channel::<event_bus::TimelineEntry>();
+    let (timeline_mpsc_tx, timeline_mpsc_rx) =
+        tokio::sync::mpsc::unbounded_channel::<event_bus::TimelineEntry>();
     let (timeline_broadcast_tx, _) = broadcast::channel::<event_bus::TimelineEvent>(512);
 
     // Frontend event stream: TimelineEvent → JSON String → WS /events
@@ -497,13 +549,20 @@ async fn main() -> Result<()> {
     // Pre-parse llm.yaml for config flags needed by AppState
     let llm_config_parsed: Option<embedding_worker::LlmConfig> = {
         let llm_yaml = default_mission_home().join("llm.yaml");
-        llm_yaml.exists()
+        llm_yaml
+            .exists()
             .then(|| std::fs::read_to_string(&llm_yaml).ok())
             .flatten()
             .and_then(|content| serde_yaml::from_str(&content).ok())
     };
-    let backfill_enabled = llm_config_parsed.as_ref().map(|c| c.backfill_enabled).unwrap_or(false);
-    let intent_analyst_enabled = llm_config_parsed.as_ref().map(|c| c.intent_analyst_enabled).unwrap_or(false);
+    let backfill_enabled = llm_config_parsed
+        .as_ref()
+        .map(|c| c.backfill_enabled)
+        .unwrap_or(false);
+    let intent_analyst_enabled = llm_config_parsed
+        .as_ref()
+        .map(|c| c.intent_analyst_enabled)
+        .unwrap_or(false);
 
     // P1 fix (Gemini audit): initialize ControlManager early so its restored
     // state can hydrate legacy AtomicBools during AppState construction.
@@ -516,7 +575,10 @@ async fn main() -> Result<()> {
         if paused {
             if let Some(legacy) = provider.to_llm_provider() {
                 llm_gate::set_disabled(legacy, true);
-                info!(provider = provider.as_str(), "Hydrated legacy llm_gate from ControlTree");
+                info!(
+                    provider = provider.as_str(),
+                    "Hydrated legacy llm_gate from ControlTree"
+                );
             }
         }
     }
@@ -529,8 +591,9 @@ async fn main() -> Result<()> {
     let slot_mgr_pty2 = Arc::clone(&pty);
     let slot_mgr_store2 = Arc::clone(&store);
     let pty_for_gemini_transport = Arc::clone(&pty);
-    let pending_spawns_for_slot: Arc<tokio::sync::RwLock<Vec<(String, String, String, tokio::time::Instant)>>> =
-        Arc::new(tokio::sync::RwLock::new(Vec::new()));
+    let pending_spawns_for_slot: Arc<
+        tokio::sync::RwLock<Vec<(String, String, String, tokio::time::Instant)>>,
+    > = Arc::new(tokio::sync::RwLock::new(Vec::new()));
 
     let state = AppState {
         mission,
@@ -572,13 +635,13 @@ async fn main() -> Result<()> {
         last_supervisor_patrol_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         // memory_paused / memory_paused_at removed — ControlTree is the single source of truth.
         global_paused: Arc::new(std::sync::atomic::AtomicBool::new(
-            home.join("global_paused").exists()
-                || control_tree_snapshot.global_paused
+            home.join("global_paused").exists() || control_tree_snapshot.global_paused,
         )),
         global_paused_at: Arc::new(std::sync::atomic::AtomicI64::new({
             let flag = home.join("global_paused");
             if flag.exists() {
-                std::fs::read_to_string(&flag).ok()
+                std::fs::read_to_string(&flag)
+                    .ok()
                     .and_then(|s| s.trim().parse::<i64>().ok())
                     .unwrap_or_else(|| chrono::Utc::now().timestamp())
             } else if control_tree_snapshot.global_paused {
@@ -611,38 +674,48 @@ async fn main() -> Result<()> {
         gemini: {
             // Check llm.yaml for provider config
             let llm_yaml = default_mission_home().join("llm.yaml");
-            let event_tx = event_bus_instance.sender();  // mpsc::UnboundedSender<TimelineEntry>
+            let event_tx = event_bus_instance.sender(); // mpsc::UnboundedSender<TimelineEntry>
             if llm_yaml.exists() {
                 if let Ok(content) = std::fs::read_to_string(&llm_yaml) {
-                    if let Ok(config) = serde_yaml::from_str::<embedding_worker::LlmConfig>(&content) {
+                    if let Ok(config) =
+                        serde_yaml::from_str::<embedding_worker::LlmConfig>(&content)
+                    {
                         if config.provider == "gemini-cli" {
                             let cli_cfg = config.gemini_cli.unwrap_or_default();
                             info!(binary = %cli_cfg.binary, model = %cli_cfg.model, "LLM provider: gemini-cli (PTY transport)");
                             // API key pool: hot-reloads from llm.yaml on each call, no restart needed
                             let initial_count = gemini_cli::resolve_apikey_pool().len();
-                            info!(count = initial_count, "Gemini API key pool: {} keys (hot-reload enabled)", initial_count);
+                            info!(
+                                count = initial_count,
+                                "Gemini API key pool: {} keys (hot-reload enabled)", initial_count
+                            );
                             let api_key_pool = std::sync::Arc::new(gemini_cli::ApiKeyPool::new());
                             // PTY transport: uses GeminiPtyDriver → PTYManager (unified)
-                            let pty_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
-                            let gemini_driver_for_transport = llm::gemini_driver::GeminiPtyDriver::new(
-                                pty_for_gemini_transport,
-                                store.clone(),
-                                pty_session_uuids_arc.clone(),
-                            );
-                            let pty_transport = std::sync::Arc::new(
-                                llm::gemini_pty::GeminiPtyTransport::new(
+                            let pty_cwd = std::env::current_dir()
+                                .unwrap_or_else(|_| std::path::PathBuf::from("/"));
+                            let gemini_driver_for_transport =
+                                llm::gemini_driver::GeminiPtyDriver::new(
+                                    pty_for_gemini_transport,
+                                    store.clone(),
+                                    pty_session_uuids_arc.clone(),
+                                );
+                            let pty_transport =
+                                std::sync::Arc::new(llm::gemini_pty::GeminiPtyTransport::new(
                                     gemini_driver_for_transport,
                                     "slot-gemini-router".to_string(),
                                     pty_cwd,
-                                ),
-                            );
+                                ));
                             info!("Gemini PTY transport initialized (via GeminiPtyDriver → PTYManager)");
-                            gemini_client::GeminiClient::with_cli(gemini_cli::GeminiCli::new(
-                                cli_cfg.binary,
-                                cli_cfg.model,
-                                std::time::Duration::from_secs(cli_cfg.timeout),
-                                Some(api_key_pool),
-                            ).with_pty(pty_transport), event_tx)
+                            gemini_client::GeminiClient::with_cli(
+                                gemini_cli::GeminiCli::new(
+                                    cli_cfg.binary,
+                                    cli_cfg.model,
+                                    std::time::Duration::from_secs(cli_cfg.timeout),
+                                    Some(api_key_pool),
+                                )
+                                .with_pty(pty_transport),
+                                event_tx,
+                            )
                         } else {
                             info!(provider = %config.provider, "LLM provider: HTTP router");
                             gemini_client::GeminiClient::new(event_tx)
@@ -669,7 +742,8 @@ async fn main() -> Result<()> {
             }
         },
         sonnet: {
-            let (handle, gateway) = sonnet_gateway::create_sonnet_gateway(event_bus_instance.sender());
+            let (handle, gateway) =
+                sonnet_gateway::create_sonnet_gateway(event_bus_instance.sender());
             info!("SonnetGateway initialized");
             tokio::spawn(gateway.run());
             Some(handle)
@@ -721,8 +795,14 @@ async fn main() -> Result<()> {
             ));
             Arc::new(slot_orchestrator::AgentSlotManager::new(
                 vec![
-                    (missiond_core::types::CliEngine::ClaudeCode, cc_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>),
-                    (missiond_core::types::CliEngine::Gemini, gemini_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>),
+                    (
+                        missiond_core::types::CliEngine::ClaudeCode,
+                        cc_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>,
+                    ),
+                    (
+                        missiond_core::types::CliEngine::Gemini,
+                        gemini_mgr as Arc<dyn slot_orchestrator::EngineSlotManager>,
+                    ),
                 ],
                 Arc::clone(&control_manager_arc),
             ))
@@ -758,40 +838,51 @@ async fn main() -> Result<()> {
     // Register SlotManager task configs
     {
         use missiond_core::types::{CliEngine, Lifecycle};
-        state.slot_manager.register(slot_orchestrator::SlotTaskConfig {
-            task_type: "arch_maintenance".to_string(),
-            engine: CliEngine::ClaudeCode,
-            lifecycle: Lifecycle::Persistent,
-            slot_id: Some("slot-arch-maint".to_string()),
-            role: Some("arch-maint".to_string()),
-            model: Some("claude-sonnet-4-6".to_string()),
-            timeout: std::time::Duration::from_secs(600),
-            cwd: std::path::PathBuf::from("<REPO_ROOT>"),
-            skip_permissions: true,
-        }).await?;
-        state.slot_manager.register(slot_orchestrator::SlotTaskConfig {
-            task_type: "strategy_analyst".to_string(),
-            engine: CliEngine::Gemini,
-            lifecycle: Lifecycle::Persistent,
-            slot_id: Some("slot-gemini-strategy".to_string()),
-            role: Some("strategy".to_string()),
-            model: None, // Uses GEMINI_MODEL constant in controller
-            timeout: std::time::Duration::from_secs(600),
-            cwd: std::path::PathBuf::from("<REPO_ROOT>"),
-            skip_permissions: true,
-        }).await?;
-        state.slot_manager.register(slot_orchestrator::SlotTaskConfig {
-            task_type: "gemini_router".to_string(),
-            engine: CliEngine::Gemini,
-            lifecycle: Lifecycle::Persistent,
-            slot_id: Some("slot-gemini-router".to_string()),
-            role: Some("gemini-router".to_string()),
-            model: None,
-            timeout: std::time::Duration::from_secs(120),
-            cwd: std::path::PathBuf::from("<REPO_ROOT>"),
-            skip_permissions: true,
-        }).await?;
-        info!("SlotManager: 3 tasks registered (arch_maintenance, strategy_analyst, gemini_router)");
+        state
+            .slot_manager
+            .register(slot_orchestrator::SlotTaskConfig {
+                task_type: "arch_maintenance".to_string(),
+                engine: CliEngine::ClaudeCode,
+                lifecycle: Lifecycle::Persistent,
+                slot_id: Some("slot-arch-maint".to_string()),
+                role: Some("arch-maint".to_string()),
+                model: Some("claude-sonnet-4-6".to_string()),
+                timeout: std::time::Duration::from_secs(600),
+                cwd: std::path::PathBuf::from("<REPO_ROOT>"),
+                skip_permissions: true,
+            })
+            .await?;
+        state
+            .slot_manager
+            .register(slot_orchestrator::SlotTaskConfig {
+                task_type: "strategy_analyst".to_string(),
+                engine: CliEngine::Gemini,
+                lifecycle: Lifecycle::Persistent,
+                slot_id: Some("slot-gemini-strategy".to_string()),
+                role: Some("strategy".to_string()),
+                model: None, // Uses GEMINI_MODEL constant in controller
+                timeout: std::time::Duration::from_secs(600),
+                cwd: std::path::PathBuf::from("<REPO_ROOT>"),
+                skip_permissions: true,
+            })
+            .await?;
+        state
+            .slot_manager
+            .register(slot_orchestrator::SlotTaskConfig {
+                task_type: "gemini_router".to_string(),
+                engine: CliEngine::Gemini,
+                lifecycle: Lifecycle::Persistent,
+                slot_id: Some("slot-gemini-router".to_string()),
+                role: Some("gemini-router".to_string()),
+                model: None,
+                timeout: std::time::Duration::from_secs(120),
+                cwd: std::path::PathBuf::from("<REPO_ROOT>"),
+                skip_permissions: true,
+            })
+            .await?;
+        info!(
+            "SlotManager: 3 tasks registered (arch_maintenance, strategy_analyst, gemini_router)"
+        );
     }
 
     // Late-bind context enricher for Jarvis chat completions
@@ -823,7 +914,10 @@ async fn main() -> Result<()> {
     {
         use std::process::Command;
         // pgrep -f finds processes whose full command/env contains this marker
-        match Command::new("pgrep").args(["-f", "MISSIOND_SLOT_ID"]).output() {
+        match Command::new("pgrep")
+            .args(["-f", "MISSIOND_SLOT_ID"])
+            .output()
+        {
             Ok(output) if output.status.success() => {
                 let pids: Vec<&str> = std::str::from_utf8(&output.stdout)
                     .unwrap_or("")
@@ -832,11 +926,12 @@ async fn main() -> Result<()> {
                     .collect();
                 if !pids.is_empty() {
                     let my_pid = std::process::id().to_string();
-                    let orphan_pids: Vec<&&str> = pids.iter()
-                        .filter(|p| **p != my_pid)
-                        .collect();
+                    let orphan_pids: Vec<&&str> = pids.iter().filter(|p| **p != my_pid).collect();
                     if !orphan_pids.is_empty() {
-                        warn!(count = orphan_pids.len(), "Found orphan PTY processes from previous daemon, killing");
+                        warn!(
+                            count = orphan_pids.len(),
+                            "Found orphan PTY processes from previous daemon, killing"
+                        );
                         for pid in &orphan_pids {
                             let _ = Command::new("kill").args(["-9", pid]).output();
                         }
@@ -857,7 +952,10 @@ async fn main() -> Result<()> {
         let slots = state.mission.list_slots();
         let persistent_count = slots.iter().filter(|s| s.config.is_persistent()).count();
         if persistent_count > 0 {
-            info!(count = persistent_count, "Persistent slots registered (lazy-spawn on first task)");
+            info!(
+                count = persistent_count,
+                "Persistent slots registered (lazy-spawn on first task)"
+            );
         }
     }
 
@@ -882,15 +980,26 @@ async fn main() -> Result<()> {
         let emb_state = state.clone();
         tokio::spawn(async move {
             let emb_svc = emb_state.embedding_service.as_ref().unwrap();
-            match emb_state.store.kb_entries_missing_embedding(Some("policy:decision")).await {
+            match emb_state
+                .store
+                .kb_entries_missing_embedding(Some("policy:decision"))
+                .await
+            {
                 Ok(missing) if !missing.is_empty() => {
-                    info!(count = missing.len(), "Backfilling embeddings for policy:decision entries");
+                    info!(
+                        count = missing.len(),
+                        "Backfilling embeddings for policy:decision entries"
+                    );
                     let mut stored = 0usize;
                     let provider_id = emb_svc.provider_id();
                     for (id, summary, detail) in &missing {
                         let text = format!("知识条目：{}\n详情：{}", summary, detail);
                         if let Some(vec) = emb_svc.embed(&text) {
-                            if let Err(e) = emb_state.store.kb_set_embedding(id, &vec, provider_id).await {
+                            if let Err(e) = emb_state
+                                .store
+                                .kb_set_embedding(id, &vec, provider_id)
+                                .await
+                            {
                                 warn!(id = %id, error = %e, "Failed to store embedding");
                             } else {
                                 stored += 1;
@@ -916,7 +1025,10 @@ async fn main() -> Result<()> {
                 Ok(all) => {
                     let mut guard = emb_state.kb_search_cache.write().await;
                     *guard = all;
-                    info!(count = guard.len(), "KB search cache warmed (all categories)");
+                    info!(
+                        count = guard.len(),
+                        "KB search cache warmed (all categories)"
+                    );
                 }
                 Err(e) => warn!(error = %e, "Failed to warm KB search cache"),
             }
@@ -980,22 +1092,26 @@ async fn main() -> Result<()> {
 
     workers::spawn_worker(
         vision_worker::VisionWorker,
-        Arc::new(state.clone()), shutdown_rx.clone(),
+        Arc::new(state.clone()),
+        shutdown_rx.clone(),
     );
     workers::spawn_worker(
         step_narrator::StepNarratorWorker,
-        Arc::new(state.clone()), shutdown_rx.clone(),
+        Arc::new(state.clone()),
+        shutdown_rx.clone(),
     );
     if state.sonnet.is_some() {
         workers::spawn_worker(
             briefing_worker::BriefingWorker,
-            Arc::new(state.clone()), shutdown_rx.clone(),
+            Arc::new(state.clone()),
+            shutdown_rx.clone(),
         );
         workers::spawn_worker(
             translation_worker::TranslationWorker {
                 timeline_rx: timeline_broadcast_tx.subscribe(),
             },
-            Arc::new(state.clone()), shutdown_rx.clone(),
+            Arc::new(state.clone()),
+            shutdown_rx.clone(),
         );
     } else {
         warn!("MinimaxGateway not available, briefing and translation workers disabled");
@@ -1080,7 +1196,9 @@ async fn main() -> Result<()> {
                                 total = ast.total_nodes,
                                 "AST embedding gap detected, triggering backfill"
                             );
-                            let _ = health_state.embedding_tx.try_send(EmbeddingTask::BackfillAll);
+                            let _ = health_state
+                                .embedding_tx
+                                .try_send(EmbeddingTask::BackfillAll);
                         } else {
                             debug!(
                                 coverage = "100.0%",
@@ -1115,7 +1233,9 @@ async fn main() -> Result<()> {
     // --- Git Commit Watcher ---
     // Polls monitored repos (from slot cwds) for new commits → timeline events.
     {
-        let slot_cwds: Vec<String> = state.mission.list_slots()
+        let slot_cwds: Vec<String> = state
+            .mission
+            .list_slots()
             .into_iter()
             .filter_map(|s| s.config.cwd)
             .collect();
@@ -1140,7 +1260,9 @@ async fn main() -> Result<()> {
 
         // Full sync at startup: trigger for all repos after delay
         let ast_tx2 = state.ast_sync_tx.clone();
-        let slot_cwds2: Vec<String> = state.mission.list_slots()
+        let slot_cwds2: Vec<String> = state
+            .mission
+            .list_slots()
             .into_iter()
             .filter_map(|s| s.config.cwd)
             .collect();
@@ -1148,13 +1270,17 @@ async fn main() -> Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             let repos = git_watcher::collect_repo_roots(&slot_cwds2);
             for repo in repos {
-                let name = repo.file_name()
+                let name = repo
+                    .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
-                if let Err(e) = ast_tx2.send(ast_sync_worker::AstSyncTask::FullSync {
-                    repo_path: repo,
-                    repo_name: name,
-                }).await {
+                if let Err(e) = ast_tx2
+                    .send(ast_sync_worker::AstSyncTask::FullSync {
+                        repo_path: repo,
+                        repo_name: name,
+                    })
+                    .await
+                {
                     tracing::warn!(err = %e, "AST: failed to queue full sync");
                 }
             }
@@ -1175,10 +1301,13 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 let snap = stats.snapshot();
-                let publish_count = s.event_bus.publish_count.load(
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                let memory_paused = s.control_manager.current()
+                let publish_count = s
+                    .event_bus
+                    .publish_count
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let memory_paused = s
+                    .control_manager
+                    .current()
                     .is_domain_paused(crate::control_tree::CtlDomain::Memory);
                 let fast_lane = {
                     let es = s.extraction_state.read().await;
@@ -1206,14 +1335,19 @@ async fn main() -> Result<()> {
             }
         });
     }
-    info!("Timeline Writer + Health snapshot started (ws://*:{}/events)", ws_port);
+    info!(
+        "Timeline Writer + Health snapshot started (ws://*:{}/events)",
+        ws_port
+    );
 
     // Timeline TTL cleanup on startup
     {
         let store = Arc::clone(&state.store);
         tokio::spawn(async move {
             match store.cleanup_timeline_ttl(7).await {
-                Ok(deleted) if deleted > 0 => info!(deleted, "Timeline: cleaned up old entries (>7 days)"),
+                Ok(deleted) if deleted > 0 => {
+                    info!(deleted, "Timeline: cleaned up old entries (>7 days)")
+                }
                 _ => {}
             }
         });
@@ -1246,9 +1380,7 @@ async fn main() -> Result<()> {
 
     // Conversation logger event stream
     workers::spawn_worker(
-        workers::conversation_logger::ConversationLoggerWorker {
-            conv_logger_rx,
-        },
+        workers::conversation_logger::ConversationLoggerWorker { conv_logger_rx },
         Arc::new(state.clone()),
         shutdown_rx.clone(),
     );
@@ -1269,7 +1401,9 @@ async fn main() -> Result<()> {
 
     // PTY manager event stream (state changes, confirm, exit, MCP errors)
     workers::spawn_worker(
-        workers::pty_event_worker::PtyEventWorker { pty_rx: pty_logger_rx },
+        workers::pty_event_worker::PtyEventWorker {
+            pty_rx: pty_logger_rx,
+        },
         Arc::new(state.clone()),
         shutdown_rx.clone(),
     );
@@ -1349,7 +1483,8 @@ async fn main() -> Result<()> {
                                     cwd: slot.config.cwd.as_deref().map(std::path::PathBuf::from),
                                     engine: slot.config.engine,
                                 };
-                                let mcp_config = slot.config.mcp_config.clone().map(std::path::PathBuf::from);
+                                let mcp_config =
+                                    slot.config.mcp_config.clone().map(std::path::PathBuf::from);
                                 match crate::slot_orchestrator::spawner::spawn_tracked_slot(
                                     &state.pty,
                                     &state.store,
@@ -1360,16 +1495,23 @@ async fn main() -> Result<()> {
                                         wait_for_idle: false,
                                         timeout_secs: None,
                                         mcp_config,
-                                        dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+                                        dangerously_skip_permissions: slot
+                                            .config
+                                            .dangerously_skip_permissions
+                                            .unwrap_or(false),
                                         model: slot.config.model.clone(),
                                         extra_env: std::collections::HashMap::new(),
                                     },
-                                    slot.config.env.as_ref()
-                                ).await {
+                                    slot.config.env.as_ref(),
+                                )
+                                .await
+                                {
                                     Ok(_) => {
                                         info!(slot_id = %slot_id, "Auto-started new slot PTY");
                                     }
-                                    Err(e) => warn!(slot_id = %slot_id, error = %e, "Failed to auto-start new slot PTY"),
+                                    Err(e) => {
+                                        warn!(slot_id = %slot_id, error = %e, "Failed to auto-start new slot PTY")
+                                    }
                                 }
                             }
                         }
@@ -1388,7 +1530,8 @@ async fn main() -> Result<()> {
         let sig_state = state.clone();
         tokio::spawn(async move {
             use tokio::signal::unix::{signal, SignalKind};
-            let mut sighup = signal(SignalKind::hangup()).expect("Failed to register SIGHUP handler");
+            let mut sighup =
+                signal(SignalKind::hangup()).expect("Failed to register SIGHUP handler");
             loop {
                 sighup.recv().await;
                 info!("SIGHUP received, reloading slots.yaml and servers.yaml");
@@ -1442,9 +1585,10 @@ async fn main() -> Result<()> {
             }
 
             // Monitored config files (emit Timeline events on change)
-            let monitored_files: std::collections::HashSet<&str> = [
-                "slots.yaml", "servers.yaml", "xjp-mcp-config.json",
-            ].into_iter().collect();
+            let monitored_files: std::collections::HashSet<&str> =
+                ["slots.yaml", "servers.yaml", "xjp-mcp-config.json"]
+                    .into_iter()
+                    .collect();
 
             info!(path = %watch_dir.display(), "Perception: watching config files for changes");
 
@@ -1575,3 +1719,4 @@ async fn main() -> Result<()> {
     info!("Graceful shutdown complete");
     Ok(())
 }
+mod services;

@@ -12,8 +12,8 @@ use tracing::{info, warn};
 
 use missiond_core::types::CliEngine;
 
-use crate::control_tree::{ControlManager, CtlProvider};
 use super::types::{EngineSlotManager, EngineStatus, SlotTaskConfig, SlotTaskRequest};
+use crate::control_tree::{ControlManager, CtlProvider};
 
 /// Map CliEngine → CtlProvider for pause checks.
 fn engine_to_provider(engine: CliEngine) -> CtlProvider {

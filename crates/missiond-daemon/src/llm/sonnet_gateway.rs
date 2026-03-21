@@ -82,8 +82,12 @@ impl SonnetHandle {
             parent_span_id,
             reply_tx,
         };
-        tx.send(req).await.map_err(|_| anyhow!("SonnetGateway channel closed"))?;
-        reply_rx.await.map_err(|_| anyhow!("SonnetGateway dropped response"))?
+        tx.send(req)
+            .await
+            .map_err(|_| anyhow!("SonnetGateway channel closed"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow!("SonnetGateway dropped response"))?
     }
 
     /// P0: Interactive / MCP calls (highest priority).
@@ -93,7 +97,17 @@ impl SonnetHandle {
         max_tokens: Option<u32>,
         caller: &'static str,
     ) -> Result<String> {
-        Self::send(&self.tx_interactive, messages, max_tokens, caller, Priority::Interactive, None, None, None).await
+        Self::send(
+            &self.tx_interactive,
+            messages,
+            max_tokens,
+            caller,
+            Priority::Interactive,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     /// P1: Embedding worker calls.
@@ -103,7 +117,17 @@ impl SonnetHandle {
         max_tokens: Option<u32>,
         task_id: Option<String>,
     ) -> Result<String> {
-        Self::send(&self.tx_embedding, messages, max_tokens, "embedding", Priority::Embedding, task_id, None, None).await
+        Self::send(
+            &self.tx_embedding,
+            messages,
+            max_tokens,
+            "embedding",
+            Priority::Embedding,
+            task_id,
+            None,
+            None,
+        )
+        .await
     }
 
     /// P2: Translation worker calls (with optional causal linking context).
@@ -115,7 +139,17 @@ impl SonnetHandle {
         trace_id: Option<String>,
         parent_span_id: Option<String>,
     ) -> Result<String> {
-        Self::send(&self.tx_translation, messages, max_tokens, "translation", Priority::Translation, task_id, trace_id, parent_span_id).await
+        Self::send(
+            &self.tx_translation,
+            messages,
+            max_tokens,
+            "translation",
+            Priority::Translation,
+            task_id,
+            trace_id,
+            parent_span_id,
+        )
+        .await
     }
 
     /// P3: Briefing worker calls.
@@ -125,7 +159,17 @@ impl SonnetHandle {
         max_tokens: Option<u32>,
         task_id: Option<String>,
     ) -> Result<String> {
-        Self::send(&self.tx_briefing, messages, max_tokens, "briefing", Priority::Briefing, task_id, None, None).await
+        Self::send(
+            &self.tx_briefing,
+            messages,
+            max_tokens,
+            "briefing",
+            Priority::Briefing,
+            task_id,
+            None,
+            None,
+        )
+        .await
     }
 
     /// P4: Intent analyst calls (lowest priority).
@@ -135,7 +179,17 @@ impl SonnetHandle {
         max_tokens: Option<u32>,
         task_id: Option<String>,
     ) -> Result<String> {
-        Self::send(&self.tx_intent, messages, max_tokens, "intent", Priority::Intent, task_id, None, None).await
+        Self::send(
+            &self.tx_intent,
+            messages,
+            max_tokens,
+            "intent",
+            Priority::Intent,
+            task_id,
+            None,
+            None,
+        )
+        .await
     }
 }
 
@@ -160,9 +214,10 @@ impl SonnetBackend {
         let (base_url, jwt) = crate::embedding_worker::resolve_llm_credentials().await?;
         let url = format!("{}/v1/chat/completions", base_url);
 
-        let openai_messages: Vec<serde_json::Value> = messages.iter().map(|m| {
-            serde_json::json!({"role": m.role, "content": m.content})
-        }).collect();
+        let openai_messages: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
+            .collect();
 
         let body = serde_json::json!({
             "model": SONNET_MODEL,
@@ -170,7 +225,8 @@ impl SonnetBackend {
             "max_tokens": max_tokens.unwrap_or(1024),
         });
 
-        let resp = self.http
+        let resp = self
+            .http
             .post(&url)
             .bearer_auth(&jwt)
             .json(&body)
@@ -184,10 +240,16 @@ impl SonnetBackend {
         }
         if !status.is_success() {
             let body_text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Sonnet HTTP {}: {}", status, &body_text[..body_text.len().min(200)]));
+            return Err(anyhow!(
+                "Sonnet HTTP {}: {}",
+                status,
+                &body_text[..body_text.len().min(200)]
+            ));
         }
 
-        let json: serde_json::Value = resp.json().await
+        let json: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| anyhow!("Sonnet response parse error: {}", e))?;
 
         let content = json
@@ -222,8 +284,10 @@ pub(crate) struct SonnetGateway {
 impl SonnetGateway {
     /// Main loop: biased select ensures strict priority ordering.
     pub async fn run(mut self) {
-        info!("SonnetGateway started (quota: {}/{:?}, concurrency: {})",
-            QUOTA_MAX, QUOTA_WINDOW, MAX_CONCURRENCY);
+        info!(
+            "SonnetGateway started (quota: {}/{:?}, concurrency: {})",
+            QUOTA_MAX, QUOTA_WINDOW, MAX_CONCURRENCY
+        );
 
         let mut last_request_at = Instant::now() - Duration::from_secs(10);
 
@@ -253,8 +317,14 @@ impl SonnetGateway {
 
             // 2b. Second-line defense: drain queued requests if gate closed after enqueue
             if crate::llm_gate::is_disabled(crate::llm_gate::LlmProvider::Sonnet) {
-                warn!(caller = req.caller, "SonnetGateway: gate closed, draining queued request");
-                let _ = req.reply_tx.send(Err(crate::llm_gate::LlmGateError(crate::llm_gate::LlmProvider::Sonnet).into()));
+                warn!(
+                    caller = req.caller,
+                    "SonnetGateway: gate closed, draining queued request"
+                );
+                let _ = req.reply_tx.send(Err(crate::llm_gate::LlmGateError(
+                    crate::llm_gate::LlmProvider::Sonnet,
+                )
+                .into()));
                 drop(permit);
                 continue;
             }
@@ -285,14 +355,17 @@ impl SonnetGateway {
                 }
 
                 drop(q);
-                warn!(caller = req.caller, "SonnetGateway: quota exhausted, throttling 30s");
+                warn!(
+                    caller = req.caller,
+                    "SonnetGateway: quota exhausted, throttling 30s"
+                );
                 tokio::time::sleep(Duration::from_secs(30)).await;
             }
 
             if quota_rejected {
-                let _ = req.reply_tx.send(Err(anyhow!(
-                    "Quota reserved for high-priority requests"
-                )));
+                let _ = req
+                    .reply_tx
+                    .send(Err(anyhow!("Quota reserved for high-priority requests")));
                 drop(permit);
                 continue;
             }
@@ -382,7 +455,10 @@ pub(crate) fn create_sonnet_gateway(
     let (tx_briefing, rx_briefing) = mpsc::channel(CHANNEL_CAPACITY);
     let (tx_intent, rx_intent) = mpsc::channel(CHANNEL_CAPACITY);
 
-    let quota = Arc::new(tokio::sync::RwLock::new(QuotaTracker::new(QUOTA_MAX, QUOTA_WINDOW)));
+    let quota = Arc::new(tokio::sync::RwLock::new(QuotaTracker::new(
+        QUOTA_MAX,
+        QUOTA_WINDOW,
+    )));
 
     let handle = SonnetHandle {
         tx_interactive,
