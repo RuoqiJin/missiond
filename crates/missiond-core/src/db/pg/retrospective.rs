@@ -278,7 +278,7 @@ impl RetrospectiveStore for PgMissionStore {
             row.get::<i64, _>("batch_index"),
             row.get::<String, _>("status"),
             row.get::<i64, _>("retry_count"),
-            row.get::<i64, _>("total_messages"),
+            row.get::<i32, _>("total_messages") as i64,
         ))
     }
 

@@ -13,7 +13,7 @@ impl MessageStore for PgMissionStore {
         let row: (i64,) = sqlx::query_as(
             "INSERT INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10, $11, $12, $13, $14, $15, $16)
-             ON CONFLICT DO NOTHING
+             ON CONFLICT (message_uuid) DO NOTHING
              RETURNING id"
         )
         .bind(&msg.session_id)
@@ -47,7 +47,7 @@ impl MessageStore for PgMissionStore {
             let row: Option<(i64,)> = sqlx::query_as(
                 "INSERT INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10, $11, $12, $13, $14, $15, $16)
-                 ON CONFLICT DO NOTHING
+                 ON CONFLICT (message_uuid) DO NOTHING
                  RETURNING id"
             )
             .bind(&msg.session_id)

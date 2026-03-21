@@ -116,6 +116,9 @@ pub async fn migrate_sqlite_to_pg(
         }
     }
 
+    // Fix identity sequences after bulk import with explicit IDs
+    fix_identity_sequences(&pool).await;
+
     info!(tables = tables_done, rows = total_rows, "Migration complete");
     Ok((tables_done, total_rows))
 }
@@ -405,4 +408,28 @@ enum SqliteValue {
     Real(f64),
     Text(String),
     Blob(Vec<u8>),
+}
+
+/// Fix identity sequences after bulk import with explicit IDs.
+/// When rows are inserted with explicit IDs (e.g., from SQLite migration),
+/// PostgreSQL identity sequences don't advance, causing duplicate PK errors
+/// on subsequent inserts.
+#[cfg(all(feature = "sqlite", feature = "postgres"))]
+async fn fix_identity_sequences(pool: &sqlx::PgPool) {
+    let sequences = [
+        ("conversation_messages", "id", "conversation_messages_id_seq"),
+        ("conversation_events", "id", "conversation_events_id_seq"),
+        ("token_usage_ledger", "id", "token_usage_ledger_id_seq"),
+        ("system_timeline", "seq", "system_timeline_seq_seq"),
+    ];
+
+    for (table, col, seq) in &sequences {
+        let sql = format!(
+            "SELECT setval('{seq}', COALESCE((SELECT MAX({col}) FROM {table}), 0) + 1, false)"
+        );
+        match sqlx::query(&sql).execute(pool).await {
+            Ok(_) => info!(table, seq, "Fixed identity sequence"),
+            Err(e) => warn!(table, seq, error = %e, "Failed to fix identity sequence"),
+        }
+    }
 }
