@@ -84,7 +84,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     },
                 )
                 .await?;
-            slot_env::capture_slot_session_uuid(state, &slot_id, &session_file, slot.config.cwd.as_deref()).await;
+            slot_env::capture_slot_session_uuid(state, &slot_id, &session_file).await;
             Ok(ToolResult::json(&info))
         }
         "mission_kill" => {
@@ -130,7 +130,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     },
                 )
                 .await?;
-            slot_env::capture_slot_session_uuid(state, &slot_id, &session_file, slot.config.cwd.as_deref()).await;
+            slot_env::capture_slot_session_uuid(state, &slot_id, &session_file).await;
             Ok(ToolResult::json(&info))
         }
         "mission_agents" => {
