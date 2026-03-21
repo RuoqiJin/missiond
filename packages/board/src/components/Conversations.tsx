@@ -423,7 +423,11 @@ const COLLAPSED_ROLES = new Set(['thinking', 'agent_user', 'agent_assistant', 't
 function MessageBubble({ msg, jsonlPath, labels }: { msg: ConversationMessage; jsonlPath?: string | null; labels?: [string, string][] }) {
   const isCollapsible = COLLAPSED_ROLES.has(msg.role);
   const [expanded, setExpanded] = useState(!isCollapsible);
-  const config = ROLE_CONFIG[msg.role] || ROLE_CONFIG.assistant;
+  
+  const isSlot = msg.roleDisplay?.startsWith('slot-');
+  const config = isSlot 
+    ? { icon: Terminal, color: 'text-orange-400', label: msg.roleDisplay as string }
+    : ROLE_CONFIG[msg.role] || ROLE_CONFIG.assistant;
   const Icon = config.icon;
 
   // Check if this message has images (use rich rendering for those)
@@ -453,7 +457,7 @@ function MessageBubble({ msg, jsonlPath, labels }: { msg: ConversationMessage; j
         )}
         <Icon className={cn('w-3.5 h-3.5', config.color)} />
         <span className={cn('text-sm font-semibold', config.color)}>
-          {roleEmoji[msg.role] || '📄'} {msg.roleDisplay || config.label} (msg {msg.id})
+          {isSlot ? '⚙️' : (roleEmoji[msg.role] || '📄')} {isSlot ? msg.roleDisplay : (msg.roleDisplay || config.label)} (msg {msg.id})
         </span>
         {msg.toolName && (
           <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-neutral-800 text-amber-300">
@@ -563,11 +567,6 @@ function ConversationListItem({
           <div className="flex items-center gap-2 min-w-0">
             {isSubagent && (
               <GitBranch className="w-3 h-3 text-neutral-600 flex-shrink-0" />
-            )}
-            {conv.project && (
-              <span className="text-[11px] font-mono text-orange-400/80 bg-orange-500/10 px-1.5 py-0.5 rounded truncate max-w-[140px]">
-                {conv.project.split('/').pop()}
-              </span>
             )}
             {conv.slotId && (
               <span className="text-[10px] font-mono text-neutral-600 truncate">
