@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
+use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
-use missiond_mcp::tools::ToolResult;
 
 use crate::state::AppState;
 use missiond_core::PermissionRule;
@@ -56,7 +56,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         };
     }
     if name == "mission_permission_mutate" {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("reload");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("reload");
         return match action {
             "set_role" => handle_inner(state, "mission_permission_set_role", args).await,
             "set_slot" => handle_inner(state, "mission_permission_set_slot", args).await,
@@ -72,9 +75,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== Permission =====
-        "mission_permission_get" => Ok(ToolResult::json_pretty(
-            &state.permission.get_config(),
-        )),
+        "mission_permission_get" => Ok(ToolResult::json_pretty(&state.permission.get_config())),
         "mission_permission_set_role" => {
             let SetRolePermissionArgs { role, rule } = serde_json::from_value(args)?;
             state.permission.set_role_rule(&role, rule.clone());
@@ -129,7 +130,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 scope_id,
             } = serde_json::from_value(args)?;
 
-            let learned = state.permission.learned()
+            let learned = state
+                .permission
+                .learned()
                 .ok_or_else(|| anyhow!("Learned permissions not initialized"))?;
 
             let result = if let (Some(st), Some(si)) = (scope_type, scope_id) {
@@ -146,7 +149,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 tool_pattern,
             } = serde_json::from_value(args)?;
 
-            let learned = state.permission.learned()
+            let learned = state
+                .permission
+                .learned()
                 .ok_or_else(|| anyhow!("Learned permissions not initialized"))?;
 
             let deleted = learned.forget(&scope_type, &scope_id, &tool_pattern)?;

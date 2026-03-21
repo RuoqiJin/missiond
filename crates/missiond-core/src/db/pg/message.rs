@@ -95,7 +95,7 @@ impl MessageStore for PgMissionStore {
 
     async fn get_conversation_message_by_id(&self, id: i64) -> DbResult<Option<ConversationMessage>> {
         let row = sqlx::query(
-            "SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
+            "SELECT id, session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = id AND l.label = 'semantic_role'), role) as role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
                     tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count
              FROM conversation_messages WHERE id = $1"
         )
@@ -108,7 +108,7 @@ impl MessageStore for PgMissionStore {
     async fn get_conversation_messages(&self, session_id: &str, since_id: Option<i64>, limit: i64) -> DbResult<Vec<ConversationMessage>> {
         let rows = if let Some(since) = since_id {
             sqlx::query(
-                "SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
+                "SELECT id, session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = id AND l.label = 'semantic_role'), role) as role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
                         tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count,
                         ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY timestamp, id) AS seq
                  FROM conversation_messages WHERE session_id = $1 AND id > $2 ORDER BY timestamp ASC, id ASC LIMIT $3"
@@ -122,7 +122,7 @@ impl MessageStore for PgMissionStore {
             // Return last N messages (subquery to reverse order, preserving seq)
             sqlx::query(
                 "SELECT * FROM (
-                    SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
+                    SELECT id, session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = id AND l.label = 'semantic_role'), role) as role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
                            tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count,
                            ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY timestamp, id) AS seq
                     FROM conversation_messages WHERE session_id = $1 ORDER BY timestamp DESC, id DESC LIMIT $2
@@ -152,21 +152,21 @@ impl MessageStore for PgMissionStore {
 
         let rows = sqlx::query(
             "WITH before_msgs AS (
-                SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
+                SELECT id, session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = id AND l.label = 'semantic_role'), role) as role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
                        tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count
                 FROM conversation_messages
                 WHERE session_id = $1 AND (timestamp < $5 OR (timestamp = $5 AND id < $2))
                 ORDER BY timestamp DESC, id DESC LIMIT $3
             ),
             after_msgs AS (
-                SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
+                SELECT id, session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = id AND l.label = 'semantic_role'), role) as role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
                        tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count
                 FROM conversation_messages
                 WHERE session_id = $1 AND (timestamp > $5 OR (timestamp = $5 AND id > $2))
                 ORDER BY timestamp ASC, id ASC LIMIT $4
             ),
             anchor AS (
-                SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
+                SELECT id, session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = id AND l.label = 'semantic_role'), role) as role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
                        tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count
                 FROM conversation_messages WHERE id = $2
             )
@@ -193,7 +193,7 @@ impl MessageStore for PgMissionStore {
     async fn search_conversation_messages(&self, query: &str, limit: i64) -> DbResult<Vec<ConversationMessage>> {
         // Phase 1: PostgreSQL FTS using plainto_tsquery
         let rows = sqlx::query(
-            "SELECT m.id, m.session_id, m.role, m.content, m.raw_content, m.message_uuid, m.parent_uuid,
+            "SELECT m.id, m.session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = m.id AND l.label = 'semantic_role'), m.role) as role, m.content, m.raw_content, m.message_uuid, m.parent_uuid,
                     m.model, m.timestamp, m.metadata, m.tool_name, m.raw_role, m.content_types,
                     m.has_image, m.has_tool_use, m.has_tool_result, m.token_count
              FROM conversation_messages m
@@ -215,7 +215,7 @@ impl MessageStore for PgMissionStore {
         // Phase 2: LIKE fallback for Chinese substrings / non-FTS matches
         let pattern = format!("%{}%", query);
         let rows = sqlx::query(
-            "SELECT m.id, m.session_id, m.role, m.content, m.raw_content, m.message_uuid, m.parent_uuid,
+            "SELECT m.id, m.session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = m.id AND l.label = 'semantic_role'), m.role) as role, m.content, m.raw_content, m.message_uuid, m.parent_uuid,
                     m.model, m.timestamp, m.metadata, m.tool_name, m.raw_role, m.content_types,
                     m.has_image, m.has_tool_use, m.has_tool_result, m.token_count
              FROM conversation_messages m
@@ -266,7 +266,7 @@ impl MessageStore for PgMissionStore {
 
         // Phase 1: FTS search
         let fts_sql = format!(
-            "SELECT m.id, m.session_id, m.role, m.content, m.raw_content, m.message_uuid, m.parent_uuid,
+            "SELECT m.id, m.session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = m.id AND l.label = 'semantic_role'), m.role) as role, m.content, m.raw_content, m.message_uuid, m.parent_uuid,
                     m.model, m.timestamp, m.metadata, m.tool_name, m.raw_role, m.content_types,
                     m.has_image, m.has_tool_use, m.has_tool_result, m.token_count
              FROM conversation_messages m
@@ -291,7 +291,7 @@ impl MessageStore for PgMissionStore {
         // Phase 2: LIKE fallback
         let pattern = format!("%{}%", query);
         let like_sql = format!(
-            "SELECT m.id, m.session_id, m.role, m.content, m.raw_content, m.message_uuid, m.parent_uuid,
+            "SELECT m.id, m.session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = m.id AND l.label = 'semantic_role'), m.role) as role, m.content, m.raw_content, m.message_uuid, m.parent_uuid,
                     m.model, m.timestamp, m.metadata, m.tool_name, m.raw_role, m.content_types,
                     m.has_image, m.has_tool_use, m.has_tool_result, m.token_count
              FROM conversation_messages m

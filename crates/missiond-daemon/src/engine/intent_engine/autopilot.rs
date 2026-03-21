@@ -1,34 +1,43 @@
-use std::collections::HashSet;
 use anyhow::{anyhow, Result};
+use std::collections::HashSet;
 use tracing::{debug, info, warn};
 
-use crate::state::{AppState, MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
-use crate::event_bus::{DaemonEvent, TraceContext};
-use crate::supervisor::{check_slot_context_levels, check_slot_stuck, check_pending_compact_restarts};
-use crate::memory_scheduler::ensure_memory_slot_by_id;
-use crate::llm_gateway::determine_llm_env;
-use missiond_core::SessionState;
-use crate::supervisor::truncate_safe;
-use crate::supervisor::{is_auth_error, is_quota_exhausted};
-use crate::memory_scheduler::{dispatch_queued_submit_tasks, reap_stale_submit_tasks};
 use crate::claude_md_sync::sync_claude_md;
 use crate::engine::learning_engine;
+use crate::event_bus::{DaemonEvent, TraceContext};
+use crate::flow_engine::{ensure_autopilot_pty, execute_flow_task};
+use crate::llm_gateway::determine_llm_env;
+use crate::memory_scheduler::ensure_memory_slot_by_id;
+use crate::memory_scheduler::{dispatch_queued_submit_tasks, reap_stale_submit_tasks};
+use crate::state::{AppState, MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 use crate::supervisor::schedule_supervisor_patrol;
-use crate::flow_engine::{execute_flow_task, ensure_autopilot_pty};
+use crate::supervisor::truncate_safe;
+use crate::supervisor::{
+    check_pending_compact_restarts, check_slot_context_levels, check_slot_stuck,
+};
+use crate::supervisor::{is_auth_error, is_quota_exhausted};
+use missiond_core::SessionState;
 
 // @beacon: orchestration
 
 /// Notify Jarvis conversation when an async task fails.
 /// Extracts conversation_id from task metadata, writes error message, and emits event.
-async fn notify_jarvis_failure(state: &AppState, task: &missiond_core::types::BoardTask, reason: &str) {
-    if task.category != "jarvis" { return; }
+async fn notify_jarvis_failure(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    reason: &str,
+) {
+    if task.category != "jarvis" {
+        return;
+    }
     if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&task.description) {
         if let Some(conv_id) = meta.get("conversation_id").and_then(|v| v.as_str()) {
             if !conv_id.is_empty() {
                 let error_msg = format!("❌ 后台任务执行失败：{}", reason);
-                let _ = state.store.router_chat_append_messages(conv_id, &[
-                    ("assistant".to_string(), error_msg),
-                ]).await;
+                let _ = state
+                    .store
+                    .router_chat_append_messages(conv_id, &[("assistant".to_string(), error_msg)])
+                    .await;
                 state.event_bus.publish_traced(
                     DaemonEvent::JarvisTaskCompleted {
                         conversation_id: conv_id.to_string(),
@@ -36,7 +45,10 @@ async fn notify_jarvis_failure(state: &AppState, task: &missiond_core::types::Bo
                     },
                     TraceContext {
                         trace_id: Some(conv_id.to_string()),
-                        summary: Some(format!("jarvis: task {} failed", &task.id.as_str()[..8.min(task.id.as_str().len())])),
+                        summary: Some(format!(
+                            "jarvis: task {} failed",
+                            &task.id.as_str()[..8.min(task.id.as_str().len())]
+                        )),
                         ..Default::default()
                     },
                 );
@@ -55,8 +67,7 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     check_pending_compact_restarts(state).await;
 
     // Complete stale active conversations (no messages for > 10 minutes)
-    let cutoff = (chrono::Utc::now() - chrono::TimeDelta::minutes(10))
-        .to_rfc3339();
+    let cutoff = (chrono::Utc::now() - chrono::TimeDelta::minutes(10)).to_rfc3339();
     match state.store.complete_stale_conversations(&cutoff).await {
         Ok(n) if n > 0 => info!(count = n, "Completed stale conversations"),
         Err(e) => warn!(error = %e, "Failed to complete stale conversations"),
@@ -89,8 +100,20 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
 
     if !memory_paused && !global_paused {
         // Check if memory slots are stuck in non-Idle state for too long
-        check_slot_stuck(state, MEMORY_SLOT_ID, &state.memory_slot_busy_since, &state.extraction_state).await;
-        check_slot_stuck(state, MEMORY_SLOW_SLOT_ID, &state.slow_slot_busy_since, &state.slow_extraction_state).await;
+        check_slot_stuck(
+            state,
+            MEMORY_SLOT_ID,
+            &state.memory_slot_busy_since,
+            &state.extraction_state,
+        )
+        .await;
+        check_slot_stuck(
+            state,
+            MEMORY_SLOW_SLOT_ID,
+            &state.slow_slot_busy_since,
+            &state.slow_extraction_state,
+        )
+        .await;
 
         // Phase 3c: schedule_memory_tasks removed — now event-driven via
         // realtime_extraction_consumer, session_reflection_consumer,
@@ -111,7 +134,13 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     learning_engine::learning_tick(state).await;
 
     // Hot-reload LLM prompts from ~/.xjp-mission/prompts/ (every 10 ticks ≈ 10 min)
-    if state.stats.autopilot_ticks.load(std::sync::atomic::Ordering::Relaxed) % 10 == 0 {
+    if state
+        .stats
+        .autopilot_ticks
+        .load(std::sync::atomic::Ordering::Relaxed)
+        % 10
+        == 0
+    {
         state.prompts.reload();
     }
 
@@ -132,11 +161,17 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     {
         let now = chrono::Utc::now().timestamp();
         let fast_es = state.extraction_state.read().await;
-        let fast_slot = state.pty.get_status(MEMORY_SLOT_ID).await
+        let fast_slot = state
+            .pty
+            .get_status(MEMORY_SLOT_ID)
+            .await
             .map(|s| format!("{:?}", s.state))
             .unwrap_or_else(|| "not_spawned".to_string());
         let slow_es = state.slow_extraction_state.read().await;
-        let slow_slot = state.pty.get_status(MEMORY_SLOW_SLOT_ID).await
+        let slow_slot = state
+            .pty
+            .get_status(MEMORY_SLOW_SLOT_ID)
+            .await
             .map(|s| format!("{:?}", s.state))
             .unwrap_or_else(|| "not_spawned".to_string());
         debug!(
@@ -158,17 +193,26 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     // no one reads the result — task stays 'running' forever.
     match state.store.list_running_autopilot_tasks().await {
         Ok(running) if !running.is_empty() => {
-            debug!(count = running.len(), "Watchdog: checking running autopilot tasks");
+            debug!(
+                count = running.len(),
+                "Watchdog: checking running autopilot tasks"
+            );
             for rt in &running {
                 let slot_id = rt.claim_executor_id.as_deref().unwrap_or("");
-                if slot_id.is_empty() { continue; }
+                if slot_id.is_empty() {
+                    continue;
+                }
 
-                let claimed_age = rt.claimed_at.as_deref()
+                let claimed_age = rt
+                    .claimed_at
+                    .as_deref()
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                     .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds())
                     .unwrap_or(0);
 
-                if claimed_age <= 120 { continue; } // Too fresh, might still be in send()
+                if claimed_age <= 120 {
+                    continue;
+                } // Too fresh, might still be in send()
 
                 if let Some(info) = state.pty.get_status(slot_id).await {
                     if info.state == SessionState::Idle {
@@ -220,8 +264,14 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
 
     // Record tick timing to DaemonStats
     let tick_ms = tick_start.elapsed().as_millis() as u64;
-    state.stats.autopilot_ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state.stats.autopilot_total_ms.fetch_add(tick_ms, std::sync::atomic::Ordering::Relaxed);
+    state
+        .stats
+        .autopilot_ticks
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state
+        .stats
+        .autopilot_total_ms
+        .fetch_add(tick_ms, std::sync::atomic::Ordering::Relaxed);
     state.stats.autopilot_latency.record(tick_ms * 1000); // histogram expects microseconds
 
     Ok(())
@@ -234,7 +284,10 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
         return Ok(());
     }
 
-    let tasks = state.store.list_autopilot_tasks().await
+    let tasks = state
+        .store
+        .list_autopilot_tasks()
+        .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
     if tasks.is_empty() {
@@ -247,7 +300,15 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
     let mut dispatched_slots: HashSet<String> = HashSet::new();
 
     // Excluded roles: these slots have dedicated purposes, not for ad-hoc tasks
-    const EXCLUDED_ROLES: &[&str] = &["jarvis", "memory", "supervisor", "deploy", "operator", "decision", "secret"];
+    const EXCLUDED_ROLES: &[&str] = &[
+        "jarvis",
+        "memory",
+        "supervisor",
+        "deploy",
+        "operator",
+        "decision",
+        "secret",
+    ];
 
     for task in tasks {
         // Dynamic slot assignment: if assignee is None, find an idle coder slot
@@ -257,8 +318,12 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                 let mut candidate: Option<String> = None;
                 for slot in state.mission.list_slots() {
                     let role = slot.config.role.as_str();
-                    if EXCLUDED_ROLES.contains(&role) { continue; }
-                    if dispatched_slots.contains(&slot.config.id) { continue; }
+                    if EXCLUDED_ROLES.contains(&role) {
+                        continue;
+                    }
+                    if dispatched_slots.contains(&slot.config.id) {
+                        continue;
+                    }
                     if let Some(info) = state.pty.get_status(&slot.config.id).await {
                         if info.state == SessionState::Idle {
                             candidate = Some(slot.config.id.clone());
@@ -299,28 +364,46 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                 }
                 Ok(missiond_core::types::DependencyStatus::Blocked(reason)) => {
                     warn!(task_id = %task.id, reason = %reason, "Autopilot: DAG dep failed, blocking task");
-                    let _ = state.store.update_board_task(
-                        task.id.as_str(),
-                        &missiond_core::types::UpdateBoardTaskInput {
-                            status: Some("blocked".to_string()),
-                            ..Default::default()
-                        },
-                    ).await;
+                    let _ = state
+                        .store
+                        .update_board_task(
+                            task.id.as_str(),
+                            &missiond_core::types::UpdateBoardTaskInput {
+                                status: Some("blocked".to_string()),
+                                ..Default::default()
+                            },
+                        )
+                        .await;
                     state.event_bus.publish_traced(
                         DaemonEvent::BoardTaskStatusChanged {
-                            task_id: task.id.to_string(), old_status: format!("{:?}", task.status), new_status: "blocked".to_string(),
-                        },
-                        TraceContext { trace_id: Some(task.id.to_string()), summary: Some(format!("board: {} → blocked", task.title)), ..Default::default() },
-                    );
-                    let _ = state.store.add_board_task_note(
-                        &missiond_core::types::AddBoardTaskNoteInput {
                             task_id: task.id.to_string(),
-                            content: format!("因前置任务失败或取消，本任务自动阻塞。\n原因：{}", reason),
+                            old_status: format!("{:?}", task.status),
+                            new_status: "blocked".to_string(),
+                        },
+                        TraceContext {
+                            trace_id: Some(task.id.to_string()),
+                            summary: Some(format!("board: {} → blocked", task.title)),
+                            ..Default::default()
+                        },
+                    );
+                    let _ = state
+                        .store
+                        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                            task_id: task.id.to_string(),
+                            content: format!(
+                                "因前置任务失败或取消，本任务自动阻塞。\n原因：{}",
+                                reason
+                            ),
                             note_type: Some("note".to_string()),
                             author: Some("autopilot".to_string()),
-                        },
-                    ).await;
-                    notify_jarvis_failure(state, &task, &format!("前置任务失败，本任务已阻塞：{}", reason)).await;
+                        })
+                        .await;
+                    notify_jarvis_failure(
+                        state,
+                        &task,
+                        &format!("前置任务失败，本任务已阻塞：{}", reason),
+                    )
+                    .await;
                     continue;
                 }
                 Err(e) => {
@@ -373,10 +456,16 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
 
         // ControlTree: skip if slot_role is paused
         {
-            let slot_role = state.mission.get_slot(&slot_id)
+            let slot_role = state
+                .mission
+                .get_slot(&slot_id)
                 .map(|s| s.config.role.clone())
                 .unwrap_or_default();
-            if state.control_manager.current().is_slot_role_paused(&slot_role) {
+            if state
+                .control_manager
+                .current()
+                .is_slot_role_paused(&slot_role)
+            {
                 debug!(slot_id = %slot_id, role = %slot_role, "Autopilot: slot_role paused, skipping");
                 continue;
             }
@@ -397,12 +486,19 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
         info!(task_id = %task.id, slot_id = %slot_id, title = %task.title, "Autopilot: executing task");
 
         // Atomically claim the task (CAS: only succeeds if open + unclaimed)
-        match state.store.claim_board_task(task.id.as_str(), &slot_id, "pty_slot").await {
+        match state
+            .store
+            .claim_board_task(task.id.as_str(), &slot_id, "pty_slot")
+            .await
+        {
             Ok(Some(_)) => {
                 dispatched_slots.insert(slot_id.clone());
                 // Set lease: normal autopilot tasks get 20 minutes
                 let lease = (chrono::Utc::now() + chrono::TimeDelta::minutes(20)).to_rfc3339();
-                let _ = state.store.set_board_task_lease(task.id.as_str(), &lease).await;
+                let _ = state
+                    .store
+                    .set_board_task_lease(task.id.as_str(), &lease)
+                    .await;
             }
             Ok(None) => {
                 debug!(task_id = %task.id, slot_id = %slot_id, "Autopilot: task already claimed, skipping");
@@ -415,7 +511,9 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
         }
 
         // Dynamic LLM model routing based on task characteristics + slot role
-        let slot_role = state.mission.get_slot(&slot_id)
+        let slot_role = state
+            .mission
+            .get_slot(&slot_id)
             .map(|s| s.config.role.clone())
             .unwrap_or_default();
         let task_env = determine_llm_env(&task, &slot_role);
@@ -427,24 +525,41 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
 
         // Link PTY session to task for audit trail
         if let Ok(Some(session_uuid)) = state.store.get_slot_session(&slot_id).await {
-            let _ = state.store.set_conversation_task_id(&session_uuid, task.id.as_str()).await;
+            let _ = state
+                .store
+                .set_conversation_task_id(&session_uuid, task.id.as_str())
+                .await;
         }
 
         // Inject answered questions as context (Phase 2 linkage)
         let full_prompt = {
-            let answered = state.store.list_questions_for_task(task.id.as_str()).await.unwrap_or_default();
+            let answered = state
+                .store
+                .list_questions_for_task(task.id.as_str())
+                .await
+                .unwrap_or_default();
             if answered.is_empty() {
                 full_prompt
             } else {
-                let qa_block: String = answered.iter()
+                let qa_block: String = answered
+                    .iter()
                     .filter(|q| q.answer.is_some())
-                    .map(|q| format!("Q: {}\nA: {}", q.question, q.answer.as_deref().unwrap_or("")))
+                    .map(|q| {
+                        format!(
+                            "Q: {}\nA: {}",
+                            q.question,
+                            q.answer.as_deref().unwrap_or("")
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n\n");
                 if qa_block.is_empty() {
                     full_prompt
                 } else {
-                    format!("[决策与指示 (Decisions & Directives)]\n{}\n\n{}", qa_block, full_prompt)
+                    format!(
+                        "[决策与指示 (Decisions & Directives)]\n{}\n\n{}",
+                        qa_block, full_prompt
+                    )
                 }
             }
         };
@@ -453,9 +568,13 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
         let full_prompt = if !task.depends_on.is_empty() {
             let mut handover_blocks = Vec::new();
             for dep_id in &task.depends_on {
-                if let Ok(Some(dep_with_notes)) = state.store.get_board_task_with_notes(dep_id.as_str()).await {
+                if let Ok(Some(dep_with_notes)) =
+                    state.store.get_board_task_with_notes(dep_id.as_str()).await
+                {
                     // Find last summary note from predecessor
-                    let summary = dep_with_notes.notes.iter()
+                    let summary = dep_with_notes
+                        .notes
+                        .iter()
                         .rev()
                         .find(|n| n.note_type == missiond_core::types::BoardNoteType::Summary)
                         .map(|n| n.content.clone());
@@ -471,7 +590,11 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
             if handover_blocks.is_empty() {
                 full_prompt
             } else {
-                format!("## 前置任务产出上下文\n{}\n\n{}", handover_blocks.join("\n\n"), full_prompt)
+                format!(
+                    "## 前置任务产出上下文\n{}\n\n{}",
+                    handover_blocks.join("\n\n"),
+                    full_prompt
+                )
             }
         } else {
             full_prompt
@@ -512,28 +635,37 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
         }
 
         // Prompt snapshot: save full context for Skill auto-verification replay
-        let _ = state.store.save_prompt_snapshot(
-            task.id.as_str(),
-            &full_prompt,
-            &cited_kb_ids,
-            &task.category,
-        ).await;
+        let _ = state
+            .store
+            .save_prompt_snapshot(
+                task.id.as_str(),
+                &full_prompt,
+                &cited_kb_ids,
+                &task.category,
+            )
+            .await;
 
         // Emit dispatch event for timeline visibility
         {
             let preview = if full_prompt.len() > 200 {
                 let mut end = 200;
-                while end > 0 && !full_prompt.is_char_boundary(end) { end -= 1; }
+                while end > 0 && !full_prompt.is_char_boundary(end) {
+                    end -= 1;
+                }
                 format!("{}...", &full_prompt[..end])
-            } else { full_prompt.clone() };
-            state.event_bus.publish(crate::event_bus::DaemonEvent::SlotTaskDispatched {
-                slot_id: slot_id.clone(),
-                task_id: Some(task.id.to_string()),
-                purpose: "board_auto_execute".to_string(),
-                prompt_chars: full_prompt.len(),
-                preview,
-                cited_kb_ids,
-            });
+            } else {
+                full_prompt.clone()
+            };
+            state
+                .event_bus
+                .publish(crate::event_bus::DaemonEvent::SlotTaskDispatched {
+                    slot_id: slot_id.clone(),
+                    task_id: Some(task.id.to_string()),
+                    purpose: "board_auto_execute".to_string(),
+                    prompt_chars: full_prompt.len(),
+                    preview,
+                    cited_kb_ids,
+                });
         }
 
         // Pre-send state verification with dispatch guard: atomically check idle + send.
@@ -586,22 +718,34 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                     // Back to open for retry (don't mark done)
                     let new_retry = task.retry_count + 1;
                     if new_retry >= task.max_retries {
-                        let _ = state.store.update_board_task(
-                        task.id.as_str(),
-                            &missiond_core::types::UpdateBoardTaskInput {
-                                status: Some("failed".to_string()),
-                                ..Default::default()
-                            },
-                        ).await;
+                        let _ = state
+                            .store
+                            .update_board_task(
+                                task.id.as_str(),
+                                &missiond_core::types::UpdateBoardTaskInput {
+                                    status: Some("failed".to_string()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
                         state.event_bus.publish_traced(
                             DaemonEvent::BoardTaskStatusChanged {
-                                task_id: task.id.to_string(), old_status: format!("{:?}", task.status), new_status: "failed".to_string(),
+                                task_id: task.id.to_string(),
+                                old_status: format!("{:?}", task.status),
+                                new_status: "failed".to_string(),
                             },
-                            TraceContext { trace_id: Some(task.id.to_string()), summary: Some(format!("board: {} → failed", task.title)), ..Default::default() },
+                            TraceContext {
+                                trace_id: Some(task.id.to_string()),
+                                summary: Some(format!("board: {} → failed", task.title)),
+                                ..Default::default()
+                            },
                         );
                         notify_jarvis_failure(state, &task, "OAuth token 过期，工位认证失败").await;
                     } else {
-                        let _ = state.store.increment_board_task_retry(task.id.as_str(), new_retry).await;
+                        let _ = state
+                            .store
+                            .increment_board_task_retry(task.id.as_str(), new_retry)
+                            .await;
                     }
                     continue;
                 }
@@ -610,9 +754,13 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                 if is_quota_exhausted(&res.response) {
                     warn!(slot_id = %slot_id, task_id = %task.id, "🚨 Autopilot: API quota exhausted! Activating global pause circuit breaker");
                     // Activate global pause
-                    state.global_paused.store(true, std::sync::atomic::Ordering::Relaxed);
+                    state
+                        .global_paused
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
                     let now = chrono::Utc::now().timestamp();
-                    state.global_paused_at.store(now, std::sync::atomic::Ordering::Relaxed);
+                    state
+                        .global_paused_at
+                        .store(now, std::sync::atomic::Ordering::Relaxed);
                     let _ = std::fs::write(
                         crate::helpers::default_mission_home().join("global_paused"),
                         now.to_string(),
@@ -631,13 +779,16 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                         },
                     ).await;
                     // Return task to open for retry after quota resets
-                    let _ = state.store.update_board_task(
-                        task.id.as_str(),
-                        &missiond_core::types::UpdateBoardTaskInput {
-                            status: Some("open".to_string()),
-                            ..Default::default()
-                        },
-                    ).await;
+                    let _ = state
+                        .store
+                        .update_board_task(
+                            task.id.as_str(),
+                            &missiond_core::types::UpdateBoardTaskInput {
+                                status: Some("open".to_string()),
+                                ..Default::default()
+                            },
+                        )
+                        .await;
                     // Create incident for visibility
                     let incident = missiond_core::types::MissionIncident {
                         id: format!("inc-{}", uuid::Uuid::new_v4()),
@@ -664,19 +815,27 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                 }
 
                 // Record result as a board note
-                let note_content = format!("**Autopilot 执行完成** ({}ms)\n\n{}", res.duration_ms, res.response);
-                let _ = state.store.add_board_task_note(
-                    &missiond_core::types::AddBoardTaskNoteInput {
+                let note_content = format!(
+                    "**Autopilot 执行完成** ({}ms)\n\n{}",
+                    res.duration_ms, res.response
+                );
+                let _ = state
+                    .store
+                    .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
                         task_id: task.id.to_string(),
                         content: note_content,
                         note_type: Some("summary".to_string()),
                         author: Some("autopilot".to_string()),
-                    },
-                ).await;
+                    })
+                    .await;
                 // CAS guard: only mark done if task is still in 'running' state.
                 // If task was auto-blocked by mission_question_create, preserve 'blocked' status.
-                let current_status = state.store.get_board_task(task.id.as_str()).await
-                    .ok().flatten()
+                let current_status = state
+                    .store
+                    .get_board_task(task.id.as_str())
+                    .await
+                    .ok()
+                    .flatten()
                     .map(|t| t.status);
                 match current_status {
                     Some(missiond_core::types::BoardTaskStatus::Done) => {
@@ -697,22 +856,34 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                     }
                     _ => {
                         // Normal case: running → done
-                        let _ = state.store.update_board_task(
-                        task.id.as_str(),
-                            &missiond_core::types::UpdateBoardTaskInput {
-                                status: Some("done".to_string()),
-                                ..Default::default()
-                            },
-                        ).await;
+                        let _ = state
+                            .store
+                            .update_board_task(
+                                task.id.as_str(),
+                                &missiond_core::types::UpdateBoardTaskInput {
+                                    status: Some("done".to_string()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
                         state.event_bus.publish_traced(
                             DaemonEvent::BoardTaskStatusChanged {
-                                task_id: task.id.to_string(), old_status: format!("{:?}", task.status), new_status: "done".to_string(),
+                                task_id: task.id.to_string(),
+                                old_status: format!("{:?}", task.status),
+                                new_status: "done".to_string(),
                             },
-                            TraceContext { trace_id: Some(task.id.to_string()), summary: Some(format!("board: {} → done", task.title)), ..Default::default() },
+                            TraceContext {
+                                trace_id: Some(task.id.to_string()),
+                                summary: Some(format!("board: {} → done", task.title)),
+                                ..Default::default()
+                            },
                         );
                         info!(task_id = %task.id, duration_ms = res.duration_ms, "Autopilot: task completed");
                         // Record outcome for Skill auto-verification replay
-                        let _ = state.store.update_prompt_snapshot_outcome(task.id.as_str(), "success").await;
+                        let _ = state
+                            .store
+                            .update_prompt_snapshot_outcome(task.id.as_str(), "success")
+                            .await;
                     }
                 }
                 // Reset slot failure count on success
@@ -725,28 +896,50 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                 // Self-supervision: entries below 0.8 (likely penalized by prior attribution)
                 // get a higher boost (+0.05) to recover faster from misattribution
                 {
-                    let cited = state.task_cited_kbs.lock().unwrap().remove(task.id.as_str());
+                    let cited = state
+                        .task_cited_kbs
+                        .lock()
+                        .unwrap()
+                        .remove(task.id.as_str());
                     if let Some(kb_ids) = cited {
                         let count = kb_ids.len();
                         for kb_id in &kb_ids {
                             // Check current confidence to determine boost amount
-                            let delta = state.store.kb_get_by_id(kb_id).await
-                                .ok().flatten()
+                            let delta = state
+                                .store
+                                .kb_get_by_id(kb_id)
+                                .await
+                                .ok()
+                                .flatten()
                                 .map(|e| if e.confidence < 0.8 { 0.05 } else { 0.03 })
                                 .unwrap_or(0.03);
                             match state.store.kb_adjust_confidence(kb_id, delta).await {
-                                Ok(Some(new_conf)) => debug!(kb_id = %kb_id, delta, new_conf, "KB confidence boost (task success)"),
-                                Ok(None) => debug!(kb_id = %kb_id, "KB entry not found for confidence adjustment"),
-                                Err(e) => warn!(kb_id = %kb_id, error = %e, "Failed to adjust KB confidence"),
+                                Ok(Some(new_conf)) => {
+                                    debug!(kb_id = %kb_id, delta, new_conf, "KB confidence boost (task success)")
+                                }
+                                Ok(None) => {
+                                    debug!(kb_id = %kb_id, "KB entry not found for confidence adjustment")
+                                }
+                                Err(e) => {
+                                    warn!(kb_id = %kb_id, error = %e, "Failed to adjust KB confidence")
+                                }
                             }
                         }
                         if count > 0 {
                             info!(task_id = %task.id, kb_count = count, "KB feedback: boosted confidence for {} cited entries", count);
                         }
                         // Phase 4a: Utility score boost on task success (atomic SQL)
-                        match state.store.kb_batch_apply_utility_feedback(&kb_ids, true).await {
-                            Ok(n) if n > 0 => info!(task_id = %task.id, boosted = n, "KB utility: boosted for task success"),
-                            Err(e) => warn!(task_id = %task.id, error = %e, "KB utility: boost failed"),
+                        match state
+                            .store
+                            .kb_batch_apply_utility_feedback(&kb_ids, true)
+                            .await
+                        {
+                            Ok(n) if n > 0 => {
+                                info!(task_id = %task.id, boosted = n, "KB utility: boosted for task success")
+                            }
+                            Err(e) => {
+                                warn!(task_id = %task.id, error = %e, "KB utility: boost failed")
+                            }
                             _ => {}
                         }
                     }
@@ -778,11 +971,16 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                 // Jarvis task post-completion: append result to conversation
                 if task.category == "jarvis" {
                     if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&task.description) {
-                        if let Some(conv_id) = meta.get("conversation_id").and_then(|v| v.as_str()) {
+                        if let Some(conv_id) = meta.get("conversation_id").and_then(|v| v.as_str())
+                        {
                             if !conv_id.is_empty() {
-                                let _ = state.store.router_chat_append_messages(conv_id, &[
-                                    ("assistant".to_string(), res.response.clone()),
-                                ]).await;
+                                let _ = state
+                                    .store
+                                    .router_chat_append_messages(
+                                        conv_id,
+                                        &[("assistant".to_string(), res.response.clone())],
+                                    )
+                                    .await;
                                 state.event_bus.publish_traced(
                                     DaemonEvent::JarvisTaskCompleted {
                                         conversation_id: conv_id.to_string(),
@@ -790,7 +988,10 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                                     },
                                     TraceContext {
                                         trace_id: Some(conv_id.to_string()),
-                                        summary: Some(format!("jarvis: task {} completed", &task.id.as_str()[..8.min(task.id.as_str().len())])),
+                                        summary: Some(format!(
+                                            "jarvis: task {} completed",
+                                            &task.id.as_str()[..8.min(task.id.as_str().len())]
+                                        )),
                                         ..Default::default()
                                     },
                                 );
@@ -822,10 +1023,12 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                             4. 提炼有价值的经验 → mission_kb_remember(category=\"memory:ops\")\n\
                             5. 如发现缺失 MCP 工具或 Skill → mission_board_create 建改进任务\n\
                             6. 如一切顺利，简要记录即可，不需要过度分析",
-                            review_title, review_task_id, review_slot,
-                            review_task_id,
+                            review_title, review_task_id, review_slot, review_task_id,
                         );
-                        let _ = review_state.pty.send(MEMORY_SLOW_SLOT_ID, &prompt, 600_000).await;
+                        let _ = review_state
+                            .pty
+                            .send(MEMORY_SLOW_SLOT_ID, &prompt, 600_000)
+                            .await;
                         info!(task_id = %review_task_id, "Deploy post-mortem review dispatched to memory-slow");
                     });
                 }
@@ -842,15 +1045,21 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                     let _ = state.store.unclaim_board_task(task.id.as_str()).await;
                 } else {
                     // Real execution failure — track and retry
-                    let note_content = format!("**Autopilot 执行失败** (retry {}/{})\n\n{}", task.retry_count + 1, task.max_retries, err_msg);
-                    let _ = state.store.add_board_task_note(
-                        &missiond_core::types::AddBoardTaskNoteInput {
+                    let note_content = format!(
+                        "**Autopilot 执行失败** (retry {}/{})\n\n{}",
+                        task.retry_count + 1,
+                        task.max_retries,
+                        err_msg
+                    );
+                    let _ = state
+                        .store
+                        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
                             task_id: task.id.to_string(),
                             content: note_content,
                             note_type: Some("note".to_string()),
                             author: Some("autopilot".to_string()),
-                        },
-                    ).await;
+                        })
+                        .await;
 
                     // Track slot consecutive failures
                     {
@@ -866,32 +1075,56 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                     // Retry logic: increment count, mark failed if exhausted
                     let new_retry = task.retry_count + 1;
                     if new_retry >= task.max_retries {
-                        let _ = state.store.update_board_task(
-                        task.id.as_str(),
-                            &missiond_core::types::UpdateBoardTaskInput {
-                                status: Some("failed".to_string()),
-                                ..Default::default()
-                            },
-                        ).await;
+                        let _ = state
+                            .store
+                            .update_board_task(
+                                task.id.as_str(),
+                                &missiond_core::types::UpdateBoardTaskInput {
+                                    status: Some("failed".to_string()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
                         state.event_bus.publish_traced(
                             DaemonEvent::BoardTaskStatusChanged {
-                                task_id: task.id.to_string(), old_status: format!("{:?}", task.status), new_status: "failed".to_string(),
+                                task_id: task.id.to_string(),
+                                old_status: format!("{:?}", task.status),
+                                new_status: "failed".to_string(),
                             },
-                            TraceContext { trace_id: Some(task.id.to_string()), summary: Some(format!("board: {} → failed", task.title)), ..Default::default() },
+                            TraceContext {
+                                trace_id: Some(task.id.to_string()),
+                                summary: Some(format!("board: {} → failed", task.title)),
+                                ..Default::default()
+                            },
                         );
                         warn!(task_id = %task.id, retries = new_retry, "Autopilot: task failed after max retries");
-                        let _ = state.store.update_prompt_snapshot_outcome(task.id.as_str(), "failed").await;
+                        let _ = state
+                            .store
+                            .update_prompt_snapshot_outcome(task.id.as_str(), "failed")
+                            .await;
                         notify_jarvis_failure(state, &task, &err_msg).await;
 
                         // Negative feedback: confidence (LLM-attributed) + utility_score (blanket)
                         {
-                            let cited = state.task_cited_kbs.lock().unwrap().remove(task.id.as_str());
+                            let cited = state
+                                .task_cited_kbs
+                                .lock()
+                                .unwrap()
+                                .remove(task.id.as_str());
                             if let Some(kb_ids) = cited {
                                 if !kb_ids.is_empty() {
                                     // Phase 4a: Utility score penalty (sync, atomic SQL)
-                                    match state.store.kb_batch_apply_utility_feedback(&kb_ids, false).await {
-                                        Ok(n) if n > 0 => info!(task_id = %task.id, penalized = n, "KB utility: penalized for task failure"),
-                                        Err(e) => warn!(task_id = %task.id, error = %e, "KB utility: penalty failed"),
+                                    match state
+                                        .store
+                                        .kb_batch_apply_utility_feedback(&kb_ids, false)
+                                        .await
+                                    {
+                                        Ok(n) if n > 0 => {
+                                            info!(task_id = %task.id, penalized = n, "KB utility: penalized for task failure")
+                                        }
+                                        Err(e) => {
+                                            warn!(task_id = %task.id, error = %e, "KB utility: penalty failed")
+                                        }
                                         _ => {}
                                     }
                                     // Confidence penalty (async, LLM-attributed)
@@ -900,14 +1133,24 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                                     let err_msg2 = err_msg.clone();
                                     let task_title2 = task.title.clone();
                                     tokio::spawn(async move {
-                                        apply_attributed_penalty(&state2, &task_id2, &task_title2, &err_msg2, &kb_ids).await;
+                                        apply_attributed_penalty(
+                                            &state2,
+                                            &task_id2,
+                                            &task_title2,
+                                            &err_msg2,
+                                            &kb_ids,
+                                        )
+                                        .await;
                                     });
                                 }
                             }
                         }
                     } else {
                         // Back to open for retry, increment retry_count
-                        let _ = state.store.increment_board_task_retry(task.id.as_str(), new_retry).await;
+                        let _ = state
+                            .store
+                            .increment_board_task_retry(task.id.as_str(), new_retry)
+                            .await;
                         warn!(task_id = %task.id, retry = new_retry, max = task.max_retries, error = %err_msg, "Autopilot: task failed, will retry");
                     }
                 }
@@ -936,12 +1179,17 @@ async fn apply_attributed_penalty(
         if let Ok(Some(entry)) = state.store.kb_get_by_id(kb_id).await {
             kb_context.push_str(&format!(
                 "- [{}] category={}, key={}, summary={}\n",
-                &kb_id[..8.min(kb_id.len())], entry.category, entry.key, entry.summary
+                &kb_id[..8.min(kb_id.len())],
+                entry.category,
+                entry.key,
+                entry.summary
             ));
         }
     }
 
-    if kb_context.is_empty() { return; }
+    if kb_context.is_empty() {
+        return;
+    }
 
     // Log dehydration: semantic summary for long errors, preserving causal chain.
     // Falls back to head+tail if Sonnet unavailable.
@@ -953,20 +1201,36 @@ async fn apply_attributed_penalty(
                 "以下是任务失败日志（{}字符）。提取关键因果链：错误类型、触发条件、失败点。≤400字，保留原始错误消息和关键状态变化。\n\n{}",
                 error_msg.len(), error_msg
             );
-            let msgs = vec![ChatMessage { role: "user".to_string(), content: summarize_prompt }];
-            match sonnet.call_briefing(msgs, Some(512), Some(format!("log-dehydrate-{}", task_id))).await {
+            let msgs = vec![ChatMessage {
+                role: "user".to_string(),
+                content: summarize_prompt,
+            }];
+            match sonnet
+                .call_briefing(msgs, Some(512), Some(format!("log-dehydrate-{}", task_id)))
+                .await
+            {
                 Ok(resp) if !resp.trim().is_empty() => Some(resp),
                 _ => None,
             }
-        } else { None };
+        } else {
+            None
+        };
 
         summary.unwrap_or_else(|| {
             // Fallback: head+tail
             let mut head_end = 200;
-            while head_end > 0 && !error_msg.is_char_boundary(head_end) { head_end -= 1; }
+            while head_end > 0 && !error_msg.is_char_boundary(head_end) {
+                head_end -= 1;
+            }
             let mut tail_start = error_msg.len().saturating_sub(200);
-            while tail_start < error_msg.len() && !error_msg.is_char_boundary(tail_start) { tail_start += 1; }
-            format!("{}\n...(truncated)...\n{}", &error_msg[..head_end], &error_msg[tail_start..])
+            while tail_start < error_msg.len() && !error_msg.is_char_boundary(tail_start) {
+                tail_start += 1;
+            }
+            format!(
+                "{}\n...(truncated)...\n{}",
+                &error_msg[..head_end],
+                &error_msg[tail_start..]
+            )
         })
     } else {
         error_msg.to_string()
@@ -993,8 +1257,14 @@ async fn apply_attributed_penalty(
 
     // Try Sonnet attribution
     let attribution = if let Some(sonnet) = state.sonnet.as_ref() {
-        let messages = vec![ChatMessage { role: "user".to_string(), content: prompt }];
-        match sonnet.call_briefing(messages, Some(512), Some(format!("kb-attr-{}", task_id))).await {
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: prompt,
+        }];
+        match sonnet
+            .call_briefing(messages, Some(512), Some(format!("kb-attr-{}", task_id)))
+            .await
+        {
             Ok(resp) => parse_attribution(&resp, kb_ids),
             Err(e) => {
                 debug!(task_id, error = %e, "KB attribution: Sonnet call failed, falling back to blanket penalty");
@@ -1010,27 +1280,49 @@ async fn apply_attributed_penalty(
             let mut stats = (0u32, 0u32, 0u32); // innocent, contributed, caused
             for (kb_id, verdict) in &verdicts {
                 let delta = match verdict.as_str() {
-                    "caused" => { stats.2 += 1; -0.15 },
-                    "contributed" => { stats.1 += 1; -0.05 },
-                    _ => { stats.0 += 1; 0.0 }, // innocent — no penalty
+                    "caused" => {
+                        stats.2 += 1;
+                        -0.15
+                    }
+                    "contributed" => {
+                        stats.1 += 1;
+                        -0.05
+                    }
+                    _ => {
+                        stats.0 += 1;
+                        0.0
+                    } // innocent — no penalty
                 };
                 if delta != 0.0 {
                     match state.store.kb_adjust_confidence(kb_id, delta).await {
-                        Ok(Some(new_conf)) => debug!(kb_id = %kb_id, delta, new_conf, "KB attributed penalty"),
+                        Ok(Some(new_conf)) => {
+                            debug!(kb_id = %kb_id, delta, new_conf, "KB attributed penalty")
+                        }
                         Ok(None) => {}
-                        Err(e) => warn!(kb_id = %kb_id, error = %e, "Failed to adjust KB confidence"),
+                        Err(e) => {
+                            warn!(kb_id = %kb_id, error = %e, "Failed to adjust KB confidence")
+                        }
                     }
                 }
             }
-            info!(task_id, innocent = stats.0, contributed = stats.1, caused = stats.2,
-                "KB attribution: differentiated penalties applied");
+            info!(
+                task_id,
+                innocent = stats.0,
+                contributed = stats.1,
+                caused = stats.2,
+                "KB attribution: differentiated penalties applied"
+            );
         }
         None => {
             // Fallback: blanket -0.02
             for kb_id in kb_ids {
                 let _ = state.store.kb_adjust_confidence(kb_id, -0.02).await;
             }
-            info!(task_id, kb_count = kb_ids.len(), "KB feedback: fallback -0.02 for all cited entries");
+            info!(
+                task_id,
+                kb_count = kb_ids.len(),
+                "KB feedback: fallback -0.02 for all cited entries"
+            );
         }
     }
 }
@@ -1038,9 +1330,12 @@ async fn apply_attributed_penalty(
 /// Parse MiniMax attribution response into (kb_id, verdict) pairs.
 fn parse_attribution(response: &str, kb_ids: &[String]) -> Option<Vec<(String, String)>> {
     // Strip markdown fences if present
-    let json_str = response.trim()
-        .trim_start_matches("```json").trim_start_matches("```")
-        .trim_end_matches("```").trim();
+    let json_str = response
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
 
     let arr: Vec<serde_json::Value> = serde_json::from_str(json_str).ok()?;
     let mut result = Vec::new();
@@ -1057,7 +1352,11 @@ fn parse_attribution(response: &str, kb_ids: &[String]) -> Option<Vec<(String, S
         }
     }
 
-    if result.is_empty() { None } else { Some(result) }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// Reap expired dynamic slots: SIGTERM → 30s grace → unregister.
@@ -1078,7 +1377,11 @@ async fn reap_expired_dynamic_slots(state: &AppState) {
         let _ = state.pty.kill(&slot.id).await;
 
         // Mark terminated in DB
-        if let Err(e) = state.store.terminate_dynamic_slot(&slot.id, "ttl_expired").await {
+        if let Err(e) = state
+            .store
+            .terminate_dynamic_slot(&slot.id, "ttl_expired")
+            .await
+        {
             warn!(slot_id = %slot.id, error = %e, "Failed to terminate dynamic slot in DB");
         }
 
@@ -1101,26 +1404,50 @@ async fn reap_expired_dynamic_slots(state: &AppState) {
 /// Safety net: running Board tasks with no recent progress notes → Inbox reminder.
 /// Runs every 5 ticks (~5 min). Deduplicates by checking existing unread inbox.
 async fn check_stale_board_progress(state: &AppState) {
-    let tick = state.stats.autopilot_ticks.load(std::sync::atomic::Ordering::Relaxed);
-    if tick % 5 != 0 { return; }
+    let tick = state
+        .stats
+        .autopilot_ticks
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if tick % 5 != 0 {
+        return;
+    }
 
-    let running = state.store.list_board_tasks(Some("running"), false).await.unwrap_or_default();
-    if running.is_empty() { return; }
+    let running = state
+        .store
+        .list_board_tasks(Some("running"), false)
+        .await
+        .unwrap_or_default();
+    if running.is_empty() {
+        return;
+    }
 
     // Prefetch recent unread inbox for dedup
-    let recent_inbox = state.store.get_inbox_messages(true, 50).await.unwrap_or_default();
+    let recent_inbox = state
+        .store
+        .get_inbox_messages(true, 50)
+        .await
+        .unwrap_or_default();
 
     for task in &running {
         // Skip autopilot-managed tasks (they have their own watchdog above)
-        if task.claim_executor_type.as_deref() == Some("pty_slot") { continue; }
+        if task.claim_executor_type.as_deref() == Some("pty_slot") {
+            continue;
+        }
 
         // Check latest note time
-        let last_note_at = state.store.get_board_task_with_notes(task.id.as_str()).await
-            .ok().flatten()
-            .and_then(|r| r.notes.last().and_then(|n|
-                chrono::DateTime::parse_from_rfc3339(&n.created_at).ok()
-                    .map(|t| t.with_timezone(&chrono::Utc))
-            ));
+        let last_note_at = state
+            .store
+            .get_board_task_with_notes(task.id.as_str())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| {
+                r.notes.last().and_then(|n| {
+                    chrono::DateTime::parse_from_rfc3339(&n.created_at)
+                        .ok()
+                        .map(|t| t.with_timezone(&chrono::Utc))
+                })
+            });
 
         let task_start = chrono::DateTime::parse_from_rfc3339(&task.updated_at)
             .ok()
@@ -1132,9 +1459,10 @@ async fn check_stale_board_progress(state: &AppState) {
             if age_min >= 30 {
                 // Dedup: skip if unread inbox already has a message about this task
                 let task_prefix = &task.id.as_str()[..8.min(task.id.as_str().len())];
-                let already_notified = recent_inbox.iter()
-                    .any(|m| m.content.contains(task_prefix));
-                if already_notified { continue; }
+                let already_notified = recent_inbox.iter().any(|m| m.content.contains(task_prefix));
+                if already_notified {
+                    continue;
+                }
 
                 let msg = missiond_core::types::InboxMessage {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -1175,7 +1503,11 @@ async fn gc_completed_jobs(state: &AppState) {
     });
     let removed = before - store.len();
     if removed > 0 {
-        debug!(removed, remaining = store.len(), "GC'd completed async jobs");
+        debug!(
+            removed,
+            remaining = store.len(),
+            "GC'd completed async jobs"
+        );
     }
 }
 
@@ -1193,20 +1525,27 @@ async fn evaluate_user_state(state: &AppState) {
             return;
         }
     };
-    if intents.is_empty() { return; }
+    if intents.is_empty() {
+        return;
+    }
 
     let now = chrono::Utc::now().timestamp();
 
     // 2. Group by session_id — Gemini audit fix: avoid cross-session false aggregation
-    let mut by_session: std::collections::HashMap<&str, Vec<&missiond_core::types::UserIntent>> = std::collections::HashMap::new();
+    let mut by_session: std::collections::HashMap<&str, Vec<&missiond_core::types::UserIntent>> =
+        std::collections::HashMap::new();
     for intent in &intents {
-        by_session.entry(&intent.session_id).or_default().push(intent);
+        by_session
+            .entry(&intent.session_id)
+            .or_default()
+            .push(intent);
     }
 
     // 3. Per-session evaluation
     for (session_id, s_intents) in &by_session {
         // UserStuck: stuck_retry >= 3 → L3 Jarvis push (降级 Inbox)
-        let stuck: Vec<_> = s_intents.iter()
+        let stuck: Vec<_> = s_intents
+            .iter()
             .filter(|i| i.intent_type == "stuck_retry")
             .copied()
             .collect();
@@ -1218,31 +1557,49 @@ async fn evaluate_user_state(state: &AppState) {
         }
 
         // DirectionShift: architecture_explore confidence > 0.8 → L2 Inbox
-        if let Some(shift) = s_intents.iter()
+        if let Some(shift) = s_intents
+            .iter()
             .find(|i| i.intent_type == "architecture_explore" && i.confidence > 0.8)
         {
             let ck = format!("direction_shift:{}", session_id);
             if !in_cooldown(state, &ck, 3600, now) {
-                trigger_inbox(state, "direction_shift",
-                    &format!("检测到架构探索偏移：{}", shift.summary.as_deref().unwrap_or("未知")),
-                ).await;
+                trigger_inbox(
+                    state,
+                    "direction_shift",
+                    &format!(
+                        "检测到架构探索偏移：{}",
+                        shift.summary.as_deref().unwrap_or("未知")
+                    ),
+                )
+                .await;
                 set_cooldown(state, &ck, now);
             }
         }
 
         // ScopeCreep: scope_creep >= 2 + Board has running tasks → L2 Inbox
-        let creep_count = s_intents.iter()
+        let creep_count = s_intents
+            .iter()
             .filter(|i| i.intent_type == "scope_creep")
             .count();
         if creep_count >= 2 {
             let ck = format!("scope_creep:{}", session_id);
             if !in_cooldown(state, &ck, 3600, now) {
-                let has_running = state.store.list_running_autopilot_tasks().await
-                    .map(|v| !v.is_empty()).unwrap_or(false);
+                let has_running = state
+                    .store
+                    .list_running_autopilot_tasks()
+                    .await
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false);
                 if has_running {
-                    trigger_inbox(state, "scope_creep",
-                        &format!("检测到 {} 次范围蔓延，当前有进行中的 Board 任务", creep_count),
-                    ).await;
+                    trigger_inbox(
+                        state,
+                        "scope_creep",
+                        &format!(
+                            "检测到 {} 次范围蔓延，当前有进行中的 Board 任务",
+                            creep_count
+                        ),
+                    )
+                    .await;
                     set_cooldown(state, &ck, now);
                 }
             }
@@ -1267,9 +1624,10 @@ async fn trigger_jarvis_push(state: &AppState, reason: &str, summary: &str) {
         reason, summary
     );
 
-    let _ = state.store.router_chat_append_messages(&conv_id, &[
-        ("user".to_string(), message),
-    ]).await;
+    let _ = state
+        .store
+        .router_chat_append_messages(&conv_id, &[("user".to_string(), message)])
+        .await;
 
     state.event_bus.publish(DaemonEvent::JarvisProactivePush {
         conversation_id: conv_id.clone(),
@@ -1296,7 +1654,10 @@ async fn trigger_inbox(state: &AppState, reason: &str, content: &str) {
 
 fn in_cooldown(state: &AppState, key: &str, cooldown_secs: i64, now: i64) -> bool {
     let guard = state.proactive_cooldowns.lock().unwrap();
-    guard.get(key).map(|&ts| now - ts < cooldown_secs).unwrap_or(false)
+    guard
+        .get(key)
+        .map(|&ts| now - ts < cooldown_secs)
+        .unwrap_or(false)
 }
 
 fn set_cooldown(state: &AppState, key: &str, now: i64) {
@@ -1305,7 +1666,8 @@ fn set_cooldown(state: &AppState, key: &str, now: i64) {
 }
 
 fn build_stuck_summary(intents: &[&missiond_core::types::UserIntent]) -> String {
-    let details: Vec<String> = intents.iter()
+    let details: Vec<String> = intents
+        .iter()
         .filter_map(|i| i.summary.as_deref())
         .map(|s| format!("- {}", s))
         .collect();
@@ -1325,22 +1687,40 @@ mod tests {
     #[test]
     fn test_build_stuck_summary_basic() {
         let i1 = missiond_core::types::UserIntent {
-            id: 1, session_id: "s1".to_string(), turn_range_start: 0, turn_range_end: 2,
-            intent_type: "stuck_retry".to_string(), confidence: 0.9,
+            id: 1,
+            session_id: "s1".to_string(),
+            turn_range_start: 0,
+            turn_range_end: 2,
+            intent_type: "stuck_retry".to_string(),
+            confidence: 0.9,
             summary: Some("反复修复CORS跨域错误".to_string()),
-            context_json: None, related_goal_id: None, created_at: String::new(),
+            context_json: None,
+            related_goal_id: None,
+            created_at: String::new(),
         };
         let i2 = missiond_core::types::UserIntent {
-            id: 2, session_id: "s1".to_string(), turn_range_start: 3, turn_range_end: 5,
-            intent_type: "stuck_retry".to_string(), confidence: 0.85,
+            id: 2,
+            session_id: "s1".to_string(),
+            turn_range_start: 3,
+            turn_range_end: 5,
+            intent_type: "stuck_retry".to_string(),
+            confidence: 0.85,
             summary: Some("CORS配置依然报错，换了nginx方案".to_string()),
-            context_json: None, related_goal_id: None, created_at: String::new(),
+            context_json: None,
+            related_goal_id: None,
+            created_at: String::new(),
         };
         let i3 = missiond_core::types::UserIntent {
-            id: 3, session_id: "s1".to_string(), turn_range_start: 6, turn_range_end: 8,
-            intent_type: "stuck_retry".to_string(), confidence: 0.8,
+            id: 3,
+            session_id: "s1".to_string(),
+            turn_range_start: 6,
+            turn_range_end: 8,
+            intent_type: "stuck_retry".to_string(),
+            confidence: 0.8,
             summary: Some("第三次尝试修复CORS".to_string()),
-            context_json: None, related_goal_id: None, created_at: String::new(),
+            context_json: None,
+            related_goal_id: None,
+            created_at: String::new(),
         };
         let refs = vec![&i1, &i2, &i3];
         let summary = build_stuck_summary(&refs);
@@ -1352,9 +1732,16 @@ mod tests {
     #[test]
     fn test_build_stuck_summary_empty_summaries() {
         let i1 = missiond_core::types::UserIntent {
-            id: 1, session_id: "s1".to_string(), turn_range_start: 0, turn_range_end: 2,
-            intent_type: "stuck_retry".to_string(), confidence: 0.9,
-            summary: None, context_json: None, related_goal_id: None, created_at: String::new(),
+            id: 1,
+            session_id: "s1".to_string(),
+            turn_range_start: 0,
+            turn_range_end: 2,
+            intent_type: "stuck_retry".to_string(),
+            confidence: 0.9,
+            summary: None,
+            context_json: None,
+            related_goal_id: None,
+            created_at: String::new(),
         };
         let refs = vec![&i1];
         let summary = build_stuck_summary(&refs);
@@ -1383,7 +1770,8 @@ async fn reap_idle_persistent_slots(state: &AppState) {
         // Check last activity time from slot_progress
         let last_active = {
             let progress = state.slot_progress.read().await;
-            progress.get(slot_id)
+            progress
+                .get(slot_id)
                 .and_then(|sp| sp.last_activity.as_ref())
                 .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
                 .map(|dt| dt.with_timezone(&chrono::Utc))

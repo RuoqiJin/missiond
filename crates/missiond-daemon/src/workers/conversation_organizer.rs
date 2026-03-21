@@ -11,11 +11,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use tokio::sync::broadcast;
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
+use super::{BackgroundWorker, WorkerContext};
 use crate::event_bus::{DaemonEvent, TimelineEvent};
 use crate::state::AppState;
-use super::{BackgroundWorker, WorkerContext};
 
 /// Debounce interval: wait for 5s of silence before processing batch.
 const DEBOUNCE_SECS: u64 = 5;
@@ -25,9 +25,15 @@ pub struct ConversationOrganizerWorker {
 }
 
 impl BackgroundWorker for ConversationOrganizerWorker {
-    fn name(&self) -> &'static str { "conversation_organizer" }
+    fn name(&self) -> &'static str {
+        "conversation_organizer"
+    }
 
-    fn run(self, state: Arc<AppState>, ctx: WorkerContext) -> impl std::future::Future<Output = ()> + Send {
+    fn run(
+        self,
+        state: Arc<AppState>,
+        ctx: WorkerContext,
+    ) -> impl std::future::Future<Output = ()> + Send {
         run_organizer(state, ctx, self.timeline_rx)
     }
 }
@@ -75,17 +81,24 @@ async fn organize(state: &AppState, session_ids: &[String]) {
     for sid in session_ids {
         if sid.contains("-acompact-") {
             if let Some(original_id) = extract_compaction_parent(sid) {
-                match state.store.link_compaction_fragment(sid, &original_id).await {
+                match state
+                    .store
+                    .link_compaction_fragment(sid, &original_id)
+                    .await
+                {
                     Ok(true) => compaction_linked += 1,
                     Ok(false) => {} // already linked or no-op
-                    Err(e) => warn!(session = %sid, error = %e, "Organizer: compaction link failed"),
+                    Err(e) => {
+                        warn!(session = %sid, error = %e, "Organizer: compaction link failed")
+                    }
                 }
             }
         }
     }
 
     // P1: Fix orphan parent links (safety net — Phase 1 root-cause fix handles most cases)
-    let subagent_ids: Vec<String> = session_ids.iter()
+    let subagent_ids: Vec<String> = session_ids
+        .iter()
         .filter(|s| s.starts_with("agent-") && !s.contains("-acompact-"))
         .cloned()
         .collect();

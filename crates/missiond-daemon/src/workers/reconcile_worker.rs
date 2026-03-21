@@ -38,7 +38,9 @@ const ACTIVE_THRESHOLD_SECS: u64 = 3600;
 pub(crate) struct ReconcileWorker;
 
 impl BackgroundWorker for ReconcileWorker {
-    fn name(&self) -> &'static str { "reconcile" }
+    fn name(&self) -> &'static str {
+        "reconcile"
+    }
 
     async fn run(self, state: Arc<AppState>, mut ctx: WorkerContext) {
         // Delay first run to let startup settle
@@ -102,9 +104,7 @@ async fn run_reconciliation(state: &AppState) {
         if files_processed % PROGRESS_LOG_INTERVAL == 0 {
             info!(
                 progress = format!("{}/{}", files_processed, total_files),
-                files_reconciled,
-                messages_recovered,
-                "Reconcile: progress"
+                files_reconciled, messages_recovered, "Reconcile: progress"
             );
         }
 
@@ -132,19 +132,34 @@ async fn run_reconciliation(state: &AppState) {
 
         // Determine status from file modification time
         let status = infer_status(&metadata);
-        
+
         // Determine slot_id and conversation_type using the central logic
-        let slot_id = state.store.get_slot_for_session(&session_id).await.unwrap_or(None);
-        let conv_type = missiond_core::db::derive_conversation_type(slot_id.as_deref(), &session_id);
+        let slot_id = state
+            .store
+            .get_slot_for_session(&session_id)
+            .await
+            .unwrap_or(None);
+        let conv_type =
+            missiond_core::db::derive_conversation_type(slot_id.as_deref(), &session_id);
 
         // Reconcile the gap (lazy init: only creates conversation if messages found)
         let recovered = reconcile_file_gap(
-            state, &path_str, &session_id, last_size, &status, &conv_type,
-        ).await;
+            state,
+            &path_str,
+            &session_id,
+            last_size,
+            &status,
+            &conv_type,
+        )
+        .await;
         messages_recovered += recovered;
 
         // Update watermark to current size
-        if let Err(e) = state.store.upsert_reconcile_watermark(&path_str, current_size).await {
+        if let Err(e) = state
+            .store
+            .upsert_reconcile_watermark(&path_str, current_size)
+            .await
+        {
             warn!(path = %path_str, error = %e, "Reconcile: failed to update watermark");
         }
 
@@ -156,7 +171,11 @@ async fn run_reconciliation(state: &AppState) {
 
     // Update global completion timestamp
     let ts = start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    if let Err(e) = state.store.upsert_reconcile_watermark(GLOBAL_WATERMARK_KEY, start.timestamp()).await {
+    if let Err(e) = state
+        .store
+        .upsert_reconcile_watermark(GLOBAL_WATERMARK_KEY, start.timestamp())
+        .await
+    {
         warn!(error = %e, "Reconcile: failed to update global watermark");
     }
 
@@ -172,7 +191,9 @@ async fn run_reconciliation(state: &AppState) {
 
 /// Infer conversation status from file modification time.
 fn infer_status(metadata: &std::fs::Metadata) -> String {
-    let modified = metadata.modified().ok()
+    let modified = metadata
+        .modified()
+        .ok()
         .and_then(|t| t.elapsed().ok())
         .map(|d| d.as_secs())
         .unwrap_or(u64::MAX);
@@ -227,7 +248,12 @@ async fn reconcile_file_gap(
     }
 
     // Check if slot session (affects role mapping)
-    let is_slot_session = state.store.get_slot_for_session(session_id).await.unwrap_or(None).is_some();
+    let is_slot_session = state
+        .store
+        .get_slot_for_session(session_id)
+        .await
+        .unwrap_or(None)
+        .is_some();
 
     let file = match tokio::fs::File::open(path).await {
         Ok(f) => f,
@@ -241,7 +267,10 @@ async fn reconcile_file_gap(
 
     // Seek to from_offset if > 0
     if from_offset > 0 {
-        if let Err(e) = reader.seek(std::io::SeekFrom::Start(from_offset as u64)).await {
+        if let Err(e) = reader
+            .seek(std::io::SeekFrom::Start(from_offset as u64))
+            .await
+        {
             warn!(path = %jsonl_path, error = %e, "Reconcile: seek failed");
             return 0;
         }
@@ -270,7 +299,9 @@ async fn reconcile_file_gap(
             let mut scanned = 0usize;
             while let Ok(Some(sl)) = scan_lines.next_line().await {
                 scanned += 1;
-                if scanned > 20 { break; } // Don't scan too deep for large files
+                if scanned > 20 {
+                    break;
+                } // Don't scan too deep for large files
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(&sl) {
                     if val.pointer("/message/role").and_then(|r| r.as_str()) == Some("assistant") {
                         has_assistant = true;
@@ -286,7 +317,8 @@ async fn reconcile_file_gap(
         }
     }
 
-    let mut batch: Vec<missiond_core::types::ConversationMessage> = Vec::with_capacity(BATCH_FLUSH_SIZE);
+    let mut batch: Vec<missiond_core::types::ConversationMessage> =
+        Vec::with_capacity(BATCH_FLUSH_SIZE);
     let mut lines = reader.lines();
     let mut line_count = 0usize;
     let mut total_recovered = 0usize;
@@ -316,13 +348,20 @@ async fn reconcile_file_gap(
         }
 
         let text_content = events_sync::extract_text_content(&msg.message.content);
-        let content_types: Vec<&str> = msg.message.content.as_array()
-            .map(|arr| arr.iter()
-                .filter_map(|b| b.get("type").and_then(|t| t.as_str()))
-                .collect())
+        let content_types: Vec<&str> = msg
+            .message
+            .content
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|b| b.get("type").and_then(|t| t.as_str()))
+                    .collect()
+            })
             .unwrap_or_default();
-        let is_tool_result = !content_types.is_empty() && content_types.iter().all(|t| *t == "tool_result");
-        let is_thinking = !content_types.is_empty() && content_types.iter().all(|t| *t == "thinking");
+        let is_tool_result =
+            !content_types.is_empty() && content_types.iter().all(|t| *t == "tool_result");
+        let is_thinking =
+            !content_types.is_empty() && content_types.iter().all(|t| *t == "thinking");
 
         if text_content.is_empty() && !is_tool_result {
             continue;
@@ -373,10 +412,17 @@ async fn reconcile_file_gap(
         if batch.len() >= BATCH_FLUSH_SIZE {
             // Lazy init: ensure conversation exists before first insert
             if !conversation_ensured {
-                let _ = state.store.ensure_conversation_exists(
-                    session_id, &project_path, jsonl_path, status, conversation_type,
-                    parent_session_id.as_deref(),
-                ).await;
+                let _ = state
+                    .store
+                    .ensure_conversation_exists(
+                        session_id,
+                        &project_path,
+                        jsonl_path,
+                        status,
+                        conversation_type,
+                        parent_session_id.as_deref(),
+                    )
+                    .await;
                 conversation_ensured = true;
             }
             // Sort by message_uuid to prevent PG deadlocks from concurrent batch inserts
@@ -393,10 +439,17 @@ async fn reconcile_file_gap(
     if !batch.is_empty() {
         // Lazy init: ensure conversation exists before first insert
         if !conversation_ensured {
-            let _ = state.store.ensure_conversation_exists(
-                session_id, &project_path, jsonl_path, status, conversation_type,
-                parent_session_id.as_deref(),
-            ).await;
+            let _ = state
+                .store
+                .ensure_conversation_exists(
+                    session_id,
+                    &project_path,
+                    jsonl_path,
+                    status,
+                    conversation_type,
+                    parent_session_id.as_deref(),
+                )
+                .await;
         }
         batch.sort_by(|a, b| a.message_uuid.cmp(&b.message_uuid));
         if let Ok(ids) = state.store.insert_conversation_messages_batch(&batch).await {
@@ -406,7 +459,10 @@ async fn reconcile_file_gap(
 
     // Update message_count from actual DB rows (self-sufficient, don't rely on hot path)
     if total_recovered > 0 {
-        let _ = state.store.refresh_conversation_message_count(session_id).await;
+        let _ = state
+            .store
+            .refresh_conversation_message_count(session_id)
+            .await;
         info!(
             session = %session_id,
             recovered = total_recovered,

@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
+use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
-use missiond_mcp::tools::ToolResult;
 
 use crate::state::AppState;
 
@@ -35,7 +35,10 @@ struct OsDiagnoseArgs {
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     // Consolidated tools
     if name == "mission_infra_query" {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("list");
         return match action {
             "list" => handle_inner(state, "mission_infra_list", args).await,
             "get" => handle_inner(state, "mission_infra_get", args).await,
@@ -43,7 +46,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         };
     }
     if name == "mission_infra_ops" {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("health");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("health");
         return match action {
             "health" => crate::handlers::misc::handle(state, "mission_health", args).await,
             "reachability" => handle_inner(state, "mission_reachability", args).await,
@@ -59,7 +65,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         // ===== Infrastructure Registry =====
         "mission_infra_list" => {
             let InfraListArgs { role, provider } =
-                serde_json::from_value(args).unwrap_or(InfraListArgs { role: None, provider: None });
+                serde_json::from_value(args).unwrap_or(InfraListArgs {
+                    role: None,
+                    provider: None,
+                });
             let infra = state.infra.read().unwrap();
             let servers: Vec<missiond_core::InfraServer> = if let Some(role) = role {
                 infra.by_role(&role).into_iter().cloned().collect()
@@ -83,33 +92,47 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         "mission_reachability" => {
             let ReachabilityArgs { target, channels } = serde_json::from_value(args)?;
 
-            let server: Option<missiond_core::InfraServer> = state.infra.read().unwrap().get(&target).cloned();
+            let server: Option<missiond_core::InfraServer> =
+                state.infra.read().unwrap().get(&target).cloned();
             let public_ip = server.as_ref().and_then(|s| s.host.clone());
             let lan_ip = server.as_ref().and_then(|s| s.lan.clone());
-            let server_name = server.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| target.clone());
+            let server_name = server
+                .as_ref()
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| target.clone());
 
             // Parse Tailscale IP from description (e.g. "ssh user@100.x.x.x")
             let ts_ip = server.as_ref().and_then(|s| {
                 let targets = s.parse_ssh_targets();
-                targets.iter().find(|t| t.via == "tailscale").map(|t| t.host.clone())
+                targets
+                    .iter()
+                    .find(|t| t.via == "tailscale")
+                    .map(|t| t.host.clone())
             });
 
             let should_probe = |ch: &str| -> bool {
-                channels.as_ref().map_or(true, |chs| chs.iter().any(|c| c == ch))
+                channels
+                    .as_ref()
+                    .map_or(true, |chs| chs.iter().any(|c| c == ch))
             };
 
             // Probe 1: LAN ping
             let lan_ip_owned = lan_ip.map(String::from);
             let do_lan = should_probe("lan_ping") && lan_ip_owned.is_some();
             let lan_ping_fut = async {
-                if !do_lan { return None; }
+                if !do_lan {
+                    return None;
+                }
                 let ip = lan_ip_owned.as_ref().unwrap();
                 let output = tokio::process::Command::new("ping")
                     .args(["-c", "3", "-W", "2", ip])
-                    .output().await.ok()?;
+                    .output()
+                    .await
+                    .ok()?;
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                let latency = stdout.lines()
+                let latency = stdout
+                    .lines()
                     .find(|l| l.contains("avg"))
                     .and_then(|l| l.split('=').nth(1))
                     .and_then(|v| v.split('/').nth(1))
@@ -126,14 +149,19 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let public_ip_owned = public_ip.map(String::from);
             let do_pub = should_probe("public_ping") && public_ip_owned.is_some();
             let public_ping_fut = async {
-                if !do_pub { return None; }
+                if !do_pub {
+                    return None;
+                }
                 let ip = public_ip_owned.as_ref().unwrap();
                 let output = tokio::process::Command::new("ping")
                     .args(["-c", "3", "-W", "2", ip])
-                    .output().await.ok()?;
+                    .output()
+                    .await
+                    .ok()?;
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                let latency = stdout.lines()
+                let latency = stdout
+                    .lines()
                     .find(|l| l.contains("avg"))
                     .and_then(|l| l.split('=').nth(1))
                     .and_then(|v| v.split('/').nth(1))
@@ -150,27 +178,44 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let ts_ip_owned = ts_ip.clone();
             let do_ts = should_probe("tailscale");
             let tailscale_fut = async {
-                if !do_ts { return None; }
+                if !do_ts {
+                    return None;
+                }
                 let output = tokio::time::timeout(
                     std::time::Duration::from_secs(5),
                     tokio::process::Command::new("tailscale")
                         .args(["status", "--json"])
-                        .output()
-                ).await.ok()?.ok()?;
-                if !output.status.success() { return None; }
+                        .output(),
+                )
+                .await
+                .ok()?
+                .ok()?;
+                if !output.status.success() {
+                    return None;
+                }
                 let status_json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
                 let peers = status_json.get("Peer")?.as_object()?;
                 for (_key, peer) in peers {
                     let ips = peer.get("TailscaleIPs")?.as_array()?;
                     let ip_strs: Vec<&str> = ips.iter().filter_map(|v| v.as_str()).collect();
                     // Match by Tailscale IP from description
-                    let matched = ts_ip_owned.as_ref().map_or(false, |tip| ip_strs.contains(&tip.as_str()));
+                    let matched = ts_ip_owned
+                        .as_ref()
+                        .map_or(false, |tip| ip_strs.contains(&tip.as_str()));
                     if matched {
-                        let online = peer.get("Online").and_then(|v| v.as_bool()).unwrap_or(false);
-                        let last_seen = peer.get("LastSeen").and_then(|v| v.as_str()).unwrap_or("unknown");
+                        let online = peer
+                            .get("Online")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let last_seen = peer
+                            .get("LastSeen")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
                         let dns_name = peer.get("DNSName").and_then(|v| v.as_str()).unwrap_or("");
                         let hostname = dns_name.split('.').next().unwrap_or(
-                            peer.get("HostName").and_then(|v| v.as_str()).unwrap_or("unknown")
+                            peer.get("HostName")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown"),
                         );
                         let ip = ip_strs.first().unwrap_or(&"unknown");
                         return Some(serde_json::json!({
@@ -182,45 +227,66 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         }));
                     }
                 }
-                Some(serde_json::json!({ "status": "not_found", "error": "Node not found in Tailscale peers" }))
+                Some(
+                    serde_json::json!({ "status": "not_found", "error": "Node not found in Tailscale peers" }),
+                )
             };
 
             // Probe 4: SSH TCP port
-            let ssh_targets_owned: Vec<(String, u16, String)> = server.as_ref()
-                .map(|s| s.parse_ssh_targets().into_iter().map(|t| (t.host, t.port, t.via)).collect())
+            let ssh_targets_owned: Vec<(String, u16, String)> = server
+                .as_ref()
+                .map(|s| {
+                    s.parse_ssh_targets()
+                        .into_iter()
+                        .map(|t| (t.host, t.port, t.via))
+                        .collect()
+                })
                 .unwrap_or_default();
             let do_ssh = should_probe("ssh") && !ssh_targets_owned.is_empty();
             let ssh_fut = async {
-                if !do_ssh { return None; }
+                if !do_ssh {
+                    return None;
+                }
                 for (host, port, via) in &ssh_targets_owned {
                     let addr = format!("{}:{}", host, port);
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(5),
-                        tokio::net::TcpStream::connect(&addr)
-                    ).await {
-                        Ok(Ok(_)) => return Some(serde_json::json!({
-                            "reachable": true, "ip": host, "port": port, "via": via,
-                        })),
-                        Ok(Err(e)) => return Some(serde_json::json!({
-                            "reachable": false, "ip": host, "port": port, "via": via,
-                            "error": e.to_string(),
-                        })),
+                        tokio::net::TcpStream::connect(&addr),
+                    )
+                    .await
+                    {
+                        Ok(Ok(_)) => {
+                            return Some(serde_json::json!({
+                                "reachable": true, "ip": host, "port": port, "via": via,
+                            }))
+                        }
+                        Ok(Err(e)) => {
+                            return Some(serde_json::json!({
+                                "reachable": false, "ip": host, "port": port, "via": via,
+                                "error": e.to_string(),
+                            }))
+                        }
                         Err(_) => continue, // timeout, try next
                     }
                 }
-                Some(serde_json::json!({ "reachable": false, "error": "All SSH targets timed out" }))
+                Some(
+                    serde_json::json!({ "reachable": false, "error": "All SSH targets timed out" }),
+                )
             };
 
             // Probe 5: Deploy agent HTTP (reads health_endpoint from servers.yaml)
             let health_url = server.as_ref().and_then(|s| s.health_endpoint.clone());
             let do_agent = should_probe("deploy_agent") && health_url.is_some();
             let agent_fut = async {
-                if !do_agent { return None; }
+                if !do_agent {
+                    return None;
+                }
                 let url = health_url.as_ref().unwrap();
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(5))
                     .danger_accept_invalid_certs(true)
-                    .build().ok()?;
+                    .build()
+                    .ok()?;
                 match client.get(url).send().await {
                     Ok(resp) => {
                         let status = resp.status().as_u16();
@@ -238,25 +304,48 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
             // Run all in parallel
             let (lan_ping, public_ping, tailscale, ssh, agent) = tokio::join!(
-                lan_ping_fut, public_ping_fut, tailscale_fut, ssh_fut, agent_fut
+                lan_ping_fut,
+                public_ping_fut,
+                tailscale_fut,
+                ssh_fut,
+                agent_fut
             );
 
             let mut channels_result = serde_json::Map::new();
-            if let Some(v) = lan_ping { channels_result.insert("lan_ping".into(), v); }
-            if let Some(v) = public_ping { channels_result.insert("public_ping".into(), v); }
-            if let Some(v) = tailscale { channels_result.insert("tailscale".into(), v); }
-            if let Some(v) = ssh { channels_result.insert("ssh".into(), v); }
-            if let Some(v) = agent { channels_result.insert("deploy_agent".into(), v); }
+            if let Some(v) = lan_ping {
+                channels_result.insert("lan_ping".into(), v);
+            }
+            if let Some(v) = public_ping {
+                channels_result.insert("public_ping".into(), v);
+            }
+            if let Some(v) = tailscale {
+                channels_result.insert("tailscale".into(), v);
+            }
+            if let Some(v) = ssh {
+                channels_result.insert("ssh".into(), v);
+            }
+            if let Some(v) = agent {
+                channels_result.insert("deploy_agent".into(), v);
+            }
 
             let total = channels_result.len();
-            let reachable = channels_result.values().filter(|v| {
-                v.get("reachable").and_then(|r| r.as_bool()).unwrap_or(false)
-                    || v.get("status").and_then(|s| s.as_str()) == Some("online")
-            }).count();
+            let reachable = channels_result
+                .values()
+                .filter(|v| {
+                    v.get("reachable")
+                        .and_then(|r| r.as_bool())
+                        .unwrap_or(false)
+                        || v.get("status").and_then(|s| s.as_str()) == Some("online")
+                })
+                .count();
 
-            let severity = if reachable == 0 { "red" }
-                else if reachable < total { "yellow" }
-                else { "green" };
+            let severity = if reachable == 0 {
+                "red"
+            } else if reachable < total {
+                "yellow"
+            } else {
+                "green"
+            };
 
             Ok(ToolResult::json_pretty(&serde_json::json!({
                 "target": target,
@@ -270,9 +359,13 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         "mission_os_diagnose" => {
             let OsDiagnoseArgs { target, checks } = serde_json::from_value(args)?;
 
-            let server: Option<missiond_core::InfraServer> = state.infra.read().unwrap().get(&target).cloned();
+            let server: Option<missiond_core::InfraServer> =
+                state.infra.read().unwrap().get(&target).cloned();
             if server.is_none() && !target.contains('@') && !target.contains('.') {
-                return Ok(ToolResult::error(format!("Server not found in infra registry: {}", target)));
+                return Ok(ToolResult::error(format!(
+                    "Server not found in infra registry: {}",
+                    target
+                )));
             }
 
             // Resolve SSH targets
@@ -314,17 +407,34 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             }
 
             // KB credential fallback
-            let kb_pass = state.store
-                .kb_search(&format!("{} password", target), Some("credential")).await
+            let kb_pass = state
+                .store
+                .kb_search(&format!("{} password", target), Some("credential"))
+                .await
                 .ok()
                 .and_then(|entries| entries.into_iter().next())
-                .and_then(|e| e.detail.as_ref()
-                    .and_then(|d| d.get("password").and_then(|v| v.as_str().map(String::from))));
+                .and_then(|e| {
+                    e.detail
+                        .as_ref()
+                        .and_then(|d| d.get("password").and_then(|v| v.as_str().map(String::from)))
+                });
 
             // Build probe script based on checks filter
-            let all_checks = ["system", "crashes", "top_cpu", "temperatures", "journal_errors", "docker", "network", "gpu"];
+            let all_checks = [
+                "system",
+                "crashes",
+                "top_cpu",
+                "temperatures",
+                "journal_errors",
+                "docker",
+                "network",
+                "gpu",
+            ];
             let active: Vec<&str> = if let Some(ref chs) = checks {
-                chs.iter().map(|s| s.as_str()).filter(|c| all_checks.contains(c)).collect()
+                chs.iter()
+                    .map(|s| s.as_str())
+                    .filter(|c| all_checks.contains(c))
+                    .collect()
             } else {
                 all_checks.to_vec()
             };
@@ -420,9 +530,12 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     ssh_args.extend(["-o".into(), "BatchMode=yes".into()]);
                 }
                 ssh_args.extend([
-                    "-o".into(), "StrictHostKeyChecking=no".into(),
-                    "-o".into(), "ConnectTimeout=10".into(),
-                    "-p".into(), st.port.to_string(),
+                    "-o".into(),
+                    "StrictHostKeyChecking=no".into(),
+                    "-o".into(),
+                    "ConnectTimeout=10".into(),
+                    "-p".into(),
+                    st.port.to_string(),
                     format!("{}@{}", st.user, st.host),
                     "bash".into(),
                 ]);
@@ -443,8 +556,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         }
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(30),
-                            child.wait_with_output()
-                        ).await {
+                            child.wait_with_output(),
+                        )
+                        .await
+                        {
                             Ok(Ok(output)) if output.status.success() => {
                                 connected_via = format!("{} ({}:{})", st.via, st.host, st.port);
                                 raw_output = String::from_utf8_lossy(&output.stdout).to_string();
@@ -458,19 +573,30 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                                     raw_output = stdout.to_string();
                                     break;
                                 }
-                                last_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                                last_error =
+                                    String::from_utf8_lossy(&output.stderr).trim().to_string();
                             }
-                            Ok(Err(e)) => { last_error = e.to_string(); }
-                            Err(_) => { last_error = format!("SSH timed out (30s) via {} {}:{}", st.via, st.host, st.port); }
+                            Ok(Err(e)) => {
+                                last_error = e.to_string();
+                            }
+                            Err(_) => {
+                                last_error = format!(
+                                    "SSH timed out (30s) via {} {}:{}",
+                                    st.via, st.host, st.port
+                                );
+                            }
                         }
                     }
-                    Err(e) => { last_error = e.to_string(); }
+                    Err(e) => {
+                        last_error = e.to_string();
+                    }
                 }
             }
 
             if raw_output.is_empty() {
                 return Ok(ToolResult::error(format!(
-                    "All SSH channels failed for '{}'. Last error: {}", target, last_error
+                    "All SSH channels failed for '{}'. Last error: {}",
+                    target, last_error
                 )));
             }
 
@@ -499,20 +625,33 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     }
                     "crashes" => {
                         let mut crashes = Vec::new();
-                        let mut current: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+                        let mut current: serde_json::Map<String, serde_json::Value> =
+                            serde_json::Map::new();
                         for line in lines {
                             if line == "NO_CRASH_DIR" {
                                 return serde_json::json!([]);
                             }
                             if line.starts_with("CRASH_FILE=") {
-                                if !current.is_empty() { crashes.push(serde_json::Value::Object(current.clone())); }
+                                if !current.is_empty() {
+                                    crashes.push(serde_json::Value::Object(current.clone()));
+                                }
                                 current = serde_json::Map::new();
-                                current.insert("file".into(), serde_json::json!(line.strip_prefix("CRASH_FILE=").unwrap_or("")));
+                                current.insert(
+                                    "file".into(),
+                                    serde_json::json!(line
+                                        .strip_prefix("CRASH_FILE=")
+                                        .unwrap_or("")),
+                                );
                             } else if line == "---" {
-                                if !current.is_empty() { crashes.push(serde_json::Value::Object(current.clone())); }
+                                if !current.is_empty() {
+                                    crashes.push(serde_json::Value::Object(current.clone()));
+                                }
                                 current = serde_json::Map::new();
                             } else if let Some((k, v)) = line.split_once(": ") {
-                                current.insert(k.to_lowercase().replace(' ', "_"), serde_json::json!(v.trim()));
+                                current.insert(
+                                    k.to_lowercase().replace(' ', "_"),
+                                    serde_json::json!(v.trim()),
+                                );
                             }
                         }
                         serde_json::json!(crashes)
@@ -528,7 +667,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             for line in raw_output.lines() {
                 if let Some(section_name) = line.strip_prefix("SECTION=") {
                     if !current_section.is_empty() {
-                        result.insert(current_section.clone(), parse_section(&current_section, &section_lines));
+                        result.insert(
+                            current_section.clone(),
+                            parse_section(&current_section, &section_lines),
+                        );
                     }
                     current_section = section_name.to_string();
                     section_lines.clear();
@@ -537,36 +679,58 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 }
             }
             if !current_section.is_empty() {
-                result.insert(current_section.clone(), parse_section(&current_section, &section_lines));
+                result.insert(
+                    current_section.clone(),
+                    parse_section(&current_section, &section_lines),
+                );
             }
 
             // Compute severity
             let mut severity = "green";
             if let Some(sys) = result.get("system").and_then(|v| v.as_object()) {
                 // Check disk usage
-                if let Some(pct) = sys.get("disk_pct").and_then(|v| v.as_str()).and_then(|v| v.parse::<u32>().ok()) {
-                    if pct > 90 { severity = "red"; }
-                    else if pct > 80 { severity = "yellow"; }
+                if let Some(pct) = sys
+                    .get("disk_pct")
+                    .and_then(|v| v.as_str())
+                    .and_then(|v| v.parse::<u32>().ok())
+                {
+                    if pct > 90 {
+                        severity = "red";
+                    } else if pct > 80 {
+                        severity = "yellow";
+                    }
                 }
                 // Check load vs nproc
                 if let Some(load_str) = sys.get("load").and_then(|v| v.as_str()) {
-                    if let Some(nproc) = sys.get("nproc").and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok()) {
-                        if let Some(load1) = load_str.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()) {
-                            if load1 > nproc { severity = "red"; }
-                            else if load1 > nproc * 0.8 && severity != "red" { severity = "yellow"; }
+                    if let Some(nproc) = sys
+                        .get("nproc")
+                        .and_then(|v| v.as_str())
+                        .and_then(|v| v.parse::<f64>().ok())
+                    {
+                        if let Some(load1) = load_str
+                            .split_whitespace()
+                            .next()
+                            .and_then(|v| v.parse::<f64>().ok())
+                        {
+                            if load1 > nproc {
+                                severity = "red";
+                            } else if load1 > nproc * 0.8 && severity != "red" {
+                                severity = "yellow";
+                            }
                         }
                     }
                 }
             }
             if let Some(crashes) = result.get("crashes").and_then(|v| v.as_array()) {
-                if !crashes.is_empty() && severity != "red" { severity = "yellow"; }
+                if !crashes.is_empty() && severity != "red" {
+                    severity = "yellow";
+                }
             }
 
             result.insert("severity".into(), serde_json::json!(severity));
 
             Ok(ToolResult::json_pretty(&serde_json::Value::Object(result)))
         }
-
 
         _ => Err(anyhow!("Unknown infra tool: {name}")),
     }

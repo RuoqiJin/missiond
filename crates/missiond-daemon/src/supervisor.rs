@@ -1,11 +1,10 @@
-
 use tracing::{debug, info, warn};
 
-use crate::state::{AppState, ExtractionPhase, ExtractionState, MAX_WAIT_FOR_IDLE_SECS};
-use crate::state::SUPERVISOR_SLOT_ID;
-use missiond_core::SessionState;
-use crate::memory_scheduler::ensure_memory_slot_by_id;
 use crate::helpers::char_boundary_at;
+use crate::memory_scheduler::ensure_memory_slot_by_id;
+use crate::state::SUPERVISOR_SLOT_ID;
+use crate::state::{AppState, ExtractionPhase, ExtractionState, MAX_WAIT_FOR_IDLE_SECS};
+use missiond_core::SessionState;
 use std::sync::Arc;
 
 /// Threshold: mark for graceful restart when context drops below this %.
@@ -76,13 +75,16 @@ pub(crate) async fn check_slot_context_levels(state: &AppState) {
 pub(crate) async fn check_pending_compact_restarts(state: &AppState) {
     let pending: Vec<String> = {
         let set = state.pending_compact_restart.lock().unwrap();
-        if set.is_empty() { return; }
+        if set.is_empty() {
+            return;
+        }
         set.iter().cloned().collect()
     };
 
     for slot_id in pending {
         let status = state.pty.get_status(&slot_id).await;
-        let is_idle = status.as_ref()
+        let is_idle = status
+            .as_ref()
             .map(|s| s.state == SessionState::Idle)
             .unwrap_or(false);
 
@@ -97,7 +99,10 @@ pub(crate) async fn check_pending_compact_restarts(state: &AppState) {
         }
 
         // Re-verify idle after acquiring guard (double-check)
-        let still_idle = state.pty.get_status(&slot_id).await
+        let still_idle = state
+            .pty
+            .get_status(&slot_id)
+            .await
             .map(|s| s.state == SessionState::Idle)
             .unwrap_or(false);
         if !still_idle {
@@ -115,8 +120,12 @@ pub(crate) async fn check_pending_compact_restarts(state: &AppState) {
         }
         // Requeue any Running submit tasks
         match state.store.requeue_running_tasks_for_slot(&slot_id).await {
-            Ok(n) if n > 0 => warn!(slot_id = %slot_id, count = n, "Requeued running submit tasks after compact restart"),
-            Err(e) => warn!(slot_id = %slot_id, error = %e, "Failed to requeue tasks after compact restart"),
+            Ok(n) if n > 0 => {
+                warn!(slot_id = %slot_id, count = n, "Requeued running submit tasks after compact restart")
+            }
+            Err(e) => {
+                warn!(slot_id = %slot_id, error = %e, "Failed to requeue tasks after compact restart")
+            }
             _ => {}
         }
         let _ = state.store.release_board_claims_by_executor(&slot_id).await;
@@ -130,7 +139,11 @@ pub(crate) async fn check_pending_compact_restarts(state: &AppState) {
         let _ = ensure_memory_slot_by_id(state, &slot_id).await;
 
         // Remove from pending set
-        state.pending_compact_restart.lock().unwrap().remove(&slot_id);
+        state
+            .pending_compact_restart
+            .lock()
+            .unwrap()
+            .remove(&slot_id);
 
         info!(slot_id = %slot_id, "Slot restarted due to compact (graceful)");
     }
@@ -144,7 +157,8 @@ pub(crate) async fn check_pending_compact_restarts(state: &AppState) {
 /// This removes lines that appear in the prompt from the response to reduce noise.
 pub(crate) fn strip_prompt_echo(response: &str, prompt: &str) -> String {
     // Build a set of significant prompt lines (skip short/empty ones)
-    let prompt_lines: std::collections::HashSet<&str> = prompt.lines()
+    let prompt_lines: std::collections::HashSet<&str> = prompt
+        .lines()
         .map(|l| l.trim())
         .filter(|l| l.len() > 20) // Only match substantial lines to avoid false positives
         .collect();
@@ -245,7 +259,10 @@ pub(crate) fn extract_context_percentage(screen: &str) -> Option<u32> {
     None
 }
 
-pub(crate) async fn get_task_jsonl_path(state: &AppState, task: &missiond_core::types::Task) -> Option<String> {
+pub(crate) async fn get_task_jsonl_path(
+    state: &AppState,
+    task: &missiond_core::types::Task,
+) -> Option<String> {
     let slot_id = task.slot_id.as_ref()?;
     let session_uuid = state.store.get_slot_session(slot_id).await.ok()??;
     let conv = state.store.get_conversation(&session_uuid).await.ok()??;
@@ -261,7 +278,9 @@ const SUPERVISOR_PATROL_INTERVAL_SECS: i64 = 300;
 /// and take corrective action (kill misbehaving slots, report issues).
 pub(crate) async fn schedule_supervisor_patrol(state: &AppState) {
     let now = chrono::Utc::now().timestamp();
-    let last = state.last_supervisor_patrol_at.load(std::sync::atomic::Ordering::Relaxed);
+    let last = state
+        .last_supervisor_patrol_at
+        .load(std::sync::atomic::Ordering::Relaxed);
     if now - last < SUPERVISOR_PATROL_INTERVAL_SECS {
         return;
     }
@@ -281,7 +300,9 @@ pub(crate) async fn schedule_supervisor_patrol(state: &AppState) {
         }
     }
 
-    state.last_supervisor_patrol_at.store(now, std::sync::atomic::Ordering::Relaxed);
+    state
+        .last_supervisor_patrol_at
+        .store(now, std::sync::atomic::Ordering::Relaxed);
 
     // Collect slot status summary for the patrol prompt
     let all_status = state.pty.get_all_status().await;
@@ -290,7 +311,10 @@ pub(crate) async fn schedule_supervisor_patrol(state: &AppState) {
         if info.slot_id == SUPERVISOR_SLOT_ID {
             continue; // Don't inspect self
         }
-        status_lines.push(format!("- {} [{}] state={:?}", info.slot_id, info.role, info.state));
+        status_lines.push(format!(
+            "- {} [{}] state={:?}",
+            info.slot_id, info.role, info.state
+        ));
     }
     let status_summary = status_lines.join("\n");
 
@@ -351,12 +375,18 @@ pub(crate) async fn check_slot_stuck(
     // Poll actual slot state: if slot is non-Idle but busy_since is 0 (lost track),
     // re-initialize busy_since so stuck detection can work.
     if busy_since == 0 {
-        let is_busy = state.pty.get_status(slot_id).await
+        let is_busy = state
+            .pty
+            .get_status(slot_id)
+            .await
             .map(|s| s.state != SessionState::Idle)
             .unwrap_or(false);
         if is_busy {
             busy_since_atomic.store(now, std::sync::atomic::Ordering::SeqCst);
-            debug!(slot_id, "slot_stuck: re-initialized busy_since (slot is non-Idle but was untracked)");
+            debug!(
+                slot_id,
+                "slot_stuck: re-initialized busy_since (slot is non-Idle but was untracked)"
+            );
         }
         return;
     }
@@ -367,12 +397,17 @@ pub(crate) async fn check_slot_stuck(
     }
 
     let status = state.pty.get_status(slot_id).await;
-    let current_state = status.as_ref()
+    let current_state = status
+        .as_ref()
         .map(|s| format!("{:?}", s.state))
         .unwrap_or_else(|| "unknown".to_string());
 
     // If slot is actually Idle, just clear the counter
-    if status.as_ref().map(|s| s.state == SessionState::Idle).unwrap_or(false) {
+    if status
+        .as_ref()
+        .map(|s| s.state == SessionState::Idle)
+        .unwrap_or(false)
+    {
         busy_since_atomic.store(0, std::sync::atomic::Ordering::SeqCst);
         return;
     }
@@ -423,11 +458,19 @@ pub(crate) async fn check_slot_stuck(
         warn!(slot_id, error = %e, "Failed to kill stuck memory slot");
     }
     // Clear from compact restart pending set (slot is being rebuilt)
-    state.pending_compact_restart.lock().unwrap().remove(slot_id);
+    state
+        .pending_compact_restart
+        .lock()
+        .unwrap()
+        .remove(slot_id);
 
     // Requeue any Running submit tasks assigned to this slot — they were lost with the old session
     match state.store.requeue_running_tasks_for_slot(slot_id).await {
-        Ok(n) if n > 0 => warn!(slot_id, count = n, "Requeued running submit tasks after slot restart"),
+        Ok(n) if n > 0 => warn!(
+            slot_id,
+            count = n,
+            "Requeued running submit tasks after slot restart"
+        ),
         Err(e) => warn!(slot_id, error = %e, "Failed to requeue tasks after slot restart"),
         _ => {}
     }
@@ -448,13 +491,20 @@ pub(crate) async fn check_slot_stuck(
         }
         // Mark slot task as failed (stuck)
         if let Some(ref st_id) = es.current_slot_task_id {
-            let _ = state.store.slot_task_set_failed(st_id, "slot stuck, force reset").await;
+            let _ = state
+                .store
+                .slot_task_set_failed(st_id, "slot stuck, force reset")
+                .await;
         }
         // Advance realtime watermarks BEFORE clearing active_type (P0 fix: use-after-clear)
         let was_realtime = matches!(es.active_type, Some("realtime"));
         if was_realtime && !es.watermark_targets.is_empty() {
             for (session_id, timestamp) in &es.watermark_targets {
-                if let Err(e) = state.store.update_realtime_forwarded_at(session_id, timestamp).await {
+                if let Err(e) = state
+                    .store
+                    .update_realtime_forwarded_at(session_id, timestamp)
+                    .await
+                {
                     warn!(slot_id, session_id, error = %e, "Failed to advance watermark on slot kill");
                 }
             }
@@ -495,20 +545,30 @@ pub(crate) async fn check_extraction_gate(
         drop(es);
         let mut es = extraction_state.write().await;
         if es.phase == ExtractionPhase::WaitingForSlotIdle {
-            warn!(age_secs = age, "{}: extraction stuck in WaitingForSlotIdle, forcing reset", label);
+            warn!(
+                age_secs = age,
+                "{}: extraction stuck in WaitingForSlotIdle, forcing reset", label
+            );
             // Mark deep analysis as failed (increments retry count) instead of silently losing
             if let Some(conv_id) = es.current_deep_conv_id.take() {
                 let _ = state.store.mark_analysis_failed(&conv_id).await;
             }
             // Mark slot task as failed (timeout)
             if let Some(ref st_id) = es.current_slot_task_id {
-                let _ = state.store.slot_task_set_failed(st_id, "WaitingForSlotIdle timeout").await;
+                let _ = state
+                    .store
+                    .slot_task_set_failed(st_id, "WaitingForSlotIdle timeout")
+                    .await;
             }
             // Advance realtime watermarks BEFORE clearing active_type (P0 fix: use-after-clear)
             let was_realtime = matches!(es.active_type, Some("realtime"));
             if was_realtime && !es.watermark_targets.is_empty() {
                 for (session_id, timestamp) in &es.watermark_targets {
-                    if let Err(e) = state.store.update_realtime_forwarded_at(session_id, timestamp).await {
+                    if let Err(e) = state
+                        .store
+                        .update_realtime_forwarded_at(session_id, timestamp)
+                        .await
+                    {
                         warn!(session_id, error = %e, "{}: failed to advance watermark on timeout", label);
                     }
                 }

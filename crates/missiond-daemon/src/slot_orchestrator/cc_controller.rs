@@ -167,7 +167,8 @@ impl EngineController for ClaudeCodeController {
                 extra_env: HashMap::new(),
             },
             None, // Pass the custom environment from the request if it had one
-        ).await?;
+        )
+        .await?;
 
         // Also try immediate registration if session is already known (fast-spawn case)
         if let Ok(Some(session_id)) = self.store.get_slot_session(slot_id).await {
@@ -181,12 +182,7 @@ impl EngineController for ClaudeCodeController {
         Ok(placeholder)
     }
 
-    async fn ask(
-        &self,
-        slot_id: &str,
-        prompt: &str,
-        timeout: Duration,
-    ) -> Result<String> {
+    async fn ask(&self, slot_id: &str, prompt: &str, timeout: Duration) -> Result<String> {
         // 0. Wait for slot to be Idle before sending.
         //    Handles auto-start race: daemon boots → slot in Starting → task arrives.
         //    Also handles back-to-back tasks where previous turn is still wrapping up.
@@ -196,9 +192,7 @@ impl EngineController for ClaudeCodeController {
         let mut rx = self.pty.subscribe();
 
         // 2. Send prompt
-        self.pty
-            .send_fire_and_forget(slot_id, prompt)
-            .await?;
+        self.pty.send_fire_and_forget(slot_id, prompt).await?;
 
         info!(
             slot_id,
@@ -242,9 +236,7 @@ impl EngineController for ClaudeCodeController {
                         "ClaudeCodeCtrl: TextComplete received, extracting from DB"
                     );
                     // TextComplete = trigger only. DB (JSONL) = authoritative source.
-                    return Ok(self
-                        .extract_from_db_or_fallback(slot_id, content)
-                        .await);
+                    return Ok(self.extract_from_db_or_fallback(slot_id, content).await);
                 }
 
                 // Slot exited unexpectedly
@@ -265,13 +257,18 @@ impl EngineController for ClaudeCodeController {
                 // Broadcast lag — events were dropped.
                 // Fallback: check if slot already returned to Idle (we missed TextComplete).
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
-                    warn!(slot_id, skipped = n, "ClaudeCodeCtrl: broadcast lagged, checking state");
+                    warn!(
+                        slot_id,
+                        skipped = n,
+                        "ClaudeCodeCtrl: broadcast lagged, checking state"
+                    );
                     // If slot is back to Idle, we missed the completion. Try DB extraction.
                     if self.pty.is_available(slot_id).await {
-                        info!(slot_id, "ClaudeCodeCtrl: slot Idle after lag, extracting from DB");
-                        return Ok(self
-                            .extract_from_db_or_fallback(slot_id, "")
-                            .await);
+                        info!(
+                            slot_id,
+                            "ClaudeCodeCtrl: slot Idle after lag, extracting from DB"
+                        );
+                        return Ok(self.extract_from_db_or_fallback(slot_id, "").await);
                     }
                     // Still processing — re-subscribe implicitly (broadcast recv continues)
                     saw_thinking = true; // Assume we missed Thinking too

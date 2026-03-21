@@ -35,7 +35,11 @@ fn git_repo_root(path: &Path) -> Option<PathBuf> {
         return None;
     }
     let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if root.is_empty() { None } else { Some(PathBuf::from(root)) }
+    if root.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(root))
+    }
 }
 
 /// Get the repo short name from its path (last component).
@@ -51,14 +55,18 @@ fn fetch_new_commits(repo: &Path, since_hash: Option<&str>) -> Vec<GitCommit> {
     let format = "%H%n%h%n%an%n%s%n%aI";
     let args: Vec<String> = if let Some(since) = since_hash {
         vec![
-            "log".into(), format!("--format={}", format),
-            format!("{}..HEAD", since), "--".into(),
+            "log".into(),
+            format!("--format={}", format),
+            format!("{}..HEAD", since),
+            "--".into(),
         ]
     } else {
         // Bootstrap: just get the latest commit
         vec![
-            "log".into(), format!("--format={}", format),
-            "-1".into(), "--".into(),
+            "log".into(),
+            format!("--format={}", format),
+            "-1".into(),
+            "--".into(),
         ]
     };
 
@@ -75,7 +83,8 @@ fn fetch_new_commits(repo: &Path, since_hash: Option<&str>) -> Vec<GitCommit> {
     let lines: Vec<&str> = text.lines().collect();
 
     // Each commit is 5 lines: hash, short_hash, author, message, committed_at
-    lines.chunks(5)
+    lines
+        .chunks(5)
         .filter(|chunk| chunk.len() == 5)
         .map(|chunk| GitCommit {
             hash: chunk[0].to_string(),
@@ -93,7 +102,9 @@ pub(crate) fn collect_repo_roots(slot_cwds: &[String]) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     for cwd in slot_cwds {
         let path = Path::new(cwd);
-        if !path.exists() { continue; }
+        if !path.exists() {
+            continue;
+        }
         if let Some(root) = git_repo_root(path) {
             if seen.insert(root.clone()) {
                 roots.push(root);

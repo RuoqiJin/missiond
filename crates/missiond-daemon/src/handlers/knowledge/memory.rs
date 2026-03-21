@@ -1,20 +1,23 @@
 use anyhow::{anyhow, Result};
+use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::info;
-use missiond_mcp::tools::ToolResult;
 
-use crate::state::AppState;
-use crate::lenient;
-use crate::state::{MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
-use crate::state::{CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES};
 use crate::events_sync;
 use crate::helpers::default_mission_home;
+use crate::lenient;
+use crate::state::AppState;
+use crate::state::{CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES};
+use crate::state::{MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     // Consolidated tool: mission_memory
     if name == "mission_memory" {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("pending");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("pending");
         return match action {
             "pending" => handle_inner(state, "mission_memory_pending", args).await,
             "pause" => handle_inner(state, "mission_memory_pause", args).await,
@@ -39,7 +42,13 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             // polling the same messages repeatedly (watermark advances only on completion).
             {
                 let es = state.extraction_state.read().await;
-                if es.pending_served && matches!(es.phase, crate::state::ExtractionPhase::Sending | crate::state::ExtractionPhase::WaitingForSlotIdle) {
+                if es.pending_served
+                    && matches!(
+                        es.phase,
+                        crate::state::ExtractionPhase::Sending
+                            | crate::state::ExtractionPhase::WaitingForSlotIdle
+                    )
+                {
                     return Ok(ToolResult::text(
                         "本批次内容已获取。请分析已获取的消息后输出总结即可。\n\
                          ⚠️ 水位线由系统自动管理，重复调用不会返回新消息。下一批将在本次处理完成后自动调度。"
@@ -48,7 +57,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             }
 
             const PENDING_MSG_LIMIT: usize = 60;
-            let pending = state.store.get_pending_realtime_messages_with_limit(PENDING_MSG_LIMIT).await
+            let pending = state
+                .store
+                .get_pending_realtime_messages_with_limit(PENDING_MSG_LIMIT)
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
 
             if pending.is_empty() {
@@ -59,12 +71,18 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let mut all_msg_ids: Vec<i64> = Vec::new();
             let mut user_count = 0usize;
             for (session_id, project, msgs) in &pending {
-                output.push_str(&format!("## session: {} (project: {})\n\n", session_id, project));
+                output.push_str(&format!(
+                    "## session: {} (project: {})\n\n",
+                    session_id, project
+                ));
                 for msg in msgs {
                     all_msg_ids.push(msg.id);
                     if msg.role == "user" {
                         user_count += 1;
-                        output.push_str(&format!("[#{}][{}] ★ user: {}\n\n", msg.id, msg.timestamp, msg.content));
+                        output.push_str(&format!(
+                            "[#{}][{}] ★ user: {}\n\n",
+                            msg.id, msg.timestamp, msg.content
+                        ));
                     } else if msg.role == "tool_result" {
                         // Tool results: file contents, command outputs — truncate to 1000 chars
                         let content = if msg.content.len() > 1000 {
@@ -73,7 +91,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         } else {
                             msg.content.clone()
                         };
-                        output.push_str(&format!("[#{}][{}] tool_result: {}\n\n", msg.id, msg.timestamp, content));
+                        output.push_str(&format!(
+                            "[#{}][{}] tool_result: {}\n\n",
+                            msg.id, msg.timestamp, content
+                        ));
                     } else {
                         // Assistant messages: truncate to reduce payload
                         let content = if msg.content.len() > 500 {
@@ -82,7 +103,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         } else {
                             msg.content.clone()
                         };
-                        output.push_str(&format!("[#{}][{}] assistant: {}\n\n", msg.id, msg.timestamp, content));
+                        output.push_str(&format!(
+                            "[#{}][{}] assistant: {}\n\n",
+                            msg.id, msg.timestamp, content
+                        ));
                     }
                 }
             }
@@ -115,7 +139,11 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             // Set latch: mark pending as served for this extraction cycle
             {
                 let mut es = state.extraction_state.write().await;
-                if matches!(es.phase, crate::state::ExtractionPhase::Sending | crate::state::ExtractionPhase::WaitingForSlotIdle) {
+                if matches!(
+                    es.phase,
+                    crate::state::ExtractionPhase::Sending
+                        | crate::state::ExtractionPhase::WaitingForSlotIdle
+                ) {
                     es.pending_served = true;
                 }
             }
@@ -130,11 +158,15 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 paused: Option<bool>,
             }
             let args: Args = serde_json::from_value(args).unwrap_or(Args { paused: None });
-            let current = state.control_manager.current()
+            let current = state
+                .control_manager
+                .current()
                 .is_domain_paused(crate::control_tree::CtlDomain::Memory);
             let new_val = args.paused.unwrap_or(!current); // toggle if not specified
-            // Route through ControlTree (single source of truth)
-            state.control_manager.set_domain(crate::control_tree::CtlDomain::Memory, new_val);
+                                                           // Route through ControlTree (single source of truth)
+            state
+                .control_manager
+                .set_domain(crate::control_tree::CtlDomain::Memory, new_val);
             if new_val {
                 info!("Memory extraction PAUSED by user (via ControlTree domain)");
             } else {
@@ -151,13 +183,17 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         }
 
         "mission_memory_status" => {
-            let paused = state.control_manager.current()
+            let paused = state
+                .control_manager
+                .current()
                 .is_domain_paused(crate::control_tree::CtlDomain::Memory);
             let now = chrono::Utc::now().timestamp();
 
             // Fast lane state
             let fast_es = state.extraction_state.read().await;
-            let fast_busy = state.memory_slot_busy_since.load(std::sync::atomic::Ordering::Relaxed);
+            let fast_busy = state
+                .memory_slot_busy_since
+                .load(std::sync::atomic::Ordering::Relaxed);
             let fast_lane = serde_json::json!({
                 "slotId": MEMORY_SLOT_ID,
                 "phase": format!("{:?}", fast_es.phase),
@@ -173,7 +209,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
             // Slow lane state
             let slow_es = state.slow_extraction_state.read().await;
-            let slow_busy = state.slow_slot_busy_since.load(std::sync::atomic::Ordering::Relaxed);
+            let slow_busy = state
+                .slow_slot_busy_since
+                .load(std::sync::atomic::Ordering::Relaxed);
             let slow_lane = serde_json::json!({
                 "slotId": MEMORY_SLOW_SLOT_ID,
                 "phase": format!("{:?}", slow_es.phase),
@@ -188,24 +226,41 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
             // Pending counts
             let pending_realtime = state.store.count_pending_realtime().await.unwrap_or(0);
-            let pending_deep = state.store.count_pending_deep_analysis(
-                CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES
-            ).await.unwrap_or(0);
+            let pending_deep = state
+                .store
+                .count_pending_deep_analysis(CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES)
+                .await
+                .unwrap_or(0);
 
             // Timestamps
-            let last_consolidation = state.store.last_completed_slot_task_at("kb_consolidation").await.unwrap_or(None).unwrap_or(0);
-            let last_gc = state.store.daemon_state_get("last_auto_gc_at").await.unwrap_or(None).unwrap_or(0);
+            let last_consolidation = state
+                .store
+                .last_completed_slot_task_at("kb_consolidation")
+                .await
+                .unwrap_or(None)
+                .unwrap_or(0);
+            let last_gc = state
+                .store
+                .daemon_state_get("last_auto_gc_at")
+                .await
+                .unwrap_or(None)
+                .unwrap_or(0);
 
             // KB stats (full — includes mostAccessed, oldest, subcategories)
-            let kb_stats = state.store.kb_stats().await
-                .map(|s| serde_json::json!({
-                    "total": s["total"],
-                    "categories": s.get("categoryRollup").unwrap_or(&s["categories"]),
-                    "subcategories": s["categories"],
-                    "neverAccessed": s["neverAccessed"],
-                    "mostAccessed": s["mostAccessed"],
-                    "oldest": s["oldest"],
-                }))
+            let kb_stats = state
+                .store
+                .kb_stats()
+                .await
+                .map(|s| {
+                    serde_json::json!({
+                        "total": s["total"],
+                        "categories": s.get("categoryRollup").unwrap_or(&s["categories"]),
+                        "subcategories": s["categories"],
+                        "neverAccessed": s["neverAccessed"],
+                        "mostAccessed": s["mostAccessed"],
+                        "oldest": s["oldest"],
+                    })
+                })
                 .unwrap_or(serde_json::json!(null));
 
             // Recent memory slot tasks (last 15 across both slots)

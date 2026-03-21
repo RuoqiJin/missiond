@@ -5,9 +5,9 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use missiond_mcp::tools::ToolResult;
 use serde_json::Value;
+use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, info, warn};
-use std::path::Path;
 
 /// Persistent MCP client for xjp-mcp server (stdio-based, lazy-initialized).
 /// Uses Arc-wrapped shared state so the outer lock can be released before awaiting responses.
@@ -33,7 +33,10 @@ pub(crate) const MCP_MAX_USES: u64 = 200;
 
 impl McpProcessClient {
     pub(crate) fn new(config_path: PathBuf) -> Self {
-        Self { state: tokio::sync::Mutex::new(None), config_path }
+        Self {
+            state: tokio::sync::Mutex::new(None),
+            config_path,
+        }
     }
 
     pub(crate) async fn call_tool(&self, tool_name: &str, tool_args: Value) -> Result<ToolResult> {
@@ -61,10 +64,14 @@ impl McpProcessClient {
             guard.as_ref().unwrap().clone()
         }; // Lock released here!
 
-        client.call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        client
+            .call_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Phase 2: Send request (no outer lock held)
-        let id = client.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = client
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = tokio::sync::oneshot::channel();
         client.pending.lock().await.insert(id, tx);
 
@@ -82,15 +89,15 @@ impl McpProcessClient {
 
         // Handle Broken Pipe: mark process dead for next call to respawn
         if let Err(e) = send_result {
-            client.reader_alive.store(false, std::sync::atomic::Ordering::Relaxed);
+            client
+                .reader_alive
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             return Err(anyhow!("xjp-mcp stdin write failed (Broken Pipe?): {}", e));
         }
 
         // Phase 3: Wait for response (completely lock-free)
-        let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            rx,
-        ).await
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
+            .await
             .map_err(|_| anyhow!("xjp-mcp tool '{}' timed out after 30s", tool_name))?
             .map_err(|_| anyhow!("xjp-mcp response channel closed (process may have died)"))?;
 
@@ -99,28 +106,41 @@ impl McpProcessClient {
                 .unwrap_or_else(|_| ToolResult::text(result.to_string()));
             Ok(tool_result)
         } else if let Some(error) = resp.get("error") {
-            let msg = error.get("message").and_then(|v| v.as_str()).unwrap_or("Unknown error");
+            let msg = error
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown error");
             let mut res = ToolResult::text(msg.to_string());
             res.is_error = Some(true);
             Ok(res)
         } else {
-            Ok(ToolResult::text(format!("Unexpected xjp-mcp response: {}", resp)))
+            Ok(ToolResult::text(format!(
+                "Unexpected xjp-mcp response: {}",
+                resp
+            )))
         }
     }
 
     async fn spawn(config_path: &Path) -> Result<McpClientState> {
-        let config_str = tokio::fs::read_to_string(config_path).await
+        let config_str = tokio::fs::read_to_string(config_path)
+            .await
             .map_err(|e| anyhow!("Failed to read xjp-mcp config: {}", e))?;
         let config: Value = serde_json::from_str(&config_str)?;
-        let mcp_config = config.get("mcpServers").and_then(|s| s.get("xjp-mcp"))
+        let mcp_config = config
+            .get("mcpServers")
+            .and_then(|s| s.get("xjp-mcp"))
             .ok_or_else(|| anyhow!("xjp-mcp not found in config"))?;
 
-        let command = mcp_config.get("command").and_then(|v| v.as_str())
+        let command = mcp_config
+            .get("command")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("Missing command"))?;
-        let args: Vec<String> = mcp_config.get("args")
+        let args: Vec<String> = mcp_config
+            .get("args")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
-        let env_map: std::collections::HashMap<String, String> = mcp_config.get("env")
+        let env_map: std::collections::HashMap<String, String> = mcp_config
+            .get("env")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
 

@@ -7,7 +7,10 @@ use crate::state::AppState;
 use std::path::Path;
 
 // @beacon: slot
-pub(crate) async fn build_slot_tracking_env(slot_id: &str, slot_env: Option<&HashMap<String, String>>) -> (HashMap<String, String>, PathBuf) {
+pub(crate) async fn build_slot_tracking_env(
+    slot_id: &str,
+    slot_env: Option<&HashMap<String, String>>,
+) -> (HashMap<String, String>, PathBuf) {
     let session_file = std::env::temp_dir().join(format!("missiond-session-{}.txt", slot_id));
     // Remove stale file from previous spawn
     let _ = std::fs::remove_file(&session_file);
@@ -16,7 +19,11 @@ pub(crate) async fn build_slot_tracking_env(slot_id: &str, slot_env: Option<&Has
 
     // 1. Merge slot-level custom env (model provider config, etc.)
     if let Some(env_map) = slot_env {
-        info!(slot_id, env_count = env_map.len(), "Injecting slot-level custom env");
+        info!(
+            slot_id,
+            env_count = env_map.len(),
+            "Injecting slot-level custom env"
+        );
         for (key, value) in env_map {
             let resolved = resolve_env_value(value).await;
             let is_sensitive = value.starts_with("${secret:") || value.starts_with("${cmd:");
@@ -63,34 +70,28 @@ pub(crate) async fn resolve_env_value(value: &str) -> String {
     };
 
     match provider {
-        "env" => {
-            match std::env::var(content) {
-                Ok(val) => {
-                    info!(var = content, "Resolved env var");
-                    val
-                }
-                Err(_) => {
-                    warn!(var = content, "Env var not set, using raw value");
-                    value.to_string()
-                }
+        "env" => match std::env::var(content) {
+            Ok(val) => {
+                info!(var = content, "Resolved env var");
+                val
             }
-        }
-        "file" => {
-            match tokio::fs::read_to_string(content).await {
-                Ok(val) => {
-                    let trimmed = val.trim().to_string();
-                    info!(path = content, "Resolved file value");
-                    trimmed
-                }
-                Err(e) => {
-                    warn!(path = content, error = %e, "Failed to read file, using raw value");
-                    value.to_string()
-                }
+            Err(_) => {
+                warn!(var = content, "Env var not set, using raw value");
+                value.to_string()
             }
-        }
-        "cmd" => {
-            resolve_cmd_value(value, content).await
-        }
+        },
+        "file" => match tokio::fs::read_to_string(content).await {
+            Ok(val) => {
+                let trimmed = val.trim().to_string();
+                info!(path = content, "Resolved file value");
+                trimmed
+            }
+            Err(e) => {
+                warn!(path = content, error = %e, "Failed to read file, using raw value");
+                value.to_string()
+            }
+        },
+        "cmd" => resolve_cmd_value(value, content).await,
         "secret" => {
             // Backward compat: translate to xjp secret get --raw
             let cmd_str = format!("xjp secret get --raw {}", content);
@@ -116,9 +117,7 @@ pub(crate) async fn resolve_cmd_value(raw_value: &str, cmd_str: &str) -> String 
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        tokio::process::Command::new(program)
-            .args(args)
-            .output(),
+        tokio::process::Command::new(program).args(args).output(),
     )
     .await;
 
@@ -151,8 +150,8 @@ pub(crate) async fn resolve_cmd_value(raw_value: &str, cmd_str: &str) -> String 
 
 use missiond_core::db::traits::MissionStore;
 use std::collections::HashSet;
-use tokio::sync::RwLock;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// After a PTY spawn with wait_for_idle, read the session UUID
 /// written by the SessionStart hook and register it in DB + cache.
@@ -210,9 +209,8 @@ pub(crate) async fn capture_slot_session_uuid(
                     let mut updated = conv;
                     updated.slot_id = Some(slot_id.to_string());
                     updated.source = "pty_jsonl".to_string();
-                    updated.conversation_type = missiond_core::db::derive_conversation_type(
-                        Some(slot_id), &session_uuid
-                    );
+                    updated.conversation_type =
+                        missiond_core::db::derive_conversation_type(Some(slot_id), &session_uuid);
                     let _ = store.upsert_conversation(&updated).await;
                     info!(session = %session_uuid, slot_id = %slot_id, "Retroactively tagged conversation with slot_id and conversation_type");
                 }

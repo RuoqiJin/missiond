@@ -51,7 +51,6 @@ impl Histogram {
         let p99 = sorted[((len as f64 * 0.99) as usize).min(len - 1)];
         (p50, p95, p99)
     }
-
 }
 
 /// Process-level daemon statistics. All counters are monotonically increasing.
@@ -158,9 +157,17 @@ impl DaemonStats {
         let gemini_lat = self.gemini_latency.percentiles();
         let ap_lat = self.autopilot_latency.percentiles();
         let db_runs = Self::l(&self.db_exec_runs);
-        let db_avg_us = if db_runs > 0 { Self::l(&self.db_exec_total_us) / db_runs } else { 0 };
+        let db_avg_us = if db_runs > 0 {
+            Self::l(&self.db_exec_total_us) / db_runs
+        } else {
+            0
+        };
         let ap_ticks = Self::l(&self.autopilot_ticks);
-        let ap_avg = if ap_ticks > 0 { Self::l(&self.autopilot_total_ms) / ap_ticks } else { 0 };
+        let ap_avg = if ap_ticks > 0 {
+            Self::l(&self.autopilot_total_ms) / ap_ticks
+        } else {
+            0
+        };
 
         let ev_pub = Self::l(&self.events_published);
         let ev_ce = Self::l(&self.events_consumed_extraction);
@@ -252,8 +259,8 @@ mod tests {
             h.record(i);
         }
         let (p50, p95, p99) = h.percentiles();
-        assert_eq!(p50, 51);  // index 50 of sorted 1..=100
-        assert_eq!(p95, 96);  // index 95
+        assert_eq!(p50, 51); // index 50 of sorted 1..=100
+        assert_eq!(p95, 96); // index 95
         assert_eq!(p99, 100); // index 99 (clamped to len-1)
     }
 

@@ -259,7 +259,8 @@ impl ControlManager {
         self.mutate(|tree| {
             tree.domains.insert(domain, paused);
             if paused {
-                tree.domain_paused_at.insert(domain, chrono::Utc::now().timestamp());
+                tree.domain_paused_at
+                    .insert(domain, chrono::Utc::now().timestamp());
             } else {
                 tree.domain_paused_at.remove(&domain);
             }
@@ -291,7 +292,10 @@ impl ControlManager {
             }
         }
         for domain in expired {
-            warn!(domain = domain.as_str(), "ControlTree: domain pause TTL expired, auto-resuming");
+            warn!(
+                domain = domain.as_str(),
+                "ControlTree: domain pause TTL expired, auto-resuming"
+            );
             self.set_domain(domain, false);
         }
     }
@@ -304,15 +308,13 @@ impl ControlManager {
         // blocking the Tokio worker thread with synchronous I/O.
         let tree = self.tx.borrow().clone();
         let path = self.persist_path.clone();
-        tokio::task::spawn_blocking(move || {
-            match serde_json::to_string_pretty(&tree) {
-                Ok(json) => {
-                    if let Err(e) = std::fs::write(&path, &json) {
-                        warn!(error = %e, "ControlTree: failed to persist");
-                    }
+        tokio::task::spawn_blocking(move || match serde_json::to_string_pretty(&tree) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, &json) {
+                    warn!(error = %e, "ControlTree: failed to persist");
                 }
-                Err(e) => warn!(error = %e, "ControlTree: failed to serialize"),
             }
+            Err(e) => warn!(error = %e, "ControlTree: failed to serialize"),
         });
     }
 
@@ -321,12 +323,10 @@ impl ControlManager {
             return ControlTree::default();
         }
         match std::fs::read_to_string(path) {
-            Ok(content) => {
-                serde_json::from_str(&content).unwrap_or_else(|e| {
-                    warn!(error = %e, "ControlTree: failed to parse, using default");
-                    ControlTree::default()
-                })
-            }
+            Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
+                warn!(error = %e, "ControlTree: failed to parse, using default");
+                ControlTree::default()
+            }),
             Err(e) => {
                 warn!(error = %e, "ControlTree: failed to read, using default");
                 ControlTree::default()

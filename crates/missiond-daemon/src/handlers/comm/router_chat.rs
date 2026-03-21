@@ -2,26 +2,37 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+use missiond_mcp::tools::ToolResult;
 use serde_json::Value;
 use tracing::{info, warn};
-use missiond_mcp::tools::ToolResult;
 
-use crate::state::AppState;
-use crate::embedding_worker::resolve_llm_credentials;
 use crate::context_budget::apply_context_budget;
 use crate::context_budget::MAX_ROUTER_PAYLOAD_BYTES;
+use crate::embedding_worker::resolve_llm_credentials;
 use crate::gemini_client::REQUEST_CALLER;
-use crate::llm::gemini_file_api::{GeminiFileApi, PreparedFile, detect_mime};
+use crate::llm::gemini_file_api::{detect_mime, GeminiFileApi, PreparedFile};
+use crate::state::AppState;
 
 /// Denied path patterns for file attachments (security denylist).
 /// Single-user local service: block known sensitive paths instead of whitelist.
 const FILE_DENY_PATTERNS: &[&str] = &[
-    "/.ssh/", "/.aws/", "/.gnupg/", "/.kube/", "/.docker/config", "/.netrc",
+    "/.ssh/",
+    "/.aws/",
+    "/.gnupg/",
+    "/.kube/",
+    "/.docker/config",
+    "/.netrc",
 ];
 /// Denied file names (exact match on filename component).
 const FILE_DENY_NAMES: &[&str] = &[
-    ".env", ".env.local", ".env.production", ".env.development",
-    "credentials.json", "service-account.json", "id_rsa", "id_ed25519",
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.development",
+    "credentials.json",
+    "service-account.json",
+    "id_rsa",
+    "id_ed25519",
 ];
 /// Max text file size (1 MB). Larger files are auto-truncated, not rejected.
 const FILE_MAX_SIZE_TEXT: u64 = 1024 * 1024;
@@ -31,10 +42,13 @@ const FILE_MAX_SIZE_BINARY: u64 = 10 * 1024 * 1024;
 /// Resolve Gemini API key from llm.yaml (for multimodal File API).
 fn resolve_gemini_api_key() -> Option<String> {
     let llm_yaml = missiond_core::default_mission_home().join("llm.yaml");
-    if !llm_yaml.exists() { return None; }
+    if !llm_yaml.exists() {
+        return None;
+    }
     let content = std::fs::read_to_string(&llm_yaml).ok()?;
     let config: serde_yaml::Value = serde_yaml::from_str(&content).ok()?;
-    config.get("gemini_api_key")
+    config
+        .get("gemini_api_key")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
@@ -60,13 +74,18 @@ fn is_file_denied(path: &Path) -> Option<&'static str> {
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     // Consolidated tool: mission_router_chat_manage
     if name == "mission_router_chat_manage" {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("list");
         return match action {
             "history" => handle_inner(state, "mission_router_chat_history", args).await,
             "list" => handle_inner(state, "mission_router_chat_list", args).await,
             "delete" => handle_inner(state, "mission_router_chat_delete", args).await,
             "clear" => handle_inner(state, "mission_router_chat_clear", args).await,
-            "delete_message" => handle_inner(state, "mission_router_chat_delete_message", args).await,
+            "delete_message" => {
+                handle_inner(state, "mission_router_chat_delete_message", args).await
+            }
             "restore" => handle_inner(state, "mission_router_chat_restore", args).await,
             "stats" => handle_inner(state, "mission_router_chat_stats", args).await,
             "compress" => handle_inner(state, "mission_router_chat_compress", args).await,
@@ -80,58 +99,80 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
     match name {
         // ===== Router Chat =====
         "mission_router_chat" => {
-            let params: serde_json::Value = serde_json::from_value(args)
-                .map_err(|e| anyhow!("Invalid params: {}", e))?;
+            let params: serde_json::Value =
+                serde_json::from_value(args).map_err(|e| anyhow!("Invalid params: {}", e))?;
 
             // Support `message` shorthand: single string → [{role: "user", content: message}]
-            let mut messages: Vec<serde_json::Value> = if let Some(msg) = params.get("message").and_then(|v| v.as_str()) {
-                vec![serde_json::json!({"role": "user", "content": msg})]
-            } else {
-                params.get("messages")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .ok_or_else(|| anyhow!("'messages' or 'message' is required"))?
-            };
+            let mut messages: Vec<serde_json::Value> =
+                if let Some(msg) = params.get("message").and_then(|v| v.as_str()) {
+                    vec![serde_json::json!({"role": "user", "content": msg})]
+                } else {
+                    params
+                        .get("messages")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .ok_or_else(|| anyhow!("'messages' or 'message' is required"))?
+                };
 
-            let context_mode = params.get("context")
+            let context_mode = params
+                .get("context")
                 .and_then(|v| v.as_str())
                 .unwrap_or("none");
-            let model = params.get("model")
+            let model = params
+                .get("model")
                 .and_then(|v| v.as_str())
                 .unwrap_or("gemini-3.1-pro")
                 .to_string();
-            let has_files = params.get("files")
+            let has_files = params
+                .get("files")
                 .and_then(|v| v.as_array())
                 .map(|a| !a.is_empty())
                 .unwrap_or(false);
-            let max_tokens: u32 = params.get("max_tokens")
+            let max_tokens: u32 = params
+                .get("max_tokens")
                 .and_then(|v| v.as_u64())
                 .map(|n| n as u32)
                 .unwrap_or(if has_files { 65536 } else { 16384 });
-            let search_enabled = params.get("search")
+            let search_enabled = params
+                .get("search")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let idle_timeout = params.get("idle_timeout")
+            let idle_timeout = params
+                .get("idle_timeout")
                 .and_then(|v| v.as_u64())
                 .map(|secs| Duration::from_secs(secs));
-            let channel = params.get("channel")
+            let channel = params
+                .get("channel")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let api_key_alias = params.get("api_key_alias")
+            let api_key_alias = params
+                .get("api_key_alias")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let task_id = params.get("task_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let task_id = params
+                .get("task_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
 
             // If task_id provided, load conversation context (rolling summary + active history)
             // Separate context (not saved) from new_messages (saved) for robustness
             let new_messages = messages.clone(); // preserve original new messages for saving
             let conv_id = if let Some(ref tid) = task_id {
-                let cid = state.store.router_chat_get_or_create(tid, &model).await
+                let cid = state
+                    .store
+                    .router_chat_get_or_create(tid, &model)
+                    .await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
 
                 // Rolling summary architecture: summary + active (unsummarized) messages
-                let (summary_opt, cursor) = state.store.router_chat_get_summary(&cid).await
+                let (summary_opt, cursor) = state
+                    .store
+                    .router_chat_get_summary(&cid)
+                    .await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
-                let active_history = state.store.router_chat_load_active_history(&cid, cursor).await
+                let active_history = state
+                    .store
+                    .router_chat_load_active_history(&cid, cursor)
+                    .await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
 
                 if summary_opt.is_some() || !active_history.is_empty() {
@@ -167,37 +208,74 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 let mut context_parts: Vec<String> = Vec::new();
 
                 if context_mode == "kb" || context_mode == "both" {
-                    let entries = state.store
-                        .kb_list(None).await
+                    let entries = state
+                        .store
+                        .kb_list(None)
+                        .await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
-                    let kb_lines: Vec<String> = entries.iter()
+                    let kb_lines: Vec<String> = entries
+                        .iter()
                         .filter(|e| e.category != "credential")
-                        .map(|e| format!("[{}] {}: {}", e.category, e.key, e.summary.replace('\n', " ")))
+                        .map(|e| {
+                            format!(
+                                "[{}] {}: {}",
+                                e.category,
+                                e.key,
+                                e.summary.replace('\n', " ")
+                            )
+                        })
                         .collect();
-                    context_parts.push(format!("\n\n[Knowledge Base ({} entries)]\n{}", entries.len(), kb_lines.join("\n")));
+                    context_parts.push(format!(
+                        "\n\n[Knowledge Base ({} entries)]\n{}",
+                        entries.len(),
+                        kb_lines.join("\n")
+                    ));
                 }
 
                 if context_mode == "board" || context_mode == "both" {
-                    let tasks = state.store.list_board_tasks(None, false).await
+                    let tasks = state
+                        .store
+                        .list_board_tasks(None, false)
+                        .await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
-                    let task_lines: Vec<String> = tasks.iter()
+                    let task_lines: Vec<String> = tasks
+                        .iter()
                         .map(|t| {
                             let desc_preview: String = t.description.chars().take(2000).collect();
                             let project = t.project.as_deref().unwrap_or("");
-                            let mut line = format!("[{}|{}|{}] {}",
-                                t.status.as_str(), t.priority, t.category, t.title);
-                            if !project.is_empty() { line.push_str(&format!(" (project: {})", project)); }
-                            if !desc_preview.is_empty() { line.push_str(&format!(" -- {}", desc_preview)); }
+                            let mut line = format!(
+                                "[{}|{}|{}] {}",
+                                t.status.as_str(),
+                                t.priority,
+                                t.category,
+                                t.title
+                            );
+                            if !project.is_empty() {
+                                line.push_str(&format!(" (project: {})", project));
+                            }
+                            if !desc_preview.is_empty() {
+                                line.push_str(&format!(" -- {}", desc_preview));
+                            }
                             line
                         })
                         .collect();
-                    context_parts.push(format!("\n\n[Mission Board ({} tasks)]\n{}", tasks.len(), task_lines.join("\n")));
+                    context_parts.push(format!(
+                        "\n\n[Mission Board ({} tasks)]\n{}",
+                        tasks.len(),
+                        task_lines.join("\n")
+                    ));
                 }
 
                 if !context_parts.is_empty() {
                     // Append context to the first user message
-                    if let Some(first_user) = messages.iter_mut().find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user")) {
-                        let original = first_user.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                    if let Some(first_user) = messages
+                        .iter_mut()
+                        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                    {
+                        let original = first_user
+                            .get("content")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("");
                         let enriched = format!("{}{}", original, context_parts.join(""));
                         first_user["content"] = serde_json::Value::String(enriched);
                     }
@@ -214,10 +292,13 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             if let Some(files) = params.get("files").and_then(|v| v.as_array()) {
                 let mut file_contents = Vec::new();
                 let gemini_api_key = resolve_gemini_api_key();
-                let file_api = gemini_api_key.as_ref().map(|k| GeminiFileApi::new(k.clone()));
+                let file_api = gemini_api_key
+                    .as_ref()
+                    .map(|k| GeminiFileApi::new(k.clone()));
 
                 for file_val in files {
-                    let path_str = file_val.as_str()
+                    let path_str = file_val
+                        .as_str()
                         .ok_or_else(|| anyhow!("file path must be a string"))?;
 
                     // Resolve path (canonicalize validates existence + resolves symlinks)
@@ -248,7 +329,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         Err(e) => {
                             file_contents.push(format!(
                                 "\n\n<file path=\"{}\">\n[Error: {}]\n</file>",
-                                path.display(), e
+                                path.display(),
+                                e
                             ));
                             continue;
                         }
@@ -271,7 +353,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                             if content.len() > FILE_MAX_SIZE_TEXT as usize {
                                 // Auto-truncate large text files instead of rejecting
                                 let target_chars = FILE_MAX_SIZE_TEXT as usize / 3;
-                                let truncated: String = content.chars().take(target_chars).collect();
+                                let truncated: String =
+                                    content.chars().take(target_chars).collect();
                                 file_contents.push(format!(
                                     "\n\n<file path=\"{}\">\n{}\n\n[... truncated: {:.0}KB of {:.0}KB shown ...]\n</file>",
                                     path.display(), truncated,
@@ -281,7 +364,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                             } else {
                                 file_contents.push(format!(
                                     "\n\n<file path=\"{}\">\n{}\n</file>",
-                                    path.display(), content
+                                    path.display(),
+                                    content
                                 ));
                             }
                         }
@@ -297,7 +381,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                                         // Add a text note so the model knows about the file
                                         file_contents.push(format!(
                                             "\n\n[Attached multimodal file: {} ({})]",
-                                            path.display(), mime
+                                            path.display(),
+                                            mime
                                         ));
                                     }
                                     Err(e) => {
@@ -319,11 +404,17 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
                 if !file_contents.is_empty() {
                     // Append to the last user message (full path preserved in XML tags)
-                    if let Some(last_user) = messages.iter_mut().rev()
+                    if let Some(last_user) = messages
+                        .iter_mut()
+                        .rev()
                         .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
                     {
-                        let original = last_user.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                        last_user["content"] = serde_json::json!(format!("{}{}", original, file_contents.join("")));
+                        let original = last_user
+                            .get("content")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("");
+                        last_user["content"] =
+                            serde_json::json!(format!("{}{}", original, file_contents.join("")));
                     }
                     info!("Router chat: attached {} file(s)", files.len());
                 }
@@ -332,7 +423,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             // Apply context budget before sending
             // When files are attached, refuse to truncate — error out instead of silent data loss
             let budget_result = if has_files {
-                let total_bytes: usize = messages.iter()
+                let total_bytes: usize = messages
+                    .iter()
                     .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
                     .map(|s| s.len())
                     .sum();
@@ -343,11 +435,17 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         MAX_ROUTER_PAYLOAD_BYTES as f64 / 1_048_576.0
                     ));
                 }
-                crate::context_budget::ContextBudgetResult { trimmed: false, note: None }
+                crate::context_budget::ContextBudgetResult {
+                    trimmed: false,
+                    note: None,
+                }
             } else {
                 let r = apply_context_budget(&mut messages, MAX_ROUTER_PAYLOAD_BYTES);
                 if r.trimmed {
-                    info!("Router chat: context budget applied — {}", r.note.as_deref().unwrap_or("trimmed"));
+                    info!(
+                        "Router chat: context budget applied — {}",
+                        r.note.as_deref().unwrap_or("trimmed")
+                    );
                 }
                 r
             };
@@ -358,16 +456,20 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             if multimodal_use_direct_api && !multimodal_files.is_empty() {
                 // Multimodal path: call Gemini generateContent API directly with file parts.
                 // Bypasses Router/CLI because OpenAI format doesn't support fileData/inlineData.
-                let api_key = resolve_gemini_api_key()
-                    .ok_or_else(|| anyhow!("gemini_api_key required for multimodal but not found in llm.yaml"))?;
+                let api_key = resolve_gemini_api_key().ok_or_else(|| {
+                    anyhow!("gemini_api_key required for multimodal but not found in llm.yaml")
+                })?;
                 let file_api = GeminiFileApi::new(api_key);
 
                 // Extract the full text prompt from messages
-                let text_prompt: String = messages.iter()
+                let text_prompt: String = messages
+                    .iter()
                     .filter_map(|m| {
                         let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("");
                         let c = m.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                        if c.is_empty() { return None; }
+                        if c.is_empty() {
+                            return None;
+                        }
                         Some(format!("[{}]: {}", role, c))
                     })
                     .collect::<Vec<_>>()
@@ -380,9 +482,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     "Router chat: using direct Gemini API for multimodal"
                 );
 
-                let response_text = file_api.generate_content(
-                    &model, &text_prompt, &multimodal_files, max_tokens,
-                ).await?;
+                let response_text = file_api
+                    .generate_content(&model, &text_prompt, &multimodal_files, max_tokens)
+                    .await?;
 
                 content = response_text;
                 finish_reason_owned = "stop".to_string();
@@ -396,7 +498,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 let url = format!("{}/v1/chat/completions", base_url);
                 // HTTP mode: channel parameter is not supported
                 if channel.is_some() && !state.gemini.is_cli_mode() {
-                    return Err(anyhow!("'channel' 参数仅在 CLI 模式下生效，当前为 HTTP Router 模式"));
+                    return Err(anyhow!(
+                        "'channel' 参数仅在 CLI 模式下生效，当前为 HTTP Router 模式"
+                    ));
                 }
 
                 let mut body = serde_json::json!({
@@ -415,15 +519,27 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     body["_api_key_alias"] = serde_json::json!(alias);
                 }
 
-                let total_chars: usize = messages.iter()
+                let total_chars: usize = messages
+                    .iter()
                     .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
                     .map(|s| s.len())
                     .sum();
-                info!("Router chat: {} messages ({} chars) to {} via {}", messages.len(), total_chars, model, url);
+                info!(
+                    "Router chat: {} messages ({} chars) to {} via {}",
+                    messages.len(),
+                    total_chars,
+                    model,
+                    url
+                );
 
-                let result = REQUEST_CALLER.scope("router_chat".to_string(), async {
-                    state.gemini.send_with_timeout(&state.http_client, &url, &jwt, &body, idle_timeout).await
-                }).await?;
+                let result = REQUEST_CALLER
+                    .scope("router_chat".to_string(), async {
+                        state
+                            .gemini
+                            .send_with_timeout(&state.http_client, &url, &jwt, &body, idle_timeout)
+                            .await
+                    })
+                    .await?;
 
                 content = result
                     .pointer("/choices/0/message/content")
@@ -436,7 +552,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     .unwrap_or("unknown")
                     .to_string();
                 usage = result.get("usage").cloned();
-                resp_model_owned = result.get("model")
+                resp_model_owned = result
+                    .get("model")
                     .and_then(|v| v.as_str())
                     .unwrap_or(&model)
                     .to_string();
@@ -473,7 +590,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
             // Save only NEW messages + assistant response (new_messages is pre-separated from context)
             if let Some(ref cid) = conv_id {
-                let mut save_msgs: Vec<(String, String)> = new_messages.iter()
+                let mut save_msgs: Vec<(String, String)> = new_messages
+                    .iter()
                     .map(|msg| {
                         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
                         let msg_content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -483,7 +601,11 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 // Add assistant response
                 save_msgs.push(("assistant".to_string(), content.to_string()));
 
-                if let Err(e) = state.store.router_chat_append_messages(cid, &save_msgs).await {
+                if let Err(e) = state
+                    .store
+                    .router_chat_append_messages(cid, &save_msgs)
+                    .await
+                {
                     warn!("Failed to save router chat history: {}", e);
                 } else {
                     info!(conv_id = %cid, saved = save_msgs.len(), "Router chat: saved messages to history");
@@ -496,15 +618,26 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
         "mission_router_chat_history" => {
             let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
-            let task_id = args_val.get("task_id").and_then(|v| v.as_str())
+            let task_id = args_val
+                .get("task_id")
+                .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("task_id is required"))?;
             let model = "gemini-3.1-pro"; // default model for lookup
-            let conv_id = state.store.router_chat_get_or_create(task_id, model).await
+            let conv_id = state
+                .store
+                .router_chat_get_or_create(task_id, model)
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
-            let history = state.store.router_chat_load_history(&conv_id).await
+            let history = state
+                .store
+                .router_chat_load_history(&conv_id)
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             if history.is_empty() {
-                return Ok(ToolResult::text(format!("任务 {} 暂无 Gemini 对话记录", task_id)));
+                return Ok(ToolResult::text(format!(
+                    "任务 {} 暂无 Gemini 对话记录",
+                    task_id
+                )));
             }
             let resp = serde_json::json!({
                 "task_id": task_id,
@@ -518,7 +651,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         "mission_router_chat_list" => {
             let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
             let limit = args_val.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
-            let convs = state.store.router_chat_list(limit).await
+            let convs = state
+                .store
+                .router_chat_list(limit)
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             let count = convs.len();
             Ok(ToolResult::json_pretty(&serde_json::json!({
@@ -528,7 +664,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         }
 
         "mission_router_chat_stats" => {
-            let stats = state.store.router_chat_stats().await
+            let stats = state
+                .store
+                .router_chat_stats()
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json_pretty(&stats))
         }
@@ -542,7 +681,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let count = if count_raw < 0 { None } else { Some(count_raw) };
             match (conv_id, task_id) {
                 (Some(cid), _) => {
-                    let (archived, remaining) = state.store.router_chat_clear(cid, count).await
+                    let (archived, remaining) = state
+                        .store
+                        .router_chat_clear(cid, count)
+                        .await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json(&serde_json::json!({
                         "conversation_id": cid,
@@ -552,7 +694,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     })))
                 }
                 (None, Some(tid)) => {
-                    let archived = state.store.router_chat_clear_by_task(tid, count).await
+                    let archived = state
+                        .store
+                        .router_chat_clear_by_task(tid, count)
+                        .await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json(&serde_json::json!({
                         "task_id": tid,
@@ -570,7 +715,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let task_id = args_val.get("task_id").and_then(|v| v.as_str());
             match (conv_id, task_id) {
                 (Some(cid), _) => {
-                    let (conv_del, msg_del) = state.store.router_chat_delete(cid).await
+                    let (conv_del, msg_del) = state
+                        .store
+                        .router_chat_delete(cid)
+                        .await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json(&serde_json::json!({
                         "deleted_conversations": conv_del,
@@ -578,7 +726,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     })))
                 }
                 (None, Some(tid)) => {
-                    let (conv_del, msg_del) = state.store.router_chat_delete_by_task(tid).await
+                    let (conv_del, msg_del) = state
+                        .store
+                        .router_chat_delete_by_task(tid)
+                        .await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
                     Ok(ToolResult::json(&serde_json::json!({
                         "task_id": tid,
@@ -590,31 +741,40 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             }
         }
 
-
         "mission_router_chat_delete_message" => {
             let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
-            let message_id = args_val.get("message_id").and_then(|v| v.as_i64())
+            let message_id = args_val
+                .get("message_id")
+                .and_then(|v| v.as_i64())
                 .ok_or_else(|| anyhow!("需要提供 message_id (整数)"))?;
-            match state.store.router_chat_delete_message(message_id).await
-                .map_err(|e| anyhow!("DB error: {}", e))? {
-                Some(conversation_id) => {
-                    Ok(ToolResult::json(&serde_json::json!({
-                        "deleted_message_id": message_id,
-                        "conversation_id": conversation_id,
-                        "note": "已归档到 router_chat_archive，可用 mission_router_chat_restore 恢复",
-                    })))
-                }
+            match state
+                .store
+                .router_chat_delete_message(message_id)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?
+            {
+                Some(conversation_id) => Ok(ToolResult::json(&serde_json::json!({
+                    "deleted_message_id": message_id,
+                    "conversation_id": conversation_id,
+                    "note": "已归档到 router_chat_archive，可用 mission_router_chat_restore 恢复",
+                }))),
                 None => Ok(ToolResult::error(&format!(
-                    "消息 {} 不存在或不属于 router_chat 对话", message_id
+                    "消息 {} 不存在或不属于 router_chat 对话",
+                    message_id
                 ))),
             }
         }
 
         "mission_router_chat_restore" => {
             let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
-            let conv_id = args_val.get("conversation_id").and_then(|v| v.as_str())
+            let conv_id = args_val
+                .get("conversation_id")
+                .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("需要提供 conversation_id"))?;
-            let restored = state.store.router_chat_restore(conv_id).await
+            let restored = state
+                .store
+                .router_chat_restore(conv_id)
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             Ok(ToolResult::json(&serde_json::json!({
                 "conversation_id": conv_id,
@@ -628,24 +788,37 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let conv_id = args_val.get("conversation_id").and_then(|v| v.as_str());
             let task_id_arg = args_val.get("task_id").and_then(|v| v.as_str());
             // Default: compress oldest 20 messages into summary, keep recent ones active
-            let batch_size = args_val.get("batch_size").and_then(|v| v.as_i64()).unwrap_or(20);
+            let batch_size = args_val
+                .get("batch_size")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(20);
             // Minimum messages to keep in active window (don't compress below this)
-            let keep_recent = args_val.get("keep_recent").and_then(|v| v.as_i64()).unwrap_or(10);
+            let keep_recent = args_val
+                .get("keep_recent")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(10);
 
             // Resolve conversation ID
             let cid = match (conv_id, task_id_arg) {
                 (Some(c), _) => c.to_string(),
-                (None, Some(tid)) => {
-                    state.store.router_chat_get_or_create(tid, "gemini-3.1-pro").await
-                        .map_err(|e| anyhow!("DB error: {}", e))?
-                }
+                (None, Some(tid)) => state
+                    .store
+                    .router_chat_get_or_create(tid, "gemini-3.1-pro")
+                    .await
+                    .map_err(|e| anyhow!("DB error: {}", e))?,
                 _ => return Ok(ToolResult::error("需要提供 conversation_id 或 task_id")),
             };
 
             // Get current summary state
-            let (existing_summary, cursor) = state.store.router_chat_get_summary(&cid).await
+            let (existing_summary, cursor) = state
+                .store
+                .router_chat_get_summary(&cid)
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
-            let unsummarized = state.store.router_chat_unsummarized_count(&cid, cursor).await
+            let unsummarized = state
+                .store
+                .router_chat_unsummarized_count(&cid, cursor)
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
 
             // Guard: don't compress if too few messages
@@ -660,7 +833,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
             // Load the oldest batch for compression (leave keep_recent in active window)
             let compress_count = (unsummarized - keep_recent).min(batch_size);
-            let to_compress = state.store.router_chat_load_compressible(&cid, cursor, compress_count).await
+            let to_compress = state
+                .store
+                .router_chat_load_compressible(&cid, cursor, compress_count)
+                .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
 
             if to_compress.is_empty() {
@@ -686,8 +862,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 messages_text.push_str(&entry);
                 actual_count += 1;
             }
-            let new_cursor = to_compress.get(actual_count.saturating_sub(1))
-                .map(|(id, _, _)| *id).unwrap_or(cursor);
+            let new_cursor = to_compress
+                .get(actual_count.saturating_sub(1))
+                .map(|(id, _, _)| *id)
+                .unwrap_or(cursor);
 
             // Use Gemini (google one channel) for summarization — Gemini summarizes its own content best
             let system_prompt = "You are a conversation summarizer. Your job is to maintain a rolling summary of a conversation between a user and an AI assistant (Gemini). Keep technical details, decisions, task IDs, and established context. Drop irrelevant chit-chat. Output only the updated summary in the same language as the conversation (Chinese if the conversation is in Chinese). Be concise but comprehensive.";
@@ -718,15 +896,26 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 "_channel": "google",  // Force google one channel for compression
             });
 
-            let summary_result = REQUEST_CALLER.scope("router_chat_compress".to_string(), async {
-                state.gemini.send_with_timeout(&state.http_client, &compress_url, &jwt, &compress_body, None).await
-            }).await
-            .and_then(|resp| {
-                resp.pointer("/choices/0/message/content")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| anyhow!("Gemini compress: empty response"))
-            });
+            let summary_result = REQUEST_CALLER
+                .scope("router_chat_compress".to_string(), async {
+                    state
+                        .gemini
+                        .send_with_timeout(
+                            &state.http_client,
+                            &compress_url,
+                            &jwt,
+                            &compress_body,
+                            None,
+                        )
+                        .await
+                })
+                .await
+                .and_then(|resp| {
+                    resp.pointer("/choices/0/message/content")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .ok_or_else(|| anyhow!("Gemini compress: empty response"))
+                });
 
             match summary_result {
                 Ok(new_summary) => {
@@ -748,16 +937,23 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
                     // Snapshot previous summary before overwrite (for rollback)
                     if let Some(ref prev) = existing_summary {
-                        if let Err(e) = state.store.router_chat_append_messages(&cid, &[
-                            ("_summary_snapshot".to_string(), prev.clone()),
-                        ]).await {
+                        if let Err(e) = state
+                            .store
+                            .router_chat_append_messages(
+                                &cid,
+                                &[("_summary_snapshot".to_string(), prev.clone())],
+                            )
+                            .await
+                        {
                             warn!(conv_id = %cid, error = %e, "Failed to snapshot previous summary");
                         }
                     }
 
-                    let updated = state.store.router_chat_update_summary(
-                        &cid, &new_summary, new_cursor, cursor,
-                    ).await.map_err(|e| anyhow!("DB error: {}", e))?;
+                    let updated = state
+                        .store
+                        .router_chat_update_summary(&cid, &new_summary, new_cursor, cursor)
+                        .await
+                        .map_err(|e| anyhow!("DB error: {}", e))?;
 
                     if updated {
                         info!(

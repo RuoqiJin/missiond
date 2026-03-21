@@ -1,16 +1,20 @@
 use anyhow::{anyhow, Result};
+use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
-use missiond_mcp::tools::ToolResult;
 
-use crate::state::AppState;
 use crate::lenient;
+use crate::state::AppState;
 
 #[derive(Deserialize)]
 struct CCSessionsArgs {
     #[serde(rename = "projectPath")]
     project_path: Option<String>,
-    #[serde(rename = "activeOnly", default, deserialize_with = "lenient::option_bool")]
+    #[serde(
+        rename = "activeOnly",
+        default,
+        deserialize_with = "lenient::option_bool"
+    )]
     active_only: Option<bool>,
 }
 
@@ -37,7 +41,10 @@ struct CCTriggerSwarmArgs {
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     // Consolidated tools
     if name == "mission_cc_query" {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("overview");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("overview");
         return match action {
             "sessions" => handle_inner(state, "mission_cc_sessions", args).await,
             "tasks" => handle_inner(state, "mission_cc_tasks", args).await,
@@ -78,7 +85,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             if let Some(filter) = project_path {
                 sessions = sessions
                     .into_iter()
-                    .filter(|s| s.project_path.contains(&filter) || s.project_name.contains(&filter))
+                    .filter(|s| {
+                        s.project_path.contains(&filter) || s.project_name.contains(&filter)
+                    })
                     .collect();
             }
 
@@ -197,7 +206,6 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             let res = state.pty.send(&slot_id, &prompt, timeout_ms).await?;
             Ok(ToolResult::text(res.response))
         }
-
 
         _ => Err(anyhow!("Unknown cc_tasks tool: {name}")),
     }

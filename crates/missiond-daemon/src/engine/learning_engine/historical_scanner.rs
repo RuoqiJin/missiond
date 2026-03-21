@@ -3,12 +3,12 @@
 //! Runs at lowest priority (after all other learning tasks), only when system is idle.
 //! Scans conversations that have never been analyzed for habits (habit_scanned_at IS NULL).
 
-use tracing::{debug, info, warn};
 use std::sync::Arc;
+use tracing::{debug, info, warn};
 
-use crate::state::{AppState, MEMORY_SLOW_SLOT_ID};
-use crate::event_bus::DaemonEvent;
 use crate::engine::intent_engine::request_execution_slot;
+use crate::event_bus::DaemonEvent;
+use crate::state::{AppState, MEMORY_SLOW_SLOT_ID};
 use missiond_core::SessionState;
 
 /// Cadence guard key for daemon_state.
@@ -23,8 +23,12 @@ const BATCH_SIZE: usize = 5;
 pub(crate) async fn check_historical_scan(state: &AppState) {
     // Gate 1: 4h cadence
     let now = chrono::Utc::now().timestamp();
-    let last = state.store.daemon_state_get(LAST_HABIT_SCAN_KEY).await
-        .unwrap_or(None).unwrap_or(0);
+    let last = state
+        .store
+        .daemon_state_get(LAST_HABIT_SCAN_KEY)
+        .await
+        .unwrap_or(None)
+        .unwrap_or(0);
     if now - last < HABIT_SCAN_INTERVAL_SECS {
         return;
     }
@@ -38,7 +42,11 @@ pub(crate) async fn check_historical_scan(state: &AppState) {
     }
 
     // Gate 3: no high/medium priority open work
-    if let Ok(urgent) = state.store.count_open_tasks_by_priority(&["high", "medium"]).await {
+    if let Ok(urgent) = state
+        .store
+        .count_open_tasks_by_priority(&["high", "medium"])
+        .await
+    {
         if urgent > 0 {
             debug!(urgent, "habit_scan: skipping, urgent tasks pending");
             return;
@@ -114,7 +122,10 @@ pub(crate) async fn check_historical_scan(state: &AppState) {
         task_id: None,
         purpose: "habit_scan".to_string(),
         prompt_chars: prompt.len(),
-        preview: format!("Habit scan: {} sessions ({} remaining)", batch_size, unscanned),
+        preview: format!(
+            "Habit scan: {} sessions ({} remaining)",
+            batch_size, unscanned
+        ),
         cited_kb_ids: vec![],
     });
 

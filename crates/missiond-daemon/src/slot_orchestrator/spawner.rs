@@ -1,11 +1,11 @@
-use std::collections::{HashMap, HashSet};
-use anyhow::Result;
-use missiond_core::pty::{PTYManager, PTYAgentInfo};
-use missiond_core::{PTYSlot, PTYSpawnOptions};
-use missiond_core::db::traits::MissionStore;
-use tokio::sync::RwLock;
-use std::sync::Arc;
 use crate::context::slot_env::{build_slot_tracking_env, capture_slot_session_uuid};
+use anyhow::Result;
+use missiond_core::db::traits::MissionStore;
+use missiond_core::pty::{PTYAgentInfo, PTYManager};
+use missiond_core::{PTYSlot, PTYSpawnOptions};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// A unified spawner for tracked slot PTY processes.
 /// This ensures that the session tracking environment and UUID capture
@@ -19,7 +19,8 @@ pub async fn spawn_tracked_slot(
     original_slot_env: Option<&HashMap<String, String>>,
 ) -> Result<PTYAgentInfo> {
     // 1. Automatically build tracking environment and session file path
-    let (tracking_env, session_file) = build_slot_tracking_env(&pty_slot.id, original_slot_env).await;
+    let (tracking_env, session_file) =
+        build_slot_tracking_env(&pty_slot.id, original_slot_env).await;
 
     // 2. Merge tracking variables into options
     options.extra_env.extend(tracking_env);

@@ -35,12 +35,7 @@ pub trait EngineController: Send + Sync {
     /// Send prompt and wait for complete response.
     /// Internally: subscribe → send → wait(Thinking) → wait(TextComplete) → return content.
     /// This is race-free because subscription happens BEFORE sending.
-    async fn ask(
-        &self,
-        slot_id: &str,
-        prompt: &str,
-        timeout: Duration,
-    ) -> Result<String>;
+    async fn ask(&self, slot_id: &str, prompt: &str, timeout: Duration) -> Result<String>;
 
     /// Clear context. No-op for Claude Code, `/clear` for Gemini CLI.
     async fn clear_context(&self, slot_id: &str) -> Result<()>;

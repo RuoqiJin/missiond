@@ -7,8 +7,8 @@
 
 use tracing::{debug, info};
 
-use missiond_core::db::traits::MissionStore;
 use missiond_core::db::shared::ModuleAstSummary;
+use missiond_core::db::traits::MissionStore;
 use missiond_core::types::KBRememberInput;
 
 /// KB category for module summaries.
@@ -48,9 +48,11 @@ pub(crate) async fn update_module_summaries(store: &dyn MissionStore, repo: &str
         let type_list = if summary.public_types.len() <= 8 {
             summary.public_types.join(", ")
         } else {
-            format!("{}, ... (+{} more)",
+            format!(
+                "{}, ... (+{} more)",
                 summary.public_types[..6].join(", "),
-                summary.public_types.len() - 6)
+                summary.public_types.len() - 6
+            )
         };
 
         let summary_text = format!(
@@ -74,7 +76,9 @@ pub(crate) async fn update_module_summaries(store: &dyn MissionStore, repo: &str
 
         match store.kb_remember(&input).await {
             Ok(_) => updated += 1,
-            Err(e) => debug!(module = %summary.module_path, error = %e, "Failed to store module summary"),
+            Err(e) => {
+                debug!(module = %summary.module_path, error = %e, "Failed to store module summary")
+            }
         }
     }
 
@@ -85,7 +89,10 @@ pub(crate) async fn update_module_summaries(store: &dyn MissionStore, repo: &str
 ///
 /// Called when micro-level AST search returns no results.
 /// Provides a high-level map so Claude Code can refine its search.
-pub(crate) fn render_module_navigation(summaries: &[ModuleAstSummary], _query: &str) -> Option<String> {
+pub(crate) fn render_module_navigation(
+    summaries: &[ModuleAstSummary],
+    _query: &str,
+) -> Option<String> {
     if summaries.is_empty() {
         return None;
     }
@@ -102,7 +109,9 @@ pub(crate) fn render_module_navigation(summaries: &[ModuleAstSummary], _query: &
 
         let mut module_xml = format!(
             "  <module path=\"{}\" nodes=\"{}\" files=\"{}\">\n",
-            summary.module_path, summary.total_nodes, summary.files.len()
+            summary.module_path,
+            summary.total_nodes,
+            summary.files.len()
         );
 
         // Types (priority: Gemini says struct/trait > functions for architecture)
@@ -110,9 +119,11 @@ pub(crate) fn render_module_navigation(summaries: &[ModuleAstSummary], _query: &
             let types_str = if summary.public_types.len() <= 10 {
                 summary.public_types.join(", ")
             } else {
-                format!("{}, (+{} more)",
+                format!(
+                    "{}, (+{} more)",
                     summary.public_types[..8].join(", "),
-                    summary.public_types.len() - 8)
+                    summary.public_types.len() - 8
+                )
             };
             module_xml.push_str(&format!("    <types>{}</types>\n", types_str));
         }
@@ -122,9 +133,11 @@ pub(crate) fn render_module_navigation(summaries: &[ModuleAstSummary], _query: &
             let fns_str = if summary.public_functions.len() <= 6 {
                 summary.public_functions.join(", ")
             } else {
-                format!("{}, (+{} more)",
+                format!(
+                    "{}, (+{} more)",
                     summary.public_functions[..4].join(", "),
-                    summary.public_functions.len() - 4)
+                    summary.public_functions.len() - 4
+                )
             };
             module_xml.push_str(&format!("    <functions>{}</functions>\n", fns_str));
         }
@@ -156,16 +169,14 @@ mod tests {
 
     #[test]
     fn test_render_module_navigation_basic() {
-        let summaries = vec![
-            ModuleAstSummary {
-                module_path: "crates/missiond-daemon".into(),
-                public_types: vec!["AppState".into(), "GeminiClient".into()],
-                public_functions: vec!["code_prefetch_query".into()],
-                total_nodes: 50,
-                files: vec!["src/main.rs".into(), "src/state.rs".into()],
-                file_docs: vec![("src/main.rs".into(), "MissionD daemon entry point".into())],
-            },
-        ];
+        let summaries = vec![ModuleAstSummary {
+            module_path: "crates/missiond-daemon".into(),
+            public_types: vec!["AppState".into(), "GeminiClient".into()],
+            public_functions: vec!["code_prefetch_query".into()],
+            total_nodes: 50,
+            files: vec!["src/main.rs".into(), "src/state.rs".into()],
+            file_docs: vec![("src/main.rs".into(), "MissionD daemon entry point".into())],
+        }];
         let xml = render_module_navigation(&summaries, "test query").unwrap();
         assert!(xml.contains("module-navigation"));
         assert!(xml.contains("crates/missiond-daemon"));
@@ -177,21 +188,25 @@ mod tests {
     #[test]
     fn test_render_respects_budget() {
         // Create many large modules to exceed budget
-        let summaries: Vec<ModuleAstSummary> = (0..100).map(|i| {
-            ModuleAstSummary {
+        let summaries: Vec<ModuleAstSummary> = (0..100)
+            .map(|i| ModuleAstSummary {
                 module_path: format!("crates/mod-{}", i),
                 public_types: (0..20).map(|j| format!("Type{}_{}", i, j)).collect(),
                 public_functions: (0..20).map(|j| format!("func{}_{}", i, j)).collect(),
                 total_nodes: 100,
                 files: (0..10).map(|j| format!("src/file_{}.rs", j)).collect(),
                 file_docs: vec![],
-            }
-        }).collect();
+            })
+            .collect();
 
         let xml = render_module_navigation(&summaries, "test").unwrap();
         // Should not contain all 100 modules due to budget
         let module_count = xml.matches("<module ").count();
-        assert!(module_count < 100, "Should respect budget, got {} modules", module_count);
+        assert!(
+            module_count < 100,
+            "Should respect budget, got {} modules",
+            module_count
+        );
         assert!(module_count > 0, "Should have at least some modules");
     }
 }

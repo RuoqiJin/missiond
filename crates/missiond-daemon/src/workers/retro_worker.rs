@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
 use crate::minimax_client::ChatMessage;
 use crate::state::AppState;
@@ -18,10 +18,16 @@ const POLL_INTERVAL_SECS: u64 = 3600;
 /// Backfill: analyze ALL sessions since a given time (no threshold filtering).
 /// Returns (analyzed_count, skipped_count).
 pub(crate) async fn backfill(state: &AppState, since: &str) -> anyhow::Result<(usize, usize)> {
-    let sessions = state.store.get_sessions_for_retro_backfill(since, false).await
+    let sessions = state
+        .store
+        .get_sessions_for_retro_backfill(since, false)
+        .await
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
 
-    info!(count = sessions.len(), since, "Retro backfill: found sessions");
+    info!(
+        count = sessions.len(),
+        since, "Retro backfill: found sessions"
+    );
 
     let mut analyzed = 0;
     let mut skipped = 0;
@@ -49,14 +55,20 @@ const INTER_SESSION_DELAY_SECS: u64 = 10;
 const MINIMAX_MAX_TOKENS: u32 = 2000;
 
 pub(crate) async fn process_pending(state: &AppState) -> anyhow::Result<usize> {
-    let pending = state.store.get_sessions_needing_retrospective().await
+    let pending = state
+        .store
+        .get_sessions_needing_retrospective()
+        .await
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
 
     if pending.is_empty() {
         return Ok(0);
     }
 
-    debug!(count = pending.len(), "Retro worker: found sessions needing analysis");
+    debug!(
+        count = pending.len(),
+        "Retro worker: found sessions needing analysis"
+    );
 
     let mut analyzed = 0;
     for (session_id, msg_count, tool_count, error_rate) in &pending {
@@ -69,12 +81,15 @@ pub(crate) async fn process_pending(state: &AppState) -> anyhow::Result<usize> {
             Err(e) => {
                 warn!(session_id, error = %e, "Retro worker: session analysis failed");
                 // Gemini ARB: record failure to prevent infinite retry loop
-                let _ = state.store.save_retrospective_result(
-                    session_id,
-                    "error",
-                    &format!("{{\"error\": \"{}\"}}", e.to_string().replace('"', "'")),
-                    None,
-                ).await;
+                let _ = state
+                    .store
+                    .save_retrospective_result(
+                        session_id,
+                        "error",
+                        &format!("{{\"error\": \"{}\"}}", e.to_string().replace('"', "'")),
+                        None,
+                    )
+                    .await;
             }
         }
     }
@@ -90,13 +105,22 @@ async fn analyze_session(
     error_rate: f64,
 ) -> anyhow::Result<()> {
     // Circuit breaker: runtime check — skip meta-agent sessions even if they slipped through SQL
-    if let Some(conv) = state.store.get_conversation(session_id).await.ok().flatten() {
+    if let Some(conv) = state
+        .store
+        .get_conversation(session_id)
+        .await
+        .ok()
+        .flatten()
+    {
         if conv.conversation_type != "user" {
             info!(session_id, conv_type = %conv.conversation_type, "Retro: skipping non-user session");
             return Ok(());
         }
         if let Some(ref slot) = conv.slot_id {
-            if slot.starts_with("slot-memory") || slot.starts_with("slot-diagnosis") || slot.starts_with("agent-") {
+            if slot.starts_with("slot-memory")
+                || slot.starts_with("slot-diagnosis")
+                || slot.starts_with("agent-")
+            {
                 info!(session_id, slot_id = %slot, "Retro: skipping meta-agent session");
                 return Ok(());
             }
@@ -117,9 +141,12 @@ async fn analyze_session(
     debug!(session_id, trigger = %trigger, "Retro worker: analyzing session");
 
     // ── L1: Rust quantitative analysis (detailed = quick + file heatmap + server map + error chains) ──
-    let result = crate::handlers::retrospective::run_analysis(state, session_id, "detailed").await?;
+    let result =
+        crate::handlers::retrospective::run_analysis(state, session_id, "detailed").await?;
 
-    let stats_text = result.content.first()
+    let stats_text = result
+        .content
+        .first()
         .map(|c| match c {
             missiond_mcp::tools::ToolContent::Text { text } => text.as_str(),
         })
@@ -154,18 +181,30 @@ async fn analyze_session(
     // feedback path via task_cited_kbs cache. kb_access_log session_ids differ
     // (user session ID vs autopilot task ID).
     if let Some(ref severity) = triage_severity {
-        let cited_kb_ids = state.store.get_session_cited_kb_ids(session_id).await
+        let cited_kb_ids = state
+            .store
+            .get_session_cited_kb_ids(session_id)
+            .await
             .unwrap_or_default();
         if !cited_kb_ids.is_empty() {
             let feedback = match severity.as_str() {
-                "low" => Some(true),  // mild boost — session went well
-                "high" | "critical" if triage_actionable => Some(false),  // penalty — actionable failure
-                _ => None,  // medium or non-actionable — no adjustment
+                "low" => Some(true), // mild boost — session went well
+                "high" | "critical" if triage_actionable => Some(false), // penalty — actionable failure
+                _ => None, // medium or non-actionable — no adjustment
             };
             if let Some(success) = feedback {
-                match state.store.kb_batch_apply_utility_feedback(&cited_kb_ids, success).await {
-                    Ok(n) if n > 0 => info!(session_id, severity, adjusted = n, success,
-                        "Retro 4b: session-level utility feedback applied"),
+                match state
+                    .store
+                    .kb_batch_apply_utility_feedback(&cited_kb_ids, success)
+                    .await
+                {
+                    Ok(n) if n > 0 => info!(
+                        session_id,
+                        severity,
+                        adjusted = n,
+                        success,
+                        "Retro 4b: session-level utility feedback applied"
+                    ),
                     Err(e) => warn!(session_id, error = %e, "Retro 4b: utility feedback failed"),
                     _ => {}
                 }
@@ -174,12 +213,11 @@ async fn analyze_session(
     }
 
     // Persist results
-    state.store.save_retrospective_result(
-        session_id,
-        &trigger,
-        stats_text,
-        full_analysis.as_deref(),
-    ).await.map_err(|e| anyhow::anyhow!("DB error saving retrospective: {}", e))?;
+    state
+        .store
+        .save_retrospective_result(session_id, &trigger, stats_text, full_analysis.as_deref())
+        .await
+        .map_err(|e| anyhow::anyhow!("DB error saving retrospective: {}", e))?;
 
     info!(session_id, trigger = %trigger,
           has_triage = full_analysis.is_some(),
@@ -194,7 +232,9 @@ async fn call_sonnet_triage(
     session_id: &str,
     detailed_stats: &str,
 ) -> anyhow::Result<String> {
-    let sonnet = state.sonnet.as_ref()
+    let sonnet = state
+        .sonnet
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Sonnet gateway not available"))?;
 
     let prompt = format!(
@@ -247,7 +287,13 @@ async fn call_sonnet_triage(
         content: prompt,
     }];
 
-    sonnet.call_briefing(messages, Some(MINIMAX_MAX_TOKENS), Some(session_id.to_string())).await
+    sonnet
+        .call_briefing(
+            messages,
+            Some(MINIMAX_MAX_TOKENS),
+            Some(session_id.to_string()),
+        )
+        .await
 }
 
 /// Create a Board task for high-severity anomaly sessions.
@@ -259,7 +305,6 @@ async fn create_anomaly_board_task(
     trigger: &str,
     triage: &serde_json::Value,
 ) {
-
     let summary = triage["summary"].as_str().unwrap_or("异常会话需人工复盘");
     let severity = triage["severity"].as_str().unwrap_or("high");
 
@@ -292,7 +337,14 @@ async fn create_anomaly_board_task(
     let input = missiond_core::types::CreateBoardTaskInput {
         title,
         description: Some(description),
-        priority: Some(if severity == "critical" { "high" } else { "medium" }.to_string()),
+        priority: Some(
+            if severity == "critical" {
+                "high"
+            } else {
+                "medium"
+            }
+            .to_string(),
+        ),
         category: Some("diagnosis".to_string()),
         project: Some("missiond".to_string()),
         server: None,
@@ -300,7 +352,7 @@ async fn create_anomaly_board_task(
         parent_id: None,
         assignee: Some("slot-diagnosis".to_string()),
         auto_execute: Some(true),
-        prompt_template: None,  // Must be None — autopilot uses title+description as prompt
+        prompt_template: None, // Must be None — autopilot uses title+description as prompt
         hidden: None,
         flow_template: None,
         depends_on: None,
@@ -310,7 +362,9 @@ async fn create_anomaly_board_task(
     };
 
     match state.store.create_board_task(&input).await {
-        Ok(task) => info!(task_id = %task.id, session_id, "Retro worker: created anomaly Board task"),
+        Ok(task) => {
+            info!(task_id = %task.id, session_id, "Retro worker: created anomaly Board task")
+        }
         Err(e) => warn!(session_id, error = %e, "Retro worker: failed to create Board task"),
     }
 }

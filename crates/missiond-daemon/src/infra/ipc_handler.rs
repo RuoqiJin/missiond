@@ -3,11 +3,14 @@ use missiond_core::ipc::{IpcListener, IpcStream};
 use missiond_mcp::protocol::{self, Request, RequestId, Response, RpcError};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use crate::gemini_client::{REQUEST_SESSION_ID, PARENT_SPAN_ID};
+use crate::gemini_client::{PARENT_SPAN_ID, REQUEST_SESSION_ID};
 use crate::state::AppState;
 use serde_json::Value;
 
-pub(crate) async fn handle_ipc_connection(state: AppState, mut reader: BufReader<IpcStream>) -> Result<()> {
+pub(crate) async fn handle_ipc_connection(
+    state: AppState,
+    mut reader: BufReader<IpcStream>,
+) -> Result<()> {
     let mut line = String::new();
     let bytes = reader.read_line(&mut line).await?;
     if bytes == 0 {
@@ -28,7 +31,9 @@ pub(crate) async fn handle_ipc_connection(state: AppState, mut reader: BufReader
     };
 
     // Extract session_id from request params meta (if provided by MCP proxy)
-    let session_id = request.params.as_ref()
+    let session_id = request
+        .params
+        .as_ref()
         .and_then(|p| p.get("_meta"))
         .and_then(|m| m.get("session_id"))
         .and_then(|v| v.as_str())
@@ -36,9 +41,11 @@ pub(crate) async fn handle_ipc_connection(state: AppState, mut reader: BufReader
         .to_string();
 
     // Wrap handler in task_local scope so all downstream code can read session_id
-    let resp = REQUEST_SESSION_ID.scope(session_id, async {
-        handle_ipc_request(state, request).await
-    }).await;
+    let resp = REQUEST_SESSION_ID
+        .scope(session_id, async {
+            handle_ipc_request(state, request).await
+        })
+        .await;
 
     let json = protocol::serialize_response_string(&resp)?;
     reader.get_mut().write_all(json.as_bytes()).await?;
@@ -80,12 +87,16 @@ pub(crate) async fn handle_ipc_request(state: AppState, request: Request) -> Res
             Response::success(id, serde_json::json!({ "instructions": instructions }))
         }
         "context/prefetch" => {
-            let req: crate::context_pipeline::PrefetchRequest = match serde_json::from_value(params.clone()) {
-                Ok(r) => r,
-                Err(e) => {
-                    return Response::from_error(id, RpcError::InvalidParams(format!("Bad prefetch params: {}", e)));
-                }
-            };
+            let req: crate::context_pipeline::PrefetchRequest =
+                match serde_json::from_value(params.clone()) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Response::from_error(
+                            id,
+                            RpcError::InvalidParams(format!("Bad prefetch params: {}", e)),
+                        );
+                    }
+                };
             let result = crate::context_pipeline::execute(&state, &req).await;
             let tool_result = missiond_mcp::tools::ToolResult::text(&result.assembled);
             Response::success(id, serde_json::to_value(tool_result).unwrap_or(Value::Null))
@@ -108,13 +119,20 @@ pub(crate) async fn handle_ipc_request(state: AppState, request: Request) -> Res
             // Cross-lane causal linking: read session's last assistant_message span_id
             // and inject as PARENT_SPAN_ID so downstream CliRequestStarted events
             // get parent_span_id set, linking AI/LLM lane back to Chat lane.
-            let session_id = REQUEST_SESSION_ID.try_with(|id| id.clone()).unwrap_or_default();
-            let parent_span = state.last_msg_span.lock().unwrap().get(&session_id).cloned();
+            let session_id = REQUEST_SESSION_ID
+                .try_with(|id| id.clone())
+                .unwrap_or_default();
+            let parent_span = state
+                .last_msg_span
+                .lock()
+                .unwrap()
+                .get(&session_id)
+                .cloned();
 
             let tool_res = if let Some(parent) = parent_span {
-                PARENT_SPAN_ID.scope(parent, async {
-                    state.call_tool(&name, arguments).await
-                }).await
+                PARENT_SPAN_ID
+                    .scope(parent, async { state.call_tool(&name, arguments).await })
+                    .await
             } else {
                 state.call_tool(&name, arguments).await
             };

@@ -159,8 +159,12 @@ impl MinimaxHandle {
             parent_span_id,
             reply_tx,
         };
-        tx.send(req).await.map_err(|_| anyhow!("MinimaxGateway channel closed"))?;
-        reply_rx.await.map_err(|_| anyhow!("MinimaxGateway dropped response"))?
+        tx.send(req)
+            .await
+            .map_err(|_| anyhow!("MinimaxGateway channel closed"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow!("MinimaxGateway dropped response"))?
     }
 
     /// P0: Interactive / MCP calls (highest priority).
@@ -170,7 +174,17 @@ impl MinimaxHandle {
         max_tokens: Option<u32>,
         caller: &'static str,
     ) -> Result<String> {
-        Self::send(&self.tx_interactive, messages, max_tokens, caller, Priority::Interactive, None, None, None).await
+        Self::send(
+            &self.tx_interactive,
+            messages,
+            max_tokens,
+            caller,
+            Priority::Interactive,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     /// P1: Embedding worker calls.
@@ -180,7 +194,17 @@ impl MinimaxHandle {
         max_tokens: Option<u32>,
         task_id: Option<String>,
     ) -> Result<String> {
-        Self::send(&self.tx_embedding, messages, max_tokens, "embedding", Priority::Embedding, task_id, None, None).await
+        Self::send(
+            &self.tx_embedding,
+            messages,
+            max_tokens,
+            "embedding",
+            Priority::Embedding,
+            task_id,
+            None,
+            None,
+        )
+        .await
     }
 
     /// P2: Translation worker calls (with optional causal linking context).
@@ -192,7 +216,17 @@ impl MinimaxHandle {
         trace_id: Option<String>,
         parent_span_id: Option<String>,
     ) -> Result<String> {
-        Self::send(&self.tx_translation, messages, max_tokens, "translation", Priority::Translation, task_id, trace_id, parent_span_id).await
+        Self::send(
+            &self.tx_translation,
+            messages,
+            max_tokens,
+            "translation",
+            Priority::Translation,
+            task_id,
+            trace_id,
+            parent_span_id,
+        )
+        .await
     }
 
     /// P3: Briefing worker calls (lowest priority).
@@ -202,7 +236,17 @@ impl MinimaxHandle {
         max_tokens: Option<u32>,
         task_id: Option<String>,
     ) -> Result<String> {
-        Self::send(&self.tx_briefing, messages, max_tokens, "briefing", Priority::Briefing, task_id, None, None).await
+        Self::send(
+            &self.tx_briefing,
+            messages,
+            max_tokens,
+            "briefing",
+            Priority::Briefing,
+            task_id,
+            None,
+            None,
+        )
+        .await
     }
 }
 
@@ -223,8 +267,10 @@ pub(crate) struct MinimaxGateway {
 impl MinimaxGateway {
     /// Main loop: biased select ensures strict priority ordering.
     pub async fn run(mut self) {
-        info!("MinimaxGateway started (quota: {}/{:?}, concurrency: {})",
-            QUOTA_MAX, QUOTA_WINDOW, MAX_CONCURRENCY);
+        info!(
+            "MinimaxGateway started (quota: {}/{:?}, concurrency: {})",
+            QUOTA_MAX, QUOTA_WINDOW, MAX_CONCURRENCY
+        );
 
         let mut last_request_at = Instant::now() - Duration::from_secs(10);
 
@@ -268,8 +314,7 @@ impl MinimaxGateway {
                     drop(q);
                     warn!(
                         caller = req.caller,
-                        remaining,
-                        "MinimaxGateway: quota reserved for high-priority, rejecting"
+                        remaining, "MinimaxGateway: quota reserved for high-priority, rejecting"
                     );
                     quota_rejected = true;
                     break;
@@ -283,14 +328,17 @@ impl MinimaxGateway {
                 drop(q);
 
                 // Protected requests wait; low-priority already rejected above
-                warn!(caller = req.caller, "MinimaxGateway: quota exhausted (300/5h), throttling 60s");
+                warn!(
+                    caller = req.caller,
+                    "MinimaxGateway: quota exhausted (300/5h), throttling 60s"
+                );
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
 
             if quota_rejected {
-                let _ = req.reply_tx.send(Err(anyhow!(
-                    "Quota reserved for high-priority requests"
-                )));
+                let _ = req
+                    .reply_tx
+                    .send(Err(anyhow!("Quota reserved for high-priority requests")));
                 drop(permit);
                 continue;
             }

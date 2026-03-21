@@ -9,16 +9,16 @@
 //!
 //! Design doc: `docs/designs/phase4-tagger-chunker.md`
 
-use std::collections::{HashSet, BTreeSet};
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 use tokio::sync::broadcast;
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
-use missiond_core::types::{ConversationMessage, RawTurn};
+use super::{BackgroundWorker, WorkerContext};
 use crate::event_bus::{DaemonEvent, TimelineEvent};
 use crate::state::{AppState, EmbeddingTask};
-use super::{BackgroundWorker, WorkerContext};
+use missiond_core::types::{ConversationMessage, RawTurn};
 
 /// Fixed-window batch interval (same as S2 Organizer).
 const BATCH_INTERVAL_SECS: u64 = 5;
@@ -46,9 +46,15 @@ pub struct TaggerChunkerWorker {
 }
 
 impl BackgroundWorker for TaggerChunkerWorker {
-    fn name(&self) -> &'static str { "tagger_chunker" }
+    fn name(&self) -> &'static str {
+        "tagger_chunker"
+    }
 
-    fn run(self, state: Arc<AppState>, ctx: WorkerContext) -> impl std::future::Future<Output = ()> + Send {
+    fn run(
+        self,
+        state: Arc<AppState>,
+        ctx: WorkerContext,
+    ) -> impl std::future::Future<Output = ()> + Send {
         run_tagger_chunker(state, ctx, self.timeline_rx)
     }
 }
@@ -139,23 +145,28 @@ async fn process_session(state: &AppState, session_id: &str) -> anyhow::Result<u
     let since_id = state.store.get_last_turn_end_message_id(session_id).await?;
 
     // 2. Fetch incremental messages
-    let messages = state.store.get_conversation_messages(
-        session_id,
-        since_id,
-        MAX_MESSAGES_PER_SESSION,
-    ).await?;
+    let messages = state
+        .store
+        .get_conversation_messages(session_id, since_id, MAX_MESSAGES_PER_SESSION)
+        .await?;
 
     if messages.is_empty() {
         return Ok(0);
     }
 
     // 3. Get next turn_idx
-    let next_idx = state.store.get_max_turn_idx(session_id).await?
+    let next_idx = state
+        .store
+        .get_max_turn_idx(session_id)
+        .await?
         .map(|i| i + 1)
         .unwrap_or(0);
 
     // 4. Check if session is completed (for tail handling)
-    let is_completed = state.store.get_conversation(session_id).await?
+    let is_completed = state
+        .store
+        .get_conversation(session_id)
+        .await?
         .map(|c| c.status == "completed" || c.status == "compacted")
         .unwrap_or(false);
 
@@ -180,7 +191,8 @@ async fn process_session(state: &AppState, session_id: &str) -> anyhow::Result<u
     // 7. Collect noise labels
     let noise_labels = collect_noise_labels(&messages);
     if !noise_labels.is_empty() {
-        let label_refs: Vec<(i64, &str, &str, &str)> = noise_labels.iter()
+        let label_refs: Vec<(i64, &str, &str, &str)> = noise_labels
+            .iter()
             .map(|(id, label, value)| (*id, label.as_str(), value.as_str(), LABEL_SOURCE))
             .collect();
         if let Err(e) = state.store.insert_message_labels_batch(&label_refs).await {
@@ -189,11 +201,10 @@ async fn process_session(state: &AppState, session_id: &str) -> anyhow::Result<u
     }
 
     // 8. Insert turns
-    let inserted = state.store.insert_conversation_turns_batch(
-        session_id,
-        next_idx,
-        &raw_turns,
-    ).await?;
+    let inserted = state
+        .store
+        .insert_conversation_turns_batch(session_id, next_idx, &raw_turns)
+        .await?;
 
     Ok(inserted)
 }
@@ -351,8 +362,11 @@ fn collect_noise_labels(messages: &[ConversationMessage]) -> Vec<(i64, String, S
 /// Quick heuristic: high ratio of non-printable chars in first 500 bytes suggests binary/base64.
 fn is_binary_like(content: &str) -> bool {
     let sample = &content[..content.len().min(500)];
-    if sample.is_empty() { return false; }
-    let non_text = sample.chars()
+    if sample.is_empty() {
+        return false;
+    }
+    let non_text = sample
+        .chars()
         .filter(|c| !c.is_ascii_graphic() && !c.is_whitespace())
         .count();
     (non_text as f64) / (sample.len() as f64) > BINARY_RATIO_THRESHOLD

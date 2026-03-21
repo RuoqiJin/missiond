@@ -1,10 +1,10 @@
 use anyhow::{anyhow, Result};
+use missiond_core::pty::{PTYSpawnOptions, Slot as PTYSlot};
+use missiond_core::types::{AsyncJob, DynamicSlot, Lifecycle, SlotConfig};
+use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use missiond_mcp::tools::{ToolResult, ToolError, error_codes};
-use missiond_core::types::{AsyncJob, DynamicSlot, SlotConfig, Lifecycle};
-use missiond_core::pty::{Slot as PTYSlot, PTYSpawnOptions};
 
 use crate::state::AppState;
 
@@ -61,7 +61,8 @@ struct TemplateConfig {
 }
 
 pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result<ToolResult> {
-    let action = args.get("action")
+    let action = args
+        .get("action")
         .and_then(|v| v.as_str())
         .unwrap_or("list");
 
@@ -71,8 +72,11 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         "extend" => extend_slot(state, &args).await,
         "list" => list_slots(state, &args).await,
         _ => Ok(ToolResult::structured_error(
-            ToolError::new(error_codes::UNKNOWN_ACTION, format!("Unknown action: {}", action))
-                .with_suggestion("Use: create, terminate, extend, list"),
+            ToolError::new(
+                error_codes::UNKNOWN_ACTION,
+                format!("Unknown action: {}", action),
+            )
+            .with_suggestion("Use: create, terminate, extend, list"),
         )),
     }
 }
@@ -80,52 +84,80 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
 async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     let template_name = match args.get("template").and_then(|v| v.as_str()) {
         Some(t) => t,
-        None => return Ok(ToolResult::structured_error(
-            ToolError::new(error_codes::MISSING_PARAM, "'template' is required")
-                .with_suggestion("Available templates: coder, ops, researcher"),
-        )),
+        None => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(error_codes::MISSING_PARAM, "'template' is required")
+                    .with_suggestion("Available templates: coder, ops, researcher"),
+            ))
+        }
     };
 
     let template = match get_template(template_name) {
         Some(t) => t,
-        None => return Ok(ToolResult::structured_error(
-            ToolError::new(error_codes::INVALID_PARAM, format!("Unknown template '{}'", template_name))
+        None => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::INVALID_PARAM,
+                    format!("Unknown template '{}'", template_name),
+                )
                 .with_suggestion("Available templates: coder, ops, researcher"),
-        )),
+            ))
+        }
     };
 
     // Check slot limit
-    let active_count = state.store.count_active_dynamic_slots().await
+    let active_count = state
+        .store
+        .count_active_dynamic_slots()
+        .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
     if active_count >= MAX_DYNAMIC_SLOTS {
         return Ok(ToolResult::structured_error(
-            ToolError::new(error_codes::LIMIT_REACHED, format!(
-                "Dynamic slot limit reached ({}/{})", active_count, MAX_DYNAMIC_SLOTS
-            )).with_suggestion("Terminate existing slots with action=terminate first"),
+            ToolError::new(
+                error_codes::LIMIT_REACHED,
+                format!(
+                    "Dynamic slot limit reached ({}/{})",
+                    active_count, MAX_DYNAMIC_SLOTS
+                ),
+            )
+            .with_suggestion("Terminate existing slots with action=terminate first"),
         ));
     }
 
     // Validate cwd
-    let cwd = args.get("cwd").and_then(|v| v.as_str()).unwrap_or(template.default_cwd);
+    let cwd = args
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .unwrap_or(template.default_cwd);
     let canonical_cwd = match std::fs::canonicalize(cwd) {
         Ok(p) => p.to_string_lossy().to_string(),
-        Err(_) => return Ok(ToolResult::structured_error(
-            ToolError::new(error_codes::INVALID_PARAM, format!("cwd '{}' does not exist or is not accessible", cwd)),
-        )),
+        Err(_) => {
+            return Ok(ToolResult::structured_error(ToolError::new(
+                error_codes::INVALID_PARAM,
+                format!("cwd '{}' does not exist or is not accessible", cwd),
+            )))
+        }
     };
 
     let canonical_path = std::path::Path::new(&canonical_cwd);
-    let cwd_allowed = ALLOWED_CWD_PREFIXES.iter().any(|prefix| canonical_path.starts_with(prefix));
+    let cwd_allowed = ALLOWED_CWD_PREFIXES
+        .iter()
+        .any(|prefix| canonical_path.starts_with(prefix));
     if !cwd_allowed {
         return Ok(ToolResult::structured_error(
-            ToolError::new(error_codes::PERMISSION_DENIED, format!(
-                "cwd '{}' is not under allowed prefixes", cwd
-            )).with_suggestion(format!("Allowed prefixes: {:?}", ALLOWED_CWD_PREFIXES)),
+            ToolError::new(
+                error_codes::PERMISSION_DENIED,
+                format!("cwd '{}' is not under allowed prefixes", cwd),
+            )
+            .with_suggestion(format!("Allowed prefixes: {:?}", ALLOWED_CWD_PREFIXES)),
         ));
     }
 
     // TTL
-    let ttl = args.get("max_ttl").and_then(|v| v.as_i64()).unwrap_or(DEFAULT_TTL_SECS);
+    let ttl = args
+        .get("max_ttl")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(DEFAULT_TTL_SECS);
     let ttl = ttl.min(MAX_TTL_SECS).max(300); // min 5 minutes
 
     let objective = args.get("objective").and_then(|v| v.as_str());
@@ -177,7 +209,10 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     };
 
     // Persist to DB
-    state.store.create_dynamic_slot(&dynamic_slot).await
+    state
+        .store
+        .create_dynamic_slot(&dynamic_slot)
+        .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
     // Register in SlotManager (runtime merge)
@@ -226,8 +261,9 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                 model: slot_config.model.clone(),
                 extra_env: HashMap::new(),
             },
-            slot_config.env.as_ref()
-        ).await;
+            slot_config.env.as_ref(),
+        )
+        .await;
 
         let mut store = state_clone.job_store.write().await;
         if let Some(job) = store.get_mut(&job_id_bg) {
@@ -243,7 +279,11 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                     }));
                 }
                 Err(e) => {
-                    state_clone.store.terminate_dynamic_slot(&slot_id_owned, "spawn_failed").await.ok();
+                    state_clone
+                        .store
+                        .terminate_dynamic_slot(&slot_id_owned, "spawn_failed")
+                        .await
+                        .ok();
                     state_clone.mission.unregister_dynamic_slot(&slot_id_owned);
                     job.fail(format!("Failed to spawn slot: {}", e));
                 }
@@ -251,22 +291,33 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         }
     });
 
-    Ok(ToolResult::job_accepted(&job_id, "mission_compute_slot:create"))
+    Ok(ToolResult::job_accepted(
+        &job_id,
+        "mission_compute_slot:create",
+    ))
 }
 
 async fn terminate_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     let slot_id = match args.get("slot_id").and_then(|v| v.as_str()) {
         Some(id) => id,
-        None => return Ok(ToolResult::structured_error(
-            ToolError::new(error_codes::MISSING_PARAM, "'slot_id' is required"),
-        )),
+        None => {
+            return Ok(ToolResult::structured_error(ToolError::new(
+                error_codes::MISSING_PARAM,
+                "'slot_id' is required",
+            )))
+        }
     };
 
     // Verify it's a dynamic slot
     if !slot_id.starts_with("slot-dyn-") {
         return Ok(ToolResult::structured_error(
-            ToolError::new(error_codes::INVALID_PARAM, "Can only terminate dynamic slots")
-                .with_suggestion("Dynamic slot IDs start with 'slot-dyn-'. Use action=list to see available slots"),
+            ToolError::new(
+                error_codes::INVALID_PARAM,
+                "Can only terminate dynamic slots",
+            )
+            .with_suggestion(
+                "Dynamic slot IDs start with 'slot-dyn-'. Use action=list to see available slots",
+            ),
         ));
     }
 
@@ -274,13 +325,17 @@ async fn terminate_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     let _ = state.pty.kill(slot_id).await;
 
     // Mark terminated in DB
-    let terminated = state.store.terminate_dynamic_slot(slot_id, "user_terminated").await
+    let terminated = state
+        .store
+        .terminate_dynamic_slot(slot_id, "user_terminated")
+        .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
     if !terminated {
-        return Ok(ToolResult::structured_error(
-            ToolError::new(error_codes::NOT_FOUND, format!("Slot '{}' not found or already terminated", slot_id)),
-        ));
+        return Ok(ToolResult::structured_error(ToolError::new(
+            error_codes::NOT_FOUND,
+            format!("Slot '{}' not found or already terminated", slot_id),
+        )));
     }
 
     // Unregister from SlotManager
@@ -296,34 +351,46 @@ async fn terminate_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
 async fn extend_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     let slot_id = match args.get("slot_id").and_then(|v| v.as_str()) {
         Some(id) => id,
-        None => return Ok(ToolResult::structured_error(
-            ToolError::new(error_codes::MISSING_PARAM, "'slot_id' is required"),
-        )),
+        None => {
+            return Ok(ToolResult::structured_error(ToolError::new(
+                error_codes::MISSING_PARAM,
+                "'slot_id' is required",
+            )))
+        }
     };
 
-    let additional = args.get("additional_seconds")
+    let additional = args
+        .get("additional_seconds")
         .and_then(|v| v.as_i64())
         .unwrap_or(3600);
 
     if additional > MAX_EXTEND_SECS {
-        return Ok(ToolResult::structured_error(
-            ToolError::new(error_codes::INVALID_PARAM, format!(
-                "Max extension is {} seconds per request", MAX_EXTEND_SECS
-            )),
-        ));
+        return Ok(ToolResult::structured_error(ToolError::new(
+            error_codes::INVALID_PARAM,
+            format!("Max extension is {} seconds per request", MAX_EXTEND_SECS),
+        )));
     }
 
-    match state.store.extend_dynamic_slot(slot_id, additional).await
-        .map_err(|e| anyhow!("DB error: {}", e))? {
+    match state
+        .store
+        .extend_dynamic_slot(slot_id, additional)
+        .await
+        .map_err(|e| anyhow!("DB error: {}", e))?
+    {
         Some(new_expires) => Ok(ToolResult::json_pretty(&json!({
             "slot_id": slot_id,
             "new_expires_at": new_expires,
             "extended_by_seconds": additional,
         }))),
         None => Ok(ToolResult::structured_error(
-            ToolError::new(error_codes::NOT_FOUND, format!(
-                "Cannot extend '{}': slot not found, not active, or max extensions (2) reached", slot_id
-            )).with_suggestion("Use action=list to check slot status"),
+            ToolError::new(
+                error_codes::NOT_FOUND,
+                format!(
+                    "Cannot extend '{}': slot not found, not active, or max extensions (2) reached",
+                    slot_id
+                ),
+            )
+            .with_suggestion("Use action=list to check slot status"),
         )),
     }
 }
@@ -332,35 +399,44 @@ async fn list_slots(state: &AppState, args: &Value) -> Result<ToolResult> {
     let status_filter = args.get("status").and_then(|v| v.as_str());
 
     // Get dynamic slots from DB
-    let dynamic_slots = state.store.list_dynamic_slots(status_filter).await
+    let dynamic_slots = state
+        .store
+        .list_dynamic_slots(status_filter)
+        .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
     // Get static slots
     let static_slots = state.mission.list_slots();
 
-    let dynamic_entries: Vec<Value> = dynamic_slots.iter().map(|s| {
-        json!({
-            "id": s.id,
-            "source": "dynamic",
-            "template": s.template,
-            "status": s.status,
-            "objective": s.objective,
-            "expires_at": s.expires_at,
-            "extend_count": s.extend_count,
-            "created_at": s.created_at,
-            "termination_reason": s.termination_reason,
+    let dynamic_entries: Vec<Value> = dynamic_slots
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "source": "dynamic",
+                "template": s.template,
+                "status": s.status,
+                "objective": s.objective,
+                "expires_at": s.expires_at,
+                "extend_count": s.extend_count,
+                "created_at": s.created_at,
+                "termination_reason": s.termination_reason,
+            })
         })
-    }).collect();
+        .collect();
 
-    let static_entries: Vec<Value> = static_slots.iter().map(|s| {
-        json!({
-            "id": s.config.id,
-            "source": "static",
-            "role": s.config.role,
-            "status": if s.session_id.is_some() { "running" } else { "stopped" },
-            "lifecycle": format!("{}", s.config.lifecycle.unwrap_or_default()),
+    let static_entries: Vec<Value> = static_slots
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.config.id,
+                "source": "static",
+                "role": s.config.role,
+                "status": if s.session_id.is_some() { "running" } else { "stopped" },
+                "lifecycle": format!("{}", s.config.lifecycle.unwrap_or_default()),
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(ToolResult::json_pretty(&json!({
         "static_slots": static_entries,

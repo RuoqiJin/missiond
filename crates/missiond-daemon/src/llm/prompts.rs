@@ -9,7 +9,7 @@
 //! `reload()` re-reads all files without daemon restart.
 
 use std::sync::RwLock;
-use tracing::{info, debug};
+use tracing::{debug, info};
 
 /// Default prompt values (compiled-in).
 mod defaults {
@@ -176,7 +176,7 @@ detail 采用三段式: {\"trigger\": \"...\", \"conclusion\": \"...\", \"action
 summary: 'deploy-agent OOM 排查：优先看 journalctl 内存趋势而非 systemctl 状态码'
 detail: {\"trigger\": \"deploy-agent 更新后服务异常\", \"conclusion\": \"根因是请求体未限流导致内存泄漏\", \"action\": \"加 body size limit + 内存监控告警\"}";
 
-pub const EXTRACTION_BOARD_PROGRESS: &str = "\
+    pub const EXTRACTION_BOARD_PROGRESS: &str = "\
 你正在为 Board 任务提取进展报告。请分析以下会话摘要，输出严格 JSON。
 
 输出格式（严格 JSON，无 markdown）:
@@ -220,10 +220,22 @@ impl PromptData {
             tier3_footer: load_or_default(&dir, "tier3_footer", defaults::TIER3_FOOTER),
             harvest_template: load_or_default(&dir, "harvest_template", defaults::HARVEST_TEMPLATE),
             help_protocol: load_or_default(&dir, "help_protocol", defaults::HELP_PROTOCOL),
-            extraction_realtime: load_or_default(&dir, "extraction_realtime", defaults::EXTRACTION_REALTIME),
+            extraction_realtime: load_or_default(
+                &dir,
+                "extraction_realtime",
+                defaults::EXTRACTION_REALTIME,
+            ),
             extraction_deep: load_or_default(&dir, "extraction_deep", defaults::EXTRACTION_DEEP),
-            extraction_habits: load_or_default(&dir, "extraction_habits", defaults::EXTRACTION_HABITS),
-            extraction_board_progress: load_or_default(&dir, "extraction_board_progress", defaults::EXTRACTION_BOARD_PROGRESS),
+            extraction_habits: load_or_default(
+                &dir,
+                "extraction_habits",
+                defaults::EXTRACTION_HABITS,
+            ),
+            extraction_board_progress: load_or_default(
+                &dir,
+                "extraction_board_progress",
+                defaults::EXTRACTION_BOARD_PROGRESS,
+            ),
         }
     }
 }
@@ -247,7 +259,9 @@ pub(crate) struct PromptStore {
 impl PromptStore {
     /// Load prompts from files (with const fallbacks).
     pub fn load() -> Self {
-        Self { data: RwLock::new(PromptData::load()) }
+        Self {
+            data: RwLock::new(PromptData::load()),
+        }
     }
 
     /// Re-read all prompt files. Call periodically from autopilot_tick.
@@ -263,30 +277,57 @@ impl PromptStore {
 
     // Accessor methods — all return owned Strings (cheap, prompts are small)
     pub fn tier2_system(&self) -> String {
-        self.data.read().map(|d| d.tier2_system.clone()).unwrap_or_else(|_| defaults::TIER2_SYSTEM.to_string())
+        self.data
+            .read()
+            .map(|d| d.tier2_system.clone())
+            .unwrap_or_else(|_| defaults::TIER2_SYSTEM.to_string())
     }
     pub fn tier3_header(&self) -> String {
-        self.data.read().map(|d| d.tier3_header.clone()).unwrap_or_else(|_| defaults::TIER3_HEADER.to_string())
+        self.data
+            .read()
+            .map(|d| d.tier3_header.clone())
+            .unwrap_or_else(|_| defaults::TIER3_HEADER.to_string())
     }
     pub fn tier3_footer(&self) -> String {
-        self.data.read().map(|d| d.tier3_footer.clone()).unwrap_or_else(|_| defaults::TIER3_FOOTER.to_string())
+        self.data
+            .read()
+            .map(|d| d.tier3_footer.clone())
+            .unwrap_or_else(|_| defaults::TIER3_FOOTER.to_string())
     }
     pub fn harvest_template(&self) -> String {
-        self.data.read().map(|d| d.harvest_template.clone()).unwrap_or_else(|_| defaults::HARVEST_TEMPLATE.to_string())
+        self.data
+            .read()
+            .map(|d| d.harvest_template.clone())
+            .unwrap_or_else(|_| defaults::HARVEST_TEMPLATE.to_string())
     }
     pub fn help_protocol(&self) -> String {
-        self.data.read().map(|d| d.help_protocol.clone()).unwrap_or_else(|_| defaults::HELP_PROTOCOL.to_string())
+        self.data
+            .read()
+            .map(|d| d.help_protocol.clone())
+            .unwrap_or_else(|_| defaults::HELP_PROTOCOL.to_string())
     }
     pub fn extraction_realtime(&self) -> String {
-        self.data.read().map(|d| d.extraction_realtime.clone()).unwrap_or_else(|_| defaults::EXTRACTION_REALTIME.to_string())
+        self.data
+            .read()
+            .map(|d| d.extraction_realtime.clone())
+            .unwrap_or_else(|_| defaults::EXTRACTION_REALTIME.to_string())
     }
     pub fn extraction_deep(&self) -> String {
-        self.data.read().map(|d| d.extraction_deep.clone()).unwrap_or_else(|_| defaults::EXTRACTION_DEEP.to_string())
+        self.data
+            .read()
+            .map(|d| d.extraction_deep.clone())
+            .unwrap_or_else(|_| defaults::EXTRACTION_DEEP.to_string())
     }
     pub fn extraction_habits(&self) -> String {
-        self.data.read().map(|d| d.extraction_habits.clone()).unwrap_or_else(|_| defaults::EXTRACTION_HABITS.to_string())
+        self.data
+            .read()
+            .map(|d| d.extraction_habits.clone())
+            .unwrap_or_else(|_| defaults::EXTRACTION_HABITS.to_string())
     }
     pub fn extraction_board_progress(&self) -> String {
-        self.data.read().map(|d| d.extraction_board_progress.clone()).unwrap_or_else(|_| defaults::EXTRACTION_BOARD_PROGRESS.to_string())
+        self.data
+            .read()
+            .map(|d| d.extraction_board_progress.clone())
+            .unwrap_or_else(|_| defaults::EXTRACTION_BOARD_PROGRESS.to_string())
     }
 }

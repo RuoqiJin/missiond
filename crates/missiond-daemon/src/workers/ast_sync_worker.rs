@@ -59,17 +59,43 @@ pub(crate) async fn run_ast_sync_worker(
 
     while let Some(task) = rx.recv().await {
         match task {
-            AstSyncTask::CommitSync { repo_path, repo_name, old_hash, new_hash } => {
-                let (final_old, final_new) = coalesce_commits(
-                    &mut rx, &repo_path, &repo_name, old_hash, new_hash,
-                ).await;
-                process_commit_sync(store.as_ref(), &repo_path, &repo_name, &final_old, &final_new, &embedding_tx).await;
+            AstSyncTask::CommitSync {
+                repo_path,
+                repo_name,
+                old_hash,
+                new_hash,
+            } => {
+                let (final_old, final_new) =
+                    coalesce_commits(&mut rx, &repo_path, &repo_name, old_hash, new_hash).await;
+                process_commit_sync(
+                    store.as_ref(),
+                    &repo_path,
+                    &repo_name,
+                    &final_old,
+                    &final_new,
+                    &embedding_tx,
+                )
+                .await;
             }
-            AstSyncTask::FullSync { repo_path, repo_name } => {
+            AstSyncTask::FullSync {
+                repo_path,
+                repo_name,
+            } => {
                 process_full_sync(store.as_ref(), &repo_path, &repo_name, &embedding_tx).await;
             }
-            AstSyncTask::FileSync { repo_path, repo_name, file_path } => {
-                process_file_sync(store.as_ref(), &repo_path, &repo_name, &file_path, &embedding_tx).await;
+            AstSyncTask::FileSync {
+                repo_path,
+                repo_name,
+                file_path,
+            } => {
+                process_file_sync(
+                    store.as_ref(),
+                    &repo_path,
+                    &repo_name,
+                    &file_path,
+                    &embedding_tx,
+                )
+                .await;
             }
         }
     }
@@ -88,9 +114,12 @@ async fn coalesce_commits(
 ) -> (String, String) {
     loop {
         match tokio::time::timeout(COALESCE_WINDOW, rx.recv()).await {
-            Ok(Some(AstSyncTask::CommitSync { repo_path: rp, old_hash, new_hash, .. }))
-                if rp == repo_path =>
-            {
+            Ok(Some(AstSyncTask::CommitSync {
+                repo_path: rp,
+                old_hash,
+                new_hash,
+                ..
+            })) if rp == repo_path => {
                 // Same repo — extend the range
                 // Keep oldest_old (first event), update newest_new (latest)
                 newest_new = new_hash;
@@ -104,8 +133,10 @@ async fn coalesce_commits(
                 // Different task type or different repo — we can't coalesce, but we
                 // shouldn't lose it. Unfortunately mpsc doesn't support push-back.
                 // For now, log and drop. FullSync will catch up.
-                warn!("AST worker: dropped non-coalesceable task during coalesce window: {:?}",
-                    std::mem::discriminant(&other_task));
+                warn!(
+                    "AST worker: dropped non-coalesceable task during coalesce window: {:?}",
+                    std::mem::discriminant(&other_task)
+                );
                 break;
             }
             Ok(None) => break, // Channel closed
@@ -141,12 +172,14 @@ async fn process_commit_sync(
 
     for (status, file_path) in &changed {
         match status.as_str() {
-            "D" => {
-                match store.ast_delete_file(repo_name, file_path).await {
-                    Ok(n) => if n > 0 { debug!(file = %file_path, deleted = n, "AST: deleted nodes"); },
-                    Err(e) => warn!(file = %file_path, err = %e, "AST: delete failed"),
+            "D" => match store.ast_delete_file(repo_name, file_path).await {
+                Ok(n) => {
+                    if n > 0 {
+                        debug!(file = %file_path, deleted = n, "AST: deleted nodes");
+                    }
                 }
-            }
+                Err(e) => warn!(file = %file_path, err = %e, "AST: delete failed"),
+            },
             "A" | "M" | "R" | "C" | "T" => {
                 let ids = sync_single_file(store, repo_path, repo_name, file_path, new_hash).await;
                 node_ids.extend(ids);
@@ -263,15 +296,21 @@ async fn sync_single_file(
     let nodes: Vec<missiond_core::ast::CodeNode> = Vec::new();
 
     if nodes.is_empty() {
-        let _ = store.ast_sync_file(repo_name, file_path, commit_hash, &[]).await;
+        let _ = store
+            .ast_sync_file(repo_name, file_path, commit_hash, &[])
+            .await;
         return Vec::new();
     }
 
-    let ids: Vec<String> = nodes.iter()
+    let ids: Vec<String> = nodes
+        .iter()
         .map(|n| n.build_id(repo_name, file_path))
         .collect();
 
-    match store.ast_sync_file(repo_name, file_path, commit_hash, &nodes).await {
+    match store
+        .ast_sync_file(repo_name, file_path, commit_hash, &nodes)
+        .await
+    {
         Ok(result) => {
             debug!(
                 file = %file_path,
@@ -293,7 +332,9 @@ async fn sync_single_file(
             for beacon_name in &node.beacons {
                 match store.beacon_ensure(beacon_name).await {
                     Ok(beacon_id) => {
-                        let _ = store.beacon_node_upsert(&beacon_id, repo_name, file_path, &node.name, None).await;
+                        let _ = store
+                            .beacon_node_upsert(&beacon_id, repo_name, file_path, &node.name, None)
+                            .await;
                     }
                     Err(e) => {
                         debug!(beacon = %beacon_name, err = %e, "Beacon: ensure failed");
@@ -315,9 +356,7 @@ async fn sync_single_file(
 
 /// Get files changed between two commits, filtered to code extensions.
 fn git_diff_files(repo: &Path, old_hash: &str, new_hash: &str) -> Vec<(String, String)> {
-    let ext_filter: Vec<String> = CODE_EXTENSIONS.iter()
-        .map(|e| format!("*.{}", e))
-        .collect();
+    let ext_filter: Vec<String> = CODE_EXTENSIONS.iter().map(|e| format!("*.{}", e)).collect();
 
     let mut args = vec![
         "diff-tree".to_string(),
@@ -361,14 +400,9 @@ fn git_diff_files(repo: &Path, old_hash: &str, new_hash: &str) -> Vec<(String, S
 
 /// List all tracked code files in the repo.
 fn git_ls_code_files(repo: &Path) -> Vec<String> {
-    let ext_filter: Vec<String> = CODE_EXTENSIONS.iter()
-        .map(|e| format!("*.{}", e))
-        .collect();
+    let ext_filter: Vec<String> = CODE_EXTENSIONS.iter().map(|e| format!("*.{}", e)).collect();
 
-    let mut args = vec![
-        "ls-files".to_string(),
-        "--".to_string(),
-    ];
+    let mut args = vec!["ls-files".to_string(), "--".to_string()];
     args.extend(ext_filter);
 
     let output = match std::process::Command::new("git")
@@ -393,9 +427,15 @@ fn git_head_hash(repo: &Path) -> Option<String> {
         .current_dir(repo)
         .output()
         .ok()?;
-    if !output.status.success() { return None; }
+    if !output.status.success() {
+        return None;
+    }
     let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if hash.is_empty() { None } else { Some(hash) }
+    if hash.is_empty() {
+        None
+    } else {
+        Some(hash)
+    }
 }
 
 /// Get uncommitted changed files via `git status --porcelain`.
@@ -413,7 +453,9 @@ pub(crate) fn git_status_changed_files(repo: &Path) -> Vec<String> {
         .lines()
         .filter_map(|line| {
             // Format: "XY filename" or "XY old -> new" for renames
-            if line.len() < 4 { return None; }
+            if line.len() < 4 {
+                return None;
+            }
             let file = line[3..].trim();
             // Handle renames: "R  old -> new"
             let file = file.rsplit(" -> ").next().unwrap_or(file);
@@ -438,7 +480,10 @@ fn trigger_embedding(
         return;
     }
     debug!(count = node_ids.len(), "AST: triggering embedding batch");
-    if embedding_tx.try_send(crate::state::EmbeddingTask::ProcessAstBatch(node_ids)).is_err() {
+    if embedding_tx
+        .try_send(crate::state::EmbeddingTask::ProcessAstBatch(node_ids))
+        .is_err()
+    {
         debug!("AST: embedding channel full, backfill will catch up");
     }
 }

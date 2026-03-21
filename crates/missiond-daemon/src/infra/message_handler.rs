@@ -8,8 +8,8 @@ use std::collections::HashSet;
 use tracing::{error, info, warn};
 
 use crate::event_bus::{DaemonEvent, TraceContext};
-use crate::state::AppState;
 use crate::events_sync;
+use crate::state::AppState;
 
 // ════════════════════════════════════════════════════════════════════════════
 // Orchestrator: coordinates the three layers
@@ -33,23 +33,44 @@ pub(crate) async fn handle_new_messages(
 
     // ── Layer 1: Ingestor ──
     let ingest_result = ingest(
-        state, &session_id, &project_path, &jsonl_path, &messages,
-        source, slot_id, parent_session_id,
-        is_slot_session, &route.conversation_type,
-    ).await;
-    let IngestResult { inserted_ids, inserted_uuids, uuid_to_id } = match ingest_result {
+        state,
+        &session_id,
+        &project_path,
+        &jsonl_path,
+        &messages,
+        source,
+        slot_id,
+        parent_session_id,
+        is_slot_session,
+        &route.conversation_type,
+    )
+    .await;
+    let IngestResult {
+        inserted_ids,
+        inserted_uuids,
+        uuid_to_id,
+        semantic_roles,
+    } = match ingest_result {
         Some(r) if !r.inserted_ids.is_empty() => r,
         _ => return, // Nothing inserted, nothing to classify/emit
     };
 
     // ── Layer 2: Classifier (audit + labels) ──
-    classify(state, &session_id, &messages, &inserted_ids).await;
+    classify(state, &session_id, &messages, &inserted_ids, &semantic_roles).await;
 
     // ── Layer 3: Emitter (timeline events + token ledger) ──
     emit(
-        state, &session_id, &inserted_ids, &inserted_uuids, &uuid_to_id, &messages,
-        is_pty, slot_id, parent_session_id,
-    ).await;
+        state,
+        &session_id,
+        &inserted_ids,
+        &inserted_uuids,
+        &uuid_to_id,
+        &messages,
+        is_pty,
+        slot_id,
+        parent_session_id,
+    )
+    .await;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -65,6 +86,8 @@ struct IngestResult {
     inserted_uuids: HashSet<String>,
     /// UUID → DB ID mapping for token_usage_ledger message_id dedup.
     uuid_to_id: std::collections::HashMap<String, i64>,
+    /// Semantic roles mapped by message UUID
+    semantic_roles: std::collections::HashMap<String, String>,
 }
 
 async fn ingest(
@@ -80,7 +103,11 @@ async fn ingest(
     conversation_type: &str,
 ) -> Option<IngestResult> {
     // Ensure conversation exists; re-activate if completed
-    let existing_conv = state.store.get_conversation(session_id).await.unwrap_or(None);
+    let existing_conv = state
+        .store
+        .get_conversation(session_id)
+        .await
+        .unwrap_or(None);
     if let Some(ref conv) = existing_conv {
         if conv.status == "completed" {
             if let Err(e) = state.store.reactivate_conversation(session_id).await {
@@ -94,7 +121,11 @@ async fn ingest(
         let first = messages.first();
         let conv = missiond_core::types::Conversation {
             id: session_id.to_string(),
-            project: Some(first.map(|m| m.cwd.clone()).unwrap_or_else(|| project_path.to_string())),
+            project: Some(
+                first
+                    .map(|m| m.cwd.clone())
+                    .unwrap_or_else(|| project_path.to_string()),
+            ),
             slot_id: slot_id.map(|s| s.to_string()),
             source: source.to_string(),
             model: first.and_then(|m| m.message.model.clone()),
@@ -131,15 +162,23 @@ async fn ingest(
 
     // Build message batch with storage-layer metadata
     let mut batch: Vec<missiond_core::types::ConversationMessage> = Vec::new();
+    let mut semantic_roles = std::collections::HashMap::new();
     for msg in messages {
         let text_content = events_sync::extract_text_content(&msg.message.content);
-        let content_types: Vec<&str> = msg.message.content.as_array()
-            .map(|arr| arr.iter()
-                .filter_map(|b| b.get("type").and_then(|t| t.as_str()))
-                .collect())
+        let content_types: Vec<&str> = msg
+            .message
+            .content
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|b| b.get("type").and_then(|t| t.as_str()))
+                    .collect()
+            })
             .unwrap_or_default();
-        let is_tool_result = !content_types.is_empty() && content_types.iter().all(|t| *t == "tool_result");
-        let is_thinking = !content_types.is_empty() && content_types.iter().all(|t| *t == "thinking");
+        let is_tool_result =
+            !content_types.is_empty() && content_types.iter().all(|t| *t == "tool_result");
+        let is_thinking =
+            !content_types.is_empty() && content_types.iter().all(|t| *t == "thinking");
 
         // Keep tool_result and thinking messages even if content extraction is empty
         if text_content.is_empty() && !is_tool_result {
@@ -151,20 +190,27 @@ async fn ingest(
             text_content
         };
 
-        // Role mapping (will also be stored as label in Layer 2)
-        let role = if is_tool_result {
-            "tool_result".to_string()
+        // Semantic role mapping (will be stored as label in Layer 2)
+        let semantic_role = if is_tool_result {
+            Some("tool_result".to_string())
         } else if is_thinking {
-            "thinking".to_string()
-        } else if msg.message.role == "user" && is_slot_session {
-            "system".to_string()
-        } else if msg.message.role == "user" && parent_session_id.is_some() && session_id.starts_with("agent-") {
-            "agent_user".to_string()
+            Some("thinking".to_string())
+        } else if msg.message.role == "user" && is_slot_session && conversation_type != "jarvis" {
+            Some("system".to_string())
+        } else if msg.message.role == "user"
+            && parent_session_id.is_some()
+            && session_id.starts_with("agent-")
+        {
+            Some("agent_user".to_string())
         } else if msg.message.role == "user" && is_compact_summary(state, session_id, msg).await {
-            "compact_summary".to_string()
+            Some("compact_summary".to_string())
         } else {
-            msg.message.role.clone()
+            None
         };
+        
+        if let Some(sr) = semantic_role {
+            semantic_roles.insert(msg.uuid.clone(), sr);
+        }
 
         let raw_content = events_sync::sanitize_raw_content(&msg.message.content);
         let tool_name = events_sync::extract_tool_names_csv(&msg.message.content);
@@ -173,18 +219,28 @@ async fn ingest(
         let has_image = content_types.iter().any(|t| *t == "image");
         let has_tool_use = content_types.iter().any(|t| *t == "tool_use");
         let has_tool_result_flag = content_types.iter().any(|t| *t == "tool_result");
-        let content_types_json = if content_types.is_empty() { None } else {
+        let content_types_json = if content_types.is_empty() {
+            None
+        } else {
             Some(serde_json::to_string(&content_types).unwrap_or_default())
         };
-        let token_count = msg.message.usage.as_ref().map(|u| {
-            u.input_tokens + u.output_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens
-        }).filter(|&t| t > 0);
+        let token_count = msg
+            .message
+            .usage
+            .as_ref()
+            .map(|u| {
+                u.input_tokens
+                    + u.output_tokens
+                    + u.cache_creation_input_tokens
+                    + u.cache_read_input_tokens
+            })
+            .filter(|&t| t > 0);
 
         batch.push(missiond_core::types::ConversationMessage {
             id: 0,
             session_id: session_id.to_string(),
             raw_role: Some(msg.message.role.clone()),
-            role,
+            role: msg.message.role.clone(),
             content,
             raw_content,
             message_uuid: Some(msg.uuid.clone()),
@@ -220,7 +276,12 @@ async fn ingest(
                 }
             }
 
-            Some(IngestResult { inserted_ids, inserted_uuids, uuid_to_id })
+            Some(IngestResult {
+                inserted_ids,
+                inserted_uuids,
+                uuid_to_id,
+                semantic_roles,
+            })
         }
         Err(e) => {
             error!(session = %session_id, error = %e, "Failed to insert conversation messages");
@@ -239,6 +300,7 @@ async fn classify(
     session_id: &str,
     messages: &[missiond_core::CCMessageLine],
     inserted_ids: &[i64],
+    semantic_roles: &std::collections::HashMap<String, String>,
 ) {
     // ── Audit: extract tool_use/tool_result into conversation_tool_calls ──
     let mut tool_calls = Vec::new();
@@ -268,19 +330,23 @@ async fn classify(
         }
     }
     for (tool_use_id, summary, raw, status) in &tool_results {
-        if let Err(e) = state.store.update_tool_call_output(tool_use_id, summary, raw, status).await {
+        if let Err(e) = state
+            .store
+            .update_tool_call_output(tool_use_id, summary, raw, status)
+            .await
+        {
             warn!(tool_use_id, error = %e, "Failed to update tool call output");
         }
     }
 
     // ── Rule-based labels (synchronous, no LLM) ──
-    apply_rule_labels(state, inserted_ids).await;
+    apply_rule_labels(state, inserted_ids, semantic_roles).await;
 }
 
 /// Apply rule-based labels to newly inserted messages (single batch write).
 /// Labels: role_mapped, has_code_change, has_mcp_call, has_tool_use, has_tool_result, has_image,
 ///         gemini_chat (send/receive), gemini_channel (apikey/google)
-async fn apply_rule_labels(state: &AppState, inserted_ids: &[i64]) {
+async fn apply_rule_labels(state: &AppState, inserted_ids: &[i64], semantic_roles: &std::collections::HashMap<String, String>) {
     // Collect all labels first, then flush as a single batch (avoids N+1 auto-commit fsync).
     let mut role_labels: Vec<(i64, String)> = Vec::new();
     let mut flag_labels: Vec<(i64, &'static str, &'static str)> = Vec::new();
@@ -291,6 +357,12 @@ async fn apply_rule_labels(state: &AppState, inserted_ids: &[i64]) {
             Ok(Some(m)) => m,
             _ => continue,
         };
+
+        if let Some(uuid) = &msg.message_uuid {
+            if let Some(semantic_role) = semantic_roles.get(uuid) {
+                string_labels.push((msg_id, "semantic_role", semantic_role.clone()));
+            }
+        }
 
         if let Some(ref raw_role) = msg.raw_role {
             if raw_role != &msg.role {
@@ -318,15 +390,20 @@ async fn apply_rule_labels(state: &AppState, inserted_ids: &[i64]) {
             }
         }
 
-        if msg.has_tool_result { flag_labels.push((msg_id, "has_tool_result", "true")); }
-        if msg.has_tool_use   { flag_labels.push((msg_id, "has_tool_use", "true")); }
-        if msg.has_image      { flag_labels.push((msg_id, "has_image", "true")); }
+        if msg.has_tool_result {
+            flag_labels.push((msg_id, "has_tool_result", "true"));
+        }
+        if msg.has_tool_use {
+            flag_labels.push((msg_id, "has_tool_use", "true"));
+        }
+        if msg.has_image {
+            flag_labels.push((msg_id, "has_image", "true"));
+        }
     }
 
     // Build batch: Vec<(msg_id, label, value, source)>
-    let mut batch: Vec<(i64, &str, String, &str)> = Vec::with_capacity(
-        role_labels.len() + flag_labels.len() + string_labels.len()
-    );
+    let mut batch: Vec<(i64, &str, String, &str)> =
+        Vec::with_capacity(role_labels.len() + flag_labels.len() + string_labels.len());
     for (msg_id, role) in &role_labels {
         batch.push((*msg_id, "role_mapped", role.clone(), "rule"));
     }
@@ -339,7 +416,8 @@ async fn apply_rule_labels(state: &AppState, inserted_ids: &[i64]) {
 
     if !batch.is_empty() {
         // Convert to borrowed tuple slice for label_set_batch
-        let refs: Vec<(i64, &str, &str, &str)> = batch.iter()
+        let refs: Vec<(i64, &str, &str, &str)> = batch
+            .iter()
             .map(|(id, l, v, s)| (*id, *l, v.as_str(), *s))
             .collect();
         match state.store.label_set_batch(&refs).await {
@@ -362,12 +440,13 @@ fn extract_gemini_channel(raw_content: &Option<String>) -> String {
         input: Option<serde_json::Value>,
     }
 
-    raw_content.as_ref()
+    raw_content
+        .as_ref()
         .and_then(|c| serde_json::from_str::<Vec<ContentBlock>>(c).ok())
         .and_then(|blocks| {
-            blocks.iter().find_map(|b| {
-                b.input.as_ref()?.get("channel")?.as_str().map(String::from)
-            })
+            blocks
+                .iter()
+                .find_map(|b| b.input.as_ref()?.get("channel")?.as_str().map(String::from))
         })
         .unwrap_or_else(|| "google".to_string())
 }
@@ -395,16 +474,21 @@ async fn emit(
             } else {
                 matches!(db_msg.role.as_str(), "user" | "assistant" | "thinking")
             };
-            if !emit_role { continue; }
+            if !emit_role {
+                continue;
+            }
 
-            let orig_msg = messages.iter()
+            let orig_msg = messages
+                .iter()
                 .find(|m| db_msg.message_uuid.as_deref() == Some(&m.uuid));
 
             let preview = if db_msg.role == "thinking" {
                 let text = &db_msg.content;
                 if text.len() > 200 {
                     let mut end = 200;
-                    while end > 0 && !text.is_char_boundary(end) { end -= 1; }
+                    while end > 0 && !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
                     format!("{}...", &text[..end])
                 } else {
                     text.clone()
@@ -417,11 +501,15 @@ async fn emit(
                     let tool_names = orig_msg
                         .map(|m| events_sync::extract_tool_names(&m.message.content))
                         .unwrap_or_default();
-                    if tool_names.is_empty() { continue; }
+                    if tool_names.is_empty() {
+                        continue;
+                    }
                     format!("[{}]", tool_names.join(", "))
                 } else if visible_text.len() > 200 {
                     let mut end = 200;
-                    while end > 0 && !visible_text.is_char_boundary(end) { end -= 1; }
+                    while end > 0 && !visible_text.is_char_boundary(end) {
+                        end -= 1;
+                    }
                     format!("{}...", &visible_text[..end])
                 } else {
                     visible_text
@@ -431,7 +519,8 @@ async fn emit(
             let content_chars = db_msg.content.len();
             // Use deterministic span_id based on message_uuid so that
             // retries/replays produce the same span_id (enables future UNIQUE dedup).
-            let msg_span_id = db_msg.message_uuid
+            let msg_span_id = db_msg
+                .message_uuid
                 .clone()
                 .unwrap_or_else(|| format!("msg-{}", msg_id));
             state.event_bus.publish_traced(
@@ -451,17 +540,25 @@ async fn emit(
                 },
             );
             if db_msg.role == "assistant" {
-                state.last_msg_span.lock().unwrap()
+                state
+                    .last_msg_span
+                    .lock()
+                    .unwrap()
                     .insert(session_id.to_string(), msg_span_id);
             }
             // Real-time message-level embedding: pre-filter before clone (v2 hot-path optimization)
-            if !crate::workers::embedding_worker::should_skip_fast(&db_msg.role, db_msg.content.len()) {
-                let _ = state.embedding_tx.try_send(crate::state::EmbeddingTask::ProcessMessage {
-                    message_id: msg_id,
-                    session_id: session_id.to_string(),
-                    role: db_msg.role.clone(),
-                    content: db_msg.content.clone(),
-                });
+            if !crate::workers::embedding_worker::should_skip_fast(
+                &db_msg.role,
+                db_msg.content.len(),
+            ) {
+                let _ = state
+                    .embedding_tx
+                    .try_send(crate::state::EmbeddingTask::ProcessMessage {
+                        message_id: msg_id,
+                        session_id: session_id.to_string(),
+                        role: db_msg.role.clone(),
+                        content: db_msg.content.clone(),
+                    });
             }
             if content_chars > 300 {
                 state.briefing_notify.notify_one();
@@ -473,7 +570,8 @@ async fn emit(
     // This prevents duplicate tool_completed events and token_usage records
     // when a batch contains a mix of new and already-seen messages (e.g., after
     // reconciliation or watcher cursor loss).
-    let new_messages: Vec<&missiond_core::CCMessageLine> = messages.iter()
+    let new_messages: Vec<&missiond_core::CCMessageLine> = messages
+        .iter()
         .filter(|m| inserted_uuids.contains(&m.uuid))
         .collect();
 
@@ -495,7 +593,9 @@ async fn emit_tool_completions(
     let mut tool_results = Vec::new();
     for msg in messages {
         if msg.message.role == "user" {
-            tool_results.extend(events_sync::extract_tool_results_from_user(&msg.message.content));
+            tool_results.extend(events_sync::extract_tool_results_from_user(
+                &msg.message.content,
+            ));
         }
     }
     for (tool_use_id, summary, _raw, status) in &tool_results {
@@ -508,7 +608,9 @@ async fn emit_tool_completions(
                     let s = format!("{}: {}", tc.tool_name, summary);
                     if s.len() > 200 {
                         let mut end = 200;
-                        while end > 0 && !s.is_char_boundary(end) { end -= 1; }
+                        while end > 0 && !s.is_char_boundary(end) {
+                            end -= 1;
+                        }
                         format!("{}...", &s[..end])
                     } else {
                         s
@@ -550,24 +652,30 @@ async fn emit_token_usage(
     };
     for msg in messages {
         if let Some(ref usage) = msg.message.usage {
-            let total = usage.input_tokens + usage.output_tokens
-                + usage.cache_creation_input_tokens + usage.cache_read_input_tokens;
+            let total = usage.input_tokens
+                + usage.output_tokens
+                + usage.cache_creation_input_tokens
+                + usage.cache_read_input_tokens;
             if total == 0 {
                 continue;
             }
             // Look up DB message_id via uuid→id mapping (built in ingest)
             let db_msg_id = uuid_to_id.get(&msg.uuid).copied();
-            if let Err(e) = state.store.insert_token_usage(
-                session_id,
-                slot_id,
-                slot_task_id.as_deref(),
-                msg.message.model.as_deref(),
-                usage.input_tokens,
-                usage.cache_creation_input_tokens,
-                usage.cache_read_input_tokens,
-                usage.output_tokens,
-                db_msg_id,
-            ).await {
+            if let Err(e) = state
+                .store
+                .insert_token_usage(
+                    session_id,
+                    slot_id,
+                    slot_task_id.as_deref(),
+                    msg.message.model.as_deref(),
+                    usage.input_tokens,
+                    usage.cache_creation_input_tokens,
+                    usage.cache_read_input_tokens,
+                    usage.output_tokens,
+                    db_msg_id,
+                )
+                .await
+            {
                 warn!(session = %session_id, error = %e, "Failed to insert token usage");
             }
         }
@@ -587,14 +695,26 @@ pub(crate) async fn handle_pty_text_complete(
 ) {
     // If this slot has a captured JSONL session UUID, JSONL provides richer data.
     // Skip inferior PTY TextComplete logging to avoid dual-write.
-    if state.store.get_slot_session(&slot_id).await.unwrap_or(None).is_some() {
+    if state
+        .store
+        .get_slot_session(&slot_id)
+        .await
+        .unwrap_or(None)
+        .is_some()
+    {
         return;
     }
 
     let session_id = format!("pty-{}", slot_id);
 
     // Ensure conversation exists for this PTY session
-    if state.store.get_conversation(&session_id).await.unwrap_or(None).is_none() {
+    if state
+        .store
+        .get_conversation(&session_id)
+        .await
+        .unwrap_or(None)
+        .is_none()
+    {
         let ts = chrono::DateTime::from_timestamp(timestamp, 0)
             .map(|dt| dt.to_rfc3339())
             .unwrap_or_else(|| timestamp.to_string());
@@ -617,7 +737,10 @@ pub(crate) async fn handle_pty_text_complete(
             analysis_retries: 0,
             deep_analyzed_message_id: 0,
             chat_type: None,
-            conversation_type: missiond_core::db::derive_conversation_type(Some(&slot_id), &session_id),
+            conversation_type: missiond_core::db::derive_conversation_type(
+                Some(&slot_id),
+                &session_id,
+            ),
             updated_at: None,
             llm_summary: None,
             embedding_provider: None,
@@ -689,7 +812,11 @@ async fn is_compact_summary(
 
     // Text matched — warn if compact_boundary event is missing (race condition or data gap)
     let has_boundary = if let Some(uuid) = msg.parent_uuid.as_ref() {
-        state.store.is_compact_boundary_event(session_id, uuid).await.unwrap_or(false)
+        state
+            .store
+            .is_compact_boundary_event(session_id, uuid)
+            .await
+            .unwrap_or(false)
     } else {
         false
     };

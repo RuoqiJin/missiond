@@ -1,6 +1,6 @@
 use anyhow::Result;
-use serde_json::Value;
 use missiond_mcp::tools::ToolResult;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 use crate::state::AppState;
@@ -20,17 +20,19 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 // ── sys_config: structured config read/patch ──
 
 async fn sys_config(state: &AppState, args: Value) -> Result<ToolResult> {
-    let action = args.get("action")
-        .and_then(|v| v.as_str())
-        .unwrap_or("get");
+    let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("get");
 
     match action {
         "get" => sys_config_get(args).await,
         "patch" => sys_config_patch(state, args).await,
-        "list" => {
-            Ok(ToolResult::text(format!("Available config files: {}", ALLOWED_CONFIGS.join(", "))))
-        }
-        _ => Ok(ToolResult::error(format!("Unknown sys_config action: {}. Use: get, patch, list", action))),
+        "list" => Ok(ToolResult::text(format!(
+            "Available config files: {}",
+            ALLOWED_CONFIGS.join(", ")
+        ))),
+        _ => Ok(ToolResult::error(format!(
+            "Unknown sys_config action: {}. Use: get, patch, list",
+            action
+        ))),
     }
 }
 
@@ -54,7 +56,8 @@ fn resolve_config_path(file: &str) -> std::result::Result<PathBuf, String> {
 }
 
 async fn sys_config_get(args: Value) -> Result<ToolResult> {
-    let file = args.get("file")
+    let file = args
+        .get("file")
         .and_then(|v| v.as_str())
         .unwrap_or("slots.yaml");
 
@@ -65,7 +68,13 @@ async fn sys_config_get(args: Value) -> Result<ToolResult> {
 
     let content = match tokio::fs::read_to_string(&path).await {
         Ok(c) => c,
-        Err(e) => return Ok(ToolResult::error(format!("Cannot read {}: {}", path.display(), e))),
+        Err(e) => {
+            return Ok(ToolResult::error(format!(
+                "Cannot read {}: {}",
+                path.display(),
+                e
+            )))
+        }
     };
 
     // Parse YAML → JSON for structured access
@@ -74,8 +83,7 @@ async fn sys_config_get(args: Value) -> Result<ToolResult> {
         Err(e) => return Ok(ToolResult::error(format!("YAML parse error: {}", e))),
     };
 
-    let json_value: Value = serde_json::to_value(&yaml_value)
-        .unwrap_or(Value::String(content));
+    let json_value: Value = serde_json::to_value(&yaml_value).unwrap_or(Value::String(content));
 
     Ok(ToolResult::json_pretty(&json_value))
 }
@@ -87,7 +95,11 @@ async fn sys_config_patch(state: &AppState, args: Value) -> Result<ToolResult> {
     };
     let pointer = match args.get("path").and_then(|v| v.as_str()) {
         Some(p) => p,
-        None => return Ok(ToolResult::error("'path' (JSON Pointer, e.g. /slots/0/description) is required")),
+        None => {
+            return Ok(ToolResult::error(
+                "'path' (JSON Pointer, e.g. /slots/0/description) is required",
+            ))
+        }
     };
     let new_value = match args.get("value") {
         Some(v) => v.clone(),
@@ -102,7 +114,8 @@ async fn sys_config_patch(state: &AppState, args: Value) -> Result<ToolResult> {
     // Acquire per-file lock to prevent concurrent TOCTOU races
     let file_lock = {
         let mut locks = state.config_file_locks.lock().await;
-        locks.entry(file.to_string())
+        locks
+            .entry(file.to_string())
             .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
             .clone()
     };
@@ -111,7 +124,13 @@ async fn sys_config_patch(state: &AppState, args: Value) -> Result<ToolResult> {
     // Read current content
     let content = match tokio::fs::read_to_string(&path).await {
         Ok(c) => c,
-        Err(e) => return Ok(ToolResult::error(format!("Cannot read {}: {}", path.display(), e))),
+        Err(e) => {
+            return Ok(ToolResult::error(format!(
+                "Cannot read {}: {}",
+                path.display(),
+                e
+            )))
+        }
     };
 
     // Parse YAML → JSON, apply patch, serialize back
@@ -128,19 +147,33 @@ async fn sys_config_patch(state: &AppState, args: Value) -> Result<ToolResult> {
     // Apply JSON Pointer patch
     let target = match json_doc.pointer_mut(pointer) {
         Some(t) => t,
-        None => return Ok(ToolResult::error(format!("JSON Pointer '{}' not found in {}", pointer, file))),
+        None => {
+            return Ok(ToolResult::error(format!(
+                "JSON Pointer '{}' not found in {}",
+                pointer, file
+            )))
+        }
     };
     *target = new_value.clone();
 
     // Serialize JSON back to YAML
     let new_yaml = match serde_yaml::to_string(&json_doc) {
         Ok(y) => y,
-        Err(e) => return Ok(ToolResult::error(format!("JSON→YAML serialization error: {}", e))),
+        Err(e) => {
+            return Ok(ToolResult::error(format!(
+                "JSON→YAML serialization error: {}",
+                e
+            )))
+        }
     };
 
     // Write back
     if let Err(e) = tokio::fs::write(&path, &new_yaml).await {
-        return Ok(ToolResult::error(format!("Cannot write {}: {}", path.display(), e)));
+        return Ok(ToolResult::error(format!(
+            "Cannot write {}: {}",
+            path.display(),
+            e
+        )));
     }
 
     // Trigger hot-reload (fsnotify will pick it up, but also signal directly)
@@ -165,14 +198,14 @@ async fn sys_config_patch(state: &AppState, args: Value) -> Result<ToolResult> {
 // ── sys_logs: daemon log introspection ──
 
 async fn sys_logs(args: Value) -> Result<ToolResult> {
-    let lines = args.get("lines")
+    let lines = args
+        .get("lines")
         .and_then(|v| v.as_u64())
         .unwrap_or(50)
         .min(500) as usize;
-    let level = args.get("level")
-        .and_then(|v| v.as_str())
-        .unwrap_or("all");
-    let grep = args.get("grep")
+    let level = args.get("level").and_then(|v| v.as_str()).unwrap_or("all");
+    let grep = args
+        .get("grep")
         .and_then(|v| v.as_str())
         .map(|s| s.to_lowercase());
 
@@ -184,38 +217,66 @@ async fn sys_logs(args: Value) -> Result<ToolResult> {
 
     let log_path = match find_latest_log(&log_dir) {
         Some(p) => p,
-        None => return Ok(ToolResult::error(format!("No log files found in {}", log_dir))),
+        None => {
+            return Ok(ToolResult::error(format!(
+                "No log files found in {}",
+                log_dir
+            )))
+        }
     };
 
     let content = match tokio::fs::read_to_string(&log_path).await {
         Ok(c) => c,
-        Err(e) => return Ok(ToolResult::error(format!("Cannot read log file {}: {}", log_path, e))),
+        Err(e) => {
+            return Ok(ToolResult::error(format!(
+                "Cannot read log file {}: {}",
+                log_path, e
+            )))
+        }
     };
 
     let all_lines: Vec<&str> = content.lines().collect();
     let tail_start = all_lines.len().saturating_sub(lines * 3);
     let tail = &all_lines[tail_start..];
 
-    let filtered: Vec<&str> = tail.iter().copied().filter(|line| {
-        let level_ok = match level {
-            "error" => line.contains("ERROR") || line.contains(" error ") || line.contains("error:"),
-            "warn" => line.contains("WARN") || line.contains("ERROR")
-                || line.contains(" warn ") || line.contains(" error "),
-            _ => true,
-        };
-        let grep_ok = match &grep {
-            Some(kw) => line.to_lowercase().contains(kw),
-            None => true,
-        };
-        level_ok && grep_ok
-    }).collect();
+    let filtered: Vec<&str> = tail
+        .iter()
+        .copied()
+        .filter(|line| {
+            let level_ok = match level {
+                "error" => {
+                    line.contains("ERROR") || line.contains(" error ") || line.contains("error:")
+                }
+                "warn" => {
+                    line.contains("WARN")
+                        || line.contains("ERROR")
+                        || line.contains(" warn ")
+                        || line.contains(" error ")
+                }
+                _ => true,
+            };
+            let grep_ok = match &grep {
+                Some(kw) => line.to_lowercase().contains(kw),
+                None => true,
+            };
+            level_ok && grep_ok
+        })
+        .collect();
 
-    let result: Vec<&str> = filtered.into_iter()
-        .rev().take(lines).collect::<Vec<_>>()
-        .into_iter().rev().collect();
+    let result: Vec<&str> = filtered
+        .into_iter()
+        .rev()
+        .take(lines)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
 
     if result.is_empty() {
-        Ok(ToolResult::text(format!("No log entries found (file: {}, level: {}, lines: {})", log_path, level, lines)))
+        Ok(ToolResult::text(format!(
+            "No log entries found (file: {}, level: {}, lines: {})",
+            log_path, level, lines
+        )))
     } else {
         Ok(ToolResult::text(format!(
             "[{} lines from {}]\n{}",
@@ -235,7 +296,8 @@ async fn daemon_update(args: Value) -> Result<ToolResult> {
     use std::process::Command;
     use tracing::info;
 
-    let skip_build = args.get("skip_build")
+    let skip_build = args
+        .get("skip_build")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
@@ -245,7 +307,8 @@ async fn daemon_update(args: Value) -> Result<ToolResult> {
     // Resolve workspace root from compile-time CARGO_MANIFEST_DIR
     // env!() is evaluated at compile time — always correct for this binary.
     let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent().and_then(|p| p.parent())
+        .parent()
+        .and_then(|p| p.parent())
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
 
@@ -261,7 +324,8 @@ async fn daemon_update(args: Value) -> Result<ToolResult> {
                 .args(["build", "--release", "--package", "missiond-daemon"])
                 .current_dir(&project_root_clone)
                 .output()
-        }).await??;
+        })
+        .await??;
 
         if !build_output.status.success() {
             let stderr = String::from_utf8_lossy(&build_output.stderr);
@@ -289,15 +353,16 @@ async fn daemon_update(args: Value) -> Result<ToolResult> {
     if let Err(e) = std::fs::copy(&build_target, &tmp_dest) {
         return Ok(ToolResult::error(format!(
             "Failed to copy binary to temp: {} → {}: {}",
-            build_target.display(), tmp_dest.display(), e
+            build_target.display(),
+            tmp_dest.display(),
+            e
         )));
     }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp_dest,
-            std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::set_permissions(&tmp_dest, std::fs::Permissions::from_mode(0o755));
     }
 
     // Atomic rename: old inode stays mapped in running process, new inode takes the path
@@ -305,11 +370,16 @@ async fn daemon_update(args: Value) -> Result<ToolResult> {
         let _ = std::fs::remove_file(&tmp_dest);
         return Ok(ToolResult::error(format!(
             "Failed to rename binary: {} → {}: {}",
-            tmp_dest.display(), binary_dest.display(), e
+            tmp_dest.display(),
+            binary_dest.display(),
+            e
         )));
     }
 
-    info!("daemon_update: binary replaced at {}", binary_dest.display());
+    info!(
+        "daemon_update: binary replaced at {}",
+        binary_dest.display()
+    );
 
     // Step 4: Restart via launchd or fallback to manual restart
     let current_pid = std::process::id();
@@ -344,8 +414,10 @@ async fn daemon_update(args: Value) -> Result<ToolResult> {
              - Method: launchctl kickstart -k {}\n\
              - Old PID: {}\n\
              - Reconnect MCP after restart.",
-            build_target.display(), binary_dest.display(),
-            kickstart_target, current_pid,
+            build_target.display(),
+            binary_dest.display(),
+            kickstart_target,
+            current_pid,
         )))
     } else {
         // Fallback: detached bash script for non-launchd environments
@@ -353,7 +425,8 @@ async fn daemon_update(args: Value) -> Result<ToolResult> {
         let socket_path = home.join("missiond.sock");
         let log_dir = home.join("logs");
 
-        let script = format!(r#"#!/bin/bash
+        let script = format!(
+            r#"#!/bin/bash
 # MissionD daemon update script (auto-generated, non-launchd fallback)
 sleep 2
 kill -TERM {pid} 2>/dev/null
@@ -387,17 +460,18 @@ echo "MissionD restarted (new PID: $!)"
             .stderr(std::process::Stdio::null());
 
         match cmd.spawn() {
-            Ok(_) => {
-                Ok(ToolResult::text(format!(
-                    "Build succeeded. Restart script launched (no launchd).\n\
+            Ok(_) => Ok(ToolResult::text(format!(
+                "Build succeeded. Restart script launched (no launchd).\n\
                      - Binary: {} → {}\n\
                      - Old PID: {}\n\
                      - Daemon will restart in ~2 seconds. Reconnect MCP.",
-                    build_target.display(), binary_dest.display(), current_pid,
-                )))
-            }
+                build_target.display(),
+                binary_dest.display(),
+                current_pid,
+            ))),
             Err(e) => Ok(ToolResult::error(format!(
-                "Failed to launch restart script: {}", e
+                "Failed to launch restart script: {}",
+                e
             ))),
         }
     }
@@ -412,11 +486,7 @@ fn find_latest_log(log_dir: &str) -> Option<String> {
     let mut logs: Vec<_> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with("missiond.log")
-        })
+        .filter(|e| e.file_name().to_string_lossy().starts_with("missiond.log"))
         .collect();
     logs.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
     logs.first().map(|e| e.path().to_string_lossy().to_string())

@@ -9,9 +9,9 @@ use std::collections::{HashMap, HashSet};
 
 use tracing::{debug, info};
 
+use crate::state::AppState;
 use missiond_core::db::shared::AstSearchHit;
 use missiond_core::embedding;
-use crate::state::AppState;
 
 // --- Progressive Folding: Render Tier system (Gemini-reviewed) ---
 
@@ -105,23 +105,31 @@ pub(crate) async fn code_prefetch_query(state: &AppState, query: &str) -> Option
 }
 
 async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
-
     let mut budget_nodes = TOKEN_BUDGET / TOKENS_PER_NODE_ESTIMATE;
 
     // Stage 0: Beacon priority match (P4)
     // If task title/description contains a beacon name, inject full topology first
     let mut beacon_hits: Vec<AstSearchHit> = Vec::new();
-    let beacon_matches = state.store.beacon_search(query)
-        .await.unwrap_or_default();
+    let beacon_matches = state.store.beacon_search(query).await.unwrap_or_default();
 
     let has_beacon_hits = !beacon_matches.is_empty();
     if has_beacon_hits {
         for beacon in &beacon_matches {
-            if budget_nodes == 0 { break; }
-            let nodes = state.store.beacon_map(&beacon.name).await.unwrap_or_default();
+            if budget_nodes == 0 {
+                break;
+            }
+            let nodes = state
+                .store
+                .beacon_map(&beacon.name)
+                .await
+                .unwrap_or_default();
             for bn in &nodes {
-                if budget_nodes == 0 { break; }
-                if let (Some(ref stub), Some(start), Some(end)) = (&bn.stub_content, bn.start_line, bn.end_line) {
+                if budget_nodes == 0 {
+                    break;
+                }
+                if let (Some(ref stub), Some(start), Some(end)) =
+                    (&bn.stub_content, bn.start_line, bn.end_line)
+                {
                     beacon_hits.push(AstSearchHit {
                         id: format!("beacon-{}-{}", beacon.name, bn.symbol_name),
                         repo: bn.repo.clone(),
@@ -147,8 +155,11 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
     }
 
     // Stage 1: FTS5 ranked IDs
-    let fts_ranked = state.store.ast_search_ranked(query, PRIMARY_TOP_K * 3)
-        .await.unwrap_or_default();
+    let fts_ranked = state
+        .store
+        .ast_search_ranked(query, PRIMARY_TOP_K * 3)
+        .await
+        .unwrap_or_default();
 
     // Stage 2: Embedding vector search (health-aware — Gemini reviewed)
     // Check embedding health via relative coverage ratio, not absolute count
@@ -160,20 +171,28 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
         && (fts_total == 0 || ast_cache_len as f64 / fts_total.max(1) as f64 > 0.5);
 
     let query_embedding = if embedding_healthy {
-        state.embedding_service.as_ref().and_then(|svc| svc.embed(query))
+        state
+            .embedding_service
+            .as_ref()
+            .and_then(|svc| svc.embed(query))
     } else {
-        debug!(cache_len = ast_cache_len, "AST embedding cache sparse, skipping vector search");
+        debug!(
+            cache_len = ast_cache_len,
+            "AST embedding cache sparse, skipping vector search"
+        );
         None
     };
 
     let cache = state.ast_embedding_cache.read().await;
     let vec_ranked: Vec<(String, usize, f32)> = if let Some(ref qe) = query_embedding {
-        let mut scores: Vec<(usize, f32)> = cache.iter()
+        let mut scores: Vec<(usize, f32)> = cache
+            .iter()
             .enumerate()
             .map(|(i, (_, vec))| (i, embedding::cosine_similarity(qe, vec)))
             .collect();
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scores.iter()
+        scores
+            .iter()
             .take(PRIMARY_TOP_K * 3)
             .enumerate()
             .map(|(rank, (idx, sim))| (cache[*idx].0.clone(), rank, *sim))
@@ -184,7 +203,10 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
     drop(cache);
 
     if fts_ranked.is_empty() && vec_ranked.is_empty() {
-        debug!("Code prefetch: no FTS or vector results for query {:?}", &query[..query.len().min(60)]);
+        debug!(
+            "Code prefetch: no FTS or vector results for query {:?}",
+            &query[..query.len().min(60)]
+        );
         return None;
     }
 
@@ -199,7 +221,8 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
         entry.2 = Some(*sim);
     }
 
-    let mut rrf_scored: Vec<(String, f64)> = merged.into_iter()
+    let mut rrf_scored: Vec<(String, f64)> = merged
+        .into_iter()
         .map(|(id, (fts_r, vec_r, _sim))| {
             let score = embedding::rrf_score(fts_r, vec_r, RRF_K);
             (id, score)
@@ -210,7 +233,10 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
     rrf_scored.truncate(PRIMARY_TOP_K * 2);
 
     if rrf_scored.is_empty() {
-        debug!("Code prefetch: all results below RRF threshold for query {:?}", &query[..query.len().min(60)]);
+        debug!(
+            "Code prefetch: all results below RRF threshold for query {:?}",
+            &query[..query.len().min(60)]
+        );
         return None;
     }
 
@@ -230,19 +256,26 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
 
     // Stage 5: MMR diversity re-ranking
     let cache = state.ast_embedding_cache.read().await;
-    let emb_map: HashMap<String, &Vec<f32>> = cache.iter()
-        .map(|(id, vec)| (id.clone(), vec))
-        .collect();
+    let emb_map: HashMap<String, &Vec<f32>> =
+        cache.iter().map(|(id, vec)| (id.clone(), vec)).collect();
 
     // Normalize scores for MMR
-    let (min_s, max_s) = scored_hits.iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), (_, s, _)| (mn.min(*s), mx.max(*s)));
+    let (min_s, max_s) = scored_hits
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), (_, s, _)| {
+            (mn.min(*s), mx.max(*s))
+        });
     let score_range = max_s - min_s;
 
-    let candidates: Vec<(usize, f64, Vec<f32>)> = scored_hits.iter()
+    let candidates: Vec<(usize, f64, Vec<f32>)> = scored_hits
+        .iter()
         .enumerate()
         .map(|(i, (id, score, _))| {
-            let norm = if score_range > 0.0 { (score - min_s) / score_range } else { 1.0 };
+            let norm = if score_range > 0.0 {
+                (score - min_s) / score_range
+            } else {
+                1.0
+            };
             let emb = emb_map.get(id).map(|v| (*v).clone()).unwrap_or_default();
             (i, norm, emb)
         })
@@ -250,7 +283,8 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
     drop(cache);
 
     let mmr_indices = embedding::mmr_rerank_cosine(&candidates, budget_nodes, MMR_LAMBDA);
-    let mut primary_hits: Vec<AstSearchHit> = mmr_indices.iter()
+    let mut primary_hits: Vec<AstSearchHit> = mmr_indices
+        .iter()
         .filter_map(|&i| scored_hits.get(i).map(|(_, _, hit)| hit.clone()))
         .collect();
 
@@ -264,22 +298,32 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
 
     // Merge: beacon hits (priority) + hybrid search hits (deduped)
     // Tag each hit with its RenderTier (Gemini review: dedup + tier promotion)
-    let beacon_keys: HashSet<String> = beacon_hits.iter()
+    let beacon_keys: HashSet<String> = beacon_hits
+        .iter()
         .map(|h| format!("{}:{}", h.file_path, h.name))
         .collect();
     primary_hits.retain(|h| !beacon_keys.contains(&format!("{}:{}", h.file_path, h.name)));
 
-    let mut ranked: Vec<RankedHit> = beacon_hits.into_iter()
-        .map(|hit| RankedHit { hit, tier: RenderTier::Beacon })
+    let mut ranked: Vec<RankedHit> = beacon_hits
+        .into_iter()
+        .map(|hit| RankedHit {
+            hit,
+            tier: RenderTier::Beacon,
+        })
         .collect();
-    ranked.extend(primary_hits.into_iter()
-        .map(|hit| RankedHit { hit, tier: RenderTier::Primary }));
+    ranked.extend(primary_hits.into_iter().map(|hit| RankedHit {
+        hit,
+        tier: RenderTier::Primary,
+    }));
 
     if ranked.is_empty() {
         // Fallback: inject module-level topology map (Step 4, Gemini-reviewed)
         // When no micro-level AST nodes match, provide architectural navigation
-        let summaries = state.store.ast_module_summaries("missiond")
-            .await.unwrap_or_default();
+        let summaries = state
+            .store
+            .ast_module_summaries("missiond")
+            .await
+            .unwrap_or_default();
 
         if !summaries.is_empty() {
             info!(
@@ -295,12 +339,8 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
     // Cross-file association: expand related types (post-search, Gemini-confirmed)
     let remaining_budget = budget_nodes.saturating_sub(ranked.len());
     if remaining_budget > 0 {
-        let existing_names: HashSet<String> = ranked.iter()
-            .map(|r| r.hit.name.clone())
-            .collect();
-        let existing_ids: HashSet<String> = ranked.iter()
-            .map(|r| r.hit.id.clone())
-            .collect();
+        let existing_names: HashSet<String> = ranked.iter().map(|r| r.hit.name.clone()).collect();
+        let existing_ids: HashSet<String> = ranked.iter().map(|r| r.hit.id.clone()).collect();
 
         let mut expansion_hits: Vec<AstSearchHit> = Vec::new();
 
@@ -323,9 +363,7 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
         // Expand: called functions not in results
         for r in ranked.iter() {
             for call_name in &r.hit.calls {
-                if !existing_names.contains(call_name)
-                    && expansion_hits.len() < remaining_budget
-                {
+                if !existing_names.contains(call_name) && expansion_hits.len() < remaining_budget {
                     if let Ok(related) = state.store.ast_find_related(call_name, 1).await {
                         for rel in related {
                             if !existing_ids.contains(&rel.id)
@@ -339,8 +377,10 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
             }
         }
 
-        ranked.extend(expansion_hits.into_iter()
-            .map(|hit| RankedHit { hit, tier: RenderTier::Expansion }));
+        ranked.extend(expansion_hits.into_iter().map(|hit| RankedHit {
+            hit,
+            tier: RenderTier::Expansion,
+        }));
     }
 
     // Dynamic budget: beacon hit → elevate to full budget (Gemini review: 3)
@@ -351,7 +391,8 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
     };
 
     // Phase 2: Pre-fetch KB memories linked to code symbols in results
-    let file_paths: Vec<String> = ranked.iter()
+    let file_paths: Vec<String> = ranked
+        .iter()
         .map(|r| r.hit.file_path.clone())
         .collect::<HashSet<_>>()
         .into_iter()
@@ -360,7 +401,8 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
     for fp in &file_paths {
         if let Ok(memories) = state.store.kb_get_memories_for_file(fp).await {
             for (symbol, entry) in memories {
-                symbol_memories.entry(symbol)
+                symbol_memories
+                    .entry(symbol)
                     .or_default()
                     .push(entry.summary);
             }
@@ -373,7 +415,11 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
     info!(
         query_prefix = &query[..query.len().min(60)],
         nodes = ranked.len(),
-        files = ranked.iter().map(|r| &r.hit.file_path).collect::<HashSet<_>>().len(),
+        files = ranked
+            .iter()
+            .map(|r| &r.hit.file_path)
+            .collect::<HashSet<_>>()
+            .len(),
         beacons = beacon_matches.len(),
         token_budget,
         "Code prefetch injected (progressive folding)"
@@ -407,15 +453,20 @@ fn fold_structural_body(stub: &str, node_type: &str) -> Option<String> {
     }
     let mut folded = String::with_capacity(stub.len());
     folded.push_str(&stub[..open + 1]);
-    folded.push_str(&format!("\n    // ... ({} fields/variants elided)\n", body_lines.len()));
+    folded.push_str(&format!(
+        "\n    // ... ({} fields/variants elided)\n",
+        body_lines.len()
+    ));
     folded.push_str(&stub[close..]);
     Some(folded)
 }
 
 /// Render a single node at signature-only level (Tier 3 / budget-exhausted fallback).
 fn render_signature_only(hit: &AstSearchHit) -> String {
-    format!("// lines: {}-{}\n{}\n",
-        hit.start_line, hit.end_line, hit.signature)
+    format!(
+        "// lines: {}-{}\n{}\n",
+        hit.start_line, hit.end_line, hit.signature
+    )
 }
 
 /// Render a single node at full level (Tier 1).
@@ -475,7 +526,8 @@ fn render_code_context_tiered(
     }
     for nodes in by_file.values_mut() {
         nodes.sort_by(|a, b| {
-            b.tier.cmp(&a.tier)
+            b.tier
+                .cmp(&a.tier)
                 .then_with(|| a.hit.start_line.cmp(&b.hit.start_line))
         });
     }
@@ -483,7 +535,9 @@ fn render_code_context_tiered(
     let mut remaining = token_budget;
     let mut xml = String::with_capacity(4096);
     xml.push_str("<code_context>\n");
-    xml.push_str("<!-- tree-sitter AST 概要 (progressive folding)。修改代码时请用 Read 获取完整源码。-->\n");
+    xml.push_str(
+        "<!-- tree-sitter AST 概要 (progressive folding)。修改代码时请用 Read 获取完整源码。-->\n",
+    );
 
     for file_path in &file_order {
         let nodes = &by_file[file_path];
@@ -553,8 +607,12 @@ fn render_code_context_tiered(
 /// Legacy render — kept for test compatibility.
 #[cfg(test)]
 fn render_code_context(hits: &[AstSearchHit]) -> String {
-    let ranked: Vec<RankedHit> = hits.iter()
-        .map(|h| RankedHit { hit: h.clone(), tier: RenderTier::Primary })
+    let ranked: Vec<RankedHit> = hits
+        .iter()
+        .map(|h| RankedHit {
+            hit: h.clone(),
+            tier: RenderTier::Primary,
+        })
         .collect();
     render_code_context_tiered(&ranked, TOKEN_BUDGET, &HashMap::new())
 }
@@ -603,7 +661,9 @@ mod tests {
                 end_line: 20,
                 is_exported: true,
                 docstring: Some("Run the app".into()),
-                stub_content: Some("/// Run the app\npub fn run() -> Result<()> {\n    // Calls: init\n}".into()),
+                stub_content: Some(
+                    "/// Run the app\npub fn run() -> Result<()> {\n    // Calls: init\n}".into(),
+                ),
                 calls: vec!["init".into()],
                 rank: 0.0,
             },
@@ -623,16 +683,57 @@ mod tests {
     #[test]
     fn test_file_cohesion() {
         let hit = AstSearchHit {
-            id: String::new(), repo: String::new(), file_path: "a.rs".into(),
-            name: String::new(), node_type: String::new(), signature: String::new(),
-            start_line: 0, end_line: 0, is_exported: false, docstring: None,
-            stub_content: None, calls: vec![], rank: 0.0,
+            id: String::new(),
+            repo: String::new(),
+            file_path: "a.rs".into(),
+            name: String::new(),
+            node_type: String::new(),
+            signature: String::new(),
+            start_line: 0,
+            end_line: 0,
+            is_exported: false,
+            docstring: None,
+            stub_content: None,
+            calls: vec![],
+            rank: 0.0,
         };
         let mut scored = vec![
-            ("1".into(), 1.0, AstSearchHit { id: "1".into(), file_path: "a.rs".into(), ..hit.clone() }),
-            ("2".into(), 1.0, AstSearchHit { id: "2".into(), file_path: "a.rs".into(), ..hit.clone() }),
-            ("3".into(), 1.0, AstSearchHit { id: "3".into(), file_path: "a.rs".into(), ..hit.clone() }),
-            ("4".into(), 1.0, AstSearchHit { id: "4".into(), file_path: "b.rs".into(), ..hit.clone() }),
+            (
+                "1".into(),
+                1.0,
+                AstSearchHit {
+                    id: "1".into(),
+                    file_path: "a.rs".into(),
+                    ..hit.clone()
+                },
+            ),
+            (
+                "2".into(),
+                1.0,
+                AstSearchHit {
+                    id: "2".into(),
+                    file_path: "a.rs".into(),
+                    ..hit.clone()
+                },
+            ),
+            (
+                "3".into(),
+                1.0,
+                AstSearchHit {
+                    id: "3".into(),
+                    file_path: "a.rs".into(),
+                    ..hit.clone()
+                },
+            ),
+            (
+                "4".into(),
+                1.0,
+                AstSearchHit {
+                    id: "4".into(),
+                    file_path: "b.rs".into(),
+                    ..hit.clone()
+                },
+            ),
         ];
         apply_file_cohesion(&mut scored);
         // a.rs has 3 hits → 1.2x boost
@@ -643,19 +744,38 @@ mod tests {
 
     // --- Progressive Folding tests ---
 
-    fn make_hit(id: &str, file: &str, name: &str, node_type: &str, sig: &str, stub: &str) -> AstSearchHit {
+    fn make_hit(
+        id: &str,
+        file: &str,
+        name: &str,
+        node_type: &str,
+        sig: &str,
+        stub: &str,
+    ) -> AstSearchHit {
         AstSearchHit {
-            id: id.into(), repo: "test".into(), file_path: file.into(),
-            name: name.into(), node_type: node_type.into(), signature: sig.into(),
-            start_line: 1, end_line: 20, is_exported: true, docstring: None,
-            stub_content: Some(stub.into()), calls: vec![], rank: 0.0,
+            id: id.into(),
+            repo: "test".into(),
+            file_path: file.into(),
+            name: name.into(),
+            node_type: node_type.into(),
+            signature: sig.into(),
+            start_line: 1,
+            end_line: 20,
+            is_exported: true,
+            docstring: None,
+            stub_content: Some(stub.into()),
+            calls: vec![],
+            rank: 0.0,
         }
     }
 
     #[test]
     fn test_fold_structural_body_short_struct() {
         let stub = "pub struct Point {\n    pub x: f64,\n    pub y: f64,\n}";
-        assert!(fold_structural_body(stub, "struct").is_none(), "Short struct should not be folded");
+        assert!(
+            fold_structural_body(stub, "struct").is_none(),
+            "Short struct should not be folded"
+        );
     }
 
     #[test]
@@ -664,8 +784,14 @@ mod tests {
         let folded = fold_structural_body(stub, "struct");
         assert!(folded.is_some(), "Large struct should be folded");
         let text = folded.unwrap();
-        assert!(text.contains("elided"), "Folded text should contain 'elided'");
-        assert!(text.contains("pub struct Config {"), "Should preserve header");
+        assert!(
+            text.contains("elided"),
+            "Folded text should contain 'elided'"
+        );
+        assert!(
+            text.contains("pub struct Config {"),
+            "Should preserve header"
+        );
         assert!(text.ends_with('}'), "Should preserve closing brace");
     }
 
@@ -677,43 +803,78 @@ mod tests {
 
     #[test]
     fn test_tiered_rendering_beacon_always_full() {
-        let hit = make_hit("a", "a.rs", "Foo", "struct", "pub struct Foo",
-            "pub struct Foo {\n    pub x: u32,\n}");
-        let ranked = vec![RankedHit { hit, tier: RenderTier::Beacon }];
+        let hit = make_hit(
+            "a",
+            "a.rs",
+            "Foo",
+            "struct",
+            "pub struct Foo",
+            "pub struct Foo {\n    pub x: u32,\n}",
+        );
+        let ranked = vec![RankedHit {
+            hit,
+            tier: RenderTier::Beacon,
+        }];
         let xml = render_code_context_tiered(&ranked, 50, &HashMap::new()); // tiny budget
-        assert!(xml.contains("pub x: u32"), "Beacon should always render full");
+        assert!(
+            xml.contains("pub x: u32"),
+            "Beacon should always render full"
+        );
     }
 
     #[test]
     fn test_tiered_rendering_expansion_signature_only() {
-        let hit = make_hit("b", "b.rs", "bar", "function",
+        let hit = make_hit(
+            "b",
+            "b.rs",
+            "bar",
+            "function",
             "pub fn bar() -> i32",
-            "pub fn bar() -> i32 {\n    // Calls: baz\n    /* elided */\n}");
-        let ranked = vec![RankedHit { hit, tier: RenderTier::Expansion }];
+            "pub fn bar() -> i32 {\n    // Calls: baz\n    /* elided */\n}",
+        );
+        let ranked = vec![RankedHit {
+            hit,
+            tier: RenderTier::Expansion,
+        }];
         let xml = render_code_context_tiered(&ranked, 10000, &HashMap::new());
-        assert!(xml.contains("pub fn bar() -> i32"), "Should contain signature");
+        assert!(
+            xml.contains("pub fn bar() -> i32"),
+            "Should contain signature"
+        );
         assert!(!xml.contains("elided"), "Expansion should NOT contain body");
     }
 
     #[test]
     fn test_tiered_rendering_budget_exhaustion() {
         // First node is big (Beacon, always full), second is Primary
-        let big_stub = "pub fn big() {\n".to_string()
-            + &"    do_stuff();\n".repeat(100)
-            + "}";
+        let big_stub = "pub fn big() {\n".to_string() + &"    do_stuff();\n".repeat(100) + "}";
         let hit1 = make_hit("a", "a.rs", "big", "function", "pub fn big()", &big_stub);
-        let hit2 = make_hit("b", "b.rs", "small", "function",
+        let hit2 = make_hit(
+            "b",
+            "b.rs",
+            "small",
+            "function",
             "pub fn small()",
-            "pub fn small() {\n    // Calls: x\n    /* elided */\n}");
+            "pub fn small() {\n    // Calls: x\n    /* elided */\n}",
+        );
         let ranked = vec![
-            RankedHit { hit: hit1, tier: RenderTier::Beacon },
-            RankedHit { hit: hit2, tier: RenderTier::Primary },
+            RankedHit {
+                hit: hit1,
+                tier: RenderTier::Beacon,
+            },
+            RankedHit {
+                hit: hit2,
+                tier: RenderTier::Primary,
+            },
         ];
         // Budget barely covers the big node
         let xml = render_code_context_tiered(&ranked, 500, &HashMap::new());
         assert!(xml.contains("pub fn big()"), "Beacon always rendered");
         // small should still appear (signature-only or full depending on remaining budget)
-        assert!(xml.contains("pub fn small()"), "Small node should still appear");
+        assert!(
+            xml.contains("pub fn small()"),
+            "Small node should still appear"
+        );
     }
 
     #[test]

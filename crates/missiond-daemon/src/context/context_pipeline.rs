@@ -80,11 +80,31 @@ fn classify_intent(query: &str) -> QueryIntent {
 
     // Greeting / chat patterns (CN + EN) — must be short
     static CHAT_PATTERNS: &[&str] = &[
-        "hi", "hello", "hey", "你好", "嗨", "在吗", "收得到",
-        "测试", "ping", "test", "谢谢", "thanks", "thank you",
-        "ok", "好的", "好", "嗯", "对", "是的",
-        "早上好", "晚上好", "早安", "晚安",
-        "good morning", "good night",
+        "hi",
+        "hello",
+        "hey",
+        "你好",
+        "嗨",
+        "在吗",
+        "收得到",
+        "测试",
+        "ping",
+        "test",
+        "谢谢",
+        "thanks",
+        "thank you",
+        "ok",
+        "好的",
+        "好",
+        "嗯",
+        "对",
+        "是的",
+        "早上好",
+        "晚上好",
+        "早安",
+        "晚安",
+        "good morning",
+        "good night",
     ];
     if char_count < 20 && CHAT_PATTERNS.iter().any(|p| q_lower.contains(p)) {
         return QueryIntent::Chat;
@@ -110,12 +130,35 @@ fn classify_intent(query: &str) -> QueryIntent {
 
     // Code signals → full pipeline
     static CODE_SIGNALS: &[&str] = &[
-        "::", "fn ", "struct ", "impl ", "mod ", "crate",
-        ".rs", ".ts", ".py", ".swift", ".go",
-        "error", "bug", "fix", "compile", "build",
-        "deploy", "refactor", "migration",
-        "代码", "编译", "报错", "修复", "部署",
-        "函数", "模块", "重构", "接口", "数据库",
+        "::",
+        "fn ",
+        "struct ",
+        "impl ",
+        "mod ",
+        "crate",
+        ".rs",
+        ".ts",
+        ".py",
+        ".swift",
+        ".go",
+        "error",
+        "bug",
+        "fix",
+        "compile",
+        "build",
+        "deploy",
+        "refactor",
+        "migration",
+        "代码",
+        "编译",
+        "报错",
+        "修复",
+        "部署",
+        "函数",
+        "模块",
+        "重构",
+        "接口",
+        "数据库",
     ];
     if CODE_SIGNALS.iter().any(|s| q_lower.contains(s)) {
         return QueryIntent::Code;
@@ -151,10 +194,28 @@ fn is_obvious_chat(query: &str) -> bool {
     let char_count = q.chars().count();
 
     static OBVIOUS_PATTERNS: &[&str] = &[
-        "hi", "hello", "hey", "你好", "嗨", "在吗",
-        "谢谢", "thanks", "thank you", "ok", "好的", "好", "嗯",
-        "早上好", "晚上好", "早安", "晚安", "good morning", "good night",
-        "测试", "ping", "test",
+        "hi",
+        "hello",
+        "hey",
+        "你好",
+        "嗨",
+        "在吗",
+        "谢谢",
+        "thanks",
+        "thank you",
+        "ok",
+        "好的",
+        "好",
+        "嗯",
+        "早上好",
+        "晚上好",
+        "早安",
+        "晚安",
+        "good morning",
+        "good night",
+        "测试",
+        "ping",
+        "test",
     ];
     if char_count < 20 && OBVIOUS_PATTERNS.iter().any(|p| q_lower.contains(p)) {
         return true;
@@ -180,11 +241,19 @@ fn is_obvious_chat(query: &str) -> bool {
 fn is_high_confidence_devops(query: &str) -> bool {
     let q = query.to_lowercase();
     const PATTERNS: &[&str] = &[
-        "docker build", "docker compose", "docker image",
-        "github action", "ci/cd", "k8s",
-        "deploy agent", "deploy center",
-        "backend-deploy", "xjp-deploy",
-        "部署到", "发布到", "上线到",
+        "docker build",
+        "docker compose",
+        "docker image",
+        "github action",
+        "ci/cd",
+        "k8s",
+        "deploy agent",
+        "deploy center",
+        "backend-deploy",
+        "xjp-deploy",
+        "部署到",
+        "发布到",
+        "上线到",
     ];
     PATTERNS.iter().any(|p| q.contains(p))
 }
@@ -194,7 +263,10 @@ fn is_high_confidence_devops(query: &str) -> bool {
 /// Stateless HTTP call — no slot contention, no conversation pollution.
 /// Returns None on any error (caller falls back to rules).
 async fn route_intent_via_router(state: &AppState, query: &str) -> Option<IntentResult> {
-    state.stats.prefetch_router_calls.fetch_add(1, Ordering::Relaxed);
+    state
+        .stats
+        .prefetch_router_calls
+        .fetch_add(1, Ordering::Relaxed);
     let start = Instant::now();
 
     let result = route_intent_http(state, query).await;
@@ -204,7 +276,10 @@ async fn route_intent_via_router(state: &AppState, query: &str) -> Option<Intent
     match result {
         Ok(intent) => Some(intent),
         Err(e) => {
-            state.stats.prefetch_router_errors.fetch_add(1, Ordering::Relaxed);
+            state
+                .stats
+                .prefetch_router_errors
+                .fetch_add(1, Ordering::Relaxed);
             warn!(error = %e, elapsed_ms = elapsed_us / 1000, "Intent router: API call failed, falling back to rules");
             None
         }
@@ -237,28 +312,38 @@ async fn route_intent_http(state: &AppState, query: &str) -> Result<IntentResult
 
     let result = tokio::time::timeout(
         Duration::from_millis(INTENT_ROUTE_TIMEOUT_MS),
-        state.http_client
+        state
+            .http_client
             .post(&url)
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {}", jwt))
             .json(&body)
             .send(),
-    ).await
-        .map_err(|_| anyhow::anyhow!("Intent router timeout ({}ms)", INTENT_ROUTE_TIMEOUT_MS))?
-        .map_err(|e| anyhow::anyhow!("Intent router HTTP error: {}", e))?;
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Intent router timeout ({}ms)", INTENT_ROUTE_TIMEOUT_MS))?
+    .map_err(|e| anyhow::anyhow!("Intent router HTTP error: {}", e))?;
 
     let status = result.status();
-    let resp: serde_json::Value = result.json().await
+    let resp: serde_json::Value = result
+        .json()
+        .await
         .map_err(|e| anyhow::anyhow!("Intent router: failed to parse response: {}", e))?;
 
     if !status.is_success() {
-        let err_msg = resp.pointer("/error/message")
+        let err_msg = resp
+            .pointer("/error/message")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown error");
-        return Err(anyhow::anyhow!("Intent router: API {} — {}", status, err_msg));
+        return Err(anyhow::anyhow!(
+            "Intent router: API {} — {}",
+            status,
+            err_msg
+        ));
     }
 
-    let content = resp.pointer("/choices/0/message/content")
+    let content = resp
+        .pointer("/choices/0/message/content")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Intent router: no content in response"))?;
 
@@ -268,8 +353,12 @@ async fn route_intent_http(state: &AppState, query: &str) -> Result<IntentResult
         "Intent router: classification received"
     );
 
-    parse_intent_response(content)
-        .ok_or_else(|| anyhow::anyhow!("Intent router: failed to parse JSON from: {}", content.chars().take(300).collect::<String>()))
+    parse_intent_response(content).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Intent router: failed to parse JSON from: {}",
+            content.chars().take(300).collect::<String>()
+        )
+    })
 }
 
 /// Parse JSON response from CC slot intent classification.
@@ -278,7 +367,8 @@ fn parse_intent_response(response: &str) -> Option<IntentResult> {
     // Strip markdown code fences if present
     let json_str = response
         .trim()
-        .strip_prefix("```json").or_else(|| response.trim().strip_prefix("```"))
+        .strip_prefix("```json")
+        .or_else(|| response.trim().strip_prefix("```"))
         .and_then(|s| s.strip_suffix("```"))
         .unwrap_or(response)
         .trim();
@@ -309,7 +399,11 @@ fn parse_intent_response(response: &str) -> Option<IntentResult> {
 
     Some(IntentResult {
         needs_context: raw.needs_context,
-        intent_type: if raw.needs_context { intent_type } else { QueryIntent::Chat },
+        intent_type: if raw.needs_context {
+            intent_type
+        } else {
+            QueryIntent::Chat
+        },
         search_queries: raw.search_queries,
         source: "router",
     })
@@ -323,7 +417,9 @@ pub(crate) struct PrefetchRequest {
     pub token_budget: usize,
 }
 
-fn default_token_budget() -> usize { 4000 }
+fn default_token_budget() -> usize {
+    4000
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -386,8 +482,14 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
 
     // Phase 1: Quick rule pre-screen — obvious chat bypasses everything (no CC call)
     if is_obvious_chat(&query) {
-        debug!(query = query.trim(), "Context prefetch: obvious chat → bypass");
-        state.stats.prefetch_intent_chat.fetch_add(1, Ordering::Relaxed);
+        debug!(
+            query = query.trim(),
+            "Context prefetch: obvious chat → bypass"
+        );
+        state
+            .stats
+            .prefetch_intent_chat
+            .fetch_add(1, Ordering::Relaxed);
         state.stats.prefetch_bypass.fetch_add(1, Ordering::Relaxed);
         return PrefetchResult {
             intent: Some("chat:rules".to_string()),
@@ -397,8 +499,14 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
 
     // Phase 1b: High-confidence DevOps heuristic — skip Router API for obvious deploy queries
     if is_high_confidence_devops(&query) {
-        info!(query = query.trim(), "Context prefetch: DevOps heuristic → skip router, go to Phase 3");
-        state.stats.prefetch_devops_heuristic.fetch_add(1, Ordering::Relaxed);
+        info!(
+            query = query.trim(),
+            "Context prefetch: DevOps heuristic → skip router, go to Phase 3"
+        );
+        state
+            .stats
+            .prefetch_devops_heuristic
+            .fetch_add(1, Ordering::Relaxed);
 
         // Jump directly to Phase 3 search (Code intent, original query)
         let search_query = query.clone();
@@ -408,7 +516,10 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
             _ => None,
         };
 
-        state.stats.prefetch_intent_code.fetch_add(1, Ordering::Relaxed);
+        state
+            .stats
+            .prefetch_intent_code
+            .fetch_add(1, Ordering::Relaxed);
 
         let (skills, kb_entries, code_context, task_updates) = {
             let result = tokio::time::timeout(global_timeout, async {
@@ -418,7 +529,8 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
                     search_code(state, &query, &req.source),
                     search_task_ack(state, ppid),
                 )
-            }).await;
+            })
+            .await;
             match result {
                 Ok((s, k, c, t)) => (s, k, c, t),
                 Err(_) => {
@@ -428,7 +540,13 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
             }
         };
 
-        let assembled = assemble_budgeted(&skills, &kb_entries, &code_context, &task_updates, CODE_TOKEN_BUDGET);
+        let assembled = assemble_budgeted(
+            &skills,
+            &kb_entries,
+            &code_context,
+            &task_updates,
+            CODE_TOKEN_BUDGET,
+        );
         info!(
             intent = "code",
             routed_by = "devops_heuristic",
@@ -466,7 +584,10 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
         }
         None => {
             // Fallback: v1 rule-based classification
-            state.stats.prefetch_fallback.fetch_add(1, Ordering::Relaxed);
+            state
+                .stats
+                .prefetch_fallback
+                .fetch_add(1, Ordering::Relaxed);
             let rule_intent = classify_intent(&query);
             debug!(
                 query = query.trim(),
@@ -488,7 +609,10 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
             source = intent_result.source,
             "Context prefetch: intent router → no context needed, bypass"
         );
-        state.stats.prefetch_intent_chat.fetch_add(1, Ordering::Relaxed);
+        state
+            .stats
+            .prefetch_intent_chat
+            .fetch_add(1, Ordering::Relaxed);
         state.stats.prefetch_bypass.fetch_add(1, Ordering::Relaxed);
         return PrefetchResult {
             intent: Some(format!("bypass:{}", intent_result.source)),
@@ -498,8 +622,14 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
 
     let intent = intent_result.intent_type;
     match intent {
-        QueryIntent::Code => state.stats.prefetch_intent_code.fetch_add(1, Ordering::Relaxed),
-        QueryIntent::General => state.stats.prefetch_intent_general.fetch_add(1, Ordering::Relaxed),
+        QueryIntent::Code => state
+            .stats
+            .prefetch_intent_code
+            .fetch_add(1, Ordering::Relaxed),
+        QueryIntent::General => state
+            .stats
+            .prefetch_intent_general
+            .fetch_add(1, Ordering::Relaxed),
         QueryIntent::Chat => unreachable!(),
     };
 
@@ -529,7 +659,8 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
                     search_code(state, &query, &req.source), // code search uses original query
                     search_task_ack(state, ppid),
                 )
-            }).await;
+            })
+            .await;
             match result {
                 Ok((s, k, c, t)) => (s, k, c, t),
                 Err(_) => {
@@ -546,7 +677,8 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
                     search_kb(state, &search_query),
                     search_task_ack(state, ppid),
                 )
-            }).await;
+            })
+            .await;
             match result {
                 Ok((s, k, t)) => (s, k, None, t),
                 Err(_) => {
@@ -572,7 +704,13 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
         QueryIntent::Chat => 0,
     };
 
-    let assembled = assemble_budgeted(&skills, &kb_entries, &code_context, &task_updates, token_budget);
+    let assembled = assemble_budgeted(
+        &skills,
+        &kb_entries,
+        &code_context,
+        &task_updates,
+        token_budget,
+    );
 
     info!(
         intent = intent_str,
@@ -597,7 +735,10 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
             PrefetchSource::Autopilot { task_id } => Some(task_id.as_str()),
             _ => None,
         };
-        let _ = state.store.kb_log_co_access(&ids, "prefetch", session_id).await;
+        let _ = state
+            .store
+            .kb_log_co_access(&ids, "prefetch", session_id)
+            .await;
     }
 
     PrefetchResult {
@@ -616,11 +757,14 @@ pub(crate) async fn execute(state: &AppState, req: &PrefetchRequest) -> Prefetch
 async fn search_skills(state: &AppState, query: &str) -> Vec<SkillHint> {
     let fut = async {
         let query_lower = query.to_lowercase();
-        let mut topic_scores: HashMap<String, (f64, Option<usize>, Option<usize>, serde_json::Value)> =
-            HashMap::new();
+        let mut topic_scores: HashMap<
+            String,
+            (f64, Option<usize>, Option<usize>, serde_json::Value),
+        > = HashMap::new();
 
         // Step 0: Trigger hardmatch — exact phrases from skill frontmatter, score=1.0
-        let mut trigger_matched: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut trigger_matched: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for s in state.skills.list() {
             if trigger_matched.contains(&s.name) {
                 continue; // Dedup: one skill matched is enough
@@ -629,11 +773,22 @@ async fn search_skills(state: &AppState, query: &str) -> Vec<SkillHint> {
                 for trigger in triggers {
                     if query_lower.contains(&trigger.to_lowercase()) {
                         debug!(skill = %s.name, trigger = %trigger, "Skill trigger hardmatch");
-                        state.stats.prefetch_skill_trigger_hit.fetch_add(1, Ordering::Relaxed);
-                        topic_scores.insert(s.name.clone(), (1.0, None, None, serde_json::json!({
-                            "name": s.name,
-                            "path": s.path,
-                        })));
+                        state
+                            .stats
+                            .prefetch_skill_trigger_hit
+                            .fetch_add(1, Ordering::Relaxed);
+                        topic_scores.insert(
+                            s.name.clone(),
+                            (
+                                1.0,
+                                None,
+                                None,
+                                serde_json::json!({
+                                    "name": s.name,
+                                    "path": s.path,
+                                }),
+                            ),
+                        );
                         trigger_matched.insert(s.name.clone());
                         break; // First trigger match per skill is enough
                     }
@@ -644,10 +799,15 @@ async fn search_skills(state: &AppState, query: &str) -> Vec<SkillHint> {
         // 1. Name/aka exact match → bonus +0.3
         for s in state.skills.search(query).iter().take(10) {
             topic_scores.entry(s.name.clone()).or_insert_with(|| {
-                (0.3, None, None, serde_json::json!({
-                    "name": s.name,
-                    "path": s.path,
-                }))
+                (
+                    0.3,
+                    None,
+                    None,
+                    serde_json::json!({
+                        "name": s.name,
+                        "path": s.path,
+                    }),
+                )
             });
         }
 
@@ -655,13 +815,20 @@ async fn search_skills(state: &AppState, query: &str) -> Vec<SkillHint> {
         if let Ok(fts_results) = state.store.skill_search_fts(query).await {
             for (rank, r) in fts_results.iter().take(20).enumerate() {
                 topic_scores.entry(r.topic.clone()).or_insert_with(|| {
-                    (0.0, Some(rank), None, serde_json::json!({
-                        "name": r.topic,
-                        "path": r.file_path,
-                    }))
+                    (
+                        0.0,
+                        Some(rank),
+                        None,
+                        serde_json::json!({
+                            "name": r.topic,
+                            "path": r.file_path,
+                        }),
+                    )
                 });
                 if let Some(entry) = topic_scores.get_mut(&r.topic) {
-                    if entry.1.is_none() { entry.1 = Some(rank); }
+                    if entry.1.is_none() {
+                        entry.1 = Some(rank);
+                    }
                 }
             }
         }
@@ -671,7 +838,8 @@ async fn search_skills(state: &AppState, query: &str) -> Vec<SkillHint> {
             if let Some(query_vec) = emb_svc.embed(query) {
                 let cache = state.skill_embedding_cache.read().await;
                 if !cache.is_empty() {
-                    let mut sims: Vec<(usize, f32)> = cache.iter()
+                    let mut sims: Vec<(usize, f32)> = cache
+                        .iter()
                         .enumerate()
                         .map(|(i, (_, vec))| (i, embedding::cosine_similarity(&query_vec, vec)))
                         .collect();
@@ -682,19 +850,34 @@ async fn search_skills(state: &AppState, query: &str) -> Vec<SkillHint> {
                         let name0 = &cache[idx0].0;
                         debug!(query, top1_skill = %name0, top1_sim = sim0, "Skill vector top-1 sim");
                         if sim0 <= MIN_COSINE_SIM {
-                            state.stats.prefetch_cosine_filtered.fetch_add(1, Ordering::Relaxed);
+                            state
+                                .stats
+                                .prefetch_cosine_filtered
+                                .fetch_add(1, Ordering::Relaxed);
                         }
                     }
 
-                    for (rank, (idx, _sim)) in sims.iter().filter(|(_, s)| *s > MIN_COSINE_SIM).take(10).enumerate() {
+                    for (rank, (idx, _sim)) in sims
+                        .iter()
+                        .filter(|(_, s)| *s > MIN_COSINE_SIM)
+                        .take(10)
+                        .enumerate()
+                    {
                         let topic_name = &cache[*idx].0;
                         let entry = topic_scores.entry(topic_name.clone()).or_insert_with(|| {
-                            (0.0, None, Some(rank), serde_json::json!({
-                                "name": topic_name,
-                                "path": serde_json::Value::Null,
-                            }))
+                            (
+                                0.0,
+                                None,
+                                Some(rank),
+                                serde_json::json!({
+                                    "name": topic_name,
+                                    "path": serde_json::Value::Null,
+                                }),
+                            )
                         });
-                        if entry.2.is_none() { entry.2 = Some(rank); }
+                        if entry.2.is_none() {
+                            entry.2 = Some(rank);
+                        }
                     }
                 }
             }
@@ -713,12 +896,21 @@ async fn search_skills(state: &AppState, query: &str) -> Vec<SkillHint> {
 
         // Top-K: 3 base + trigger-matched extras (so triggers don't squeeze out semantic results)
         let top_k = 3 + trigger_matched.len();
-        scored.iter().take(top_k).map(|(_, _, meta)| {
-            SkillHint {
-                name: meta.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                path: meta.get("path").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            }
-        }).collect::<Vec<_>>()
+        scored
+            .iter()
+            .take(top_k)
+            .map(|(_, _, meta)| SkillHint {
+                name: meta
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                path: meta
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            })
+            .collect::<Vec<_>>()
     };
 
     tokio::time::timeout(Duration::from_millis(SKILL_TIMEOUT_MS), fut)
@@ -732,11 +924,21 @@ async fn search_skills(state: &AppState, query: &str) -> Vec<SkillHint> {
 /// Category → daily decay factor for read-time utility computation.
 /// daily_factor = 0.5^(1/half_life_days). Non-decaying categories return 1.0.
 fn category_daily_factor(category: &str) -> f64 {
-    if category == "memory:debug" { return 0.9517; }  // 14d
-    if category == "memory:bugfix" { return 0.9772; }  // 30d
-    if category == "memory:ops" { return 0.9675; }     // 21d
-    if category == "memory:feature" { return 0.9923; } // 90d
-    if category.starts_with("memory") { return 0.9885; } // 60d
+    if category == "memory:debug" {
+        return 0.9517;
+    } // 14d
+    if category == "memory:bugfix" {
+        return 0.9772;
+    } // 30d
+    if category == "memory:ops" {
+        return 0.9675;
+    } // 21d
+    if category == "memory:feature" {
+        return 0.9923;
+    } // 90d
+    if category.starts_with("memory") {
+        return 0.9885;
+    } // 60d
     1.0 // non-decaying
 }
 
@@ -746,21 +948,34 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
 
         // 1. FTS5 ranked
         let fts_ranked: Vec<(String, usize, Option<String>)> = {
-            let ranked = state.store.kb_search_fts_ranked(query, None).await.unwrap_or_default();
+            let ranked = state
+                .store
+                .kb_search_fts_ranked(query, None)
+                .await
+                .unwrap_or_default();
             if ranked.is_empty() {
-                let like = state.store.kb_search_like_ranked(query, None).await.unwrap_or_default();
-                like.into_iter().map(|(id, rank)| (id, rank, None)).collect()
+                let like = state
+                    .store
+                    .kb_search_like_ranked(query, None)
+                    .await
+                    .unwrap_or_default();
+                like.into_iter()
+                    .map(|(id, rank)| (id, rank, None))
+                    .collect()
             } else {
                 ranked
             }
         };
 
         // 2. Embedding cosine similarity
-        let query_embedding = state.embedding_service.as_ref()
+        let query_embedding = state
+            .embedding_service
+            .as_ref()
             .and_then(|svc| svc.embed(query));
         let cache = state.kb_search_cache.read().await;
         let vec_ranked: Vec<(String, usize, f32)> = if let Some(ref qe) = query_embedding {
-            let mut scores: Vec<(usize, f32)> = cache.iter()
+            let mut scores: Vec<(usize, f32)> = cache
+                .iter()
                 .enumerate()
                 .map(|(i, (_, vec))| (i, embedding::cosine_similarity(qe, vec)))
                 .collect();
@@ -771,11 +986,15 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
                 let name0 = &cache[idx0].0;
                 debug!(query, top1_kb = %name0, top1_sim = sim0, "KB vector top-1 sim");
                 if sim0 <= MIN_COSINE_SIM {
-                    state.stats.prefetch_cosine_filtered.fetch_add(1, Ordering::Relaxed);
+                    state
+                        .stats
+                        .prefetch_cosine_filtered
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
 
-            scores.iter()
+            scores
+                .iter()
                 .filter(|(_, sim)| *sim > MIN_COSINE_SIM) // cosine cutoff before ranking
                 .take(top_k * 3)
                 .enumerate()
@@ -788,7 +1007,8 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
 
         // 3. RRF merge + score threshold
         let rrf_k = 60;
-        let mut merged: HashMap<String, (Option<usize>, Option<usize>, Option<f32>)> = HashMap::new();
+        let mut merged: HashMap<String, (Option<usize>, Option<usize>, Option<f32>)> =
+            HashMap::new();
         for (id, rank, _snippet) in &fts_ranked {
             merged.entry(id.clone()).or_insert((None, None, None)).0 = Some(*rank);
         }
@@ -797,7 +1017,8 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
             entry.1 = Some(*rank);
             entry.2 = Some(*sim);
         }
-        let mut ranked: Vec<(String, f64)> = merged.into_iter()
+        let mut ranked: Vec<(String, f64)> = merged
+            .into_iter()
             .map(|(id, (fts_r, vec_r, _sim))| {
                 let score = embedding::rrf_score(fts_r, vec_r, rrf_k);
                 (id, score)
@@ -813,7 +1034,9 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
         for (id, rrf) in &ranked {
             if let Ok(Some(entry)) = state.store.kb_get_by_id(id).await {
                 // Working Memory scope: skip scratchpad entries in global retrieval
-                if entry.scope_task_id.is_some() { continue; }
+                if entry.scope_task_id.is_some() {
+                    continue;
+                }
                 let age_days = chrono::DateTime::parse_from_rfc3339(&entry.updated_at)
                     .map(|t| (now - t.with_timezone(&chrono::Utc)).num_hours() as f64 / 24.0)
                     .unwrap_or(0.0);
@@ -847,13 +1070,18 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
         // Co-access preloading: preload frequently co-accessed entries
         {
             let cache = state.kb_cooccurrence_cache.read().await;
-            let existing_ids: HashSet<String> = scored_entries.iter().map(|(e, _)| e.id.clone()).collect();
+            let existing_ids: HashSet<String> =
+                scored_entries.iter().map(|(e, _)| e.id.clone()).collect();
             let mut to_add: Vec<(KnowledgeEntry, f64)> = Vec::new();
             for (e, _) in scored_entries.iter() {
-                if to_add.len() >= 2 { break; }
+                if to_add.len() >= 2 {
+                    break;
+                }
                 if let Some(co_ids) = cache.get(&e.id) {
                     for co_id in co_ids {
-                        if to_add.len() >= 2 { break; }
+                        if to_add.len() >= 2 {
+                            break;
+                        }
                         if !existing_ids.contains(co_id) {
                             if let Ok(Some(co_entry)) = state.store.kb_get_by_id(co_id).await {
                                 if co_entry.scope_task_id.is_none() {
@@ -867,12 +1095,15 @@ async fn search_kb(state: &AppState, query: &str) -> Vec<KbHint> {
             scored_entries.extend(to_add);
         }
 
-        scored_entries.into_iter().map(|(e, _)| KbHint {
-            id: e.id,
-            category: e.category,
-            key: e.key,
-            summary: e.summary,
-        }).collect::<Vec<_>>()
+        scored_entries
+            .into_iter()
+            .map(|(e, _)| KbHint {
+                id: e.id,
+                category: e.category,
+                key: e.key,
+                summary: e.summary,
+            })
+            .collect::<Vec<_>>()
     };
 
     tokio::time::timeout(Duration::from_millis(KB_TIMEOUT_MS), fut)
@@ -901,18 +1132,33 @@ async fn search_task_ack(state: &AppState, ppid: Option<u32>) -> Vec<TaskUpdate>
     };
 
     let fut = async {
-        let tasks = state.store.ack_completed_tasks(None).await.unwrap_or_default();
-        tasks.into_iter().map(|t| TaskUpdate {
-            id: t.id[..8.min(t.id.len())].to_string(),
-            slot_id: t.slot_id.unwrap_or_else(|| "?".to_string()),
-            status: format!("{:?}", t.status).to_lowercase(),
-            detail: match t.status {
-                missiond_core::types::TaskStatus::Done =>
-                    t.result.unwrap_or_else(|| "completed".to_string()).chars().take(200).collect(),
-                _ =>
-                    t.error.unwrap_or_else(|| "failed".to_string()).chars().take(200).collect(),
-            },
-        }).collect()
+        let tasks = state
+            .store
+            .ack_completed_tasks(None)
+            .await
+            .unwrap_or_default();
+        tasks
+            .into_iter()
+            .map(|t| TaskUpdate {
+                id: t.id[..8.min(t.id.len())].to_string(),
+                slot_id: t.slot_id.unwrap_or_else(|| "?".to_string()),
+                status: format!("{:?}", t.status).to_lowercase(),
+                detail: match t.status {
+                    missiond_core::types::TaskStatus::Done => t
+                        .result
+                        .unwrap_or_else(|| "completed".to_string())
+                        .chars()
+                        .take(200)
+                        .collect(),
+                    _ => t
+                        .error
+                        .unwrap_or_else(|| "failed".to_string())
+                        .chars()
+                        .take(200)
+                        .collect(),
+                },
+            })
+            .collect()
     };
 
     tokio::time::timeout(Duration::from_millis(TASK_ACK_TIMEOUT_MS), fut)
@@ -946,7 +1192,10 @@ fn assemble_budgeted(
         let mut block = "[Background Task Updates]\n".to_string();
         for t in task_updates {
             let icon = if t.status == "done" { "✅" } else { "❌" };
-            block.push_str(&format!("- {} task {} (slot: {}): {}\n", icon, t.id, t.slot_id, t.detail));
+            block.push_str(&format!(
+                "- {} task {} (slot: {}): {}\n",
+                icon, t.id, t.slot_id, t.detail
+            ));
         }
         let tokens = estimate_tokens(&block);
         if used_tokens + tokens <= token_budget {
@@ -959,7 +1208,11 @@ fn assemble_budgeted(
     if !skills.is_empty() {
         let mut block = "[Matched Skills — 建议先 Read 对应 Skill 文件]\n".to_string();
         for s in skills {
-            block.push_str(&format!("- {}: {}\n", s.name, s.path.as_deref().unwrap_or("null")));
+            block.push_str(&format!(
+                "- {}: {}\n",
+                s.name,
+                s.path.as_deref().unwrap_or("null")
+            ));
         }
         let tokens = estimate_tokens(&block);
         if used_tokens + tokens <= token_budget {
@@ -968,7 +1221,11 @@ fn assemble_budgeted(
         } else if !parts.is_empty() || used_tokens > 0 {
             // At least inject top-1 skill
             let s = &skills[0];
-            let mini = format!("[Matched Skills]\n- {}: {}\n", s.name, s.path.as_deref().unwrap_or("null"));
+            let mini = format!(
+                "[Matched Skills]\n- {}: {}\n",
+                s.name,
+                s.path.as_deref().unwrap_or("null")
+            );
             let tokens = estimate_tokens(&mini);
             if used_tokens + tokens <= token_budget {
                 used_tokens += tokens;
@@ -984,7 +1241,13 @@ fn assemble_budgeted(
         let mut kb_tokens = estimate_tokens(header);
 
         for e in kb_entries {
-            let line = format!("- [{}] {}: {} [KB:{}]\n", e.category, e.key, e.summary, &e.id[..8.min(e.id.len())]);
+            let line = format!(
+                "- [{}] {}: {} [KB:{}]\n",
+                e.category,
+                e.key,
+                e.summary,
+                &e.id[..8.min(e.id.len())]
+            );
             let line_tokens = estimate_tokens(&line);
             if used_tokens + kb_tokens + line_tokens > token_budget {
                 break; // truncate remaining KB entries

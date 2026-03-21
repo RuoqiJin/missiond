@@ -77,9 +77,7 @@ impl ClaudeCodeSlotManager {
             prompt_len = req.prompt.len(),
             "ClaudeCodeSlotMgr: sending to persistent slot"
         );
-        self.controller
-            .ask(slot_id, &req.prompt, req.timeout)
-            .await
+        self.controller.ask(slot_id, &req.prompt, req.timeout).await
     }
 
     /// Execute on an ephemeral slot: semaphore → spawn → ask → kill.

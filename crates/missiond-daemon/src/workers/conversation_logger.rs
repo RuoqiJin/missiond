@@ -9,8 +9,8 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
-use missiond_core::WatcherEvent;
 use missiond_core::cc_tasks::CCMessageLine;
+use missiond_core::WatcherEvent;
 
 use crate::events_sync;
 use crate::infra::ingestion_router;
@@ -22,7 +22,9 @@ pub(crate) struct ConversationLoggerWorker {
 }
 
 impl super::BackgroundWorker for ConversationLoggerWorker {
-    fn name(&self) -> &'static str { "conversation_logger" }
+    fn name(&self) -> &'static str {
+        "conversation_logger"
+    }
 
     async fn run(self, state: Arc<AppState>, _ctx: super::WorkerContext) {
         let mut rx = self.conv_logger_rx;
@@ -33,8 +35,23 @@ impl super::BackgroundWorker for ConversationLoggerWorker {
 async fn run_loop(s: &AppState, rx: &mut broadcast::Receiver<WatcherEvent>) {
     loop {
         match rx.recv().await {
-            Ok(WatcherEvent::NewMessages { session_id, project_path, jsonl_path, messages, read_end_offset, source }) => {
-                handle_new_messages_event(s, session_id, project_path, jsonl_path.clone(), messages, source).await;
+            Ok(WatcherEvent::NewMessages {
+                session_id,
+                project_path,
+                jsonl_path,
+                messages,
+                read_end_offset,
+                source,
+            }) => {
+                handle_new_messages_event(
+                    s,
+                    session_id,
+                    project_path,
+                    jsonl_path.clone(),
+                    messages,
+                    source,
+                )
+                .await;
                 // Ack: cursor is safe to persist — messages have been written to PG
                 let _ = s.cursor_ack_tx.send((jsonl_path, read_end_offset));
             }
@@ -46,7 +63,10 @@ async fn run_loop(s: &AppState, rx: &mut broadcast::Receiver<WatcherEvent>) {
             }
             Ok(_) => {}
             Err(broadcast::error::RecvError::Lagged(n)) => {
-                warn!(skipped = n, "Conversation logger lagged — triggering reconciliation");
+                warn!(
+                    skipped = n,
+                    "Conversation logger lagged — triggering reconciliation"
+                );
                 reconcile(s).await;
             }
             Err(_) => {}
@@ -64,13 +84,21 @@ async fn handle_new_messages_event(
 ) {
     // ── Step 1: IngestionRouter classifies the batch (sole decision point) ──
     let (route, compaction) = ingestion_router::classify(
-        s, &session_id, &event_source, &jsonl_path, &project_path, &messages
-    ).await;
+        s,
+        &session_id,
+        &event_source,
+        &jsonl_path,
+        &project_path,
+        &messages,
+    )
+    .await;
 
     // ── Step 2: Compaction side-effects (binding inheritance + embedding queue) ──
     if let Some(ref old_sid) = compaction.old_session_id {
         inherit_task_bindings(s, old_sid, &session_id);
-        let _ = s.embedding_tx.try_send(EmbeddingTask::ProcessSession(old_sid.clone()));
+        let _ = s
+            .embedding_tx
+            .try_send(EmbeddingTask::ProcessSession(old_sid.clone()));
         info!(old_session = %old_sid, "Compaction: queued embedding for compacted session");
     }
 
@@ -80,14 +108,18 @@ async fn handle_new_messages_event(
             let mut progress = s.slot_progress.write().await;
             let sp = progress.entry(slot_id.clone()).or_default();
             if sp.session_id != session_id {
-                *sp = SlotProgress { session_id: session_id.clone(), ..Default::default() };
+                *sp = SlotProgress {
+                    session_id: session_id.clone(),
+                    ..Default::default()
+                };
             }
             for msg in &messages {
                 if let Some(blocks) = msg.message.content.as_array() {
                     for block in blocks {
                         match block.get("type").and_then(|t| t.as_str()) {
                             Some("tool_use") => {
-                                let name = block.get("name")
+                                let name = block
+                                    .get("name")
                                     .and_then(|n| n.as_str())
                                     .unwrap_or("unknown")
                                     .to_string();
@@ -102,7 +134,11 @@ async fn handle_new_messages_event(
                             Some("tool_result") => {
                                 sp.total_results += 1;
                                 sp.current_tool = None;
-                                if block.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false) {
+                                if block
+                                    .get("is_error")
+                                    .and_then(|e| e.as_bool())
+                                    .unwrap_or(false)
+                                {
                                     sp.error_count += 1;
                                 }
                                 sp.last_activity = Some(msg.timestamp.clone());
@@ -118,7 +154,8 @@ async fn handle_new_messages_event(
     // ── Step 4: Ghost session filter (防污网) ──
     // Skip sessions that have no assistant messages — these are /exit ghost sessions
     // produced by slot restarts. No business value, must not pollute the DB.
-    let db_messages: Vec<_> = messages.into_iter()
+    let db_messages: Vec<_> = messages
+        .into_iter()
         .filter(|m| m.message_type != "tool_use")
         .collect();
     if is_garbage_session(&db_messages) {
@@ -127,7 +164,15 @@ async fn handle_new_messages_event(
     }
 
     // ── Step 5: Hand off to message_handler with the pre-computed route ──
-    handle_new_messages(s, session_id.clone(), project_path, jsonl_path, db_messages, &route).await;
+    handle_new_messages(
+        s,
+        session_id.clone(),
+        project_path,
+        jsonl_path,
+        db_messages,
+        &route,
+    )
+    .await;
 
     // ── Step 6: Compaction task inheritance ──
     if let Some(tid) = compaction.task_id {
@@ -167,7 +212,9 @@ async fn handle_session_inactive(s: &AppState, session_id: &str) {
     } else {
         info!(session = %session_id, "Conversation marked completed");
         build_session_timeline(s, session_id).await;
-        let _ = s.embedding_tx.try_send(EmbeddingTask::ProcessSession(session_id.to_string()));
+        let _ = s
+            .embedding_tx
+            .try_send(EmbeddingTask::ProcessSession(session_id.to_string()));
         // Auto-progress extraction: if this session was working on a Board task, extract progress
         submit_board_progress_extraction(s, session_id).await;
     }
@@ -175,13 +222,21 @@ async fn handle_session_inactive(s: &AppState, session_id: &str) {
 
 /// Build session timeline if this parent session has compaction fragments.
 async fn build_session_timeline(s: &AppState, session_id: &str) {
-    let frags = s.store.get_compaction_fragments(session_id).await.unwrap_or_default();
+    let frags = s
+        .store
+        .get_compaction_fragments(session_id)
+        .await
+        .unwrap_or_default();
     if frags.is_empty() {
         return;
     }
     let mut entries = Vec::new();
     for (idx, (frag_id, started_at, msg_count)) in frags.iter().enumerate() {
-        let summary = s.store.get_last_assistant_content(frag_id).await.unwrap_or(None);
+        let summary = s
+            .store
+            .get_last_assistant_content(frag_id)
+            .await
+            .unwrap_or(None);
         let summary_tokens = summary.as_ref().map(|s| s.len() / 4).unwrap_or(0);
         entries.push(serde_json::json!({
             "fragment_id": frag_id,
@@ -195,7 +250,9 @@ async fn build_session_timeline(s: &AppState, session_id: &str) {
     }
     if let Ok(json) = serde_json::to_string(&entries) {
         match s.store.set_session_timeline(session_id, &json).await {
-            Ok(true) => info!(session = %session_id, fragments = frags.len(), "Session timeline built"),
+            Ok(true) => {
+                info!(session = %session_id, fragments = frags.len(), "Session timeline built")
+            }
             Ok(false) => debug!(session = %session_id, "Session timeline already exists"),
             Err(e) => warn!(session = %session_id, error = %e, "Failed to build session timeline"),
         }
@@ -204,7 +261,10 @@ async fn build_session_timeline(s: &AppState, session_id: &str) {
 
 /// Reconcile: re-scan active sessions' JSONL to recover lost messages after broadcast lag.
 async fn reconcile(s: &AppState) {
-    let convs = s.store.list_conversations(Some("active"), 100, Some("all"), None, None, None, None).await
+    let convs = s
+        .store
+        .list_conversations(Some("active"), 100, Some("all"), None, None, None, None)
+        .await
         .unwrap_or_default();
     let mut reconciled = 0usize;
     for conv in &convs {
@@ -250,32 +310,46 @@ async fn submit_board_progress_extraction(s: &AppState, session_id: &str) {
         Ok(mut map) => map.remove(session_id).unwrap_or_default(),
         Err(_) => return,
     };
-    if bindings.is_empty() { return; }
+    if bindings.is_empty() {
+        return;
+    }
 
     // 2. Filter: only keep tasks still in Running status
     let mut active_bindings = Vec::new();
     for b in bindings {
-        let is_running = s.store.get_board_task(&b.task_id).await
-            .ok().flatten()
+        let is_running = s
+            .store
+            .get_board_task(&b.task_id)
+            .await
+            .ok()
+            .flatten()
             .map(|t| t.status == missiond_core::types::BoardTaskStatus::Running)
             .unwrap_or(false);
         if is_running {
             active_bindings.push(b);
         }
     }
-    if active_bindings.is_empty() { return; }
+    if active_bindings.is_empty() {
+        return;
+    }
 
     // 3. Check message volume (< 4 → skip, not enough signal)
     // Gemini ARB: lowered from 10 to 4 — short efficient sessions still deserve progress extraction
-    let msgs = s.store.get_conversation_messages(session_id, None, 4).await
+    let msgs = s
+        .store
+        .get_conversation_messages(session_id, None, 4)
+        .await
         .unwrap_or_default();
-    if msgs.len() < 4 { return; }
+    if msgs.len() < 4 {
+        return;
+    }
 
     // 4. Build conversation summary (Rust-side, token-safe — Gemini P1)
     let summary = build_conversation_summary_for_progress(s, session_id, 50).await;
 
     // 5. Build prompt with task info
-    let task_list: Vec<String> = active_bindings.iter()
+    let task_list: Vec<String> = active_bindings
+        .iter()
         .map(|b| format!("- {} (ID: {})", b.task_title, b.task_id))
         .collect();
 
@@ -290,13 +364,16 @@ async fn submit_board_progress_extraction(s: &AppState, session_id: &str) {
     match crate::state::submit_task(s.store.as_ref(), "memory", &prompt).await {
         Ok(task_id) => {
             // Pin to slow memory slot
-            let _ = s.store.update_task(
-                &task_id,
-                &missiond_core::types::TaskUpdate {
-                    slot_id: Some(MEMORY_SLOW_SLOT_ID.to_string()),
-                    ..Default::default()
-                },
-            ).await;
+            let _ = s
+                .store
+                .update_task(
+                    &task_id,
+                    &missiond_core::types::TaskUpdate {
+                        slot_id: Some(MEMORY_SLOW_SLOT_ID.to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await;
             info!(
                 session = %session_id,
                 tasks = active_bindings.len(),
@@ -314,26 +391,37 @@ async fn submit_board_progress_extraction(s: &AppState, session_id: &str) {
 /// Extracts user + assistant messages, truncates long content, caps total at ~4000 tokens.
 /// Gemini ARB: tail-biased — recent messages are most important for is_done judgment.
 /// Strategy: build from tail, then reverse so output reads chronologically.
-async fn build_conversation_summary_for_progress(s: &AppState, session_id: &str, max_messages: usize) -> String {
-    let messages = s.store
-        .get_conversation_messages(session_id, None, max_messages as i64).await
+async fn build_conversation_summary_for_progress(
+    s: &AppState,
+    session_id: &str,
+    max_messages: usize,
+) -> String {
+    let messages = s
+        .store
+        .get_conversation_messages(session_id, None, max_messages as i64)
+        .await
         .unwrap_or_default();
 
     // Build from tail (most recent first) to ensure latest progress is preserved
     let mut parts: Vec<String> = Vec::new();
     let mut total_len = 0usize;
     for msg in messages.iter().rev() {
-        if msg.role != "user" && msg.role != "assistant" { continue; }
+        if msg.role != "user" && msg.role != "assistant" {
+            continue;
+        }
         let content = if msg.content.len() > 500 {
             let mut end = 500;
-            while end > 0 && !msg.content.is_char_boundary(end) { end -= 1; }
+            while end > 0 && !msg.content.is_char_boundary(end) {
+                end -= 1;
+            }
             format!("{}...[truncated]", &msg.content[..end])
         } else {
             msg.content.clone()
         };
         let line = format!("[{}] {}\n", msg.role, content);
         total_len += line.len();
-        if total_len > 15000 { // ~4000 tokens hard cap
+        if total_len > 15000 {
+            // ~4000 tokens hard cap
             parts.push("[...earlier messages truncated]\n".to_string());
             break;
         }

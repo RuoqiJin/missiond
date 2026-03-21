@@ -36,7 +36,8 @@ pub(crate) async fn detect_compaction(
             // Check if the current session's root matches
             if let Ok(Some(current_conv)) = state.store.get_conversation(current_uuid).await {
                 if let Some(current_path) = current_conv.jsonl_path {
-                    missiond_core::db::extract_parent_session_id(&current_path) == Some(root_id.clone())
+                    missiond_core::db::extract_parent_session_id(&current_path)
+                        == Some(root_id.clone())
                 } else {
                     false
                 }

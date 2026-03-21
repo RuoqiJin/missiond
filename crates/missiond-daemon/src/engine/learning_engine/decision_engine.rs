@@ -1,13 +1,12 @@
-
 use std::sync::atomic::Ordering;
 
 use anyhow::{anyhow, Result};
 use tracing::{debug, info, warn};
 
-use crate::state::AppState;
+use crate::engine::intent_engine::request_execution_slot;
 use crate::event_bus::{DaemonEvent, TraceContext};
 use crate::llm_gateway::call_gemini_for_flow;
-use crate::engine::intent_engine::request_execution_slot;
+use crate::state::AppState;
 
 pub(crate) struct TierResult {
     hit: bool,
@@ -16,12 +15,33 @@ pub(crate) struct TierResult {
 
 /// Save routing trace JSON to the question record.
 /// Also increments DaemonStats tier counters based on resolved_tier.
-pub(crate) async fn save_routing_trace(state: &AppState, question_id: &str, resolved_tier: &str, path: &[serde_json::Value], latency_ms: u128) {
+pub(crate) async fn save_routing_trace(
+    state: &AppState,
+    question_id: &str,
+    resolved_tier: &str,
+    path: &[serde_json::Value],
+    latency_ms: u128,
+) {
     // Increment tier-specific DaemonStats counters
     match resolved_tier {
-        "T1" => { state.stats.decisions_tier1_hit.fetch_add(1, Ordering::Relaxed); }
-        "T2" => { state.stats.decisions_tier2_hit.fetch_add(1, Ordering::Relaxed); }
-        "T3" => { state.stats.decisions_tier3_dispatched.fetch_add(1, Ordering::Relaxed); }
+        "T1" => {
+            state
+                .stats
+                .decisions_tier1_hit
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        "T2" => {
+            state
+                .stats
+                .decisions_tier2_hit
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        "T3" => {
+            state
+                .stats
+                .decisions_tier3_dispatched
+                .fetch_add(1, Ordering::Relaxed);
+        }
         _ => {} // "downgraded", "error", "T2-escalated" — no dedicated counter
     }
 
@@ -30,7 +50,10 @@ pub(crate) async fn save_routing_trace(state: &AppState, question_id: &str, reso
         "path": path,
         "latency_ms": latency_ms,
     });
-    let _ = state.store.set_question_routing_trace(question_id, &trace.to_string()).await;
+    let _ = state
+        .store
+        .set_question_routing_trace(question_id, &trace.to_string())
+        .await;
 }
 
 /// Decision Engine: process pending questions targeted at master.
@@ -39,7 +62,11 @@ pub(crate) async fn save_routing_trace(state: &AppState, question_id: &str, reso
 /// Records routing_trace for each decision for observability.
 pub(crate) async fn process_pending_master_questions(state: &AppState) {
     // Query pending questions with target=master (spawn_blocking: batch scan)
-    let questions = match state.store.list_agent_questions(Some("pending"), Some("master"), None).await {
+    let questions = match state
+        .store
+        .list_agent_questions(Some("pending"), Some("master"), None)
+        .await
+    {
         Ok(qs) => qs,
         Err(e) => {
             warn!(error = %e, "Decision Engine: failed to list pending master questions");
@@ -68,10 +95,24 @@ pub(crate) async fn process_pending_master_questions(state: &AppState) {
             path.push(serde_json::json!({"tier": "anti-loop", "status": "downgraded", "reason": format!("retry_count={}", question.retry_count)}));
             let _ = state.store.downgrade_question_to_user(&question.id).await;
             state.event_bus.publish_traced(
-                DaemonEvent::QuestionResolved { question_id: question.id.clone(), resolution: "downgraded".to_string() },
-                TraceContext { trace_id: question.task_id.clone(), summary: Some("Anti-loop: retry limit reached".to_string()), ..Default::default() },
+                DaemonEvent::QuestionResolved {
+                    question_id: question.id.clone(),
+                    resolution: "downgraded".to_string(),
+                },
+                TraceContext {
+                    trace_id: question.task_id.clone(),
+                    summary: Some("Anti-loop: retry limit reached".to_string()),
+                    ..Default::default()
+                },
             );
-            save_routing_trace(state, &question.id, "downgraded", &path, start.elapsed().as_millis()).await;
+            save_routing_trace(
+                state,
+                &question.id,
+                "downgraded",
+                &path,
+                start.elapsed().as_millis(),
+            )
+            .await;
             continue;
         }
 
@@ -84,7 +125,14 @@ pub(crate) async fn process_pending_master_questions(state: &AppState) {
                 let r = decision_tier3_dispatch(state, &question).await;
                 if let Ok(ref tr) = r {
                     path.push(tr.detail.clone());
-                    save_routing_trace(state, &question.id, "T3", &path, start.elapsed().as_millis()).await;
+                    save_routing_trace(
+                        state,
+                        &question.id,
+                        "T3",
+                        &path,
+                        start.elapsed().as_millis(),
+                    )
+                    .await;
                 }
                 r.map(|tr| tr.hit)
             }
@@ -96,11 +144,25 @@ pub(crate) async fn process_pending_master_questions(state: &AppState) {
                 if let Ok(ref tr) = r {
                     path.push(tr.detail.clone());
                     if tr.hit {
-                        save_routing_trace(state, &question.id, "T2", &path, start.elapsed().as_millis()).await;
+                        save_routing_trace(
+                            state,
+                            &question.id,
+                            "T2",
+                            &path,
+                            start.elapsed().as_millis(),
+                        )
+                        .await;
                     } else {
                         // T2 escalated but no T3 for this fast-lane — downgrade
                         path.push(serde_json::json!({"tier": "T2", "status": "escalated_no_t3"}));
-                        save_routing_trace(state, &question.id, "T2-escalated", &path, start.elapsed().as_millis()).await;
+                        save_routing_trace(
+                            state,
+                            &question.id,
+                            "T2-escalated",
+                            &path,
+                            start.elapsed().as_millis(),
+                        )
+                        .await;
                     }
                 }
                 r.map(|tr| tr.hit)
@@ -113,26 +175,61 @@ pub(crate) async fn process_pending_master_questions(state: &AppState) {
                     Ok(ref tr) => {
                         path.push(tr.detail.clone());
                         if tr.hit {
-                            save_routing_trace(state, &question.id, "T1", &path, start.elapsed().as_millis()).await;
+                            save_routing_trace(
+                                state,
+                                &question.id,
+                                "T1",
+                                &path,
+                                start.elapsed().as_millis(),
+                            )
+                            .await;
                         } else {
                             info!(question_id = %question.id, "Tier 1 miss for preference → downgrade to user");
                             path.push(serde_json::json!({"tier": "preference", "status": "downgraded", "reason": "t1_miss_preference_exclusive"}));
                             let _ = state.store.downgrade_question_to_user(&question.id).await;
                             state.event_bus.publish_traced(
-                                DaemonEvent::QuestionResolved { question_id: question.id.clone(), resolution: "downgraded".to_string() },
-                                TraceContext { trace_id: question.task_id.clone(), summary: Some("Preference miss → downgrade".to_string()), ..Default::default() },
+                                DaemonEvent::QuestionResolved {
+                                    question_id: question.id.clone(),
+                                    resolution: "downgraded".to_string(),
+                                },
+                                TraceContext {
+                                    trace_id: question.task_id.clone(),
+                                    summary: Some("Preference miss → downgrade".to_string()),
+                                    ..Default::default()
+                                },
                             );
-                            save_routing_trace(state, &question.id, "downgraded", &path, start.elapsed().as_millis()).await;
+                            save_routing_trace(
+                                state,
+                                &question.id,
+                                "downgraded",
+                                &path,
+                                start.elapsed().as_millis(),
+                            )
+                            .await;
                         }
                     }
                     Err(_) => {
                         path.push(serde_json::json!({"tier": "T1", "status": "error"}));
                         let _ = state.store.downgrade_question_to_user(&question.id).await;
                         state.event_bus.publish_traced(
-                            DaemonEvent::QuestionResolved { question_id: question.id.clone(), resolution: "downgraded".to_string() },
-                            TraceContext { trace_id: question.task_id.clone(), summary: Some("T1 error → downgrade".to_string()), ..Default::default() },
+                            DaemonEvent::QuestionResolved {
+                                question_id: question.id.clone(),
+                                resolution: "downgraded".to_string(),
+                            },
+                            TraceContext {
+                                trace_id: question.task_id.clone(),
+                                summary: Some("T1 error → downgrade".to_string()),
+                                ..Default::default()
+                            },
                         );
-                        save_routing_trace(state, &question.id, "downgraded", &path, start.elapsed().as_millis()).await;
+                        save_routing_trace(
+                            state,
+                            &question.id,
+                            "downgraded",
+                            &path,
+                            start.elapsed().as_millis(),
+                        )
+                        .await;
                     }
                 }
                 r.map(|tr| tr.hit)
@@ -146,7 +243,14 @@ pub(crate) async fn process_pending_master_questions(state: &AppState) {
                 match t1 {
                     Ok(tr) if tr.hit => {
                         path.push(tr.detail);
-                        save_routing_trace(state, &question.id, "T1", &path, start.elapsed().as_millis()).await;
+                        save_routing_trace(
+                            state,
+                            &question.id,
+                            "T1",
+                            &path,
+                            start.elapsed().as_millis(),
+                        )
+                        .await;
                         Ok(true)
                     }
                     Ok(tr) => {
@@ -156,7 +260,14 @@ pub(crate) async fn process_pending_master_questions(state: &AppState) {
                         match t2 {
                             Ok(tr2) if tr2.hit => {
                                 path.push(tr2.detail);
-                                save_routing_trace(state, &question.id, "T2", &path, start.elapsed().as_millis()).await;
+                                save_routing_trace(
+                                    state,
+                                    &question.id,
+                                    "T2",
+                                    &path,
+                                    start.elapsed().as_millis(),
+                                )
+                                .await;
                                 Ok(true)
                             }
                             Ok(tr2) => {
@@ -166,11 +277,25 @@ pub(crate) async fn process_pending_master_questions(state: &AppState) {
                                 match t3 {
                                     Ok(ref tr3) => {
                                         path.push(tr3.detail.clone());
-                                        save_routing_trace(state, &question.id, "T3", &path, start.elapsed().as_millis()).await;
+                                        save_routing_trace(
+                                            state,
+                                            &question.id,
+                                            "T3",
+                                            &path,
+                                            start.elapsed().as_millis(),
+                                        )
+                                        .await;
                                     }
                                     Err(ref e) => {
                                         path.push(serde_json::json!({"tier": "T3", "status": "error", "reason": e.to_string()}));
-                                        save_routing_trace(state, &question.id, "error", &path, start.elapsed().as_millis()).await;
+                                        save_routing_trace(
+                                            state,
+                                            &question.id,
+                                            "error",
+                                            &path,
+                                            start.elapsed().as_millis(),
+                                        )
+                                        .await;
                                     }
                                 }
                                 t3.map(|tr3| tr3.hit)
@@ -182,11 +307,25 @@ pub(crate) async fn process_pending_master_questions(state: &AppState) {
                                 match t3 {
                                     Ok(ref tr3) => {
                                         path.push(tr3.detail.clone());
-                                        save_routing_trace(state, &question.id, "T3", &path, start.elapsed().as_millis()).await;
+                                        save_routing_trace(
+                                            state,
+                                            &question.id,
+                                            "T3",
+                                            &path,
+                                            start.elapsed().as_millis(),
+                                        )
+                                        .await;
                                     }
                                     Err(ref e2) => {
                                         path.push(serde_json::json!({"tier": "T3", "status": "error", "reason": e2.to_string()}));
-                                        save_routing_trace(state, &question.id, "error", &path, start.elapsed().as_millis()).await;
+                                        save_routing_trace(
+                                            state,
+                                            &question.id,
+                                            "error",
+                                            &path,
+                                            start.elapsed().as_millis(),
+                                        )
+                                        .await;
                                     }
                                 }
                                 t3.map(|tr3| tr3.hit)
@@ -200,14 +339,32 @@ pub(crate) async fn process_pending_master_questions(state: &AppState) {
                         match t2 {
                             Ok(tr2) if tr2.hit => {
                                 path.push(tr2.detail);
-                                save_routing_trace(state, &question.id, "T2", &path, start.elapsed().as_millis()).await;
+                                save_routing_trace(
+                                    state,
+                                    &question.id,
+                                    "T2",
+                                    &path,
+                                    start.elapsed().as_millis(),
+                                )
+                                .await;
                                 Ok(true)
                             }
                             _ => {
-                                if let Ok(ref tr2) = t2 { path.push(tr2.detail.clone()); }
+                                if let Ok(ref tr2) = t2 {
+                                    path.push(tr2.detail.clone());
+                                }
                                 let t3 = decision_tier3_dispatch(state, &question).await;
-                                if let Ok(ref tr3) = t3 { path.push(tr3.detail.clone()); }
-                                save_routing_trace(state, &question.id, if t3.is_ok() { "T3" } else { "error" }, &path, start.elapsed().as_millis()).await;
+                                if let Ok(ref tr3) = t3 {
+                                    path.push(tr3.detail.clone());
+                                }
+                                save_routing_trace(
+                                    state,
+                                    &question.id,
+                                    if t3.is_ok() { "T3" } else { "error" },
+                                    &path,
+                                    start.elapsed().as_millis(),
+                                )
+                                .await;
                                 t3.map(|tr3| tr3.hit)
                             }
                         }
@@ -231,18 +388,27 @@ pub(crate) async fn process_pending_master_questions(state: &AppState) {
 ///   Merge via RRF (k=60), hit if cosine > 0.60 AND rrf above threshold
 ///
 /// Fallback (embedding unavailable): FTS5 + keyword overlap ≥ 30%
-pub(crate) async fn decision_tier1_kb(state: &AppState, question: &missiond_core::types::AgentQuestion) -> Result<TierResult> {
+pub(crate) async fn decision_tier1_kb(
+    state: &AppState,
+    question: &missiond_core::types::AgentQuestion,
+) -> Result<TierResult> {
     let tier_start = std::time::Instant::now();
     // Path A: FTS5 search with ranked results
-    let fts_results = state.store.kb_search_ranked(&question.question, Some("policy:decision"), 20)
-        .await.unwrap_or_default();
+    let fts_results = state
+        .store
+        .kb_search_ranked(&question.question, Some("policy:decision"), 20)
+        .await
+        .unwrap_or_default();
 
-    let fts_ids: Vec<(String, usize)> = fts_results.iter()
+    let fts_ids: Vec<(String, usize)> = fts_results
+        .iter()
         .map(|(e, rank)| (e.id.clone(), *rank))
         .collect();
 
     // Path B: Semantic vector search (if embedding service available)
-    let query_embedding = state.embedding_service.as_ref()
+    let query_embedding = state
+        .embedding_service
+        .as_ref()
         .and_then(|svc| svc.embed(&question.question));
 
     let cache_guard = state.embedding_cache.read().await;
@@ -263,8 +429,8 @@ pub(crate) async fn decision_tier1_kb(state: &AppState, question: &missiond_core
                 q_emb,
                 &cache_guard,
                 &fts_ids,
-                20,   // top_k
-                60,   // rrf_k
+                20, // top_k
+                60, // rrf_k
             );
             drop(cache_guard); // Release read lock
 
@@ -307,14 +473,18 @@ pub(crate) async fn decision_tier1_kb(state: &AppState, question: &missiond_core
             }
 
             // Fetch the actual KB entry
-            let entry = fts_results.iter()
+            let entry = fts_results
+                .iter()
                 .find(|(e, _)| e.id == top.id)
                 .map(|(e, _)| e.clone());
             let entry = match entry {
                 Some(e) => e,
                 None => {
                     // Entry found by vector but not by FTS — fetch from DB
-                    state.store.kb_get_by_id(&top.id).await
+                    state
+                        .store
+                        .kb_get_by_id(&top.id)
+                        .await
                         .unwrap_or(None)
                         .ok_or_else(|| anyhow!("KB entry {} not found", top.id))?
                 }
@@ -329,10 +499,15 @@ pub(crate) async fn decision_tier1_kb(state: &AppState, question: &missiond_core
                 "Tier 1: hybrid hit, answering"
             );
 
-            state.store.answer_agent_question(&question.id, &answer).await
+            state
+                .store
+                .answer_agent_question(&question.id, &answer)
+                .await
                 .map_err(|e| anyhow!("Failed to answer: {}", e))?;
             // Scheduling signal (wake submit consumer)
-            state.event_bus.publish(DaemonEvent::TaskCreated { task_id: String::new() });
+            state.event_bus.publish(DaemonEvent::TaskCreated {
+                task_id: String::new(),
+            });
             // Semantic trace: decision resolved
             state.event_bus.publish_traced(
                 DaemonEvent::DecisionResolved {
@@ -375,11 +550,13 @@ pub(crate) async fn decision_tier1_kb(state: &AppState, question: &missiond_core
     let top = &fts_results[0].0;
 
     // Keyword overlap check (original logic)
-    let q_tokens: std::collections::HashSet<&str> = question.question
+    let q_tokens: std::collections::HashSet<&str> = question
+        .question
         .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
         .filter(|w| w.len() > 1)
         .collect();
-    let rule_tokens: std::collections::HashSet<&str> = top.summary
+    let rule_tokens: std::collections::HashSet<&str> = top
+        .summary
         .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
         .filter(|w| w.len() > 1)
         .collect();
@@ -411,9 +588,14 @@ pub(crate) async fn decision_tier1_kb(state: &AppState, question: &missiond_core
     info!(question_id = %question.id, coverage = %coverage_str,
         rule_key = %top.key, "Tier 1: FTS-only hit, answering");
 
-    state.store.answer_agent_question(&question.id, &answer).await
+    state
+        .store
+        .answer_agent_question(&question.id, &answer)
+        .await
         .map_err(|e| anyhow!("Failed to answer: {}", e))?;
-    state.event_bus.publish(DaemonEvent::TaskCreated { task_id: String::new() });
+    state.event_bus.publish(DaemonEvent::TaskCreated {
+        task_id: String::new(),
+    });
     state.event_bus.publish_traced(
         DaemonEvent::DecisionResolved {
             question_id: question.id.clone(),
@@ -436,7 +618,10 @@ pub(crate) async fn decision_tier1_kb(state: &AppState, question: &missiond_core
 }
 
 /// Tier 2: Call Gemini with structured JSON contract
-pub(crate) async fn decision_tier2_gemini(state: &AppState, question: &missiond_core::types::AgentQuestion) -> Result<TierResult> {
+pub(crate) async fn decision_tier2_gemini(
+    state: &AppState,
+    question: &missiond_core::types::AgentQuestion,
+) -> Result<TierResult> {
     let tier_start = std::time::Instant::now();
     // Build context: task description + question + phase + recent notes
     let mut context_parts = Vec::new();
@@ -444,7 +629,10 @@ pub(crate) async fn decision_tier2_gemini(state: &AppState, question: &missiond_
     // 1. Task description (if linked)
     if let Some(ref task_id) = question.task_id {
         if let Ok(Some(task)) = state.store.get_board_task(task_id).await {
-            context_parts.push(format!("## 任务目标\n**{}**\n{}", task.title, task.description));
+            context_parts.push(format!(
+                "## 任务目标\n**{}**\n{}",
+                task.title, task.description
+            ));
             if let Some(ref fp) = task.flow_phase {
                 context_parts.push(format!("## 当前阶段\n{}", fp));
             }
@@ -452,7 +640,8 @@ pub(crate) async fn decision_tier2_gemini(state: &AppState, question: &missiond_
             if let Ok(notes) = state.store.get_board_task_notes(task_id).await {
                 let recent: Vec<_> = notes.iter().rev().take(3).collect();
                 if !recent.is_empty() {
-                    let notes_text = recent.iter()
+                    let notes_text = recent
+                        .iter()
                         .map(|n| format!("[{}] {}", n.created_at, n.content))
                         .collect::<Vec<_>>()
                         .join("\n\n");
@@ -494,15 +683,26 @@ pub(crate) async fn decision_tier2_gemini(state: &AppState, question: &missiond_
 
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_text) {
                 let action = parsed.get("action").and_then(|a| a.as_str()).unwrap_or("");
-                let decision = parsed.get("decision").and_then(|d| d.as_str()).unwrap_or("");
-                let reasoning = parsed.get("reasoning").and_then(|r| r.as_str()).unwrap_or("");
+                let decision = parsed
+                    .get("decision")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("");
+                let reasoning = parsed
+                    .get("reasoning")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("");
 
                 if action == "DECIDE" && !decision.is_empty() {
                     let answer = format!("[主控裁决·Gemini] {}\n\n理由：{}", decision, reasoning);
                     info!(question_id = %question.id, "Tier 2: Gemini decided");
-                    state.store.answer_agent_question(&question.id, &answer).await
+                    state
+                        .store
+                        .answer_agent_question(&question.id, &answer)
+                        .await
                         .map_err(|e| anyhow!("Failed to answer: {}", e))?;
-                    state.event_bus.publish(DaemonEvent::TaskCreated { task_id: String::new() });
+                    state.event_bus.publish(DaemonEvent::TaskCreated {
+                        task_id: String::new(),
+                    });
                     state.event_bus.publish_traced(
                         DaemonEvent::DecisionResolved {
                             question_id: question.id.clone(),
@@ -511,7 +711,10 @@ pub(crate) async fn decision_tier2_gemini(state: &AppState, question: &missiond_
                         },
                         TraceContext {
                             trace_id: question.task_id.clone(),
-                            summary: Some(format!("T2 Gemini: {}", decision.chars().take(60).collect::<String>())),
+                            summary: Some(format!(
+                                "T2 Gemini: {}",
+                                decision.chars().take(60).collect::<String>()
+                            )),
                             ..Default::default()
                         },
                     );
@@ -543,7 +746,10 @@ pub(crate) async fn decision_tier2_gemini(state: &AppState, question: &missiond_
 }
 
 /// Tier 3: Dispatch to slot-decision workstation via slot_tasks
-pub(crate) async fn decision_tier3_dispatch(state: &AppState, question: &missiond_core::types::AgentQuestion) -> Result<TierResult> {
+pub(crate) async fn decision_tier3_dispatch(
+    state: &AppState,
+    question: &missiond_core::types::AgentQuestion,
+) -> Result<TierResult> {
     let slot_id = "slot-decision";
 
     // Build investigation prompt
@@ -568,8 +774,15 @@ pub(crate) async fn decision_tier3_dispatch(state: &AppState, question: &mission
             if let Ok(notes) = state.store.get_board_task_notes(task_id).await {
                 let recent: Vec<_> = notes.iter().rev().take(5).collect();
                 if !recent.is_empty() {
-                    let notes_text = recent.iter()
-                        .map(|n| format!("[{}] {}", &n.created_at[..19.min(n.created_at.len())], n.content))
+                    let notes_text = recent
+                        .iter()
+                        .map(|n| {
+                            format!(
+                                "[{}] {}",
+                                &n.created_at[..19.min(n.created_at.len())],
+                                n.content
+                            )
+                        })
                         .collect::<Vec<_>>()
                         .join("\n");
                     prompt_parts.push(format!("最近进展（Board Notes）：\n{}", notes_text));
@@ -581,7 +794,11 @@ pub(crate) async fn decision_tier3_dispatch(state: &AppState, question: &mission
 
     let prompt = prompt_parts.join("\n");
     let prompt_summary = if prompt.len() > 200 {
-        let end = prompt.char_indices().nth(200).map(|(i,_)| i).unwrap_or(prompt.len());
+        let end = prompt
+            .char_indices()
+            .nth(200)
+            .map(|(i, _)| i)
+            .unwrap_or(prompt.len());
         format!("{}...", &prompt[..end])
     } else {
         prompt.clone()
@@ -668,10 +885,13 @@ pub(crate) async fn reap_stale_decision_tasks(state: &AppState) {
     // Force-fail all stale decision slot_tasks
     if let Ok(stale_tasks) = state.store.find_stale_decision_tasks(900).await {
         for task in &stale_tasks {
-            let _ = state.store.slot_task_set_failed(
-                &task.id,
-                "Decision reaper: 15min timeout, forced termination",
-            ).await;
+            let _ = state
+                .store
+                .slot_task_set_failed(
+                    &task.id,
+                    "Decision reaper: 15min timeout, forced termination",
+                )
+                .await;
         }
     }
 
@@ -684,8 +904,15 @@ pub(crate) async fn reap_stale_decision_tasks(state: &AppState) {
             warn!(question_id = %question.id, error = %e, "Decision reaper: downgrade failed");
         }
         state.event_bus.publish_traced(
-            DaemonEvent::QuestionResolved { question_id: question.id.clone(), resolution: "downgraded".to_string() },
-            TraceContext { trace_id: question.task_id.clone(), summary: Some("Stale decision: 15min timeout → downgrade".to_string()), ..Default::default() },
+            DaemonEvent::QuestionResolved {
+                question_id: question.id.clone(),
+                resolution: "downgraded".to_string(),
+            },
+            TraceContext {
+                trace_id: question.task_id.clone(),
+                summary: Some("Stale decision: 15min timeout → downgrade".to_string()),
+                ..Default::default()
+            },
         );
 
         // 2. Write warning note to associated board task

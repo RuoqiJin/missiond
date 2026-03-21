@@ -8,20 +8,35 @@ const MANAGED_END: &str = "<!-- missiond:managed:end -->";
 /// Sync KB preferences + strategic context + hot topics into ~/.claude/CLAUDE.md managed section.
 /// Only writes when content actually changes (hash-based detection).
 pub(crate) async fn sync_claude_md(state: &AppState) {
-    let preferences = state.store.kb_list(Some("preference")).await.unwrap_or_default();
+    let preferences = state
+        .store
+        .kb_list(Some("preference"))
+        .await
+        .unwrap_or_default();
     let hot_keys = state.store.kb_hot_keys(20).await.unwrap_or_default();
 
     // Load strategic state from KB (Phase 2b: context feedback)
-    let strategic_state = state.store.kb_get("strategic-state").await
+    let strategic_state = state
+        .store
+        .kb_get("strategic-state")
+        .await
         .ok()
         .flatten()
         .and_then(|e| e.detail);
 
     // Running board tasks for Active Tasks anchor
-    let running_tasks = state.store.list_board_tasks(Some("running"), false).await.unwrap_or_default();
+    let running_tasks = state
+        .store
+        .list_board_tasks(Some("running"), false)
+        .await
+        .unwrap_or_default();
 
     // Nothing to sync
-    if preferences.is_empty() && hot_keys.is_empty() && strategic_state.is_none() && running_tasks.is_empty() {
+    if preferences.is_empty()
+        && hot_keys.is_empty()
+        && strategic_state.is_none()
+        && running_tasks.is_empty()
+    {
         return;
     }
 
@@ -29,13 +44,24 @@ pub(crate) async fn sync_claude_md(state: &AppState) {
     let new_hash = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for p in &preferences { p.summary.hash(&mut hasher); }
-        for k in &hot_keys { k.hash(&mut hasher); }
-        if let Some(ref s) = strategic_state { s.to_string().hash(&mut hasher); }
-        for t in &running_tasks { t.id.hash(&mut hasher); t.title.hash(&mut hasher); }
+        for p in &preferences {
+            p.summary.hash(&mut hasher);
+        }
+        for k in &hot_keys {
+            k.hash(&mut hasher);
+        }
+        if let Some(ref s) = strategic_state {
+            s.to_string().hash(&mut hasher);
+        }
+        for t in &running_tasks {
+            t.id.hash(&mut hasher);
+            t.title.hash(&mut hasher);
+        }
         hasher.finish()
     };
-    let last_hash = state.claude_md_hash.load(std::sync::atomic::Ordering::Relaxed);
+    let last_hash = state
+        .claude_md_hash
+        .load(std::sync::atomic::Ordering::Relaxed);
     if new_hash == last_hash && last_hash != 0 {
         return;
     }
@@ -64,8 +90,11 @@ pub(crate) async fn sync_claude_md(state: &AppState) {
             let age = chrono::DateTime::parse_from_rfc3339(&t.updated_at)
                 .map(|dt| {
                     let mins = (chrono::Utc::now() - dt.with_timezone(&chrono::Utc)).num_minutes();
-                    if mins < 60 { format!(", {}min", mins) }
-                    else { format!(", {}h", mins / 60) }
+                    if mins < 60 {
+                        format!(", {}min", mins)
+                    } else {
+                        format!(", {}h", mins / 60)
+                    }
                 })
                 .unwrap_or_default();
             managed.push_str(&format!(
@@ -95,10 +124,9 @@ pub(crate) async fn sync_claude_md(state: &AppState) {
     let existing = std::fs::read_to_string(&claude_md_path).unwrap_or_default();
 
     // Replace or append managed section
-    let new_content = if let (Some(start), Some(end_pos)) = (
-        existing.find(MANAGED_START),
-        existing.find(MANAGED_END),
-    ) {
+    let new_content = if let (Some(start), Some(end_pos)) =
+        (existing.find(MANAGED_START), existing.find(MANAGED_END))
+    {
         let before = &existing[..start];
         let after_marker = end_pos + MANAGED_END.len();
         let after = &existing[after_marker..];
@@ -114,7 +142,9 @@ pub(crate) async fn sync_claude_md(state: &AppState) {
 
     // Only write if content actually differs
     if new_content == existing {
-        state.claude_md_hash.store(new_hash, std::sync::atomic::Ordering::Relaxed);
+        state
+            .claude_md_hash
+            .store(new_hash, std::sync::atomic::Ordering::Relaxed);
         return;
     }
 
@@ -125,7 +155,9 @@ pub(crate) async fn sync_claude_md(state: &AppState) {
                 topics = hot_keys.len(),
                 "CLAUDE.md managed section synced"
             );
-            state.claude_md_hash.store(new_hash, std::sync::atomic::Ordering::Relaxed);
+            state
+                .claude_md_hash
+                .store(new_hash, std::sync::atomic::Ordering::Relaxed);
         }
         Err(e) => warn!(error = %e, "Failed to write CLAUDE.md"),
     }
@@ -142,8 +174,12 @@ fn build_strategic_section(managed: &mut String, state_json: &serde_json::Value)
 
     // Development trajectory — current focus (1) & goals (max 2)
     if let Some(traj) = state_json.get("development_trajectory") {
-        let focus = traj.get("current_focus").and_then(|v| v.as_str()).unwrap_or("");
-        let goals: Vec<&str> = traj.get("inferred_goals")
+        let focus = traj
+            .get("current_focus")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let goals: Vec<&str> = traj
+            .get("inferred_goals")
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_str()).take(2).collect())
             .unwrap_or_default();
@@ -164,7 +200,8 @@ fn build_strategic_section(managed: &mut String, state_json: &serde_json::Value)
 
     // Anti-patterns — high-severity friction points as warnings (max 3)
     if let Some(anti) = state_json.get("anti_patterns").and_then(|v| v.as_array()) {
-        let rules: Vec<&str> = anti.iter()
+        let rules: Vec<&str> = anti
+            .iter()
             .filter_map(|v| v.get("rule").and_then(|r| r.as_str()))
             .take(3)
             .collect();
@@ -180,8 +217,12 @@ fn build_strategic_section(managed: &mut String, state_json: &serde_json::Value)
     }
 
     // Negative collaboration patterns — things to avoid (max 3)
-    if let Some(patterns) = state_json.get("collaboration_patterns").and_then(|v| v.as_array()) {
-        let negatives: Vec<&str> = patterns.iter()
+    if let Some(patterns) = state_json
+        .get("collaboration_patterns")
+        .and_then(|v| v.as_array())
+    {
+        let negatives: Vec<&str> = patterns
+            .iter()
             .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("negative"))
             .filter_map(|v| v.get("pattern").and_then(|p| p.as_str()))
             .take(3)

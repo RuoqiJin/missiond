@@ -33,10 +33,12 @@ pub(crate) struct ArchMaintenanceWorker {
 }
 
 impl BackgroundWorker for ArchMaintenanceWorker {
-    fn name(&self) -> &'static str { "arch_maintenance" }
+    fn name(&self) -> &'static str {
+        "arch_maintenance"
+    }
 
     fn dependencies(&self) -> Vec<crate::control_tree::Dependency> {
-        use crate::control_tree::{Dependency, CtlProvider};
+        use crate::control_tree::{CtlProvider, Dependency};
         vec![Dependency::Provider(CtlProvider::Sonnet)]
     }
 
@@ -264,13 +266,7 @@ fn commit_yaml_update(repo_path: &Path, yaml_path: &str, commit_msg: &str) -> Re
 
     let full_msg = format!("{} {}", ARCH_COMMIT_PREFIX, commit_msg);
     let commit_output = std::process::Command::new("git")
-        .args([
-            "commit",
-            "-m",
-            &full_msg,
-            "--author",
-            ARCH_COMMIT_AUTHOR,
-        ])
+        .args(["commit", "-m", &full_msg, "--author", ARCH_COMMIT_AUTHOR])
         .current_dir(repo_path)
         .output()
         .map_err(|e| anyhow!("git commit failed: {}", e))?;
@@ -401,7 +397,11 @@ async fn process_commit(state: &AppState, repo: &str, hash: &str) -> Result<bool
         .map_err(|e| anyhow!("Failed to write {}: {}", yaml_path.display(), e))?;
 
     // 9. Commit (in missiond repo, since that's where the YAML lives)
-    let commit_msg = format!("update {} manifest (triggered by {})", repo, &hash[..7.min(hash.len())]);
+    let commit_msg = format!(
+        "update {} manifest (triggered by {})",
+        repo,
+        &hash[..7.min(hash.len())]
+    );
     tokio::task::spawn_blocking({
         let root = missiond_root.clone();
         let yaml = yaml_rel.to_string();

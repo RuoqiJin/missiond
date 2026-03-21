@@ -71,7 +71,9 @@ impl GeminiPtyTransport {
         let response = self.driver.ask(&self.slot_id, prompt, idle_timeout).await?;
 
         if response.is_empty() {
-            return Err(anyhow!("GeminiPtyTransport: empty response from Gemini CLI"));
+            return Err(anyhow!(
+                "GeminiPtyTransport: empty response from Gemini CLI"
+            ));
         }
 
         info!(response_len = response.len(), "GeminiPtyTransport: done");

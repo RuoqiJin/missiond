@@ -24,7 +24,13 @@ const POLL_TIMEOUT: Duration = Duration::from_secs(300); // 5 min
 
 /// MIME type detection by file extension.
 pub(crate) fn detect_mime(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase().as_str() {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
         "mp4" => "video/mp4",
         "mov" | "qt" => "video/quicktime",
         "avi" => "video/x-msvideo",
@@ -65,10 +71,7 @@ pub(crate) enum PreparedFile {
         base64_data: String,
     },
     /// Large file: uploaded via File API, reference by URI.
-    FileRef {
-        mime_type: String,
-        file_uri: String,
-    },
+    FileRef { mime_type: String, file_uri: String },
 }
 
 impl GeminiFileApi {
@@ -87,7 +90,8 @@ impl GeminiFileApi {
         path: &Path,
         store: &dyn missiond_core::db::traits::ObservabilityStore,
     ) -> Result<PreparedFile> {
-        let data = tokio::fs::read(path).await
+        let data = tokio::fs::read(path)
+            .await
             .map_err(|e| anyhow!("Failed to read '{}': {}", path.display(), e))?;
 
         let mime_type = detect_mime(path).to_string();
@@ -104,10 +108,16 @@ impl GeminiFileApi {
         }
 
         // Check cache
-        if let Some(uri) = store.gemini_file_cache_get(&hash).await
-            .map_err(|e| anyhow!("DB error: {}", e))? {
+        if let Some(uri) = store
+            .gemini_file_cache_get(&hash)
+            .await
+            .map_err(|e| anyhow!("DB error: {}", e))?
+        {
             info!(hash = %hash, uri = %uri, "Gemini File API: cache hit");
-            return Ok(PreparedFile::FileRef { mime_type, file_uri: uri });
+            return Ok(PreparedFile::FileRef {
+                mime_type,
+                file_uri: uri,
+            });
         }
 
         // Upload via File API
@@ -115,15 +125,21 @@ impl GeminiFileApi {
 
         // Cache the result (40h TTL, File API keeps files for 48h)
         let expires_at = chrono::Utc::now().timestamp() + 40 * 3600;
-        store.gemini_file_cache_put(&hash, &file_uri, &mime_type, expires_at).await
+        store
+            .gemini_file_cache_put(&hash, &file_uri, &mime_type, expires_at)
+            .await
             .map_err(|e| anyhow!("DB error: {}", e))?;
 
-        Ok(PreparedFile::FileRef { mime_type, file_uri })
+        Ok(PreparedFile::FileRef {
+            mime_type,
+            file_uri,
+        })
     }
 
     /// Upload file to Gemini File API and poll until ACTIVE.
     async fn upload_file(&self, data: &[u8], mime_type: &str, path: &Path) -> Result<String> {
-        let display_name = path.file_name()
+        let display_name = path
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("upload")
             .to_string();
@@ -145,10 +161,15 @@ impl GeminiFileApi {
             "file": { "displayName": display_name }
         });
 
-        let resp = self.http.post(&init_url)
+        let resp = self
+            .http
+            .post(&init_url)
             .header("X-Goog-Upload-Protocol", "resumable")
             .header("X-Goog-Upload-Command", "start")
-            .header("X-Goog-Upload-Header-Content-Length", data.len().to_string())
+            .header(
+                "X-Goog-Upload-Header-Content-Length",
+                data.len().to_string(),
+            )
             .header("X-Goog-Upload-Header-Content-Type", mime_type)
             .header("Content-Type", "application/json")
             .body(metadata.to_string())
@@ -162,14 +183,17 @@ impl GeminiFileApi {
             return Err(anyhow!("File API init returned {}: {}", status, body));
         }
 
-        let upload_url = resp.headers()
+        let upload_url = resp
+            .headers()
             .get("x-goog-upload-url")
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| anyhow!("File API: missing upload URL in response headers"))?
             .to_string();
 
         // Step 2: Upload the actual data
-        let resp = self.http.put(&upload_url)
+        let resp = self
+            .http
+            .put(&upload_url)
             .header("X-Goog-Upload-Command", "upload, finalize")
             .header("X-Goog-Upload-Offset", "0")
             .header("Content-Type", mime_type)
@@ -184,18 +208,23 @@ impl GeminiFileApi {
             return Err(anyhow!("File API upload returned {}: {}", status, body));
         }
 
-        let result: Value = resp.json().await
+        let result: Value = resp
+            .json()
+            .await
             .map_err(|e| anyhow!("File API: invalid JSON response: {}", e))?;
 
-        let file_name = result.pointer("/file/name")
+        let file_name = result
+            .pointer("/file/name")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("File API: missing file.name in response: {}", result))?
             .to_string();
-        let file_uri = result.pointer("/file/uri")
+        let file_uri = result
+            .pointer("/file/uri")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("File API: missing file.uri in response: {}", result))?
             .to_string();
-        let state = result.pointer("/file/state")
+        let state = result
+            .pointer("/file/state")
             .and_then(|v| v.as_str())
             .unwrap_or("PROCESSING");
 
@@ -219,12 +248,19 @@ impl GeminiFileApi {
 
         loop {
             if tokio::time::Instant::now() > deadline {
-                return Err(anyhow!("File API: timeout waiting for ACTIVE state ({})", file_name));
+                return Err(anyhow!(
+                    "File API: timeout waiting for ACTIVE state ({})",
+                    file_name
+                ));
             }
 
             tokio::time::sleep(POLL_INTERVAL).await;
 
-            let resp = self.http.get(&url).send().await
+            let resp = self
+                .http
+                .get(&url)
+                .send()
+                .await
                 .map_err(|e| anyhow!("File API poll failed: {}", e))?;
 
             if !resp.status().is_success() {
@@ -233,7 +269,10 @@ impl GeminiFileApi {
             }
 
             let result: Value = resp.json().await.unwrap_or_default();
-            let state = result.get("state").and_then(|v| v.as_str()).unwrap_or("UNKNOWN");
+            let state = result
+                .get("state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("UNKNOWN");
 
             match state {
                 "ACTIVE" => {
@@ -242,7 +281,11 @@ impl GeminiFileApi {
                 }
                 "FAILED" => {
                     let error = result.get("error").cloned().unwrap_or_default();
-                    return Err(anyhow!("File API: processing FAILED for {}: {}", file_name, error));
+                    return Err(anyhow!(
+                        "File API: processing FAILED for {}: {}",
+                        file_name,
+                        error
+                    ));
                 }
                 _ => {
                     info!(file = %file_name, state = %state, "Gemini File API: still processing...");
@@ -265,7 +308,10 @@ impl GeminiFileApi {
         // Add file parts first
         for file in files {
             match file {
-                PreparedFile::Inline { mime_type, base64_data } => {
+                PreparedFile::Inline {
+                    mime_type,
+                    base64_data,
+                } => {
                     parts.push(serde_json::json!({
                         "inlineData": {
                             "mimeType": mime_type,
@@ -273,7 +319,10 @@ impl GeminiFileApi {
                         }
                     }));
                 }
-                PreparedFile::FileRef { mime_type, file_uri } => {
+                PreparedFile::FileRef {
+                    mime_type,
+                    file_uri,
+                } => {
                     parts.push(serde_json::json!({
                         "fileData": {
                             "mimeType": mime_type,
@@ -308,7 +357,9 @@ impl GeminiFileApi {
 
         info!(model = %gemini_model, parts = parts.len(), "Gemini File API: generateContent");
 
-        let resp = self.http.post(&url)
+        let resp = self
+            .http
+            .post(&url)
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -318,14 +369,21 @@ impl GeminiFileApi {
         if !resp.status().is_success() {
             let status = resp.status();
             let err_body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Gemini generateContent returned {}: {}", status, err_body));
+            return Err(anyhow!(
+                "Gemini generateContent returned {}: {}",
+                status,
+                err_body
+            ));
         }
 
-        let result: Value = resp.json().await
+        let result: Value = resp
+            .json()
+            .await
             .map_err(|e| anyhow!("Gemini generateContent: invalid JSON: {}", e))?;
 
         // Extract text from response
-        let content = result.pointer("/candidates/0/content/parts/0/text")
+        let content = result
+            .pointer("/candidates/0/content/parts/0/text")
             .and_then(|v| v.as_str())
             .unwrap_or("(empty response)");
 

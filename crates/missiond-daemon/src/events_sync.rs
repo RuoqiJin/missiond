@@ -17,7 +17,8 @@ use crate::state::AppState;
 pub fn extract_visible_text(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),
-        Value::Array(arr) => arr.iter()
+        Value::Array(arr) => arr
+            .iter()
             .filter_map(|item| {
                 let block_type = item.get("type")?.as_str()?;
                 if block_type == "text" {
@@ -36,13 +37,18 @@ pub fn extract_visible_text(content: &Value) -> String {
 /// Returns None if no tool_use blocks found.
 pub fn extract_tool_names_csv(content: &Value) -> Option<String> {
     let names = extract_tool_names(content);
-    if names.is_empty() { None } else { Some(names.join(",")) }
+    if names.is_empty() {
+        None
+    } else {
+        Some(names.join(","))
+    }
 }
 
 /// Extract tool names from content blocks (for tool_use preview on timeline).
 pub fn extract_tool_names(content: &Value) -> Vec<String> {
     match content {
-        Value::Array(arr) => arr.iter()
+        Value::Array(arr) => arr
+            .iter()
             .filter_map(|item| {
                 if item.get("type")?.as_str()? == "tool_use" {
                     item.get("name")?.as_str().map(String::from)
@@ -94,12 +100,15 @@ pub fn extract_text_content(content: &Value) -> String {
                                 }
                             })
                             .or_else(|| {
-                                item.get("content").and_then(|c| c.as_str()).map(String::from)
+                                item.get("content")
+                                    .and_then(|c| c.as_str())
+                                    .map(String::from)
                             });
                         if let Some(text) = text {
                             Some(format!("{label}\n{text}"))
                         } else {
-                            let media_type = item.pointer("/source/media_type").and_then(|m| m.as_str());
+                            let media_type =
+                                item.pointer("/source/media_type").and_then(|m| m.as_str());
                             if let Some(mt) = media_type {
                                 Some(format!("{label} ({mt})"))
                             } else {
@@ -256,7 +265,10 @@ fn generate_output_summary(content: &Value) -> String {
         // Check first item for common patterns
         if let Some(first) = arr.first().and_then(|v| v.as_object()) {
             if first.contains_key("deleted") {
-                let deleted = arr.iter().filter(|v| v.get("deleted").and_then(|d| d.as_bool()) == Some(true)).count();
+                let deleted = arr
+                    .iter()
+                    .filter(|v| v.get("deleted").and_then(|d| d.as_bool()) == Some(true))
+                    .count();
                 return format!("{} deleted", deleted);
             }
         }
@@ -348,8 +360,7 @@ pub fn extract_tool_results_from_user(content: &Value) -> Vec<(String, String, S
                 if text.is_empty() {
                     result_content.clone()
                 } else {
-                    serde_json::from_str::<Value>(&text)
-                        .unwrap_or(Value::String(text))
+                    serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text))
                 }
             } else {
                 result_content.clone()
@@ -394,7 +405,9 @@ pub async fn handle_new_events(state: &AppState, session_id: String, events: Vec
         // Extract event UUID for dedup: progress/system have "uuid", file-history-snapshot has "messageId".
         // Fallback: synthesize deterministic UUID from content hash so that
         // UNIQUE(session_id, event_uuid) prevents duplicate inserts for events without UUID.
-        let event_uuid = val.get("uuid").and_then(|v| v.as_str())
+        let event_uuid = val
+            .get("uuid")
+            .and_then(|v| v.as_str())
             .or_else(|| val.get("messageId").and_then(|v| v.as_str()))
             .map(String::from)
             .or_else(|| {
@@ -557,7 +570,10 @@ pub async fn handle_new_events(state: &AppState, session_id: String, events: Vec
                             .unwrap_or("unknown");
                         Some(format!("trigger={trigger}, preTokens={pre_tokens}"))
                     }
-                    _ => val.get("content").and_then(|c| c.as_str()).map(String::from),
+                    _ => val
+                        .get("content")
+                        .and_then(|c| c.as_str())
+                        .map(String::from),
                 };
                 conv_events.push(missiond_core::types::ConversationEvent {
                     id: 0,
@@ -570,10 +586,7 @@ pub async fn handle_new_events(state: &AppState, session_id: String, events: Vec
                 });
             }
             "queue-operation" => {
-                let operation = val
-                    .get("operation")
-                    .and_then(|o| o.as_str())
-                    .unwrap_or("");
+                let operation = val.get("operation").and_then(|o| o.as_str()).unwrap_or("");
                 let content = val
                     .get("content")
                     .and_then(|c| c.as_str())
@@ -620,7 +633,11 @@ pub async fn handle_new_events(state: &AppState, session_id: String, events: Vec
     }
 
     if !agent_messages.is_empty() {
-        match state.store.insert_conversation_messages_batch(&agent_messages).await {
+        match state
+            .store
+            .insert_conversation_messages_batch(&agent_messages)
+            .await
+        {
             Ok(ids) if !ids.is_empty() => {
                 info!(session = %session_id, count = ids.len(), "Logged agent sub-conversation messages");
             }
@@ -632,7 +649,11 @@ pub async fn handle_new_events(state: &AppState, session_id: String, events: Vec
     }
 
     if !conv_events.is_empty() {
-        match state.store.insert_conversation_events_batch(&conv_events).await {
+        match state
+            .store
+            .insert_conversation_events_batch(&conv_events)
+            .await
+        {
             Ok(count) if count > 0 => {
                 info!(session = %session_id, count, "Logged conversation events");
             }
@@ -648,10 +669,18 @@ pub async fn handle_new_events(state: &AppState, session_id: String, events: Vec
 /// for sessions that don't yet have events.
 pub async fn backfill_conversation_events(state: &AppState) {
     // Get sessions that already have events (skip them)
-    let sessions_with_events = state.store.get_sessions_with_events().await.unwrap_or_default();
+    let sessions_with_events = state
+        .store
+        .get_sessions_with_events()
+        .await
+        .unwrap_or_default();
 
     // Get all conversations with jsonl_path
-    let conversations = state.store.get_conversations_with_jsonl().await.unwrap_or_default();
+    let conversations = state
+        .store
+        .get_conversations_with_jsonl()
+        .await
+        .unwrap_or_default();
 
     let to_backfill: Vec<_> = conversations
         .into_iter()
@@ -734,10 +763,18 @@ pub async fn backfill_conversation_events(state: &AppState) {
 /// for sessions that don't yet have tool call records.
 pub async fn backfill_tool_calls(state: &crate::state::AppState) {
     // Sessions already backfilled — skip
-    let sessions_with_tc = state.store.get_sessions_with_tool_calls().await.unwrap_or_default();
+    let sessions_with_tc = state
+        .store
+        .get_sessions_with_tool_calls()
+        .await
+        .unwrap_or_default();
 
     // All conversations
-    let conversations = state.store.get_conversations_with_jsonl().await.unwrap_or_default();
+    let conversations = state
+        .store
+        .get_conversations_with_jsonl()
+        .await
+        .unwrap_or_default();
     let to_backfill: Vec<_> = conversations
         .into_iter()
         .filter(|(id, _)| !sessions_with_tc.contains(id))
@@ -759,7 +796,11 @@ pub async fn backfill_tool_calls(state: &crate::state::AppState) {
 
     for (session_id, _jsonl_path) in &to_backfill {
         // Read stored messages from DB (raw_content has the full JSON content array)
-        let messages = match state.store.get_messages_for_tool_call_backfill(session_id).await {
+        let messages = match state
+            .store
+            .get_messages_for_tool_call_backfill(session_id)
+            .await
+        {
             Ok(msgs) => msgs,
             Err(_) => continue,
         };
@@ -779,7 +820,9 @@ pub async fn backfill_tool_calls(state: &crate::state::AppState) {
             };
 
             if role == "assistant" {
-                tool_calls.extend(extract_tool_calls_from_assistant(session_id, timestamp, &content));
+                tool_calls.extend(extract_tool_calls_from_assistant(
+                    session_id, timestamp, &content,
+                ));
             } else if role == "user" || role == "system" || role == "tool_result" {
                 // "system" = slot sessions where user messages are stored as system role
                 // "tool_result" = stored as separate role in DB
@@ -804,7 +847,11 @@ pub async fn backfill_tool_calls(state: &crate::state::AppState) {
 
         // Update tool results
         for (tool_use_id, summary, raw, status) in &tool_results {
-            if let Err(e) = state.store.update_tool_call_output(tool_use_id, summary, raw, status).await {
+            if let Err(e) = state
+                .store
+                .update_tool_call_output(tool_use_id, summary, raw, status)
+                .await
+            {
                 warn!(tool_use_id, error = %e, "Tool call backfill: update output failed");
             } else {
                 total_results += 1;
@@ -828,11 +875,22 @@ pub async fn backfill_tool_calls(state: &crate::state::AppState) {
     // (previous backfill may have inserted tool_use but missed tool_result)
     let pending_count = state.store.count_pending_tool_calls().await.unwrap_or(0);
     if pending_count > 0 {
-        info!(pending_count, "Tool call backfill: updating pending tool calls with missing output");
-        let sessions_with_pending = state.store.get_sessions_with_pending_tool_calls().await.unwrap_or_default();
+        info!(
+            pending_count,
+            "Tool call backfill: updating pending tool calls with missing output"
+        );
+        let sessions_with_pending = state
+            .store
+            .get_sessions_with_pending_tool_calls()
+            .await
+            .unwrap_or_default();
         let mut patched = 0usize;
         for session_id in &sessions_with_pending {
-            let messages = match state.store.get_messages_for_tool_call_backfill(session_id).await {
+            let messages = match state
+                .store
+                .get_messages_for_tool_call_backfill(session_id)
+                .await
+            {
                 Ok(msgs) => msgs,
                 Err(_) => continue,
             };
@@ -846,27 +904,36 @@ pub async fn backfill_tool_calls(state: &crate::state::AppState) {
                 };
                 let results = extract_tool_results_from_user(&content);
                 for (tool_use_id, summary, raw, status) in &results {
-                    if let Ok(true) = state.store.update_tool_call_output(tool_use_id, summary, raw, status).await {
+                    if let Ok(true) = state
+                        .store
+                        .update_tool_call_output(tool_use_id, summary, raw, status)
+                        .await
+                    {
                         patched += 1;
                     }
                 }
             }
         }
-        info!(patched, "Tool call backfill: patched pending tool calls with output");
+        info!(
+            patched,
+            "Tool call backfill: patched pending tool calls with output"
+        );
     }
 
     info!(
         backfilled,
-        total_tc,
-        total_results,
-        "Tool call backfill complete"
+        total_tc, total_results, "Tool call backfill complete"
     );
 }
 
 /// Reconcile conversation_messages for a single session by re-reading its JSONL file.
 /// Used as a compensating action when broadcast lag causes message loss.
 /// INSERT OR IGNORE ensures idempotency via UNIQUE index on message_uuid.
-pub async fn reconcile_conversation_messages(state: &crate::state::AppState, session_id: &str, jsonl_path: &str) {
+pub async fn reconcile_conversation_messages(
+    state: &crate::state::AppState,
+    session_id: &str,
+    jsonl_path: &str,
+) {
     use missiond_core::cc_tasks::parse_jsonl_stream;
     use std::path::Path;
 
@@ -876,7 +943,12 @@ pub async fn reconcile_conversation_messages(state: &crate::state::AppState, ses
     }
 
     // Check if slot session (affects role mapping)
-    let is_slot_session = state.store.get_slot_for_session(session_id).await.unwrap_or(None).is_some();
+    let is_slot_session = state
+        .store
+        .get_slot_for_session(session_id)
+        .await
+        .unwrap_or(None)
+        .is_some();
 
     let mut batch: Vec<missiond_core::types::ConversationMessage> = Vec::new();
     let sid = session_id.to_string();
@@ -888,13 +960,20 @@ pub async fn reconcile_conversation_messages(state: &crate::state::AppState, ses
         }
 
         let text_content = extract_text_content(&msg.message.content);
-        let content_types: Vec<&str> = msg.message.content.as_array()
-            .map(|arr| arr.iter()
-                .filter_map(|b| b.get("type").and_then(|t| t.as_str()))
-                .collect())
+        let content_types: Vec<&str> = msg
+            .message
+            .content
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|b| b.get("type").and_then(|t| t.as_str()))
+                    .collect()
+            })
             .unwrap_or_default();
-        let is_tool_result = !content_types.is_empty() && content_types.iter().all(|t| *t == "tool_result");
-        let is_thinking = !content_types.is_empty() && content_types.iter().all(|t| *t == "thinking");
+        let is_tool_result =
+            !content_types.is_empty() && content_types.iter().all(|t| *t == "tool_result");
+        let is_thinking =
+            !content_types.is_empty() && content_types.iter().all(|t| *t == "thinking");
 
         if text_content.is_empty() && !is_tool_result {
             return;
@@ -937,7 +1016,8 @@ pub async fn reconcile_conversation_messages(state: &crate::state::AppState, ses
             seq: None,
             role_display: None,
         });
-    }).await;
+    })
+    .await;
 
     if let Err(e) = result {
         warn!(session = %session_id, error = %e, "Reconcile: failed to parse JSONL");
