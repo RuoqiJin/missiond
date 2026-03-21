@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Virtuoso, type VirtuosoHandle, type ListRange } from 'react-virtuoso';
-import { Search, RefreshCw, MessageSquare, User, Bot, Wrench, ArrowLeft, ChevronRight, ChevronDown, GitBranch, Terminal, Brain, Timer, Layers, Zap, Tag, Sparkles, Server } from 'lucide-react';
+import { Search, RefreshCw, MessageSquare, User, Bot, Wrench, ArrowLeft, ChevronRight, ChevronDown, ChevronsDownUp, ChevronsUpDown, GitBranch, Terminal, Brain, Timer, Layers, Zap, Tag, Sparkles, Server } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import { MarkdownContent } from '@/components/timeline/MarkdownContent';
@@ -1069,6 +1069,24 @@ export function Conversations() {
     });
   }, []);
 
+  const isAllCollapsed = useMemo(() => {
+    if (viewMode === 'workers') {
+      return slotGroups.length > 0 && slotGroups.every(g => collapsedSlots.has(g.slotId));
+    } else {
+      return dayGroups.length > 0 && dayGroups.every(g => collapsedDays.has(g.dayKey));
+    }
+  }, [viewMode, slotGroups, dayGroups, collapsedSlots, collapsedDays]);
+
+  const toggleCollapseAll = useCallback(() => {
+    if (isAllCollapsed) {
+      if (viewMode === 'workers') setCollapsedSlots(new Set());
+      else setCollapsedDays(new Set());
+    } else {
+      if (viewMode === 'workers') setCollapsedSlots(new Set(slotGroups.map(g => g.slotId)));
+      else setCollapsedDays(new Set(dayGroups.map(g => g.dayKey)));
+    }
+  }, [isAllCollapsed, viewMode, slotGroups, dayGroups]);
+
   return (
     <div className="flex-1 flex min-h-0 overflow-hidden">
       {/* Left: Conversation list */}
@@ -1174,6 +1192,13 @@ export function Conversations() {
               title="刷新"
             >
               <RefreshCw className={cn('w-3 h-3', loading && 'animate-spin')} />
+            </button>
+            <button
+              onClick={toggleCollapseAll}
+              className="p-1 rounded text-neutral-600 hover:text-neutral-400 transition-colors"
+              title={isAllCollapsed ? "展开全部" : "折叠全部"}
+            >
+              {isAllCollapsed ? <ChevronsUpDown className="w-3 h-3" /> : <ChevronsDownUp className="w-3 h-3" />}
             </button>
           </div>
         </div>
