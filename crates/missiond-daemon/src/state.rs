@@ -237,9 +237,9 @@ pub(crate) struct AppState {
     /// Key format: "{trigger_type}:{session_id}" for per-session cooldown.
     pub(crate) proactive_cooldowns: Arc<std::sync::Mutex<HashMap<String, i64>>>,
     /// Expectation tickets: slot spawns awaiting session_id discovery.
-    /// Key: project_path, Value: (slot_id, spawn_timestamp).
+    /// Key: project_path, Value: (slot_id, prompt, spawn_timestamp).
     /// IngestionRouter claims these when a new session appears in the matching project.
-    pub(crate) pending_slot_spawns: Arc<tokio::sync::RwLock<Vec<(String, String, tokio::time::Instant)>>>,
+    pub(crate) pending_slot_spawns: Arc<tokio::sync::RwLock<Vec<(String, String, String, tokio::time::Instant)>>>,
     /// Cursor ack channel: message_handler sends (jsonl_path, byte_offset) after successful INSERT.
     /// Only ack'd cursors are persisted to DB — prevents data loss on crash.
     pub(crate) cursor_ack_tx: tokio::sync::mpsc::UnboundedSender<(String, u64)>,

@@ -49,6 +49,7 @@ pub(crate) async fn classify(
     event_source: &str,
     jsonl_path: &str,
     project_path: &str,
+    messages: &[missiond_core::CCMessageLine],
 ) -> (IngestionRoute, CompactionInfo) {
     let mut is_pty = state.pty_session_uuids.read().await.contains(session_id);
     let mut compaction = CompactionInfo::default();
@@ -57,7 +58,7 @@ pub(crate) async fn classify(
     // recently spawned in the same project. Late-binding resolves the cross-process race
     // where Claude Code generates a UUID that MissionD cannot predict.
     if !is_pty && event_source == "claude_code" {
-        if let Some(slot_id) = claim_pending_spawn(state, project_path).await {
+        if let Some(slot_id) = claim_pending_spawn(state, project_path, messages).await {
             info!(
                 session_id,
                 slot_id = %slot_id,
@@ -129,22 +130,38 @@ pub(crate) async fn classify(
 }
 
 /// Claim a pending slot spawn expectation ticket.
-/// Matches by project path within a 30-second window. Consumes the ticket on match.
-async fn claim_pending_spawn(state: &AppState, project_path: &str) -> Option<String> {
+/// Matches by project path and prompt content within a 30-second window. Consumes the ticket on match.
+async fn claim_pending_spawn(state: &AppState, project_path: &str, messages: &[missiond_core::CCMessageLine]) -> Option<String> {
     let now = tokio::time::Instant::now();
     let max_age = std::time::Duration::from_secs(30);
 
     let mut spawns = state.pending_slot_spawns.write().await;
 
-    // Find matching ticket: same project path, within time window
-    let idx = spawns.iter().position(|(path, _, ts)| {
-        path == project_path && now.duration_since(*ts) < max_age
+    // Extract the first user message content from the JSONL batch
+    let first_user_msg = messages.iter()
+        .find(|m| m.message.role == "user")
+        .and_then(|m| m.message.content.as_str().or_else(|| {
+            // Claude Code sometimes wraps content in an array of blocks
+            m.message.content.as_array().and_then(|arr| {
+                arr.first().and_then(|b| b.get("text").and_then(|t| t.as_str()))
+            })
+        }))
+        .unwrap_or("");
+
+    // Find matching ticket: same project path, within time window, and prompt matches
+    let idx = spawns.iter().position(|(path, _, prompt, ts)| {
+        if path != project_path || now.duration_since(*ts) >= max_age {
+            return false;
+        }
+        // Match if the ticket prompt is a substring of the actual recorded message
+        // (Claude Code might prepend/append invisible chars or wrapper text)
+        first_user_msg.contains(prompt) || prompt.contains(first_user_msg)
     })?;
 
-    let (_, slot_id, _) = spawns.remove(idx);
+    let (_, slot_id, _, _) = spawns.remove(idx);
 
     // GC: also remove any expired tickets
-    spawns.retain(|(_, _, ts)| now.duration_since(*ts) < max_age);
+    spawns.retain(|(_, _, _, ts)| now.duration_since(*ts) < max_age);
 
     Some(slot_id)
 }

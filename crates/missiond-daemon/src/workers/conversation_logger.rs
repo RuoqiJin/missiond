@@ -64,7 +64,7 @@ async fn handle_new_messages_event(
 ) {
     // ── Step 1: IngestionRouter classifies the batch (sole decision point) ──
     let (route, compaction) = ingestion_router::classify(
-        s, &session_id, &event_source, &jsonl_path, &project_path,
+        s, &session_id, &event_source, &jsonl_path, &project_path, &messages
     ).await;
 
     // ── Step 2: Compaction side-effects (binding inheritance + embedding queue) ──
