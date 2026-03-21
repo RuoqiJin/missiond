@@ -258,6 +258,34 @@ async fn reconcile_file_gap(
     // Extract parent session ID for subagent conversations (fixes cold-path NULL parent linkage)
     let parent_session_id = missiond_core::db::extract_parent_session_id(jsonl_path);
 
+    // Ghost session pre-scan: read first ~10 lines to detect /exit-only sessions.
+    // If no assistant messages found among parseable lines, skip the entire file.
+    {
+        use tokio::io::AsyncBufReadExt;
+        let scan_file = tokio::fs::File::open(path).await.ok();
+        if let Some(sf) = scan_file {
+            let scan_reader = tokio::io::BufReader::new(sf);
+            let mut scan_lines = scan_reader.lines();
+            let mut has_assistant = false;
+            let mut scanned = 0usize;
+            while let Ok(Some(sl)) = scan_lines.next_line().await {
+                scanned += 1;
+                if scanned > 20 { break; } // Don't scan too deep for large files
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&sl) {
+                    if val.pointer("/message/role").and_then(|r| r.as_str()) == Some("assistant") {
+                        has_assistant = true;
+                        break;
+                    }
+                }
+            }
+            // Small file fully scanned with no assistant messages → garbage
+            if !has_assistant && scanned <= 20 {
+                debug!(session = %session_id, lines = scanned, "Reconcile: skipping garbage session (no assistant content)");
+                return 0;
+            }
+        }
+    }
+
     let mut batch: Vec<missiond_core::types::ConversationMessage> = Vec::with_capacity(BATCH_FLUSH_SIZE);
     let mut lines = reader.lines();
     let mut line_count = 0usize;

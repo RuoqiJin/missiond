@@ -840,36 +840,14 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Auto-spawn persistent slots (all via PTYManager)
+    // Persistent slots: NO boot-spawn. Slots start on-demand when the first
+    // task arrives (lazy-spawn in ClaudeCodeSlotMgr::execute_persistent).
+    // This eliminates boot-time resource waste and ghost /exit sessions from restarts.
     {
         let slots = state.mission.list_slots();
-        for slot in &slots {
-            if slot.config.is_persistent() {
-                info!(slot_id = %slot.config.id, role = %slot.config.role, "Auto-starting slot on daemon boot");
-                let pty_slot = missiond_core::PTYSlot {
-                    id: slot.config.id.clone(),
-                    role: slot.config.role.clone(),
-                    cwd: slot.config.cwd.as_deref().map(std::path::PathBuf::from),
-                    engine: slot.config.engine,
-                };
-                let mcp_config = slot.config.mcp_config.clone().map(std::path::PathBuf::from);
-                let (extra_env, session_file) = slot_env::build_slot_tracking_env(&slot.config.id, slot.config.env.as_ref()).await;
-                match state.pty.spawn(&pty_slot, missiond_core::PTYSpawnOptions {
-                    auto_restart: true,
-                    wait_for_idle: false,
-                    timeout_secs: None,
-                    mcp_config,
-                    dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
-                    model: slot.config.model.clone(),
-                    extra_env,
-                }).await {
-                    Ok(_) => {
-                        slot_env::capture_slot_session_uuid(&state, &slot.config.id, &session_file).await;
-                        info!(slot_id = %slot.config.id, "Auto-started PTY session");
-                    }
-                    Err(e) => warn!(slot_id = %slot.config.id, error = %e, "Failed to auto-start PTY"),
-                }
-            }
+        let persistent_count = slots.iter().filter(|s| s.config.is_persistent()).count();
+        if persistent_count > 0 {
+            info!(count = persistent_count, "Persistent slots registered (lazy-spawn on first task)");
         }
     }
 
