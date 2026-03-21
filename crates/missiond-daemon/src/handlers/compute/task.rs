@@ -196,7 +196,7 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
             }).await.is_ok();
 
             let sent = if spawn_ok {
-                capture_slot_session_uuid(state, candidate_id, &session_file).await;
+                capture_slot_session_uuid(state, candidate_id, &session_file, slot.config.cwd.as_deref()).await;
                 state.pty.send_fire_and_forget(candidate_id, &prompt).await.ok().is_some()
             } else {
                 warn!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: auto-spawn failed");

@@ -865,7 +865,7 @@ async fn main() -> Result<()> {
                     extra_env,
                 }).await {
                     Ok(_) => {
-                        slot_env::capture_slot_session_uuid(&state, &slot.config.id, &session_file).await;
+                        slot_env::capture_slot_session_uuid(&state, &slot.config.id, &session_file, slot.config.cwd.as_deref()).await;
                         info!(slot_id = %slot.config.id, "Auto-started PTY session");
                     }
                     Err(e) => warn!(slot_id = %slot.config.id, error = %e, "Failed to auto-start PTY"),
@@ -1374,7 +1374,7 @@ async fn main() -> Result<()> {
                                     extra_env,
                                 }).await {
                                     Ok(_) => {
-                                        slot_env::capture_slot_session_uuid(&state, slot_id, &session_file).await;
+                                        slot_env::capture_slot_session_uuid(&state, slot_id, &session_file, slot.config.cwd.as_deref()).await;
                                         info!(slot_id = %slot_id, "Auto-started new slot PTY");
                                     }
                                     Err(e) => warn!(slot_id = %slot_id, error = %e, "Failed to auto-start new slot PTY"),

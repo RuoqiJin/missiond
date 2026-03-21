@@ -160,7 +160,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
             // Capture UUID after spawn (only reliable when we waited for idle)
             if wait {
-                capture_slot_session_uuid(state, &slot_id, &session_file).await;
+                capture_slot_session_uuid(state, &slot_id, &session_file, slot.config.cwd.as_deref()).await;
             }
             Ok(ToolResult::json(&info))
         }
