@@ -19,7 +19,7 @@ impl EventStore for PgMissionStore {
             let result = sqlx::query(
                 "INSERT INTO conversation_events (session_id, event_uuid, event_type, content, raw_data, timestamp)
                  VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT DO NOTHING"
+                 ON CONFLICT (session_id, event_uuid) DO NOTHING"
             )
             .bind(&event.session_id)
             .bind(&event.event_uuid)

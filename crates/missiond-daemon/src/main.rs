@@ -321,6 +321,7 @@ async fn main() -> Result<()> {
             let pg_store = missiond_core::db::pg::PgMissionStore::connect(&url)
                 .await
                 .map_err(|e| anyhow!("PostgreSQL connection failed: {}", e))?;
+            pg_store.fix_identity_sequences().await;
             info!("PostgreSQL store ready");
             let _ = db_stats_callback; // PG mode: latency tracked by sqlx instrumentation
             Arc::new(pg_store)

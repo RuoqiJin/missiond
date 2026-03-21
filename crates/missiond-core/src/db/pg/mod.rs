@@ -49,6 +49,33 @@ impl PgMissionStore {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
+
+    /// Fix identity sequences that may be desynced after bulk imports.
+    /// Safe to call on every startup — only advances sequences that are behind.
+    pub async fn fix_identity_sequences(&self) {
+        use tracing::{info, warn};
+
+        let checks: &[(&str, &str, &str)] = &[
+            ("conversation_messages", "id", "conversation_messages_id_seq"),
+            ("conversation_events", "id", "conversation_events_id_seq"),
+            ("token_usage_ledger", "id", "token_usage_ledger_id_seq"),
+            ("system_timeline", "seq", "system_timeline_seq_seq"),
+        ];
+
+        let mut fixed = 0usize;
+        for &(table, col, seq) in checks {
+            let sql = format!(
+                "SELECT setval('{seq}', GREATEST(nextval('{seq}'), COALESCE((SELECT MAX({col}) FROM {table}), 0) + 1), false)"
+            );
+            match sqlx::query(&sql).execute(&self.pool).await {
+                Ok(_) => fixed += 1,
+                Err(e) => warn!(table, seq, error = %e, "Failed to fix identity sequence"),
+            }
+        }
+        if fixed > 0 {
+            info!(fixed, "Identity sequence health check complete");
+        }
+    }
 }
 
 // MissionStore super-trait implementation
