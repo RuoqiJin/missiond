@@ -47,7 +47,8 @@ pub(crate) async fn register_slot_session(
     let _ = store.cleanup_pty_placeholder(slot_id).await;
 
     // 2. Ensure conversation record exists — use derive_conversation_type (single source of truth)
-    let conversation_type = missiond_core::db::derive_conversation_type(Some(slot_id), session_id, "pty_jsonl");
+    let category: Option<String> = None;
+    let conversation_type = missiond_core::db::derive_conversation_type(category.as_deref(), Some(slot_id), session_id, "pty_jsonl");
 
     let conv = Conversation {
         id: session_id.to_string(),

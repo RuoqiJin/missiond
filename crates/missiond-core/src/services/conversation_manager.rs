@@ -19,6 +19,7 @@ impl ConversationManager {
         // TODO: 最终应该让底层接口也接受 ConversationQuery 对象
         let conv_type_str = match query.conv_type {
             Some(ConversationTypeFilter::System) => Some("system".to_string()),
+            Some(ConversationTypeFilter::Gemini) => Some("gemini".to_string()),
             Some(ConversationTypeFilter::Jarvis) => Some("jarvis".to_string()),
             Some(ConversationTypeFilter::Worker) => Some("worker".to_string()),
             Some(ConversationTypeFilter::Meta) => Some("meta".to_string()),

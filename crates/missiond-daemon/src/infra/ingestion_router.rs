@@ -136,7 +136,7 @@ pub(crate) async fn classify(
 
     // Determine conversation_type via the central brain
     let conversation_type =
-        missiond_core::db::derive_conversation_type(slot_id.as_deref(), session_id, event_source);
+        missiond_core::db::derive_conversation_type(slot_id.as_deref().and_then(|id| state.mission.get_slot_category(id)).as_deref(), slot_id.as_deref(), session_id, event_source);
 
     // Extract parent session ID: compaction inherits from predecessor,
     // subagent extracts from JSONL path structure.

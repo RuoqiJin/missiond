@@ -79,6 +79,21 @@ impl SlotManager {
         slots.get(slot_id).cloned()
     }
 
+    /// Retrieve the declarative pipeline category for a given slot.
+    pub fn get_slot_category(&self, slot_id: &str) -> Option<String> {
+        self.get_slot(slot_id).and_then(|s| s.config.category.clone())
+    }
+
+    /// Discover slots by declarative trait (e.g. IsMetaAgent).
+    pub fn find_slots_by_trait(&self, trait_to_find: crate::types::SlotTrait) -> Vec<Slot> {
+        let slots = self.slots.read().unwrap();
+        slots
+            .values()
+            .filter(|s| s.config.traits.contains(&trait_to_find))
+            .cloned()
+            .collect()
+    }
+
     /// Find a slot by role
     pub fn find_slot_by_role(&self, role: &str) -> Option<Slot> {
         let slots = self.slots.read().unwrap();
