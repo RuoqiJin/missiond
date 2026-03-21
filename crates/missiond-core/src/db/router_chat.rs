@@ -198,6 +198,18 @@ impl MissionDB {
         Ok(())
     }
 
+    /// Phase 7: Find the most recent active Jarvis UI conversation.
+    pub fn find_latest_jarvis_conversation(&self) -> DbResult<Option<String>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM conversations \
+             WHERE source = 'jarvis_ui' AND status = 'active' \
+             ORDER BY started_at DESC LIMIT 1"
+        )?;
+        let id = stmt.query_row([], |row| row.get::<_, String>(0)).ok();
+        Ok(id)
+    }
+
     /// List all router_chat conversations with message size stats
     pub fn router_chat_list(&self, limit: i64) -> DbResult<Vec<serde_json::Value>> {
         let conn = self.read_conn();

@@ -135,6 +135,7 @@ impl ConversationStore for PgMissionStore {
                 message_count = $10,
                 ended_at = $12,
                 status = $13,
+                parent_session_id = COALESCE(conversations.parent_session_id, $8),
                 conversation_type = COALESCE($15, conversations.conversation_type)"
         )
         .bind(&conv.id)
@@ -157,17 +158,18 @@ impl ConversationStore for PgMissionStore {
         Ok(())
     }
 
-    async fn ensure_conversation_exists(&self, session_id: &str, project_path: &str, jsonl_path: &str, status: &str, conversation_type: &str) -> DbResult<()> {
+    async fn ensure_conversation_exists(&self, session_id: &str, project_path: &str, jsonl_path: &str, status: &str, conversation_type: &str, parent_session_id: Option<&str>) -> DbResult<()> {
         sqlx::query(
-            "INSERT INTO conversations (id, project, source, jsonl_path, message_count, started_at, status, conversation_type)
-             VALUES ($1, $2, 'claude_cli', $3, 0, NOW(), $4, $5)
-             ON CONFLICT (id) DO NOTHING"
+            "INSERT INTO conversations (id, project, source, jsonl_path, message_count, started_at, status, conversation_type, parent_session_id)
+             VALUES ($1, $2, 'claude_cli', $3, 0, NOW(), $4, $5, $6)
+             ON CONFLICT (id) DO UPDATE SET parent_session_id = COALESCE(conversations.parent_session_id, EXCLUDED.parent_session_id)"
         )
             .bind(session_id)
             .bind(project_path)
             .bind(jsonl_path)
             .bind(status)
             .bind(conversation_type)
+            .bind(parent_session_id)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -193,11 +195,29 @@ impl ConversationStore for PgMissionStore {
 
     async fn list_conversations(&self, status: Option<&str>, limit: i64, conv_type: Option<&str>, task_id: Option<&str>, since: Option<&str>, until: Option<&str>, source: Option<&str>) -> DbResult<Vec<Conversation>> {
         let source_clause = match source {
+            Some(s) if s.starts_with('!') => {
+                // Exclusion: "!gemini_cli,!router_chat" → NOT IN ('gemini_cli','router_chat')
+                let excluded: Vec<String> = s.split(',')
+                    .map(|v| v.trim_start_matches('!').replace('\'', "''"))
+                    .filter(|v| !v.is_empty())
+                    .map(|v| format!("'{}'", v))
+                    .collect();
+                if excluded.is_empty() { String::new() }
+                else { format!(" AND source NOT IN ({})", excluded.join(",")) }
+            }
+            Some(s) if s.contains(',') => {
+                // Multi-inclusion: "claude_cli,pty_jsonl" → IN ('claude_cli','pty_jsonl')
+                let included: Vec<String> = s.split(',')
+                    .map(|v| format!("'{}'", v.replace('\'', "''")))
+                    .collect();
+                format!(" AND source IN ({})", included.join(","))
+            }
             Some(s) => format!(" AND source = '{}'", s.replace('\'', "''")),
             None => String::new(),
         };
         let type_clause = match conv_type {
             Some("all") => String::new(),
+            Some("user") => " AND conversation_type = 'user'".to_string(),
             Some("meta") => " AND conversation_type = 'meta'".to_string(),
             Some("worker") => " AND conversation_type = 'worker'".to_string(),
             Some("system") => " AND conversation_type IN ('meta', 'worker')".to_string(),
@@ -304,6 +324,35 @@ impl ConversationStore for PgMissionStore {
             .fetch_all(&self.pool)
             .await?;
         Ok(rows.iter().map(Self::row_to_conversation).collect())
+    }
+
+    async fn fix_orphan_parent_links(&self, session_ids: &[String]) -> DbResult<usize> {
+        if session_ids.is_empty() { return Ok(0); }
+        // Batch SQL: extract parent_session_id from jsonl_path using regexp, single query
+        let result = sqlx::query(
+            "UPDATE conversations
+             SET parent_session_id = (regexp_match(jsonl_path, '/([^/]+)/subagents/[^/]+\\.jsonl$'))[1]
+             WHERE id = ANY($1)
+               AND parent_session_id IS NULL
+               AND jsonl_path IS NOT NULL
+               AND jsonl_path ~ '/[^/]+/subagents/[^/]+\\.jsonl$'"
+        )
+            .bind(session_ids)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() as usize)
+    }
+
+    async fn link_compaction_fragment(&self, fragment_id: &str, original_id: &str) -> DbResult<bool> {
+        let result = sqlx::query(
+            "UPDATE conversations SET parent_session_id = $1
+             WHERE id = $2 AND parent_session_id IS NULL AND conversation_type = 'compaction'"
+        )
+            .bind(original_id)
+            .bind(fragment_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     // -- deep analysis tracking --
@@ -1119,5 +1168,293 @@ impl ConversationStore for PgMissionStore {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    // -- conversation_turns (S3 Tagger & Chunker) --
+
+    async fn get_last_turn_end_message_id(&self, session_id: &str) -> DbResult<Option<i64>> {
+        let row = sqlx::query_scalar::<_, i64>(
+            "SELECT end_message_id FROM conversation_turns
+             WHERE session_id = $1
+             ORDER BY turn_idx DESC LIMIT 1"
+        )
+            .bind(session_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row)
+    }
+
+    async fn get_max_turn_idx(&self, session_id: &str) -> DbResult<Option<i32>> {
+        // MAX() always returns exactly one row; empty table → [NULL].
+        // Must decode as Option<i32> to avoid UnexpectedNullError.
+        let row = sqlx::query_scalar::<_, Option<i32>>(
+            "SELECT MAX(turn_idx) FROM conversation_turns WHERE session_id = $1"
+        )
+            .bind(session_id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row)
+    }
+
+    async fn insert_conversation_turns_batch(&self, session_id: &str, base_idx: i32, turns: &[RawTurn]) -> DbResult<usize> {
+        if turns.is_empty() { return Ok(0); }
+        let mut qb = sqlx::QueryBuilder::new(
+            "INSERT INTO conversation_turns \
+             (session_id, turn_idx, start_message_id, end_message_id, \
+              user_content, tool_names, tool_call_count, message_count, \
+              has_code_change, has_mcp_call, started_at, ended_at) "
+        );
+        qb.push_values(turns.iter().enumerate(), |mut b, (i, turn)| {
+            b.push_bind(session_id)
+             .push_bind(base_idx + i as i32)
+             .push_bind(turn.start_message_id)
+             .push_bind(turn.end_message_id)
+             .push_bind(&turn.user_content)
+             .push_bind(&turn.tool_names)
+             .push_bind(turn.tool_call_count)
+             .push_bind(turn.message_count)
+             .push_bind(turn.has_code_change)
+             .push_bind(turn.has_mcp_call)
+             .push_bind(&turn.started_at)
+             .push_bind(&turn.ended_at);
+        });
+        qb.push(" ON CONFLICT (session_id, turn_idx) DO NOTHING");
+        let result = qb.build().execute(&self.pool).await?;
+        Ok(result.rows_affected() as usize)
+    }
+
+    async fn insert_message_labels_batch(&self, labels: &[(i64, &str, &str, &str)]) -> DbResult<usize> {
+        if labels.is_empty() { return Ok(0); }
+        let mut inserted = 0usize;
+        for &(message_id, label, value, source) in labels {
+            let result = sqlx::query(
+                "INSERT INTO message_labels (message_id, label, value, source)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (message_id, label) DO NOTHING"
+            )
+                .bind(message_id)
+                .bind(label)
+                .bind(value)
+                .bind(source)
+                .execute(&self.pool)
+                .await?;
+            if result.rows_affected() > 0 {
+                inserted += 1;
+            }
+        }
+        Ok(inserted)
+    }
+
+    async fn sessions_pending_turn_extraction(&self, limit: i64) -> DbResult<Vec<String>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT c.id FROM conversations c
+             WHERE c.message_count > 0
+               AND c.status IN ('completed', 'compacted')
+               AND NOT EXISTS (SELECT 1 FROM conversation_turns ct WHERE ct.session_id = c.id)
+             ORDER BY c.started_at DESC
+             LIMIT $1"
+        )
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
+    // -- S4 per-turn embedding --
+
+    async fn turns_pending_embedding(&self, session_id: &str, provider: &str) -> DbResult<Vec<ConversationTurn>> {
+        let rows = sqlx::query_as::<_, ConversationTurn>(
+            "SELECT t.id, t.session_id, t.turn_idx, t.start_message_id, t.end_message_id,
+                    t.user_content, t.tool_names, t.tool_call_count, t.message_count,
+                    t.has_code_change, t.has_mcp_call, t.started_at, t.ended_at,
+                    t.topic, t.intent_group_id
+             FROM conversation_turns t
+             WHERE t.session_id = $1
+               AND NOT EXISTS (
+                   SELECT 1 FROM conversation_topic_vectors tv
+                   WHERE tv.session_id = t.session_id
+                     AND tv.chunk_idx = t.turn_idx
+                     AND tv.embedding_provider = $2
+               )
+             ORDER BY t.turn_idx"
+        )
+            .bind(session_id)
+            .bind(provider)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
+    async fn update_turn_topics_batch(&self, updates: &[(i64, &str)]) -> DbResult<usize> {
+        let mut count = 0usize;
+        for &(id, topic) in updates {
+            let result = sqlx::query(
+                "UPDATE conversation_turns SET topic = $2 WHERE id = $1"
+            )
+                .bind(id)
+                .bind(topic)
+                .execute(&self.pool)
+                .await?;
+            count += result.rows_affected() as usize;
+        }
+        Ok(count)
+    }
+
+    async fn set_conversation_turn_vectors(&self, session_id: &str, vectors: &[(String, i32, Vec<f32>)], provider: &str) -> DbResult<usize> {
+        if vectors.is_empty() { return Ok(0); }
+        let mut count = 0usize;
+        for (topic, turn_idx, vec) in vectors {
+            let bytes = crate::embedding::f32_vec_to_bytes(vec);
+            let result = sqlx::query(
+                "INSERT INTO conversation_topic_vectors (session_id, chunk_idx, topic, embedding, embedding_provider)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (session_id, chunk_idx)
+                 DO UPDATE SET topic = EXCLUDED.topic,
+                               embedding = EXCLUDED.embedding,
+                               embedding_provider = EXCLUDED.embedding_provider"
+            )
+                .bind(session_id)
+                .bind(*turn_idx as i64)
+                .bind(topic)
+                .bind(&bytes)
+                .bind(provider)
+                .execute(&self.pool)
+                .await?;
+            count += result.rows_affected() as usize;
+        }
+        Ok(count)
+    }
+
+    async fn sessions_with_turns_but_no_vectors(&self, provider: &str, cursor: i64, limit: i64) -> DbResult<Vec<String>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT DISTINCT ct.session_id
+             FROM conversation_turns ct
+             JOIN conversations c ON c.id = ct.session_id
+             WHERE c.status IN ('completed', 'compacted')
+               AND c.conversation_type IN ('user', 'worker')
+               AND c.id > $3
+               AND NOT EXISTS (
+                   SELECT 1 FROM conversation_topic_vectors tv
+                   WHERE tv.session_id = ct.session_id
+                     AND tv.embedding_provider = $1
+               )
+             ORDER BY ct.session_id
+             LIMIT $2"
+        )
+            .bind(provider)
+            .bind(limit)
+            .bind(cursor.to_string())
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
+    // -- Phase 6: user_intents --
+
+    async fn insert_user_intent(
+        &self,
+        session_id: &str,
+        turn_range_start: i32,
+        turn_range_end: i32,
+        intent_type: &str,
+        confidence: f32,
+        summary: Option<&str>,
+        context_json: Option<&str>,
+        related_goal_id: Option<&str>,
+    ) -> DbResult<i64> {
+        let row = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO user_intents (session_id, turn_range_start, turn_range_end, intent_type, confidence, summary, context_json, related_goal_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (session_id, turn_range_start) DO UPDATE
+             SET turn_range_end = EXCLUDED.turn_range_end,
+                 intent_type = EXCLUDED.intent_type,
+                 confidence = EXCLUDED.confidence,
+                 summary = EXCLUDED.summary,
+                 context_json = EXCLUDED.context_json
+             RETURNING id"
+        )
+            .bind(session_id)
+            .bind(turn_range_start)
+            .bind(turn_range_end)
+            .bind(intent_type)
+            .bind(confidence)
+            .bind(summary)
+            .bind(context_json)
+            .bind(related_goal_id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row)
+    }
+
+    async fn get_intent_coverage(&self, session_id: &str) -> DbResult<Option<i32>> {
+        let row = sqlx::query_scalar::<_, Option<i32>>(
+            "SELECT MAX(turn_range_end) FROM user_intents WHERE session_id = $1"
+        )
+            .bind(session_id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row)
+    }
+
+    async fn get_turns_after(&self, session_id: &str, after_idx: i32) -> DbResult<Vec<ConversationTurn>> {
+        let rows = sqlx::query_as::<_, ConversationTurn>(
+            "SELECT id, session_id, turn_idx, start_message_id, end_message_id,
+                    user_content, tool_names, tool_call_count, message_count,
+                    has_code_change, has_mcp_call, started_at, ended_at, topic, intent_group_id
+             FROM conversation_turns
+             WHERE session_id = $1 AND turn_idx > $2
+             ORDER BY turn_idx"
+        )
+            .bind(session_id)
+            .bind(after_idx)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
+    async fn update_turns_intent_group(&self, session_id: &str, turn_range_start: i32, turn_range_end: i32, intent_id: i64) -> DbResult<()> {
+        sqlx::query(
+            "UPDATE conversation_turns SET intent_group_id = $4
+             WHERE session_id = $1 AND turn_idx >= $2 AND turn_idx <= $3"
+        )
+            .bind(session_id)
+            .bind(turn_range_start)
+            .bind(turn_range_end)
+            .bind(intent_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn get_recent_intents(&self, since_secs: i64) -> DbResult<Vec<UserIntent>> {
+        let rows = sqlx::query_as::<_, UserIntent>(
+            "SELECT id, session_id, turn_range_start, turn_range_end, intent_type,
+                    confidence, summary, context_json, related_goal_id,
+                    created_at::text as created_at
+             FROM user_intents
+             WHERE created_at > NOW() - make_interval(secs => $1::double precision)
+             ORDER BY created_at DESC"
+        )
+            .bind(since_secs as f64)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
+    async fn sessions_pending_intent_analysis(&self, limit: i64) -> DbResult<Vec<String>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT DISTINCT ct.session_id
+             FROM conversation_turns ct
+             JOIN conversations c ON c.id = ct.session_id
+             WHERE c.status IN ('completed', 'compacted')
+               AND c.conversation_type IN ('user', 'worker')
+               AND NOT EXISTS (SELECT 1 FROM user_intents ui WHERE ui.session_id = ct.session_id)
+             ORDER BY ct.session_id
+             LIMIT $1"
+        )
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
     }
 }

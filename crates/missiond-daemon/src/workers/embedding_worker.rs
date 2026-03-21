@@ -66,6 +66,10 @@ pub(crate) struct LlmConfig {
     /// Set to true to run cursor-based backfill across all phases on startup.
     #[serde(default)]
     pub(crate) backfill_enabled: bool,
+    /// Enable Intent Analyst (Phase 6). Default: false.
+    /// When enabled, analyzes conversation turns via Sonnet to detect stuck retries, direction shifts, etc.
+    #[serde(default)]
+    pub(crate) intent_analyst_enabled: bool,
 }
 
 #[derive(serde::Deserialize, Clone)]
@@ -467,6 +471,147 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
     info!(session = %session_id, topic_count = topics.len(), "Multi-topic embeddings generated");
 }
 
+// ── Per-turn embedding (Phase 5 S4) ────────────────────────────────────
+
+/// Process per-turn embeddings for a session. Zero LLM — embeds turn content directly.
+/// Input: user_content + tool_names + AI final response (denoised).
+async fn process_turns_for_session(
+    state: &AppState,
+    session_id: &str,
+    provider_id: &str,
+) -> Result<()> {
+    let embedding_service = state.embedding_service.as_ref()
+        .ok_or_else(|| anyhow!("No embedding service"))?;
+
+    // 1. Query turns that lack topic_vectors
+    let pending = state.store.turns_pending_embedding(session_id, provider_id).await
+        .map_err(|e| anyhow!("turns_pending_embedding: {}", e))?;
+    if pending.is_empty() { return Ok(()); }
+
+    // 2. Preload all messages for this session (single DB query)
+    let all_messages = state.store.get_conversation_messages(session_id, None, 5000).await
+        .map_err(|e| anyhow!("get_conversation_messages: {}", e))?;
+
+    let mut topic_vectors: Vec<(String, i32, Vec<f32>)> = Vec::new();
+    let mut topic_updates: Vec<(i64, String)> = Vec::new();
+
+    for turn in &pending {
+        // 3. Slice messages for this turn's range
+        let turn_messages: Vec<_> = all_messages.iter()
+            .filter(|m| m.id >= turn.start_message_id && m.id <= turn.end_message_id)
+            .collect();
+
+        // 4. Build embedding text
+        let text = build_turn_embedding_text(turn, &turn_messages);
+        if text.trim().len() < 20 { continue; }  // Skip empty turns (e.g., preamble)
+
+        // 5. Generate embedding vector
+        let svc = Arc::clone(embedding_service);
+        let t = text.clone();
+        match tokio::task::spawn_blocking(move || svc.embed(&t)).await {
+            Ok(Some(vec)) => {
+                // topic = user_content truncated to 200 chars (for display)
+                let topic = turn.user_content.as_ref()
+                    .map(|s| {
+                        if s.chars().count() > 200 {
+                            s.chars().take(200).collect::<String>()
+                        } else {
+                            s.clone()
+                        }
+                    })
+                    .unwrap_or_default();
+                topic_vectors.push((topic.clone(), turn.turn_idx, vec));
+                topic_updates.push((turn.id, topic));
+            }
+            Ok(None) => {
+                warn!(session = %session_id, turn_idx = turn.turn_idx, "Turn embedding returned None");
+            }
+            Err(e) => {
+                warn!(session = %session_id, turn_idx = turn.turn_idx, error = %e, "Turn embedding panicked");
+            }
+        }
+    }
+
+    if topic_vectors.is_empty() { return Ok(()); }
+
+    // 6. Batch write to conversation_topic_vectors (ON CONFLICT DO UPDATE)
+    let stored = state.store.set_conversation_turn_vectors(session_id, &topic_vectors, provider_id).await
+        .map_err(|e| anyhow!("set_conversation_turn_vectors: {}", e))?;
+
+    // 7. Update conversation_turns.topic
+    let refs: Vec<(i64, &str)> = topic_updates.iter()
+        .map(|(id, t)| (*id, t.as_str()))
+        .collect();
+    let _ = state.store.update_turn_topics_batch(&refs).await;
+
+    // 8. Update llm_summary (concatenate turn topics, hard cap 3000 chars)
+    let summary = topic_vectors.iter()
+        .map(|(topic, idx, _)| format!("T{}: {}", idx, topic))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let final_summary = if summary.len() > 3000 {
+        summary[..char_boundary_at(&summary, 3000)].to_string()
+    } else {
+        summary
+    };
+    let _ = state.store.set_conversation_summary(session_id, &final_summary).await;
+
+    // 9. Also update single-vec for backwards compat (first turn as representative)
+    let _ = state.store.set_conversation_embedding(session_id, &topic_vectors[0].2, provider_id).await;
+
+    info!(session = %session_id, count = stored, "Per-turn embeddings stored");
+    Ok(())
+}
+
+/// Build embedding input text for a single Turn.
+/// Core principle: user instruction + tools + AI final action, skip tool_result noise.
+fn build_turn_embedding_text(
+    turn: &missiond_core::types::ConversationTurn,
+    messages: &[&missiond_core::types::ConversationMessage],
+) -> String {
+    let mut text = String::with_capacity(2048);
+
+    // 1. User instruction (core semantic)
+    if let Some(ref uc) = turn.user_content {
+        if !uc.is_empty() {
+            text.push_str("Q: ");
+            text.push_str(uc);
+            text.push('\n');
+        }
+    }
+
+    // 2. Tool summary (structured signal)
+    if let Some(ref tools) = turn.tool_names {
+        if !tools.is_empty() {
+            text.push_str("Tools: ");
+            text.push_str(tools);
+            text.push('\n');
+        }
+    }
+
+    // 3. AI final response (last assistant message that is NOT a tool_use)
+    if let Some(final_reply) = messages.iter().rev()
+        .find(|m| m.role == "assistant" && !m.has_tool_use)
+    {
+        let reply = if final_reply.content.len() > 1500 {
+            &final_reply.content[..char_boundary_at(&final_reply.content, 1500)]
+        } else {
+            &final_reply.content
+        };
+        if !reply.trim().is_empty() {
+            text.push_str("A: ");
+            text.push_str(reply);
+        }
+    }
+
+    // 4. Hard cap 3000 chars (embedding model 512 token window)
+    if text.len() > 3000 {
+        text.truncate(char_boundary_at(&text, 3000));
+    }
+
+    text
+}
+
 /// Build the system prompt for topic extraction.
 fn topic_extraction_prompt(max_topics: usize) -> String {
     format!(
@@ -721,11 +866,26 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
 
             match task {
                 EmbeddingTask::ProcessSession(session_id) => {
-                    if tokio::time::timeout(
-                        std::time::Duration::from_secs(60),
-                        generate_and_store_conv_embedding(&state, &session_id),
-                    ).await.is_err() {
-                        warn!(session = %session_id, "Embedding generation timed out (60s)");
+                    // Legacy: reroute to per-turn if turns exist, otherwise use old session-level flow
+                    if let Ok(turns) = state.store.turns_pending_embedding(&session_id, &provider_id).await {
+                        if !turns.is_empty() {
+                            if let Err(e) = process_turns_for_session(&state, &session_id, &provider_id).await {
+                                warn!(session = %session_id, error = %e, "Per-turn embedding failed");
+                            }
+                        } else {
+                            // No pending turns — use legacy session-level flow
+                            if tokio::time::timeout(
+                                std::time::Duration::from_secs(60),
+                                generate_and_store_conv_embedding(&state, &session_id),
+                            ).await.is_err() {
+                                warn!(session = %session_id, "Embedding generation timed out (60s)");
+                            }
+                        }
+                    }
+                }
+                EmbeddingTask::ProcessTurns { session_id } => {
+                    if let Err(e) = process_turns_for_session(&state, &session_id, &provider_id).await {
+                        warn!(session = %session_id, error = %e, "Per-turn embedding failed");
                     }
                 }
                 EmbeddingTask::ProcessKBEntry(id) => {

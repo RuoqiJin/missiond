@@ -396,6 +396,26 @@ pub(crate) enum DaemonEvent {
         /// "created" | "updated" | "deleted" | "mixed"
         action: String,
     },
+
+    // ===== Cognitive Pipeline (S2→S3→S4) =====
+    /// S2 Organizer finished processing a session (parent links + compaction spliced).
+    /// Consumer: future S3 Tagger & Chunker.
+    SessionOrganized { session_id: String },
+    /// S3 Chunker extracted turns from a session.
+    /// Consumer: future S4 Embedder (per-turn) + Intent Analyst.
+    TurnExtracted { session_id: String, turn_count: usize },
+    /// Phase 6: Intent Analyst analyzed turns for a session.
+    /// Consumer: Phase 7 Consciousness layer (autopilot evaluate_user_state).
+    IntentAnalyzed { session_id: String, intent_type: String },
+
+    // ===== Phase 7: Consciousness — Proactive Push =====
+    /// MissionD proactively pushed context to Jarvis conversation.
+    /// Frontend: refetch Jarvis conversation to show the injected message.
+    JarvisProactivePush {
+        conversation_id: String,
+        trigger_reason: String,     // "user_stuck" | "direction_shift" | "scope_creep"
+        summary: String,
+    },
 }
 
 /// How a conversation session ended.
@@ -464,6 +484,10 @@ impl DaemonEvent {
             Self::SessionCompleted { .. } => "session_completed",
             Self::DeepAnalysisCompleted { .. } => "deep_analysis_completed",
             Self::KBBatchMutated { .. } => "kb_batch_mutated",
+            Self::SessionOrganized { .. } => "session_organized",
+            Self::TurnExtracted { .. } => "turn_extracted",
+            Self::IntentAnalyzed { .. } => "intent_analyzed",
+            Self::JarvisProactivePush { .. } => "jarvis_proactive_push",
         }
     }
 
@@ -479,6 +503,9 @@ impl DaemonEvent {
             | Self::ImageMessageInserted { .. }
             | Self::TranslationStarted { .. }
             | Self::NarrationBatchCompleted { .. }
+            | Self::SessionOrganized { .. }
+            | Self::TurnExtracted { .. }
+            | Self::IntentAnalyzed { .. }
         )
     }
 
@@ -699,6 +726,14 @@ impl DaemonEvent {
                 json!({ "session_id": session_id, "kb_entries_created": kb_entries_created }),
             Self::KBBatchMutated { count, categories, action } =>
                 json!({ "count": count, "categories": categories, "action": action }),
+            Self::SessionOrganized { session_id } =>
+                json!({ "session_id": session_id }),
+            Self::TurnExtracted { session_id, turn_count } =>
+                json!({ "session_id": session_id, "turn_count": turn_count }),
+            Self::IntentAnalyzed { session_id, intent_type } =>
+                json!({ "session_id": session_id, "intent_type": intent_type }),
+            Self::JarvisProactivePush { conversation_id, trigger_reason, summary } =>
+                json!({ "conversation_id": conversation_id, "trigger_reason": trigger_reason, "summary": summary }),
         }
     }
 }

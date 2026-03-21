@@ -1163,6 +1163,17 @@ impl ObservabilityStore for PgMissionStore {
         Ok(())
     }
 
+    async fn find_latest_jarvis_conversation(&self) -> DbResult<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT id FROM conversations \
+             WHERE source = 'jarvis_ui' AND status = 'active' \
+             ORDER BY started_at DESC LIMIT 1"
+        )
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.0))
+    }
+
     async fn router_chat_list(&self, limit: i64) -> DbResult<Vec<serde_json::Value>> {
         let rows = sqlx::query(
             "SELECT c.id, c.task_id, c.model, c.message_count, c.started_at, c.status,

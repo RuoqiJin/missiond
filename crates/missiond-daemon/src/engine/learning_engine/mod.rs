@@ -9,6 +9,7 @@ pub mod decision_harvest;
 pub mod timeline_analyst;
 pub mod idle_explorer;
 pub mod historical_scanner;
+pub mod intent_analyst;
 
 use tracing::info;
 use crate::state::AppState;

@@ -100,6 +100,15 @@ impl GeminiPtyDriver {
 
         self.pty.init_slot(&pty_slot).await;
 
+        // Force dumb terminal mode: disables React Ink TUI, making output
+        // append-only (like Claude Code). This fixes two critical issues:
+        // 1. IncrementalExtractor can't handle Ink's in-place redraws → ▀▀▀ garbage
+        // 2. DA1 response leak (1;2c) from terminal capability queries
+        let mut extra_env = std::collections::HashMap::new();
+        extra_env.insert("TERM".to_string(), "dumb".to_string());
+        extra_env.insert("FORCE_COLOR".to_string(), "0".to_string());
+        extra_env.insert("NO_COLOR".to_string(), "1".to_string());
+
         match self
             .pty
             .spawn(
@@ -111,7 +120,7 @@ impl GeminiPtyDriver {
                     mcp_config: None,
                     dangerously_skip_permissions: true,
                     model: Some(model.unwrap_or(GEMINI_MODEL).to_string()),
-                    extra_env: std::collections::HashMap::new(),
+                    extra_env,
                 },
             )
             .await
@@ -243,13 +252,17 @@ impl GeminiPtyDriver {
 
                 Ok(Ok(ManagerEvent::TextComplete {
                     slot_id: ref id,
-                    content,
                     ..
                 })) if id == slot_id && saw_thinking => {
+                    // TextComplete is just a signal that the turn is done.
+                    // Don't use its content — IncrementalExtractor mangles React Ink
+                    // in-place redraws (captures only ▀▀▀ borders, drops actual text).
+                    // Instead, capture the final screen frame and extract text from it.
+                    let content = self.extract_from_screen(slot_id).await;
                     info!(
                         slot_id,
                         content_len = content.len(),
-                        "GeminiDriver: TextComplete received"
+                        "GeminiDriver: TextComplete → screen extraction"
                     );
                     return Ok(content);
                 }
@@ -298,6 +311,89 @@ impl GeminiPtyDriver {
     }
 
     // ── Private helpers ──
+
+    /// Capture the final screen frame and extract Gemini's response text.
+    /// Used instead of TextComplete.content because IncrementalExtractor
+    /// mangles React Ink's in-place redraws (captures only ▀▀▀ borders).
+    async fn extract_from_screen(&self, slot_id: &str) -> String {
+        let screen = self
+            .pty
+            .get_screen_text(slot_id)
+            .await
+            .unwrap_or_default();
+
+        Self::sanitize_tui_output(&screen)
+    }
+
+    /// Strip Gemini CLI TUI artifacts from screen text.
+    /// Removes box-drawing characters, block elements, sparkles, prompt lines,
+    /// YOLO banner, workspace footer, and other Ink TUI decorations.
+    fn sanitize_tui_output(raw: &str) -> String {
+        raw.lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                // Skip empty lines
+                if trimmed.is_empty() {
+                    return false;
+                }
+                // Skip lines that are purely box-drawing / block elements
+                let stripped: String = trimmed
+                    .chars()
+                    .filter(|c| !matches!(c, '▀' | '▄' | '█' | '╭' | '╮' | '╰' | '╯' | '│' | '─' | '├' | '┤' | '┬' | '┴' | '┼' | '┌' | '┐' | '└' | '┘' | '╌' | '╍'))
+                    .collect();
+                if stripped.trim().is_empty() {
+                    return false;
+                }
+                // Skip Gemini CLI chrome lines
+                if trimmed.starts_with("YOLO")
+                    || trimmed.starts_with("workspace (")
+                    || trimmed.starts_with("~/")
+                    || trimmed.starts_with("Gemini CLI")
+                    || trimmed.starts_with("Signed in")
+                    || trimmed.starts_with("Plan:")
+                    || trimmed.starts_with("We're making changes")
+                    || trimmed.starts_with("What's Changing")
+                    || trimmed.starts_with("How it affects")
+                    || trimmed.starts_with("Read more:")
+                    || trimmed.contains("GEMINI.md file")
+                    || trimmed.contains("skills")
+                    || trimmed.starts_with("/model")
+                    || trimmed.starts_with("branch")
+                    || trimmed.starts_with("sandbox")
+                    || trimmed.starts_with("no sandbox")
+                    || trimmed.starts_with("main")
+                    || trimmed.starts_with("Auto (Gemini")
+                {
+                    return false;
+                }
+                // Skip prompt lines (> ... or * ...)
+                if trimmed.starts_with("> ") || trimmed.starts_with("* ") {
+                    // But keep if it looks like content (markdown list items)
+                    if trimmed.starts_with("* ") && !trimmed.contains(";2c") {
+                        return true;
+                    }
+                    return false;
+                }
+                // Skip DA response residue (1;2c...)
+                if trimmed.contains(";2c") && !trimmed.contains(' ') {
+                    return false;
+                }
+                true
+            })
+            .map(|line| {
+                // Strip leading sparkle (✦) from content lines
+                let trimmed = line.trim();
+                if let Some(rest) = trimmed.strip_prefix("✦") {
+                    rest.trim_start().to_string()
+                } else {
+                    trimmed.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string()
+    }
 
     /// Write prompt to temp file for @file mode. Returns (message_to_send, temp_path).
     fn prepare_file_prompt(prompt: &str) -> Result<(String, PathBuf)> {
