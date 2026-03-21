@@ -171,8 +171,8 @@ async fn claim_pending_spawn(state: &AppState, project_path: &str, messages: &[m
             return false;
         }
         let path_match = path == project_path
-            || project_path.starts_with(path)
-            || path.starts_with(project_path);
+            || project_path.starts_with(&format!("{}/", path))
+            || path.starts_with(&format!("{}/", project_path));
         if !path_match {
             return false;
         }
