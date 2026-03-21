@@ -161,9 +161,18 @@ async fn claim_pending_spawn(state: &AppState, project_path: &str, messages: &[m
         }))
         .unwrap_or("");
 
-    // Find matching ticket: same project path, within time window, and prompt matches
+    // Find matching ticket: project path match, within time window, and prompt matches.
+    // Path matching uses prefix semantics: a slot with cwd="/Users/x/Projects" should
+    // match a session writing to cwd="/Users/x/Projects/missiond". This handles slots
+    // whose cwd is a parent of the actual project (e.g., slot-jarvis).
     let idx = spawns.iter().position(|(path, _, prompt, ts)| {
-        if path != project_path || now.duration_since(*ts) >= max_age {
+        if now.duration_since(*ts) >= max_age {
+            return false;
+        }
+        let path_match = path == project_path
+            || project_path.starts_with(path)
+            || path.starts_with(project_path);
+        if !path_match {
             return false;
         }
         // Match if the ticket prompt is a substring of the actual recorded message

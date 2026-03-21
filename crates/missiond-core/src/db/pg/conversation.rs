@@ -220,7 +220,7 @@ impl ConversationStore for PgMissionStore {
             Some("user") => " AND conversation_type = 'user'".to_string(),
             Some("meta") => " AND conversation_type = 'meta'".to_string(),
             Some("worker") => " AND conversation_type = 'worker'".to_string(),
-            Some("system") => " AND conversation_type IN ('meta', 'worker')".to_string(),
+            Some("system") => " AND conversation_type IN ('meta', 'worker', 'jarvis')".to_string(),
             _ => " AND conversation_type IN ('user', 'worker')".to_string(),
         };
 
