@@ -121,12 +121,14 @@ pub(crate) async fn classify(
         slot_id.as_deref(), session_id,
     );
 
-    // Extract parent session ID for subagent conversations
-    let parent_session_id = if session_id.starts_with("agent-") {
-        missiond_core::db::extract_parent_session_id(jsonl_path)
-    } else {
-        None
-    };
+    // Extract parent session ID: compaction inherits from predecessor,
+    // subagent extracts from JSONL path structure.
+    let parent_session_id = compaction.old_session_id.clone()
+        .or_else(|| if session_id.starts_with("agent-") {
+            missiond_core::db::extract_parent_session_id(jsonl_path)
+        } else {
+            None
+        });
 
     // Determine chat_type for non-standard sources
     let route = IngestionRoute {
