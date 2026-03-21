@@ -144,6 +144,10 @@ async fn run_gemini_reconciliation(state: &AppState) {
 
             // Determine status from file modification time
             let status = infer_status(file).await;
+            
+            // Determine slot_id and conversation_type using the central logic
+            let slot_id = state.store.get_slot_for_session(&session.session_id).await.unwrap_or(None);
+            let conv_type = missiond_core::db::derive_conversation_type(slot_id.as_deref(), &session.session_id);
 
             // Ensure conversation exists (with correct source/chat_type for Gemini CLI)
             ensure_gemini_conversation(
@@ -152,6 +156,7 @@ async fn run_gemini_reconciliation(state: &AppState) {
                 &project_path,
                 &file_key,
                 &status,
+                &conv_type,
             ).await;
 
             // Build message batch (reuses the same pipeline as message_handler)
@@ -259,6 +264,7 @@ async fn ensure_gemini_conversation(
     project_path: &str,
     jsonl_path: &str,
     status: &str,
+    conversation_type: &str,
 ) {
     // Check if already exists
     if let Ok(Some(_)) = state.store.get_conversation(session_id).await {
@@ -284,7 +290,7 @@ async fn ensure_gemini_conversation(
         analysis_retries: 0,
         deep_analyzed_message_id: 0,
         chat_type: Some("gemini_cli".to_string()),
-        conversation_type: "user".to_string(),
+        conversation_type: conversation_type.to_string(),
         updated_at: None,
         llm_summary: None,
         embedding_provider: None,

@@ -132,8 +132,10 @@ async fn run_reconciliation(state: &AppState) {
 
         // Determine status from file modification time
         let status = infer_status(&metadata);
-        // Determine conversation_type from session_id pattern
-        let conv_type = infer_conversation_type(&session_id);
+        
+        // Determine slot_id and conversation_type using the central logic
+        let slot_id = state.store.get_slot_for_session(&session_id).await.unwrap_or(None);
+        let conv_type = missiond_core::db::derive_conversation_type(slot_id.as_deref(), &session_id);
 
         // Reconcile the gap (lazy init: only creates conversation if messages found)
         let recovered = reconcile_file_gap(
@@ -179,17 +181,6 @@ fn infer_status(metadata: &std::fs::Metadata) -> String {
         "completed".to_string()
     } else {
         "active".to_string()
-    }
-}
-
-/// Infer conversation_type from session_id pattern.
-fn infer_conversation_type(session_id: &str) -> String {
-    if session_id.starts_with("agent-acompact-") {
-        "compaction".to_string()
-    } else if session_id.starts_with("agent-") {
-        "subagent".to_string()
-    } else {
-        "user".to_string()
     }
 }
 
@@ -263,6 +254,9 @@ async fn reconcile_file_gap(
         .parent()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
+
+    // Extract parent session ID for subagent conversations (fixes cold-path NULL parent linkage)
+    let parent_session_id = missiond_core::db::extract_parent_session_id(jsonl_path);
 
     let mut batch: Vec<missiond_core::types::ConversationMessage> = Vec::with_capacity(BATCH_FLUSH_SIZE);
     let mut lines = reader.lines();
@@ -353,6 +347,7 @@ async fn reconcile_file_gap(
             if !conversation_ensured {
                 let _ = state.store.ensure_conversation_exists(
                     session_id, &project_path, jsonl_path, status, conversation_type,
+                    parent_session_id.as_deref(),
                 ).await;
                 conversation_ensured = true;
             }
@@ -372,6 +367,7 @@ async fn reconcile_file_gap(
         if !conversation_ensured {
             let _ = state.store.ensure_conversation_exists(
                 session_id, &project_path, jsonl_path, status, conversation_type,
+                parent_session_id.as_deref(),
             ).await;
         }
         batch.sort_by(|a, b| a.message_uuid.cmp(&b.message_uuid));
