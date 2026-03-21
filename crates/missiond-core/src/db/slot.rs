@@ -33,6 +33,21 @@ impl MissionDB {
         Ok(())
     }
 
+    /// Cleans up any leftover pty-{slot_id} placeholder conversation.
+    pub fn cleanup_pty_placeholder(&self, slot_id: &str) -> DbResult<()> {
+        let session_id = format!("pty-{}", slot_id);
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        
+        tx.execute("DELETE FROM conversation_messages WHERE session_id = ?", params![session_id])?;
+        tx.execute("DELETE FROM conversation_events WHERE session_id = ?", params![session_id])?;
+        tx.execute("DELETE FROM conversation_turns WHERE session_id = ?", params![session_id])?;
+        tx.execute("DELETE FROM conversations WHERE id = ?", params![session_id])?;
+        
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Delete a slot session
     pub fn delete_slot_session(&self, slot_id: &str) -> DbResult<()> {
         let conn = self.conn();

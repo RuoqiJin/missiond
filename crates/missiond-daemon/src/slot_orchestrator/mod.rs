@@ -42,6 +42,9 @@ pub(crate) async fn register_slot_session(
         tracing::warn!(slot_id, session_id, "Failed to set slot session: {}", e);
         return;
     }
+    
+    // 1.5. Clean up any leftover PTY placeholder conversation
+    let _ = store.cleanup_pty_placeholder(slot_id).await;
 
     // 2. Ensure conversation record exists — use derive_conversation_type (single source of truth)
     let conversation_type = missiond_core::db::derive_conversation_type(

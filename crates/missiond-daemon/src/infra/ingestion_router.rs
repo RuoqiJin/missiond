@@ -76,6 +76,7 @@ pub(crate) async fn classify(
                 "IngestionRouter: claimed expectation ticket"
             );
             let _ = state.store.set_slot_session(&slot_id, session_id).await;
+            let _ = state.store.cleanup_pty_placeholder(&slot_id).await;
             state.pty_session_uuids.write().await.insert(session_id.to_string());
             is_pty = true;
         }
@@ -94,6 +95,7 @@ pub(crate) async fn classify(
             );
             let _ = state.store.mark_conversation_compacted(&old_uuid).await;
             let _ = state.store.set_slot_session(&slot_id, session_id).await;
+            let _ = state.store.cleanup_pty_placeholder(&slot_id).await;
             state.pty_session_uuids.write().await.remove(&old_uuid);
             state.pty_session_uuids.write().await.insert(session_id.to_string());
             is_pty = true;
@@ -163,16 +165,16 @@ async fn claim_pending_spawn(state: &AppState, project_path: &str, messages: &[m
         .unwrap_or("");
 
     // Find matching ticket: project path match, within time window, and prompt matches.
-    // Path matching uses prefix semantics: a slot with cwd="/Users/x/Projects" should
-    // match a session writing to cwd="/Users/x/Projects/missiond". This handles slots
-    // whose cwd is a parent of the actual project (e.g., slot-jarvis).
+    // Path matching is one-directional: a session cwd may be inside a slot's cwd
+    // (e.g., slot-jarvis cwd="/Users/x/Projects" matches session cwd="/Users/x/Projects/missiond").
+    // The reverse (session cwd is PARENT of slot cwd) is NOT allowed — it would let
+    // a Jarvis session (cwd=/Users/x/Projects) be stolen by slot-arch-maint (cwd=.../missiond).
     let idx = spawns.iter().position(|(path, _, prompt, ts)| {
         if now.duration_since(*ts) >= max_age {
             return false;
         }
         let path_match = path == project_path
-            || project_path.starts_with(&format!("{}/", path))
-            || path.starts_with(&format!("{}/", project_path));
+            || project_path.starts_with(&format!("{}/", path));
         if !path_match {
             return false;
         }

@@ -110,6 +110,7 @@ impl SlotManager {
             #[cfg(feature = "sqlite")]
             if let Some(ref db) = self.db {
                 let _ = db.set_slot_session(slot_id, session_id);
+                let _ = db.cleanup_pty_placeholder(slot_id);
             }
             debug!(slot_id = %slot_id, session_id = %session_id, "Session updated");
         }
