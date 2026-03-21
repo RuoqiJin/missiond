@@ -158,7 +158,7 @@ async fn ingest(
             "thinking".to_string()
         } else if msg.message.role == "user" && is_slot_session {
             "system".to_string()
-        } else if msg.message.role == "user" && parent_session_id.is_some() {
+        } else if msg.message.role == "user" && parent_session_id.is_some() && session_id.starts_with("agent-") {
             "agent_user".to_string()
         } else if msg.message.role == "user" && is_compact_summary(state, session_id, msg).await {
             "compact_summary".to_string()
