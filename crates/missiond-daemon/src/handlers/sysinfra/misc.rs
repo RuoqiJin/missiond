@@ -58,7 +58,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     Ok(ToolResult::text("▶️ 全局暂停已解除。工位恢复正常工作。"))
                 }
                 _ => {
-                    let paused = state.global_paused.load(Ordering::Relaxed);
+                    let paused = state.control_manager.current().global_paused;
                     let since = state.global_paused_at.load(Ordering::Relaxed);
                     let msg = if paused {
                         format!("⏸ 当前处于全局暂停状态 (始于 {})", 
@@ -87,8 +87,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 })
                 .collect();
 
-            // Memory extraction state
-            let memory_paused = state.memory_paused.load(std::sync::atomic::Ordering::Relaxed);
+            // Memory extraction state (read from ControlTree)
+            let memory_paused = state.control_manager.current()
+                .is_domain_paused(crate::control_tree::CtlDomain::Memory);
             let fast_lane = {
                 let es = state.extraction_state.read().await;
                 json!({ "phase": format!("{:?}", es.phase), "type": es.active_type })

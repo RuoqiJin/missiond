@@ -104,6 +104,9 @@ pub struct ControlTree {
     pub workers: HashMap<String, bool>,
     #[serde(default)]
     pub slot_roles: HashMap<String, bool>,
+    /// Timestamps when domains were paused (for TTL auto-resume).
+    #[serde(default)]
+    pub domain_paused_at: HashMap<CtlDomain, i64>,
 }
 
 impl Default for ControlTree {
@@ -114,6 +117,7 @@ impl Default for ControlTree {
             domains: HashMap::new(),
             workers: HashMap::new(),
             slot_roles: HashMap::new(),
+            domain_paused_at: HashMap::new(),
         }
     }
 }
@@ -159,6 +163,18 @@ impl ControlTree {
                         return true;
                     }
                 }
+            }
+        }
+        false
+    }
+
+    /// Check if a domain was paused and its TTL has expired (> 2 hours).
+    pub fn is_domain_ttl_expired(&self, d: CtlDomain) -> bool {
+        const PAUSE_TTL_SECS: i64 = 2 * 60 * 60; // 2 hours
+        if let Some(&paused_at) = self.domain_paused_at.get(&d) {
+            if paused_at > 0 {
+                let now = chrono::Utc::now().timestamp();
+                return now - paused_at > PAUSE_TTL_SECS;
             }
         }
         false
@@ -242,6 +258,11 @@ impl ControlManager {
     pub fn set_domain(&self, domain: CtlDomain, paused: bool) {
         self.mutate(|tree| {
             tree.domains.insert(domain, paused);
+            if paused {
+                tree.domain_paused_at.insert(domain, chrono::Utc::now().timestamp());
+            } else {
+                tree.domain_paused_at.remove(&domain);
+            }
         });
         info!(%paused, domain = domain.as_str(), "ControlTree: domain changed");
     }
@@ -258,6 +279,21 @@ impl ControlManager {
             tree.slot_roles.insert(role.to_string(), paused);
         });
         info!(%paused, role, "ControlTree: slot_role changed");
+    }
+
+    /// Auto-resume domains whose pause TTL has expired. Called from autopilot_tick.
+    pub fn check_domain_ttl_auto_resume(&self) {
+        let tree = self.tx.borrow().clone();
+        let mut expired = Vec::new();
+        for (&domain, &is_paused) in &tree.domains {
+            if is_paused && tree.is_domain_ttl_expired(domain) {
+                expired.push(domain);
+            }
+        }
+        for domain in expired {
+            warn!(domain = domain.as_str(), "ControlTree: domain pause TTL expired, auto-resuming");
+            self.set_domain(domain, false);
+        }
     }
 
     // ── Internal helpers ──

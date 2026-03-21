@@ -130,20 +130,18 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 paused: Option<bool>,
             }
             let args: Args = serde_json::from_value(args).unwrap_or(Args { paused: None });
-            let current = state.memory_paused.load(std::sync::atomic::Ordering::Relaxed);
+            let current = state.control_manager.current()
+                .is_domain_paused(crate::control_tree::CtlDomain::Memory);
             let new_val = args.paused.unwrap_or(!current); // toggle if not specified
-            state.memory_paused.store(new_val, std::sync::atomic::Ordering::Relaxed);
-            // Persist to flag file so pause survives daemon restart
-            let flag = default_mission_home().join("memory_paused");
+            // Route through ControlTree (single source of truth)
+            state.control_manager.set_domain(crate::control_tree::CtlDomain::Memory, new_val);
             if new_val {
-                let now = chrono::Utc::now().timestamp();
-                let _ = std::fs::write(&flag, now.to_string());
-                state.memory_paused_at.store(now, std::sync::atomic::Ordering::Relaxed);
-                info!("Memory extraction PAUSED by user");
+                info!("Memory extraction PAUSED by user (via ControlTree domain)");
             } else {
+                // Clean up legacy flag file if it exists
+                let flag = default_mission_home().join("memory_paused");
                 let _ = std::fs::remove_file(&flag);
-                state.memory_paused_at.store(0, std::sync::atomic::Ordering::Relaxed);
-                info!("Memory extraction RESUMED by user");
+                info!("Memory extraction RESUMED by user (via ControlTree domain)");
             }
             Ok(ToolResult::text(if new_val {
                 "记忆任务已暂停（2 小时后自动恢复）。调用 mission_memory_pause(paused: false) 手动恢复。"
@@ -153,7 +151,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         }
 
         "mission_memory_status" => {
-            let paused = state.memory_paused.load(std::sync::atomic::Ordering::Relaxed);
+            let paused = state.control_manager.current()
+                .is_domain_paused(crate::control_tree::CtlDomain::Memory);
             let now = chrono::Utc::now().timestamp();
 
             // Fast lane state

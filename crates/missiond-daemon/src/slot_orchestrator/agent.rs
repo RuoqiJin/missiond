@@ -89,7 +89,8 @@ impl AgentSlotManager {
 
         // ControlTree pause check: respect provider-level and global pause.
         let provider = engine_to_provider(config.engine);
-        if self.control.current().is_provider_paused(provider) {
+        let tree = self.control.current();
+        if tree.is_provider_paused(provider) {
             warn!(
                 task_type,
                 provider = provider.as_str(),
@@ -100,6 +101,22 @@ impl AgentSlotManager {
                 provider.as_str(),
                 task_type
             ));
+        }
+
+        // ControlTree pause check: respect slot_role-level pause.
+        if let Some(ref role) = config.role {
+            if tree.is_slot_role_paused(role) {
+                warn!(
+                    task_type,
+                    role = role.as_str(),
+                    "SlotManager: task blocked — slot_role paused"
+                );
+                return Err(anyhow!(
+                    "Slot role {} is paused (task: {})",
+                    role,
+                    task_type
+                ));
+            }
         }
 
         let manager = self

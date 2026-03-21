@@ -28,6 +28,11 @@ pub(crate) async fn ensure_memory_slot_by_id(state: &AppState, slot_id: &str) ->
         warn!(slot_id, "Memory slot not configured in slots.yaml");
         return false;
     };
+    // ControlTree: refuse spawn if slot_role is paused
+    if state.control_manager.current().is_slot_role_paused(&slot.config.role) {
+        tracing::warn!(slot_id, role = %slot.config.role, "ensure_memory_slot: slot_role paused, refusing spawn");
+        return false;
+    }
     let pty_slot = missiond_core::PTYSlot {
         id: slot.config.id.clone(),
         role: slot.config.role.clone(),
