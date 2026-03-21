@@ -116,6 +116,7 @@ pub enum ManagerEvent {
     MessageSent {
         slot_id: String,
         project_path: Option<String>,
+        prompt: String,
     },
     /// State changed
     StateChange {
@@ -664,6 +665,7 @@ impl PTYManager {
         let _ = self.event_tx.send(ManagerEvent::MessageSent {
             slot_id: slot_id.to_string(),
             project_path: Some(cwd),
+            prompt: message.to_string(),
         });
 
         info!(slot_id = slot_id, message_len = message.len(), "Message sent (fire-and-forget)");
@@ -708,6 +710,7 @@ impl PTYManager {
         let _ = self.event_tx.send(ManagerEvent::MessageSent {
             slot_id: slot_id.to_string(),
             project_path: Some(cwd),
+            prompt: message.to_string(),
         });
 
         let duration_ms = start.elapsed().as_millis() as u64;

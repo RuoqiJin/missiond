@@ -528,7 +528,7 @@ async fn main() -> Result<()> {
     let slot_mgr_pty2 = Arc::clone(&pty);
     let slot_mgr_store2 = Arc::clone(&store);
     let pty_for_gemini_transport = Arc::clone(&pty);
-    let pending_spawns_for_slot: Arc<tokio::sync::RwLock<Vec<(String, String, tokio::time::Instant)>>> =
+    let pending_spawns_for_slot: Arc<tokio::sync::RwLock<Vec<(String, String, String, tokio::time::Instant)>>> =
         Arc::new(tokio::sync::RwLock::new(Vec::new()));
 
     let state = AppState {
