@@ -82,9 +82,10 @@ pub(crate) async fn classify(
     }
 
     // Compaction detection: a non-PTY session that actually belongs to a slot
-    // (context compaction creates a new session_id for the same slot)
-    if !is_pty {
-        if let Some((slot_id, old_uuid, old_task_id)) = detect_compaction(state, session_id, resolved_project).await {
+    // (context compaction creates a new session_id for the same slot).
+    // Only applies to Claude Code sessions — Gemini CLI has no compaction mechanism.
+    if !is_pty && event_source == "claude_code" {
+        if let Some((slot_id, old_uuid, old_task_id)) = detect_compaction(state, session_id, jsonl_path).await {
             info!(
                 slot_id = %slot_id,
                 old_session = %old_uuid,

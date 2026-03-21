@@ -12,35 +12,48 @@ use crate::state::AppState;
 pub(crate) async fn detect_compaction(
     state: &AppState,
     new_session_id: &str,
-    new_project: &str,
+    new_jsonl_path: &str,
 ) -> Option<(String, String, Option<String>)> {
+    // 1. Hard requirement: Must be a compaction fragment
+    if !new_session_id.contains("-acompact-") {
+        return None;
+    }
+
+    // 2. Extract the globally unique root session ID from the file path
+    let root_id = missiond_core::db::extract_parent_session_id(new_jsonl_path)?;
+
     let all_slot_sessions = state.store.get_all_slot_sessions().await.ok()?;
 
-    for (slot_id, old_uuid) in &all_slot_sessions {
-        if old_uuid == new_session_id {
-            continue; // Same session, not compaction
+    for (slot_id, current_uuid) in &all_slot_sessions {
+        if current_uuid == new_session_id {
+            continue; // Same session
         }
-        let old_conv = state.store.get_conversation(old_uuid).await.ok()??;
-        // Must be same project and still active
-        if old_conv.project.as_deref() != Some(new_project) || old_conv.status != "active" {
-            continue;
-        }
-        // The old session should have been written to recently (within 10 min)
-        // to avoid false positives with stale slot sessions.
-        // Use updated_at (last message time) when available, fall back to started_at.
-        let last_active = old_conv.updated_at.as_deref()
-            .unwrap_or(&old_conv.started_at);
-        if let Ok(t) = chrono::DateTime::parse_from_rfc3339(last_active) {
-            let age = chrono::Utc::now().signed_duration_since(t);
-            if age > chrono::Duration::minutes(10) {
-                continue; // No messages in last 10 min — not a live compaction
+
+        // 3. Deterministic match: Does the slot's current session belong to the same root tree?
+        let is_match = if current_uuid == &root_id {
+            true // The current session IS the root
+        } else {
+            // Check if the current session's root matches
+            if let Ok(Some(current_conv)) = state.store.get_conversation(current_uuid).await {
+                if let Some(current_path) = current_conv.jsonl_path {
+                    missiond_core::db::extract_parent_session_id(&current_path) == Some(root_id.clone())
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if is_match {
+            if let Ok(Some(old_conv)) = state.store.get_conversation(current_uuid).await {
+                return Some((
+                    slot_id.clone(),
+                    current_uuid.clone(),
+                    old_conv.task_id.clone(),
+                ));
             }
         }
-        return Some((
-            slot_id.clone(),
-            old_uuid.clone(),
-            old_conv.task_id.clone(),
-        ));
     }
     None
 }
