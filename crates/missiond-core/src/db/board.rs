@@ -656,7 +656,7 @@ impl MissionDB {
 
         while let Some(current) = queue.pop() {
             for t in &all_tasks {
-                if t.depends_on.iter().any(|d| d.as_str().starts_with(&current) || current.starts_with(d.as_str())) {
+                if t.depends_on.iter().any(|d| d.as_str() == current) {
                     let tid_str = t.id.as_str().to_string();
                     if visited.insert(tid_str.clone()) {
                         downstream.push(tid_str.clone());
