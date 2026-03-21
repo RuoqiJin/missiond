@@ -51,6 +51,17 @@ pub(crate) async fn classify(
     project_path: &str,
     messages: &[missiond_core::CCMessageLine],
 ) -> (IngestionRoute, CompactionInfo) {
+    // Data-Payload SSOT: trust the physical cwd recorded in the JSONL message payload
+    // over the watcher's guess. When FSEvent fires before sessions-index.json is updated,
+    // the watcher falls back to the parent directory of the JSONL file (a .claude/projects/
+    // cache path), which is NOT the real project path. This causes detect_compaction and
+    // claim_pending_spawn to fail on strict path comparison. The message payload always
+    // carries the real cwd, so we use it as the single source of truth.
+    let resolved_project = messages.first()
+        .map(|m| m.cwd.as_str())
+        .filter(|cwd| !cwd.is_empty())
+        .unwrap_or(project_path);
+
     let mut is_pty = state.pty_session_uuids.read().await.contains(session_id);
     let mut compaction = CompactionInfo::default();
 
@@ -58,7 +69,7 @@ pub(crate) async fn classify(
     // recently spawned in the same project. Late-binding resolves the cross-process race
     // where Claude Code generates a UUID that MissionD cannot predict.
     if !is_pty && event_source == "claude_code" {
-        if let Some(slot_id) = claim_pending_spawn(state, project_path, messages).await {
+        if let Some(slot_id) = claim_pending_spawn(state, resolved_project, messages).await {
             info!(
                 session_id,
                 slot_id = %slot_id,
@@ -73,7 +84,7 @@ pub(crate) async fn classify(
     // Compaction detection: a non-PTY session that actually belongs to a slot
     // (context compaction creates a new session_id for the same slot)
     if !is_pty {
-        if let Some((slot_id, old_uuid, old_task_id)) = detect_compaction(state, session_id, project_path).await {
+        if let Some((slot_id, old_uuid, old_task_id)) = detect_compaction(state, session_id, resolved_project).await {
             info!(
                 slot_id = %slot_id,
                 old_session = %old_uuid,
