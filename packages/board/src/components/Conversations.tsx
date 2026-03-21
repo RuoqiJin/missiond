@@ -465,29 +465,41 @@ export function Conversations() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [totalMessageCount, setTotalMessageCount] = useState(0);
 
+  const isGeminiSource = useCallback((source: string) => {
+    return source === 'router_chat' || source === 'gemini_cli';
+  }, []);
+
   const fetchConversations = useCallback(async () => {
     setLoading(true);
     try {
+      // Server-side source filtering per tab. No conversationType filter —
+      // frontend is a faithful DB viewer, misclassified records must be visible.
       const params = new URLSearchParams();
       if (statusFilter) params.set('status', statusFilter);
       params.set('limit', '300');
+      params.set('conversationType', 'all');
+
+      if (viewMode === 'gemini') {
+        params.set('source', 'gemini_cli,router_chat');
+      } else if (viewMode === 'workers') {
+        params.set('conversationType', 'system');
+        params.set('source', '!gemini_cli,!router_chat');
+      } else {
+        // "对话" tab: only user conversations, exclude gemini + exclude correctly classified workers
+        params.set('conversationType', 'user');
+        params.set('source', '!gemini_cli,!router_chat');
+      }
+
       const res = await fetch(`/api/conversations?${params}`);
       if (res.ok) {
         const data = await res.json();
-        const list: Conversation[] = Array.isArray(data) ? data : [];
-        // Sort: active first, then by most recent
-        list.sort((a, b) => {
-          if (a.status === 'active' && b.status !== 'active') return -1;
-          if (a.status !== 'active' && b.status === 'active') return 1;
-          return new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime();
-        });
-        setConversations(list);
+        setConversations(Array.isArray(data) ? data : []);
       }
     } catch {
       // silent
     }
     setLoading(false);
-  }, [statusFilter]);
+  }, [statusFilter, viewMode]);
 
   const PAGE_SIZE = 500;
 
@@ -607,10 +619,6 @@ export function Conversations() {
     return groups;
   }, [messages, events]);
 
-  const isGeminiSource = useCallback((source: string) => {
-    return source === 'router_chat' || source === 'gemini_cli';
-  }, []);
-
   const filterByTab = useCallback((c: Conversation, tab: typeof viewMode) => {
     if (tab === 'conversations') {
       return c.conversationType === 'user' && !isGeminiSource(c.source);
@@ -630,13 +638,15 @@ export function Conversations() {
     return { active, completed, compacted, total: filtered.length };
   }, [conversations, viewMode, filterByTab]);
 
+  // Tab counts: current tab shows exact count, others show '…' until switched
   const tabCounts = useMemo(() => ({
-    conversations: conversations.filter((c) => filterByTab(c, 'conversations')).length,
-    workers: conversations.filter((c) => filterByTab(c, 'workers')).length,
-    gemini: conversations.filter((c) => filterByTab(c, 'gemini')).length,
-  }), [conversations, filterByTab]);
+    conversations: viewMode === 'conversations' ? conversations.length : null,
+    workers: viewMode === 'workers' ? conversations.length : null,
+    gemini: viewMode === 'gemini' ? conversations.length : null,
+  }), [conversations, viewMode]);
 
-  // Group: separate subagents and compacted sessions from main list, filter by viewMode
+  // Group: separate subagents and compacted sessions from main list.
+  // Data is already tab-filtered from the API, no client-side filterByTab needed.
   const { mainList, subagentMap } = useMemo(() => {
     const map = new Map<string, Conversation[]>();
     const main: Conversation[] = [];
@@ -647,12 +657,18 @@ export function Conversations() {
         map.set(conv.parentSessionId, list);
       } else if (conv.status === 'compacted') {
         continue;
-      } else if (filterByTab(conv, viewMode)) {
+      } else {
         main.push(conv);
       }
     }
+    // Sort: active first, then by most recent
+    main.sort((a, b) => {
+      if (a.status === 'active' && b.status !== 'active') return -1;
+      if (a.status !== 'active' && b.status === 'active') return 1;
+      return new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime();
+    });
     return { mainList: main, subagentMap: map };
-  }, [conversations, viewMode, filterByTab]);
+  }, [conversations]);
 
   const toggleParentExpand = useCallback((sessionId: string) => {
     setExpandedParents((prev) => {
@@ -685,7 +701,7 @@ export function Conversations() {
             )}
           >
             <MessageSquare className="w-3 h-3" />
-            对话 {tabCounts.conversations > 0 && <span className="text-neutral-600">{tabCounts.conversations}</span>}
+            对话 {tabCounts.conversations != null && tabCounts.conversations > 0 && <span className="text-neutral-600">{tabCounts.conversations}</span>}
           </button>
           <button
             onClick={() => setViewMode('workers')}
@@ -697,7 +713,7 @@ export function Conversations() {
             )}
           >
             <Server className="w-3 h-3" />
-            工位 {tabCounts.workers > 0 && <span className="text-neutral-600">{tabCounts.workers}</span>}
+            工位 {tabCounts.workers != null && tabCounts.workers > 0 && <span className="text-neutral-600">{tabCounts.workers}</span>}
           </button>
           <button
             onClick={() => setViewMode('gemini')}
@@ -709,7 +725,7 @@ export function Conversations() {
             )}
           >
             <Sparkles className="w-3 h-3" />
-            Gemini {tabCounts.gemini > 0 && <span className="text-neutral-600">{tabCounts.gemini}</span>}
+            Gemini {tabCounts.gemini != null && tabCounts.gemini > 0 && <span className="text-neutral-600">{tabCounts.gemini}</span>}
           </button>
         </div>
 
