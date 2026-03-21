@@ -90,7 +90,12 @@ pub fn extract_parent_session_id(jsonl_path: &str) -> Option<String> {
 /// Derive conversation_type from slot_id and session_id.
 /// "meta" = memory slots, "compaction" = context compaction shards,
 /// "subagent" = agent-* IDs, "worker" = other slots, "user" = direct CLI.
-pub fn derive_conversation_type(slot_id: Option<&str>, session_id: &str) -> String {
+pub fn derive_conversation_type(slot_id: Option<&str>, session_id: &str, source: &str) -> String {
+    // Top-level interception for Gemini CLI (unless it's bound to a system worker slot)
+    if source == "gemini_cli" && slot_id.is_none() {
+        return "gemini_chat".to_string();
+    }
+
     match slot_id {
         Some("slot-memory" | "slot-memory-slow") => "meta".to_string(),
         Some("slot-jarvis") => "jarvis".to_string(),

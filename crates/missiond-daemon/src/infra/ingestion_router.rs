@@ -69,7 +69,7 @@ pub(crate) async fn classify(
     // Expectation ticket claim: if this is a new claude_code session, check if a slot
     // recently spawned in the same project. Late-binding resolves the cross-process race
     // where Claude Code generates a UUID that MissionD cannot predict.
-    if !is_pty && event_source == "claude_code" {
+    if !is_pty && (event_source == "claude_code" || event_source == "gemini_cli") {
         if let Some(slot_id) = claim_pending_spawn(state, resolved_project, messages).await {
             info!(
                 session_id,
@@ -90,7 +90,7 @@ pub(crate) async fn classify(
     // Compaction detection: a non-PTY session that actually belongs to a slot
     // (context compaction creates a new session_id for the same slot).
     // Only applies to Claude Code sessions — Gemini CLI has no compaction mechanism.
-    if !is_pty && event_source == "claude_code" {
+    if !is_pty && (event_source == "claude_code" || event_source == "gemini_cli") {
         if let Some((slot_id, old_uuid, old_task_id)) =
             detect_compaction(state, session_id, jsonl_path).await
         {
@@ -136,7 +136,7 @@ pub(crate) async fn classify(
 
     // Determine conversation_type via the central brain
     let conversation_type =
-        missiond_core::db::derive_conversation_type(slot_id.as_deref(), session_id);
+        missiond_core::db::derive_conversation_type(slot_id.as_deref(), session_id, event_source);
 
     // Extract parent session ID: compaction inherits from predecessor,
     // subagent extracts from JSONL path structure.
