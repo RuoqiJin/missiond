@@ -12,7 +12,7 @@ use crate::workers::registry::WorkerState;
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     // ── Unified Control Tree ──
     if name == "mission_control" {
-        return handle_control(state, args);
+        return handle_control(state, args).await;
     }
 
     // Consolidated tool: mission_worker
@@ -40,7 +40,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
 // ── mission_control handler ─────────────────────────────────────────
 
-fn handle_control(state: &AppState, args: Value) -> Result<ToolResult> {
+async fn handle_control(state: &AppState, args: Value) -> Result<ToolResult> {
     let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("status");
     let target_type = args.get("target_type").and_then(|v| v.as_str()).unwrap_or("global");
     let target_name = args.get("target_name").and_then(|v| v.as_str()).unwrap_or("");
@@ -88,16 +88,8 @@ fn handle_control(state: &AppState, args: Value) -> Result<ToolResult> {
                     "Unknown domain: '{}'. Available: memory, flow, board, strategy", target_name
                 ))?;
             mgr.set_domain(domain, paused);
-            // Sync legacy memory_paused
-            if domain == CtlDomain::Memory {
-                state.memory_paused.store(paused, std::sync::atomic::Ordering::Relaxed);
-                if paused {
-                    let now = chrono::Utc::now().timestamp();
-                    state.memory_paused_at.store(now, std::sync::atomic::Ordering::Relaxed);
-                } else {
-                    state.memory_paused_at.store(0, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
+            // Legacy sync removed: ControlTree is now the single source of truth.
+            // autopilot_tick syncs ControlTree → legacy AtomicBools each tick.
         }
         "worker" => {
             if target_name.is_empty() {
@@ -114,6 +106,24 @@ fn handle_control(state: &AppState, args: Value) -> Result<ToolResult> {
                 return Ok(ToolResult::error("target_name is required for slot_role control"));
             }
             mgr.set_slot_role(target_name, paused);
+            // Phase 2: actively kill running PTY sessions for this role
+            if paused {
+                let slots = state.mission.list_slots();
+                for slot in slots {
+                    if slot.config.role == target_name {
+                        if let Some(info) = state.pty.get_status(&slot.config.id).await {
+                            if info.state != missiond_core::SessionState::Exited {
+                                tracing::info!(
+                                    slot_id = %slot.config.id,
+                                    role = target_name,
+                                    "ControlTree: killing PTY for paused slot_role"
+                                );
+                                let _ = state.pty.kill(&slot.config.id).await;
+                            }
+                        }
+                    }
+                }
+            }
         }
         _ => return Ok(ToolResult::error(format!(
             "Unknown target_type: '{}'. Use: global, provider, domain, worker, slot_role", target_type

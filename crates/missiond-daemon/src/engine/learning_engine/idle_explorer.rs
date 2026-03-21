@@ -28,11 +28,12 @@ pub(crate) async fn check_idle_exploration(state: &AppState) {
         return;
     }
 
-    // Gate 2: not paused
-    if state.global_paused.load(std::sync::atomic::Ordering::Relaxed)
-        || state.memory_paused.load(std::sync::atomic::Ordering::Relaxed)
+    // Gate 2: not paused (read from ControlTree — single source of truth)
     {
-        return;
+        let tree = state.control_manager.current();
+        if tree.global_paused || tree.is_domain_paused(crate::control_tree::CtlDomain::Memory) {
+            return;
+        }
     }
 
     // Gate 3: no pending explore tasks already (prevent flooding)

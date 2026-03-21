@@ -8,7 +8,6 @@ use crate::supervisor::{check_slot_context_levels, check_slot_stuck, check_pendi
 use crate::memory_scheduler::ensure_memory_slot_by_id;
 use crate::llm_gateway::determine_llm_env;
 use missiond_core::SessionState;
-use crate::helpers::default_mission_home;
 use crate::supervisor::truncate_safe;
 use crate::supervisor::{is_auth_error, is_quota_exhausted};
 use crate::memory_scheduler::{dispatch_queued_submit_tasks, reap_stale_submit_tasks};
@@ -70,24 +69,13 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     // GC completed jobs older than 30 minutes
     gc_completed_jobs(state).await;
 
-    let mut memory_paused = state.memory_paused.load(std::sync::atomic::Ordering::Relaxed);
-    let global_paused = state.global_paused.load(std::sync::atomic::Ordering::Relaxed);
+    // ControlTree is the single source of truth for pause state.
+    // TTL auto-resume: domains paused > 2 hours are automatically resumed.
+    state.control_manager.check_domain_ttl_auto_resume();
 
-    // TTL auto-resume: if paused for > 2 hours, auto-resume
-    if memory_paused {
-        const PAUSE_TTL_SECS: i64 = 2 * 60 * 60; // 2 hours
-        let paused_at = state.memory_paused_at.load(std::sync::atomic::Ordering::Relaxed);
-        if paused_at > 0 {
-            let now = chrono::Utc::now().timestamp();
-            if now - paused_at > PAUSE_TTL_SECS {
-                warn!(paused_secs = now - paused_at, "Memory pause TTL expired, auto-resuming");
-                state.memory_paused.store(false, std::sync::atomic::Ordering::Relaxed);
-                state.memory_paused_at.store(0, std::sync::atomic::Ordering::Relaxed);
-                let _ = std::fs::remove_file(default_mission_home().join("memory_paused"));
-                memory_paused = false;
-            }
-        }
-    }
+    let tree = state.control_manager.current();
+    let memory_paused = tree.is_domain_paused(crate::control_tree::CtlDomain::Memory);
+    let global_paused = tree.global_paused;
 
     if global_paused {
         debug!("autopilot: global pause active, skipping all task dispatches");
@@ -222,6 +210,11 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     // Safety net: running tasks with no recent notes → Inbox reminder
     check_stale_board_progress(state).await;
 
+    // Phase 7: Consciousness — evaluate user state for proactive triggers
+    if state.intent_analyst_enabled {
+        evaluate_user_state(state).await;
+    }
+
     // Record tick timing to DaemonStats
     let tick_ms = tick_start.elapsed().as_millis() as u64;
     state.stats.autopilot_ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -234,7 +227,7 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
 /// Board task dispatch — extracted for reuse by idle-triggered dispatch.
 /// Called from autopilot_tick (60s) and event-driven (slot became idle).
 pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
-    if state.global_paused.load(std::sync::atomic::Ordering::Relaxed) {
+    if state.control_manager.current().global_paused {
         return Ok(());
     }
 
@@ -374,6 +367,17 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                 (format!("{}\n\n{}", result.assembled, prompt), cited)
             }
         };
+
+        // ControlTree: skip if slot_role is paused
+        {
+            let slot_role = state.mission.get_slot(&slot_id)
+                .map(|s| s.config.role.clone())
+                .unwrap_or_default();
+            if state.control_manager.current().is_slot_role_paused(&slot_role) {
+                debug!(slot_id = %slot_id, role = %slot_role, "Autopilot: slot_role paused, skipping");
+                continue;
+            }
+        }
 
         // Slot throttling: skip if slot has 3+ consecutive failures within 30 min
         {
@@ -1169,5 +1173,188 @@ async fn gc_completed_jobs(state: &AppState) {
     let removed = before - store.len();
     if removed > 0 {
         debug!(removed, remaining = store.len(), "GC'd completed async jobs");
+    }
+}
+
+// ── Phase 7: Consciousness — Proactive Triggers ──
+
+/// Evaluate recent user intents and trigger proactive notifications.
+/// Called from autopilot_tick when intent_analyst is enabled.
+/// Groups intents by session_id to avoid cross-session false aggregation.
+async fn evaluate_user_state(state: &AppState) {
+    // 1. Pull recent intents (last 30 min, global)
+    let intents = match state.store.get_recent_intents(1800).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, "evaluate_user_state: failed to get recent intents");
+            return;
+        }
+    };
+    if intents.is_empty() { return; }
+
+    let now = chrono::Utc::now().timestamp();
+
+    // 2. Group by session_id — Gemini audit fix: avoid cross-session false aggregation
+    let mut by_session: std::collections::HashMap<&str, Vec<&missiond_core::types::UserIntent>> = std::collections::HashMap::new();
+    for intent in &intents {
+        by_session.entry(&intent.session_id).or_default().push(intent);
+    }
+
+    // 3. Per-session evaluation
+    for (session_id, s_intents) in &by_session {
+        // UserStuck: stuck_retry >= 3 → L3 Jarvis push (降级 Inbox)
+        let stuck: Vec<_> = s_intents.iter()
+            .filter(|i| i.intent_type == "stuck_retry")
+            .copied()
+            .collect();
+        let ck_stuck = format!("user_stuck:{}", session_id);
+        if stuck.len() >= 3 && !in_cooldown(state, &ck_stuck, 1800, now) {
+            let summary = build_stuck_summary(&stuck);
+            trigger_jarvis_push(state, "user_stuck", &summary).await;
+            set_cooldown(state, &ck_stuck, now);
+        }
+
+        // DirectionShift: architecture_explore confidence > 0.8 → L2 Inbox
+        if let Some(shift) = s_intents.iter()
+            .find(|i| i.intent_type == "architecture_explore" && i.confidence > 0.8)
+        {
+            let ck = format!("direction_shift:{}", session_id);
+            if !in_cooldown(state, &ck, 3600, now) {
+                trigger_inbox(state, "direction_shift",
+                    &format!("检测到架构探索偏移：{}", shift.summary.as_deref().unwrap_or("未知")),
+                ).await;
+                set_cooldown(state, &ck, now);
+            }
+        }
+
+        // ScopeCreep: scope_creep >= 2 + Board has running tasks → L2 Inbox
+        let creep_count = s_intents.iter()
+            .filter(|i| i.intent_type == "scope_creep")
+            .count();
+        if creep_count >= 2 {
+            let ck = format!("scope_creep:{}", session_id);
+            if !in_cooldown(state, &ck, 3600, now) {
+                let has_running = state.store.list_running_autopilot_tasks().await
+                    .map(|v| !v.is_empty()).unwrap_or(false);
+                if has_running {
+                    trigger_inbox(state, "scope_creep",
+                        &format!("检测到 {} 次范围蔓延，当前有进行中的 Board 任务", creep_count),
+                    ).await;
+                    set_cooldown(state, &ck, now);
+                }
+            }
+        }
+    }
+}
+
+/// L3: Push message into active Jarvis conversation + emit event. Falls back to Inbox.
+async fn trigger_jarvis_push(state: &AppState, reason: &str, summary: &str) {
+    let conv_id = match state.store.find_latest_jarvis_conversation().await {
+        Ok(Some(id)) => id,
+        _ => {
+            info!("No active Jarvis conversation, falling back to Inbox");
+            trigger_inbox(state, reason, summary).await;
+            return;
+        }
+    };
+
+    // Use "user" role with prefix — router_chat doesn't support "system" in message array
+    let message = format!(
+        "[MissionD System] 意识层提醒 [{}]\n\n{}\n\n如需帮助，请告知。",
+        reason, summary
+    );
+
+    let _ = state.store.router_chat_append_messages(&conv_id, &[
+        ("user".to_string(), message),
+    ]).await;
+
+    state.event_bus.publish(DaemonEvent::JarvisProactivePush {
+        conversation_id: conv_id.clone(),
+        trigger_reason: reason.to_string(),
+        summary: summary.to_string(),
+    });
+
+    info!(reason, conv_id = %conv_id, "Proactive push sent to Jarvis");
+}
+
+/// L2: Write an Inbox message for the user.
+async fn trigger_inbox(state: &AppState, reason: &str, content: &str) {
+    let msg = missiond_core::types::InboxMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        task_id: String::new(),
+        from_role: "consciousness".to_string(),
+        content: format!("[{}] {}", reason, content),
+        read: false,
+        created_at: chrono::Utc::now().timestamp(),
+    };
+    let _ = state.store.insert_inbox_message(&msg).await;
+    debug!(reason, "Proactive inbox message created");
+}
+
+fn in_cooldown(state: &AppState, key: &str, cooldown_secs: i64, now: i64) -> bool {
+    let guard = state.proactive_cooldowns.lock().unwrap();
+    guard.get(key).map(|&ts| now - ts < cooldown_secs).unwrap_or(false)
+}
+
+fn set_cooldown(state: &AppState, key: &str, now: i64) {
+    let mut guard = state.proactive_cooldowns.lock().unwrap();
+    guard.insert(key.to_string(), now);
+}
+
+fn build_stuck_summary(intents: &[&missiond_core::types::UserIntent]) -> String {
+    let details: Vec<String> = intents.iter()
+        .filter_map(|i| i.summary.as_deref())
+        .map(|s| format!("- {}", s))
+        .collect();
+    format!(
+        "用户在最近 30 分钟内连续 {} 次卡在同一问题上：\n{}\n\n建议：检查是否需要换一种方法，或提供更多上下文帮助用户。",
+        intents.len(),
+        details.join("\n"),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Minimal AppState is hard to construct, so test pure functions only.
+
+    #[test]
+    fn test_build_stuck_summary_basic() {
+        let i1 = missiond_core::types::UserIntent {
+            id: 1, session_id: "s1".to_string(), turn_range_start: 0, turn_range_end: 2,
+            intent_type: "stuck_retry".to_string(), confidence: 0.9,
+            summary: Some("反复修复CORS跨域错误".to_string()),
+            context_json: None, related_goal_id: None, created_at: String::new(),
+        };
+        let i2 = missiond_core::types::UserIntent {
+            id: 2, session_id: "s1".to_string(), turn_range_start: 3, turn_range_end: 5,
+            intent_type: "stuck_retry".to_string(), confidence: 0.85,
+            summary: Some("CORS配置依然报错，换了nginx方案".to_string()),
+            context_json: None, related_goal_id: None, created_at: String::new(),
+        };
+        let i3 = missiond_core::types::UserIntent {
+            id: 3, session_id: "s1".to_string(), turn_range_start: 6, turn_range_end: 8,
+            intent_type: "stuck_retry".to_string(), confidence: 0.8,
+            summary: Some("第三次尝试修复CORS".to_string()),
+            context_json: None, related_goal_id: None, created_at: String::new(),
+        };
+        let refs = vec![&i1, &i2, &i3];
+        let summary = build_stuck_summary(&refs);
+        assert!(summary.contains("连续 3 次"));
+        assert!(summary.contains("CORS"));
+        assert!(summary.contains("第三次"));
+    }
+
+    #[test]
+    fn test_build_stuck_summary_empty_summaries() {
+        let i1 = missiond_core::types::UserIntent {
+            id: 1, session_id: "s1".to_string(), turn_range_start: 0, turn_range_end: 2,
+            intent_type: "stuck_retry".to_string(), confidence: 0.9,
+            summary: None, context_json: None, related_goal_id: None, created_at: String::new(),
+        };
+        let refs = vec![&i1];
+        let summary = build_stuck_summary(&refs);
+        assert!(summary.contains("连续 1 次"));
     }
 }

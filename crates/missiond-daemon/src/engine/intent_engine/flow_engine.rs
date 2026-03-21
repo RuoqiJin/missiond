@@ -451,6 +451,14 @@ pub(crate) async fn ensure_autopilot_pty(state: &AppState, task: &missiond_core:
         .into_iter()
         .find(|s| s.config.id == slot_id);
 
+    // ControlTree: refuse spawn if slot_role is paused
+    if let Some(ref s) = slot {
+        if state.control_manager.current().is_slot_role_paused(&s.config.role) {
+            warn!(slot_id, role = %s.config.role, "ensure_pty: slot_role paused, refusing spawn");
+            return false;
+        }
+    }
+
     let Some(slot) = slot else {
         warn!(task_id = %task.id, slot_id, "Autopilot: slot not found, skipping");
         // Record failure note + increment retry

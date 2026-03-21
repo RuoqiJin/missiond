@@ -15,6 +15,8 @@ pub struct SlotTaskConfig {
     pub lifecycle: Lifecycle,
     /// Bound slot_id for Persistent lifecycle.
     pub slot_id: Option<String>,
+    /// Slot role for ControlTree pause checks (e.g., "memory", "coder").
+    pub role: Option<String>,
     /// Model override (e.g., "sonnet", "opus", "gemini-3.1-pro-preview").
     pub model: Option<String>,
     /// Max time to wait for LLM response.
