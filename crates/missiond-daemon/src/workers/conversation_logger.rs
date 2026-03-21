@@ -115,16 +115,44 @@ async fn handle_new_messages_event(
         }
     }
 
-    // ── Step 4: Hand off to message_handler with the pre-computed route ──
+    // ── Step 4: Ghost session filter (防污网) ──
+    // Skip sessions that have no assistant messages — these are /exit ghost sessions
+    // produced by slot restarts. No business value, must not pollute the DB.
     let db_messages: Vec<_> = messages.into_iter()
         .filter(|m| m.message_type != "tool_use")
         .collect();
+    if is_garbage_session(&db_messages) {
+        debug!(session = %session_id, msgs = db_messages.len(), "Garbage session filtered (no assistant content)");
+        return;
+    }
+
+    // ── Step 5: Hand off to message_handler with the pre-computed route ──
     handle_new_messages(s, session_id.clone(), project_path, jsonl_path, db_messages, &route).await;
 
-    // ── Step 5: Compaction task inheritance ──
+    // ── Step 6: Compaction task inheritance ──
     if let Some(tid) = compaction.task_id {
         let _ = s.store.set_conversation_task_id(&session_id, &tid).await;
     }
+}
+
+/// Ghost session detector: returns true if the batch has no business value.
+/// Ghost sessions are produced by slot restarts (/exit command, no AI interaction).
+/// Pattern: all messages are user role, content is local commands (/exit, caveat, stdout).
+fn is_garbage_session(messages: &[CCMessageLine]) -> bool {
+    if messages.is_empty() {
+        return false; // Empty batch is just incremental — let it through
+    }
+    // Quick check: if ANY message is from the assistant, it's a real session
+    if messages.iter().any(|m| m.message.role == "assistant") {
+        return false;
+    }
+    // All user-only: check if it's a local-command-only session (/exit pattern)
+    messages.iter().all(|m| {
+        let content = m.message.content.as_str().unwrap_or("");
+        content.contains("<command-name>")
+            || content.contains("<local-command-stdout>")
+            || content.contains("<local-command-caveat>")
+    })
 }
 
 async fn handle_session_inactive(s: &AppState, session_id: &str) {

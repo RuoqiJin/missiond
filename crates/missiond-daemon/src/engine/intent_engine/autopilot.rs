@@ -69,6 +69,9 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     // GC completed jobs older than 30 minutes
     gc_completed_jobs(state).await;
 
+    // Scale-to-zero: release idle persistent slots after 30 minutes
+    reap_idle_persistent_slots(state).await;
+
     // ControlTree is the single source of truth for pause state.
     // TTL auto-resume: domains paused > 2 hours are automatically resumed.
     state.control_manager.check_domain_ttl_auto_resume();
@@ -1356,5 +1359,53 @@ mod tests {
         let refs = vec![&i1];
         let summary = build_stuck_summary(&refs);
         assert!(summary.contains("连续 1 次"));
+    }
+}
+
+/// Scale-to-zero: release persistent slots that have been idle > IDLE_TIMEOUT.
+/// The slot will be auto-respawned by ClaudeCodeSlotMgr::execute_persistent
+/// when the next task arrives (lazy-spawn pattern).
+async fn reap_idle_persistent_slots(state: &AppState) {
+    const IDLE_TIMEOUT_SECS: u64 = 30 * 60; // 30 minutes
+
+    let slots = state.mission.list_slots();
+    for slot in &slots {
+        if !slot.config.is_persistent() {
+            continue;
+        }
+        let slot_id = &slot.config.id;
+
+        // Check if slot is alive and idle
+        if !state.pty.is_available(slot_id).await {
+            continue; // Not idle (thinking, responding, or not running)
+        }
+
+        // Check last activity time from slot_progress
+        let last_active = {
+            let progress = state.slot_progress.read().await;
+            progress.get(slot_id)
+                .and_then(|sp| sp.last_activity.as_ref())
+                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+        };
+
+        let idle_secs = match last_active {
+            Some(ts) => (chrono::Utc::now() - ts).num_seconds().max(0) as u64,
+            None => {
+                // No activity record — check if slot has been alive long enough
+                // If no record at all, it might have just spawned. Skip.
+                continue;
+            }
+        };
+
+        if idle_secs >= IDLE_TIMEOUT_SECS {
+            info!(
+                slot_id,
+                idle_mins = idle_secs / 60,
+                "Scale-to-zero: releasing idle persistent slot"
+            );
+            // Graceful shutdown: session.close() sends /exit and waits 3s
+            state.pty.kill(slot_id).await.ok();
+        }
     }
 }
