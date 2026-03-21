@@ -182,21 +182,25 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
                 engine: slot.config.engine,
             };
             let mcp_config = slot.config.mcp_config.clone().map(std::path::PathBuf::from);
-            let (extra_env, session_file) = build_slot_tracking_env(candidate_id, slot.config.env.as_ref()).await;
-
             info!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: auto-spawning exited slot");
-            let spawn_ok = state.pty.spawn(&pty_slot, PTYSpawnOptions {
-                auto_restart: false,
-                wait_for_idle: true,
-                timeout_secs: Some(30),
-                mcp_config,
-                dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
-                model: slot.config.model.clone(),
-                extra_env,
-            }).await.is_ok();
+            let spawn_ok = crate::slot_orchestrator::spawner::spawn_tracked_slot(
+                &state.pty,
+                &state.store,
+                &state.pty_session_uuids,
+                &pty_slot,
+                PTYSpawnOptions {
+                    auto_restart: false,
+                    wait_for_idle: true,
+                    timeout_secs: Some(30),
+                    mcp_config,
+                    dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+                    model: slot.config.model.clone(),
+                    extra_env: std::collections::HashMap::new(),
+                },
+                slot.config.env.as_ref()
+            ).await.is_ok();
 
             let sent = if spawn_ok {
-                capture_slot_session_uuid(state, candidate_id, &session_file).await;
                 state.pty.send_fire_and_forget(candidate_id, &prompt).await.ok().is_some()
             } else {
                 warn!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: auto-spawn failed");

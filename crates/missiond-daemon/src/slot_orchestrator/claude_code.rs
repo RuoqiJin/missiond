@@ -33,10 +33,17 @@ pub struct ClaudeCodeSlotManager {
     ephemeral_semaphore: Arc<Semaphore>,
 }
 
+use std::collections::HashSet;
+use tokio::sync::RwLock;
+
 impl ClaudeCodeSlotManager {
-    pub fn new(pty: Arc<PTYManager>, store: Arc<dyn MissionStore>) -> Self {
+    pub fn new(
+        pty: Arc<PTYManager>,
+        store: Arc<dyn MissionStore>,
+        pty_session_uuids: Arc<RwLock<HashSet<String>>>,
+    ) -> Self {
         Self {
-            controller: ClaudeCodeController::new(pty, store),
+            controller: ClaudeCodeController::new(pty, store, pty_session_uuids),
             persistent_locks: DashMap::new(),
             ephemeral_semaphore: Arc::new(Semaphore::new(EPHEMERAL_CAPACITY)),
         }

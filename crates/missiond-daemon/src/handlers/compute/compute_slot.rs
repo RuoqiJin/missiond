@@ -210,20 +210,24 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         // Init slot in PTYManager first (registers agent_info)
         state_clone.pty.init_slot(&pty_slot).await;
 
-        let mut extra_env = HashMap::new();
-        extra_env.insert("MISSIOND_SLOT_ID".to_string(), slot_id_owned.clone());
-
         let mcp_config = slot_config.mcp_config.as_ref().map(PathBuf::from);
 
-        let result = state_clone.pty.spawn(&pty_slot, PTYSpawnOptions {
-            auto_restart: false,
-            wait_for_idle: true,
-            timeout_secs: Some(60),
-            mcp_config,
-            dangerously_skip_permissions: false,
-            model: slot_config.model.clone(),
-            extra_env,
-        }).await;
+        let result = crate::slot_orchestrator::spawner::spawn_tracked_slot(
+            &state_clone.pty,
+            &state_clone.store,
+            &state_clone.pty_session_uuids,
+            &pty_slot,
+            PTYSpawnOptions {
+                auto_restart: false,
+                wait_for_idle: true,
+                timeout_secs: Some(60),
+                mcp_config,
+                dangerously_skip_permissions: false,
+                model: slot_config.model.clone(),
+                extra_env: HashMap::new(),
+            },
+            slot_config.env.as_ref()
+        ).await;
 
         let mut store = state_clone.job_store.write().await;
         if let Some(job) = store.get_mut(&job_id_bg) {

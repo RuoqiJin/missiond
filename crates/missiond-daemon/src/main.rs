@@ -486,6 +486,7 @@ async fn main() -> Result<()> {
     if !pty_uuids.is_empty() {
         info!(count = pty_uuids.len(), "Loaded PTY session UUIDs from DB");
     }
+    let pty_session_uuids_arc = Arc::new(tokio::sync::RwLock::new(pty_uuids));
 
     let event_bus_instance = Arc::new(event_bus::EventBus::new(timeline_mpsc_tx));
 
@@ -533,14 +534,14 @@ async fn main() -> Result<()> {
 
     let state = AppState {
         mission,
-        store,
+        store: store.clone(),
         permission,
         pty,
         cc_tasks,
         skills,
         infra,
         infra_path: servers_path.clone(),
-        pty_session_uuids: Arc::new(tokio::sync::RwLock::new(pty_uuids)),
+        pty_session_uuids: pty_session_uuids_arc.clone(),
         extraction_state: Arc::new(tokio::sync::RwLock::new(ExtractionState {
             phase: ExtractionPhase::Idle,
             active_type: None,
@@ -623,7 +624,11 @@ async fn main() -> Result<()> {
                             let api_key_pool = std::sync::Arc::new(gemini_cli::ApiKeyPool::new());
                             // PTY transport: uses GeminiPtyDriver → PTYManager (unified)
                             let pty_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
-                            let gemini_driver_for_transport = llm::gemini_driver::GeminiPtyDriver::new(pty_for_gemini_transport);
+                            let gemini_driver_for_transport = llm::gemini_driver::GeminiPtyDriver::new(
+                                pty_for_gemini_transport,
+                                store.clone(),
+                                pty_session_uuids_arc.clone(),
+                            );
                             let pty_transport = std::sync::Arc::new(
                                 llm::gemini_pty::GeminiPtyTransport::new(
                                     gemini_driver_for_transport,
@@ -703,8 +708,13 @@ async fn main() -> Result<()> {
             let cc_mgr = Arc::new(slot_orchestrator::ClaudeCodeSlotManager::new(
                 slot_mgr_pty,
                 slot_mgr_store,
+                pty_session_uuids_arc.clone(),
             ));
-            let gemini_driver_for_slots = llm::gemini_driver::GeminiPtyDriver::new(slot_mgr_pty2);
+            let gemini_driver_for_slots = llm::gemini_driver::GeminiPtyDriver::new(
+                slot_mgr_pty2,
+                slot_mgr_store2.clone(),
+                pty_session_uuids_arc.clone(),
+            );
             let gemini_mgr = Arc::new(slot_orchestrator::GeminiCliSlotManager::new(
                 gemini_driver_for_slots,
                 slot_mgr_store2,
@@ -1340,18 +1350,23 @@ async fn main() -> Result<()> {
                                     engine: slot.config.engine,
                                 };
                                 let mcp_config = slot.config.mcp_config.clone().map(std::path::PathBuf::from);
-                                let (extra_env, session_file) = slot_env::build_slot_tracking_env(slot_id, slot.config.env.as_ref()).await;
-                                match state.pty.spawn(&pty_slot, missiond_core::PTYSpawnOptions {
-                                    auto_restart: true,
-                                    wait_for_idle: false,
-                                    timeout_secs: None,
-                                    mcp_config,
-                                    dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
-                                    model: slot.config.model.clone(),
-                                    extra_env,
-                                }).await {
+                                match crate::slot_orchestrator::spawner::spawn_tracked_slot(
+                                    &state.pty,
+                                    &state.store,
+                                    &state.pty_session_uuids,
+                                    &pty_slot,
+                                    missiond_core::PTYSpawnOptions {
+                                        auto_restart: true,
+                                        wait_for_idle: false,
+                                        timeout_secs: None,
+                                        mcp_config,
+                                        dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+                                        model: slot.config.model.clone(),
+                                        extra_env: std::collections::HashMap::new(),
+                                    },
+                                    slot.config.env.as_ref()
+                                ).await {
                                     Ok(_) => {
-                                        slot_env::capture_slot_session_uuid(&state, slot_id, &session_file).await;
                                         info!(slot_id = %slot_id, "Auto-started new slot PTY");
                                     }
                                     Err(e) => warn!(slot_id = %slot_id, error = %e, "Failed to auto-start new slot PTY"),

@@ -63,14 +63,24 @@ impl Drop for TempFileGuard {
 /// Stateless — all session state lives in PTYManager.
 /// Both GeminiCliController (slot orchestrator) and GeminiPtyTransport (router)
 /// delegate PTY operations to this driver.
+use missiond_core::db::traits::MissionStore;
+use std::collections::HashSet;
+use tokio::sync::RwLock;
+
 #[derive(Clone)]
 pub struct GeminiPtyDriver {
     pty: Arc<PTYManager>,
+    store: Arc<dyn MissionStore>,
+    pty_session_uuids: Arc<RwLock<HashSet<String>>>,
 }
 
 impl GeminiPtyDriver {
-    pub fn new(pty: Arc<PTYManager>) -> Self {
-        Self { pty }
+    pub fn new(
+        pty: Arc<PTYManager>,
+        store: Arc<dyn MissionStore>,
+        pty_session_uuids: Arc<RwLock<HashSet<String>>>,
+    ) -> Self {
+        Self { pty, store, pty_session_uuids }
     }
 
     /// Expose PTYManager for is_running/is_available checks.
@@ -109,21 +119,23 @@ impl GeminiPtyDriver {
         extra_env.insert("FORCE_COLOR".to_string(), "0".to_string());
         extra_env.insert("NO_COLOR".to_string(), "1".to_string());
 
-        match self
-            .pty
-            .spawn(
-                &pty_slot,
-                PTYSpawnOptions {
-                    auto_restart: !is_ephemeral,
-                    wait_for_idle: true,
-                    timeout_secs: Some(120),
-                    mcp_config: None,
-                    dangerously_skip_permissions: true,
-                    model: Some(model.unwrap_or(GEMINI_MODEL).to_string()),
-                    extra_env,
-                },
-            )
-            .await
+        match crate::slot_orchestrator::spawner::spawn_tracked_slot(
+            &self.pty,
+            &self.store,
+            &self.pty_session_uuids,
+            &pty_slot,
+            PTYSpawnOptions {
+                auto_restart: !is_ephemeral,
+                wait_for_idle: true,
+                timeout_secs: Some(120),
+                mcp_config: None,
+                dangerously_skip_permissions: true,
+                model: Some(model.unwrap_or(GEMINI_MODEL).to_string()),
+                extra_env,
+            },
+            None, // No slot_env provided here, could be passed if needed
+        )
+        .await
         {
             Ok(_) => Ok(()),
             Err(e) => {

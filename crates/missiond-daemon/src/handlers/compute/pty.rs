@@ -140,28 +140,25 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 .or(slot.config.mcp_config.clone())
                 .map(PathBuf::from);
 
-            let (extra_env, session_file) = build_slot_tracking_env(&slot_id, slot.config.env.as_ref()).await;
             let wait = wait_for_idle.unwrap_or(false);
-            let info = state
-                .pty
-                .spawn(
-                    &pty_slot,
-                    PTYSpawnOptions {
-                        auto_restart: auto_restart.unwrap_or(false),
-                        wait_for_idle: wait,
-                        timeout_secs,
-                        mcp_config,
-                        dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
-                        model: slot.config.model.clone(),
-                        extra_env,
-                    },
-                )
-                .await?;
+            let info = crate::slot_orchestrator::spawner::spawn_tracked_slot(
+                &state.pty,
+                &state.store,
+                &state.pty_session_uuids,
+                &pty_slot,
+                PTYSpawnOptions {
+                    auto_restart: auto_restart.unwrap_or(false),
+                    wait_for_idle: wait,
+                    timeout_secs,
+                    mcp_config,
+                    dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
+                    model: slot.config.model.clone(),
+                    extra_env: std::collections::HashMap::new(),
+                },
+                slot.config.env.as_ref()
+            )
+            .await?;
 
-            // Capture UUID after spawn (only reliable when we waited for idle)
-            if wait {
-                capture_slot_session_uuid(state, &slot_id, &session_file).await;
-            }
             Ok(ToolResult::json(&info))
         }
         "mission_pty_send" => {

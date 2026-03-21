@@ -64,27 +64,26 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 engine: slot.config.engine,
             };
             let mcp_config = slot.config.mcp_config.clone().map(std::path::PathBuf::from);
-            let (extra_env, session_file) =
-                slot_env::build_slot_tracking_env(&slot_id, slot.config.env.as_ref()).await;
-            let info = state
-                .pty
-                .spawn(
-                    &pty_slot,
-                    PTYSpawnOptions {
-                        auto_restart: auto_restart.unwrap_or(false),
-                        wait_for_idle: true,
-                        timeout_secs: Some(30),
-                        mcp_config,
-                        dangerously_skip_permissions: slot
-                            .config
-                            .dangerously_skip_permissions
-                            .unwrap_or(false),
-                        model: slot.config.model.clone(),
-                        extra_env,
-                    },
-                )
-                .await?;
-            slot_env::capture_slot_session_uuid(state, &slot_id, &session_file).await;
+
+            let info = crate::slot_orchestrator::spawner::spawn_tracked_slot(
+                &state.pty,
+                &state.store,
+                &state.pty_session_uuids,
+                &pty_slot,
+                PTYSpawnOptions {
+                    auto_restart: auto_restart.unwrap_or(false),
+                    wait_for_idle: true,
+                    timeout_secs: Some(30),
+                    mcp_config,
+                    dangerously_skip_permissions: slot
+                        .config
+                        .dangerously_skip_permissions
+                        .unwrap_or(false),
+                    model: slot.config.model.clone(),
+                    extra_env: std::collections::HashMap::new(),
+                },
+                slot.config.env.as_ref()
+            ).await?;
             Ok(ToolResult::json(&info))
         }
         "mission_kill" => {
@@ -110,27 +109,29 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 engine: slot.config.engine,
             };
             let mcp_config = slot.config.mcp_config.clone().map(std::path::PathBuf::from);
-            let (extra_env, session_file) =
-                slot_env::build_slot_tracking_env(&slot_id, slot.config.env.as_ref()).await;
-            let info = state
-                .pty
-                .restart(
-                    &pty_slot,
-                    PTYSpawnOptions {
-                        auto_restart: auto_restart.unwrap_or(false),
-                        wait_for_idle: true,
-                        timeout_secs: Some(30),
-                        mcp_config,
-                        dangerously_skip_permissions: slot
-                            .config
-                            .dangerously_skip_permissions
-                            .unwrap_or(false),
-                        model: slot.config.model.clone(),
-                        extra_env,
-                    },
-                )
-                .await?;
-            slot_env::capture_slot_session_uuid(state, &slot_id, &session_file).await;
+
+            // Replicate pty.restart behavior but with tracking
+            let _ = state.pty.kill(&slot_id).await;
+
+            let info = crate::slot_orchestrator::spawner::spawn_tracked_slot(
+                &state.pty,
+                &state.store,
+                &state.pty_session_uuids,
+                &pty_slot,
+                PTYSpawnOptions {
+                    auto_restart: auto_restart.unwrap_or(false),
+                    wait_for_idle: true,
+                    timeout_secs: Some(30),
+                    mcp_config,
+                    dangerously_skip_permissions: slot
+                        .config
+                        .dangerously_skip_permissions
+                        .unwrap_or(false),
+                    model: slot.config.model.clone(),
+                    extra_env: std::collections::HashMap::new(),
+                },
+                slot.config.env.as_ref()
+            ).await?;
             Ok(ToolResult::json(&info))
         }
         "mission_agents" => {
