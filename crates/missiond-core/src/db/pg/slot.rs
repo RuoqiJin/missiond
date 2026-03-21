@@ -37,6 +37,38 @@ impl SlotStore for PgMissionStore {
         Ok(())
     }
 
+    async fn cleanup_pty_placeholder(&self, slot_id: &str) -> DbResult<()> {
+        let session_id = format!("pty-{}", slot_id);
+        let mut tx = self.pool.begin().await?;
+        
+        // Delete messages
+        sqlx::query("DELETE FROM conversation_messages WHERE session_id = $1")
+            .bind(&session_id)
+            .execute(&mut *tx)
+            .await?;
+            
+        // Delete events
+        sqlx::query("DELETE FROM conversation_events WHERE session_id = $1")
+            .bind(&session_id)
+            .execute(&mut *tx)
+            .await?;
+            
+        // Delete turns
+        sqlx::query("DELETE FROM conversation_turns WHERE session_id = $1")
+            .bind(&session_id)
+            .execute(&mut *tx)
+            .await?;
+            
+        // Delete the conversation
+        sqlx::query("DELETE FROM conversations WHERE id = $1")
+            .bind(&session_id)
+            .execute(&mut *tx)
+            .await?;
+            
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn delete_slot_session(&self, slot_id: &str) -> DbResult<()> {
         sqlx::query("DELETE FROM slot_sessions WHERE slot_id = $1")
             .bind(slot_id)

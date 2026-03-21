@@ -197,6 +197,8 @@ pub(crate) async fn capture_slot_session_uuid(
             // Persist in DB (activates the previously-orphaned slot_sessions table)
             if let Err(e) = store.set_slot_session(slot_id, &session_uuid).await {
                 warn!(slot_id = %slot_id, error = %e, "Failed to persist slot session mapping");
+            } else {
+                let _ = store.cleanup_pty_placeholder(slot_id).await;
             }
 
             // Update in-memory cache

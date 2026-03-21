@@ -464,6 +464,7 @@ pub trait SlotStore: Send + Sync {
     // -- slot.rs: session mapping --
     async fn get_slot_session(&self, slot_id: &str) -> DbResult<Option<String>>;
     async fn set_slot_session(&self, slot_id: &str, session_id: &str) -> DbResult<()>;
+    async fn cleanup_pty_placeholder(&self, slot_id: &str) -> DbResult<()>;
     async fn delete_slot_session(&self, slot_id: &str) -> DbResult<()>;
     async fn get_all_slot_sessions(&self) -> DbResult<Vec<(String, String)>>;
     async fn get_slot_for_session(&self, session_id: &str) -> DbResult<Option<String>>;

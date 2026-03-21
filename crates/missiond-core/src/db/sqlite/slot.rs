@@ -19,6 +19,11 @@ impl SlotStore for SqliteMissionStore {
         self.executor.run(move |db| db.set_slot_session(&slot_id, &session_id)).await
     }
 
+    async fn cleanup_pty_placeholder(&self, slot_id: &str) -> DbResult<()> {
+        let slot_id = slot_id.to_owned();
+        self.executor.run(move |db| db.cleanup_pty_placeholder(&slot_id)).await
+    }
+
     async fn delete_slot_session(&self, slot_id: &str) -> DbResult<()> {
         let slot_id = slot_id.to_owned();
         self.executor.run(move |db| db.delete_slot_session(&slot_id)).await
