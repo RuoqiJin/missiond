@@ -184,6 +184,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         dangerously_skip_permissions: Some(false), // ALWAYS false for dynamic slots
         model: template.model.map(|s| s.to_string()),
         traits: vec![],
+        category: None,
         env: None,
     };
 

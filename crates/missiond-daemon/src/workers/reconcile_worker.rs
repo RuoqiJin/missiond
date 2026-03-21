@@ -140,7 +140,7 @@ async fn run_reconciliation(state: &AppState) {
             .await
             .unwrap_or(None);
         let conv_type =
-            missiond_core::db::derive_conversation_type(slot_id.as_deref(), &session_id, "claude_code");
+            missiond_core::db::derive_conversation_type(slot_id.as_deref().and_then(|id| state.mission.get_slot_category(id)).as_deref(), slot_id.as_deref(), &session_id, "claude_code");
 
         // Reconcile the gap (lazy init: only creates conversation if messages found)
         let recovered = reconcile_file_gap(

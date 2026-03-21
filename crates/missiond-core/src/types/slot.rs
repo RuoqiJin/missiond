@@ -98,6 +98,10 @@ pub struct SlotConfig {
     /// If empty/absent, defaults are inferred from role at load time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub traits: Vec<SlotTrait>,
+    /// The conversation category this slot's logs should be routed to (e.g. 'worker', 'meta', 'jarvis').
+    /// If not provided, it falls back to 'worker' (or 'meta' if IsMetaAgent trait is present).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
     /// Custom environment variables injected into the PTY child process.
     /// Supports `${secret:path}` syntax for Secret Store resolution.
     /// Used for per-slot model provider configuration (e.g., MiniMax M2.5).
@@ -140,6 +144,18 @@ impl SlotConfig {
             match self.role.as_str() {
                 "memory" => self.traits.push(SlotTrait::IsMetaAgent),
                 _ => {}
+            }
+        }
+
+        // Apply fallback category if none provided
+        if self.category.is_none() {
+            // Check hardcoded IDs for historical compatibility if needed, but primarily use traits/role
+            if self.is_meta_agent() || self.id == "slot-memory" || self.id == "slot-memory-slow" {
+                self.category = Some("meta".to_string());
+            } else if self.id == "slot-jarvis" || self.role == "jarvis" {
+                self.category = Some("jarvis".to_string());
+            } else {
+                self.category = Some("worker".to_string());
             }
         }
 

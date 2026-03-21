@@ -173,6 +173,10 @@ impl MissionControl {
         Ok(())
     }
 
+    pub fn get_slot_category(&self, slot_id: &str) -> Option<String> {
+        self.slot_manager.get_slot_category(slot_id)
+    }
+
     /// Reload slots configuration (hot-reload).
     /// Returns diff of what changed.
     pub fn reload_slots_config(&self) -> Result<super::SlotReloadResult> {

@@ -737,11 +737,15 @@ pub(crate) async fn handle_pty_text_complete(
             analysis_retries: 0,
             deep_analyzed_message_id: 0,
             chat_type: None,
-            conversation_type: missiond_core::db::derive_conversation_type(
-                Some(&slot_id),
-                &session_id,
-                "claude_code",
-            ),
+            conversation_type: {
+                let category = state.mission.get_slot_category(&slot_id);
+                missiond_core::db::derive_conversation_type(
+                    category.as_deref(),
+                    Some(&slot_id),
+                    &session_id,
+                    "claude_code",
+                )
+            },
             updated_at: None,
             llm_summary: None,
             embedding_provider: None,

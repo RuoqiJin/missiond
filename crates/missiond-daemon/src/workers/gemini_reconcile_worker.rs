@@ -154,7 +154,9 @@ async fn run_gemini_reconciliation(state: &AppState) {
                 .get_slot_for_session(&session.session_id)
                 .await
                 .unwrap_or(None);
+            let category = slot_id.as_deref().and_then(|id| state.mission.get_slot_category(id));
             let conv_type = missiond_core::db::derive_conversation_type(
+                category.as_deref(),
                 slot_id.as_deref(),
                 &session.session_id,
                 "gemini_cli",
