@@ -305,6 +305,10 @@ impl ObservabilityStore for SqliteMissionStore {
         self.executor.run(move |db| db.jarvis_update_title(&conv_id, &title)).await
     }
 
+    async fn find_latest_jarvis_conversation(&self) -> DbResult<Option<String>> {
+        self.executor.run(|db| db.find_latest_jarvis_conversation()).await
+    }
+
     async fn router_chat_list(&self, limit: i64) -> DbResult<Vec<serde_json::Value>> {
         self.executor.run(move |db| db.router_chat_list(limit)).await
     }

@@ -46,13 +46,14 @@ const QUOTA_RESERVE_THRESHOLD: usize = 50;
 // ── Request / Response ─────────────────────────────────────────────
 
 /// Priority level for quota reservation.
-/// P0-P1 are protected (always allowed), P2-P3 are throttled when quota is low.
+/// P0-P1 are protected (always allowed), P2-P4 are throttled when quota is low.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Priority {
     Interactive = 0,
     Embedding = 1,
     Translation = 2,
     Briefing = 3,
+    Intent = 4,
 }
 
 impl Priority {

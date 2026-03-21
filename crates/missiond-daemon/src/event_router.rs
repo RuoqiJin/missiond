@@ -57,8 +57,10 @@ pub(crate) fn start_event_consumers(
     spawn_harvest_consumer(state, timeline_tx, shutdown_rx.clone());
     spawn_realtime_extraction_consumer(state, timeline_tx, shutdown_rx.clone());
     spawn_session_reflection_consumer(state, timeline_tx, shutdown_rx.clone());
-    spawn_kb_consolidation_consumer(state, timeline_tx, shutdown_rx);
+    spawn_kb_consolidation_consumer(state, timeline_tx, shutdown_rx.clone());
     spawn_sweeper(state);
+    // Phase 6: Intent Analyst — deep intent analysis from conversation turns
+    crate::engine::learning_engine::intent_analyst::spawn_intent_consumer(state, timeline_tx, shutdown_rx);
 }
 
 /// Extraction lane: SlotBecameIdle → schedule_memory_tasks.
@@ -92,7 +94,7 @@ fn spawn_extraction_consumer(state: &AppState, timeline_tx: &broadcast::Sender<T
                 // Trailing edge fire
                 consecutive_lags = 0;
                 s.stats.events_consumed_extraction.fetch_add(1, Ordering::Relaxed);
-                if !s.memory_paused.load(Ordering::Relaxed) {
+                if !s.control_manager.current().is_domain_paused(crate::control_tree::CtlDomain::Memory) {
                     schedule_memory_tasks(&s).await;
                 }
                 pending = false;
@@ -109,7 +111,7 @@ fn spawn_extraction_consumer(state: &AppState, timeline_tx: &broadcast::Sender<T
                             DaemonEvent::SlotBecameIdle { ref slot_id }
                                 if slot_id == MEMORY_SLOT_ID || slot_id == MEMORY_SLOW_SLOT_ID =>
                             {
-                                if !s.memory_paused.load(Ordering::Relaxed) {
+                                if !s.control_manager.current().is_domain_paused(crate::control_tree::CtlDomain::Memory) {
                                     pending = true;
                                 }
                             }
@@ -122,7 +124,7 @@ fn spawn_extraction_consumer(state: &AppState, timeline_tx: &broadcast::Sender<T
                             s.stats.events_lagged_extraction.fetch_add(1, Ordering::Relaxed);
                             s.stats.events_lagged_total_skipped.fetch_add(n, Ordering::Relaxed);
                             tokio::time::sleep(backoff).await;
-                            if !s.memory_paused.load(Ordering::Relaxed) {
+                            if !s.control_manager.current().is_domain_paused(crate::control_tree::CtlDomain::Memory) {
                                 schedule_memory_tasks(&s).await;
                             }
                         }
@@ -163,7 +165,7 @@ fn spawn_submit_consumer(state: &AppState, timeline_tx: &broadcast::Sender<Timel
                 consecutive_lags = 0;
                 s.stats.events_consumed_submit.fetch_add(1, Ordering::Relaxed);
                 dispatch_queued_submit_tasks(&s).await;
-                if !s.memory_paused.load(Ordering::Relaxed) {
+                if !s.control_manager.current().is_domain_paused(crate::control_tree::CtlDomain::Memory) {
                     schedule_memory_tasks(&s).await;
                 }
                 pending = false;
@@ -338,7 +340,7 @@ fn spawn_realtime_extraction_consumer(state: &AppState, timeline_tx: &broadcast:
                     result = rx.recv() => match result {
                         Ok(te) => {
                             if let DaemonEvent::ConversationMessageLogged { ref session_id, ref slot_id, .. } = te.event {
-                                if slot_id.is_some() && !s.memory_paused.load(Ordering::Relaxed) {
+                                if slot_id.is_some() && !s.control_manager.current().is_domain_paused(crate::control_tree::CtlDomain::Memory) {
                                     pending_sessions.insert(session_id.clone());
                                 }
                             }
@@ -383,7 +385,8 @@ fn spawn_session_reflection_consumer(state: &AppState, timeline_tx: &broadcast::
                     }
                 }
                 // Gemini ARB: check pause guards + tokio::spawn to avoid blocking receiver
-                if s.memory_paused.load(Ordering::Relaxed) || s.global_paused.load(Ordering::Relaxed) {
+                let _tree = s.control_manager.current();
+                if _tree.is_domain_paused(crate::control_tree::CtlDomain::Memory) || _tree.global_paused {
                     tracing::debug!("session_reflection: paused, skipping dispatch");
                     pending_sessions.clear();
                     continue;

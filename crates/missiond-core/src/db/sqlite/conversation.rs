@@ -13,7 +13,7 @@ impl ConversationStore for SqliteMissionStore {
         self.executor.run(move |db| db.upsert_conversation(&conv)).await
     }
 
-    async fn ensure_conversation_exists(&self, _session_id: &str, _project_path: &str, _jsonl_path: &str, _status: &str, _conversation_type: &str) -> DbResult<()> {
+    async fn ensure_conversation_exists(&self, _session_id: &str, _project_path: &str, _jsonl_path: &str, _status: &str, _conversation_type: &str, _parent_session_id: Option<&str>) -> DbResult<()> {
         // SQLite stub — ReconcileWorker only runs with PG
         Ok(())
     }
@@ -41,6 +41,14 @@ impl ConversationStore for SqliteMissionStore {
     async fn get_child_conversations(&self, parent_session_id: &str) -> DbResult<Vec<Conversation>> {
         let parent_session_id = parent_session_id.to_owned();
         self.executor.run(move |db| db.get_child_conversations(&parent_session_id)).await
+    }
+
+    async fn fix_orphan_parent_links(&self, _session_ids: &[String]) -> DbResult<usize> {
+        Ok(0) // SQLite deprecated
+    }
+
+    async fn link_compaction_fragment(&self, _fragment_id: &str, _original_id: &str) -> DbResult<bool> {
+        Ok(false) // SQLite deprecated
     }
 
     // -- conversation.rs: deep analysis tracking --
@@ -287,4 +295,25 @@ impl ConversationStore for SqliteMissionStore {
         let timestamp = timestamp.to_owned();
         self.executor.run(move |db| db.update_realtime_forwarded_at(&session_id, &timestamp)).await
     }
+
+    // -- conversation_turns (S3 Tagger & Chunker) — SQLite deprecated --
+    async fn get_last_turn_end_message_id(&self, _session_id: &str) -> DbResult<Option<i64>> { Ok(None) }
+    async fn get_max_turn_idx(&self, _session_id: &str) -> DbResult<Option<i32>> { Ok(None) }
+    async fn insert_conversation_turns_batch(&self, _session_id: &str, _base_idx: i32, _turns: &[RawTurn]) -> DbResult<usize> { Ok(0) }
+    async fn insert_message_labels_batch(&self, _labels: &[(i64, &str, &str, &str)]) -> DbResult<usize> { Ok(0) }
+    async fn sessions_pending_turn_extraction(&self, _limit: i64) -> DbResult<Vec<String>> { Ok(vec![]) }
+
+    // -- S4 per-turn embedding — SQLite deprecated --
+    async fn turns_pending_embedding(&self, _session_id: &str, _provider: &str) -> DbResult<Vec<ConversationTurn>> { Ok(vec![]) }
+    async fn update_turn_topics_batch(&self, _updates: &[(i64, &str)]) -> DbResult<usize> { Ok(0) }
+    async fn set_conversation_turn_vectors(&self, _session_id: &str, _vectors: &[(String, i32, Vec<f32>)], _provider: &str) -> DbResult<usize> { Ok(0) }
+    async fn sessions_with_turns_but_no_vectors(&self, _provider: &str, _cursor: i64, _limit: i64) -> DbResult<Vec<String>> { Ok(vec![]) }
+
+    // -- Phase 6: user_intents — SQLite deprecated --
+    async fn insert_user_intent(&self, _session_id: &str, _turn_range_start: i32, _turn_range_end: i32, _intent_type: &str, _confidence: f32, _summary: Option<&str>, _context_json: Option<&str>, _related_goal_id: Option<&str>) -> DbResult<i64> { Ok(0) }
+    async fn get_intent_coverage(&self, _session_id: &str) -> DbResult<Option<i32>> { Ok(None) }
+    async fn get_turns_after(&self, _session_id: &str, _after_idx: i32) -> DbResult<Vec<ConversationTurn>> { Ok(vec![]) }
+    async fn update_turns_intent_group(&self, _session_id: &str, _turn_range_start: i32, _turn_range_end: i32, _intent_id: i64) -> DbResult<()> { Ok(()) }
+    async fn get_recent_intents(&self, _since_secs: i64) -> DbResult<Vec<UserIntent>> { Ok(vec![]) }
+    async fn sessions_pending_intent_analysis(&self, _limit: i64) -> DbResult<Vec<String>> { Ok(vec![]) }
 }

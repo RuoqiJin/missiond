@@ -209,3 +209,59 @@ pub struct SlotTask {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
 }
+
+// ============ Conversation Turns ============
+
+/// A structured Turn extracted from flat conversation messages.
+/// One Turn = one user instruction + all Claude Code actions to complete it.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ConversationTurn {
+    pub id: i64,
+    pub session_id: String,
+    pub turn_idx: i32,
+    pub start_message_id: i64,
+    pub end_message_id: i64,
+    pub user_content: Option<String>,
+    pub tool_names: Option<String>,
+    pub tool_call_count: i32,
+    pub message_count: i32,
+    pub has_code_change: bool,
+    pub has_mcp_call: bool,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub topic: Option<String>,
+    pub intent_group_id: Option<i64>,
+}
+
+/// Intermediate Turn representation before DB insertion (no id/session_id yet).
+#[derive(Debug, Clone)]
+pub struct RawTurn {
+    pub start_message_id: i64,
+    pub end_message_id: i64,
+    pub user_content: String,
+    pub tool_names: String,
+    pub tool_call_count: i32,
+    pub message_count: i32,
+    pub has_code_change: bool,
+    pub has_mcp_call: bool,
+    pub started_at: String,
+    pub ended_at: String,
+}
+
+// ============ User Intents ============
+
+/// Deep intent analysis result from conversation turns.
+/// One intent spans N consecutive turns and captures the user's high-level motivation.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct UserIntent {
+    pub id: i64,
+    pub session_id: String,
+    pub turn_range_start: i32,
+    pub turn_range_end: i32,
+    pub intent_type: String,
+    pub confidence: f32,
+    pub summary: Option<String>,
+    pub context_json: Option<String>,
+    pub related_goal_id: Option<String>,
+    pub created_at: String,
+}

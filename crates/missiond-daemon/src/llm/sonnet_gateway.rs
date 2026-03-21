@@ -52,6 +52,7 @@ pub(crate) struct SonnetHandle {
     tx_embedding: mpsc::Sender<GatewayRequest>,
     tx_translation: mpsc::Sender<GatewayRequest>,
     tx_briefing: mpsc::Sender<GatewayRequest>,
+    tx_intent: mpsc::Sender<GatewayRequest>,
 }
 
 impl SonnetHandle {
@@ -117,7 +118,7 @@ impl SonnetHandle {
         Self::send(&self.tx_translation, messages, max_tokens, "translation", Priority::Translation, task_id, trace_id, parent_span_id).await
     }
 
-    /// P3: Briefing worker calls (lowest priority).
+    /// P3: Briefing worker calls.
     pub async fn call_briefing(
         &self,
         messages: Vec<ChatMessage>,
@@ -125,6 +126,16 @@ impl SonnetHandle {
         task_id: Option<String>,
     ) -> Result<String> {
         Self::send(&self.tx_briefing, messages, max_tokens, "briefing", Priority::Briefing, task_id, None, None).await
+    }
+
+    /// P4: Intent analyst calls (lowest priority).
+    pub async fn call_intent(
+        &self,
+        messages: Vec<ChatMessage>,
+        max_tokens: Option<u32>,
+        task_id: Option<String>,
+    ) -> Result<String> {
+        Self::send(&self.tx_intent, messages, max_tokens, "intent", Priority::Intent, task_id, None, None).await
     }
 }
 
@@ -201,6 +212,7 @@ pub(crate) struct SonnetGateway {
     rx_embedding: mpsc::Receiver<GatewayRequest>,
     rx_translation: mpsc::Receiver<GatewayRequest>,
     rx_briefing: mpsc::Receiver<GatewayRequest>,
+    rx_intent: mpsc::Receiver<GatewayRequest>,
     backend: SonnetBackend,
     quota: Arc<tokio::sync::RwLock<QuotaTracker>>,
     concurrency: Arc<Semaphore>,
@@ -232,6 +244,7 @@ impl SonnetGateway {
                 Some(r) = self.rx_embedding.recv() => r,
                 Some(r) = self.rx_translation.recv() => r,
                 Some(r) = self.rx_briefing.recv() => r,
+                Some(r) = self.rx_intent.recv() => r,
                 else => {
                     info!("SonnetGateway: all senders dropped, shutting down");
                     break;
@@ -367,6 +380,7 @@ pub(crate) fn create_sonnet_gateway(
     let (tx_embedding, rx_embedding) = mpsc::channel(CHANNEL_CAPACITY);
     let (tx_translation, rx_translation) = mpsc::channel(CHANNEL_CAPACITY);
     let (tx_briefing, rx_briefing) = mpsc::channel(CHANNEL_CAPACITY);
+    let (tx_intent, rx_intent) = mpsc::channel(CHANNEL_CAPACITY);
 
     let quota = Arc::new(tokio::sync::RwLock::new(QuotaTracker::new(QUOTA_MAX, QUOTA_WINDOW)));
 
@@ -375,6 +389,7 @@ pub(crate) fn create_sonnet_gateway(
         tx_embedding,
         tx_translation,
         tx_briefing,
+        tx_intent,
     };
 
     let gateway = SonnetGateway {
@@ -382,6 +397,7 @@ pub(crate) fn create_sonnet_gateway(
         rx_embedding,
         rx_translation,
         rx_briefing,
+        rx_intent,
         backend,
         quota,
         concurrency: Arc::new(Semaphore::new(MAX_CONCURRENCY)),

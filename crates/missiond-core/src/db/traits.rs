@@ -27,14 +27,22 @@ pub use crate::ast::CodeNode;
 pub trait ConversationStore: Send + Sync {
     // -- conversation.rs: session CRUD --
     async fn upsert_conversation(&self, conv: &Conversation) -> DbResult<()>;
-    /// Insert conversation record only if it doesn't exist (DO NOTHING on conflict).
-    /// Used by ReconcileWorker to avoid overwriting conversation_type/status/message_count.
-    async fn ensure_conversation_exists(&self, session_id: &str, project_path: &str, jsonl_path: &str, status: &str, conversation_type: &str) -> DbResult<()>;
+    /// Insert conversation record if it doesn't exist; on conflict, backfill parent_session_id.
+    /// Used by ReconcileWorker to avoid overwriting conversation_type/status/message_count
+    /// while still ensuring parent linkage is populated.
+    async fn ensure_conversation_exists(&self, session_id: &str, project_path: &str, jsonl_path: &str, status: &str, conversation_type: &str, parent_session_id: Option<&str>) -> DbResult<()>;
     /// Refresh message_count from actual rows in conversation_messages.
     async fn refresh_conversation_message_count(&self, session_id: &str) -> DbResult<()>;
     async fn get_conversation(&self, id: &str) -> DbResult<Option<Conversation>>;
     async fn list_conversations(&self, status: Option<&str>, limit: i64, conv_type: Option<&str>, task_id: Option<&str>, since: Option<&str>, until: Option<&str>, source: Option<&str>) -> DbResult<Vec<Conversation>>;
     async fn get_child_conversations(&self, parent_session_id: &str) -> DbResult<Vec<Conversation>>;
+
+    /// Fix orphan subagent parent links by re-extracting parent_session_id from jsonl_path.
+    /// Returns count of fixed rows.
+    async fn fix_orphan_parent_links(&self, session_ids: &[String]) -> DbResult<usize>;
+    /// Link a compaction fragment to its original session.
+    /// Returns true if the link was newly created.
+    async fn link_compaction_fragment(&self, fragment_id: &str, original_id: &str) -> DbResult<bool>;
 
     // -- conversation.rs: deep analysis tracking --
     async fn get_pending_deep_analysis(&self, current_version: i32, max_retries: i32) -> DbResult<Vec<Conversation>>;
@@ -100,6 +108,44 @@ pub trait ConversationStore: Send + Sync {
     async fn get_pending_realtime_messages(&self) -> DbResult<Vec<(String, String, Vec<ConversationMessage>)>>;
     async fn get_pending_realtime_messages_with_limit(&self, limit: usize) -> DbResult<Vec<(String, String, Vec<ConversationMessage>)>>;
     async fn update_realtime_forwarded_at(&self, session_id: &str, timestamp: &str) -> DbResult<()>;
+
+    // -- conversation_turns (S3 Tagger & Chunker) --
+    /// Get the end_message_id of the last Turn for incremental processing.
+    async fn get_last_turn_end_message_id(&self, session_id: &str) -> DbResult<Option<i64>>;
+    /// Get the maximum turn_idx for a session.
+    async fn get_max_turn_idx(&self, session_id: &str) -> DbResult<Option<i32>>;
+    /// Batch insert conversation turns. Returns number of rows inserted.
+    async fn insert_conversation_turns_batch(&self, session_id: &str, base_idx: i32, turns: &[RawTurn]) -> DbResult<usize>;
+    /// Insert message labels in batch (message_id, label, value). Idempotent via ON CONFLICT DO NOTHING.
+    async fn insert_message_labels_batch(&self, labels: &[(i64, &str, &str, &str)]) -> DbResult<usize>;
+    /// Get session IDs that have messages but no turns (for backfill).
+    async fn sessions_pending_turn_extraction(&self, limit: i64) -> DbResult<Vec<String>>;
+
+    // -- conversation_turns: S4 per-turn embedding --
+    /// Get turns that have no corresponding topic_vector entry yet (incremental).
+    async fn turns_pending_embedding(&self, session_id: &str, provider: &str) -> DbResult<Vec<ConversationTurn>>;
+    /// Batch update conversation_turns.topic column.
+    async fn update_turn_topics_batch(&self, updates: &[(i64, &str)]) -> DbResult<usize>;
+    /// Upsert per-turn topic vectors. ON CONFLICT DO UPDATE (incremental safe).
+    async fn set_conversation_turn_vectors(&self, session_id: &str, vectors: &[(String, i32, Vec<f32>)], provider: &str) -> DbResult<usize>;
+    /// Find sessions that have turns but lack per-turn topic_vectors (backfill).
+    async fn sessions_with_turns_but_no_vectors(&self, provider: &str, cursor: i64, limit: i64) -> DbResult<Vec<String>>;
+
+    // -- user_intents (Phase 6 Intent Analyst) --
+    /// Insert a single intent analysis result. Returns the generated id.
+    async fn insert_user_intent(&self, session_id: &str, turn_range_start: i32, turn_range_end: i32,
+        intent_type: &str, confidence: f32, summary: Option<&str>, context_json: Option<&str>,
+        related_goal_id: Option<&str>) -> DbResult<i64>;
+    /// Get the max turn_range_end covered by existing intents for a session (incremental cursor).
+    async fn get_intent_coverage(&self, session_id: &str) -> DbResult<Option<i32>>;
+    /// Get turns after a given turn_idx for a session.
+    async fn get_turns_after(&self, session_id: &str, after_idx: i32) -> DbResult<Vec<ConversationTurn>>;
+    /// Update conversation_turns.intent_group_id for a turn range.
+    async fn update_turns_intent_group(&self, session_id: &str, turn_range_start: i32, turn_range_end: i32, intent_id: i64) -> DbResult<()>;
+    /// Get recent intents across all sessions within a time window.
+    async fn get_recent_intents(&self, since_secs: i64) -> DbResult<Vec<UserIntent>>;
+    /// Find sessions with turns but no intent analysis (backfill).
+    async fn sessions_pending_intent_analysis(&self, limit: i64) -> DbResult<Vec<String>>;
 }
 
 // ============================================================================
@@ -625,6 +671,8 @@ pub trait ObservabilityStore: Send + Sync {
     async fn jarvis_get_or_create(&self, conversation_id: Option<&str>) -> DbResult<String>;
     async fn jarvis_save_exchange(&self, conv_id: &str, user_message: &str, assistant_message: &str) -> DbResult<()>;
     async fn jarvis_update_title(&self, conv_id: &str, title: &str) -> DbResult<()>;
+    /// Phase 7: Find the most recent active Jarvis UI conversation.
+    async fn find_latest_jarvis_conversation(&self) -> DbResult<Option<String>>;
     async fn router_chat_list(&self, limit: i64) -> DbResult<Vec<serde_json::Value>>;
     async fn router_chat_stats(&self) -> DbResult<serde_json::Value>;
     async fn router_chat_clear(&self, conversation_id: &str, count: Option<i64>) -> DbResult<(i64, i64)>;
