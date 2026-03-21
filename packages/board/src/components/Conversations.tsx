@@ -1240,8 +1240,44 @@ export function Conversations() {
             className="flex-1 overflow-auto p-2 space-y-1"
             tabIndex={0}
             onKeyDown={(e) => {
-              if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+              if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return;
               e.preventDefault();
+              
+              const currentConv = visibleList.find((c) => c.id === selectedId);
+              
+              if (e.key === 'ArrowRight') {
+                if (currentConv && subagentMap.has(currentConv.id) && !expandedParents.has(currentConv.id)) {
+                  toggleParentExpand(currentConv.id);
+                }
+                return;
+              }
+              
+              if (e.key === 'ArrowLeft') {
+                if (currentConv) {
+                  // 1. If it's a parent and is expanded, collapse it
+                  if (subagentMap.has(currentConv.id) && expandedParents.has(currentConv.id)) {
+                    toggleParentExpand(currentConv.id);
+                    return;
+                  }
+                  // 2. If it's a subagent, jump to its parent
+                  if (currentConv.parentSessionId && expandedParents.has(currentConv.parentSessionId)) {
+                    selectConversation(currentConv.parentSessionId);
+                    const el = document.getElementById(`conv-${currentConv.parentSessionId}`);
+                    el?.scrollIntoView({ block: 'nearest' });
+                    return;
+                  }
+                  // 3. Otherwise, collapse the day/slot group it belongs to
+                  if (viewMode === 'workers') {
+                     const slotKey = currentConv.slotId || '_unassigned';
+                     if (!collapsedSlots.has(slotKey)) toggleSlotCollapse(slotKey);
+                  } else {
+                     const dayKey = getDayKey(currentConv.startedAt);
+                     if (!collapsedDays.has(dayKey)) toggleDayCollapse(dayKey);
+                  }
+                }
+                return;
+              }
+
               const idx = visibleList.findIndex((c) => c.id === selectedId);
               const next = e.key === 'ArrowDown'
                 ? Math.min(idx + 1, visibleList.length - 1)
