@@ -112,6 +112,11 @@ pub struct PTYManager {
 pub enum ManagerEvent {
     /// Session spawned
     Spawned { slot_id: String },
+    /// Message sent to session (trigger for Expectation Tickets)
+    MessageSent {
+        slot_id: String,
+        project_path: Option<String>,
+    },
     /// State changed
     StateChange {
         slot_id: String,
@@ -646,8 +651,20 @@ impl PTYManager {
 
         // Session's send_fire_and_forget sets state to Thinking and broadcasts StateChange,
         // which auto-syncs agent_info via the event forwarding loop.
-        let session = session.read().await;
-        session.send_fire_and_forget(message).await?;
+        let cwd = {
+            let s = session.read().await;
+            s.cwd.to_string_lossy().into_owned()
+        };
+
+        {
+            let s = session.read().await;
+            s.send_fire_and_forget(message).await?;
+        }
+        
+        let _ = self.event_tx.send(ManagerEvent::MessageSent {
+            slot_id: slot_id.to_string(),
+            project_path: Some(cwd),
+        });
 
         info!(slot_id = slot_id, message_len = message.len(), "Message sent (fire-and-forget)");
         Ok(())
@@ -676,12 +693,22 @@ impl PTYManager {
             }
         }
 
+        let cwd = {
+            let s = session.read().await;
+            s.cwd.to_string_lossy().into_owned()
+        };
+
         let start = std::time::Instant::now();
 
         let response = {
-            let session = session.read().await;
-            session.send(message, timeout_ms).await?
+            let s = session.read().await;
+            s.send(message, timeout_ms).await?
         };
+
+        let _ = self.event_tx.send(ManagerEvent::MessageSent {
+            slot_id: slot_id.to_string(),
+            project_path: Some(cwd),
+        });
 
         let duration_ms = start.elapsed().as_millis() as u64;
 

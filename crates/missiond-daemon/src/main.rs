@@ -703,7 +703,6 @@ async fn main() -> Result<()> {
             let cc_mgr = Arc::new(slot_orchestrator::ClaudeCodeSlotManager::new(
                 slot_mgr_pty,
                 slot_mgr_store,
-                Arc::clone(&pending_spawns_for_slot),
             ));
             let gemini_driver_for_slots = llm::gemini_driver::GeminiPtyDriver::new(slot_mgr_pty2);
             let gemini_mgr = Arc::new(slot_orchestrator::GeminiCliSlotManager::new(
@@ -865,7 +864,7 @@ async fn main() -> Result<()> {
                     extra_env,
                 }).await {
                     Ok(_) => {
-                        slot_env::capture_slot_session_uuid(&state, &slot.config.id, &session_file, slot.config.cwd.as_deref()).await;
+                        slot_env::capture_slot_session_uuid(&state, &slot.config.id, &session_file).await;
                         info!(slot_id = %slot.config.id, "Auto-started PTY session");
                     }
                     Err(e) => warn!(slot_id = %slot.config.id, error = %e, "Failed to auto-start PTY"),
@@ -1374,7 +1373,7 @@ async fn main() -> Result<()> {
                                     extra_env,
                                 }).await {
                                     Ok(_) => {
-                                        slot_env::capture_slot_session_uuid(&state, slot_id, &session_file, slot.config.cwd.as_deref()).await;
+                                        slot_env::capture_slot_session_uuid(&state, slot_id, &session_file).await;
                                         info!(slot_id = %slot_id, "Auto-started new slot PTY");
                                     }
                                     Err(e) => warn!(slot_id = %slot_id, error = %e, "Failed to auto-start new slot PTY"),

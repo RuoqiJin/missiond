@@ -151,16 +151,10 @@ pub(crate) async fn resolve_cmd_value(raw_value: &str, cmd_str: &str) -> String 
 
 /// After a PTY spawn with wait_for_idle, read the session UUID
 /// written by the SessionStart hook and register it in DB + cache.
-///
-/// If hook capture fails, automatically issues an Expectation Ticket
-/// so the IngestionRouter can late-bind the session when the JSONL appears.
-/// This is the **sole checkpoint** for PTY session UUID binding — all spawn
-/// paths converge here, eliminating ticket dispatch fragmentation.
 pub(crate) async fn capture_slot_session_uuid(
     state: &AppState,
     slot_id: &str,
     session_file: &Path,
-    project_path: Option<&str>,
 ) {
     let mut uuid = None;
 
@@ -217,26 +211,10 @@ pub(crate) async fn capture_slot_session_uuid(
             }
         }
         None => {
-            // Hook capture failed — issue Expectation Ticket as fallback.
-            // IngestionRouter will match by project_path + time window when
-            // the JSONL file appears, completing the late-binding.
-            if let Some(path) = project_path {
-                state.pending_slot_spawns.write().await.push((
-                    path.to_string(),
-                    slot_id.to_string(),
-                    tokio::time::Instant::now(),
-                ));
-                info!(
-                    slot_id = %slot_id,
-                    project = %path,
-                    "Hook capture failed — issued expectation ticket for late-binding"
-                );
-            } else {
-                warn!(
-                    slot_id = %slot_id,
-                    "Failed to capture session UUID and no project_path for ticket"
-                );
-            }
+            warn!(
+                slot_id = %slot_id,
+                "Failed to capture session UUID - hook may not be installed"
+            );
         }
     }
 }

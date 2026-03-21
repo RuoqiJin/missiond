@@ -52,7 +52,7 @@ pub(crate) async fn ensure_memory_slot_by_id(state: &AppState, slot_id: &str) ->
         extra_env,
     }).await {
         Ok(_) => {
-            capture_slot_session_uuid(state, slot_id, &session_file, slot.config.cwd.as_deref()).await;
+            capture_slot_session_uuid(state, slot_id, &session_file).await;
             info!(slot_id, "Memory slot spawned (auto_restart=true)");
             true
         }

@@ -49,6 +49,19 @@ impl super::BackgroundWorker for PtyEventWorker {
                     handle_mcp_tool_error(&state, &slot_id, &tool_name, &error);
                 }
                 Ok(missiond_core::ManagerEvent::Spawned { .. }) => {}
+                Ok(missiond_core::ManagerEvent::MessageSent { slot_id, project_path }) => {
+                    if let Some(path) = project_path {
+                        state.pending_slot_spawns.write().await.push((
+                            path,
+                            slot_id.clone(),
+                            tokio::time::Instant::now(),
+                        ));
+                        tracing::info!(
+                            slot_id = %slot_id,
+                            "Issued expectation ticket on message sent"
+                        );
+                    }
+                }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(skipped = n, "PTY logger lagged");
                 }
