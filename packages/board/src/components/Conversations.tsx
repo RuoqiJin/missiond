@@ -651,7 +651,11 @@ export function Conversations() {
     const map = new Map<string, Conversation[]>();
     const main: Conversation[] = [];
     for (const conv of conversations) {
-      if (conv.parentSessionId) {
+      // Only fold subagent/compaction types into parent map.
+      // Compaction *continuations* (user/worker with parentSessionId) stay in main list
+      // so they remain visible — parentSessionId just records the stitching lineage.
+      const isSubordinateType = conv.conversationType === 'subagent' || conv.conversationType === 'compaction';
+      if (conv.parentSessionId && isSubordinateType) {
         const list = map.get(conv.parentSessionId) || [];
         list.push(conv);
         map.set(conv.parentSessionId, list);
@@ -822,8 +826,25 @@ export function Conversations() {
             ))}
           </div>
         ) : (
-          /* Conversation list */
-          <div className="flex-1 overflow-auto p-2 space-y-1">
+          /* Conversation list — arrow key navigation */
+          <div
+            className="flex-1 overflow-auto p-2 space-y-1"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+              e.preventDefault();
+              const idx = mainList.findIndex((c) => c.id === selectedId);
+              const next = e.key === 'ArrowDown'
+                ? Math.min(idx + 1, mainList.length - 1)
+                : Math.max(idx - 1, 0);
+              if (next !== idx && mainList[next]) {
+                selectConversation(mainList[next].id);
+                // Scroll the item into view
+                const el = document.getElementById(`conv-${mainList[next].id}`);
+                el?.scrollIntoView({ block: 'nearest' });
+              }
+            }}
+          >
             {loading && conversations.length === 0 ? (
               <div className="text-center py-8 text-neutral-600 text-xs">加载中...</div>
             ) : mainList.length === 0 ? (
@@ -833,12 +854,13 @@ export function Conversations() {
             ) : viewMode === 'gemini' ? (
               <div className="space-y-0.5">
                 {mainList.map((conv) => (
-                  <GeminiListItem
-                    key={conv.id}
-                    conv={conv}
-                    active={conv.id === selectedId}
-                    onClick={() => selectConversation(conv.id)}
-                  />
+                  <div key={conv.id} id={`conv-${conv.id}`}>
+                    <GeminiListItem
+                      conv={conv}
+                      active={conv.id === selectedId}
+                      onClick={() => selectConversation(conv.id)}
+                    />
+                  </div>
                 ))}
               </div>
             ) : (
@@ -846,7 +868,7 @@ export function Conversations() {
                 const children = subagentMap.get(conv.id) || [];
                 const isExpanded = expandedParents.has(conv.id);
                 return (
-                  <div key={conv.id}>
+                  <div key={conv.id} id={`conv-${conv.id}`}>
                     <ConversationListItem
                       conv={conv}
                       active={conv.id === selectedId}

@@ -93,6 +93,7 @@ pub fn extract_parent_session_id(jsonl_path: &str) -> Option<String> {
 pub fn derive_conversation_type(slot_id: Option<&str>, session_id: &str) -> String {
     match slot_id {
         Some("slot-memory" | "slot-memory-slow") => "meta".to_string(),
+        Some("slot-jarvis") => "jarvis".to_string(),
         Some(_) => "worker".to_string(),
         None if session_id.contains("-acompact-") => "compaction".to_string(),
         None if session_id.starts_with("agent-") => "subagent".to_string(),

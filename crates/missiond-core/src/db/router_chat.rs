@@ -169,7 +169,7 @@ impl MissionDB {
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO conversations (id, source, model, chat_type, message_count, started_at, status, conversation_type)
-             VALUES (?1, 'jarvis_ui', 'claude-code', 'jarvis', 0, ?2, 'active', 'user')",
+             VALUES (?1, 'jarvis_ui', 'claude-code', 'jarvis', 0, ?2, 'active', 'jarvis')",
             params![id, now],
         )?;
         Ok(id)
