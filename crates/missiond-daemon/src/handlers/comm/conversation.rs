@@ -166,6 +166,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .get_conversation(&session_id)
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
+                
+            let slot_id_for_display = conv.as_ref().and_then(|c| c.slot_id.clone());
+            let is_jarvis = conv.as_ref().map(|c| c.conversation_type.as_str()) == Some("jarvis");
+
             let msgs = state
                 .store
                 .get_conversation_messages(&session_id, since_id, tail.unwrap_or(50))
@@ -175,12 +179,16 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 // Full messages for frontend (includes rawContent/model/metadata for image rendering)
                 msgs.iter()
                     .map(|m| {
+                        let mut role_display = m.role_display.clone();
+                        if (m.role == "system" || m.role == "agent_user" || (m.role == "user" && !is_jarvis)) && slot_id_for_display.is_some() {
+                            role_display = slot_id_for_display.clone();
+                        }
                         serde_json::json!({
                             "id": m.id,
                             "seq": m.seq,
                             "sessionId": m.session_id,
                             "role": m.role,
-                            "roleDisplay": m.role_display,
+                            "roleDisplay": role_display,
                             "content": m.content,
                             "rawContent": m.raw_content,
                             "messageUuid": m.message_uuid,
@@ -196,11 +204,15 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 // Lite messages for LLM consumption (strip base64 images to protect context)
                 msgs.iter()
                     .map(|m| {
+                        let mut role_display = m.role_display.clone();
+                        if (m.role == "system" || m.role == "agent_user" || (m.role == "user" && !is_jarvis)) && slot_id_for_display.is_some() {
+                            role_display = slot_id_for_display.clone();
+                        }
                         serde_json::json!({
                             "id": m.id,
                             "seq": m.seq,
                             "role": m.role,
-                            "roleDisplay": m.role_display,
+                            "roleDisplay": role_display,
                             "content": m.content,
                             "timestamp": m.timestamp,
                             "messageUuid": m.message_uuid,
