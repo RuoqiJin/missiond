@@ -545,11 +545,27 @@ function ToolPairBubble({
   const params = parseToolCall(call.content);
   const config = ROLE_CONFIG[call.role] || ROLE_CONFIG.assistant;
   const Icon = config.icon;
+  const [expanded, setExpanded] = useState(false);
+
+  // Build a short preview for collapsed state
+  const preview = toolName === "Read" && params.file_path ? params.file_path
+    : toolName === "Edit" && params.file_path ? params.file_path
+    : toolName === "Bash" && params.command ? params.command.slice(0, 80)
+    : call.content.replace(/^\[Tool: \w+\]\s*/, "").slice(0, 80);
 
   return (
     <div className="border-b border-neutral-800/30 py-2">
-      {/* Compact header */}
-      <div className="flex items-center gap-2 mb-1 flex-wrap">
+      {/* Compact header — clickable to toggle */}
+      <div
+        className="flex items-center gap-2 flex-wrap cursor-pointer select-none"
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <ChevronRight
+          className={cn(
+            "w-3 h-3 text-neutral-600 transition-transform",
+            expanded && "rotate-90",
+          )}
+        />
         <Icon className={cn("w-3.5 h-3.5", config.color)} />
         <span className={cn("text-sm font-semibold", config.color)}>
           🔧 工具调用 (msg {call.id})
@@ -558,26 +574,155 @@ function ToolPairBubble({
           {toolName}
         </span>
         {labels && labels.length > 0 && <LabelBadges labels={labels} />}
+        {!expanded && (
+          <span className="text-xs text-neutral-600 truncate max-w-[400px] ml-1 font-mono">
+            {preview}
+          </span>
+        )}
         <span className="text-[10px] text-cyan-500/50 font-mono ml-auto">
           {call.timestamp.split("T")[1]?.split(".")[0] || call.timestamp}
         </span>
       </div>
 
-      {/* Specialized viewer based on tool type */}
-      {toolName === "Read" && params.file_path ? (
-        <FileViewer filePath={params.file_path} content={result.content} />
-      ) : toolName === "Edit" && params.file_path ? (
-        <DiffViewer filePath={params.file_path} result={result.content} />
-      ) : toolName === "Bash" && params.command ? (
-        <TerminalViewer
-          command={params.command}
-          description={params.description}
-          result={result.content}
-        />
-      ) : (
-        /* Fallback: show call + result as plain text, collapse large results */
-        <ToolPairFallback call={call} result={result} />
+      {/* Specialized viewer based on tool type — only when expanded */}
+      {expanded && (
+        <>
+          {toolName === "Read" && params.file_path ? (
+            <FileViewer filePath={params.file_path} content={result.content} />
+          ) : toolName === "Edit" && params.file_path ? (
+            <DiffViewer filePath={params.file_path} result={result.content} />
+          ) : toolName === "Bash" && params.command ? (
+            <TerminalViewer
+              command={params.command}
+              description={params.description}
+              result={result.content}
+            />
+          ) : (
+            <ToolPairFallback call={call} result={result} />
+          )}
+        </>
       )}
+    </div>
+  );
+}
+
+/** Minimap sidebar: full user message index with scroll-tracking highlight and on-demand loading */
+function UserMessageMinimap({
+  sessionId,
+  flatTimeline,
+  visibleStartIndex,
+  onJump,
+  onLoadAround,
+}: {
+  sessionId: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  flatTimeline: any[];
+  visibleStartIndex: number;
+  onJump: (index: number) => void;
+  onLoadAround: (messageId: number) => void;
+}) {
+  // Fetch full user message index from DB (lightweight)
+  const [allMarkers, setAllMarkers] = useState<{ id: number; time: string; preview: string }[]>([]);
+  const activeRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!sessionId) return;
+    let cancelled = false;
+    fetch(`/api/conversations?sessionId=${encodeURIComponent(sessionId)}&userIndex=1`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        const items = (data.items || []).map((it: { id: number; time: string; preview: string }) => ({
+          id: it.id,
+          time: it.time,
+          preview: (it.preview || "").replace(/\n/g, " "),
+        }));
+        setAllMarkers(items);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [sessionId]);
+
+  // Build a Set of loaded message IDs for quick lookup
+  const loadedIds = useMemo(() => {
+    const s = new Set<number>();
+    for (const item of flatTimeline) {
+      if (item.type === "message") s.add(item.data.id);
+      else if (item.type === "tool-pair") { s.add(item.call.id); s.add(item.result.id); }
+    }
+    return s;
+  }, [flatTimeline]);
+
+  // Find which user message is currently visible (closest to visibleStartIndex)
+  const activeMarkerId = useMemo(() => {
+    // Walk backward from visibleStartIndex to find the nearest user message
+    for (let i = Math.min(visibleStartIndex + 5, flatTimeline.length - 1); i >= 0; i--) {
+      const item = flatTimeline[i];
+      if (item?.type === "message" && item.data?.role === "user") {
+        return item.data.id as number;
+      }
+    }
+    return null;
+  }, [flatTimeline, visibleStartIndex]);
+
+  // Auto-scroll the minimap to keep the active marker visible
+  useEffect(() => {
+    activeRef.current?.scrollIntoView({ block: "nearest" });
+  }, [activeMarkerId]);
+
+  if (allMarkers.length === 0) return null;
+
+  return (
+    <div className="w-36 flex-shrink-0 border-l border-neutral-800/50 overflow-y-auto">
+      <div className="sticky top-0 bg-neutral-950 px-2 py-1.5 text-[9px] text-neutral-600 border-b border-neutral-800/30 z-10">
+        👤 {allMarkers.length} 条用户消息
+      </div>
+      <div className="py-1">
+        {allMarkers.map((m) => {
+          const isLoaded = loadedIds.has(m.id);
+          const isActive = m.id === activeMarkerId;
+          return (
+            <button
+              key={m.id}
+              ref={isActive ? activeRef : undefined}
+              onClick={() => {
+                if (isLoaded) {
+                  // Find index in flatTimeline and scroll
+                  const idx = flatTimeline.findIndex(
+                    (it: { type: string; data?: { id: number } }) =>
+                      it.type === "message" && it.data?.id === m.id,
+                  );
+                  if (idx >= 0) onJump(idx);
+                } else {
+                  onLoadAround(m.id);
+                }
+              }}
+              className={cn(
+                "w-full text-left px-2 py-1 transition-colors",
+                isActive
+                  ? "bg-blue-500/20 border-l-2 border-blue-400"
+                  : "hover:bg-neutral-800/50 border-l-2 border-transparent",
+                !isLoaded && "opacity-50",
+              )}
+              title={isLoaded ? m.preview : `${m.preview}\n(点击加载此区域)`}
+            >
+              <div className="flex items-center gap-1">
+                <div className={cn(
+                  "w-1.5 h-1.5 rounded-full flex-shrink-0",
+                  isActive ? "bg-blue-400" : "bg-blue-400/50",
+                )} />
+                <span className={cn("text-[9px]", isActive ? "text-blue-300" : "text-neutral-600")}>{m.time}</span>
+              </div>
+              <p className={cn(
+                "text-[10px] truncate pl-2.5",
+                isActive ? "text-blue-200/80" : "text-neutral-600",
+              )}>
+                {m.preview || "(空)"}
+              </p>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -769,6 +914,8 @@ function ConversationListItem({
   expanded,
   onToggleExpand,
   isSubagent,
+  starred,
+  onToggleStar,
 }: {
   conv: Conversation;
   active: boolean;
@@ -777,6 +924,8 @@ function ConversationListItem({
   expanded?: boolean;
   onToggleExpand?: () => void;
   isSubagent?: boolean;
+  starred?: boolean;
+  onToggleStar?: () => void;
 }) {
   return (
     <div
@@ -788,12 +937,23 @@ function ConversationListItem({
           "w-full text-left p-3 rounded-lg border transition-colors",
           active
             ? "bg-neutral-800/50 border-orange-500/30"
-            : "border-neutral-800/50 hover:border-neutral-700",
+            : starred
+              ? "border-amber-500/30 hover:border-amber-500/50"
+              : "border-neutral-800/50 hover:border-neutral-700",
           isSubagent && "py-2",
         )}
       >
         <div className="flex items-center justify-between mb-1">
           <div className="flex items-center gap-2 min-w-0">
+            {onToggleStar && (
+              <span
+                onClick={(e) => { e.stopPropagation(); onToggleStar(); }}
+                className={cn("cursor-pointer flex-shrink-0 text-[12px]", starred ? "text-amber-400" : "text-neutral-700 hover:text-neutral-500")}
+                title={starred ? "取消标星" : "标星"}
+              >
+                {starred ? "★" : "☆"}
+              </span>
+            )}
             {isSubagent && (
               <GitBranch className="w-3 h-3 text-neutral-600 flex-shrink-0" />
             )}
@@ -901,10 +1061,14 @@ function GeminiListItem({
   conv,
   active,
   onClick,
+  starred,
+  onToggleStar,
 }: {
   conv: Conversation;
   active: boolean;
   onClick: () => void;
+  starred?: boolean;
+  onToggleStar?: () => void;
 }) {
   // Derive display label: taskId for router_chat, project name for gemini_cli
   const label = conv.taskId
@@ -920,11 +1084,22 @@ function GeminiListItem({
         "w-full text-left px-3 py-2 rounded-md border transition-colors",
         active
           ? "bg-neutral-800/50 border-indigo-500/30"
-          : "border-neutral-800/30 hover:border-neutral-700",
+          : starred
+            ? "border-amber-500/30 hover:border-amber-500/50"
+            : "border-neutral-800/30 hover:border-neutral-700",
       )}
     >
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 min-w-0">
+          {onToggleStar && (
+            <span
+              onClick={(e) => { e.stopPropagation(); onToggleStar(); }}
+              className={cn("cursor-pointer flex-shrink-0 text-[12px]", starred ? "text-amber-400" : "text-neutral-700 hover:text-neutral-500")}
+              title={starred ? "取消标星" : "标星"}
+            >
+              {starred ? "★" : "☆"}
+            </span>
+          )}
           <Sparkles className="w-3 h-3 text-indigo-400 flex-shrink-0" />
           <span className="text-[11px] font-mono text-indigo-300/80 truncate max-w-[120px]">
             {label}
@@ -977,7 +1152,8 @@ export function Conversations() {
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<
-    ConversationMessage[] | null
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    any[] | null
   >(null);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<
@@ -997,6 +1173,20 @@ export function Conversations() {
   );
   const [collapsedDays, setCollapsedDays] = useState<Set<string>>(new Set());
   const [collapsedSlots, setCollapsedSlots] = useState<Set<string>>(new Set());
+  const [starredIds, setStarredIds] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem("conv:starred");
+      return saved ? new Set(JSON.parse(saved)) : new Set();
+    } catch { return new Set(); }
+  });
+  const toggleStar = useCallback((id: string) => {
+    setStarredIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      localStorage.setItem("conv:starred", JSON.stringify([...next]));
+      return next;
+    });
+  }, []);
   const [hasMore, setHasMore] = useState(false); // whether more messages exist beyond loaded window
   const [loadingMore, setLoadingMore] = useState(false);
   // Scroll position persistence refs
@@ -1013,8 +1203,10 @@ export function Conversations() {
     sessionStorage.setItem("conv:viewMode", viewMode);
   }, [viewMode]);
 
-  // Track Virtuoso visible range for scroll persistence
+  // Track Virtuoso visible range for scroll persistence + minimap highlight
   const visibleRangeRef = useRef<{ startIndex: number }>({ startIndex: 0 });
+  const [visibleStart, setVisibleStart] = useState(0);
+  const pendingScrollToMsgId = useRef<number | null>(null);
 
   // Save scroll positions before unload
   useEffect(() => {
@@ -1130,8 +1322,12 @@ export function Conversations() {
     }
     setLoading(true);
     try {
+      const ctParam = viewMode === "gemini" ? "&conversationType=gemini"
+        : viewMode === "jarvis" ? "&conversationType=jarvis"
+        : viewMode === "workers" ? "&conversationType=system"
+        : "&conversationType=user";
       const res = await fetch(
-        `/api/conversations?search=${encodeURIComponent(search)}&limit=50`,
+        `/api/conversations?search=${encodeURIComponent(search)}&limit=50${ctParam}`,
       );
       if (res.ok) {
         const data = await res.json();
@@ -1141,7 +1337,7 @@ export function Conversations() {
       setSearchResults([]);
     }
     setLoading(false);
-  }, [search]);
+  }, [search, viewMode]);
 
   useEffect(() => {
     fetchConversations();
@@ -1271,6 +1467,22 @@ export function Conversations() {
     }
   }, [loadingMessages, flatTimeline]);
 
+  // Handle pending scroll to a message ID (after onLoadAround reloads messages)
+  useEffect(() => {
+    const targetId = pendingScrollToMsgId.current;
+    if (targetId == null || flatTimeline.length === 0) return;
+    const idx = flatTimeline.findIndex(
+      (it: { type: string; data?: { id: number } }) =>
+        it.type === "message" && it.data?.id === targetId,
+    );
+    if (idx >= 0) {
+      pendingScrollToMsgId.current = null;
+      requestAnimationFrame(() => {
+        virtuosoRef.current?.scrollToIndex({ index: idx, align: "start" });
+      });
+    }
+  }, [flatTimeline]);
+
   const filterByTab = useCallback(
     (c: Conversation, tab: typeof viewMode) => {
       if (tab === "conversations") {
@@ -1336,6 +1548,12 @@ export function Conversations() {
   }, [conversations]);
 
   const dayGroups = useMemo(() => groupByDay(mainList), [mainList]);
+
+  // Starred conversations (shown at top of list)
+  const starredConvs = useMemo(
+    () => mainList.filter((c) => starredIds.has(c.id)),
+    [mainList, starredIds],
+  );
 
   // Workers tab: group sessions by slotId
   const slotGroups = useMemo(() => {
@@ -1577,7 +1795,7 @@ export function Conversations() {
           <div className="flex-1 overflow-auto p-2 space-y-1">
             <div className="flex items-center justify-between px-1 mb-2">
               <span className="text-[11px] text-neutral-500">
-                搜索到 {searchResults.length} 条消息
+                搜索到 {searchResults.length} 条会话
               </span>
               <button
                 onClick={() => {
@@ -1589,27 +1807,31 @@ export function Conversations() {
                 清除
               </button>
             </div>
-            {searchResults.map((msg) => (
+            {searchResults.map((r) => (
               <button
-                key={msg.id}
-                onClick={() => selectConversation(msg.sessionId)}
+                key={r.sessionId || r.id}
+                onClick={() => selectConversation(r.sessionId || r.id)}
                 className="w-full text-left p-2 rounded-md border border-neutral-800/50 hover:border-neutral-700 transition-colors"
               >
                 <div className="flex items-center gap-2 mb-0.5">
-                  <span
-                    className={cn(
-                      "text-[10px]",
-                      ROLE_CONFIG[msg.role]?.color || "text-neutral-500",
-                    )}
-                  >
-                    {ROLE_CONFIG[msg.role]?.label || msg.role}
+                  <span className="text-[10px] font-mono text-indigo-300/70 truncate max-w-[140px]">
+                    {r.sessionId?.slice(0, 8) || r.id}
                   </span>
+                  {r.source && (
+                    <span className="text-[9px] px-1 rounded bg-neutral-800 text-neutral-500">{r.source}</span>
+                  )}
+                  {r.messageCount != null && (
+                    <span className="text-[10px] text-neutral-600">{r.messageCount} 条</span>
+                  )}
                   <span className="text-[10px] text-neutral-600">
-                    {timeAgo(msg.timestamp)}
+                    {timeAgo(r.startedAt || r.timestamp)}
                   </span>
                 </div>
-                <p className="text-xs text-neutral-400 line-clamp-2">
-                  {msg.content}
+                {r.summary && (
+                  <p className="text-[11px] text-neutral-400 truncate mb-0.5">{r.summary}</p>
+                )}
+                <p className="text-xs text-neutral-500 line-clamp-2">
+                  {r.matchReason || r.content}
                 </p>
               </button>
             ))}
@@ -1757,6 +1979,8 @@ export function Conversations() {
                                 onToggleExpand={() =>
                                   toggleParentExpand(conv.id)
                                 }
+                                starred={starredIds.has(conv.id)}
+                                onToggleStar={() => toggleStar(conv.id)}
                               />
                               {isExpanded &&
                                 children.map((child) => (
@@ -1766,6 +1990,8 @@ export function Conversations() {
                                     active={child.id === selectedId}
                                     onClick={() => selectConversation(child.id)}
                                     isSubagent
+                                    starred={starredIds.has(child.id)}
+                                    onToggleStar={() => toggleStar(child.id)}
                                   />
                                 ))}
                             </div>
@@ -1776,8 +2002,42 @@ export function Conversations() {
                 },
               )
             ) : (
-              /* Conversations + Gemini tabs: group by day */
-              dayGroups.map(({ dayKey, label, items }) => {
+              /* Conversations + Gemini tabs: starred + group by day */
+              <>
+              {starredConvs.length > 0 && (
+                <div className="mb-2">
+                  <div className="flex items-center gap-2 px-2 py-1.5 text-[11px] text-amber-400 font-medium">
+                    <span>★ 标星</span>
+                    <span className="text-neutral-600">{starredConvs.length}</span>
+                  </div>
+                  <div className="space-y-0.5">
+                    {starredConvs.map((conv) =>
+                      viewMode === "gemini" ? (
+                        <div key={`star-${conv.id}`} id={`conv-${conv.id}`}>
+                          <GeminiListItem
+                            conv={conv}
+                            active={conv.id === selectedId}
+                            onClick={() => selectConversation(conv.id)}
+                            starred
+                            onToggleStar={() => toggleStar(conv.id)}
+                          />
+                        </div>
+                      ) : (
+                        <div key={`star-${conv.id}`} id={`conv-${conv.id}`}>
+                          <ConversationListItem
+                            conv={conv}
+                            active={conv.id === selectedId}
+                            onClick={() => selectConversation(conv.id)}
+                            starred
+                            onToggleStar={() => toggleStar(conv.id)}
+                          />
+                        </div>
+                      ),
+                    )}
+                  </div>
+                </div>
+              )}
+              {dayGroups.map(({ dayKey, label, items }) => {
                 const isDayCollapsed = collapsedDays.has(dayKey);
                 return (
                   <div key={dayKey}>
@@ -1804,6 +2064,8 @@ export function Conversations() {
                                 conv={conv}
                                 active={conv.id === selectedId}
                                 onClick={() => selectConversation(conv.id)}
+                                starred={starredIds.has(conv.id)}
+                                onToggleStar={() => toggleStar(conv.id)}
                               />
                             </div>
                           ))}
@@ -1823,6 +2085,8 @@ export function Conversations() {
                                 onToggleExpand={() =>
                                   toggleParentExpand(conv.id)
                                 }
+                                starred={starredIds.has(conv.id)}
+                                onToggleStar={() => toggleStar(conv.id)}
                               />
                               {isExpanded &&
                                 children.map((child) => (
@@ -1832,6 +2096,8 @@ export function Conversations() {
                                     active={child.id === selectedId}
                                     onClick={() => selectConversation(child.id)}
                                     isSubagent
+                                    starred={starredIds.has(child.id)}
+                                    onToggleStar={() => toggleStar(child.id)}
                                   />
                                 ))}
                             </div>
@@ -1840,7 +2106,8 @@ export function Conversations() {
                       ))}
                   </div>
                 );
-              })
+              })}
+              </>
             )}
           </div>
         )}
@@ -2076,6 +2343,7 @@ export function Conversations() {
                         </div>
                       );
                     })()}
+                  <div className="flex flex-1 min-h-0">
                   <Virtuoso
                     ref={virtuosoRef}
                     style={{ flex: 1, minHeight: 0 }}
@@ -2084,6 +2352,7 @@ export function Conversations() {
                       visibleRangeRef.current = {
                         startIndex: range.startIndex,
                       };
+                      setVisibleStart(range.startIndex);
                     }}
                     endReached={() => {
                       if (hasMore && !loadingMore) loadMoreMessages();
@@ -2140,6 +2409,36 @@ export function Conversations() {
                         ) : null,
                     }}
                   />
+                  {/* User message minimap sidebar */}
+                  {selectedId && (
+                  <UserMessageMinimap
+                    sessionId={selectedId}
+                    flatTimeline={flatTimeline}
+                    visibleStartIndex={visibleStart}
+                    onJump={(index) => {
+                      virtuosoRef.current?.scrollToIndex({ index, align: "start" });
+                    }}
+                    onLoadAround={async (messageId) => {
+                      // Set pending scroll target, then reload messages around the target
+                      pendingScrollToMsgId.current = messageId;
+                      const sinceId = Math.max(0, messageId - 250);
+                      try {
+                        const res = await fetch(
+                          `/api/conversations?sessionId=${encodeURIComponent(selectedId)}&sinceId=${sinceId}&tail=500`,
+                        );
+                        if (res.ok) {
+                          const data = await res.json();
+                          const msgs: ConversationMessage[] = data.messages || [];
+                          if (msgs.length > 0) {
+                            setMessages(msgs);
+                            setHasMore(msgs.length >= 500);
+                          }
+                        }
+                      } catch { /* silent */ }
+                    }}
+                  />
+                  )}
+                  </div>
                 </>
               )}
             </div>

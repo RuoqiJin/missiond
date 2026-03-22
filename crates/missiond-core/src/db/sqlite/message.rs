@@ -54,7 +54,7 @@ impl MessageStore for SqliteMissionStore {
         self.executor.run(move |db| db.get_session_fts_snippets(&session_id, &query, limit)).await
     }
 
-    async fn search_conversation_sessions_fts_filtered(&self, query: &str, limit: i64, time_after: Option<&str>, project: Option<&str>) -> DbResult<Vec<(String, f64)>> {
+    async fn search_conversation_sessions_fts_filtered(&self, query: &str, limit: i64, time_after: Option<&str>, project: Option<&str>, _conversation_type: Option<&str>) -> DbResult<Vec<(String, f64)>> {
         let query = query.to_owned();
         let time_after = time_after.map(|s| s.to_owned());
         let project = project.map(|s| s.to_owned());

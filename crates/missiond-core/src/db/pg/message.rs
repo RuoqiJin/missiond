@@ -388,7 +388,7 @@ impl MessageStore for PgMissionStore {
         Ok(rows)
     }
 
-    async fn search_conversation_sessions_fts_filtered(&self, query: &str, limit: i64, time_after: Option<&str>, project: Option<&str>) -> DbResult<Vec<(String, f64)>> {
+    async fn search_conversation_sessions_fts_filtered(&self, query: &str, limit: i64, time_after: Option<&str>, project: Option<&str>, conversation_type: Option<&str>) -> DbResult<Vec<(String, f64)>> {
         let mut conditions = vec![
             "m.fts_content @@ plainto_tsquery('simple', $1)".to_string(),
             "c.conversation_type NOT IN ('meta', 'compaction')".to_string(),
@@ -406,6 +406,22 @@ impl MessageStore for PgMissionStore {
             param_idx += 1;
             conditions.push(format!("c.project = ${}", param_idx));
             extra_vals.push(p.to_string());
+        }
+        // conversation_type: supports comma-separated for IN clause (e.g. "gemini_chat,router_chat")
+        if let Some(ct) = conversation_type {
+            let types: Vec<&str> = ct.split(',').map(|s| s.trim()).collect();
+            if types.len() == 1 {
+                param_idx += 1;
+                conditions.push(format!("c.conversation_type = ${}", param_idx));
+                extra_vals.push(types[0].to_string());
+            } else {
+                let placeholders: Vec<String> = types.iter().map(|t| {
+                    param_idx += 1;
+                    extra_vals.push(t.to_string());
+                    format!("${}", param_idx)
+                }).collect();
+                conditions.push(format!("c.conversation_type IN ({})", placeholders.join(",")));
+            }
         }
 
         let where_clause = conditions.join(" AND ");
@@ -431,10 +447,10 @@ impl MessageStore for PgMissionStore {
             return Ok(rows);
         }
 
-        // LIKE fallback
+        // ILIKE fallback (leverages gin_trgm_ops index for Chinese text)
         let pattern = format!("%{}%", query);
         let mut like_conditions = vec![
-            "m.content LIKE $1".to_string(),
+            "m.content ILIKE $1".to_string(),
             "c.conversation_type NOT IN ('meta', 'compaction')".to_string(),
         ];
         let mut like_idx = 2u32;
@@ -449,6 +465,21 @@ impl MessageStore for PgMissionStore {
             like_idx += 1;
             like_conditions.push(format!("c.project = ${}", like_idx));
             like_vals.push(p.to_string());
+        }
+        if let Some(ct) = conversation_type {
+            let types: Vec<&str> = ct.split(',').map(|s| s.trim()).collect();
+            if types.len() == 1 {
+                like_idx += 1;
+                like_conditions.push(format!("c.conversation_type = ${}", like_idx));
+                like_vals.push(types[0].to_string());
+            } else {
+                let placeholders: Vec<String> = types.iter().map(|t| {
+                    like_idx += 1;
+                    like_vals.push(t.to_string());
+                    format!("${}", like_idx)
+                }).collect();
+                like_conditions.push(format!("c.conversation_type IN ({})", placeholders.join(",")));
+            }
         }
 
         let like_sql = format!(
@@ -468,6 +499,58 @@ impl MessageStore for PgMissionStore {
             q = q.bind(val);
         }
         let rows = q.fetch_all(&self.pool).await?;
+        Ok(rows)
+    }
+
+    async fn search_conversations_by_metadata(&self, query: &str, limit: i64, conversation_type: Option<&str>) -> DbResult<Vec<(String, f64)>> {
+        let pattern = format!("%{}%", query);
+        let mut extra_vals: Vec<String> = Vec::new();
+        let mut param_idx = 2u32; // $1 = pattern, $2 = limit
+        let ct_clause = if let Some(ct) = conversation_type {
+            let types: Vec<&str> = ct.split(',').map(|s| s.trim()).collect();
+            if types.len() == 1 {
+                param_idx += 1;
+                extra_vals.push(types[0].to_string());
+                format!("AND conversation_type = ${}", param_idx)
+            } else {
+                let placeholders: Vec<String> = types.iter().map(|t| {
+                    param_idx += 1;
+                    extra_vals.push(t.to_string());
+                    format!("${}", param_idx)
+                }).collect();
+                format!("AND conversation_type IN ({})", placeholders.join(","))
+            }
+        } else {
+            String::new()
+        };
+        let sql = format!(
+            "SELECT id, 1.0::float8 as score FROM conversations
+             WHERE conversation_type NOT IN ('meta', 'compaction')
+               AND (id::text ILIKE $1 OR task_id ILIKE $1 OR llm_summary ILIKE $1)
+               {}
+             ORDER BY started_at DESC LIMIT $2",
+            ct_clause
+        );
+        let mut q = sqlx::query_as::<_, (String, f64)>(&sql)
+            .bind(&pattern)
+            .bind(limit);
+        for val in &extra_vals {
+            q = q.bind(val);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        Ok(rows)
+    }
+
+    async fn get_user_message_index(&self, session_id: &str) -> DbResult<Vec<(i64, String, String)>> {
+        let rows: Vec<(i64, String, String)> = sqlx::query_as(
+            "SELECT id, to_char(timestamp, 'HH24:MI:SS') as ts, LEFT(content, 50) as preview
+             FROM conversation_messages
+             WHERE session_id = $1 AND role = 'user'
+             ORDER BY id ASC"
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows)
     }
 

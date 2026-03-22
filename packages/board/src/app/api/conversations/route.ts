@@ -6,6 +6,12 @@ export async function GET(req: NextRequest) {
     const sessionId = req.nextUrl.searchParams.get('sessionId');
     const search = req.nextUrl.searchParams.get('search');
 
+    // Get user message index (lightweight, for minimap sidebar)
+    if (sessionId && req.nextUrl.searchParams.get('userIndex') === '1') {
+      const result = await callTool('mission_user_message_index', { sessionId });
+      return NextResponse.json(result);
+    }
+
     // Get messages for a specific conversation
     if (sessionId) {
       const tail = req.nextUrl.searchParams.get('tail') || '200';
@@ -32,10 +38,10 @@ export async function GET(req: NextRequest) {
     // Search messages
     if (search) {
       const limit = req.nextUrl.searchParams.get('limit') || '30';
-      const result = await callTool('mission_conversation_search', {
-        query: search,
-        limit: Number(limit),
-      });
+      const conversationType = req.nextUrl.searchParams.get('conversationType') || undefined;
+      const args: Record<string, unknown> = { query: search, limit: Number(limit) };
+      if (conversationType && conversationType !== 'all') args.conversationType = conversationType;
+      const result = await callTool('mission_conversation_search', args);
       return NextResponse.json(result);
     }
 
