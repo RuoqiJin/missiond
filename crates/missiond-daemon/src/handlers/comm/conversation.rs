@@ -293,6 +293,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 #[serde(alias = "time_range")]
                 time_range: Option<String>,
                 project: Option<String>,
+                /// Filter by conversation_type (e.g. "gemini_chat")
+                #[serde(alias = "conversation_type")]
+                conversation_type: Option<String>,
             }
             let Args {
                 query,
@@ -303,10 +306,19 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 query_mode,
                 time_range,
                 project,
+                conversation_type,
             } = serde_json::from_value(args)?;
             let top_k = limit.unwrap_or(10) as usize;
             let skip = offset.unwrap_or(0) as usize;
             let mode = query_mode.as_deref().unwrap_or("hybrid");
+
+            // Map conversationType shorthand to actual DB values (comma-separated for IN clause)
+            let conversation_type = conversation_type.map(|ct| match ct.as_str() {
+                "gemini" => "gemini_chat,router_chat".to_string(),
+                "system" => "meta,worker".to_string(),
+                "user" | "jarvis" | "all" => ct,
+                _ => ct,
+            });
 
             // Resolve timeRange to ISO timestamp
             let time_after: Option<String> = time_range.as_deref().and_then(|tr| {
@@ -322,6 +334,42 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                         .to_rfc3339(),
                 )
             });
+
+            // ── Path 0: ID/metadata fast path ──
+            // If query looks like a UUID prefix or short hex ID, search conversation metadata directly
+            let is_id_query = query.len() >= 4 && query.len() <= 36
+                && query.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+            if is_id_query {
+                let meta_results = state
+                    .store
+                    .search_conversations_by_metadata(&query, top_k as i64, conversation_type.as_deref())
+                    .await
+                    .unwrap_or_default();
+                if !meta_results.is_empty() {
+                    let mut results = Vec::new();
+                    for (sid, _score) in &meta_results {
+                        let conv = state.store.get_conversation(sid).await.ok().flatten();
+                        results.push(serde_json::json!({
+                            "sessionId": sid,
+                            "project": conv.as_ref().and_then(|c| c.project.as_deref()),
+                            "status": conv.as_ref().map(|c| c.status.as_str()),
+                            "slotId": conv.as_ref().and_then(|c| c.slot_id.as_deref()),
+                            "summary": conv.as_ref().and_then(|c| c.llm_summary.as_deref()),
+                            "messageCount": conv.as_ref().map(|c| c.message_count),
+                            "startedAt": conv.as_ref().map(|c| &c.started_at),
+                            "matchReason": format!("[ID匹配] {}", sid),
+                            "source": conv.as_ref().map(|c| c.source.as_str()),
+                        }));
+                    }
+                    return Ok(ToolResult::json(&serde_json::json!({
+                        "results": results,
+                        "count": results.len(),
+                        "totalHits": results.len(),
+                        "query": query,
+                        "mode": "metadata",
+                    })));
+                }
+            }
 
             // ── Path A: single-session search — semantic + FTS hybrid ──
             if let Some(ref sid) = session_id {
@@ -400,6 +448,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                         pool_limit,
                         time_after.as_deref(),
                         project.as_deref(),
+                        conversation_type.as_deref(),
                     )
                     .await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
@@ -657,6 +706,31 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     "toolName": tool_name,
                     "timeRange": time_range,
                 },
+            })))
+        }
+
+        "mission_user_message_index" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                #[serde(alias = "session_id")]
+                session_id: String,
+            }
+            let Args { session_id } = serde_json::from_value(args)?;
+            let rows = state
+                .store
+                .get_user_message_index(&session_id)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            let items: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|(id, ts, preview)| {
+                    serde_json::json!({ "id": id, "time": ts, "preview": preview })
+                })
+                .collect();
+            Ok(ToolResult::json(&serde_json::json!({
+                "items": items,
+                "count": items.len(),
             })))
         }
 

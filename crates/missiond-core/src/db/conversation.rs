@@ -393,6 +393,7 @@ impl MissionDB {
             Some("subagent") => " AND conversation_type = 'subagent'".to_string(),
             Some("compaction") => " AND conversation_type = 'compaction'".to_string(),
             Some("system") => " AND conversation_type IN ('meta', 'worker')".to_string(),
+            Some("gemini") => " AND conversation_type = 'gemini_chat'".to_string(),
             _ => " AND conversation_type IN ('user', 'worker')".to_string(),
         };
 

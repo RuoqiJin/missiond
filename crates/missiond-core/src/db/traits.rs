@@ -166,7 +166,17 @@ pub trait MessageStore: Send + Sync {
     async fn search_messages_filtered(&self, query: &str, session_id: Option<&str>, role: Option<&str>, tool_name: Option<&str>, time_after: Option<&str>, limit: i64) -> DbResult<Vec<ConversationMessage>>;
     async fn search_conversation_sessions_fts(&self, query: &str, limit: i64) -> DbResult<Vec<(String, f64)>>;
     async fn get_session_fts_snippets(&self, session_id: &str, query: &str, limit: usize) -> DbResult<Vec<(String, String)>>;
-    async fn search_conversation_sessions_fts_filtered(&self, query: &str, limit: i64, time_after: Option<&str>, project: Option<&str>) -> DbResult<Vec<(String, f64)>>;
+    async fn search_conversation_sessions_fts_filtered(&self, query: &str, limit: i64, time_after: Option<&str>, project: Option<&str>, conversation_type: Option<&str>) -> DbResult<Vec<(String, f64)>>;
+    /// Search conversations table by ID prefix, task_id, or llm_summary.
+    async fn search_conversations_by_metadata(&self, query: &str, limit: i64, conversation_type: Option<&str>) -> DbResult<Vec<(String, f64)>> {
+        let _ = (query, limit, conversation_type);
+        Ok(vec![])
+    }
+    /// Lightweight user message index: (id, timestamp, content_preview) for minimap.
+    async fn get_user_message_index(&self, session_id: &str) -> DbResult<Vec<(i64, String, String)>> {
+        let _ = session_id;
+        Ok(vec![])
+    }
     async fn get_first_user_message(&self, session_id: &str) -> DbResult<Option<String>>;
 
     // -- pgvector hybrid search (P3: message-level embedding) --

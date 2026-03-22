@@ -91,8 +91,9 @@ pub fn extract_parent_session_id(jsonl_path: &str) -> Option<String> {
 /// "meta" = memory slots, "compaction" = context compaction shards,
 /// "subagent" = agent-* IDs, "worker" = other slots, "user" = direct CLI.
 pub fn derive_conversation_type(slot_category: Option<&str>, slot_id: Option<&str>, session_id: &str, source: &str) -> String {
-    // Top-level interception for Gemini CLI (unless it's bound to a system worker slot)
-    if source == "gemini_cli" && slot_id.is_none() {
+    // Top-level interception for all Gemini family conversations
+    // Regardless of whether they have a slot or not, they belong in the Gemini tab.
+    if source == "gemini_cli" || source == "router_chat" {
         return "gemini_chat".to_string();
     }
 
