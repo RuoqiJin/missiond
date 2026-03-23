@@ -320,7 +320,11 @@ async fn daemon_update(args: Value) -> Result<ToolResult> {
         info!("daemon_update: starting cargo build --release");
         let project_root_clone = project_root.clone();
         let build_output = tokio::task::spawn_blocking(move || {
-            Command::new("cargo")
+            // Resolve cargo path — launchd doesn't inherit shell PATH
+            let cargo = std::env::var("CARGO")
+                .or_else(|_| std::env::var("HOME").map(|h| format!("{}/.cargo/bin/cargo", h)))
+                .unwrap_or_else(|_| "cargo".to_string());
+            Command::new(&cargo)
                 .args(["build", "--release", "--package", "missiond-daemon"])
                 .current_dir(&project_root_clone)
                 .output()
@@ -374,6 +378,19 @@ async fn daemon_update(args: Value) -> Result<ToolResult> {
             binary_dest.display(),
             e
         )));
+    }
+
+    // Step 3.5: codesign (macOS requires ad-hoc signature for execution)
+    #[cfg(target_os = "macos")]
+    {
+        let sign_status = Command::new("codesign")
+            .args(["-s", "-", "--force", binary_dest.to_str().unwrap_or("missiond")])
+            .status();
+        match sign_status {
+            Ok(s) if s.success() => info!("daemon_update: codesign succeeded"),
+            Ok(s) => info!("daemon_update: codesign exited with {}", s),
+            Err(e) => info!("daemon_update: codesign failed: {}", e),
+        }
     }
 
     info!(

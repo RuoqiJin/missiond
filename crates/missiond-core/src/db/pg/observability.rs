@@ -720,6 +720,64 @@ impl ObservabilityStore for PgMissionStore {
         }
     }
 
+    // ── conversation labels (EAV) ──────────────────────────────────
+
+    async fn conversation_label_set(&self, session_id: &str, label: &str, value: &str, source: &str) -> DbResult<()> {
+        sqlx::query(
+            "INSERT INTO conversation_labels (session_id, label, value, source)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (session_id, label) DO UPDATE SET
+                value = EXCLUDED.value, source = EXCLUDED.source"
+        )
+        .bind(session_id).bind(label).bind(value).bind(source)
+        .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn conversation_label_delete(&self, session_id: &str, label: &str) -> DbResult<()> {
+        sqlx::query("DELETE FROM conversation_labels WHERE session_id = $1 AND label = $2")
+            .bind(session_id).bind(label)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn conversation_label_get(&self, session_id: &str) -> DbResult<Vec<(String, String)>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT label, COALESCE(value, '') FROM conversation_labels WHERE session_id = $1"
+        ).bind(session_id).fetch_all(&self.pool).await?;
+        Ok(rows)
+    }
+
+    async fn conversation_label_get_batch(&self, session_ids: &[&str]) -> DbResult<HashMap<String, Vec<(String, String)>>> {
+        if session_ids.is_empty() { return Ok(HashMap::new()); }
+        let rows = sqlx::query(
+            "SELECT session_id, label, COALESCE(value, '') FROM conversation_labels WHERE session_id = ANY($1)"
+        ).bind(session_ids).fetch_all(&self.pool).await?;
+        let mut result: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for r in &rows {
+            use sqlx::Row;
+            let sid: String = r.get("session_id");
+            let label: String = r.get("label");
+            let value: String = r.get(2);
+            result.entry(sid).or_default().push((label, value));
+        }
+        Ok(result)
+    }
+
+    async fn conversation_label_find(&self, label: &str, value: Option<&str>, limit: i64) -> DbResult<Vec<String>> {
+        if let Some(v) = value {
+            let rows: Vec<(String,)> = sqlx::query_as(
+                "SELECT session_id FROM conversation_labels WHERE label = $1 AND value = $2 LIMIT $3"
+            ).bind(label).bind(v).bind(limit).fetch_all(&self.pool).await?;
+            Ok(rows.into_iter().map(|r| r.0).collect())
+        } else {
+            let rows: Vec<(String,)> = sqlx::query_as(
+                "SELECT session_id FROM conversation_labels WHERE label = $1 LIMIT $2"
+            ).bind(label).bind(limit).fetch_all(&self.pool).await?;
+            Ok(rows.into_iter().map(|r| r.0).collect())
+        }
+    }
+
     // ── backfill ──────────────────────────────────────────────────
 
     async fn backfill_get_phase(&self, phase: &str) -> DbResult<Option<BackfillPhaseStatus>> {
