@@ -641,6 +641,23 @@ pub trait ObservabilityStore: Send + Sync {
     async fn label_get_batch(&self, message_ids: &[i64]) -> DbResult<HashMap<i64, Vec<(String, String)>>>;
     async fn label_find_messages(&self, label: &str, value: Option<&str>, limit: i64) -> DbResult<Vec<i64>>;
 
+    // -- conversation labels (EAV, same pattern as message_labels) --
+    async fn conversation_label_set(&self, session_id: &str, label: &str, value: &str, source: &str) -> DbResult<()> {
+        let _ = (session_id, label, value, source); Ok(())
+    }
+    async fn conversation_label_delete(&self, session_id: &str, label: &str) -> DbResult<()> {
+        let _ = (session_id, label); Ok(())
+    }
+    async fn conversation_label_get(&self, session_id: &str) -> DbResult<Vec<(String, String)>> {
+        let _ = session_id; Ok(vec![])
+    }
+    async fn conversation_label_get_batch(&self, session_ids: &[&str]) -> DbResult<HashMap<String, Vec<(String, String)>>> {
+        let _ = session_ids; Ok(HashMap::new())
+    }
+    async fn conversation_label_find(&self, label: &str, value: Option<&str>, limit: i64) -> DbResult<Vec<String>> {
+        let _ = (label, value, limit); Ok(vec![])
+    }
+
     // -- backfill.rs --
     async fn backfill_get_phase(&self, phase: &str) -> DbResult<Option<BackfillPhaseStatus>>;
     async fn backfill_list_phases(&self) -> DbResult<Vec<BackfillPhaseStatus>>;

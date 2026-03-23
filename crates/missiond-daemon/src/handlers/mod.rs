@@ -124,7 +124,9 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
             || n == "mission_activity_report"
             || n == "mission_message_search"
             || n == "mission_context_around"
-            || n == "mission_user_message_index" =>
+            || n == "mission_user_message_index"
+            || n == "mission_conversation_set_label"
+            || n == "mission_conversation_delete_label" =>
         {
             conversation::handle(state, n, args).await
         }

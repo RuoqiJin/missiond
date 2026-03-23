@@ -16,6 +16,7 @@ interface KBEntry {
   accessCount: number;
   createdAt: string;
   updatedAt: string;
+  contextSnippet?: string;
 }
 
 const CATEGORY_CONFIG: Record<string, { label: string; icon: typeof Brain; color: string; bg: string }> = {
@@ -107,6 +108,9 @@ function KBEntryCard({ entry, onDelete }: { entry: KBEntry; onDelete: (key: stri
             )}
           </div>
           <p className="text-sm text-neutral-300 leading-relaxed">{entry.summary}</p>
+          {entry.contextSnippet && (
+            <p className="text-xs text-indigo-300/70 mt-1 italic line-clamp-2">{entry.contextSnippet}</p>
+          )}
           <div className="flex items-center gap-3 mt-1.5 text-[11px] text-neutral-600">
             <span>{SOURCE_LABELS[entry.source] || entry.source}</span>
             <span>{timeAgo(entry.updatedAt)}</span>
@@ -138,6 +142,8 @@ export function KnowledgeBase() {
   const [entries, setEntries] = useState<KBEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const [searchResults, setSearchResults] = useState<KBEntry[] | null>(null);
+  const [searchMode, setSearchMode] = useState<'local' | 'hybrid'>('local');
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('knowledge');
 
@@ -159,6 +165,29 @@ export function KnowledgeBase() {
     fetchEntries();
   }, [fetchEntries]);
 
+  // Backend hybrid search (Enter key triggers)
+  const handleSearch = useCallback(async () => {
+    if (!search.trim()) {
+      setSearchResults(null);
+      setSearchMode('local');
+      return;
+    }
+    setLoading(true);
+    setSearchMode('hybrid');
+    try {
+      const params = new URLSearchParams({ query: search, limit: '30' });
+      if (activeCategory) params.set('category', activeCategory);
+      const res = await fetch(`/api/kb?${params}`);
+      if (res.ok) {
+        const data = await res.json();
+        setSearchResults(Array.isArray(data) ? data : data.entries || []);
+      }
+    } catch {
+      setSearchResults([]);
+    }
+    setLoading(false);
+  }, [search, activeCategory]);
+
   const handleDelete = useCallback(async (key: string) => {
     setEntries((prev) => prev.filter((e) => e.key !== key));
     try {
@@ -171,6 +200,9 @@ export function KnowledgeBase() {
   const renewalCount = useMemo(() => entries.filter(isRenewalEntry).length, [entries]);
 
   const filtered = useMemo(() => {
+    // Use backend search results when available
+    if (searchResults !== null) return searchResults;
+
     let result = entries;
     // Split by view mode: knowledge hides renewals, renewals shows only renewals
     if (viewMode === 'knowledge') {
@@ -194,7 +226,7 @@ export function KnowledgeBase() {
       );
     }
     return result;
-  }, [entries, activeCategory, search, viewMode]);
+  }, [entries, searchResults, activeCategory, search, viewMode]);
 
   // Group by root category (memory:debug → memory)
   const grouped = useMemo(() => {
@@ -257,12 +289,24 @@ export function KnowledgeBase() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" />
           <input
             type="text"
-            placeholder="搜索知识..."
+            placeholder={searchMode === 'hybrid' ? "语义搜索 (Enter 检索)" : "搜索知识... (Enter 语义检索)"}
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              if (!e.target.value) { setSearchResults(null); setSearchMode('local'); }
+            }}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleSearch(); }}
             className="w-full pl-9 pr-3 py-2 bg-neutral-900 border border-neutral-800 rounded-lg text-sm text-neutral-300 placeholder:text-neutral-600 focus:outline-none focus:border-neutral-700"
           />
         </div>
+        {searchMode === 'hybrid' && (
+          <button
+            onClick={() => { setSearch(''); setSearchResults(null); setSearchMode('local'); }}
+            className="px-2 py-1.5 text-[11px] rounded-lg border border-indigo-500/30 bg-indigo-500/10 text-indigo-300 hover:bg-indigo-500/20 transition-colors"
+          >
+            语义搜索 · {searchResults?.length ?? 0} 条 ✕
+          </button>
+        )}
         <button
           onClick={fetchEntries}
           className="p-2 rounded-lg border border-neutral-800 text-neutral-500 hover:text-neutral-300 hover:border-neutral-700 transition-colors"

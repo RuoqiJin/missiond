@@ -23,6 +23,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "message_search" => "mission_message_search",
                 "context" => "mission_context_around",
                 "events" => "mission_conversation_events",
+                "user_index" => "mission_user_message_index",
+                "set_label" => "mission_conversation_set_label",
+                "delete_label" => "mission_conversation_delete_label",
                 other => return Err(anyhow!("Unknown conversation action: {other}")),
             };
             // Forward with same args (action field is harmlessly ignored by sub-handlers)
@@ -129,7 +132,34 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .list(query)
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
-            Ok(ToolResult::json_pretty(&convs))
+
+            // Batch-fetch conversation labels (star, etc.) and embed in response
+            let conv_ids: Vec<&str> = convs.iter().map(|c| c.id.as_str()).collect();
+            let labels_map = state.store
+                .conversation_label_get_batch(&conv_ids)
+                .await
+                .unwrap_or_default();
+
+            if labels_map.is_empty() {
+                Ok(ToolResult::json_pretty(&convs))
+            } else {
+                // Serialize convs with labels embedded
+                let mut arr: Vec<serde_json::Value> = serde_json::to_value(&convs)
+                    .unwrap_or_default()
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                for item in &mut arr {
+                    if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                        if let Some(labels) = labels_map.get(id) {
+                            item.as_object_mut().map(|obj| {
+                                obj.insert("labels".to_string(), serde_json::json!(labels));
+                            });
+                        }
+                    }
+                }
+                Ok(ToolResult::json_pretty(&arr))
+            }
         }
         "mission_conversation_get" => {
             #[derive(Deserialize)]
@@ -153,6 +183,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     alias = "include_labels"
                 )]
                 include_labels: Option<bool>,
+                #[serde(
+                    default,
+                    deserialize_with = "lenient::option_bool",
+                    alias = "include_user_index"
+                )]
+                include_user_index: Option<bool>,
             }
             let Args {
                 session_id,
@@ -160,6 +196,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 since_id,
                 include_raw,
                 include_labels,
+                include_user_index,
             } = serde_json::from_value(args)?;
             let conv = state
                 .store
@@ -270,6 +307,17 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     })
                     .collect();
                 result["subagents"] = serde_json::json!(child_summaries);
+            }
+            // Embed lightweight user message index for minimap sidebar
+            if include_user_index.unwrap_or(false) {
+                let user_msgs = state.store
+                    .get_user_message_index(&session_id)
+                    .await
+                    .unwrap_or_default();
+                let items: Vec<Value> = user_msgs.iter()
+                    .map(|(id, ts, preview)| serde_json::json!({ "id": id, "time": ts, "preview": preview }))
+                    .collect();
+                result["userIndex"] = serde_json::json!(items);
             }
             Ok(ToolResult::json(&result))
         }
@@ -732,6 +780,42 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "items": items,
                 "count": items.len(),
             })))
+        }
+
+        "mission_conversation_set_label" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                #[serde(alias = "session_id")]
+                session_id: String,
+                label: String,
+                #[serde(default)]
+                value: Option<String>,
+                #[serde(default)]
+                source: Option<String>,
+            }
+            let Args { session_id, label, value, source } = serde_json::from_value(args)?;
+            state.store
+                .conversation_label_set(&session_id, &label, value.as_deref().unwrap_or("1"), source.as_deref().unwrap_or("user"))
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            Ok(ToolResult::json(&serde_json::json!({ "ok": true, "sessionId": session_id, "label": label })))
+        }
+
+        "mission_conversation_delete_label" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                #[serde(alias = "session_id")]
+                session_id: String,
+                label: String,
+            }
+            let Args { session_id, label } = serde_json::from_value(args)?;
+            state.store
+                .conversation_label_delete(&session_id, &label)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            Ok(ToolResult::json(&serde_json::json!({ "ok": true, "sessionId": session_id, "label": label })))
         }
 
         "mission_context_around" => {

@@ -608,40 +608,24 @@ function ToolPairBubble({
 
 /** Minimap sidebar: full user message index with scroll-tracking highlight and on-demand loading */
 function UserMessageMinimap({
-  sessionId,
+  userIndex,
   flatTimeline,
   visibleStartIndex,
   onJump,
   onLoadAround,
 }: {
-  sessionId: string;
+  userIndex: { id: number; time: string; preview: string }[];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   flatTimeline: any[];
   visibleStartIndex: number;
   onJump: (index: number) => void;
   onLoadAround: (messageId: number) => void;
 }) {
-  // Fetch full user message index from DB (lightweight)
-  const [allMarkers, setAllMarkers] = useState<{ id: number; time: string; preview: string }[]>([]);
   const activeRef = useRef<HTMLButtonElement | null>(null);
-
-  useEffect(() => {
-    if (!sessionId) return;
-    let cancelled = false;
-    fetch(`/api/conversations?sessionId=${encodeURIComponent(sessionId)}&userIndex=1`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (cancelled) return;
-        const items = (data.items || []).map((it: { id: number; time: string; preview: string }) => ({
-          id: it.id,
-          time: it.time,
-          preview: (it.preview || "").replace(/\n/g, " "),
-        }));
-        setAllMarkers(items);
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [sessionId]);
+  const allMarkers = useMemo(
+    () => userIndex.map((it) => ({ ...it, preview: (it.preview || "").replace(/\n/g, " ") })),
+    [userIndex],
+  );
 
   // Build a Set of loaded message IDs for quick lookup
   const loadedIds = useMemo(() => {
@@ -746,6 +730,7 @@ function MessageBubble({
 }) {
   const isCollapsible = COLLAPSED_ROLES.has(msg.role);
   const [expanded, setExpanded] = useState(!isCollapsible);
+  const [showFull, setShowFull] = useState(false);
 
   const isSlot = msg.roleDisplay?.startsWith("slot-");
   const config = isSlot
@@ -847,11 +832,11 @@ function MessageBubble({
           >
             {hasImages ? (
               <MessageContent msg={msg} jsonlPath={jsonlPath} />
-            ) : msg.content.length > 2000 && !isCollapsible ? (
+            ) : msg.content.length > 2000 && !showFull ? (
               <>
                 <div>{msg.content.slice(0, 2000)}</div>
                 <button
-                  onClick={() => setExpanded(true)}
+                  onClick={() => setShowFull(true)}
                   className="text-[11px] text-cyan-500 hover:text-cyan-400 mt-1"
                 >
                   ▼ 展开全部 ({msg.content.length.toLocaleString()} chars)
@@ -1173,25 +1158,48 @@ export function Conversations() {
   );
   const [collapsedDays, setCollapsedDays] = useState<Set<string>>(new Set());
   const [collapsedSlots, setCollapsedSlots] = useState<Set<string>>(new Set());
-  const [starredIds, setStarredIds] = useState<Set<string>>(() => {
-    try {
-      const saved = localStorage.getItem("conv:starred");
-      return saved ? new Set(JSON.parse(saved)) : new Set();
-    } catch { return new Set(); }
-  });
+  const [starredIds, setStarredIds] = useState<Set<string>>(new Set());
   const toggleStar = useCallback((id: string) => {
     setStarredIds((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      localStorage.setItem("conv:starred", JSON.stringify([...next]));
+      const isStarred = next.has(id);
+      if (isStarred) next.delete(id); else next.add(id);
+      // Persist to backend
+      fetch('/api/conversations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: isStarred ? 'delete_label' : 'set_label',
+          sessionId: id,
+          label: 'star',
+        }),
+      }).catch(() => {});
       return next;
     });
   }, []);
+  const [userIndex, setUserIndex] = useState<{ id: number; time: string; preview: string }[]>([]);
   const [hasMore, setHasMore] = useState(false); // whether more messages exist beyond loaded window
   const [loadingMore, setLoadingMore] = useState(false);
   // Scroll position persistence refs
   const listScrollRef = useRef<HTMLDivElement>(null);
   const restoredRef = useRef(false); // guard: only restore once after initial load
+
+  // One-time migration: sync localStorage stars to backend, then clear
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("conv:starred");
+      if (!saved) return;
+      const ids: string[] = JSON.parse(saved);
+      if (!Array.isArray(ids) || ids.length === 0) return;
+      Promise.all(ids.map((id) =>
+        fetch('/api/conversations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'set_label', sessionId: id, label: 'star' }),
+        }).catch(() => {}),
+      )).then(() => localStorage.removeItem("conv:starred"));
+    } catch { /* silent */ }
+  }, []);
 
   // Persist selectedId & viewMode to sessionStorage
   useEffect(() => {
@@ -1252,7 +1260,18 @@ export function Conversations() {
       const res = await fetch(`/api/conversations?${params}`);
       if (res.ok) {
         const data = await res.json();
-        setConversations(Array.isArray(data) ? data : []);
+        const list = Array.isArray(data) ? data : [];
+        setConversations(list);
+        // Extract starred IDs from conversation labels
+        const stars = new Set<string>();
+        for (const c of list) {
+          if (c.labels && Array.isArray(c.labels)) {
+            for (const [label] of c.labels) {
+              if (label === "star") { stars.add(c.id); break; }
+            }
+          }
+        }
+        setStarredIds(stars);
       }
     } catch {
       // silent
@@ -1279,6 +1298,7 @@ export function Conversations() {
           setEvents(data.events || []);
           setJsonlPath(data.conversation?.jsonlPath || null);
           setLabelsMap(data.labels || {});
+          setUserIndex(data.userIndex || []);
           setHasMore(msgs.length >= PAGE_SIZE);
         }
       } catch {
@@ -2410,9 +2430,9 @@ export function Conversations() {
                     }}
                   />
                   {/* User message minimap sidebar */}
-                  {selectedId && (
+                  {userIndex.length > 0 && (
                   <UserMessageMinimap
-                    sessionId={selectedId}
+                    userIndex={userIndex}
                     flatTimeline={flatTimeline}
                     visibleStartIndex={visibleStart}
                     onJump={(index) => {

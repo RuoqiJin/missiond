@@ -6,13 +6,7 @@ export async function GET(req: NextRequest) {
     const sessionId = req.nextUrl.searchParams.get('sessionId');
     const search = req.nextUrl.searchParams.get('search');
 
-    // Get user message index (lightweight, for minimap sidebar)
-    if (sessionId && req.nextUrl.searchParams.get('userIndex') === '1') {
-      const result = await callTool('mission_user_message_index', { sessionId });
-      return NextResponse.json(result);
-    }
-
-    // Get messages for a specific conversation
+    // Get messages for a specific conversation (userIndex embedded in response)
     if (sessionId) {
       const tail = req.nextUrl.searchParams.get('tail') || '200';
       const sinceId = req.nextUrl.searchParams.get('sinceId');
@@ -23,6 +17,7 @@ export async function GET(req: NextRequest) {
           sessionId,
           tail: Number(tail),
           includeRaw: true,
+          includeUserIndex: true,
           ...(sinceId != null && { sinceId: Number(sinceId) }),
           ...(includeLabels && { includeLabels: true }),
         }),
@@ -56,6 +51,25 @@ export async function GET(req: NextRequest) {
     if (source) args.source = source;
     const conversations = await callTool('mission_conversation_list', args);
     return NextResponse.json(conversations);
+  } catch (err) {
+    return NextResponse.json({ error: String(err) }, { status: 502 });
+  }
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const { action, sessionId, label, value } = body;
+
+    if (action === 'set_label' && sessionId && label) {
+      const result = await callTool('mission_conversation_set_label', { sessionId, label, value: value ?? '1' });
+      return NextResponse.json(result);
+    }
+    if (action === 'delete_label' && sessionId && label) {
+      const result = await callTool('mission_conversation_delete_label', { sessionId, label });
+      return NextResponse.json(result);
+    }
+    return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 502 });
   }

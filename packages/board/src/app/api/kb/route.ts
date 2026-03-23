@@ -3,7 +3,19 @@ import { callTool } from '@/lib/missiond';
 
 export async function GET(req: NextRequest) {
   try {
+    const query = req.nextUrl.searchParams.get('query');
     const category = req.nextUrl.searchParams.get('category') || undefined;
+
+    // Hybrid search via mission_kb_query
+    if (query) {
+      const limit = req.nextUrl.searchParams.get('limit') || '20';
+      const args: Record<string, unknown> = { action: 'search', query, limit: Number(limit) };
+      if (category) args.category = category;
+      const result = await callTool('mission_kb_query', args);
+      return NextResponse.json(result);
+    }
+
+    // List all entries
     const args: Record<string, unknown> = {};
     if (category) args.category = category;
     const entries = await callTool('mission_kb_list', args);
