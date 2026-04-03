@@ -243,7 +243,7 @@ impl SonnetBackend {
             return Err(anyhow!(
                 "Sonnet HTTP {}: {}",
                 status,
-                &body_text[..body_text.len().min(200)]
+                missiond_core::util::safe_byte_truncate(&body_text, 200)
             ));
         }
 

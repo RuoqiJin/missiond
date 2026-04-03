@@ -189,6 +189,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     alias = "include_user_index"
                 )]
                 include_user_index: Option<bool>,
+                #[serde(
+                    default,
+                    deserialize_with = "lenient::option_bool",
+                    alias = "include_turns"
+                )]
+                include_turns: Option<bool>,
             }
             let Args {
                 session_id,
@@ -197,6 +203,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 include_raw,
                 include_labels,
                 include_user_index,
+                include_turns,
             } = serde_json::from_value(args)?;
             let conv = state
                 .store
@@ -318,6 +325,30 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     .map(|(id, ts, preview)| serde_json::json!({ "id": id, "time": ts, "preview": preview }))
                     .collect();
                 result["userIndex"] = serde_json::json!(items);
+            }
+            // Embed conversation turns for turn splitter visualization
+            if include_turns.unwrap_or(false) {
+                let turns = state.store
+                    .get_turns_after(&session_id, -1)
+                    .await
+                    .unwrap_or_default();
+                let items: Vec<Value> = turns.iter()
+                    .map(|t| serde_json::json!({
+                        "turnIdx": t.turn_idx,
+                        "startMessageId": t.start_message_id,
+                        "endMessageId": t.end_message_id,
+                        "userContent": t.user_content,
+                        "toolNames": t.tool_names,
+                        "toolCallCount": t.tool_call_count,
+                        "messageCount": t.message_count,
+                        "hasCodeChange": t.has_code_change,
+                        "hasMcpCall": t.has_mcp_call,
+                        "startedAt": t.started_at,
+                        "endedAt": t.ended_at,
+                        "topic": t.topic,
+                    }))
+                    .collect();
+                result["turns"] = serde_json::json!(items);
             }
             Ok(ToolResult::json(&result))
         }

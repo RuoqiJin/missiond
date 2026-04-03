@@ -70,6 +70,21 @@ interface ConversationEvent {
   timestamp: string;
 }
 
+interface ConversationTurn {
+  turnIdx: number;
+  startMessageId: number;
+  endMessageId: number;
+  userContent: string | null;
+  toolNames: string | null;
+  toolCallCount: number;
+  messageCount: number;
+  hasCodeChange: boolean;
+  hasMcpCall: boolean;
+  startedAt: string | null;
+  endedAt: string | null;
+  topic: string | null;
+}
+
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const mins = Math.floor(diff / 60000);
@@ -127,11 +142,13 @@ function groupByDay(
     arr.push(conv);
     groups.set(key, arr);
   }
-  return Array.from(groups.entries()).map(([dayKey, items]) => ({
-    dayKey,
-    label: getDayLabel(dayKey),
-    items,
-  }));
+  return Array.from(groups.entries())
+    .sort(([a], [b]) => b.localeCompare(a))
+    .map(([dayKey, items]) => ({
+      dayKey,
+      label: getDayLabel(dayKey),
+      items,
+    }));
 }
 
 const ROLE_CONFIG: Record<
@@ -891,6 +908,65 @@ function EventBubble({ event }: { event: ConversationEvent }) {
   );
 }
 
+/** Turn boundary separator — shows turn index, user content preview, tool stats */
+function TurnHeaderBubble({ turn }: { turn: ConversationTurn }) {
+  const tools = turn.toolNames?.split(",").filter(Boolean) || [];
+  const duration = turn.startedAt && turn.endedAt
+    ? ((new Date(turn.endedAt).getTime() - new Date(turn.startedAt).getTime()) / 1000)
+    : null;
+
+  return (
+    <div className="flex items-stretch gap-0 my-2">
+      {/* Left accent bar */}
+      <div className="w-1 rounded-l bg-cyan-500/60 flex-shrink-0" />
+      <div className="flex-1 border border-cyan-500/20 border-l-0 rounded-r bg-cyan-950/20 px-3 py-2">
+        {/* Top row: turn index + user content preview */}
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] font-bold text-cyan-400 flex-shrink-0">
+            Turn {turn.turnIdx}
+          </span>
+          {turn.topic && (
+            <span className="text-[11px] text-cyan-300/70 truncate max-w-[300px]">
+              {turn.topic}
+            </span>
+          )}
+          <span className="ml-auto text-[10px] text-neutral-600 flex-shrink-0">
+            {turn.messageCount} msgs
+            {turn.toolCallCount > 0 && ` · ${turn.toolCallCount} tools`}
+            {duration != null && ` · ${duration >= 60 ? `${(duration / 60).toFixed(1)}m` : `${duration.toFixed(0)}s`}`}
+          </span>
+        </div>
+        {/* User content preview */}
+        {turn.userContent && (
+          <p className="text-[11px] text-neutral-400 mt-1 truncate max-w-full">
+            👤 {turn.userContent.slice(0, 120)}{turn.userContent.length > 120 ? "..." : ""}
+          </p>
+        )}
+        {/* Bottom row: tool badges + flags */}
+        {(tools.length > 0 || turn.hasCodeChange || turn.hasMcpCall) && (
+          <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+            {tools.map((t, i) => (
+              <span key={i} className="text-[9px] px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-500 font-mono">
+                {t}
+              </span>
+            ))}
+            {turn.hasCodeChange && (
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 font-mono">
+                code-change
+              </span>
+            )}
+            {turn.hasMcpCall && (
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-400 font-mono">
+                mcp
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ConversationListItem({
   conv,
   active,
@@ -1178,6 +1254,7 @@ export function Conversations() {
     });
   }, []);
   const [userIndex, setUserIndex] = useState<{ id: number; time: string; preview: string }[]>([]);
+  const [turns, setTurns] = useState<ConversationTurn[]>([]);
   const [hasMore, setHasMore] = useState(false); // whether more messages exist beyond loaded window
   const [loadingMore, setLoadingMore] = useState(false);
   // Scroll position persistence refs
@@ -1299,6 +1376,7 @@ export function Conversations() {
           setJsonlPath(data.conversation?.jsonlPath || null);
           setLabelsMap(data.labels || {});
           setUserIndex(data.userIndex || []);
+          setTurns(data.turns || []);
           setHasMore(msgs.length >= PAGE_SIZE);
         }
       } catch {
@@ -1306,6 +1384,7 @@ export function Conversations() {
         setEvents([]);
         setJsonlPath(null);
         setLabelsMap({});
+        setTurns([]);
         setHasMore(false);
       }
       setLoadingMessages(false);
@@ -1400,6 +1479,7 @@ export function Conversations() {
     | { type: "date-header"; date: string }
     | { type: "message"; data: ConversationMessage }
     | { type: "event"; data: ConversationEvent }
+    | { type: "turn-header"; turn: ConversationTurn }
     | {
         type: "tool-pair";
         call: ConversationMessage;
@@ -1424,6 +1504,12 @@ export function Conversations() {
         return false;
       return new Date(e.timestamp).getTime() >= earliestMsg;
     });
+
+    // Build a map: startMessageId → turn (for inserting turn headers)
+    const turnByStartMsg = new Map<number, ConversationTurn>();
+    for (const t of turns) {
+      turnByStartMsg.set(t.startMessageId, t);
+    }
 
     // Sort messages + events by timestamp
     type SortedItem =
@@ -1450,6 +1536,14 @@ export function Conversations() {
         flat.push({ type: "date-header", date });
       }
 
+      // Insert turn-header before the turn's start message
+      if (item.type === "message") {
+        const turn = turnByStartMsg.get(item.data.id);
+        if (turn) {
+          flat.push({ type: "turn-header", turn });
+        }
+      }
+
       // Check for tool_use(assistant) + tool_result pair
       if (
         item.type === "message" &&
@@ -1467,7 +1561,7 @@ export function Conversations() {
       i++;
     }
     return flat;
-  }, [messages, events]);
+  }, [messages, events, turns]);
 
   const virtuosoRef = useRef<VirtuosoHandle>(null);
 
@@ -2290,16 +2384,29 @@ export function Conversations() {
               ) : (
                 <>
                   {/* Event stats summary */}
-                  {events.length > 0 && (
+                  {(events.length > 0 || turns.length > 0) && (
                     <div className="flex items-center gap-3 px-1 py-1.5 mb-2 text-[10px] text-neutral-600 border border-neutral-800/50 rounded">
                       <Layers className="w-3 h-3" />
-                      <span>{events.length} 系统事件</span>
+                      {events.length > 0 && <span>{events.length} 系统事件</span>}
+                      {turns.length > 0 && (
+                        <span className="text-cyan-500/70">
+                          {turns.length} turns (S3分割)
+                          {(() => {
+                            const codeChanges = turns.filter(t => t.hasCodeChange).length;
+                            const mcpCalls = turns.filter(t => t.hasMcpCall).length;
+                            const parts: string[] = [];
+                            if (codeChanges > 0) parts.push(`${codeChanges} 含代码修改`);
+                            if (mcpCalls > 0) parts.push(`${mcpCalls} 含MCP`);
+                            return parts.length > 0 ? ` · ${parts.join(" · ")}` : "";
+                          })()}
+                        </span>
+                      )}
                       {(() => {
-                        const turns = events.filter(
+                        const turnEvents = events.filter(
                           (e) => e.eventType === "turn_duration",
                         );
-                        if (turns.length === 0) return null;
-                        const totalMs = turns.reduce(
+                        if (turnEvents.length === 0) return null;
+                        const totalMs = turnEvents.reduce(
                           (sum, e) =>
                             sum +
                             (parseInt(e.content?.replace("ms", "") || "0") ||
@@ -2308,7 +2415,7 @@ export function Conversations() {
                         );
                         return (
                           <span>
-                            {turns.length} turns, 总计{" "}
+                            {turnEvents.length} turn_duration, 总计{" "}
                             {(totalMs / 1000).toFixed(1)}s
                           </span>
                         );
@@ -2415,6 +2522,9 @@ export function Conversations() {
                             }
                           />
                         );
+                      }
+                      if (item.type === "turn-header") {
+                        return <TurnHeaderBubble turn={item.turn} />;
                       }
                       return <EventBubble event={item.data} />;
                     }}

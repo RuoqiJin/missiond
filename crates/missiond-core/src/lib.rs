@@ -21,6 +21,7 @@ pub mod semantic;
 pub mod skill;
 pub mod sync;
 pub mod types;
+pub mod util;
 pub mod ws;
 
 // Re-export core management types

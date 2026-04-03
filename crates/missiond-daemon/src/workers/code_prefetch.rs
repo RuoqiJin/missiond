@@ -205,7 +205,7 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
     if fts_ranked.is_empty() && vec_ranked.is_empty() {
         debug!(
             "Code prefetch: no FTS or vector results for query {:?}",
-            &query[..query.len().min(60)]
+            missiond_core::util::safe_byte_truncate(query, 60)
         );
         return None;
     }
@@ -235,7 +235,7 @@ async fn code_prefetch_inner(state: &AppState, query: &str) -> Option<String> {
     if rrf_scored.is_empty() {
         debug!(
             "Code prefetch: all results below RRF threshold for query {:?}",
-            &query[..query.len().min(60)]
+            missiond_core::util::safe_byte_truncate(query, 60)
         );
         return None;
     }

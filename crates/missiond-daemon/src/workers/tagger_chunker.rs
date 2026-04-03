@@ -361,7 +361,7 @@ fn collect_noise_labels(messages: &[ConversationMessage]) -> Vec<(i64, String, S
 
 /// Quick heuristic: high ratio of non-printable chars in first 500 bytes suggests binary/base64.
 fn is_binary_like(content: &str) -> bool {
-    let sample = &content[..content.len().min(500)];
+    let sample = missiond_core::util::safe_byte_truncate(content, 500);
     if sample.is_empty() {
         return false;
     }

@@ -246,7 +246,7 @@ fn truncate_at_boundary(text: &str, max_chars: usize) -> String {
         }
     }
     // No good boundary — hard truncate
-    format!("{}...", &window[..window.len().min(max_chars - 3)])
+    format!("{}...", missiond_core::util::safe_byte_truncate(&window, max_chars.saturating_sub(3)))
 }
 
 pub(crate) struct BriefingWorker;
