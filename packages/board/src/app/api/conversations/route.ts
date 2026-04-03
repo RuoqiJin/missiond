@@ -18,6 +18,7 @@ export async function GET(req: NextRequest) {
           tail: Number(tail),
           includeRaw: true,
           includeUserIndex: true,
+          includeTurns: true,
           ...(sinceId != null && { sinceId: Number(sinceId) }),
           ...(includeLabels && { includeLabels: true }),
         }),

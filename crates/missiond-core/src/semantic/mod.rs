@@ -7,6 +7,7 @@ mod confirm;
 pub mod fingerprint;
 mod gemini_state;
 pub mod patterns;
+pub mod pure_parsing;
 mod state;
 mod status;
 mod title;

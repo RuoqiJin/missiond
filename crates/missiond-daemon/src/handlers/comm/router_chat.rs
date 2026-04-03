@@ -568,7 +568,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             if has_files && (finish_reason == "length" || finish_reason == "max_tokens") {
                 return Err(anyhow!(
                     "输出被截断（finish_reason={}，max_tokens={}）。附件模式下不允许截断。\n请增大 max_tokens 或简化 prompt 后重试。\n\n--- 部分响应 ---\n{}",
-                    finish_reason, max_tokens, &content[..content.len().min(500)]
+                    finish_reason, max_tokens, missiond_core::util::safe_byte_truncate(&content, 500)
                 ));
             }
 

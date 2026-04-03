@@ -144,7 +144,8 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         | "mission_gemini_trace"
         | "mission_gemini_stats"
         | "mission_gemini_content"
-        | "mission_gemini_watch" => misc::handle(state, name, args).await,
+        | "mission_gemini_watch"
+        | "mission_code_map_graph" => misc::handle(state, name, args).await,
 
         // ===== xjp proxy =====
         _ if name.starts_with("xjp_") => match state.xjp_mcp.call_tool(name, args).await {
