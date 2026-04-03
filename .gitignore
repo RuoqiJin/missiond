@@ -38,6 +38,9 @@ dist/
 兼容 node.md
 docs/designs/
 
+# Temp media/audio files
+*_temp/
+
 # Misc
 *.md.bak
 .fastembed_cache/
