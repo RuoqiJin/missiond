@@ -123,6 +123,7 @@ pub(crate) fn spawn_intent_consumer(
 }
 
 /// Startup backfill: process completed sessions that have turns but no intents.
+#[allow(dead_code)]
 pub(crate) async fn intent_startup_backfill(state: &AppState) {
     if !state.intent_analyst_enabled {
         return;
