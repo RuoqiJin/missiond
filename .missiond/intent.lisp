@@ -16,6 +16,8 @@
 ;; ============================================================
 
 (intent missiond
+  (granularity L3-Implementation)
+  (governance-mode cartography)
   (generated-at 2026-04-02T00:00:00Z)
   (survey-phase 1)
 
