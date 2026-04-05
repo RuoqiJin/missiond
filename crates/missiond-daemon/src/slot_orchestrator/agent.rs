@@ -129,6 +129,7 @@ impl AgentSlotManager {
     }
 
     /// Check if a task type is registered.
+    #[allow(dead_code)]
     pub fn is_registered(&self, task_type: &str) -> bool {
         self.registry
             .try_read()
@@ -137,6 +138,7 @@ impl AgentSlotManager {
     }
 
     /// Get all engine statuses.
+    #[allow(dead_code)]
     pub async fn all_status(&self) -> Vec<EngineStatus> {
         let mut statuses = Vec::new();
         for mgr in self.managers.values() {

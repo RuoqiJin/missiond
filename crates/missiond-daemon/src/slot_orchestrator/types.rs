@@ -57,6 +57,7 @@ impl SlotTaskRequest {
 
 /// Health/queue status for an engine sub-manager.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct EngineStatus {
     pub engine: CliEngine,
     pub persistent_slots: usize,
@@ -66,6 +67,7 @@ pub struct EngineStatus {
 
 /// Engine sub-manager trait. Implemented by ClaudeCodeSlotManager and GeminiCliSlotManager.
 #[async_trait]
+#[allow(dead_code)]
 pub trait EngineSlotManager: Send + Sync {
     fn engine_type(&self) -> CliEngine;
 
