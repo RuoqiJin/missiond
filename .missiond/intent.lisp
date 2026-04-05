@@ -1014,23 +1014,227 @@
          (claude-md-sync    "sync preferences to ~/.claude/CLAUDE.md")
          (topology-infer    "infer cross-slot relationships")))
 
-    ;; --- GAP 6: Semantic Parser ---
+    ;; --- CARTOGRAPHY 6: Semantic Parser ---
+    ;; Pattern: trait-polymorphic-recognizer-pipeline
+    ;; A multi-layer parser/recognizer that transforms raw PTY screen lines
+    ;; into structured states with confidence scores. NOT a state machine —
+    ;; it FEEDS state machines. All parsers share Arc<CompiledPatterns> loaded
+    ;; from external YAML with hot-reload, making regex updates zero-recompile.
     (component semantic-parser
-      :pattern-gap "semantic-parser"
-      :certainty 0
+      :pattern "trait-polymorphic-recognizer-pipeline"
+      :certainty 92
       :target "missiond-core/src/semantic/"
       :files (types.rs state.rs confirm.rs tool.rs
               fingerprint.rs patterns.rs gemini_state.rs)
-      :description "Terminal output pattern matching and state inference.
-        Parses raw PTY screen lines into structured states using regex
-        fingerprints. Not a state-machine (it FEEDS state machines).
-        It is a parser/recognizer pattern."
-      :sub-patterns
-        ((screen-parser    "line-by-line terminal output analysis")
-         (fingerprint-db   "regex pattern database for state detection")
-         (confirm-parser   "permission dialog structure extraction")
-         (tool-recognizer  "tool invocation output parsing")
-         (multi-engine     "per-engine parser variants (Claude/Gemini)")))
+
+      (pattern trait-polymorphic-recognizer-pipeline
+        :description "Strategy-pattern parsers with external regex config,
+          confidence-scored outputs, and per-engine polymorphism."
+        :key-insight "Every detection returns Option<(State, f64)> — confidence
+          scoring allows priority-cascade composition without hard coupling."
+
+        ;; --- Layer 1: Type Contracts ---
+        (layer type-contracts
+          :file "types.rs"
+          :description "Rich ADT system defining the parser interface surface."
+          (enum State
+            :variants (Starting Idle SlashMenu Thinking Responding
+                       ToolRunning Confirming Error)
+            :role "Terminal state universe — 8 discrete states detected
+              from raw screen content.")
+          (trait StateParser
+            :methods (meta detect_state)
+            :signature "detect_state(&self, &ParserContext) -> Option<StateDetectionResult>"
+            :role "Core recognition contract: context in, scored state out.")
+          (trait ConfirmParser
+            :methods (meta detect_confirm format_response)
+            :role "Bidirectional: parse dialog structure AND format responses.")
+          (trait ToolOutputParser
+            :methods (meta can_parse parse)
+            :role "Two-phase: fast can_parse gate, then full extraction.")
+          (trait TitleParser
+            :methods (meta can_parse parse)
+            :role "Terminal title bar parsing (spinner + task name).")
+          (trait StatusParser
+            :methods (meta can_parse parse)
+            :role "Status bar parsing (phase + interruptibility).")
+          (struct ParserContext
+            :fields (last_lines current_state full_content)
+            :helpers (text bottom_lines bottom_text last_non_empty_lines)
+            :role "Unified input: last N screen lines with position helpers.
+              last_non_empty_lines(N) handles mid-screen prompts with
+              trailing blank lines.")
+          (struct StateDetectionResult
+            :fields (state confidence meta)
+            :role "Scored output with optional metadata (confirm_type,
+              needs_trust_confirm)."))
+
+        ;; --- Layer 2: External Pattern Config ---
+        (layer pattern-config
+          :file "patterns.rs"
+          :description "YAML-to-compiled-regex pipeline with hot-reload.
+            Decouples all regex from Rust source — pattern updates are
+            zero-recompile via pty-patterns/{engine}.yaml files."
+          (struct EnginePatternFile
+            :sections (spinner prompt status_bar confirm tool_output
+                       state anchors box_drawing thinking error
+                       footer tool_exec placeholder)
+            :role "YAML schema — per-engine pattern definitions.
+              Gemini sections (box_drawing, thinking, etc.) are Option<T>,
+              only present for gemini-cli.yaml.")
+          (struct CompiledPatterns
+            :fields (raw regexes spinner_chars known_tools anchors)
+            :compile-pipeline "YAML str → EnginePatternFile (serde) →
+              CompiledPatterns::compile() → HashMap<String, Regex>"
+            :placeholder-expansion "{spinner_chars} → escaped char class"
+            :accessors (regex is_spinner_char is_known_tool
+                        phase_skip_words phase_keywords
+                        bottom_bar_ignore error_marker
+                        cancel_marker ask_user_marker check_anchors))
+          (struct PatternConfig
+            :role "Global registry: CliEngine → Arc<CompiledPatterns>."
+            :hot-reload "maybe_reload() checks file mtime, recompiles on change."
+            :auto-create "Creates default YAML from embedded const strings
+              if pattern files missing on disk.")
+          (global GLOBAL_PATTERNS
+            :type "Lazy<Arc<RwLock<PatternConfig>>>"
+            :role "Process-wide singleton, lock-free reads via Arc clone."))
+
+        ;; --- Layer 3: Fingerprint Registry ---
+        (layer fingerprint-registry
+          :file "fingerprint.rs"
+          :description "Categorized pattern database for batch extraction.
+            Pre-built fingerprints from CompiledPatterns, organized by
+            category with priority sorting."
+          (struct FingerprintRegistry
+            :index "HashMap<String, Fingerprint> + by_category index"
+            :operations (register get get_by_category extract clear)
+            :role "Pattern store with category-indexed lookup.")
+          (struct Fingerprint
+            :fields (id fingerprint_type category pattern confidence
+                     priority source)
+            :pattern-types (Regex String Enum Marker)
+            :categories (Spinner Statusbar Prompt Separator Assistant
+                         Tool Error Confirm))
+          (fn extract
+            :signature "(&self, &ParserContext) -> FingerprintResult"
+            :output-hints (has_spinner has_prompt has_tool_output
+                           has_confirm_dialog has_error)
+            :role "Batch-match all fingerprints against context,
+              produce FingerprintHints for fast state pre-screening.")
+          (factory claude_code_fingerprints_from
+            :input "CompiledPatterns"
+            :output "Vec<Fingerprint> — 18 fingerprints across 7 categories"
+            :role "Bridges compiled YAML patterns into typed fingerprints."))
+
+        ;; --- Layer 4: Claude Code State Parser ---
+        (layer claude-code-state-parser
+          :file "state.rs"
+          :description "Priority-cascade state detector for Claude Code TUI.
+            Core detection engine with deep knowledge of Claude Code's
+            screen layout (content → separator → prompt → separator → bottom bar)."
+          (struct ClaudeCodeStateParser
+            :implements "StateParser"
+            :shared-state "Arc<CompiledPatterns>"
+            :detection-cascade
+              (0 "trust-dialog: Starting state + 'Yes, proceed/trust' + Enter"
+               1 "confirm-dialog: option_trigger or yes_no pattern + cancel marker"
+               2 "idle/slash-menu: no ACTIVE spinner + prompt or menu items"
+               3 "processing: active spinner → phase-hint or tool-call fallback"
+               4 "responding: no spinner, no prompt, but ⏺ output blocks"
+               5 "error: ✖ prefix (Claude Code's own, not compiler output)")
+            :key-distinction
+              "active-vs-completion-spinner: ellipsis (…) = active processing,
+               no ellipsis ('Baked for 7m 11s') = stale completion display.
+               Bottom bar 'esc to interrupt' is PERMANENT — never a state signal."
+            :phase-hint-extraction
+              "Parses last (...) in spinner line: 'thinking' → Thinking,
+               'tool'/'running' → ToolRunning. Phase hint overrides historical
+               ⏺ tool call lines in scroll buffer."
+            :slash-menu-detection
+              "Prompt with / typed + ≥2 menu items (/command-name lines)."))
+
+        ;; --- Layer 5: Confirm Parser ---
+        (layer confirm-parser
+          :file "confirm.rs"
+          :description "Permission dialog parser with response formatting.
+            Bidirectional: parses dialog structure AND generates terminal
+            input sequences (ANSI escape codes) for automated responses."
+          (struct ClaudeCodeConfirmParser
+            :implements "ConfirmParser"
+            :dialog-styles
+              (options "numbered 1. 2. 3. with ❯ selector + Esc to cancel"
+               yes-no  "[Y/n] or (yes/no) prompt")
+            :tool-info-extraction
+              (mcp-format   "server-name - tool_name(key: \"value\") (MCP)"
+               skill-format "Use skill \"skill-name\""
+               builtin-type "Read file / Bash command"
+               builtin-call "Read(...) / Grep(...)")
+            :response-formatting
+              (confirm "\\r (Enter)"
+               deny-options "\\x1b[B\\x1b[B\\r (Down Down Enter)"
+               deny-yesno "n\\r"
+               select "N-1 × \\x1b[B + \\r (arrow navigation)"
+               input "value\\r (type + Enter)")))
+
+        ;; --- Layer 6: Tool Output Parser ---
+        (layer tool-output-parser
+          :file "tool.rs"
+          :description "Tool invocation output extraction from Claude Code's
+            box-draw and inline display formats."
+          (struct ClaudeCodeToolOutputParser
+            :implements "ToolOutputParser"
+            :tool-styles
+              (box    "⏺ ToolName + │ key: value param lines"
+               inline "⏺ ToolName(args) + ⎿ output lines")
+            :output-fields (tool_name params output duration_ms status)
+            :confidence-scoring
+              "known-tool → 0.95, unknown-tool → 0.80"
+            :duration-to-status
+              "duration_ms present → Completed, absent → Running"
+            :arg-parsing
+              "quote-aware comma splitting, Bash special-case (raw command)."))
+
+        ;; --- Layer 7: Gemini Engine Variant ---
+        (layer gemini-state-parser
+          :file "gemini_state.rs"
+          :description "State parser for Gemini CLI's React Ink TUI.
+            Same StateParser trait, different detection strategy."
+          (struct GeminiCliStateParser
+            :implements "StateParser"
+            :tui-differences
+              (box-drawing "╭╮╰╯│─ sanitized to spaces before analysis"
+               spinners    "braille set ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ (not Unicode stars)"
+               layout      "bottom-up scan: Footer → Input → Loading → Messages"
+               placeholder "Type your message or @path/to/file → Idle signal"
+               footer      "/model gemini-3.1-pro → engine presence anchor")
+            :detection-cascade
+              (0 "error: error pattern + no spinner"
+               1 "thinking: spinner + thinking keywords"
+               2 "responding: spinner without thinking text"
+               3 "tool-running: tool_exec pattern with/without spinner"
+               4 "idle: prompt visible, no spinner"
+               5 "idle-placeholder: placeholder text, no spinner"
+               6 "idle-transitional: footer only, low confidence 0.5")))
+
+        ;; --- Cross-cutting Concerns ---
+        (cross-cutting
+          (shared-pattern-ownership
+            "All parsers receive Arc<CompiledPatterns> — single compiled
+             regex set shared lock-free across state/confirm/tool/fingerprint.")
+          (dual-construction
+            "Every parser: ::new() (embedded defaults) and
+             ::with_patterns(Arc<CompiledPatterns>) (injected config).
+             Tests use ::new(), production uses with_patterns() from
+             hot-reloadable PatternConfig.")
+          (engine-dispatch
+            "CliEngine enum (ClaudeCode | Gemini) selects YAML file,
+             CompiledPatterns, and parser struct. Adding a new CLI engine:
+             1. New YAML, 2. New StateParser impl, 3. Register in PatternConfig.")
+          (confidence-composition
+            "Fingerprint confidence (0.85-0.95) feeds FingerprintHints,
+             state parser confidence (0.5-0.95) feeds state machine debounce.
+             Low confidence = keep current state, high = transition."))))
 
     ;; --- GAP 7: Event Bus / Timeline ---
     (component event-infrastructure
