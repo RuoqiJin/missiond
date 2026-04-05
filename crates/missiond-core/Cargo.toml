@@ -91,6 +91,11 @@ tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 tempfile = "3.14"
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "split_args"
+harness = false
 
 [lints]
 workspace = true
