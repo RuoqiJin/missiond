@@ -19,41 +19,53 @@ impl SemanticParsing for SemanticParsingImpl {
     }
 
     /// State-machine split: tracks quote depth to avoid splitting inside quotes.
+    ///
+    /// Optimized: byte-level iteration (all delimiters are ASCII), slice-based
+    /// segment tracking avoids accumulating into an intermediate String buffer.
     fn split_args(input: &str) -> Vec<String> {
-        let mut parts = Vec::new();
-        let mut current = String::new();
-        let mut in_quotes = false;
-        let mut escape_next = false;
-
-        for c in input.chars() {
-            if escape_next {
-                current.push(c);
-                escape_next = false;
-                continue;
-            }
-            match c {
-                '\\' => {
-                    current.push(c);
-                    escape_next = true;
-                }
-                '"' => {
-                    current.push(c);
-                    in_quotes = !in_quotes;
-                }
-                ',' if !in_quotes => {
-                    let trimmed = current.trim().to_string();
-                    if !trimmed.is_empty() {
-                        parts.push(trimmed);
-                    }
-                    current.clear();
-                }
-                _ => current.push(c),
-            }
+        if input.is_empty() {
+            return Vec::new();
         }
 
-        let trimmed = current.trim().to_string();
+        // Pre-count commas for Vec capacity — avoids reallocation on push.
+        // Single byte scan; comma is 0x2C (ASCII), safe to count in raw bytes.
+        let comma_count = input.bytes().filter(|&b| b == b',').count();
+        let mut parts = Vec::with_capacity(comma_count + 1);
+
+        let bytes = input.as_bytes();
+        let len = bytes.len();
+        let mut start = 0usize; // byte offset of current segment start
+        let mut in_quotes = false;
+        let mut escape_next = false;
+        let mut i = 0usize;
+
+        while i < len {
+            if escape_next {
+                escape_next = false;
+                i += 1;
+                continue;
+            }
+
+            match bytes[i] {
+                b'\\' => escape_next = true,
+                b'"' => in_quotes = !in_quotes,
+                b',' if !in_quotes => {
+                    // `i` is at an ASCII byte — always a valid UTF-8 boundary.
+                    let trimmed = input[start..i].trim();
+                    if !trimmed.is_empty() {
+                        parts.push(trimmed.to_string());
+                    }
+                    start = i + 1;
+                }
+                _ => {}
+            }
+
+            i += 1;
+        }
+
+        let trimmed = input[start..].trim();
         if !trimmed.is_empty() {
-            parts.push(trimmed);
+            parts.push(trimmed.to_string());
         }
         parts
     }

@@ -3,6 +3,7 @@
 //! Run: cargo bench --bench split_args -p missiond-core
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use missiond_core::semantic::pure_parsing::{SemanticParsing, SemanticParsingImpl};
 
 /// Copy of the production split_args for benchmarking.
 /// The AI's task is to optimize the ORIGINAL in custom.rs —
@@ -76,5 +77,35 @@ fn bench_split_args(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_split_args);
+fn bench_split_args_optimized(c: &mut Criterion) {
+    // Simple case
+    c.bench_function("opt_split_args_simple", |b| {
+        b.iter(|| SemanticParsingImpl::split_args(black_box("arg1, arg2, arg3")))
+    });
+
+    // Quoted args
+    c.bench_function("opt_split_args_quoted", |b| {
+        b.iter(|| SemanticParsingImpl::split_args(black_box(r#"key: "hello, world", other: "foo""#)))
+    });
+
+    // Many args
+    let many_args = (0..50)
+        .map(|i| format!("arg{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    c.bench_function("opt_split_args_50", |b| {
+        b.iter(|| SemanticParsingImpl::split_args(black_box(&many_args)))
+    });
+
+    // Complex with escapes
+    c.bench_function("opt_split_args_complex", |b| {
+        b.iter(|| {
+            SemanticParsingImpl::split_args(black_box(
+                r#"path: "/tmp/foo bar/baz", cmd: "echo \"hello\"", flag: true, count: 42"#,
+            ))
+        })
+    });
+}
+
+criterion_group!(benches, bench_split_args, bench_split_args_optimized);
 criterion_main!(benches);
