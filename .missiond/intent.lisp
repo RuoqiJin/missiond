@@ -50,6 +50,17 @@
       (slot-lifecycle    "slot_manager is authority")
       (knowledge-truth   "PostgreSQL KB table is authority")))
 
+  ;; ── UPSTREAM DEPENDENCIES (for Universe Graph) ──
+  (upstream-dependency
+    (service "forge"
+      :consumes ("forge-build-cli" "generated-rs-output" "generation-gap-pattern")
+      :breaks-if ("codegen-pattern-change" "ir-whitelist-change")))
+
+  (upstream-dependency
+    (service "mechanic"
+      :consumes ("mechanic-repair-cli" "governance-mode-repair")
+      :breaks-if ("repair-cli-interface-change" "governance-mode-change")))
+
   ;; ============================================================
   ;; PILLAR 1: DATA LAYER (missiond-core/db/)
   ;; Pattern: [P1] crud-gateway

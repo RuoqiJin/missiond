@@ -411,6 +411,21 @@ pub(crate) enum DaemonEvent {
         trigger_reason: String, // "user_stuck" | "direction_shift" | "scope_creep"
         summary: String,
     },
+
+    // ===== Cascade Controller =====
+    /// A cascade repair was triggered (before execution).
+    CascadeTriggered {
+        service: String,
+        changed: Vec<String>,
+    },
+    /// A cascade repair completed (after execution).
+    CascadeCompleted {
+        service: String,
+        services_repaired: usize,
+        services_failed: usize,
+        hard_halted: bool,
+        duration_ms: u128,
+    },
 }
 
 /// How a conversation session ended.
@@ -481,6 +496,8 @@ impl DaemonEvent {
             Self::TurnExtracted { .. } => "turn_extracted",
             Self::IntentAnalyzed { .. } => "intent_analyzed",
             Self::JarvisProactivePush { .. } => "jarvis_proactive_push",
+            Self::CascadeTriggered { .. } => "cascade_triggered",
+            Self::CascadeCompleted { .. } => "cascade_completed",
         }
     }
 
@@ -912,6 +929,18 @@ impl DaemonEvent {
                 summary,
             } => {
                 json!({ "conversation_id": conversation_id, "trigger_reason": trigger_reason, "summary": summary })
+            }
+            Self::CascadeTriggered { service, changed } => {
+                json!({ "service": service, "changed": changed, "action": "triggered" })
+            }
+            Self::CascadeCompleted {
+                service,
+                services_repaired,
+                services_failed,
+                hard_halted,
+                duration_ms,
+            } => {
+                json!({ "service": service, "services_repaired": services_repaired, "services_failed": services_failed, "hard_halted": hard_halted, "duration_ms": duration_ms, "action": "completed" })
             }
         }
     }
