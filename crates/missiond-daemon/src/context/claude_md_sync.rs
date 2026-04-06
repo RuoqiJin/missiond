@@ -7,7 +7,16 @@ const MANAGED_END: &str = "<!-- missiond:managed:end -->";
 
 /// Sync KB preferences + strategic context + hot topics into ~/.claude/CLAUDE.md managed section.
 /// Only writes when content actually changes (hash-based detection).
+/// Respects Strategy domain pause — `mission_control pause domain strategy` stops sync.
 pub(crate) async fn sync_claude_md(state: &AppState) {
+    if state
+        .control_manager
+        .current()
+        .is_domain_paused(crate::control_tree::CtlDomain::Strategy)
+    {
+        return;
+    }
+
     let preferences = state
         .store
         .kb_list(Some("preference"))

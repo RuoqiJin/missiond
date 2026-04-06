@@ -84,8 +84,7 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     reap_idle_persistent_slots(state).await;
 
     // ControlTree is the single source of truth for pause state.
-    // TTL auto-resume: domains paused > 2 hours are automatically resumed.
-    state.control_manager.check_domain_ttl_auto_resume();
+    // Domain pause is permanent until user explicitly resumes.
 
     let tree = state.control_manager.current();
     let memory_paused = tree.is_domain_paused(crate::control_tree::CtlDomain::Memory);

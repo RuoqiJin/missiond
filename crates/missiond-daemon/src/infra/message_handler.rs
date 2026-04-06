@@ -191,11 +191,13 @@ async fn ingest(
         };
 
         // Semantic role mapping (will be stored as label in Layer 2)
+        // In automated slot sessions, "user" role messages are system-injected task prompts,
+        // not human input. Interactive sessions (chat/jarvis/user) keep original roles.
         let semantic_role = if is_tool_result {
             Some("tool_result".to_string())
         } else if is_thinking {
             Some("thinking".to_string())
-        } else if msg.message.role == "user" && is_slot_session && conversation_type != "jarvis" {
+        } else if msg.message.role == "user" && is_slot_session && !is_interactive_conversation(conversation_type) {
             Some("system".to_string())
         } else if msg.message.role == "user"
             && parent_session_id.is_some()
@@ -429,6 +431,13 @@ async fn apply_rule_labels(state: &AppState, inserted_ids: &[i64], semantic_role
             }
         }
     }
+}
+
+/// Interactive conversation types where "user" role messages are real human input.
+/// Automated slot sessions (worker, topology, executor, etc.) have their "user" messages
+/// remapped to "system" because those are MissionD's internal task prompts.
+fn is_interactive_conversation(conversation_type: &str) -> bool {
+    matches!(conversation_type, "chat" | "jarvis" | "user")
 }
 
 /// Extract Gemini channel from raw_content JSON (tool_use input).
