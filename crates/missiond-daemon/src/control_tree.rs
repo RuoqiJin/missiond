@@ -133,9 +133,12 @@ impl ControlTree {
         self.global_paused || self.domains.get(&d).copied().unwrap_or(false)
     }
 
-    /// Check if a specific worker is paused (direct, not cascade).
+    /// Check if a specific worker is paused (worker override > global).
     pub fn is_worker_paused(&self, name: &str) -> bool {
-        self.global_paused || self.workers.get(name).copied().unwrap_or(false)
+        match self.workers.get(name) {
+            Some(&paused) => paused,
+            None => self.global_paused,
+        }
     }
 
     /// Check if a slot role is paused.
@@ -144,13 +147,21 @@ impl ControlTree {
     }
 
     /// Cascade evaluation: is this worker effectively paused given its dependencies?
+    ///
+    /// Priority: worker explicit override > global > provider/domain cascade.
+    /// - `workers[name] = true`  → force paused (overrides everything)
+    /// - `workers[name] = false` → force resumed (overrides global, useful for debugging)
+    /// - `workers[name]` absent  → follow cascade: global → provider → domain
     pub fn is_effectively_paused(&self, worker_name: &str, deps: &[Dependency]) -> bool {
+        // Worker-level explicit override has highest priority
+        if let Some(&paused) = self.workers.get(worker_name) {
+            return paused;
+        }
+        // Global kill switch
         if self.global_paused {
             return true;
         }
-        if self.workers.get(worker_name).copied().unwrap_or(false) {
-            return true;
-        }
+        // Provider/domain cascade
         for dep in deps {
             match dep {
                 Dependency::Provider(p) => {
@@ -188,8 +199,12 @@ impl ControlTree {
                 .filter(|(_, &v)| v)
                 .map(|(k, _)| k.as_str())
                 .collect::<Vec<_>>(),
-            "workers": self.workers.iter()
+            "workers_paused": self.workers.iter()
                 .filter(|(_, &v)| v)
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>(),
+            "workers_force_resumed": self.workers.iter()
+                .filter(|(_, &v)| !v)
                 .map(|(k, _)| k.as_str())
                 .collect::<Vec<_>>(),
             "slot_roles": self.slot_roles.iter()
