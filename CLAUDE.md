@@ -1,6 +1,14 @@
-# MissionD — Semantic Role Architecture Fix
+# MissionD
 
-Fixing the semantic_role classification pipeline:
-1. `message_handler.rs:198` — overly broad user→system remap rule
-2. Clear polluted `message_labels` + `conversation_turns`
-3. Architectural hardening of the COALESCE override chain
+Local-first orchestration layer for Claude Code & MCP Agents.
+
+## Dev Setup
+
+```bash
+cargo build                    # Build all crates
+cargo test -p missiond-core    # Run core tests
+```
+
+## Architecture
+
+See `.missiond/intent.lisp` for the full system intent declaration and `docs/MODULE_CATALOG.md` for module reference.

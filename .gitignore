@@ -36,7 +36,27 @@ dist/
 分析.md
 历史记录.md
 兼容 node.md
+架构设计记录.md
+notebookLLM 接入.md
+gemini-audit-request.md
 docs/designs/
+docs/architectures/cuthub.yaml
+docs/architectures/xiaojinpro-backend.yaml
+docs/architectures/xjp-backend.yaml
+docs/audit/
+
+# One-off fix/migration scripts
+fix_*.py
+rewrite_sql.py
+update_tabs.py
+
+# Internal infra scripts
+scripts/vpn-gateway-setup.sh
+scripts/gemini-auth.sh
+scripts/backfill_labels.sql
+
+# Env files (business config)
+"$ENV_FILE"
 
 # Temp media/audio files
 *_temp/
