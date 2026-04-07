@@ -566,7 +566,7 @@ pub fn claude_code_fingerprints_from(compiled: &CompiledPatterns) -> Vec<Fingerp
 
 /// Legacy: create fingerprints with default embedded patterns
 pub fn claude_code_fingerprints() -> Vec<Fingerprint> {
-    let compiled = super::patterns::default_compiled(crate::types::CliEngine::ClaudeCode)
+    let compiled = super::patterns::default_compiled(missiond_shared::CliEngine::ClaudeCode)
         .expect("embedded claude-code patterns must parse");
     claude_code_fingerprints_from(&compiled)
 }

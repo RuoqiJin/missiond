@@ -34,7 +34,7 @@ impl GeminiCliStateParser {
     /// Create with default embedded patterns
     pub fn new() -> Self {
         let patterns = Arc::new(
-            super::patterns::default_compiled(crate::types::CliEngine::Gemini)
+            super::patterns::default_compiled(missiond_shared::CliEngine::Gemini)
                 .expect("embedded gemini-cli patterns must parse"),
         );
         Self::with_patterns(patterns)
