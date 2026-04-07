@@ -25,8 +25,6 @@ use crate::extraction::{
 };
 use crate::memory_scheduler::{dispatch_queued_submit_tasks, schedule_memory_tasks};
 use crate::state::{AppState, MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
-use crate::workers::gemini::strategy_worker;
-use crate::workers::sonnet::retro_worker;
 
 /// Exponential backoff for Lagged recovery: 100ms → 200ms → … → 2000ms cap.
 /// Adds ±25% jitter to avoid thundering herd.
@@ -471,14 +469,12 @@ fn spawn_session_reflection_consumer(
                     sessions = pending_sessions.len(),
                     "session_reflection: debounce fired, dispatching analysis"
                 );
+                // Signal BackgroundWorkers via Notify (they handle ControlTree checks internally)
+                s.strategy_notify.notify_one();
+                s.retro_notify.notify_one();
                 let sc = s.clone();
                 tokio::spawn(async move {
-                    // Gemini ARB: unified trigger — strategy + deep analysis + retro
-                    strategy_worker::run_pending_analysis(&sc).await;
                     check_deep_analysis(&sc).await;
-                    if let Err(e) = retro_worker::process_pending(&sc).await {
-                        tracing::warn!(error = %e, "session_reflection: retro analysis failed");
-                    }
                 });
                 pending_sessions.clear();
                 if *shutdown.borrow() {
@@ -592,14 +588,12 @@ async fn reconciliation_sweep(state: &AppState) {
     // Gemini ARB: realtime extraction (ConversationMessageLogged easily Lagged)
     check_realtime_extraction(state).await;
 
-    // Strategy + deep analysis: pending sessions
-    strategy_worker::run_pending_analysis(state).await;
-    check_deep_analysis(state).await;
+    // Strategy + retro: signal BackgroundWorkers via Notify
+    state.strategy_notify.notify_one();
+    state.retro_notify.notify_one();
 
-    // Retro: sessions needing retrospective
-    if let Err(e) = retro_worker::process_pending(state).await {
-        tracing::warn!(error = %e, "Sweeper: retro reconciliation failed");
-    }
+    // Deep analysis (not yet a BackgroundWorker)
+    check_deep_analysis(state).await;
 
     // KB consolidation: check if overdue
     check_kb_consolidation(state).await;

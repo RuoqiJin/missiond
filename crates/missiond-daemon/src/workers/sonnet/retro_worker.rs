@@ -4,12 +4,16 @@
 //! L2: MiniMax M2.5 full-coverage triage — structured findings/severity.
 //! High-severity sessions get Board tasks for manual deep-dive.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
 use crate::minimax_client::ChatMessage;
 use crate::state::AppState;
+
+use super::{BackgroundWorker, WorkerContext, WorkerKind};
 
 /// Poll interval (legacy, kept for backfill reference).
 #[allow(dead_code)]
@@ -366,5 +370,29 @@ async fn create_anomaly_board_task(
             info!(task_id = %task.id, session_id, "Retro worker: created anomaly Board task")
         }
         Err(e) => warn!(session_id, error = %e, "Retro worker: failed to create Board task"),
+    }
+}
+
+// ── BackgroundWorker wrapper ──────────────────────────────────────────
+
+pub(crate) struct RetroWorker {
+    pub notify: Arc<Notify>,
+}
+
+impl BackgroundWorker for RetroWorker {
+    const KIND: WorkerKind = WorkerKind::Sonnet;
+
+    fn name(&self) -> &'static str {
+        "retro_worker"
+    }
+
+    async fn run(self, state: Arc<AppState>, mut ctx: WorkerContext) {
+        loop {
+            self.notify.notified().await;
+            ctx.wait_if_paused().await;
+            if let Err(e) = process_pending(&state).await {
+                warn!(error = %e, "retro_worker: analysis failed");
+            }
+        }
     }
 }

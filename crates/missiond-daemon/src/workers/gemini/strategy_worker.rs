@@ -18,11 +18,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
+use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
 use crate::event_bus::DaemonEvent;
 use crate::state::AppState;
+
+use super::{BackgroundWorker, WorkerContext, WorkerKind};
 
 /// Analysis version — bump to re-analyze all sessions with a new schema.
 const STRATEGY_ANALYSIS_VERSION: i32 = 2; // v2: workspace-based agentic analysis
@@ -815,4 +818,26 @@ fn extract_json_from_response(content: &str) -> String {
 
     // Fallback: return as-is and let serde handle the error
     trimmed.to_string()
+}
+
+// ── BackgroundWorker wrapper ──────────────────────────────────────────
+
+pub(crate) struct StrategyWorker {
+    pub notify: Arc<Notify>,
+}
+
+impl BackgroundWorker for StrategyWorker {
+    const KIND: WorkerKind = WorkerKind::Gemini;
+
+    fn name(&self) -> &'static str {
+        "strategy_worker"
+    }
+
+    async fn run(self, state: Arc<AppState>, mut ctx: WorkerContext) {
+        loop {
+            self.notify.notified().await;
+            ctx.wait_if_paused().await;
+            run_pending_analysis(&state).await;
+        }
+    }
 }

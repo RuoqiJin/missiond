@@ -3,4 +3,5 @@
 
 pub(crate) mod strategy_worker;
 
-// No re-exports needed — strategy_worker is event-driven, not BackgroundWorker.
+// Re-exports so workers can use `super::BackgroundWorker` etc.
+pub(crate) use super::{BackgroundWorker, WorkerContext, WorkerKind};
