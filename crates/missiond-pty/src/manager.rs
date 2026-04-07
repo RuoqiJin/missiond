@@ -985,7 +985,9 @@ impl PTYManager {
         self.event_tx.subscribe()
     }
 
-    /// Shutdown all sessions
+    /// Shutdown all sessions concurrently.
+    /// Previous serial loop could exceed the outer timeout when multiple
+    /// sessions are slow to exit (each close() waits up to 3s).
     pub async fn shutdown(&self) {
         info!("Shutting down all PTY sessions...");
 
@@ -999,12 +1001,37 @@ impl PTYManager {
             sessions.keys().cloned().collect()
         };
 
-        // Kill all sessions
-        for slot_id in slot_ids {
-            if let Err(e) = self.kill(&slot_id).await {
-                error!(slot_id = %slot_id, error = %e, "Error killing PTY session");
+        // Kill all sessions concurrently: extract sessions first, then
+        // close them in parallel (each close() waits up to 3s for graceful exit).
+        let mut extracted = Vec::new();
+        {
+            let mut sessions = self.sessions.write().await;
+            for slot_id in &slot_ids {
+                if let Some(session) = sessions.remove(slot_id) {
+                    extracted.push((slot_id.clone(), session));
+                }
             }
         }
+
+        let agent_info = Arc::clone(&self.agent_info);
+        let mut set = tokio::task::JoinSet::new();
+        for (slot_id, session) in extracted {
+            let agent_info = Arc::clone(&agent_info);
+            set.spawn(async move {
+                let mut s = session.write().await;
+                if let Err(e) = s.close().await {
+                    error!(slot_id = %slot_id, error = %e, "Error closing PTY session");
+                }
+                // Update agent info
+                let mut info = agent_info.write().await;
+                if let Some(ai) = info.get_mut(&slot_id) {
+                    ai.state = SessionState::Exited;
+                    ai.pid = None;
+                }
+                info!(slot_id = %slot_id, "PTY session killed");
+            });
+        }
+        while set.join_next().await.is_some() {}
 
         info!("All PTY sessions shut down");
     }
