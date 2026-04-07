@@ -40,7 +40,7 @@ impl ClaudeCodeStatusParser {
     /// Create with default embedded patterns
     pub fn new() -> Self {
         let patterns = Arc::new(
-            super::patterns::default_compiled(crate::types::CliEngine::ClaudeCode)
+            super::patterns::default_compiled(missiond_shared::CliEngine::ClaudeCode)
                 .expect("embedded claude-code patterns must parse"),
         );
         Self::with_patterns(patterns)

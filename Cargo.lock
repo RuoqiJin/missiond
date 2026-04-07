@@ -2677,6 +2677,8 @@ dependencies = [
  "gethostname",
  "image",
  "libc",
+ "missiond-semantic",
+ "missiond-shared",
  "notify",
  "once_cell",
  "portable-pty",
@@ -2759,6 +2761,29 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "missiond-semantic"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "missiond-shared",
+ "once_cell",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "missiond-shared"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "serde",
 ]
 
 [[package]]

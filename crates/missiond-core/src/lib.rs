@@ -17,7 +17,7 @@ pub mod db;
 pub mod embedding;
 pub mod ipc;
 pub mod pty;
-pub mod semantic;
+pub use missiond_semantic as semantic;
 pub mod skill;
 pub mod sync;
 pub mod types;

@@ -17,8 +17,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::ipc::default_mission_home;
-use crate::types::CliEngine;
+use missiond_shared::default_mission_home;
+use missiond_shared::CliEngine;
 
 // ========== YAML Schema ==========
 
