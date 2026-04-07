@@ -1,0 +1,12 @@
+[package]
+name = "missiond-shared"
+version.workspace = true
+edition.workspace = true
+description = "Shared types for missiond crates"
+
+[dependencies]
+serde = { workspace = true }
+dirs = { workspace = true }
+
+[lints]
+workspace = true
