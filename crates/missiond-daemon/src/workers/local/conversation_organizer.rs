@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
-use super::{BackgroundWorker, WorkerContext};
+use super::{BackgroundWorker, WorkerContext, WorkerKind};
 use crate::event_bus::{DaemonEvent, TimelineEvent};
 use crate::state::AppState;
 
@@ -25,6 +25,8 @@ pub struct ConversationOrganizerWorker {
 }
 
 impl BackgroundWorker for ConversationOrganizerWorker {
+    const KIND: WorkerKind = WorkerKind::Local;
+
     fn name(&self) -> &'static str {
         "conversation_organizer"
     }

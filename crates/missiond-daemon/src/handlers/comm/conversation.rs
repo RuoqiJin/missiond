@@ -1424,7 +1424,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 // Full reconcile (trigger immediately, don't wait for daily timer)
                 let state_clone = state.clone();
                 tokio::spawn(async move {
-                    crate::workers::reconcile_worker::run_reconciliation_now(&state_clone).await;
+                    crate::workers::local::reconcile_worker::run_reconciliation_now(&state_clone).await;
                 });
                 Ok(ToolResult::text(
                     "Full reconciliation triggered in background",

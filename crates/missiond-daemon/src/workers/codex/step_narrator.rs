@@ -76,10 +76,7 @@ impl super::BackgroundWorker for StepNarratorWorker {
         "step_narrator"
     }
 
-    fn dependencies(&self) -> Vec<crate::control_tree::Dependency> {
-        use crate::control_tree::{CtlProvider, Dependency};
-        vec![Dependency::Provider(CtlProvider::Codex)]
-    }
+    const KIND: super::WorkerKind = super::WorkerKind::Codex;
 
     async fn run(self, state: Arc<AppState>, mut ctx: super::WorkerContext) {
         let codex = CodexCli::new(

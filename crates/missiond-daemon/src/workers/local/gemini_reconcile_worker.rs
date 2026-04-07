@@ -20,7 +20,7 @@ use missiond_core::gemini_cli::{
 use crate::events_sync;
 use crate::state::AppState;
 
-use super::{BackgroundWorker, WorkerContext};
+use super::{BackgroundWorker, WorkerContext, WorkerKind};
 
 /// Watermark key prefix to distinguish from Claude Code watermarks.
 const WATERMARK_PREFIX: &str = "gemini:";
@@ -38,6 +38,8 @@ const ACTIVE_THRESHOLD_SECS: u64 = 3600;
 pub(crate) struct GeminiReconcileWorker;
 
 impl BackgroundWorker for GeminiReconcileWorker {
+    const KIND: WorkerKind = WorkerKind::Local;
+
     fn name(&self) -> &'static str {
         "gemini_reconcile"
     }

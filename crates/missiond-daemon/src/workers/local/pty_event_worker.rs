@@ -24,6 +24,8 @@ pub(crate) struct PtyEventWorker {
 }
 
 impl super::BackgroundWorker for PtyEventWorker {
+    const KIND: super::WorkerKind = super::WorkerKind::Local;
+
     fn name(&self) -> &'static str {
         "pty_events"
     }

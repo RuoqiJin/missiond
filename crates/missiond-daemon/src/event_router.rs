@@ -25,7 +25,8 @@ use crate::extraction::{
 };
 use crate::memory_scheduler::{dispatch_queued_submit_tasks, schedule_memory_tasks};
 use crate::state::{AppState, MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
-use crate::workers::{retro_worker, strategy_worker};
+use crate::workers::gemini::strategy_worker;
+use crate::workers::sonnet::retro_worker;
 
 /// Exponential backoff for Lagged recovery: 100ms → 200ms → … → 2000ms cap.
 /// Adds ±25% jitter to avoid thundering herd.

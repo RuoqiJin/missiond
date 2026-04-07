@@ -202,13 +202,10 @@ pub(crate) struct TranslationWorker {
 }
 
 impl super::BackgroundWorker for TranslationWorker {
+    const KIND: super::WorkerKind = super::WorkerKind::Sonnet;
+
     fn name(&self) -> &'static str {
         "translation_worker"
-    }
-
-    fn dependencies(&self) -> Vec<crate::control_tree::Dependency> {
-        use crate::control_tree::{CtlProvider, Dependency};
-        vec![Dependency::Provider(CtlProvider::Sonnet)]
     }
 
     async fn run(self, state: Arc<AppState>, ctx: super::WorkerContext) {
