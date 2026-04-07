@@ -22,6 +22,8 @@ pub(crate) struct ConversationLoggerWorker {
 }
 
 impl super::BackgroundWorker for ConversationLoggerWorker {
+    const KIND: super::WorkerKind = super::WorkerKind::Local;
+
     fn name(&self) -> &'static str {
         "conversation_logger"
     }

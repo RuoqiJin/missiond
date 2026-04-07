@@ -16,6 +16,8 @@ pub(crate) struct GeminiLoggerWorker {
 }
 
 impl super::BackgroundWorker for GeminiLoggerWorker {
+    const KIND: super::WorkerKind = super::WorkerKind::Local;
+
     fn name(&self) -> &'static str {
         "gemini_logger"
     }

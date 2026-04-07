@@ -252,13 +252,10 @@ fn truncate_at_boundary(text: &str, max_chars: usize) -> String {
 pub(crate) struct BriefingWorker;
 
 impl super::BackgroundWorker for BriefingWorker {
+    const KIND: super::WorkerKind = super::WorkerKind::Sonnet;
+
     fn name(&self) -> &'static str {
         "briefing_worker"
-    }
-
-    fn dependencies(&self) -> Vec<crate::control_tree::Dependency> {
-        use crate::control_tree::{CtlProvider, Dependency};
-        vec![Dependency::Provider(CtlProvider::Sonnet)]
     }
 
     async fn run(self, state: Arc<AppState>, mut ctx: super::WorkerContext) {

@@ -954,16 +954,15 @@ pub(crate) struct EmbeddingLoopWorker {
 }
 
 impl super::BackgroundWorker for EmbeddingLoopWorker {
+    const KIND: super::WorkerKind = super::WorkerKind::Sonnet;
+
     fn name(&self) -> &'static str {
         "embedding"
     }
 
-    fn dependencies(&self) -> Vec<crate::control_tree::Dependency> {
-        use crate::control_tree::{CtlDomain, CtlProvider, Dependency};
-        vec![
-            Dependency::Provider(CtlProvider::Sonnet),
-            Dependency::Domain(CtlDomain::Memory),
-        ]
+    fn extra_deps(&self) -> Vec<crate::control_tree::Dependency> {
+        use crate::control_tree::{CtlDomain, Dependency};
+        vec![Dependency::Domain(CtlDomain::Memory)]
     }
 
     async fn run(self, state: Arc<AppState>, mut ctx: super::WorkerContext) {

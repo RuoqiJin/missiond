@@ -967,7 +967,7 @@ async fn handle_backfill(state: &AppState, args: Value) -> Result<ToolResult> {
     let state_clone = state.clone();
     let since_clone = since.clone();
     tokio::spawn(async move {
-        match crate::workers::retro_worker::backfill(&state_clone, &since_clone).await {
+        match crate::workers::sonnet::retro_worker::backfill(&state_clone, &since_clone).await {
             Ok((analyzed, skipped)) => {
                 tracing::info!(analyzed, skipped, since = %since_clone, "Retrospective backfill completed");
             }

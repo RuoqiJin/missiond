@@ -556,7 +556,7 @@ async fn emit(
                     .insert(session_id.to_string(), msg_span_id);
             }
             // Real-time message-level embedding: pre-filter before clone (v2 hot-path optimization)
-            if !crate::workers::embedding_worker::should_skip_fast(
+            if !crate::workers::sonnet::embedding_worker::should_skip_fast(
                 &db_msg.role,
                 db_msg.content.len(),
             ) {

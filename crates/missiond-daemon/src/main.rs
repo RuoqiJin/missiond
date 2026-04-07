@@ -36,10 +36,9 @@ use llm::{
     codex_cli, gemini_cli, gemini_client, llm_gate, llm_gateway, minimax_client, minimax_gateway,
     prompts, sonnet_gateway,
 };
-use workers::{
-    ast_sync_worker, briefing_worker, code_prefetch, embedding_worker, experience_harvester,
-    step_narrator, translation_worker, vision_worker,
-};
+use workers::codex::{step_narrator, vision_worker};
+use workers::local::{ast_sync_worker, code_prefetch, experience_harvester};
+use workers::sonnet::{briefing_worker, embedding_worker, translation_worker};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1076,14 +1075,14 @@ async fn main() -> Result<()> {
 
     // Embedding Worker: event-driven actor (KB/Skill/Conv/AST embeddings + backfill)
     workers::spawn_worker(
-        workers::embedding_worker::EmbeddingLoopWorker { rx: embedding_rx },
+        workers::sonnet::embedding_worker::EmbeddingLoopWorker { rx: embedding_rx },
         Arc::new(state.clone()),
         shutdown_rx.clone(),
     );
 
     // Gemini request log subscriber (Timeline → DB persistence)
     workers::spawn_worker(
-        workers::gemini_logger::GeminiLoggerWorker {
+        workers::local::gemini_logger::GeminiLoggerWorker {
             timeline_rx: timeline_broadcast_tx.subscribe(),
         },
         Arc::new(state.clone()),
@@ -1380,7 +1379,7 @@ async fn main() -> Result<()> {
 
     // Conversation logger event stream
     workers::spawn_worker(
-        workers::conversation_logger::ConversationLoggerWorker { conv_logger_rx },
+        workers::local::conversation_logger::ConversationLoggerWorker { conv_logger_rx },
         Arc::new(state.clone()),
         shutdown_rx.clone(),
     );
@@ -1401,7 +1400,7 @@ async fn main() -> Result<()> {
 
     // PTY manager event stream (state changes, confirm, exit, MCP errors)
     workers::spawn_worker(
-        workers::pty_event_worker::PtyEventWorker {
+        workers::local::pty_event_worker::PtyEventWorker {
             pty_rx: pty_logger_rx,
         },
         Arc::new(state.clone()),
@@ -1412,7 +1411,7 @@ async fn main() -> Result<()> {
 
     // Architecture maintenance worker — auto-updates YAML manifests on structural code changes
     workers::spawn_worker(
-        workers::arch_maintenance_worker::ArchMaintenanceWorker {
+        workers::sonnet::arch_maintenance_worker::ArchMaintenanceWorker {
             timeline_rx: timeline_broadcast_tx.subscribe(),
         },
         Arc::new(state.clone()),
@@ -1423,14 +1422,14 @@ async fn main() -> Result<()> {
 
     // Daily reconcile worker — JSONL-to-DB integrity checker (safety net for missed FSEvents)
     workers::spawn_worker(
-        workers::reconcile_worker::ReconcileWorker,
+        workers::local::reconcile_worker::ReconcileWorker,
         Arc::new(state.clone()),
         shutdown_rx.clone(),
     );
 
     // Gemini CLI reconcile worker — ~/.gemini/tmp/*/chats/*.json integrity checker
     workers::spawn_worker(
-        workers::gemini_reconcile_worker::GeminiReconcileWorker,
+        workers::local::gemini_reconcile_worker::GeminiReconcileWorker,
         Arc::new(state.clone()),
         shutdown_rx.clone(),
     );
@@ -1438,7 +1437,7 @@ async fn main() -> Result<()> {
     // Conversation Organizer — Stage 2 of Cognitive Pipeline
     // Repairs parent links, splices compaction fragments, emits SessionOrganized
     workers::spawn_worker(
-        workers::conversation_organizer::ConversationOrganizerWorker {
+        workers::local::conversation_organizer::ConversationOrganizerWorker {
             timeline_rx: timeline_broadcast_tx.subscribe(),
         },
         Arc::new(state.clone()),
@@ -1448,7 +1447,7 @@ async fn main() -> Result<()> {
     // Tagger & Chunker — Stage 3 of Cognitive Pipeline
     // Extracts structured Turns from flat messages, applies noise labels
     workers::spawn_worker(
-        workers::tagger_chunker::TaggerChunkerWorker {
+        workers::local::tagger_chunker::TaggerChunkerWorker {
             timeline_rx: timeline_broadcast_tx.subscribe(),
         },
         Arc::new(state.clone()),

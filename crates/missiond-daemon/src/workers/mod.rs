@@ -1,32 +1,37 @@
-// Background workers — each implements BackgroundWorker trait.
-// Spawned via spawn_worker() in main.rs with unified lifecycle management.
-pub mod arch_maintenance_worker;
-pub mod ast_sync_worker;
-pub mod briefing_worker;
-pub mod code_prefetch;
-pub mod conversation_logger;
-pub mod conversation_organizer;
-pub mod embedding_worker;
-pub mod experience_harvester;
-pub mod gemini_logger;
-pub mod gemini_reconcile_worker;
-pub mod pty_event_worker;
-pub mod reconcile_worker;
+// Background workers — organized by LLM dependency.
+// Directory structure is the contract: sonnet/, codex/, gemini/, local/.
+//
+// - sonnet/  → Sonnet API (via SonnetGateway)
+// - codex/   → Claude Code / Codex CLI (via SlotManager PTY)
+// - gemini/  → Gemini CLI (via SlotManager PTY)
+// - local/   → Pure computation, no LLM dependency
+pub mod codex;
+pub mod gemini;
+pub mod local;
 pub mod registry;
-pub mod retro_worker;
-pub mod step_narrator;
-pub mod strategy_worker;
-pub mod tagger_chunker;
-pub mod translation_worker;
-pub mod vision_worker;
+pub mod sonnet;
 
 use std::future::Future;
 use std::sync::Arc;
 use tracing::info;
 
-use crate::control_tree::Dependency;
+use crate::control_tree::{CtlProvider, Dependency};
 use crate::state::AppState;
 pub use registry::{WorkerContext, WorkerRegistry};
+
+/// Worker LLM dependency category — directory = contract.
+/// Determines which ControlTree provider deps are auto-injected by `spawn_worker`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerKind {
+    /// Calls Sonnet API (via SonnetGateway)
+    Sonnet,
+    /// Calls Claude Code / Codex CLI (via SlotManager PTY)
+    Codex,
+    /// Calls Gemini CLI (via SlotManager PTY)
+    Gemini,
+    /// Pure computation — no LLM dependency
+    Local,
+}
 
 /// Unified lifecycle trait for background workers.
 ///
@@ -34,17 +39,19 @@ pub use registry::{WorkerContext, WorkerRegistry};
 /// Shutdown is handled externally by `spawn_worker()` via `tokio::select!`
 /// — when the shutdown signal fires, the worker's future is dropped.
 ///
-/// `WorkerContext` provides runtime pause/resume control:
-/// - Call `ctx.wait_if_paused()` at the top of the main loop
-/// - Use `ctx.record_success()` / `ctx.record_failure()` for stats
-/// - Workers that don't need pause support can ignore `_ctx`
+/// `const KIND` declares the LLM dependency (must match the directory).
+/// `spawn_worker` auto-injects ControlTree deps from KIND.
+/// `extra_deps()` adds domain-level deps (e.g. Memory for embedding).
 pub(crate) trait BackgroundWorker: Send + 'static {
+    /// LLM dependency category. Must match the directory the worker lives in.
+    const KIND: WorkerKind;
+
     /// Human-readable name for logging.
     fn name(&self) -> &'static str;
 
-    /// ControlTree dependencies for cascade pause evaluation.
-    /// Override to declare LLM provider / domain dependencies.
-    fn dependencies(&self) -> Vec<Dependency> {
+    /// Additional domain dependencies beyond the auto-injected provider dep.
+    /// Override only when needed (e.g. embedding_worker adds Domain::Memory).
+    fn extra_deps(&self) -> Vec<Dependency> {
         Vec::new()
     }
 
@@ -55,17 +62,24 @@ pub(crate) trait BackgroundWorker: Send + 'static {
 
 /// Spawn a background worker with unified lifecycle management.
 ///
-/// - Registers the worker in the global WorkerRegistry (with ControlTree deps)
+/// - Auto-injects ControlTree provider deps from `W::KIND`
+/// - Merges with `extra_deps()` for domain-level deps
+/// - Registers the worker in the global WorkerRegistry
 /// - Logs start/stop with worker name
 /// - Integrates with the shutdown watch channel for graceful termination
-/// - Returns a JoinHandle for optional tracking
 pub(crate) fn spawn_worker<W: BackgroundWorker>(
     worker: W,
     state: Arc<AppState>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     let name = worker.name();
-    let deps = worker.dependencies();
+    let mut deps = match W::KIND {
+        WorkerKind::Sonnet => vec![Dependency::Provider(CtlProvider::Sonnet)],
+        WorkerKind::Codex => vec![Dependency::Provider(CtlProvider::Codex)],
+        WorkerKind::Gemini => vec![Dependency::Provider(CtlProvider::Gemini)],
+        WorkerKind::Local => vec![],
+    };
+    deps.extend(worker.extra_deps());
     let tree_rx = state.control_manager.subscribe();
     let ctx = state
         .worker_registry

@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 use crate::events_sync;
 use crate::state::AppState;
 
-use super::{BackgroundWorker, WorkerContext};
+use super::{BackgroundWorker, WorkerContext, WorkerKind};
 
 /// Sentinel key in reconcile_watermarks for global completion timestamp.
 const GLOBAL_WATERMARK_KEY: &str = "__last_full_reconcile__";
@@ -38,6 +38,8 @@ const ACTIVE_THRESHOLD_SECS: u64 = 3600;
 pub(crate) struct ReconcileWorker;
 
 impl BackgroundWorker for ReconcileWorker {
+    const KIND: WorkerKind = WorkerKind::Local;
+
     fn name(&self) -> &'static str {
         "reconcile"
     }
