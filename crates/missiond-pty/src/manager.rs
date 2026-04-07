@@ -16,7 +16,7 @@ use tracing::{debug, error, info, warn};
 
 use super::session::{
     ConfirmInfo, ConfirmResponse, PTYSession, PTYSessionOptions, PermissionDecision, SessionEvent,
-    SessionState,
+    SessionState, TextOutputEvent,
 };
 
 // ========== Types ==========
@@ -28,7 +28,7 @@ pub struct PTYAgentInfo {
     pub slot_id: String,
     pub role: String,
     /// CLI engine running in this slot
-    pub engine: crate::types::CliEngine,
+    pub engine: missiond_shared::CliEngine,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     pub state: SessionState,
@@ -76,7 +76,7 @@ pub struct Slot {
     pub role: String,
     pub cwd: Option<PathBuf>,
     /// CLI engine type (ClaudeCode, Gemini, Codex)
-    pub engine: crate::types::CliEngine,
+    pub engine: missiond_shared::CliEngine,
 }
 
 /// Permission policy trait
@@ -387,7 +387,7 @@ impl PTYManager {
                         });
                         break;
                     }
-                    SessionEvent::TextOutput(crate::pty::TextOutputEvent::Complete {
+                    SessionEvent::TextOutput(TextOutputEvent::Complete {
                         turn_id,
                         content,
                         timestamp,

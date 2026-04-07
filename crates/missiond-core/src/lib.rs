@@ -16,7 +16,7 @@ pub mod gemini_cli;
 pub mod db;
 pub mod embedding;
 pub mod ipc;
-pub mod pty;
+pub use missiond_pty as pty;
 pub use missiond_semantic as semantic;
 pub mod skill;
 pub mod sync;
