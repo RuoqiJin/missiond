@@ -2677,6 +2677,7 @@ dependencies = [
  "gethostname",
  "image",
  "libc",
+ "missiond-pty",
  "missiond-semantic",
  "missiond-shared",
  "notify",
@@ -2749,6 +2750,29 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "missiond-pty"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "alacritty_terminal",
+ "anyhow",
+ "chrono",
+ "image",
+ "libc",
+ "missiond-semantic",
+ "missiond-shared",
+ "once_cell",
+ "portable-pty",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+ "vte 0.14.1",
 ]
 
 [[package]]

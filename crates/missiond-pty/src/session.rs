@@ -46,7 +46,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use super::extractor::{IncrementalExtractor, StableTextOp, TextAssembler};
-use crate::semantic::{
+use missiond_semantic::{
     ClaudeCodeConfirmParser, ClaudeCodeStateParser, ClaudeCodeStatusParser,
     ClaudeCodeToolOutputParser, GeminiCliStateParser,
     ConfirmParser, ParserContext, StateParser, StatusParser, ToolOutputParser,
@@ -191,7 +191,7 @@ pub struct PTYSessionOptions {
     pub cols: u16,
     pub rows: u16,
     /// CLI engine type (determines which binary to spawn and state parser to use)
-    pub engine: crate::types::CliEngine,
+    pub engine: missiond_shared::CliEngine,
     /// Path to MCP config JSON file (passed as --mcp-config to claude)
     pub mcp_config: Option<PathBuf>,
     /// Skip all permission prompts and trust dialogs
@@ -209,7 +209,7 @@ impl Default for PTYSessionOptions {
             log_file: None,
             cols: 120,
             rows: 30,
-            engine: crate::types::CliEngine::default(),
+            engine: missiond_shared::CliEngine::default(),
             mcp_config: None,
             dangerously_skip_permissions: false,
             model: None,
@@ -245,7 +245,7 @@ pub struct PTYSession {
     pub cols: u16,
     pub rows: u16,
     /// CLI engine type (determines spawn command and state parser)
-    pub engine: crate::types::CliEngine,
+    pub engine: missiond_shared::CliEngine,
 
     // Internal state
     state: Arc<RwLock<SessionState>>,
@@ -331,13 +331,13 @@ pub enum SessionEvent {
 /// Each engine has different binary, arguments, and flag support.
 /// The working directory is set via CommandBuilder::cwd(), not via CLI flags.
 fn build_cli_command(
-    engine: crate::types::CliEngine,
+    engine: missiond_shared::CliEngine,
     cwd: &std::path::Path,
     mcp_config: Option<&std::path::Path>,
     dangerously_skip_permissions: bool,
     model: Option<&str>,
 ) -> String {
-    use crate::types::CliEngine;
+    use missiond_shared::CliEngine;
 
     match engine {
         CliEngine::ClaudeCode => {
@@ -825,7 +825,7 @@ impl PTYSession {
     #[allow(clippy::too_many_arguments)]
     async fn state_check_loop(
         slot_id: String,
-        engine: crate::types::CliEngine,
+        engine: missiond_shared::CliEngine,
         state: Arc<RwLock<SessionState>>,
         term: Arc<Mutex<Term<SessionEventListener>>>,
         extractor: Arc<Mutex<IncrementalExtractor>>,
@@ -846,7 +846,7 @@ impl PTYSession {
 
         // Create parsers based on engine type, sharing one Arc<CompiledPatterns> snapshot.
         // Patterns are loaded from external YAML with periodic hot-reload.
-        use crate::types::CliEngine;
+        use missiond_shared::CliEngine;
 
         // Get initial compiled patterns for this engine
         let compiled_patterns = Arc::new(
@@ -1396,7 +1396,7 @@ impl PTYSession {
 
         // Gemini/Codex: Ink TUI handles bracketed paste natively, no polling needed.
         // Just a brief settle for the TUI to process the input.
-        if self.engine != crate::types::CliEngine::ClaudeCode {
+        if self.engine != missiond_shared::CliEngine::ClaudeCode {
             tokio::time::sleep(Duration::from_millis(300)).await;
             tracing::debug!(slot = %slot_id, engine = %self.engine, "Paste settle (non-Claude CLI)");
             return;

@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::semantic::State;
-use crate::types::CliEngine;
+use missiond_semantic::State;
+use missiond_shared::CliEngine;
 
 /// Anomaly detected by the PTY compatibility guardian
 #[derive(Debug, Clone, Serialize, Deserialize)]
