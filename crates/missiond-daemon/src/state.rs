@@ -186,6 +186,10 @@ pub(crate) struct AppState {
     pub(crate) prompts: Arc<PromptStore>,
     /// Wakeup signal for briefing worker when a long conversation message is logged.
     pub(crate) briefing_notify: Arc<tokio::sync::Notify>,
+    /// Wakeup signal for strategy worker (SessionCompleted / sweeper reconciliation).
+    pub(crate) strategy_notify: Arc<tokio::sync::Notify>,
+    /// Wakeup signal for retro worker (SessionCompleted / sweeper reconciliation).
+    pub(crate) retro_notify: Arc<tokio::sync::Notify>,
     /// AST sync worker channel: code indexing pipeline (P2 Holographic Context Engine).
     pub(crate) ast_sync_tx: tokio::sync::mpsc::Sender<crate::ast_sync_worker::AstSyncTask>,
     /// In-memory AST embedding cache for code prefetch hybrid search (P3).

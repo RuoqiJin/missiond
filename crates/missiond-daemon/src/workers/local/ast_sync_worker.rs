@@ -16,6 +16,9 @@ use tracing::{debug, info, warn};
 
 use missiond_core::db::traits::MissionStore;
 
+use super::{BackgroundWorker, WorkerContext, WorkerKind};
+use crate::state::AppState;
+
 /// Source code file extensions we index.
 const CODE_EXTENSIONS: &[&str] = &["rs", "ts", "tsx", "py"];
 
@@ -49,58 +52,70 @@ pub(crate) enum AstSyncTask {
 }
 
 // @beacon: holographic
-/// Run the AST sync worker loop. Receives tasks from channel, coalesces commits.
-pub(crate) async fn run_ast_sync_worker(
-    mut rx: mpsc::Receiver<AstSyncTask>,
-    store: Arc<dyn MissionStore>,
-    embedding_tx: mpsc::Sender<crate::state::EmbeddingTask>,
-) {
-    info!("AST sync worker started");
+/// AST sync worker — BackgroundWorker wrapper for code indexing pipeline.
+pub(crate) struct AstSyncWorker {
+    pub rx: mpsc::Receiver<AstSyncTask>,
+}
 
-    while let Some(task) = rx.recv().await {
-        match task {
-            AstSyncTask::CommitSync {
-                repo_path,
-                repo_name,
-                old_hash,
-                new_hash,
-            } => {
-                let (final_old, final_new) =
-                    coalesce_commits(&mut rx, &repo_path, &repo_name, old_hash, new_hash).await;
-                process_commit_sync(
-                    store.as_ref(),
-                    &repo_path,
-                    &repo_name,
-                    &final_old,
-                    &final_new,
-                    &embedding_tx,
-                )
-                .await;
-            }
-            AstSyncTask::FullSync {
-                repo_path,
-                repo_name,
-            } => {
-                process_full_sync(store.as_ref(), &repo_path, &repo_name, &embedding_tx).await;
-            }
-            AstSyncTask::FileSync {
-                repo_path,
-                repo_name,
-                file_path,
-            } => {
-                process_file_sync(
-                    store.as_ref(),
-                    &repo_path,
-                    &repo_name,
-                    &file_path,
-                    &embedding_tx,
-                )
-                .await;
-            }
-        }
+impl BackgroundWorker for AstSyncWorker {
+    const KIND: WorkerKind = WorkerKind::Local;
+
+    fn name(&self) -> &'static str {
+        "ast_sync_worker"
     }
 
-    info!("AST sync worker stopped (channel closed)");
+    async fn run(mut self, state: Arc<AppState>, mut ctx: WorkerContext) {
+        info!("AST sync worker started");
+        let store = state.store.clone();
+        let embedding_tx = state.embedding_tx.clone();
+
+        while let Some(task) = self.rx.recv().await {
+            ctx.wait_if_paused().await;
+            match task {
+                AstSyncTask::CommitSync {
+                    repo_path,
+                    repo_name,
+                    old_hash,
+                    new_hash,
+                } => {
+                    let (final_old, final_new) =
+                        coalesce_commits(&mut self.rx, &repo_path, &repo_name, old_hash, new_hash)
+                            .await;
+                    process_commit_sync(
+                        store.as_ref(),
+                        &repo_path,
+                        &repo_name,
+                        &final_old,
+                        &final_new,
+                        &embedding_tx,
+                    )
+                    .await;
+                }
+                AstSyncTask::FullSync {
+                    repo_path,
+                    repo_name,
+                } => {
+                    process_full_sync(store.as_ref(), &repo_path, &repo_name, &embedding_tx).await;
+                }
+                AstSyncTask::FileSync {
+                    repo_path,
+                    repo_name,
+                    file_path,
+                } => {
+                    process_file_sync(
+                        store.as_ref(),
+                        &repo_path,
+                        &repo_name,
+                        &file_path,
+                        &embedding_tx,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        info!("AST sync worker stopped (channel closed)");
+    }
 }
 
 /// Coalesce multiple CommitSync tasks for the same repo within a time window.

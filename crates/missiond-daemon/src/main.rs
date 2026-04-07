@@ -770,6 +770,8 @@ async fn main() -> Result<()> {
         stats: Arc::clone(&daemon_stats),
         prompts: Arc::new(prompts::PromptStore::load()),
         briefing_notify: Arc::new(tokio::sync::Notify::new()),
+        strategy_notify: Arc::new(tokio::sync::Notify::new()),
+        retro_notify: Arc::new(tokio::sync::Notify::new()),
         ast_sync_tx,
         ast_embedding_cache: missiond_core::embedding::new_cache(),
         last_msg_span: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -1249,14 +1251,14 @@ async fn main() -> Result<()> {
     }
 
     // --- AST Sync Worker (P2 HCE) ---
-    // Worker loop + startup full sync for all repos
-    {
-        let ast_store = Arc::clone(&state.store);
-        let etx = state.embedding_tx.clone();
-        tokio::spawn(async move {
-            ast_sync_worker::run_ast_sync_worker(ast_sync_rx, ast_store, etx).await;
-        });
+    // BackgroundWorker: unified lifecycle + ControlTree pause/resume
+    workers::spawn_worker(
+        workers::local::ast_sync_worker::AstSyncWorker { rx: ast_sync_rx },
+        Arc::new(state.clone()),
+        shutdown_rx.clone(),
+    );
 
+    {
         // Full sync at startup: trigger for all repos after delay
         let ast_tx2 = state.ast_sync_tx.clone();
         let slot_cwds2: Vec<String> = state
@@ -1407,7 +1409,14 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     );
 
-    // Phase 3d: RetroWorker removed — retro analysis now event-driven via session_reflection_consumer
+    // Retro Worker — Notify-driven session retrospective (Sonnet)
+    workers::spawn_worker(
+        workers::sonnet::retro_worker::RetroWorker {
+            notify: Arc::clone(&state.retro_notify),
+        },
+        Arc::new(state.clone()),
+        shutdown_rx.clone(),
+    );
 
     // Architecture maintenance worker — auto-updates YAML manifests on structural code changes
     workers::spawn_worker(
@@ -1418,7 +1427,14 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     );
 
-    // Phase 3d: StrategyWorker removed — strategy analysis now event-driven via session_reflection_consumer
+    // Strategy Worker — Notify-driven strategic analysis (Gemini CLI)
+    workers::spawn_worker(
+        workers::gemini::strategy_worker::StrategyWorker {
+            notify: Arc::clone(&state.strategy_notify),
+        },
+        Arc::new(state.clone()),
+        shutdown_rx.clone(),
+    );
 
     // Daily reconcile worker — JSONL-to-DB integrity checker (safety net for missed FSEvents)
     workers::spawn_worker(
