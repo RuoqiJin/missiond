@@ -7,7 +7,7 @@
   (granularity L3-Implementation)
   (survey-hash "9facdfa-928da99-9a843c5-e141804-29f9e25-b0fa8df")
   (survey-date "2026-04-07T00:00:00Z")
-  (last-updated "2026-04-07 — refactor: decompose missiond-core into pty/semantic/shared; workers by LLM dep; db gen/ subdir")
+  (last-updated "2026-04-07 — feat: worker-level override in ControlTree cascade (debug mode); refactor: decompose missiond-core into pty/semantic/shared; workers by LLM dep; db gen/ subdir")
 
   ;; ══════════════════════════════════════════════════════
   ;; DESIGN CONSTRAINTS
@@ -817,7 +817,39 @@
 
     (component control-tree
       :target "crates/missiond-daemon/src/control_tree.rs"
-      (depends worker-registry))
+      (depends worker-registry)
+
+      (struct ControlTree
+        (field global_paused :type bool)
+        (field providers     :type "HashMap<CtlProvider, bool>")
+        (field domains       :type "HashMap<CtlDomain, bool>")
+        (field workers       :type "HashMap<String, bool>"
+          :note "true=force-paused  false=force-resumed(debug override)  absent=follow cascade")
+        (field slot_roles    :type "HashMap<String, bool>")
+        (field domain_paused_at :type "HashMap<CtlDomain, i64>" :note "informational only"))
+
+      (cascade-priority
+        :note "is_effectively_paused() evaluation order"
+        (1 worker-explicit-override
+          :semantics "workers[name]=true  → always paused; workers[name]=false → always resumed (debug mode)")
+        (2 global-kill-switch
+          :semantics "global_paused=true  → all workers paused unless worker override present")
+        (3 provider-domain-cascade
+          :semantics "each Dependency::Provider / Dependency::Domain checked; any true → paused"))
+
+      (method is_worker_paused
+        :semantics "worker explicit override beats global; absent → follow global_paused")
+      (method is_effectively_paused
+        :args (worker_name "deps: &[Dependency]")
+        :semantics "full cascade: worker override > global > provider/domain deps")
+      (method status_summary
+        :returns serde_json::Value
+        :fields (global_paused providers domains workers_paused workers_force_resumed slot_roles)
+        :note "workers split into paused/force_resumed lists for debug visibility")
+
+      (struct ControlManager
+        :note "mutation + tokio::watch broadcast + crash-recover from control_tree.json"
+        (mutations (set_global_paused set_provider set_domain set_worker set_slot_role))))
 
     ;; workers/sonnet/ — Sonnet API via SonnetGateway
     (component workers-sonnet
