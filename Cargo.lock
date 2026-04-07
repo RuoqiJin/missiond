@@ -2664,8 +2664,6 @@ dependencies = [
 name = "missiond-core"
 version = "0.1.0"
 dependencies = [
- "ab_glyph",
- "alacritty_terminal",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
@@ -2675,14 +2673,12 @@ dependencies = [
  "fastembed",
  "futures-util",
  "gethostname",
- "image",
  "libc",
  "missiond-pty",
  "missiond-semantic",
  "missiond-shared",
  "notify",
  "once_cell",
- "portable-pty",
  "regex",
  "rusqlite",
  "serde",
@@ -2702,7 +2698,6 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "uuid",
- "vte 0.14.1",
 ]
 
 [[package]]
