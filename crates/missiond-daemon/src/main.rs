@@ -1716,13 +1716,31 @@ async fn main() -> Result<()> {
         info!("Received shutdown signal, starting graceful shutdown");
     }
 
+    // Hard deadline: if graceful shutdown takes too long, force exit.
+    // spawn_blocking(child.wait()) can wedge the tokio runtime, making the
+    // process unkillable (UE state). This watchdog guarantees we always exit.
+    let sock_for_watchdog = endpoint.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(8));
+        // Clean up socket before forced exit
+        let _ = std::fs::remove_file(&sock_for_watchdog);
+        eprintln!("Shutdown watchdog: graceful shutdown exceeded 8s, forcing exit");
+        std::process::exit(1);
+    });
+
     // Phase 1: Notify workers to stop
     let _ = shutdown_tx.send(true);
 
     // Phase 2: Gracefully shut down all PTY sessions
     // This sends /exit to each Claude Code instance, waits 3s, then force-kills
     info!("Shutting down PTY sessions...");
-    state.pty.shutdown().await;
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        state.pty.shutdown(),
+    ).await {
+        Ok(()) => info!("PTY sessions shut down cleanly"),
+        Err(_) => warn!("PTY shutdown timed out after 5s, proceeding with cleanup"),
+    }
 
     // Phase 3: Clean up IPC socket
     let sock_path = endpoint.clone();

@@ -733,21 +733,24 @@ impl PTYSession {
             .await;
         });
 
-        // Wait for child exit in background
+        // Wait for child exit in background using async try_wait polling.
+        // Previous approach used spawn_blocking(child.wait()) which blocked a
+        // tokio thread pool thread, preventing runtime shutdown (UE state).
         let event_tx_for_exit = self.event_tx.clone();
         let running_for_exit = Arc::clone(&self.running);
         let state_for_exit = Arc::clone(&self.state);
 
         tokio::spawn(async move {
-            // Wait for child to exit (blocking in thread pool)
-            let exit_status = tokio::task::spawn_blocking(move || child.wait())
-                .await
-                .ok()
-                .and_then(|r| r.ok());
-
-            let exit_code = exit_status
-                .map(|s| s.exit_code() as i32)
-                .unwrap_or(-1);
+            let mut child = child;
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            let exit_code = loop {
+                interval.tick().await;
+                match child.try_wait() {
+                    Ok(Some(status)) => break status.exit_code() as i32,
+                    Err(_) => break -1,
+                    Ok(None) => {} // still running
+                }
+            };
 
             running_for_exit.store(false, Ordering::SeqCst);
             *state_for_exit.write().await = SessionState::Exited;
@@ -1729,15 +1732,17 @@ impl PTYSession {
             let _ = tx.send(());
         }
 
-        // SIGKILL the child process BEFORE dropping the writer.
-        // Without this, child.wait() (in spawn_blocking) blocks forever,
-        // preventing tokio runtime shutdown → daemon stuck in UE state.
+        // SIGKILL the entire process group to kill child AND any grandchildren
+        // (e.g. npm, tsc, rg spawned by Claude Code). Grandchildren holding the
+        // PTY slave FD would prevent reader.read() from getting EOF, deadlocking
+        // the read_loop's spawn_blocking thread.
         let pid_opt = *self.pty_pid.read().await;
         if let Some(pid) = pid_opt {
             #[cfg(unix)]
             {
-                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL); }
-                info!(pid, "PTY child SIGKILL sent");
+                // kill(-pid) sends SIGKILL to the entire process group
+                unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL); }
+                info!(pid, "PTY process group SIGKILL sent");
             }
             #[cfg(not(unix))]
             {
