@@ -18,6 +18,9 @@ embeddings = ["dep:fastembed"]
 code-context = ["dep:tree-sitter", "dep:tree-sitter-rust", "dep:tree-sitter-typescript", "dep:tree-sitter-python"]
 
 [dependencies]
+# Internal crates
+missiond-shared.workspace = true
+
 # Async runtime
 tokio = { workspace = true, features = ["sync", "time", "process", "io-util", "fs", "macros", "rt"] }
 

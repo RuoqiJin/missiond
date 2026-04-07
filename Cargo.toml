@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/missiond-shared",
     "crates/missiond-core",
     "crates/missiond-runner",
     "crates/missiond-mcp",
@@ -99,6 +100,7 @@ tree-sitter-typescript = "0.23"
 tree-sitter-python = "0.23"
 
 # Internal crates
+missiond-shared = { version = "0.1.0", path = "crates/missiond-shared" }
 missiond-core = { version = "0.1.0", path = "crates/missiond-core" }
 missiond-runner = { version = "0.1.0", path = "crates/missiond-runner" }
 missiond-mcp = { version = "0.1.0", path = "crates/missiond-mcp" }
