@@ -1,56 +1,50 @@
-;; ============================================================
-;; MissionD Intent Declaration (Phase 1: High-Dimensional Survey)
-;; Generated: 2026-04-02  |  Forge Methodology v1
-;; Status: DRAFT — surveyed, not yet validated against source
-;; ============================================================
-;;
-;; Pattern Coverage Legend:
-;;   [P1] crud-gateway      — DB CRUD layer
-;;   [P2] event-listener    — Event-driven workers
-;;   [P3] cron-worker       — Interval/tick workers
-;;   [P4] state-machine     — Finite state automata
-;;   [P5] mcp-tool          — MCP tool registration & dispatch
-;;   [P6] bootstrap         — DI & initialization wiring
-;;   [GAP:xxx]              — No existing mold, needs new pattern
-;;
-;; ============================================================
+;; ══════════════════════════════════════════════════════
+;; MissionD — Implementation Detail (Full System)
+;; Generated: 2026-04-07 | Forge Deep Cartography v3
+;; ══════════════════════════════════════════════════════
 
 (intent missiond
   (granularity L3-Implementation)
-  (governance-mode self-distillation)
-  (generated-at 2026-04-02T00:00:00Z)
-  (survey-phase 1)
+  (survey-hash "9facdfa-928da99-9a843c5-e141804-29f9e25-b0fa8df")
+  (survey-date "2026-04-07T00:00:00Z")
+  (last-updated "2026-04-07 — refactor: decompose missiond-core into pty/semantic/shared; workers by LLM dep; db gen/ subdir")
 
-  ;; ============================================================
-  ;; GLOBAL DESIGN CONSTRAINTS
-  ;; ============================================================
+  ;; ══════════════════════════════════════════════════════
+  ;; DESIGN CONSTRAINTS
+  ;; ══════════════════════════════════════════════════════
   (design-constraints
     (crate-boundary
-      (missiond-core   "types, DB, PTY, semantic, embedding, IPC")
-      (missiond-daemon "business logic, handlers, engines, workers, LLM")
-      (missiond-mcp    "MCP JSON-RPC server, tool schema definitions")
-      (missiond-attach "CLI PTY attach utility")
-      (missiond-runner "Claude CLI wrapper")
-      (semantic-terminal-napi "Node N-API bindings")
-      (skill-store     "skill/workflow management"))
+      (missiond-shared   "CliEngine enum + default_mission_home — zero-dep shared primitives")
+      (missiond-semantic "semantic terminal parser: fingerprints, state, confirm, title, tool, status, patterns")
+      (missiond-pty      "PTY session management: PTYManager, PTYSession, IncrementalExtractor, screenshot")
+      (missiond-core     "types, DB traits, IPC, embedding, context — depends on pty+semantic+shared")
+      (missiond-daemon   "business logic, handlers, engines, workers (sonnet/codex/gemini/local), LLM gateways")
+      (missiond-mcp      "MCP JSON-RPC stdio server, tool schema + dispatch")
+      (missiond-attach   "CLI PTY attach utility")
+      (missiond-runner   "Claude CLI process wrapper")
+      (semantic-terminal-napi "Node N-API bindings for semantic parser")
+      (skill-store       "standalone skill marketplace microservice"))
 
     (communication
       (internal  "DaemonEvent broadcast + per-worker MPSC channels")
-      (external  "IPC (Unix socket/TCP) between mcp↔daemon")
-      (frontend  "WebSocket (tokio-tungstenite) for realtime UI"))
+      (external  "IPC Unix-socket/TCP between mcp↔daemon")
+      (frontend  "WebSocket tokio-tungstenite for realtime board UI"))
 
     (db-access
-      (backend "PostgreSQL (sqlx) + SQLite (rusqlite) dual-mode")
-      (gateway "missiond-core/db/ is sole DB gateway")
-      (migrations "20+ SQL migration files"))
+      (backend "PostgreSQL (sqlx) + SQLite (rusqlite) dual-backend via MissionDB trait")
+      (gateway "missiond-core/src/db/ is sole DB gateway — 100+ query functions")
+      (generated "crates/missiond-core/src/db/gen/*.rs from Forge codegen, custom hand-written in sibling db/ modules"))
 
     (authority
-      (pty-state         "semantic parser is authority")
+      (pty-state         "semantic parser pipeline is authority")
       (task-lifecycle    "autopilot tick loop is authority")
-      (slot-lifecycle    "slot_manager is authority")
-      (knowledge-truth   "PostgreSQL KB table is authority")))
+      (slot-lifecycle    "SlotManager is authority")
+      (knowledge-truth   "PostgreSQL KB tables are authority")
+      (permission        "PermissionPolicy + LearnedPermissions is authority")))
 
-  ;; ── UPSTREAM DEPENDENCIES (for Universe Graph) ──
+  ;; ══════════════════════════════════════════════════════
+  ;; UPSTREAM DEPENDENCIES
+  ;; ══════════════════════════════════════════════════════
   (upstream-dependency
     (service "forge"
       :consumes ("forge-build-cli" "generated-rs-output" "generation-gap-pattern")
@@ -61,399 +55,667 @@
       :consumes ("mechanic-repair-cli" "governance-mode-repair")
       :breaks-if ("repair-cli-interface-change" "governance-mode-change")))
 
-  ;; ============================================================
-  ;; PILLAR 1: DATA LAYER (missiond-core/db/)
-  ;; Pattern: [P1] crud-gateway
-  ;; ============================================================
-  (pillar data-layer
-    (purpose "sole DB gateway — all tables, all CRUD, all migrations")
+  ;; ══════════════════════════════════════════════════════
+  ;; PILLAR 1: DATABASE SCHEMA — CORE BUSINESS TABLES
+  ;; ══════════════════════════════════════════════════════
+  (pillar db-core
+    (purpose "primary business entities: board tasks, conversations, knowledge, compute")
 
-    ;; --- Task & Inbox Domain ---
-    (component tasks-db
+    (component board-tables
       :pattern crud-gateway
-      :target "missiond-core/src/db/mod.rs"  ;; or split files
-      (table tasks
-        (col id :type text :pk)
-        (col role :type text)
-        (col status :type text :default "queued")
-        (col slot_id :type text)
-        (col prompt :type text)
-        (col result :type text)
-        (col error :type text)
-        (col created_at :type timestamptz)
-        (col updated_at :type timestamptz))
-      (table inbox
-        (col id :type integer :pk :auto-increment)
-        (col task_id :type text)
-        (col from_role :type text)
-        (col content :type text)
-        (col read :type boolean :default false)
-        (col created_at :type timestamptz))
-      (table events
-        (col id :type integer :pk :auto-increment)
-        (col task_id :type text)
-        (col event_type :type text)
-        (col data :type jsonb)
-        (col timestamp :type timestamptz)))
+      :target "crates/missiond-core/src/db/board.rs"
+      :gen-target "crates/missiond-core/src/db/gen/board.rs"
 
-    ;; --- Knowledge Domain ---
-    (component knowledge-db
-      :pattern crud-gateway
-      :target "missiond-core/src/db/knowledge.rs"
-      (table knowledge
-        (col id :type integer :pk :auto-increment)
-        (col category :type text)
-        (col key :type text)
-        (col summary :type text)
-        (col detail :type jsonb)
-        (col confidence :type float8 :default 1.0)
-        (col embedding_vec :type blob)
-        (col utility_score :type float8)
-        (col created_at :type timestamptz)
-        (col updated_at :type timestamptz))
-      (table knowledge_edges
-        (col id :type integer :pk)
-        (col source_id :type integer)
-        (col target_id :type integer)
-        (col relation_type :type text)
-        (col weight :type float8))
-      (table kb_access_log
-        (col id :type integer :pk)
-        (col kb_id :type integer)
-        (col co_accessed_ids :type jsonb)
-        (col context_source :type text)
-        (col accessed_at :type timestamptz))
-      (table kb_operation_queue
-        (col id :type integer :pk)
-        (col operation :type text)
-        (col target_keys :type jsonb)
-        (col status :type text)
-        (col created_at :type timestamptz))
-      (table kb_ast_links
-        (col id :type integer :pk)
-        (col kb_id :type integer)
-        (col symbol_name :type text)
-        (col file_path :type text)
-        (col relation :type text)
-        (col confidence :type float8)))
-
-    ;; --- Conversation Domain ---
-    (component conversation-db
-      :pattern crud-gateway
-      :target "missiond-core/src/db/conversation.rs"
-      (table conversations
-        (col id :type text :pk)
-        (col slot_id :type text)
-        (col status :type text)
-        (col message_count :type integer)
-        (col analyzed_at :type timestamptz)
-        (col memory_forwarded_at :type timestamptz)
-        (col created_at :type timestamptz))
-      (table conversation_messages
-        (col id :type integer :pk)
-        (col session_id :type text)
-        (col role :type text)
-        (col content :type text)
-        (col timestamp :type timestamptz)
-        (col tool_name :type text)
-        (col fts_content :type text))
-      (table conversation_events
-        (col id :type integer :pk)
-        (col session_id :type text)
-        (col event_type :type text)
-        (col timestamp :type timestamptz))
-      (table conversation_tool_calls
-        (col id :type integer :pk)
-        (col session_id :type text)
-        (col tool_name :type text)
-        (col input_summary :type text)
-        (col output_summary :type text))
-      (table conversation_topic_vectors
-        (col id :type integer :pk)
-        (col session_id :type text)
-        (col chunk_idx :type integer)
-        (col embedding_vec :type blob)))
-
-    ;; --- Board Domain ---
-    (component board-db
-      :pattern crud-gateway
-      :target "missiond-core/src/db/board.rs"
       (table board_tasks
-        (col id :type text :pk)
-        (col title :type text)
+        (col id :type uuid :pk)
+        (col title :type text :not-null)
         (col description :type text)
-        (col status :type text :default "open")
-        (col priority :type text :default "medium")
-        (col parent_id :type text)
-        (col flow_phase :type text)
+        (col status :type text :not-null :default "open"
+          :enum ("open" "running" "done" "failed" "blocked"))
+        (col priority :type text :default "medium"
+          :enum ("critical" "high" "medium" "low"))
+        (col engineering_phase :type text
+          :enum ("investigate" "consult" "plan" "execute" "finalize"))
+        (col category :type text)
+        (col executor :type text)
+        (col assigned_slot :type text)
         (col depends_on :type jsonb)
-        (col assignee :type text)
-        (col created_at :type timestamptz)
-        (col updated_at :type timestamptz))
+        (col dedupe_key :type text)
+        (col lease_until :type timestamptz)
+        (col retry_count :type integer :default 0)
+        (col autopilot :type boolean :default false)
+        (col context :type jsonb)
+        (col created_at :type timestamptz :not-null)
+        (col updated_at :type timestamptz :not-null)
+
+        (op insert (binds title description status priority category))
+        (op create (binds title description priority category engineering_phase depends_on dedupe_key autopilot context))
+        (op select-one (binds id) :alias get_board_task)
+        (op select-many (binds status) (order-by updated_at :desc) (limit 100))
+        (op update (binds title description status priority engineering_phase category executor assigned_slot) (where id))
+        (op delete (where id))
+        (op toggle (binds status) (where id))
+        (op claim (binds executor assigned_slot) (where id status="open"))
+        (op retry (binds retry_count status) (where id))
+        (op search (binds query status category priority) :fts true)
+        (op find-by-dedupe (binds dedupe_key status="open"))
+        (op close-by-dedupe (binds dedupe_key))
+        (op list-running-autopilot (where autopilot=true status="running"))
+        (op list-autopilot (where autopilot=true))
+        (op board-summary :aggregate true)
+        (op count-by-priority (group-by priority) (where status="open"))
+        (op count-by-category (group-by category))
+        (op check-dependencies (binds depends_on))
+        (op find-downstream (binds id))
+        (op set-lease (binds lease_until) (where id))
+        (op release-claims (binds executor))
+        (op recover-stale (where lease_until < now()))
+        (op clear-done)
+        (op query-in-range (binds since until))
+        (op query-in-range-with-status (binds since until status)))
+
       (table board_task_notes
-        (col id :type integer :pk)
+        (col id :type uuid :pk)
+        (col task_id :type uuid :fk board_tasks.id)
+        (col author :type text :not-null)
+        (col content :type text :not-null)
+        (col created_at :type timestamptz :not-null)
+
+        (op insert (binds task_id author content))
+        (op select-by-task (binds task_id) (order-by created_at :asc))))
+
+    (component conversation-tables
+      :pattern crud-gateway
+      :target "crates/missiond-core/src/db/conversation.rs"
+      :gen-target "crates/missiond-core/src/db/gen/conversation.rs"
+
+      (table conversations
+        (col id :type text :pk :comment "session_id from Claude Code")
+        (col slot_name :type text)
+        (col source :type text :comment "claude-code|gemini-cli|codex")
+        (col status :type text :default "active" :enum ("active" "completed"))
+        (col parent_id :type text :fk conversations.id)
         (col task_id :type text)
+        (col summary :type text)
+        (col summary_embedding :type bytea)
+        (col topic_vectors :type bytea)
+        (col timeline :type jsonb)
+        (col jsonl_path :type text)
+        (col exit_code :type integer)
+        (col deep_checkpoint :type text)
+        (col created_at :type timestamptz :not-null)
+        (col updated_at :type timestamptz :not-null)
+        (col completed_at :type timestamptz)
+        (col analyzed_at :type timestamptz)
+        (col compacted_at :type timestamptz)
+        (col habit_scanned_at :type timestamptz)
+
+        (op upsert (binds id slot_name source status jsonl_path))
+        (op select-one (binds id))
+        (op select-children (binds parent_id))
+        (op list (binds status source limit offset since until conv_type task_id))
+        (op complete (binds completed_at) (where id))
+        (op save-exit-code (binds exit_code) (where id))
+        (op mark-analyzed (binds analyzed_at) (where id))
+        (op mark-compacted (binds compacted_at) (where id))
+        (op mark-habit-scanned (binds habit_scanned_at) (where id))
+        (op set-task-id (binds task_id) (where id))
+        (op get-by-task-id (binds task_id))
+        (op set-summary (binds summary) (where id))
+        (op clear-summary (where id))
+        (op set-embedding (binds summary_embedding) (where id))
+        (op set-topic-vectors (binds topic_vectors) (where id))
+        (op set-timeline (binds timeline) (where id))
+        (op missing-summary (where summary=NULL completed_at!=NULL) (limit 50))
+        (op stale-embedding (where summary_embedding=NULL summary!=NULL))
+        (op needing-topic-vectors (where topic_vectors=NULL summary!=NULL))
+        (op needing-timeline (where timeline=NULL completed_at!=NULL))
+        (op load-embeddings :returns "Vec<(id, embedding)>")
+        (op load-topic-vectors :returns "Vec<(id, vectors)>")
+        (op reactivate (binds id))
+        (op complete-stale (where status="active" updated_at < threshold))
+        (op pending-deep-analysis)
+        (op unscanned (where habit_scanned_at=NULL) (limit batch_size))
+        (op compaction-fragments (binds id)))
+
+      (table conversation_messages
+        (col id :type bigint :pk :autoincrement)
+        (col conversation_id :type text :fk conversations.id)
+        (col role :type text :not-null :enum ("user" "assistant" "system" "tool"))
         (col content :type text)
-        (col note_type :type text)
-        (col author :type text)
-        (col created_at :type timestamptz)))
+        (col tool_name :type text)
+        (col tool_call_id :type text)
+        (col token_usage :type jsonb)
+        (col created_at :type timestamptz :not-null)
+        (col memory_forwarded_at :type timestamptz)
+        (col user_voice_forwarded_at :type timestamptz)
+        (col realtime_forwarded_at :type timestamptz)
 
-    ;; --- Agent Questions ---
-    (component question-db
-      :pattern crud-gateway
-      :target "missiond-core/src/db/question.rs"
-      (table agent_questions
-        (col id :type text :pk)
-        (col question :type text)
-        (col status :type text :default "pending")
-        (col target :type text)
-        (col decision_type :type text)
-        (col routing_trace :type jsonb)
-        (col answer :type text)
-        (col created_at :type timestamptz)))
+        (op insert (binds conversation_id role content tool_name tool_call_id token_usage))
+        (op insert-batch (binds "Vec<message>"))
+        (op select-one (binds id))
+        (op select-by-conversation (binds conversation_id limit offset))
+        (op get-around (binds id context_count))
+        (op search (binds query conversation_id) :fts true)
+        (op search-filtered (binds query role slot_name since until))
+        (op search-sessions-fts (binds query limit))
+        (op search-sessions-fts-filtered (binds query slot_name since until limit))
+        (op get-fts-snippets (binds conversation_id query))
+        (op pending-memory (where memory_forwarded_at=NULL role="assistant"))
+        (op pending-user-voice (where user_voice_forwarded_at=NULL role="user"))
+        (op pending-realtime (where realtime_forwarded_at=NULL))
+        (op pending-realtime-with-limit (binds limit))
+        (op update-memory-forwarded (binds memory_forwarded_at) (where id))
+        (op update-user-voice-forwarded (binds user_voice_forwarded_at) (where id))
+        (op update-realtime-forwarded (binds realtime_forwarded_at) (where id))
+        (op last-assistant-content (binds conversation_id))))
 
-    ;; --- Slot & State ---
-    (component slot-state-db
+    (component knowledge-tables
       :pattern crud-gateway
+      :target "crates/missiond-core/src/db/knowledge.rs"
+      :gen-target "crates/missiond-core/src/db/gen/knowledge.rs"
+
+      (table knowledge
+        (col id :type uuid :pk)
+        (col key :type text :unique :not-null)
+        (col category :type text :not-null)
+        (col scope :type text)
+        (col content :type text :not-null)
+        (col source :type text)
+        (col embedding :type bytea)
+        (col linked_task_id :type text)
+        (col access_count :type integer :default 0)
+        (col last_accessed_at :type timestamptz)
+        (col created_at :type timestamptz :not-null)
+        (col updated_at :type timestamptz :not-null)
+
+        (op remember (binds key category scope content source) :upsert-on key)
+        (op update (binds key content category scope source) (where key))
+        (op select-one (binds id))
+        (op get-id-by-key (binds key))
+        (op search-fts (binds query category limit) :fts true)
+        (op search-like (binds pattern category limit))
+        (op search-ranked (binds query embedding category limit) :hybrid true)
+        (op search (binds query category limit))
+        (op list (binds category limit offset))
+        (op list-paginated (binds category cursor limit))
+        (op list-by-scope (binds scope))
+        (op forget (binds id))
+        (op batch-forget (binds "Vec<id>"))
+        (op clear-scope (binds scope))
+        (op set-embedding (binds id embedding))
+        (op set-linked-task-id (binds id linked_task_id))
+        (op stale-embedding (where updated_at > embedded_at))
+        (op missing-embedding (where embedding=NULL))
+        (op load-embeddings :returns "Vec<(id, embedding)>")
+        (op load-all-embeddings :returns "Vec<(id, key, embedding)>")
+        (op update-access-stats (binds id))
+        (op summary :aggregate true)
+        (op hot-keys (order-by access_count :desc) (limit 20))
+        (op find-stale (where updated_at < threshold))
+        (op find-duplicates)
+        (op embedding-stats :aggregate true))
+
+      (table knowledge_edges
+        (col from_id :type uuid :fk knowledge.id)
+        (col to_id :type uuid :fk knowledge.id)
+        (col relation :type text)
+        (col created_at :type timestamptz)
+        (op add-edge (binds from_id to_id relation)))
+
+      (table prompt_snapshots
+        (col id :type uuid :pk)
+        (col prompt_text :type text :not-null)
+        (col model :type text)
+        (col outcome :type text)
+        (col created_at :type timestamptz :not-null)
+        (col updated_at :type timestamptz)
+        (op save (binds prompt_text model))
+        (op update-outcome (binds id outcome))
+        (op list (order-by created_at :desc) (limit 50))))
+
+    (component compute-tables
+      :pattern crud-gateway
+      :target "crates/missiond-core/src/db/slot.rs"
+      :gen-target "crates/missiond-core/src/db/gen/compute.rs"
+
       (table slot_sessions
-        (col slot_id :type text :pk)
+        (col slot_name :type text :pk)
         (col session_id :type text)
-        (col updated_at :type timestamptz))
-      (table dynamic_slots
-        (col id :type text :pk)
-        (col template :type text)
-        (col objective :type text)
-        (col ttl :type integer)
+        (col pid :type integer)
         (col status :type text)
-        (col created_at :type timestamptz))
+        (col started_at :type timestamptz)
+        (op set (binds slot_name session_id pid status))
+        (op delete (binds slot_name)))
+
+      (table slot_tasks
+        (col id :type uuid :pk)
+        (col slot_name :type text :not-null)
+        (col task_type :type text)
+        (col prompt :type text)
+        (col status :type text :default "queued" :enum ("queued" "running" "completed" "failed"))
+        (col result :type text)
+        (col created_at :type timestamptz :not-null)
+        (col started_at :type timestamptz)
+        (col completed_at :type timestamptz)
+        (op insert (binds slot_name task_type prompt))
+        (op set-running (binds started_at) (where id))
+        (op set-completed (binds result completed_at) (where id))
+        (op set-failed (binds result completed_at) (where id)))
+
+      (table tasks
+        (col id :type uuid :pk)
+        (col description :type text :not-null)
+        (col status :type text :default "queued" :enum ("queued" "running" "completed" "failed"))
+        (col result :type text)
+        (col slot_name :type text)
+        (col created_at :type timestamptz :not-null)
+        (col started_at :type timestamptz)
+        (col completed_at :type timestamptz)
+        (op insert (binds description))
+        (op select-one (binds id)))
+
       (table daemon_state
         (col key :type text :pk)
-        (col value :type jsonb)
-        (col updated_at :type timestamptz)))
+        (col value :type text :not-null)
+        (col updated_at :type timestamptz)
+        (op set (binds key value)))
 
-    ;; --- Slot Tasks & Tokens ---
-    (component slot-tasks-db
+      (table inbox_messages
+        (col id :type uuid :pk)
+        (col slot_name :type text :not-null)
+        (col content :type text :not-null)
+        (col read :type boolean :default false)
+        (col created_at :type timestamptz :not-null)
+        (col read_at :type timestamptz)
+        (op insert (binds slot_name content))
+        (op mark-read (binds id)))))
+
+  ;; ══════════════════════════════════════════════════════
+  ;; PILLAR 2: DATABASE SCHEMA — OBSERVABILITY
+  ;; ══════════════════════════════════════════════════════
+  (pillar db-observability
+    (purpose "audit trail, tool calls, timeline, LLM traces, retrospectives")
+
+    (component audit-tables
       :pattern crud-gateway
-      (table slot_tasks
-        (col id :type integer :pk)
-        (col slot_id :type text)
-        (col task_type :type text)
+      :target "crates/missiond-core/src/db/audit.rs"
+      :gen-target "crates/missiond-core/src/db/gen/audit.rs"
+
+      (table tool_calls
+        (col id :type uuid :pk)
+        (col session_id :type text :not-null)
+        (col conversation_id :type text)
+        (col tool_name :type text :not-null)
+        (col input :type jsonb)
+        (col output :type jsonb)
+        (col status :type text)
+        (col error :type text)
+        (col created_at :type timestamptz :not-null)
+        (col completed_at :type timestamptz)
+
+        (op insert (binds session_id conversation_id tool_name input))
+        (op insert-batch (binds "Vec<tool_call>"))
+        (op update-output (binds id output status error completed_at))
+        (op select-one (binds id))
+        (op select-by-session (binds session_id limit offset))
+        (op stats (binds session_id) :aggregate true)
+        (op count-pending (binds session_id))
+        (op sessions-with-pending :returns "Vec<session_id>")
+        (op for-detailed-analysis (binds session_id))
+        (op with-status-timeline (binds session_id))
+        (op name-sequence (binds session_id))
+        (op error-samples (binds tool_name limit))
+        (op retro-tool-stats (binds session_id))
+        (op retro-meta (binds session_id))
+        (op retro-repeat-patterns (binds session_id))
+        (op retro-high-error-tools (binds session_id))
+        (op first-user-message (binds session_id))
+        (op for-backfill (binds session_id)))
+
+      (table conversation_events
+        (col id :type bigint :pk :autoincrement)
+        (col conversation_id :type text :not-null)
+        (col event_type :type text :not-null)
+        (col data :type jsonb)
+        (col created_at :type timestamptz :not-null)
+        (op insert-batch (binds "Vec<event>"))
+        (op select (binds conversation_id event_type since until limit))
+        (op agent-trajectory (binds conversation_id))
+        (op type-summary (binds conversation_id) :aggregate true)
+        (op cleanup-old (binds threshold))
+        (op sessions-with-events (binds since limit)))
+
+      (table retrospective_results
+        (col session_id :type text :pk)
+        (col result :type jsonb :not-null)
+        (col created_at :type timestamptz :not-null)
+        (op save (binds session_id result))
+        (op has (binds session_id) :returns bool)
+        (op select-one (binds session_id))
+        (op list (binds limit offset))
+        (op needing-retro (where NOT EXISTS))
+        (op for-backfill)))
+
+    (component timeline-tables
+      :target "crates/missiond-core/src/db/timeline.rs"
+
+      (table system_timeline
+        (col id :type bigint :pk :autoincrement)
+        (col event_type :type text :not-null)
+        (col slot_name :type text)
+        (col session_id :type text)
+        (col summary :type text)
+        (col data :type jsonb)
+        (col trace_id :type text)
+        (col created_at :type timestamptz :not-null)
+        (op insert (binds event_type slot_name session_id summary data trace_id))
+        (op query (binds event_type slot_name since until limit offset))
+        (op update-summary (binds id summary))
+        (op stats (binds since) :aggregate true)
+        (op traces (binds trace_id))))
+
+    (component gemini-log-tables
+      :target "crates/missiond-core/src/db/gemini_log.rs"
+
+      (table gemini_requests
+        (col id :type uuid :pk)
+        (col model :type text :not-null)
+        (col purpose :type text)
+        (col prompt_preview :type text)
+        (col response_preview :type text)
+        (col input_tokens :type integer)
+        (col output_tokens :type integer)
         (col status :type text)
         (col duration_ms :type integer)
-        (col created_at :type timestamptz))
-      (table token_usage_ledger
-        (col id :type integer :pk)
-        (col slot_id :type text)
-        (col conversation_id :type text)
+        (col created_at :type timestamptz :not-null)
+        (col completed_at :type timestamptz)
+        (op insert-started (binds model purpose prompt_preview))
+        (op update-completed (binds id response_preview input_tokens output_tokens status duration_ms))
+        (op get-content (binds id))
+        (op query (binds model purpose since until limit))
+        (op stats (binds since) :aggregate true)
+        (op cleanup (binds threshold)))
+
+      (table gemini_file_cache
+        (col file_hash :type text :pk)
+        (col uri :type text :not-null)
+        (col expires_at :type timestamptz :not-null)
+        (op get (binds file_hash))
+        (op put (binds file_hash uri expires_at))
+        (op gc (where expires_at < now()))))
+
+    (component incident-tables
+      :target "crates/missiond-core/src/db/incident.rs"
+
+      (table incidents
+        (col id :type uuid :pk)
+        (col incident_type :type text :not-null)
+        (col severity :type text :not-null)
+        (col message :type text :not-null)
+        (col data :type jsonb)
+        (col created_at :type timestamptz :not-null)
+        (op insert (binds incident_type severity message data))
+        (op has-recent (binds incident_type since) :returns bool)
+        (op list (binds severity since limit)))
+
+      (table token_usage
+        (col id :type uuid :pk)
+        (col session_id :type text)
         (col model :type text)
         (col input_tokens :type integer)
         (col output_tokens :type integer)
-        (col cache_tokens :type integer)
-        (col recorded_at :type timestamptz)))
+        (col cost_usd :type float8)
+        (col created_at :type timestamptz :not-null)
+        (op insert (binds session_id model input_tokens output_tokens))
+        (op stats (binds since) :aggregate true)))
 
-    ;; --- Skills ---
-    (component skill-db
-      :pattern crud-gateway
-      :target "missiond-core/src/db/skill.rs"
-      (table skill_topics
-        (col id :type integer :pk)
-        (col topic :type text)
-        (col description :type text)
-        (col file_path :type text)
-        (col hit_count :type integer :default 0)
-        (col embedding_vec :type blob))
-      (table skill_blocks
-        (col id :type integer :pk)
-        (col topic :type text)
-        (col block_type :type text)
-        (col title :type text)
-        (col content :type text)
-        (col fts_doc :type text))
-      (table skill_versions
-        (col id :type integer :pk)
-        (col topic :type text)
-        (col checksum :type text)
-        (col created_at :type timestamptz))
-      (table skill_executions
-        (col id :type integer :pk)
-        (col skill_topic :type text)
-        (col action_id :type text)
-        (col status :type text)
-        (col steps_total :type integer)
-        (col steps_completed :type integer)))
+    (component narration-tables
+      :target "crates/missiond-core/src/db/narration.rs"
 
-    ;; --- Observability ---
-    (component observability-db
-      :pattern crud-gateway
-      (table gemini_requests
-        (col id :type integer :pk)
-        (col caller :type text)
-        (col model :type text)
-        (col prompt_chars :type integer)
-        (col duration_ms :type integer)
-        (col status :type text)
-        (col error_msg :type text)
-        (col created_at :type timestamptz))
-      (table gemini_file_uploads
-        (col id :type integer :pk)
-        (col file_hash :type text)
-        (col file_uri :type text)
-        (col expires_at :type timestamptz))
-      (table incidents
-        (col id :type integer :pk)
-        (col severity :type text)
-        (col source :type text)
-        (col title :type text)
-        (col server_id :type text)
-        (col dedupe_key :type text)
-        (col created_at :type timestamptz))
-      (table system_timeline
-        (col seq :type integer :pk)
-        (col trace_id :type text)
-        (col event_type :type text)
-        (col summary :type text)
-        (col payload :type jsonb)
-        (col fts_doc :type text)
-        (col created_at :type timestamptz))
-      (table router_chat_archive
-        (col id :type integer :pk)
-        (col session_id :type text)
-        (col role :type text)
-        (col content :type text)
-        (col archive_reason :type text)
-        (col created_at :type timestamptz)))
-
-    ;; --- Watcher & Cursor ---
-    (component cursor-db
-      :pattern crud-gateway
-      (table watcher_cursors
-        (col file_path :type text :pk)
-        (col byte_offset :type bigint)
-        (col session_id :type text))
-      (table consumer_watermarks
-        (col consumer_name :type text :pk)
-        (col session_id :type text)
-        (col last_processed_msg_id :type integer)))
-
-    ;; --- Code Intelligence ---
-    (component code-intel-db
-      :pattern crud-gateway
-      :target "missiond-core/src/db/ast.rs"
-      (table ast_nodes
-        (col id :type integer :pk)
-        (col repo :type text)
-        (col file_path :type text)
-        (col node_type :type text)
-        (col name :type text)
-        (col signature :type text)
-        (col start_line :type integer)
-        (col embedding_vec :type blob))
-      (table ast_file_meta
-        (col id :type integer :pk)
-        (col repo :type text)
-        (col file_path :type text)
-        (col commit_hash :type text)
-        (col node_count :type integer))
-      (table beacons
-        (col id :type integer :pk)
-        (col name :type text)
-        (col description :type text)
-        (col harvest_count :type integer :default 0))
-      (table beacon_nodes
-        (col id :type integer :pk)
-        (col beacon_id :type integer)
-        (col repo :type text)
-        (col symbol_name :type text)))
-
-    ;; --- Analysis & Narrative ---
-    (component narrative-db
-      :pattern crud-gateway
-      (table message_narrations
-        (col id :type integer :pk)
-        (col message_id :type integer)
-        (col step_title :type text)
-        (col step_intent :type text)
-        (col step_result :type text))
       (table narration_cursors
-        (col session_id :type text :pk)
-        (col last_processed_id :type integer)
-        (col batch_index :type integer)
-        (col status :type text))
-      (table retrospective_results
-        (col id :type integer :pk)
-        (col session_id :type text)
-        (col trigger_reason :type text)
-        (col quick_stats :type jsonb)
-        (col full_analysis :type text)))
+        (col conversation_id :type text :pk)
+        (col last_message_id :type bigint)
+        (col processing :type boolean :default false)
+        (col updated_at :type timestamptz)
+        (op mark-processing (binds conversation_id)))
 
-    ;; --- Caching ---
-    (component cache-db
-      :pattern crud-gateway
+      (table message_narrations
+        (col id :type bigint :pk :autoincrement)
+        (col message_id :type bigint :fk conversation_messages.id)
+        (col narration :type text :not-null)
+        (col created_at :type timestamptz :not-null))))
+
+  ;; ══════════════════════════════════════════════════════
+  ;; PILLAR 3: DATABASE SCHEMA — PIPELINE & CODE INTEL
+  ;; ══════════════════════════════════════════════════════
+  (pillar db-pipeline
+    (purpose "AST sync, beacons, backfill phases, watermarks, translations")
+
+    (component ast-tables
+      :target "crates/missiond-core/src/db/ast.rs"
+
+      (table ast_nodes
+        (col id :type uuid :pk)
+        (col file_path :type text :not-null)
+        (col symbol_name :type text :not-null)
+        (col kind :type text :not-null
+          :enum ("function" "struct" "enum" "trait" "impl" "mod" "const" "type"))
+        (col start_line :type integer :not-null)
+        (col end_line :type integer :not-null)
+        (col signature :type text)
+        (col is_exported :type boolean :default false)
+        (col parent_symbol :type text)
+        (col embedding :type bytea)
+        (col beacon_tags :type jsonb)
+        (col commit_hash :type text)
+        (col created_at :type timestamptz :not-null)
+
+        (op sync-file (binds file_path "Vec<CodeNode>" commit_hash))
+        (op delete-file (binds file_path))
+        (op search (binds query kind is_exported limit) :fts true)
+        (op search-ranked (binds query embedding limit) :hybrid true)
+        (op get-file-nodes (binds file_path))
+        (op find-related (binds symbol_name kind))
+        (op get-file-commit (binds file_path))
+        (op stats :aggregate true)
+        (op set-embedding (binds id embedding))
+        (op find-unembedded (limit batch_size))
+        (op load-all-embeddings :returns "Vec<(id, embedding)>")
+        (op get-search-hit (binds id))
+        (op get-node (binds id))
+        (op module-summaries :returns "Vec<(module, count)>")))
+
+    (component beacon-tables
+      :target "crates/missiond-core/src/db/beacon.rs"
+      :gen-target "crates/missiond-core/src/db/gen/pipeline.rs"
+
+      (table beacons
+        (col id :type uuid :pk)
+        (col tag :type text :unique :not-null)
+        (col description :type text)
+        (col harvest_count :type integer :default 0)
+        (col created_at :type timestamptz :not-null)
+        (op list)
+        (op ensure (binds tag) :upsert-on tag)
+        (op increment-harvest (binds tag))
+        (op set-description (binds tag description))
+        (op search (binds query) :fts true)
+        (op cleanup-empty (where harvest_count=0)))
+
+      (table beacon_nodes
+        (col id :type uuid :pk)
+        (col beacon_id :type uuid :fk beacons.id)
+        (col file_path :type text :not-null)
+        (col symbol_name :type text)
+        (col line :type integer)
+        (col annotation :type text)
+        (op upsert (binds beacon_id file_path symbol_name line))
+        (op map (binds beacon_id))
+        (op delete-file (binds file_path))
+        (op annotate (binds id annotation))))
+
+    (component pipeline-tables
+      :gen-target "crates/missiond-core/src/db/gen/pipeline.rs"
+
+      (table backfill_phases
+        (col phase_name :type text :pk)
+        (col status :type text :default "pending" :enum ("pending" "running" "completed" "failed"))
+        (col progress :type integer :default 0)
+        (col total :type integer)
+        (col started_at :type timestamptz)
+        (col completed_at :type timestamptz)
+        (col error :type text)
+        (op get (binds phase_name))
+        (op list)
+        (op start (binds phase_name total))
+        (op update-progress (binds phase_name progress))
+        (op complete (binds phase_name))
+        (op record-failure (binds phase_name error))
+        (op retryable-failures)
+        (op clear-failure (binds phase_name)))
+
+      (table watermarks
+        (col key :type text :pk)
+        (col time_value :type timestamptz)
+        (col msg_id_value :type bigint)
+        (op advance-time (binds key time_value))
+        (op advance-msg-id (binds key msg_id_value)))
+
+      (table labels
+        (col key :type text :pk)
+        (col value :type text :not-null)
+        (op set (binds key value)))
+
+      (table translations
+        (col id :type uuid :pk)
+        (col message_id :type bigint)
+        (col language :type text :not-null)
+        (col content :type text :not-null)
+        (col created_at :type timestamptz :not-null)
+        (op insert (binds message_id language content))
+        (op has (binds message_id language) :returns bool)))
+
+    (component vision-tables
+      :target "crates/missiond-core/src/db/vision.rs"
+
       (table image_descriptions
-        (col image_hash :type text :pk)
-        (col media_type :type text)
-        (col description :type text))
-      (table message_translations
-        (col message_id :type integer :pk)
-        (col translation :type text)
-        (col source_lang :type text)
-        (col target_lang :type text)))
+        (col id :type uuid :pk)
+        (col image_hash :type text :unique :not-null)
+        (col description :type text :not-null)
+        (col created_at :type timestamptz :not-null)
+        (op save (binds image_hash description) :upsert-on image_hash)
+        (op count :aggregate true))))
 
-    ;; --- Prompt & Labeling ---
-    (component prompt-db
-      :pattern crud-gateway
-      (table prompt_snapshots
-        (col id :type integer :pk)
-        (col task_id :type text)
-        (col prompt :type text)
-        (col cited_kb_ids :type jsonb)
-        (col category :type text)
-        (col task_outcome :type text))
-      (table message_labels
-        (col id :type integer :pk)
-        (col message_id :type integer)
-        (col label :type text)
-        (col value :type text)
-        (col source :type text)))
+  ;; ══════════════════════════════════════════════════════
+  ;; PILLAR 4: DATABASE SCHEMA — AGENTS & SKILLS
+  ;; ══════════════════════════════════════════════════════
+  (pillar db-agents
+    (purpose "questions, dynamic slots, skills, router chat")
 
-    ;; --- Backfill ---
-    (component backfill-db
-      :pattern crud-gateway
-      (table backfill_progress
-        (col phase :type text :pk)
-        (col status :type text)
-        (col last_cursor :type text)
-        (col processed :type integer)
-        (col failed :type integer))
-      (table backfill_failures
-        (col id :type integer :pk)
-        (col session_id :type text)
-        (col phase :type text)
-        (col retry_count :type integer)
-        (col last_error :type text))))
+    (component question-tables
+      :target "crates/missiond-core/src/db/question.rs"
+      :gen-target "crates/missiond-core/src/db/gen/misc.rs"
 
-  ;; ============================================================
-  ;; PILLAR 2: STATE MACHINES
-  ;; Pattern: [P4] state-machine
-  ;; ============================================================
+      (table agent_questions
+        (col id :type uuid :pk)
+        (col task_id :type uuid)
+        (col slot_name :type text)
+        (col question :type text :not-null)
+        (col context :type jsonb)
+        (col status :type text :default "pending" :enum ("pending" "answered" "dismissed"))
+        (col answer :type text)
+        (col routing_trace :type jsonb)
+        (col retry_count :type integer :default 0)
+        (col created_at :type timestamptz :not-null)
+        (col answered_at :type timestamptz)
+        (op select-one (binds id))
+        (op list-for-task (binds task_id))
+        (op increment-retry (binds id))
+        (op set-routing-trace (binds id routing_trace))
+        (op downgrade-to-user (binds id))))
+
+    (component dynamic-slot-tables
+      :target "crates/missiond-core/src/db/dynamic_slot.rs"
+      :gen-target "crates/missiond-core/src/db/gen/misc.rs"
+
+      (table dynamic_slots
+        (col id :type uuid :pk)
+        (col slot_name :type text :unique :not-null)
+        (col config :type jsonb :not-null)
+        (col status :type text :default "active")
+        (col expires_at :type timestamptz)
+        (col created_at :type timestamptz :not-null)
+        (op create (binds slot_name config expires_at))
+        (op select-one (binds id))
+        (op list (binds status))
+        (op count-active)
+        (op terminate (binds id))
+        (op extend (binds id expires_at))
+        (op find-expired (where expires_at < now()))
+        (op find-expiring (where expires_at < soon()))))
+
+    (component skill-tables
+      :target "crates/missiond-core/src/db/skill.rs"
+      :gen-target "crates/missiond-core/src/db/gen/skill.rs"
+
+      (table skills
+        (col id :type uuid :pk)
+        (col name :type text :unique :not-null)
+        (col description :type text)
+        (col content :type text :not-null)
+        (col version :type integer :default 1)
+        (col enabled :type boolean :default true)
+        (col created_at :type timestamptz :not-null)
+        (col updated_at :type timestamptz :not-null))
+
+      (table skill_topics
+        (col id :type uuid :pk)
+        (col skill_id :type uuid :fk skills.id)
+        (col topic :type text :not-null)
+        (col hit_count :type integer :default 0)
+        (col last_hit_at :type timestamptz)
+        (op hit (binds id))
+        (op update-stats (binds id hit_count)))
+
+      (table skill_blocks
+        (col id :type uuid :pk)
+        (col skill_id :type uuid :fk skills.id)
+        (col block_type :type text :not-null)
+        (col content :type text :not-null)
+        (col status :type text :default "active")
+        (op set-status (binds id status))))
+
+    (component router-chat-tables
+      :target "crates/missiond-core/src/db/router_chat.rs"
+
+      (table router_chat_sessions
+        (col id :type uuid :pk)
+        (col title :type text)
+        (col model :type text)
+        (col created_at :type timestamptz :not-null)
+        (col updated_at :type timestamptz :not-null))
+
+      (table router_chat_messages
+        (col id :type uuid :pk)
+        (col session_id :type uuid :fk router_chat_sessions.id)
+        (col role :type text :not-null)
+        (col content :type text :not-null)
+        (col model :type text)
+        (col tokens :type integer)
+        (col created_at :type timestamptz :not-null))))
+
+  ;; ══════════════════════════════════════════════════════
+  ;; PILLAR 5: STATE MACHINES
+  ;; ══════════════════════════════════════════════════════
   (pillar state-machines
     (purpose "all finite state automata governing lifecycle transitions")
 
-    (component pty-state
-      :pattern state-machine
-      :target "missiond-core/src/semantic/types.rs"
-      (state-machine pty-session-state
-        :enum State
-        :derive (Debug Clone Copy PartialEq Eq Serialize Deserialize)
-        (states
-          (Starting  :doc "PTY spawned, waiting for Claude Code TUI")
-          (Idle      :doc "Waiting for user input, prompt visible")
-          (SlashMenu :doc "Slash command menu open")
-          (Thinking  :doc "Claude processing, spinner visible")
-          (Responding :doc "Claude generating output")
-          (ToolRunning :doc "Tool execution active")
-          (Confirming :doc "Permission dialog pending")
-          (Error     :doc "Error state"))
+    (component pty-session-state
+      :target "crates/missiond-semantic/src/types.rs"
+      (state-machine pty-session
+        (states (Starting) (Idle) (SlashMenu) (Thinking) (Responding)
+                (ToolRunning) (Confirming) (Error))
         (transitions
           (Starting -> Idle :trigger "prompt-detected")
           (Starting -> Error :trigger "process-crash")
@@ -469,38 +731,20 @@
           (ToolRunning -> Idle :trigger "prompt-returns")
           (ToolRunning -> Confirming :trigger "permission-dialog")
           (Confirming -> ToolRunning :trigger "confirmed")
-          (Confirming -> Idle :trigger "denied"))
-        (trait SessionStateDetector
-          (detect-from-screen :params ((lines "&[String]") (current "&State")) :returns "Option<State>"))))
+          (Confirming -> Idle :trigger "denied"))))
 
-    (component extraction-phase
-      :pattern state-machine
-      :target "missiond-daemon/src/engine/learning_engine/extraction.rs"
-      (state-machine extraction-phase
-        :enum ExtractionPhase
-        (states
-          (Idle     :doc "No extraction in progress")
-          (Sending  :doc "Sending content to extraction slot")
-          (WaitingForIdleness :doc "Waiting for slot to finish")
-          (Complete :doc "Extraction round finished"))
+    (component board-task-status
+      :target "crates/missiond-core/src/types/board.rs"
+      (state-machine board-task
+        (states (Open) (Running) (Done) (Failed) (Blocked))
         (transitions
-          (Idle -> Sending :trigger "extraction-triggered")
-          (Sending -> WaitingForIdleness :trigger "content-sent")
-          (WaitingForIdleness -> Complete :trigger "slot-idle")
-          (WaitingForIdleness -> Idle :trigger "timeout")
-          (Complete -> Idle :trigger "reset"))))
-
-    (component engineering-phase
-      :pattern state-machine
-      :target "missiond-core/src/types/board.rs"
+          (Open -> Running :trigger "claimed")
+          (Open -> Blocked :trigger "dependency-unmet")
+          (Running -> Done :trigger "completed")
+          (Running -> Failed :trigger "error")
+          (Blocked -> Open :trigger "dependency-resolved")))
       (state-machine engineering-phase
-        :enum EngineeringPhase
-        (states
-          (Investigate :doc "Gathering context and requirements")
-          (Consult     :doc "Consulting Gemini for architecture review")
-          (Plan        :doc "Writing implementation plan")
-          (Execute     :doc "Executing the plan")
-          (Finalize    :doc "Verifying and closing"))
+        (states (Investigate) (Consult) (Plan) (Execute) (Finalize))
         (transitions
           (Investigate -> Consult :trigger "context-gathered")
           (Consult -> Plan :trigger "review-complete")
@@ -509,800 +753,534 @@
           (Finalize -> Investigate :trigger "issues-found"))))
 
     (component task-status
-      :pattern state-machine
-      (state-machine task-status
-        :enum TaskStatus
+      :target "crates/missiond-core/src/types/task.rs"
+      (state-machine task
         (states (Queued) (Running) (Completed) (Failed))
         (transitions
           (Queued -> Running :trigger "slot-claimed")
           (Running -> Completed :trigger "result-received")
           (Running -> Failed :trigger "error-or-timeout"))))
 
-    (component board-task-status
-      :pattern state-machine
-      (state-machine board-task-status
-        :enum BoardTaskStatus
-        (states (Open) (Running) (Done) (Failed) (Blocked))
-        (transitions
-          (Open -> Running :trigger "claimed")
-          (Open -> Blocked :trigger "dependency-unmet")
-          (Running -> Done :trigger "completed")
-          (Running -> Failed :trigger "error")
-          (Blocked -> Open :trigger "dependency-resolved"))))
-
-    (component async-job-status
-      :pattern state-machine
-      (state-machine async-job-status
-        :enum AsyncJobStatus
-        (states (Queued) (Running) (Done) (Failed))
-        (transitions
-          (Queued -> Running :trigger "worker-picks-up")
-          (Running -> Done :trigger "success")
-          (Running -> Failed :trigger "error"))))
-
     (component question-status
-      :pattern state-machine
-      (state-machine question-status
-        :enum AgentQuestionStatus
+      :target "crates/missiond-core/src/types/question.rs"
+      (state-machine question
         (states (Pending) (Answered) (Dismissed))
         (transitions
           (Pending -> Answered :trigger "answer-provided")
-          (Pending -> Dismissed :trigger "user-dismissed")))))
+          (Pending -> Dismissed :trigger "user-dismissed"))))
 
-  ;; ============================================================
-  ;; PILLAR 3: WORKERS
-  ;; Pattern: [P2] event-listener + [P3] cron-worker
-  ;; ============================================================
-  (pillar workers
-    (purpose "18 background workers with unified BackgroundWorker trait")
+    (component extraction-phase
+      :target "crates/missiond-daemon/src/engine/learning_engine/extraction.rs"
+      (state-machine extraction
+        (states (Idle) (Sending) (WaitingForIdleness) (Complete))
+        (transitions
+          (Idle -> Sending :trigger "extraction-triggered")
+          (Sending -> WaitingForIdleness :trigger "content-sent")
+          (WaitingForIdleness -> Complete :trigger "slot-idle")
+          (WaitingForIdleness -> Idle :trigger "timeout")
+          (Complete -> Idle :trigger "reset")))))
 
-    ;; --- Event-Driven Workers [P2] ---
-    (component conversation-logger
-      :pattern event-listener
-      :target "missiond-daemon/src/workers/conversation_logger.rs"
-      :struct ConversationLogger
-      (listens-to (JsonlMessageIngested :fields (session_id message)))
-      (writes-to conversations conversation_messages))
+  ;; ══════════════════════════════════════════════════════
+  ;; PILLAR 6: EVENT BUS + WORKER TOPOLOGY
+  ;; ══════════════════════════════════════════════════════
+  (pillar event-workers
+    (purpose "pub-sub event backbone + 18 background workers organized by LLM dependency: sonnet(5) codex(2) gemini(1) local(10)")
 
-    (component conversation-organizer
-      :pattern event-listener
-      :target "missiond-daemon/src/workers/conversation_organizer.rs"
-      :struct ConversationOrganizer
-      (listens-to (MessagePersisted :fields (session_id msg_id)))
-      (writes-to message_labels conversation_events))
+    (component event-bus
+      :target "crates/missiond-daemon/src/event_bus.rs"
+      (description "tokio broadcast channel hub for DaemonEvent enum")
+      (event-categories
+        (pty-events       "PtyStateChanged, PtyOutput, PtyScreenshot")
+        (message-events   "JsonlMessageIngested, MessagePersisted")
+        (task-events      "TaskSubmitted, TaskCompleted, TaskFailed")
+        (board-events     "BoardTaskCreated, BoardTaskUpdated, BoardTaskClaimed")
+        (slot-events      "SlotBecameIdle, SlotStuck, SlotSessionChanged")
+        (knowledge-events "KbEntryCreated, KbEntryUpdated")
+        (system-events    "WorkerStatusChanged, ShutdownRequested")
+        (cascade-events   "CascadeTriggered, CascadeCompleted")))
 
-    (component pty-event-worker
-      :pattern event-listener
-      :target "missiond-daemon/src/workers/pty_event_worker.rs"
-      :struct PtyEventWorker
-      (listens-to (PtyStateChanged :fields (slot_id old_state new_state)))
-      (emits (SlotBecameIdle) (SlotStuck)))
+    (component event-router
+      :target "crates/missiond-daemon/src/event_router.rs"
+      (depends event-bus))
 
-    (component tagger-chunker
-      :pattern event-listener
-      :target "missiond-daemon/src/workers/tagger_chunker.rs"
-      :struct TaggerChunker
-      (listens-to (MessagePersisted :fields (session_id msg_id)))
-      (writes-to message_labels))
+    (component events-sync
+      :target "crates/missiond-daemon/src/events_sync.rs"
+      (depends event-bus)
+      (writes-to system_timeline))
 
-    (component step-narrator
-      :pattern event-listener
-      :target "missiond-daemon/src/workers/step_narrator.rs"
-      :struct StepNarrator
-      (listens-to (MessagePersisted :fields (session_id msg_id)))
-      (writes-to message_narrations narration_cursors))
+    (component worker-registry
+      :target "crates/missiond-daemon/src/workers/registry.rs"
+      (trait BackgroundWorker
+        (const KIND :type WorkerKind :enum (Sonnet Codex Gemini Local))
+        (methods (name extra-deps run)))
+      (note "KIND must match the subdirectory the worker lives in; ControlTree provider deps auto-injected by spawn_worker"))
 
-    ;; --- Cron/Tick Workers [P3] ---
-    (component embedding-worker
-      :pattern cron-worker
-      :target "missiond-daemon/src/workers/embedding_worker.rs"
-      :struct EmbeddingWorker
-      :deps ((db "DbExecutor") (embed_model "FastEmbed") (sonnet "SonnetGateway"))
-      (schedule :channel-driven "embedding_rx MPSC")
-      (writes-to knowledge conversation_topic_vectors))
+    (component control-tree
+      :target "crates/missiond-daemon/src/control_tree.rs"
+      (depends worker-registry))
 
-    (component translation-worker
-      :pattern cron-worker
-      :target "missiond-daemon/src/workers/translation_worker.rs"
-      :struct TranslationWorker
-      :deps ((db "DbExecutor") (sonnet "SonnetGateway"))
-      (schedule :interval 5s)
-      (writes-to message_translations))
+    ;; workers/sonnet/ — Sonnet API via SonnetGateway
+    (component workers-sonnet
+      (worker embedding-worker
+        :target "crates/missiond-daemon/src/workers/sonnet/embedding_worker.rs"
+        :trigger "channel embedding_rx MPSC"
+        :writes-to (knowledge conversation_topic_vectors))
+      (worker translation-worker
+        :target "crates/missiond-daemon/src/workers/sonnet/translation_worker.rs"
+        :trigger "interval 5s"
+        :writes-to translations)
+      (worker briefing-worker
+        :target "crates/missiond-daemon/src/workers/sonnet/briefing_worker.rs"
+        :trigger on-demand)
+      (worker arch-maintenance-worker
+        :target "crates/missiond-daemon/src/workers/sonnet/arch_maintenance_worker.rs"
+        :trigger "interval 3600s"
+        :writes-to knowledge)
+      (worker retro-worker
+        :target "crates/missiond-daemon/src/workers/sonnet/retro_worker.rs"
+        :trigger on-session-end
+        :writes-to retrospective_results))
 
-    (component briefing-worker
-      :pattern cron-worker
-      :target "missiond-daemon/src/workers/briefing_worker.rs"
-      :struct BriefingWorker
-      :deps ((db "DbExecutor") (sonnet "SonnetGateway"))
-      (schedule :on-demand)
-      (writes-to slot context briefings))
+    ;; workers/codex/ — Codex CLI / Claude Code PTY via SlotManager
+    (component workers-codex
+      (worker step-narrator
+        :target "crates/missiond-daemon/src/workers/codex/step_narrator.rs"
+        :listens-to MessagePersisted
+        :writes-to (message_narrations narration_cursors))
+      (worker vision-worker
+        :target "crates/missiond-daemon/src/workers/codex/vision_worker.rs"
+        :trigger channel
+        :writes-to image_descriptions))
 
-    (component vision-worker
-      :pattern cron-worker
-      :target "missiond-daemon/src/workers/vision_worker.rs"
-      :struct VisionWorker
-      (schedule :channel-driven)
-      (writes-to image_descriptions))
+    ;; workers/gemini/ — Gemini CLI PTY via SlotManager
+    (component workers-gemini
+      (worker strategy-worker
+        :target "crates/missiond-daemon/src/workers/gemini/strategy_worker.rs"
+        :trigger "interval 300s flag-gated"))
 
-    (component experience-harvester
-      :pattern cron-worker
-      :target "missiond-daemon/src/workers/experience_harvester.rs"
-      :struct ExperienceHarvester
-      (schedule :interval 60s)
-      (writes-to knowledge))
+    ;; workers/local/ — pure computation, no LLM dependency
+    (component workers-local
+      (worker conversation-logger
+        :target "crates/missiond-daemon/src/workers/local/conversation_logger.rs"
+        :listens-to JsonlMessageIngested
+        :writes-to (conversations conversation_messages))
+      (worker conversation-organizer
+        :target "crates/missiond-daemon/src/workers/local/conversation_organizer.rs"
+        :listens-to MessagePersisted)
+      (worker pty-event-worker
+        :target "crates/missiond-daemon/src/workers/local/pty_event_worker.rs"
+        :listens-to PtyStateChanged
+        :emits (SlotBecameIdle SlotStuck))
+      (worker tagger-chunker
+        :target "crates/missiond-daemon/src/workers/local/tagger_chunker.rs"
+        :listens-to MessagePersisted)
+      (worker experience-harvester
+        :target "crates/missiond-daemon/src/workers/local/experience_harvester.rs"
+        :trigger "interval 60s"
+        :writes-to knowledge)
+      (worker reconcile-worker
+        :target "crates/missiond-daemon/src/workers/local/reconcile_worker.rs"
+        :trigger "interval 10s"
+        :writes-to slot_sessions)
+      (worker gemini-reconcile-worker
+        :target "crates/missiond-daemon/src/workers/local/gemini_reconcile_worker.rs"
+        :trigger "interval 10s")
+      (worker ast-sync-worker
+        :target "crates/missiond-daemon/src/workers/local/ast_sync_worker.rs"
+        :trigger "channel ast_sync_rx MPSC"
+        :writes-to (ast_nodes))
+      (worker code-prefetch
+        :target "crates/missiond-daemon/src/workers/local/code_prefetch.rs"
+        :trigger on-demand)
+      (worker gemini-logger
+        :target "crates/missiond-daemon/src/workers/local/gemini_logger.rs"
+        :trigger channel
+        :writes-to gemini_requests)))
 
-    (component reconcile-worker
-      :pattern cron-worker
-      :target "missiond-daemon/src/workers/reconcile_worker.rs"
-      :struct ReconcileWorker
-      (schedule :interval 10s)
-      (writes-to slot_sessions))
+  ;; ══════════════════════════════════════════════════════
+  ;; PILLAR 7: ENGINES
+  ;; ══════════════════════════════════════════════════════
+  (pillar engines
+    (purpose "composite orchestration: autopilot + learning + slot lifecycle")
 
-    (component gemini-reconcile-worker
-      :pattern cron-worker
-      :target "missiond-daemon/src/workers/gemini_reconcile_worker.rs"
-      :struct GeminiReconcileWorker
-      (schedule :interval 10s))
+    (component autopilot-engine
+      :target "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
+      (tick-pipeline
+        memory-scheduler -> extraction-check -> board-task-dispatch
+        -> flow-progression -> supervision-check)
+      (depends (db slot_manager event_bus llm_gateway context_pipeline)))
 
-    (component ast-sync-worker
-      :pattern cron-worker
-      :target "missiond-daemon/src/workers/ast_sync_worker.rs"
-      :struct AstSyncWorker
-      :deps ((db "DbExecutor") (treesitter "tree-sitter"))
-      (schedule :channel-driven "ast_sync_rx MPSC")
-      (writes-to ast_nodes ast_file_meta))
+    (component flow-engine
+      :target "crates/missiond-daemon/src/engine/intent_engine/flow_engine.rs"
+      (depends (db slot_manager)))
 
-    (component code-prefetch
-      :pattern cron-worker
-      :target "missiond-daemon/src/workers/code_prefetch.rs"
-      :struct CodePrefetch
-      (schedule :on-demand))
+    (component memory-scheduler
+      :target "crates/missiond-daemon/src/engine/intent_engine/memory_scheduler.rs"
+      (depends db))
 
-    (component strategy-worker
-      :pattern cron-worker
-      :target "missiond-daemon/src/workers/strategy_worker.rs"
-      :struct StrategyWorker
-      :deps ((gemini "GeminiGateway"))
-      (schedule :interval 300s :flag-gated true)
-      (reads-from board_tasks knowledge conversations))
+    (component workflow-executor
+      :target "crates/missiond-daemon/src/engine/intent_engine/workflow_executor.rs"
+      (depends (db slot_manager)))
 
-    (component retro-worker
-      :pattern cron-worker
-      :target "missiond-daemon/src/workers/retro_worker.rs"
-      :struct RetroWorker
-      (schedule :on-session-end)
-      (writes-to retrospective_results))
+    (component learning-engine
+      :target "crates/missiond-daemon/src/engine/learning_engine/mod.rs"
+      (sub-engines
+        (decision-engine
+          :target "crates/missiond-daemon/src/engine/learning_engine/decision_engine.rs"
+          (decision-cascade kb-lookup -> gemini-consult -> decision-slot -> human-escalation))
+        (extraction
+          :target "crates/missiond-daemon/src/engine/learning_engine/extraction.rs")
+        (decision-harvest
+          :target "crates/missiond-daemon/src/engine/learning_engine/decision_harvest.rs")
+        (intent-analyst
+          :target "crates/missiond-daemon/src/engine/learning_engine/intent_analyst.rs")
+        (timeline-analyst
+          :target "crates/missiond-daemon/src/engine/learning_engine/timeline_analyst.rs")
+        (idle-explorer
+          :target "crates/missiond-daemon/src/engine/learning_engine/idle_explorer.rs")
+        (historical-scanner
+          :target "crates/missiond-daemon/src/engine/learning_engine/historical_scanner.rs")))
 
-    (component arch-maintenance-worker
-      :pattern cron-worker
-      :target "missiond-daemon/src/workers/arch_maintenance_worker.rs"
-      :struct ArchMaintenanceWorker
-      (schedule :interval 3600s)
-      (writes-to knowledge))
+    (component slot-orchestrator
+      :target "crates/missiond-daemon/src/slot_orchestrator/mod.rs"
+      (engine-adapters
+        (cc-controller    :target "crates/missiond-daemon/src/slot_orchestrator/cc_controller.rs")
+        (gemini-controller :target "crates/missiond-daemon/src/slot_orchestrator/gemini_controller.rs"))
+      (depends (pty_manager slot_manager event_bus))))
 
-    (component gemini-logger
-      :pattern cron-worker
-      :target "missiond-daemon/src/workers/gemini_logger.rs"
-      :struct GeminiLogger
-      (schedule :channel-driven)
-      (writes-to gemini_requests)))
+  ;; ══════════════════════════════════════════════════════
+  ;; PILLAR 8: SEMANTIC PARSER
+  ;; ══════════════════════════════════════════════════════
+  (pillar semantic-parser
+    (purpose "multi-layer recognizer: raw PTY screen → structured states")
 
-  ;; ============================================================
-  ;; PILLAR 4: MCP TOOLS
-  ;; Pattern: [P5] mcp-tool
-  ;; ============================================================
-  (pillar mcp-tools
-    (purpose "60+ MCP tools across 4 domains, JSON-RPC dispatch")
+    (component parser-pipeline
+      :target "crates/missiond-semantic/src/"
+      (pipeline
+        pattern-config -> fingerprint-registry -> state-parser
+        -> confirm-parser -> tool-output-parser)
+      (shared-resource "Arc<CompiledPatterns> from YAML hot-reload"))
 
-    ;; --- Compute Domain ---
-    (mcp-module compute-pty
-      :target "missiond-daemon/src/handlers/compute/pty.rs"
-      (tool mission_pty_spawn :description "Spawn new PTY session"
-        (input (slot_id string :required) (command string) (args array) (cwd string)))
-      (tool mission_pty_send :description "Send input to PTY"
-        (input (slot_id string :required) (content string :required)))
-      (tool mission_pty_read :description "Read PTY output"
-        (input (slot_id string :required) (lines integer)))
-      (tool mission_pty_screenshot :description "Capture PTY screenshot"
-        (input (slot_id string :required)))
-      (tool mission_pty_status :description "Get PTY state"
-        (input (slot_id string :required)))
-      (tool mission_pty_confirm :description "Respond to permission dialog"
-        (input (slot_id string :required) (allow boolean :required)))
-      (tool mission_pty_signal :description "Send signal to PTY"
-        (input (slot_id string :required) (signal string :required))))
+    (component pattern-config
+      :target "crates/missiond-semantic/src/patterns.rs"
+      (dispatch "CliEngine enum → engine-specific YAML + parser"))
 
-    (mcp-module compute-task
-      :target "missiond-daemon/src/handlers/compute/task.rs"
-      (tool mission_task_submit :description "Submit async task"
-        (input (prompt string :required) (slot_id string) (priority string)))
-      (tool mission_task_query :description "Query task status"
-        (input (task_id string :required)))
-      (tool mission_task_cancel :description "Cancel running task"
-        (input (task_id string :required)))
-      (tool mission_task_delegate :description "Delegate task to slot"
-        (input (slot_id string :required) (objective string :required) (context object))))
+    (component claude-code-parser
+      :target "crates/missiond-semantic/src/state.rs"
+      (detection-order
+        trust-dialog -> confirm-dialog -> idle-or-slash
+        -> processing -> responding -> error))
 
-    (mcp-module compute-slot
-      :target "missiond-daemon/src/handlers/compute/slot.rs"
-      (tool mission_slots :description "List slot configurations")
-      (tool mission_slot_history :description "Slot task history"
-        (input (slot_id string :required) (limit integer)))
-      (tool mission_compute_slot :description "Dynamic compute slot"
-        (input (action string :required :enum (create status destroy))
-               (template string) (objective string) (ttl integer))))
+    (component gemini-parser
+      :target "crates/missiond-semantic/src/gemini_state.rs"
+      (detection-order
+        error -> thinking -> responding -> tool-running
+        -> idle -> idle-placeholder -> idle-transitional))
 
-    (mcp-module compute-cc
-      :target "missiond-daemon/src/handlers/compute/cc_tasks.rs"
-      (tool mission_cc_query :description "Query Claude Code tasks"
-        (input (slot_id string) (status string) (limit integer)))
-      (tool mission_cc_swarm :description "Multi-slot swarm execution"
-        (input (objective string :required) (slot_ids array))))
+    (component fingerprint :target "crates/missiond-semantic/src/fingerprint.rs")
+    (component confirm     :target "crates/missiond-semantic/src/confirm.rs")
+    (component tool-parser :target "crates/missiond-semantic/src/tool.rs")
+    (component status      :target "crates/missiond-semantic/src/status.rs")
+    (component title       :target "crates/missiond-semantic/src/title.rs"))
 
-    (mcp-module compute-worker
-      :target "missiond-daemon/src/handlers/compute/worker.rs"
-      (tool mission_worker :description "Worker status and control"
-        (input (action string :required :enum (list status pause resume restart))
-               (worker_name string))))
+  ;; ══════════════════════════════════════════════════════
+  ;; PILLAR 9: LLM GATEWAYS + CONTEXT PIPELINE
+  ;; ══════════════════════════════════════════════════════
+  (pillar llm-context
+    (purpose "multi-provider LLM dispatch + budget-constrained prompt assembly")
 
-    (mcp-module compute-job
-      :target "missiond-daemon/src/handlers/compute/job.rs"
-      (tool mission_job_poll :description "Poll async job result"
-        (input (job_id string :required))))
+    (component llm-gateway
+      :target "crates/missiond-daemon/src/llm/llm_gateway.rs"
+      (providers
+        (gemini-gateway  :target "crates/missiond-daemon/src/llm/gemini_client.rs")
+        (sonnet-gateway  :target "crates/missiond-daemon/src/llm/sonnet_gateway.rs")
+        (minimax-gateway :target "crates/missiond-daemon/src/llm/minimax_gateway.rs")))
 
-    ;; --- Knowledge Domain ---
-    (mcp-module knowledge-kb
-      :target "missiond-daemon/src/handlers/knowledge/kb.rs"
-      (tool mission_kb_query :description "Search KB entries"
-        (input (query string :required) (category string) (limit integer :default 10)))
-      (tool mission_kb_remember :description "Upsert KB entry"
-        (input (category string :required) (key string :required)
-               (summary string :required) (detail object) (confidence number)))
-      (tool mission_kb_mutate :description "KB mutation operations"
-        (input (action string :required :enum (forget merge consolidate))
-               (key string) (keys array)))
-      (tool mission_kb_ops :description "KB maintenance"
-        (input (action string :required :enum (stats export import reindex)))))
+    (component llm-gate
+      :target "crates/missiond-daemon/src/llm/llm_gate.rs"
+      (description "rate limiter + 429 backoff + quota tracking"))
 
-    (mcp-module knowledge-memory
-      :target "missiond-daemon/src/handlers/knowledge/memory.rs"
-      (tool mission_memory :description "Memory extraction pipeline control"
-        (input (action string :required :enum (status trigger pause)))))
+    (component gemini-driver  :target "crates/missiond-daemon/src/llm/gemini_driver.rs")
+    (component gemini-file-api :target "crates/missiond-daemon/src/llm/gemini_file_api.rs")
+    (component gemini-cli     :target "crates/missiond-daemon/src/llm/gemini_cli.rs")
+    (component codex-cli      :target "crates/missiond-daemon/src/llm/codex_cli.rs")
+    (component prompts        :target "crates/missiond-daemon/src/llm/prompts.rs")
 
-    (mcp-module knowledge-board
-      :target "missiond-daemon/src/handlers/knowledge/board.rs"
-      (tool mission_board_query :description "Query board tasks"
-        (input (action string :required :enum (list get)) (id string) (status string)))
-      (tool mission_board_create :description "Create board task"
-        (input (title string :required) (description string) (priority string)
-               (category string) (assignee string) (parent_id string)))
-      (tool mission_board_update :description "Update board task"
-        (input (id string :required) (status string) (title string) (priority string)))
-      (tool mission_board_delete :description "Delete board task"
-        (input (id string :required)))
-      (tool mission_board_claim :description "Claim board task for execution"
-        (input (id string :required)))
-      (tool mission_board_decompose :description "Decompose task into subtasks"
-        (input (id string :required)))
-      (tool mission_board_note_add :description "Add note to board task"
-        (input (task_id string :required) (content string :required) (note_type string)))
-      (tool mission_board_retry :description "Retry failed board task"
-        (input (id string :required))))
+    (component context-pipeline
+      :target "crates/missiond-daemon/src/context/context_pipeline.rs"
+      (source-priority
+        slot-env -> skill-context -> kb-entries -> conversation-history
+        -> topology-map -> claude-md)
+      (depends (db slot_manager)))
 
-    (mcp-module knowledge-skill
-      :target "missiond-daemon/src/handlers/knowledge/skill.rs"
-      (tool mission_skill_query :description "Search skills"
-        (input (query string) (topic string)))
-      (tool mission_skill_exec :description "Execute skill workflow"
-        (input (topic string :required) (action string)))
-      (tool mission_skill_mutate :description "Create/update skill"
-        (input (action string :required) (topic string :required) (content string)))
-      (tool mission_skill_context :description "Build skill context"
-        (input (topic string :required))))
+    (component context-budget  :target "crates/missiond-daemon/src/context/context_budget.rs")
+    (component slot-env        :target "crates/missiond-daemon/src/context/slot_env.rs")
+    (component topology-map    :target "crates/missiond-daemon/src/context/topology_map.rs")
+    (component claude-md-sync  :target "crates/missiond-daemon/src/context/claude_md_sync.rs"))
 
-    (mcp-module knowledge-insight
-      :target "missiond-daemon/src/handlers/knowledge/insight.rs"
-      (tool mission_insight :description "Strategic insight analysis"
-        (input (query string :required) (depth string :enum (quick detailed)))))
+  ;; ══════════════════════════════════════════════════════
+  ;; PILLAR 10: MCP DISPATCH — 60+ TOOLS
+  ;; ══════════════════════════════════════════════════════
+  (pillar mcp-dispatch
+    (purpose "JSON-RPC stdio server → handler dispatch across 4 domains")
 
-    ;; --- Communication Domain ---
-    (mcp-module comm-conversation
-      :target "missiond-daemon/src/handlers/comm/conversation.rs"
-      (tool mission_conversation_query :description "List conversations"
-        (input (slot_id string) (status string) (limit integer)))
-      (tool mission_conversation_analyze :description "Analyze conversation"
-        (input (session_id string :required)))
-      (tool mission_conversation_reconcile :description "Reconcile conversation state"
-        (input (session_id string :required))))
+    (component mcp-server
+      :target "crates/missiond-mcp/src/bin/mission-mcp.rs"
+      (gateway-impl :target "crates/missiond-mcp/src/gateway_impl.rs")
+      (gen-gateway  :target "crates/missiond-mcp/src/gen_gateway.rs"))
 
-    (mcp-module comm-question
-      :target "missiond-daemon/src/handlers/comm/question.rs"
-      (tool mission_question :description "Manage agent questions"
-        (input (action string :required :enum (create list answer dismiss))
-               (question string) (id string) (answer string))))
+    (component compute-tools
+      :target "crates/missiond-mcp/src/tools/compute/"
+      (tool mission_pty_spawn      :handler "handlers::compute::pty")
+      (tool mission_pty_send       :handler "handlers::compute::pty")
+      (tool mission_pty_read       :handler "handlers::compute::pty")
+      (tool mission_pty_screenshot :handler "handlers::compute::pty")
+      (tool mission_pty_status     :handler "handlers::compute::pty")
+      (tool mission_pty_signal     :handler "handlers::compute::pty")
+      (tool mission_pty_confirm    :handler "handlers::compute::pty")
+      (tool mission_task_submit    :handler "handlers::compute::task")
+      (tool mission_task_query     :handler "handlers::compute::task")
+      (tool mission_task_cancel    :handler "handlers::compute::task")
+      (tool mission_task_delegate  :handler "handlers::compute::task_delegate")
+      (tool mission_compute_slot   :handler "handlers::compute::compute_slot")
+      (tool mission_slots          :handler "handlers::compute::slot")
+      (tool mission_worker         :handler "handlers::compute::worker")
+      (tool mission_job_poll       :handler "handlers::compute::job")
+      (tool mission_sonnet_process :handler "handlers::compute::process")
+      (tool mission_minimax_process :handler "handlers::compute::minimax")
+      (tool mission_agent          :handler "handlers::compute::cc_tasks"))
 
-    (mcp-module comm-router-chat
-      :target "missiond-daemon/src/handlers/comm/router_chat.rs"
-      (tool mission_router_chat :description "Chat with Gemini via router"
-        (input (message string :required) (session_id string)
-               (files array) (thinking boolean)))
-      (tool mission_router_chat_manage :description "Manage router chat sessions"
-        (input (action string :required :enum (list get archive delete))
-               (session_id string))))
+    (component knowledge-tools
+      :target "crates/missiond-mcp/src/tools/knowledge/"
+      (tool mission_kb_query       :handler "handlers::knowledge::kb")
+      (tool mission_kb_mutate      :handler "handlers::knowledge::kb")
+      (tool mission_kb_ops         :handler "handlers::knowledge::kb")
+      (tool mission_kb_remember    :handler "handlers::knowledge::kb")
+      (tool mission_memory         :handler "handlers::knowledge::memory")
+      (tool mission_board_query    :handler "handlers::knowledge::board")
+      (tool mission_board_create   :handler "handlers::knowledge::board")
+      (tool mission_board_update   :handler "handlers::knowledge::board")
+      (tool mission_board_delete   :handler "handlers::knowledge::board")
+      (tool mission_board_claim    :handler "handlers::knowledge::board")
+      (tool mission_board_retry    :handler "handlers::knowledge::board")
+      (tool mission_board_note_add :handler "handlers::knowledge::board")
+      (tool mission_board_decompose :handler "handlers::knowledge::board")
+      (tool mission_cc_query       :handler "handlers::knowledge::cascade")
+      (tool mission_cc_swarm       :handler "handlers::knowledge::cascade")
+      (tool mission_skill_query    :handler "handlers::knowledge::skill")
+      (tool mission_skill_exec     :handler "handlers::knowledge::skill")
+      (tool mission_skill_mutate   :handler "handlers::knowledge::skill")
+      (tool mission_skill_context  :handler "handlers::knowledge::skill")
+      (tool mission_insight        :handler "handlers::knowledge::insight")
+      (tool mission_embedding_ops  :handler "handlers::knowledge::kb")
+      (tool mission_code_search    :handler "handlers::knowledge::kb")
+      (tool mission_universe_graph :handler "handlers::knowledge::cascade")
+      (tool mission_cascade_plan   :handler "handlers::knowledge::cascade")
+      (tool mission_cascade_trigger :handler "handlers::knowledge::cascade")
+      (tool mission_cascade_lint   :handler "handlers::knowledge::cascade"))
 
-    (mcp-module comm-timeline
-      :target "missiond-daemon/src/handlers/comm/timeline.rs"
-      (tool mission_timeline :description "Query system timeline"
-        (input (event_type string) (trace_id string) (since string) (limit integer))))
+    (component comm-tools
+      :target "crates/missiond-mcp/src/tools/comm/"
+      (tool mission_conversation_query     :handler "handlers::comm::conversation")
+      (tool mission_conversation_analyze   :handler "handlers::comm::conversation")
+      (tool mission_conversation_reconcile :handler "handlers::comm::conversation")
+      (tool mission_question               :handler "handlers::comm::question")
+      (tool mission_router_chat            :handler "handlers::comm::router_chat")
+      (tool mission_router_chat_manage     :handler "handlers::comm::router_chat")
+      (tool mission_timeline               :handler "handlers::comm::timeline")
+      (tool mission_audit                  :handler "handlers::comm::audit")
+      (tool mission_retrospective_manage   :handler "handlers::comm::retrospective")
+      (tool mission_llm_trace              :handler "handlers::comm::audit")
+      (tool mission_decision_stats         :handler "handlers::comm::conversation")
+      (tool mission_slot_history           :handler "handlers::comm::timeline")
+      (tool mission_beacon                 :handler "handlers::comm::audit"))
 
-    (mcp-module comm-audit
-      :target "missiond-daemon/src/handlers/comm/audit.rs"
-      (tool mission_audit :description "Audit trail query"
-        (input (action string :required :enum (trace detail stats export))
-               (trace_id string) (tool_name string))))
+    (component sysinfra-tools
+      :target "crates/missiond-mcp/src/tools/sysinfra/"
+      (tool mission_control          :handler "handlers::sysinfra::system")
+      (tool mission_daemon_update    :handler "handlers::sysinfra::system")
+      (tool mission_sys_config       :handler "handlers::sysinfra::system")
+      (tool mission_sys_logs         :handler "handlers::sysinfra::system")
+      (tool mission_infra_ops        :handler "handlers::sysinfra::infra")
+      (tool mission_infra_query      :handler "handlers::sysinfra::infra")
+      (tool mission_permission_query :handler "handlers::sysinfra::permission")
+      (tool mission_permission_mutate :handler "handlers::sysinfra::permission")
+      (tool mission_power_control    :handler "handlers::sysinfra::power")
+      (tool mission_pause            :handler "handlers::sysinfra::misc")
+      (tool mission_inbox            :handler "handlers::sysinfra::misc")
+      (tool mission_incident         :handler "handlers::sysinfra::misc")
+      (tool mission_submit_phase_result :handler "handlers::sysinfra::misc")
+      (tool mission_gemini_auth      :handler "handlers::sysinfra::misc")))
 
-    (mcp-module comm-retrospective
-      :target "missiond-daemon/src/handlers/comm/retrospective.rs"
-      (tool mission_retrospective_manage :description "Session retrospective"
-        (input (session_id string :required) (depth string :enum (quick detailed full)))))
+  ;; ══════════════════════════════════════════════════════
+  ;; PILLAR 11: TRANSPORT & BOOTSTRAP
+  ;; ══════════════════════════════════════════════════════
+  (pillar transport-bootstrap
+    (purpose "IPC, WebSocket, PTY transport + daemon initialization")
 
-    ;; --- System/Infra Domain ---
-    (mcp-module sysinfra
-      :target "missiond-daemon/src/handlers/sysinfra/"
-      (tool mission_infra_query :description "Query infrastructure"
-        (input (action string :required :enum (list get discover))))
-      (tool mission_infra_ops :description "Infrastructure operations"
-        (input (action string :required) (server_id string)))
-      (tool mission_permission_query :description "Query permissions"
-        (input (slot_id string) (tool_name string)))
-      (tool mission_permission_mutate :description "Update permissions"
-        (input (action string :required) (slot_id string) (rules object)))
-      (tool mission_sys_config :description "System configuration"
-        (input (action string :required :enum (get set list))))
-      (tool mission_sys_logs :description "System logs"
-        (input (lines integer) (level string)))
-      (tool mission_power_control :description "Physical server power"
-        (input (server_id string :required) (action string :required)))
-      (tool mission_control :description "Master control interface"
-        (input (action string :required)))
-      (tool mission_pause :description "Pause/resume subsystems"
-        (input (target string :required) (action string :required :enum (pause resume))))))
+    (component ws-server
+      :target "crates/missiond-core/src/ws/server.rs"
+      (sub-components
+        (screenshot-broker :target "crates/missiond-core/src/ws/screenshot_broker.rs")
+        (jarvis-trace      :target "crates/missiond-core/src/ws/jarvis_trace.rs")))
 
-  ;; ============================================================
-  ;; PILLAR 5: BOOTSTRAP / DI WIRING
-  ;; Pattern: [P6] bootstrap
-  ;; ============================================================
-  (pillar bootstrap
-    (purpose "daemon initialization — topological dependency injection")
+    (component ipc
+      :target "crates/missiond-core/src/ipc/mod.rs")
+
+    (component pty-manager
+      :target "crates/missiond-pty/src/manager.rs"
+      (sub-components
+        (session    :target "crates/missiond-pty/src/session.rs")
+        (screenshot :target "crates/missiond-pty/src/screenshot.rs")
+        (extractor  :target "crates/missiond-pty/src/extractor.rs")
+        (anomaly    :target "crates/missiond-pty/src/anomaly.rs")))
 
     (component daemon-init
-      :pattern bootstrap
-      :target "missiond-daemon/src/main.rs"
+      :target "crates/missiond-daemon/src/main.rs"
+      (init-order
+        ;; Phase 1: Infrastructure
+        db -> embed_model -> event_bus
+        ;; Phase 2: Core modules
+        -> pty_manager -> slot_manager -> mission_control
+        ;; Phase 3: Gateways
+        -> gemini_gateway -> sonnet_gateway -> llm_gateway
+        ;; Phase 4: Pipelines
+        -> context_pipeline -> worker_registry -> control_tree
+        ;; Phase 5: Workers (18 spawns)
+        -> all-workers
+        ;; Phase 6: Engines
+        -> autopilot -> ipc-handler -> ws-server)
 
-      (infra
-        (component db :type "DbExecutor"
-          :init "DbExecutor::new(&config).await?"
-          :post-init "db.migrate().await?")
-        (component embed_model :type "FastEmbed"
-          :init "FastEmbed::new()?")
-        (component event_bus :type "EventBus"
-          :init "EventBus::new(512)")
-        (component pty_manager :type "PTYManager" :wrap "Arc::new"
-          :deps (event_bus))
-        (component slot_manager :type "SlotManager" :wrap "Arc::new"
-          :deps (db pty_manager event_bus)
-          :post-init "slot_manager.load_config().await?")
-        (component mission_control :type "MissionControl" :wrap "Arc::new"
-          :deps (db slot_manager event_bus))
-        (component gemini_gateway :type "GeminiGateway"
-          :deps (db))
-        (component sonnet_gateway :type "SonnetGateway"
-          :deps (slot_manager))
-        (component llm_gateway :type "LlmGateway"
-          :deps (gemini_gateway sonnet_gateway))
-        (component context_pipeline :type "ContextPipeline"
-          :deps (db slot_manager))
-        (component worker_registry :type "WorkerRegistry"
-          :deps (event_bus))
-        (component control_tree :type "ControlTree"
-          :deps (worker_registry)))
+      (depends-graph
+        (pty_manager     (event_bus))
+        (slot_manager    (db pty_manager event_bus))
+        (mission_control (db slot_manager event_bus))
+        (gemini_gateway  (db))
+        (sonnet_gateway  (slot_manager))
+        (llm_gateway     (gemini_gateway sonnet_gateway))
+        (context_pipeline (db slot_manager))
+        (autopilot       (db slot_manager event_bus llm_gateway context_pipeline))))
 
-      (workers
-        (spawn conversation-logger    :deps (db event_bus))
-        (spawn conversation-organizer :deps (db event_bus))
-        (spawn embedding-worker       :deps (db embed_model sonnet_gateway))
-        (spawn translation-worker     :deps (db sonnet_gateway))
-        (spawn briefing-worker        :deps (db sonnet_gateway))
-        (spawn vision-worker          :deps (db))
-        (spawn experience-harvester   :deps (db event_bus))
-        (spawn pty-event-worker       :deps (event_bus slot_manager))
-        (spawn reconcile-worker       :deps (db slot_manager))
-        (spawn gemini-reconcile-worker :deps (db pty_manager))
-        (spawn ast-sync-worker        :deps (db))
-        (spawn code-prefetch          :deps (db))
-        (spawn step-narrator          :deps (db sonnet_gateway))
-        (spawn strategy-worker        :deps (db gemini_gateway) :flag "strategy_enabled")
-        (spawn retro-worker           :deps (db sonnet_gateway event_bus))
-        (spawn tagger-chunker         :deps (db event_bus))
-        (spawn arch-maintenance-worker :deps (db))
-        (spawn gemini-logger          :deps (db)))
+    (component state-management
+      :target "crates/missiond-daemon/src/state.rs")
 
-      (engines
-        (spawn autopilot :deps (db slot_manager event_bus llm_gateway context_pipeline))
-        (spawn ipc-handler :deps (mission_control))
-        (spawn ws-server :deps (event_bus pty_manager)))))
+    (component supervisor
+      :target "crates/missiond-daemon/src/supervisor.rs")
 
-  ;; ============================================================
-  ;; PILLAR 6: COMPONENTS WITHOUT EXISTING PATTERNS
-  ;; Pattern: [GAP] — needs new mold design
-  ;; ============================================================
-  (pillar uncovered-components
-    (purpose "components that do NOT fit any existing Forge pattern")
+    (component infra-modules
+      (module aiops             :target "crates/missiond-daemon/src/infra/aiops.rs")
+      (module daemon-stats      :target "crates/missiond-daemon/src/infra/daemon_stats.rs")
+      (module git-watcher       :target "crates/missiond-daemon/src/infra/git_watcher.rs")
+      (module ingestion-router  :target "crates/missiond-daemon/src/infra/ingestion_router.rs")
+      (module ipc-handler       :target "crates/missiond-daemon/src/infra/ipc_handler.rs")
+      (module mcp-client        :target "crates/missiond-daemon/src/infra/mcp_client.rs")
+      (module message-handler   :target "crates/missiond-daemon/src/infra/message_handler.rs")
+      (module session-util      :target "crates/missiond-daemon/src/infra/session_util.rs")))
 
-    ;; --- GAP 1: LLM Gateway ---
-    (component llm-gateway
-      :pattern-gap "llm-gateway"
-      :certainty 0
-      :target "missiond-daemon/src/llm/"
-      :files (gemini_client.rs gemini_gateway.rs gemini_cli.rs
-              sonnet_gateway.rs minimax_client.rs minimax_gateway.rs
-              llm_gateway.rs llm_gate.rs gemini_driver.rs
-              gemini_file_api.rs gemini_pty.rs prompts.rs)
-      :description "Queue-driven LLM dispatch with priority channels,
-        rate limiting, backpressure, retry, and multi-provider routing.
-        Not CRUD, not Worker, not StateMachine — it is a gateway pattern
-        with channel-based priority queues (interactive/embedding/translation/briefing)."
-      :sub-patterns
-        ((queue-channel   "MPSC-based priority queue per use-case")
-         (rate-limiter    "429 backoff, quota tracking")
-         (provider-router "Gemini HTTP / Gemini CLI / Sonnet slot / MiniMax HTTP")
-         (prompt-builder  "System prompt assembly from templates")))
+  ;; ══════════════════════════════════════════════════════
+  ;; PILLAR 12: STANDALONE SERVICES & FRONTENDS
+  ;; ══════════════════════════════════════════════════════
+  (pillar standalone
+    (purpose "independently deployable services and client packages")
 
-    ;; --- GAP 2: Slot Orchestrator ---
-    (component slot-orchestrator
-      :pattern-gap "slot-orchestrator"
-      :certainty 0
-      :target "missiond-daemon/src/slot_orchestrator/"
-      :files (agent.rs cc_controller.rs gemini_controller.rs spawner.rs types.rs)
-      :description "Process lifecycle controller for multi-engine AI sessions.
-        Combines state machine + PTY management + health monitoring + restart.
-        More than a Worker or StateMachine — it is a supervisor pattern
-        managing heterogeneous child processes (Claude/Gemini/Codex)."
-      :sub-patterns
-        ((process-lifecycle "spawn/monitor/restart/kill agent processes")
-         (engine-adapter   "per-engine controller interface (CC/Gemini/Codex)")
-         (context-monitor  "track context window usage, trigger compaction/restart")
-         (task-dispatch    "route tasks to available slots")))
+    (component skill-store
+      :target "crates/skill-store/src/main.rs"
+      (routes
+        (auth          :target "crates/skill-store/src/routes/auth.rs")
+        (skills        :target "crates/skill-store/src/routes/skills.rs")
+        (invoke        :target "crates/skill-store/src/routes/invoke.rs")
+        (creator       :target "crates/skill-store/src/routes/creator.rs")
+        (subscriptions :target "crates/skill-store/src/routes/subscriptions.rs"))
+      (services
+        (billing   :target "crates/skill-store/src/services/billing.rs")
+        (defense   :target "crates/skill-store/src/services/defense.rs")
+        (executor  :target "crates/skill-store/src/services/executor.rs")
+        (llm-proxy :target "crates/skill-store/src/services/llm_proxy.rs")))
 
-    ;; --- GAP 3: Autopilot / Tick Engine ---
-    (component autopilot-engine
-      :pattern-gap "tick-engine"
-      :certainty 0
-      :target "missiond-daemon/src/engine/intent_engine/"
-      :files (autopilot.rs flow_engine.rs memory_scheduler.rs workflow_executor.rs)
-      :description "Composite orchestrator tick loop that sequences multiple
-        sub-engines (memory→extraction→task→decision→flow→supervision).
-        More complex than cron-worker — it is a pipeline-of-engines pattern
-        where each tick runs a chain of sub-ticks in order."
-      :sub-patterns
-        ((tick-pipeline   "ordered sequence of sub-engine ticks")
-         (flow-lifecycle  "Board task progression through EngineeringPhase")
-         (memory-trigger  "condition-based memory extraction scheduling")
-         (workflow-exec   "skill-driven workflow step execution")))
+    (component missiond-attach
+      :target "crates/missiond-attach/src/main.rs")
 
-    ;; --- GAP 4: Learning Engine ---
-    (component learning-engine
-      :pattern-gap "learning-engine"
-      :certainty 0
-      :target "missiond-daemon/src/engine/learning_engine/"
-      :files (decision_engine.rs extraction.rs decision_harvest.rs
-              intent_analyst.rs timeline_analyst.rs idle_explorer.rs
-              historical_scanner.rs)
-      :description "Multi-strategy decision routing and knowledge extraction.
-        Routes questions through KB→LLM→human cascade. Extracts patterns,
-        decisions, and intent from conversation history. Not a simple worker —
-        it is a decision-cascade + extraction-pipeline composite."
-      :sub-patterns
-        ((decision-cascade  "KB lookup → Gemini → decision slot → human")
-         (extraction-fsm    "ExtractionPhase state machine for memory harvest")
-         (intent-analysis   "extract user intent from conversation turns")
-         (pattern-mining    "historical session analysis for recurring patterns")))
+    (component missiond-runner
+      :target "crates/missiond-runner/src/runner.rs")
 
-    ;; --- GAP 5: Context Pipeline ---
-    (component context-pipeline
-      :pattern-gap "context-pipeline"
-      :certainty 0
-      :target "missiond-daemon/src/context/"
-      :files (context_pipeline.rs context_budget.rs slot_env.rs
-              claude_md_sync.rs topology_map.rs)
-      :description "LLM prompt builder with budget constraints.
-        Assembles context from KB, skills, history, and topology within
-        a token budget. Not CRUD, not Worker — it is a builder/pipeline
-        with prioritized source assembly and truncation rules."
-      :sub-patterns
-        ((budget-allocator  "token budget partitioning across context sources")
-         (source-ranker     "prioritize KB/skill/history by relevance")
-         (claude-md-sync    "sync preferences to ~/.claude/CLAUDE.md")
-         (topology-infer    "infer cross-slot relationships")))
+    (component semantic-terminal-napi
+      :target "crates/semantic-terminal-napi/src/lib.rs")
 
-    ;; --- CARTOGRAPHY 6: Semantic Parser ---
-    ;; Pattern: trait-polymorphic-recognizer-pipeline
-    ;; A multi-layer parser/recognizer that transforms raw PTY screen lines
-    ;; into structured states with confidence scores. NOT a state machine —
-    ;; it FEEDS state machines. All parsers share Arc<CompiledPatterns> loaded
-    ;; from external YAML with hot-reload, making regex updates zero-recompile.
-    (component semantic-parser
-      :pattern "trait-polymorphic-recognizer-pipeline"
-      :certainty 92
-      :target "missiond-core/src/semantic/"
-      :files (types.rs state.rs confirm.rs tool.rs
-              fingerprint.rs patterns.rs gemini_state.rs)
+    (component board-frontend
+      :target "packages/board/src/App.tsx"
+      (api-routes :target "packages/board/src/app/api/"
+        (route "/api/slots"            :handler "slots/route.ts")
+        (route "/api/tasks"            :handler "tasks/route.ts")
+        (route "/api/conversations"    :handler "conversations/route.ts")
+        (route "/api/kb"               :handler "kb/route.ts")
+        (route "/api/questions"        :handler "questions/route.ts")
+        (route "/api/timeline/events"  :handler "timeline/events/route.ts")
+        (route "/api/architecture"     :handler "architecture/route.ts")
+        (route "/api/pty/spawn"        :handler "pty/spawn/route.ts")
+        (route "/api/pty/screen"       :handler "pty/screen/route.ts")
+        (route "/api/pty/confirm"      :handler "pty/confirm/route.ts")
+        (route "/api/system/health"    :handler "system/health/route.ts")
+        (route "/api/system/llm-traces" :handler "system/llm-traces/route.ts")
+        (route "/api/deploy/status"    :handler "deploy/status/route.ts")))
 
-      (pattern trait-polymorphic-recognizer-pipeline
-        :description "Strategy-pattern parsers with external regex config,
-          confidence-scored outputs, and per-engine polymorphism."
-        :key-insight "Every detection returns Option<(State, f64)> — confidence
-          scoring allows priority-cascade composition without hard coupling."
+    (component node-client
+      :target "packages/node-client/src/index.ts"
+      (modules
+        (client :target "packages/node-client/src/client.ts")
+        (daemon :target "packages/node-client/src/daemon.ts")
+        (binary :target "packages/node-client/src/binary.ts")
+        (pty    :target "packages/node-client/src/pty.ts")
+        (types  :target "packages/node-client/src/types.ts"))))
 
-        ;; --- Layer 1: Type Contracts ---
-        (layer type-contracts
-          :file "types.rs"
-          :description "Rich ADT system defining the parser interface surface."
-          (enum State
-            :variants (Starting Idle SlashMenu Thinking Responding
-                       ToolRunning Confirming Error)
-            :role "Terminal state universe — 8 discrete states detected
-              from raw screen content.")
-          (trait StateParser
-            :methods (meta detect_state)
-            :signature "detect_state(&self, &ParserContext) -> Option<StateDetectionResult>"
-            :role "Core recognition contract: context in, scored state out.")
-          (trait ConfirmParser
-            :methods (meta detect_confirm format_response)
-            :role "Bidirectional: parse dialog structure AND format responses.")
-          (trait ToolOutputParser
-            :methods (meta can_parse parse)
-            :role "Two-phase: fast can_parse gate, then full extraction.")
-          (trait TitleParser
-            :methods (meta can_parse parse)
-            :role "Terminal title bar parsing (spinner + task name).")
-          (trait StatusParser
-            :methods (meta can_parse parse)
-            :role "Status bar parsing (phase + interruptibility).")
-          (struct ParserContext
-            :fields (last_lines current_state full_content)
-            :helpers (text bottom_lines bottom_text last_non_empty_lines)
-            :role "Unified input: last N screen lines with position helpers.
-              last_non_empty_lines(N) handles mid-screen prompts with
-              trailing blank lines.")
-          (struct StateDetectionResult
-            :fields (state confidence meta)
-            :role "Scored output with optional metadata (confirm_type,
-              needs_trust_confirm)."))
+  ;; ══════════════════════════════════════════════════════
+  ;; FLOWS
+  ;; ══════════════════════════════════════════════════════
+  (flows
+    (flow user-message-to-knowledge
+      (description "raw PTY output → persisted message → extracted knowledge")
+      (steps
+        pty-session -> semantic-parser -> conversation-logger
+        -> tagger-chunker -> embedding-worker -> knowledge))
 
-        ;; --- Layer 2: External Pattern Config ---
-        (layer pattern-config
-          :file "patterns.rs"
-          :description "YAML-to-compiled-regex pipeline with hot-reload.
-            Decouples all regex from Rust source — pattern updates are
-            zero-recompile via pty-patterns/{engine}.yaml files."
-          (struct EnginePatternFile
-            :sections (spinner prompt status_bar confirm tool_output
-                       state anchors box_drawing thinking error
-                       footer tool_exec placeholder)
-            :role "YAML schema — per-engine pattern definitions.
-              Gemini sections (box_drawing, thinking, etc.) are Option<T>,
-              only present for gemini-cli.yaml.")
-          (struct CompiledPatterns
-            :fields (raw regexes spinner_chars known_tools anchors)
-            :compile-pipeline "YAML str → EnginePatternFile (serde) →
-              CompiledPatterns::compile() → HashMap<String, Regex>"
-            :placeholder-expansion "{spinner_chars} → escaped char class"
-            :accessors (regex is_spinner_char is_known_tool
-                        phase_skip_words phase_keywords
-                        bottom_bar_ignore error_marker
-                        cancel_marker ask_user_marker check_anchors))
-          (struct PatternConfig
-            :role "Global registry: CliEngine → Arc<CompiledPatterns>."
-            :hot-reload "maybe_reload() checks file mtime, recompiles on change."
-            :auto-create "Creates default YAML from embedded const strings
-              if pattern files missing on disk.")
-          (global GLOBAL_PATTERNS
-            :type "Lazy<Arc<RwLock<PatternConfig>>>"
-            :role "Process-wide singleton, lock-free reads via Arc clone."))
+    (flow board-task-lifecycle
+      (description "task creation → autopilot claim → slot dispatch → completion")
+      (steps
+        board-create -> autopilot-tick -> slot-dispatch
+        -> cc-controller -> pty-session -> result-harvest -> board-done))
 
-        ;; --- Layer 3: Fingerprint Registry ---
-        (layer fingerprint-registry
-          :file "fingerprint.rs"
-          :description "Categorized pattern database for batch extraction.
-            Pre-built fingerprints from CompiledPatterns, organized by
-            category with priority sorting."
-          (struct FingerprintRegistry
-            :index "HashMap<String, Fingerprint> + by_category index"
-            :operations (register get get_by_category extract clear)
-            :role "Pattern store with category-indexed lookup.")
-          (struct Fingerprint
-            :fields (id fingerprint_type category pattern confidence
-                     priority source)
-            :pattern-types (Regex String Enum Marker)
-            :categories (Spinner Statusbar Prompt Separator Assistant
-                         Tool Error Confirm))
-          (fn extract
-            :signature "(&self, &ParserContext) -> FingerprintResult"
-            :output-hints (has_spinner has_prompt has_tool_output
-                           has_confirm_dialog has_error)
-            :role "Batch-match all fingerprints against context,
-              produce FingerprintHints for fast state pre-screening.")
-          (factory claude_code_fingerprints_from
-            :input "CompiledPatterns"
-            :output "Vec<Fingerprint> — 18 fingerprints across 7 categories"
-            :role "Bridges compiled YAML patterns into typed fingerprints."))
+    (flow decision-cascade
+      (description "agent question → multi-tier resolution")
+      (steps
+        question-raised -> kb-lookup -> gemini-consult
+        -> decision-slot -> human-escalation -> answer-routed))
 
-        ;; --- Layer 4: Claude Code State Parser ---
-        (layer claude-code-state-parser
-          :file "state.rs"
-          :description "Priority-cascade state detector for Claude Code TUI.
-            Core detection engine with deep knowledge of Claude Code's
-            screen layout (content → separator → prompt → separator → bottom bar)."
-          (struct ClaudeCodeStateParser
-            :implements "StateParser"
-            :shared-state "Arc<CompiledPatterns>"
-            :detection-cascade
-              (0 "trust-dialog: Starting state + 'Yes, proceed/trust' + Enter"
-               1 "confirm-dialog: option_trigger or yes_no pattern + cancel marker"
-               2 "idle/slash-menu: no ACTIVE spinner + prompt or menu items"
-               3 "processing: active spinner → phase-hint or tool-call fallback"
-               4 "responding: no spinner, no prompt, but ⏺ output blocks"
-               5 "error: ✖ prefix (Claude Code's own, not compiler output)")
-            :key-distinction
-              "active-vs-completion-spinner: ellipsis (…) = active processing,
-               no ellipsis ('Baked for 7m 11s') = stale completion display.
-               Bottom bar 'esc to interrupt' is PERMANENT — never a state signal."
-            :phase-hint-extraction
-              "Parses last (...) in spinner line: 'thinking' → Thinking,
-               'tool'/'running' → ToolRunning. Phase hint overrides historical
-               ⏺ tool call lines in scroll buffer."
-            :slash-menu-detection
-              "Prompt with / typed + ≥2 menu items (/command-name lines)."))
+    (flow mcp-request
+      (description "external MCP call → daemon handler → response")
+      (steps
+        stdio-jsonrpc -> mcp-server -> ipc-bridge
+        -> handler-dispatch -> db-query -> jsonrpc-response))
 
-        ;; --- Layer 5: Confirm Parser ---
-        (layer confirm-parser
-          :file "confirm.rs"
-          :description "Permission dialog parser with response formatting.
-            Bidirectional: parses dialog structure AND generates terminal
-            input sequences (ANSI escape codes) for automated responses."
-          (struct ClaudeCodeConfirmParser
-            :implements "ConfirmParser"
-            :dialog-styles
-              (options "numbered 1. 2. 3. with ❯ selector + Esc to cancel"
-               yes-no  "[Y/n] or (yes/no) prompt")
-            :tool-info-extraction
-              (mcp-format   "server-name - tool_name(key: \"value\") (MCP)"
-               skill-format "Use skill \"skill-name\""
-               builtin-type "Read file / Bash command"
-               builtin-call "Read(...) / Grep(...)")
-            :response-formatting
-              (confirm "\\r (Enter)"
-               deny-options "\\x1b[B\\x1b[B\\r (Down Down Enter)"
-               deny-yesno "n\\r"
-               select "N-1 × \\x1b[B + \\r (arrow navigation)"
-               input "value\\r (type + Enter)")))
+    (flow context-assembly
+      (description "slot activation → budget-constrained prompt building")
+      (steps
+        slot-activated -> context-pipeline -> budget-allocator
+        -> source-ranker -> kb-fetch -> skill-fetch -> history-fetch
+        -> truncation -> assembled-prompt))
 
-        ;; --- Layer 6: Tool Output Parser ---
-        (layer tool-output-parser
-          :file "tool.rs"
-          :description "Tool invocation output extraction from Claude Code's
-            box-draw and inline display formats."
-          (struct ClaudeCodeToolOutputParser
-            :implements "ToolOutputParser"
-            :tool-styles
-              (box    "⏺ ToolName + │ key: value param lines"
-               inline "⏺ ToolName(args) + ⎿ output lines")
-            :output-fields (tool_name params output duration_ms status)
-            :confidence-scoring
-              "known-tool → 0.95, unknown-tool → 0.80"
-            :duration-to-status
-              "duration_ms present → Completed, absent → Running"
-            :arg-parsing
-              "quote-aware comma splitting, Bash special-case (raw command)."))
+    (flow retrospective
+      (description "session end → analysis → knowledge extraction")
+      (steps
+        session-end -> retro-worker -> tool-stats -> pattern-analysis
+        -> sonnet-summarize -> retrospective-result -> knowledge-upsert))
 
-        ;; --- Layer 7: Gemini Engine Variant ---
-        (layer gemini-state-parser
-          :file "gemini_state.rs"
-          :description "State parser for Gemini CLI's React Ink TUI.
-            Same StateParser trait, different detection strategy."
-          (struct GeminiCliStateParser
-            :implements "StateParser"
-            :tui-differences
-              (box-drawing "╭╮╰╯│─ sanitized to spaces before analysis"
-               spinners    "braille set ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ (not Unicode stars)"
-               layout      "bottom-up scan: Footer → Input → Loading → Messages"
-               placeholder "Type your message or @path/to/file → Idle signal"
-               footer      "/model gemini-3.1-pro → engine presence anchor")
-            :detection-cascade
-              (0 "error: error pattern + no spinner"
-               1 "thinking: spinner + thinking keywords"
-               2 "responding: spinner without thinking text"
-               3 "tool-running: tool_exec pattern with/without spinner"
-               4 "idle: prompt visible, no spinner"
-               5 "idle-placeholder: placeholder text, no spinner"
-               6 "idle-transitional: footer only, low confidence 0.5")))
+    (flow embedding-pipeline
+      (description "new content → embedding generation → vector storage")
+      (steps
+        content-created -> embedding-worker -> model-inference
+        -> vector-storage -> search-index-ready))
 
-        ;; --- Cross-cutting Concerns ---
-        (cross-cutting
-          (shared-pattern-ownership
-            "All parsers receive Arc<CompiledPatterns> — single compiled
-             regex set shared lock-free across state/confirm/tool/fingerprint.")
-          (dual-construction
-            "Every parser: ::new() (embedded defaults) and
-             ::with_patterns(Arc<CompiledPatterns>) (injected config).
-             Tests use ::new(), production uses with_patterns() from
-             hot-reloadable PatternConfig.")
-          (engine-dispatch
-            "CliEngine enum (ClaudeCode | Gemini) selects YAML file,
-             CompiledPatterns, and parser struct. Adding a new CLI engine:
-             1. New YAML, 2. New StateParser impl, 3. Register in PatternConfig.")
-          (confidence-composition
-            "Fingerprint confidence (0.85-0.95) feeds FingerprintHints,
-             state parser confidence (0.5-0.95) feeds state machine debounce.
-             Low confidence = keep current state, high = transition."))))
-
-    ;; --- GAP 7: Event Bus / Timeline ---
-    (component event-infrastructure
-      :pattern-gap "event-bus"
-      :certainty 0
-      :target "missiond-daemon/src/"
-      :files (event_bus.rs event_router.rs events_sync.rs)
-      :description "Publish-subscribe event infrastructure with persistent
-        timeline. More than a broadcast channel — includes event routing,
-        persistence to system_timeline table, and multi-consumer fan-out."
-      :sub-patterns
-        ((broadcast-hub    "tokio broadcast channel with DaemonEvent enum")
-         (event-router     "route events to registered handlers")
-         (timeline-writer  "persist events to system_timeline with FTS")
-         (frontend-bridge  "relay events to WebSocket for UI")))
-
-    ;; --- GAP 8: Worker Registry / Control Tree ---
-    (component worker-lifecycle
-      :pattern-gap "worker-registry"
-      :certainty 0
-      :target "missiond-daemon/src/workers/"
-      :files (registry.rs ../control_tree.rs)
-      :description "Supervisor pattern for worker lifecycle management.
-        BackgroundWorker trait + registry + hierarchical pause/resume.
-        Not a single worker — it is the META-pattern that manages workers."
-      :sub-patterns
-        ((trait-contract    "BackgroundWorker trait: name/start/stop/status")
-         (registry          "track all workers, health checks")
-         (control-tree      "hierarchical pause/resume: provider→worker→sub")
-         (graceful-shutdown "ordered shutdown with drain")))
-
-    ;; --- GAP 9: IPC / MCP Protocol ---
-    (component ipc-protocol
-      :pattern-gap "ipc-protocol"
-      :certainty 0
-      :target "missiond-mcp/src/"
-      :files (server.rs protocol.rs)
-      :description "JSON-RPC 2.0 over stdio transport layer.
-        The mcp-tool pattern covers tool DEFINITIONS but not the
-        protocol layer that dispatches JSON-RPC requests to handlers."
-      :sub-patterns
-        ((jsonrpc-server   "JSON-RPC 2.0 request/response/notification")
-         (stdio-transport  "stdin/stdout message framing")
-         (tool-dispatch    "route tool_name → handler function")
-         (ipc-bridge       "Unix socket / TCP bridge to daemon")))
-
-    ;; --- GAP 10: WebSocket / Frontend Bridge ---
-    (component ws-bridge
-      :pattern-gap "ws-bridge"
-      :certainty 0
-      :target "missiond-core/src/ws/"
-      :files (server.rs screenshot_broker.rs jarvis_trace.rs)
-      :description "WebSocket server for realtime frontend communication.
-        Distributes PTY screenshots, trace events, and state updates
-        to connected UI clients. A distinct transport/broadcast pattern."
-      :sub-patterns
-        ((ws-server         "tokio-tungstenite WebSocket acceptor")
-         (screenshot-broker "distribute PTY frames to subscribers")
-         (trace-relay       "forward request traces to UI"))))
-)
+    (flow gemini-llm-call
+      (description "LLM request → rate limiting → provider dispatch → logging")
+      (steps
+        handler-request -> llm-gate -> rate-check
+        -> gemini-client -> api-call -> gemini-logger -> response))))
