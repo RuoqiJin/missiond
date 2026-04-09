@@ -231,6 +231,9 @@ pub struct ConversationTurn {
     pub ended_at: Option<String>,
     pub topic: Option<String>,
     pub intent_group_id: Option<i64>,
+    pub files_read: Option<String>,
+    pub files_changed: Option<String>,
+    pub outcome: Option<String>,
 }
 
 /// Intermediate Turn representation before DB insertion (no id/session_id yet).
@@ -246,6 +249,12 @@ pub struct RawTurn {
     pub has_mcp_call: bool,
     pub started_at: String,
     pub ended_at: String,
+    /// Comma-separated short file names read by tools (Read/Grep/Glob).
+    pub files_read: String,
+    /// Comma-separated short file names changed by tools (Edit/Write).
+    pub files_changed: String,
+    /// Last assistant non-tool text (truncated), used as embedding outcome signal.
+    pub outcome: String,
 }
 
 // ============ User Intents ============

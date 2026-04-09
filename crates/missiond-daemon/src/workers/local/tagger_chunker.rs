@@ -311,6 +311,14 @@ fn extract_turns(messages: &[ConversationMessage]) -> Vec<RawTurn> {
     turns
 }
 
+/// Max outcome text length (chars).
+const OUTCOME_MAX_CHARS: usize = 500;
+
+/// Regex to extract file_path from tool_use content: `file_path: "/path/to/file"`
+static FILE_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"file_path:\s*"([^"]+)""#).unwrap()
+});
+
 struct TurnBuilder {
     start_message_id: i64,
     end_message_id: i64,
@@ -322,6 +330,9 @@ struct TurnBuilder {
     has_mcp_call: bool,
     started_at: String,
     ended_at: String,
+    files_read: BTreeSet<String>,
+    files_changed: BTreeSet<String>,
+    outcome: String,
 }
 
 impl TurnBuilder {
@@ -342,6 +353,9 @@ impl TurnBuilder {
             has_mcp_call: false,
             started_at: msg.timestamp.clone(),
             ended_at: msg.timestamp.clone(),
+            files_read: BTreeSet::new(),
+            files_changed: BTreeSet::new(),
+            outcome: String::new(),
         }
     }
 
@@ -357,6 +371,9 @@ impl TurnBuilder {
             has_mcp_call: false,
             started_at: msg.timestamp.clone(),
             ended_at: msg.timestamp.clone(),
+            files_read: BTreeSet::new(),
+            files_changed: BTreeSet::new(),
+            outcome: String::new(),
         }
     }
 
@@ -369,12 +386,29 @@ impl TurnBuilder {
             self.tool_call_count += 1;
             if let Some(ref name) = msg.tool_name {
                 self.tool_names.insert(name.clone());
-                if name.contains("Write") || name.contains("Edit") {
+
+                let is_write_tool = name.contains("Write") || name.contains("Edit");
+                if is_write_tool {
                     self.has_code_change = true;
                 }
                 if name.contains("mcp__") {
                     self.has_mcp_call = true;
                 }
+
+                // Extract file path from tool content → short name
+                if let Some(short) = extract_file_short_name(&msg.content) {
+                    if is_write_tool {
+                        self.files_changed.insert(short);
+                    } else if name == "Read" || name == "Grep" || name == "Glob" {
+                        self.files_read.insert(short);
+                    }
+                }
+            }
+        } else if msg.role == "assistant" && !msg.content.starts_with("[thinking]") {
+            // Track last assistant text as outcome (skip thinking blocks)
+            let trimmed = msg.content.trim();
+            if !trimmed.is_empty() && trimmed.len() > 10 {
+                self.outcome = truncate_str(trimmed, OUTCOME_MAX_CHARS);
             }
         }
     }
@@ -391,8 +425,26 @@ impl TurnBuilder {
             has_mcp_call: self.has_mcp_call,
             started_at: self.started_at,
             ended_at: self.ended_at,
+            files_read: self.files_read.into_iter().collect::<Vec<_>>().join(","),
+            files_changed: self.files_changed.into_iter().collect::<Vec<_>>().join(","),
+            outcome: self.outcome,
         }
     }
+}
+
+/// Extract short file name from tool_use content containing `file_path: "..."`.
+/// Returns just the file name (last path component), deduplication-friendly.
+fn extract_file_short_name(content: &str) -> Option<String> {
+    let caps = FILE_PATH_RE.captures(content)?;
+    let full_path = caps.get(1)?.as_str();
+    let short = full_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(full_path);
+    if short.is_empty() {
+        return None;
+    }
+    Some(short.to_string())
 }
 
 // ─── Tagger (noise labels) ─────────────────────────────────────────────
@@ -776,5 +828,46 @@ mod tests {
         // No commit labels, no commits detected
         assert!(labels.is_empty());
         assert!(commits.is_empty());
+    }
+
+    #[test]
+    fn test_extract_file_short_name() {
+        assert_eq!(
+            extract_file_short_name(r#"[Tool: Read] file_path: "<REPO_ROOT>/src/main.rs""#),
+            Some("main.rs".to_string())
+        );
+        assert_eq!(
+            extract_file_short_name(r#"[Tool: Read] file_path: "/a/b/c.rs", limit: 120, offset: 1"#),
+            Some("c.rs".to_string())
+        );
+        assert_eq!(
+            extract_file_short_name(r#"[Tool: Bash] command: "cargo test""#),
+            None
+        );
+    }
+
+    #[test]
+    fn test_turn_files_and_outcome() {
+        let mut read_msg = make_msg(2, "assistant", r#"[Tool: Read] file_path: "/a/b/foo.rs""#);
+        read_msg.has_tool_use = true;
+        read_msg.tool_name = Some("Read".to_string());
+
+        let mut edit_msg = make_msg(4, "assistant", r#"[Tool: Edit] file_path: "/a/b/bar.rs", old_string: "x""#);
+        edit_msg.has_tool_use = true;
+        edit_msg.tool_name = Some("Edit".to_string());
+
+        let msgs = vec![
+            make_msg(1, "user", "Fix the bug"),
+            read_msg,
+            make_msg(3, "tool_result", "file contents"),
+            edit_msg,
+            make_msg(5, "tool_result", "edit ok"),
+            make_msg(6, "assistant", "I've fixed the bug in bar.rs by changing x to y."),
+        ];
+        let turns = extract_turns(&msgs);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].files_read, "foo.rs");
+        assert_eq!(turns[0].files_changed, "bar.rs");
+        assert_eq!(turns[0].outcome, "I've fixed the bug in bar.rs by changing x to y.");
     }
 }
