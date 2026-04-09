@@ -29,12 +29,13 @@ impl KnowledgeStore for SqliteMissionStore {
         self.executor.run(move |db| db.kb_get_id_by_key(&key)).await
     }
 
-    async fn kb_update(&self, key: &str, new_category: Option<&str>, new_summary: Option<&str>, new_detail: Option<&serde_json::Value>, new_confidence: Option<f64>, new_linked_task_id: Option<&str>) -> DbResult<Option<(KnowledgeEntry, bool)>> {
+    async fn kb_update(&self, key: &str, new_category: Option<&str>, new_summary: Option<&str>, new_detail: Option<&serde_json::Value>, new_confidence: Option<f64>, new_linked_task_id: Option<&str>, new_project_id: Option<&str>) -> DbResult<Option<(KnowledgeEntry, bool)>> {
         let key = key.to_owned();
         let new_category = new_category.map(|s| s.to_owned());
         let new_summary = new_summary.map(|s| s.to_owned());
         let new_detail = new_detail.cloned();
         let new_linked_task_id = new_linked_task_id.map(|s| s.to_owned());
+        let _new_project_id = new_project_id.map(|s| s.to_owned());
         self.executor.run(move |db| db.kb_update(&key, new_category.as_deref(), new_summary.as_deref(), new_detail.as_ref(), new_confidence, new_linked_task_id.as_deref())).await
     }
 

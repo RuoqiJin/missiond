@@ -72,6 +72,7 @@ pub(crate) async fn update_module_summaries(store: &dyn MissionStore, repo: &str
             detail: Some(detail),
             source: Some("ast-topology".to_string()),
             confidence: Some(1.0),
+            project_id: None,
         };
 
         match store.kb_remember(&input).await {

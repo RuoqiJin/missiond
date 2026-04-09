@@ -309,7 +309,7 @@ pub trait KnowledgeStore: Send + Sync {
     async fn kb_get(&self, key: &str) -> DbResult<Option<KnowledgeEntry>>;
     async fn kb_get_by_id(&self, id: &str) -> DbResult<Option<KnowledgeEntry>>;
     async fn kb_get_id_by_key(&self, key: &str) -> DbResult<Option<String>>;
-    async fn kb_update(&self, key: &str, new_category: Option<&str>, new_summary: Option<&str>, new_detail: Option<&serde_json::Value>, new_confidence: Option<f64>, new_linked_task_id: Option<&str>) -> DbResult<Option<(KnowledgeEntry, bool)>>;
+    async fn kb_update(&self, key: &str, new_category: Option<&str>, new_summary: Option<&str>, new_detail: Option<&serde_json::Value>, new_confidence: Option<f64>, new_linked_task_id: Option<&str>, new_project_id: Option<&str>) -> DbResult<Option<(KnowledgeEntry, bool)>>;
     async fn kb_set_linked_task_id(&self, key: &str, task_id: Option<&str>) -> DbResult<bool>;
     async fn kb_forget(&self, key: &str) -> DbResult<bool>;
     async fn kb_batch_forget(&self, keys: &[String]) -> DbResult<usize>;

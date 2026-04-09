@@ -17,6 +17,7 @@ interface KBEntry {
   createdAt: string;
   updatedAt: string;
   contextSnippet?: string;
+  projectId?: string | null;
 }
 
 interface Project {
@@ -80,7 +81,12 @@ function DetailView({ detail }: { detail: Record<string, unknown> }) {
   );
 }
 
-function KBEntryCard({ entry, onDelete }: { entry: KBEntry; onDelete: (key: string) => void }) {
+function KBEntryCard({ entry, onDelete, projects, onSetProject }: {
+  entry: KBEntry;
+  onDelete: (key: string) => void;
+  projects: Project[];
+  onSetProject: (key: string, projectId: string | null) => void;
+}) {
   const [expanded, setExpanded] = useState(false);
   const config = CATEGORY_CONFIG[entry.category] || CATEGORY_CONFIG.memory;
 
@@ -120,6 +126,26 @@ function KBEntryCard({ entry, onDelete }: { entry: KBEntry; onDelete: (key: stri
           <div className="flex items-center gap-3 mt-1.5 text-[11px] text-neutral-600">
             <span>{SOURCE_LABELS[entry.source] || entry.source}</span>
             <span>{timeAgo(entry.updatedAt)}</span>
+            {/* Project selector */}
+            <select
+              value={entry.projectId ?? ''}
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => {
+                e.stopPropagation();
+                onSetProject(entry.key, e.target.value || null);
+              }}
+              className={cn(
+                'text-[11px] bg-transparent border rounded px-1.5 py-0.5 cursor-pointer transition-colors',
+                entry.projectId
+                  ? 'border-cyan-500/30 text-cyan-400'
+                  : 'border-neutral-700 text-neutral-500 hover:border-neutral-600',
+              )}
+            >
+              <option value="" className="bg-neutral-900 text-neutral-500">未分类</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id} className="bg-neutral-900 text-neutral-300">{p.id}</option>
+              ))}
+            </select>
           </div>
         </div>
 
@@ -159,7 +185,8 @@ export function KnowledgeBase() {
     setLoading(true);
     try {
       const params = new URLSearchParams();
-      if (activeProject) params.set('project', activeProject);
+      // __unclassified__ is client-side only filter, don't send to backend
+      if (activeProject && activeProject !== '__unclassified__') params.set('project', activeProject);
       const qs = params.toString();
       const res = await fetch(`/api/kb${qs ? `?${qs}` : ''}`);
       if (res.ok) {
@@ -195,7 +222,7 @@ export function KnowledgeBase() {
     try {
       const params = new URLSearchParams({ query: search, limit: '30' });
       if (activeCategory) params.set('category', activeCategory);
-      if (activeProject) params.set('project', activeProject);
+      if (activeProject && activeProject !== '__unclassified__') params.set('project', activeProject);
       const res = await fetch(`/api/kb?${params}`);
       if (res.ok) {
         const data = await res.json();
@@ -211,6 +238,20 @@ export function KnowledgeBase() {
     setEntries((prev) => prev.filter((e) => e.key !== key));
     try {
       await fetch(`/api/kb?key=${encodeURIComponent(key)}`, { method: 'DELETE' });
+    } catch {
+      fetchEntries(); // rollback
+    }
+  }, [fetchEntries]);
+
+  const handleSetProject = useCallback(async (key: string, projectId: string | null) => {
+    // Optimistic update
+    setEntries((prev) => prev.map((e) => e.key === key ? { ...e, projectId } : e));
+    try {
+      await fetch('/api/kb', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, project_id: projectId }),
+      });
     } catch {
       fetchEntries(); // rollback
     }
@@ -235,6 +276,10 @@ export function KnowledgeBase() {
         e.category.startsWith(`${activeCategory}:`)
       );
     }
+    // Client-side project filter for "__unclassified__"
+    if (activeProject === '__unclassified__') {
+      result = result.filter((e) => !e.projectId);
+    }
     if (search) {
       const q = search.toLowerCase();
       result = result.filter(
@@ -245,7 +290,7 @@ export function KnowledgeBase() {
       );
     }
     return result;
-  }, [entries, searchResults, activeCategory, search, viewMode]);
+  }, [entries, searchResults, activeCategory, activeProject, search, viewMode]);
 
   // Group by root category (memory:debug → memory)
   const grouped = useMemo(() => {
@@ -385,6 +430,17 @@ export function KnowledgeBase() {
               <GitBranch className="w-3 h-3" />
               全部项目
             </button>
+            <button
+              onClick={() => setActiveProject(activeProject === '__unclassified__' ? null : '__unclassified__')}
+              className={cn(
+                'px-3 py-1 text-xs rounded-full border transition-colors flex items-center gap-1.5',
+                activeProject === '__unclassified__'
+                  ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                  : 'text-neutral-500 border-neutral-800 hover:text-neutral-300',
+              )}
+            >
+              未分类
+            </button>
             {projects.map((proj) => (
               <button
                 key={proj.id}
@@ -428,7 +484,7 @@ export function KnowledgeBase() {
                 </div>
                 <div className="space-y-1.5">
                   {catEntries.map((entry) => (
-                    <KBEntryCard key={entry.id} entry={entry} onDelete={handleDelete} />
+                    <KBEntryCard key={entry.id} entry={entry} onDelete={handleDelete} projects={projects} onSetProject={handleSetProject} />
                   ))}
                 </div>
               </div>

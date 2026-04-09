@@ -111,6 +111,7 @@ async fn test_pg_knowledge_store() {
         detail: None,
         source: Some("test".into()),
         confidence: Some(0.9),
+        project_id: None,
     };
     let result = store.kb_remember(&input).await.unwrap();
     assert_eq!(result.action, "created");
@@ -127,6 +128,7 @@ async fn test_pg_knowledge_store() {
         detail: None,
         source: Some("test".into()),
         confidence: Some(1.0),
+        project_id: None,
     };
     let result2 = store.kb_remember(&input2).await.unwrap();
     assert_eq!(result2.action, "updated");

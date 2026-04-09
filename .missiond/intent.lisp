@@ -1242,9 +1242,15 @@
       (tool mission_cascade_trigger :handler "handlers::knowledge::cascade")
       (tool mission_cascade_lint   :handler "handlers::knowledge::cascade")
       ;; P4+P5 (commit 76900d1): mission_project — 项目管理 MCP 工具
+      ;; commit 84ac1a6: 新增 init action; list 响应增加 lispFiles/lispCount
       (tool mission_project        :handler "handlers::knowledge::project"
-        :actions (list get set_active sync)
-        :doc "list: 列出所有项目; get: 按id获取; set_active: 设置活跃状态; sync: 扫描 ~/.claude/projects/ 自动发现注册"))
+        :actions (list get set_active sync init)
+        :doc "init: 一步注册新项目(path→git-remote→intent-scan→upsert+backfill+reload); list: 列出所有项目(附带lispFiles/lispCount); get: 按id获取; set_active: 设置活跃状态; sync: 扫描 ~/.claude/projects/ 自动发现注册"
+        (action init
+          :params (path :required id :optional slots :optional)
+          :steps ("canonicalize path" "derive id from dir name (or param)" "git remote get-url origin → github_url" "scan .missiond/.jarvis/ intent.lisp" "upsert project" "backfill_project_id(path%) + backfill_project_id(claude-encoded-pattern%)" "reload SharedProjectRegistry")
+          :returns (id path githubUrl intentPath backfilledConversations status="registered")
+          :added "84ac1a6")))
 
     (component comm-tools
       :target "crates/missiond-mcp/src/tools/comm/"
@@ -1389,8 +1395,16 @@
       (api-routes :target "packages/board/src/app/api/"
         (route "/api/slots"            :handler "slots/route.ts")
         (route "/api/tasks"            :handler "tasks/route.ts")
-        (route "/api/conversations"    :handler "conversations/route.ts")
-        (route "/api/kb"               :handler "kb/route.ts")
+        (route "/api/conversations"    :handler "conversations/route.ts"
+          :params (status limit conversationType source project)
+          :note "project参数透传至mission_conversation_list; commit 5671c95")
+        (route "/api/kb"               :handler "kb/route.ts"
+          :params (query category project limit)
+          :note "project参数透传至mission_kb_query/mission_kb_list; commit 5671c95")
+        (route "/api/projects"         :handler "projects/route.ts"
+          :method GET :calls "mission_project{action:list}"
+          :returns "Vec<ProjectInfo>(含lispFiles/lispCount/githubUrl)"
+          :added "eae9bbd")
         (route "/api/questions"        :handler "questions/route.ts")
         (route "/api/timeline/events"  :handler "timeline/events/route.ts")
         (route "/api/architecture"     :handler "architecture/route.ts")
@@ -1399,7 +1413,39 @@
         (route "/api/pty/confirm"      :handler "pty/confirm/route.ts")
         (route "/api/system/health"    :handler "system/health/route.ts")
         (route "/api/system/llm-traces" :handler "system/llm-traces/route.ts")
-        (route "/api/deploy/status"    :handler "deploy/status/route.ts")))
+        (route "/api/deploy/status"    :handler "deploy/status/route.ts"))
+
+      (ui-components :target "packages/board/src/components/"
+        (component Conversations
+          :target "packages/board/src/components/Conversations.tsx"
+          (state projectFilter :type string :default "all")
+          (state projects      :type "Project[]" :fetched-from "/api/projects")
+          (widget project-filter-select
+            :trigger onMount+onChange :passes "project" to "/api/conversations"
+            :shows active-projects-sorted-by-conversation_count
+            :added "5671c95")
+          (note "viewMode union type 新增 jarvis — fix pre-existing build error (commit ac96b3c)"))
+
+        (component KnowledgeBase
+          :target "packages/board/src/components/KnowledgeBase.tsx"
+          (state activeProject :type "string|null" :default nil)
+          (state projects      :type "Project[]" :fetched-from "/api/projects")
+          (widget project-filter-pills
+            :style pill-buttons :separator divider-line
+            :passes "project" to "/api/kb"
+            :added "5671c95"))
+
+        (component SystemDashboard
+          :target "packages/board/src/components/SystemDashboard.tsx"
+          (sub-component ProjectsPanel
+            :target "packages/board/src/components/SystemDashboard.tsx"
+            :fetches "/api/projects"
+            :layout "grid 1/2/3 columns responsive"
+            :sort "active first → lispCount desc → alphabetical"
+            :card-fields (id path-abbreviated active-badge githubUrl-link slots lisp-files-tags)
+            :note "githubUrl: git@github.com:X/Y.git → https://github.com/X/Y 转换"
+            :added "eae9bbd")
+          :note "ProjectsPanel 置于 MemoryDashboard 之前(最顶部折叠区); collapsed 默认展开")))
 
     (component node-client
       :target "packages/node-client/src/index.ts"
@@ -1488,4 +1534,19 @@
       (description "自动发现并注册 ~/.claude/projects/ 下的项目")
       (steps
         mission_project-sync-action -> scan-~/.claude/projects/ -> for-each-dir
-        -> decode-dir-name-as-path -> skip-if-exists -> upsert_project-to-PG))))
+        -> decode-dir-name-as-path -> skip-if-exists -> upsert_project-to-PG))
+
+    (flow project-init
+      :added "84ac1a6"
+      (description "一步注册新项目：path → 完整项目元数据 → DB + 历史回填 + 注册表热重载")
+      (steps
+        mission_project-init-action{path,id?,slots?}
+        -> canonicalize-path
+        -> derive-id-from-dir-name
+        -> git-remote-get-url-origin → github_url
+        -> scan-intent-lisp-candidates(".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp")
+        -> upsert_project-to-PG
+        -> backfill_project_id(path%) → N rows updated
+        -> backfill_project_id(claude-encoded-pattern%) → M rows updated
+        -> reload-SharedProjectRegistry
+        -> return{id path githubUrl intentPath backfilledConversations status}))))

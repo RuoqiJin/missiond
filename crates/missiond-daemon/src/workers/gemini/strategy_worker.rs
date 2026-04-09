@@ -592,6 +592,7 @@ async fn apply_strategic_output(
             detail: Some(updated_state),
             source: Some("strategy_analyst".to_string()),
             confidence: Some(1.0),
+            project_id: None,
         })
         .await?;
 
@@ -611,6 +612,7 @@ async fn apply_strategic_output(
                     })),
                     source: Some("strategy_analyst".to_string()),
                     confidence: Some(pref.confidence),
+                    project_id: None,
                 })
                 .await?;
         }
@@ -703,6 +705,7 @@ async fn apply_strategic_output(
                     })),
                     source: Some("strategy_analyst".to_string()),
                     confidence: Some(0.8),
+                    project_id: None,
                 })
                 .await?;
         }

@@ -38,7 +38,32 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "summary": {"type": "string", "description": "结论性摘要 ≤400字"},
                     "detail": {"type": "object", "description": "结构化详情 JSON"},
                     "source": {"type": "string", "enum": ["conversation", "discovery", "import"], "default": "conversation"},
-                    "confidence": {"type": "number", "description": "置信度 0.0-1.0", "default": 1.0}
+                    "confidence": {"type": "number", "description": "置信度 0.0-1.0", "default": 1.0},
+                    "project": {"type": "string", "description": "所属项目 ID（可选）"}
+                }
+            }),
+        ),
+
+        // ===== mission_kb_batch_set_project =====
+        ToolDefinition::new(
+            "mission_kb_batch_set_project",
+            "批量设置 KB 条目的项目归属。传入 assignments 数组，一次分配多条",
+            json!({
+                "type": "object",
+                "required": ["assignments"],
+                "properties": {
+                    "assignments": {
+                        "type": "array",
+                        "description": "每个元素 {key, project_id}。project_id 为空或 null 表示清除归属（设为全局）",
+                        "items": {
+                            "type": "object",
+                            "required": ["key"],
+                            "properties": {
+                                "key": {"type": "string"},
+                                "project_id": {"type": "string"}
+                            }
+                        }
+                    }
                 }
             }),
         ),
@@ -59,6 +84,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "detail": {"type": "object", "description": "[update] 新详情 JSON"},
                     "confidence": {"type": "number", "description": "[update] 新置信度"},
                     "linked_task_id": {"type": "string", "description": "[update] 关联 Board 任务 ID(空串清除)"},
+                    "project_id": {"type": "string", "description": "[update] 所属项目 ID(空串清除)"},
                     "format": {"type": "string", "description": "[import] 导入格式", "enum": ["servers_yaml", "json"]},
                     "path": {"type": "string", "description": "[import] 文件路径"}
                 }
