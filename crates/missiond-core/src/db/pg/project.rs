@@ -1,0 +1,99 @@
+//! Project registry — PostgreSQL persistence layer.
+
+use sqlx::PgPool;
+use crate::types::ProjectConfig;
+
+pub async fn upsert_project(pool: &PgPool, config: &ProjectConfig) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO projects (id, path, intent_path, active, slots, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::text[], COALESCE($6, NOW()), NOW())
+         ON CONFLICT (id) DO UPDATE SET
+           path = EXCLUDED.path,
+           intent_path = EXCLUDED.intent_path,
+           active = EXCLUDED.active,
+           slots = EXCLUDED.slots,
+           updated_at = NOW()"
+    )
+    .bind(&config.id)
+    .bind(&config.path)
+    .bind(&config.intent_path)
+    .bind(config.active)
+    .bind(&config.slots)
+    .bind(config.created_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn list_projects(pool: &PgPool) -> Result<Vec<ProjectConfig>, sqlx::Error> {
+    let rows: Vec<(String, String, Option<String>, bool, Vec<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as(
+            "SELECT id, path, intent_path, active, slots, created_at, updated_at FROM projects ORDER BY id"
+        )
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(row_to_config).collect())
+}
+
+pub async fn list_active_projects(pool: &PgPool) -> Result<Vec<ProjectConfig>, sqlx::Error> {
+    let rows: Vec<(String, String, Option<String>, bool, Vec<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as(
+            "SELECT id, path, intent_path, active, slots, created_at, updated_at FROM projects WHERE active = true ORDER BY id"
+        )
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(row_to_config).collect())
+}
+
+pub async fn get_project(pool: &PgPool, id: &str) -> Result<Option<ProjectConfig>, sqlx::Error> {
+    let row: Option<(String, String, Option<String>, bool, Vec<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as(
+            "SELECT id, path, intent_path, active, slots, created_at, updated_at FROM projects WHERE id = $1"
+        )
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(row_to_config))
+}
+
+pub async fn update_project_active(pool: &PgPool, id: &str, active: bool) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE projects SET active = $2, updated_at = NOW() WHERE id = $1"
+    )
+    .bind(id)
+    .bind(active)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn update_project_slots(pool: &PgPool, id: &str, slots: &[String]) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE projects SET slots = $2::text[], updated_at = NOW() WHERE id = $1"
+    )
+    .bind(id)
+    .bind(slots)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn delete_project(pool: &PgPool, id: &str) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM projects WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+fn row_to_config(r: (String, String, Option<String>, bool, Vec<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)) -> ProjectConfig {
+    ProjectConfig {
+        id: r.0,
+        path: r.1,
+        intent_path: r.2,
+        active: r.3,
+        slots: r.4,
+        created_at: Some(r.5),
+        updated_at: Some(r.6),
+    }
+}
