@@ -30,7 +30,7 @@ impl ConversationTypeFilter {
             Self::Custom(s) => format!(" AND {}conversation_type = '{}'", prefix, s.replace('\'', "''")),
         }
     }
-    
+
     pub fn from_str(s: &str) -> Self {
         match s {
             "all" => Self::All,
@@ -38,7 +38,7 @@ impl ConversationTypeFilter {
             "meta" => Self::Meta,
             "worker" => Self::Worker,
             "jarvis" => Self::Jarvis,
-            "system" => Self::System, // <-- 系统大盘视图：只有 meta 和 worker
+            "system" => Self::System,
             "gemini" => Self::Gemini,
             "subagent" => Self::Subagent,
             "compaction" => Self::Compaction,
@@ -66,44 +66,49 @@ impl ConversationQuery {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     pub fn status(mut self, status: impl Into<String>) -> Self {
         self.status = Some(status.into());
         self
     }
-    
+
     pub fn limit(mut self, limit: i64) -> Self {
         self.limit = Some(limit);
         self
     }
-    
+
     pub fn offset(mut self, offset: i64) -> Self {
         self.offset = Some(offset);
         self
     }
-    
+
     pub fn conv_type(mut self, conv_type: ConversationTypeFilter) -> Self {
         self.conv_type = Some(conv_type);
         self
     }
-    
+
     pub fn task_id(mut self, task_id: impl Into<String>) -> Self {
         self.task_id = Some(task_id.into());
         self
     }
-    
+
     pub fn since(mut self, since: impl Into<String>) -> Self {
         self.since = Some(since.into());
         self
     }
-    
+
     pub fn until(mut self, until: impl Into<String>) -> Self {
         self.until = Some(until.into());
         self
     }
-    
+
     pub fn source(mut self, source: impl Into<String>) -> Self {
         self.source = Some(source.into());
+        self
+    }
+
+    pub fn project(mut self, project: impl Into<String>) -> Self {
+        self.project = Some(project.into());
         self
     }
 

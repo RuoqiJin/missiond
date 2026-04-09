@@ -136,6 +136,8 @@ struct BoardListArgs {
         deserialize_with = "lenient::option_bool"
     )]
     include_hidden: Option<bool>,
+    #[serde(default)]
+    project: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -175,11 +177,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             };
             match action.as_str() {
                 "list" => {
-                    let BoardListArgs { status, include_hidden } =
-                        serde_json::from_value(args).unwrap_or(BoardListArgs { status: None, include_hidden: None });
-                    let tasks = state.store
+                    let BoardListArgs { status, include_hidden, project } =
+                        serde_json::from_value(args).unwrap_or(BoardListArgs { status: None, include_hidden: None, project: None });
+                    let mut tasks = state.store
                         .list_board_tasks(status.as_deref(), include_hidden.unwrap_or(false)).await
                         .map_err(|e| anyhow!("DB error: {}", e))?;
+                    if let Some(ref proj) = project {
+                        tasks.retain(|t| t.project.as_deref() == Some(proj.as_str()) || t.project.is_none());
+                    }
                     Ok(ToolResult::json_pretty(&tasks))
                 }
                 "get" => {

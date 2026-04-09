@@ -24,7 +24,7 @@ pub(crate) use comm::retrospective;
 // Domain aliases for dispatch readability
 use comm::{audit, conversation, question, router_chat, timeline};
 use compute::{cc_tasks, compute_slot, job, minimax, process, pty, task, task_delegate, worker};
-use knowledge::{board, cascade, insight, kb, memory, skill};
+use knowledge::{board, cascade, insight, kb, memory, project, skill};
 use sysinfra::{health, infra, misc, permission, system};
 
 // @beacon: mcp
@@ -59,6 +59,7 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         "mission_router_chat" | "mission_router_chat_manage" => {
             router_chat::handle(state, name, args).await
         }
+        "mission_project" => project::handle(state, name, args).await,
         "mission_memory" => memory::handle(state, name, args).await,
         "mission_insight" => insight::handle(state, name, args).await,
         "mission_audit" => audit::handle(state, name, args).await,

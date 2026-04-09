@@ -31,7 +31,7 @@ impl ConversationManager {
             None => None,
         };
 
-        let convs = self.store.list_conversations(
+        let mut convs = self.store.list_conversations(
             query.status.as_deref(),
             query.limit.unwrap_or(20),
             conv_type_str.as_deref(),
@@ -40,7 +40,11 @@ impl ConversationManager {
             query.until.as_deref(),
             query.source.as_deref(),
         ).await?;
-        
+
+        if let Some(ref proj) = query.project {
+            convs.retain(|c| c.project.as_deref() == Some(proj.as_str()));
+        }
+
         Ok(convs)
     }
 
