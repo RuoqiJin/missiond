@@ -235,6 +235,7 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
                         .unwrap_or(false),
                     model: slot.config.model.clone(),
                     extra_env: std::collections::HashMap::new(),
+                    initial_prompt: None,
                 },
                 slot.config.env.as_ref(),
             )

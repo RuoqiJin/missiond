@@ -1516,6 +1516,7 @@ async fn main() -> Result<()> {
                                             .unwrap_or(false),
                                         model: slot.config.model.clone(),
                                         extra_env: std::collections::HashMap::new(),
+                                        initial_prompt: slot.config.initial_prompt.clone(),
                                     },
                                     slot.config.env.as_ref(),
                                 )

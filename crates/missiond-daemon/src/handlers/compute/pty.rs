@@ -175,6 +175,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         .unwrap_or(false),
                     model: slot.config.model.clone(),
                     extra_env: std::collections::HashMap::new(),
+                    initial_prompt: None,
                 },
                 slot.config.env.as_ref(),
             )

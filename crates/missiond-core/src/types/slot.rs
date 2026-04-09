@@ -55,16 +55,16 @@ pub struct SlotConfig {
     pub engine: CliEngine,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", alias = "mcp_config")]
     pub mcp_config: Option<String>,
     /// Agent lifecycle mode. If set, takes precedence over `auto_start`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<Lifecycle>,
     /// Legacy auto-start flag. Prefer `lifecycle: persistent` in new configs.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", alias = "auto_start")]
     pub auto_start: Option<bool>,
     /// Skip all permission prompts and trust dialogs (--dangerously-skip-permissions)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "dangerously_skip_permissions")]
     pub dangerously_skip_permissions: Option<bool>,
     /// Model override for the CLI session (e.g., "sonnet", "opus", "haiku").
     /// Passed as `--model <model>` to Claude Code. Ignored for other engines.
@@ -83,6 +83,10 @@ pub struct SlotConfig {
     /// Used for per-slot model provider configuration (e.g., MiniMax M2.5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
+    /// Prompt injected as the first message after the slot reaches Idle.
+    /// Used for persistent slots that need a standing instruction on boot.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "initial_prompt")]
+    pub initial_prompt: Option<String>,
 }
 
 impl SlotConfig {

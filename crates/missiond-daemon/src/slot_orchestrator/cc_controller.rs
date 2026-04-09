@@ -165,6 +165,7 @@ impl EngineController for ClaudeCodeController {
                 dangerously_skip_permissions: req.skip_permissions,
                 model: req.model.clone(),
                 extra_env: HashMap::new(),
+                initial_prompt: None,
             },
             None, // Pass the custom environment from the request if it had one
         )

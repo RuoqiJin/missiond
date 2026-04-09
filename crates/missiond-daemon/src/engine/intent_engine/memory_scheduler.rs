@@ -57,6 +57,7 @@ pub(crate) async fn ensure_memory_slot_by_id(state: &AppState, slot_id: &str) ->
             dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
             model: slot.config.model.clone(),
             extra_env: std::collections::HashMap::new(),
+            initial_prompt: None,
         },
         slot_env,
     )

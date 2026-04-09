@@ -626,6 +626,7 @@ pub(crate) async fn ensure_autopilot_pty(
             dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
             model: slot.config.model.clone(),
             extra_env: HashMap::new(),
+            initial_prompt: None,
         },
         Some(&final_slot_env),
     )

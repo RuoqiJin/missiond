@@ -60,6 +60,8 @@ pub struct PTYSpawnOptions {
     /// Extra environment variables to inject into the PTY child process
     /// Used for slot tracking (MISSIOND_SLOT_ID, MISSIOND_SESSION_FILE)
     pub extra_env: HashMap<String, String>,
+    /// Prompt to send after the session reaches Idle state.
+    pub initial_prompt: Option<String>,
 }
 
 /// Result of executing a message
