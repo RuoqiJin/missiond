@@ -30,7 +30,7 @@ pub trait ConversationStore: Send + Sync {
     /// Insert conversation record if it doesn't exist; on conflict, backfill parent_session_id.
     /// Used by ReconcileWorker to avoid overwriting conversation_type/status/message_count
     /// while still ensuring parent linkage is populated.
-    async fn ensure_conversation_exists(&self, session_id: &str, project_path: &str, jsonl_path: &str, status: &str, conversation_type: &str, parent_session_id: Option<&str>) -> DbResult<()>;
+    async fn ensure_conversation_exists(&self, session_id: &str, project_path: &str, jsonl_path: &str, status: &str, conversation_type: &str, parent_session_id: Option<&str>, started_at: Option<&str>) -> DbResult<()>;
     /// Refresh message_count from actual rows in conversation_messages.
     async fn refresh_conversation_message_count(&self, session_id: &str) -> DbResult<()>;
     async fn get_conversation(&self, id: &str) -> DbResult<Option<Conversation>>;

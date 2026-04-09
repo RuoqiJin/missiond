@@ -165,6 +165,7 @@ async fn run_gemini_reconciliation(state: &AppState) {
             );
 
             // Ensure conversation exists (with correct source/chat_type for Gemini CLI)
+            let first_ts = cc_lines.first().map(|m| m.timestamp.as_str());
             ensure_gemini_conversation(
                 state,
                 &session.session_id,
@@ -172,6 +173,7 @@ async fn run_gemini_reconciliation(state: &AppState) {
                 &file_key,
                 &status,
                 &conv_type,
+                first_ts,
             )
             .await;
 
@@ -295,6 +297,7 @@ async fn ensure_gemini_conversation(
     jsonl_path: &str,
     status: &str,
     conversation_type: &str,
+    first_timestamp: Option<&str>,
 ) {
     // Check if already exists
     if let Ok(Some(_)) = state.store.get_conversation(session_id).await {
@@ -313,7 +316,10 @@ async fn ensure_gemini_conversation(
         parent_session_id: None,
         task_id: None,
         message_count: 0,
-        started_at: chrono::Utc::now().to_rfc3339(),
+        started_at: match first_timestamp.filter(|s| !s.is_empty()) {
+            Some(ts) => ts.to_string(),
+            None => chrono::Utc::now().to_rfc3339(),
+        },
         ended_at: None,
         status: status.to_string(),
         analyzed_at: None,

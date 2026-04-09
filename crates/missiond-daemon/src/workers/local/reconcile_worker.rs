@@ -325,6 +325,7 @@ async fn reconcile_file_gap(
     let mut line_count = 0usize;
     let mut total_recovered = 0usize;
     let mut conversation_ensured = false;
+    let mut first_timestamp: Option<String> = None;
     let sid = session_id.to_string();
 
     while let Ok(Some(line)) = lines.next_line().await {
@@ -347,6 +348,10 @@ async fn reconcile_file_gap(
         // Skip tool_use lines (same as normal pipeline)
         if msg.message_type == "tool_use" {
             continue;
+        }
+
+        if first_timestamp.is_none() && !msg.timestamp.is_empty() {
+            first_timestamp = Some(msg.timestamp.clone());
         }
 
         let text_content = events_sync::extract_text_content(&msg.message.content);
@@ -423,6 +428,7 @@ async fn reconcile_file_gap(
                         status,
                         conversation_type,
                         parent_session_id.as_deref(),
+                        first_timestamp.as_deref(),
                     )
                     .await;
                 conversation_ensured = true;
@@ -450,6 +456,7 @@ async fn reconcile_file_gap(
                     status,
                     conversation_type,
                     parent_session_id.as_deref(),
+                    first_timestamp.as_deref(),
                 )
                 .await;
         }
