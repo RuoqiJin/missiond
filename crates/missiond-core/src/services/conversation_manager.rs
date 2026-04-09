@@ -42,7 +42,7 @@ impl ConversationManager {
         ).await?;
 
         if let Some(ref proj) = query.project {
-            convs.retain(|c| c.project.as_deref() == Some(proj.as_str()));
+            convs.retain(|c| c.project_id.as_deref() == Some(proj.as_str()));
         }
 
         Ok(convs)
