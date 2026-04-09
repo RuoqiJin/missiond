@@ -126,6 +126,8 @@ async fn ingest(
                     .map(|m| m.cwd.clone())
                     .unwrap_or_else(|| project_path.to_string()),
             ),
+            // TODO: resolve project_id via ProjectRegistry once available in AppState
+            project_id: None,
             slot_id: slot_id.map(|s| s.to_string()),
             source: source.to_string(),
             model: first.and_then(|m| m.message.model.clone()),
@@ -730,6 +732,7 @@ pub(crate) async fn handle_pty_text_complete(
         let conv = missiond_core::types::Conversation {
             id: session_id.clone(),
             project: None,
+            project_id: None,
             slot_id: Some(slot_id.clone()),
             source: "pty".to_string(),
             model: None,

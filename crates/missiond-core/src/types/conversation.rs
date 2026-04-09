@@ -10,6 +10,8 @@ pub struct Conversation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub slot_id: Option<String>,
     pub source: String, // "claude_cli" | "pty"
     #[serde(skip_serializing_if = "Option::is_none")]

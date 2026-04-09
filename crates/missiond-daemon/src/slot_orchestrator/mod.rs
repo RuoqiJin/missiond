@@ -53,6 +53,7 @@ pub(crate) async fn register_slot_session(
     let conv = Conversation {
         id: session_id.to_string(),
         project: None,
+        project_id: None,
         slot_id: Some(slot_id.to_string()),
         source: "pty_jsonl".to_string(),
         model: None,
