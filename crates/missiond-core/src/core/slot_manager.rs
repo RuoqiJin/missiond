@@ -285,6 +285,7 @@ mod tests {
                 model: None,
                 traits: vec![],
                 env: None,
+                initial_prompt: None,
             },
             SlotConfig {
                 id: "slot-2".to_string(),
@@ -299,6 +300,7 @@ mod tests {
                 model: None,
                 traits: vec![],
                 env: None,
+                initial_prompt: None,
             },
             SlotConfig {
                 id: "slot-3".to_string(),
@@ -313,6 +315,7 @@ mod tests {
                 model: None,
                 traits: vec![],
                 env: None,
+                initial_prompt: None,
             },
         ];
 
@@ -353,6 +356,7 @@ mod tests {
             model: None,
             traits: vec![],
             env: None,
+            initial_prompt: None,
         }];
 
         manager.load_slots(configs);
@@ -392,6 +396,7 @@ mod tests {
                 model: None,
                 traits: vec![],
                 env: None,
+                initial_prompt: None,
             },
             SlotConfig {
                 id: "slot-2".to_string(),
@@ -406,6 +411,7 @@ mod tests {
                 model: None,
                 traits: vec![],
                 env: None,
+                initial_prompt: None,
             },
         ]);
 
@@ -427,6 +433,7 @@ mod tests {
                 model: None,
                 traits: vec![],
                 env: None,
+                initial_prompt: None,
             },
             SlotConfig {
                 id: "slot-3".to_string(),
@@ -441,6 +448,7 @@ mod tests {
                 model: None,
                 traits: vec![],
                 env: None,
+                initial_prompt: None,
             },
         ]);
 
@@ -481,6 +489,7 @@ mod tests {
                 model: None,
                 traits: vec![],
                 env: None,
+                initial_prompt: None,
             },
             SlotConfig {
                 id: "slot-2".to_string(),
@@ -495,6 +504,7 @@ mod tests {
                 model: None,
                 traits: vec![],
                 env: None,
+                initial_prompt: None,
             },
             SlotConfig {
                 id: "slot-3".to_string(),
@@ -509,6 +519,7 @@ mod tests {
                 model: None,
                 traits: vec![],
                 env: None,
+                initial_prompt: None,
             },
         ];
 

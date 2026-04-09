@@ -136,6 +136,7 @@ impl GeminiPtyDriver {
                 dangerously_skip_permissions: true,
                 model: Some(model.unwrap_or(GEMINI_MODEL).to_string()),
                 extra_env,
+                initial_prompt: None,
             },
             None, // No slot_env provided here, could be passed if needed
         )

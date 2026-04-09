@@ -32,14 +32,14 @@ fn get_template(name: &str) -> Option<TemplateConfig> {
             description: "Dynamic coder slot (ephemeral)",
             mcp_config: Some("<HOME>/.missiond/mcp-config.json"),
             default_cwd: "<PROJECTS_ROOT>",
-            model: None,
+            model: Some("sonnet"),
         }),
         "ops" => Some(TemplateConfig {
             role: "operator",
             description: "Dynamic ops slot (ephemeral)",
             mcp_config: Some("<HOME>/.missiond/mcp-config.json"),
             default_cwd: "<PROJECTS_ROOT>",
-            model: None,
+            model: Some("sonnet"),
         }),
         "researcher" => Some(TemplateConfig {
             role: "coder",
@@ -186,6 +186,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         traits: vec![],
         category: None,
         env: None,
+        initial_prompt: None,
     };
 
     let config_json = serde_json::to_string(&slot_config)
@@ -261,6 +262,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                 dangerously_skip_permissions: false,
                 model: slot_config.model.clone(),
                 extra_env: HashMap::new(),
+                initial_prompt: objective_owned.clone(),
             },
             slot_config.env.as_ref(),
         )
