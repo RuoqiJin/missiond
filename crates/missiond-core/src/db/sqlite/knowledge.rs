@@ -105,6 +105,14 @@ impl KnowledgeStore for SqliteMissionStore {
         self.executor.run(move |db| db.kb_search_like_ranked(&query, category.as_deref())).await
     }
 
+    async fn kb_search_fts_ranked_scoped(&self, query: &str, category: Option<&str>, _project_id: Option<&str>) -> DbResult<Vec<(String, usize, Option<String>)>> {
+        self.kb_search_fts_ranked(query, category).await
+    }
+
+    async fn kb_search_like_ranked_scoped(&self, query: &str, category: Option<&str>, _project_id: Option<&str>) -> DbResult<Vec<(String, usize)>> {
+        self.kb_search_like_ranked(query, category).await
+    }
+
     // -- Embeddings --
 
     async fn kb_set_embedding(&self, id: &str, embedding: &[f32], provider: &str) -> DbResult<()> {

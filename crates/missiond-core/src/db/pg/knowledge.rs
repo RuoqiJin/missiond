@@ -578,6 +578,105 @@ impl KnowledgeStore for PgMissionStore {
         Ok(rows.into_iter().enumerate().map(|(rank, (id,))| (id, rank)).collect())
     }
 
+    async fn kb_search_fts_ranked_scoped(&self, query: &str, category: Option<&str>, project_id: Option<&str>) -> DbResult<Vec<(String, usize, Option<String>)>> {
+        if project_id.is_none() {
+            return self.kb_search_fts_ranked(query, category).await;
+        }
+        let tsquery = query.split_whitespace()
+            .map(|w| w.replace('\'', ""))
+            .filter(|w| !w.is_empty())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        if tsquery.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows: Vec<(String, Option<String>)> = if let Some(cat) = category {
+            let like_pattern = format!("{}:%", cat);
+            sqlx::query_as(
+                "SELECT k.id, ts_headline('simple', COALESCE(k.detail, k.summary), plainto_tsquery('simple', $1), 'StartSel=**, StopSel=**, MaxFragments=2, MaxWords=40')
+                 FROM knowledge k
+                 WHERE k.fts_doc @@ plainto_tsquery('simple', $1) AND (k.category = $2 OR k.category LIKE $3)
+                   AND (k.project_id = $4 OR k.project_id IS NULL)
+                 ORDER BY ts_rank(k.fts_doc, plainto_tsquery('simple', $1)) DESC
+                 LIMIT 100"
+            )
+            .bind(query)
+            .bind(cat)
+            .bind(like_pattern)
+            .bind(project_id.unwrap())
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as(
+                "SELECT k.id, ts_headline('simple', COALESCE(k.detail, k.summary), plainto_tsquery('simple', $1), 'StartSel=**, StopSel=**, MaxFragments=2, MaxWords=40')
+                 FROM knowledge k
+                 WHERE k.fts_doc @@ plainto_tsquery('simple', $1)
+                   AND (k.project_id = $2 OR k.project_id IS NULL)
+                 ORDER BY ts_rank(k.fts_doc, plainto_tsquery('simple', $1)) DESC
+                 LIMIT 100"
+            )
+            .bind(query)
+            .bind(project_id.unwrap())
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        Ok(rows.into_iter().enumerate().map(|(rank, (id, snippet))| {
+            let snip = snippet.filter(|s| s.contains("**"));
+            (id, rank, snip)
+        }).collect())
+    }
+
+    async fn kb_search_like_ranked_scoped(&self, query: &str, category: Option<&str>, project_id: Option<&str>) -> DbResult<Vec<(String, usize)>> {
+        if project_id.is_none() {
+            return self.kb_search_like_ranked(query, category).await;
+        }
+        let keywords: Vec<String> = {
+            let mut kw: Vec<String> = query.split_whitespace().map(|w| w.to_string()).collect();
+            let trimmed = query.trim();
+            if !trimmed.is_empty() && trimmed.chars().any(|c| !c.is_ascii()) && !kw.contains(&trimmed.to_string()) {
+                kw.insert(0, trimmed.to_string());
+            }
+            kw
+        };
+        if keywords.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut sql = String::from("SELECT id FROM knowledge WHERE (");
+        let mut like_parts: Vec<String> = Vec::new();
+        for (i, _) in keywords.iter().enumerate() {
+            let p = i + 1;
+            like_parts.push(format!(
+                "(key LIKE ${p} OR summary LIKE ${p} OR COALESCE(detail,'') LIKE ${p})"
+            ));
+        }
+        sql.push_str(&like_parts.join(" OR "));
+        sql.push(')');
+        let mut next_param = keywords.len() + 1;
+        if let Some(_cat) = category {
+            sql.push_str(&format!(" AND (category = ${} OR category LIKE ${})", next_param, next_param + 1));
+            next_param += 2;
+        }
+        sql.push_str(&format!(" AND (project_id = ${} OR project_id IS NULL)", next_param));
+        next_param += 1;
+        let _ = next_param;
+        sql.push_str(" ORDER BY access_count DESC, updated_at DESC LIMIT 30");
+
+        let mut q = sqlx::query_as::<_, (String,)>(&sql);
+        for kw in &keywords {
+            q = q.bind(format!("%{}%", kw));
+        }
+        if let Some(cat) = category {
+            q = q.bind(cat.to_string());
+            q = q.bind(format!("{}:%", cat));
+        }
+        q = q.bind(project_id.unwrap().to_string());
+        let rows = q.fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().enumerate().map(|(rank, (id,))| (id, rank)).collect())
+    }
+
     // ========== Embeddings ==========
 
     async fn kb_set_embedding(&self, id: &str, embedding: &[f32], provider: &str) -> DbResult<()> {

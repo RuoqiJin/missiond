@@ -105,4 +105,9 @@ impl ConversationQuery {
         self.source = Some(source.into());
         self
     }
+
+    pub fn project(mut self, project: impl Into<String>) -> Self {
+        self.project = Some(project.into());
+        self
+    }
 }

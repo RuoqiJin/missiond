@@ -169,6 +169,8 @@ struct KBSearchArgs {
     offset: Option<usize>,
     #[serde(default)]
     search_mode: Option<String>,
+    #[serde(default)]
+    project: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -512,12 +514,14 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 limit,
                 offset,
                 search_mode,
+                project,
             } = serde_json::from_value(args).unwrap_or(KBSearchArgs {
                 query: None,
                 category: None,
                 limit: None,
                 offset: None,
                 search_mode: None,
+                project: None,
             });
             let query = query.unwrap_or_default();
             if query.is_empty() && category.is_none() {
@@ -537,14 +541,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let fts_ranked: Vec<(String, usize, Option<String>)> = {
                 let ranked = state
                     .store
-                    .kb_search_fts_ranked(&query, category.as_deref())
+                    .kb_search_fts_ranked_scoped(&query, category.as_deref(), project.as_deref())
                     .await
                     .unwrap_or_default();
                 if ranked.is_empty() {
-                    // like_ranked returns (id, rank) — pad with None snippet
                     let like = state
                         .store
-                        .kb_search_like_ranked(&query, category.as_deref())
+                        .kb_search_like_ranked_scoped(&query, category.as_deref(), project.as_deref())
                         .await
                         .unwrap_or_default();
                     like.into_iter()

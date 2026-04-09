@@ -19,6 +19,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "limit": {"type": "integer", "description": "[search] 返回条数上限(最大 50)", "default": 10},
                     "offset": {"type": "integer", "description": "[search] 分页偏移", "default": 0},
                     "search_mode": {"type": "string", "description": "[search] exact=纯相关性; explore=含 MMR 多样性", "enum": ["exact", "explore"], "default": "explore"},
+                    "project": {"type": "string", "description": "[search] 项目过滤(返回该项目+全局条目)"},
                     "key": {"type": "string", "description": "[get] 精确 key"}
                 }
             }),

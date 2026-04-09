@@ -3,4 +3,5 @@ pub(crate) mod cascade;
 pub(crate) mod insight;
 pub(crate) mod kb;
 pub(crate) mod memory;
+pub(crate) mod project;
 pub(crate) mod skill;

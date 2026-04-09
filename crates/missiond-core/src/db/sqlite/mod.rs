@@ -64,3 +64,23 @@ impl MissionStore for SqliteMissionStore {
         Ok(())
     }
 }
+
+#[async_trait]
+impl super::traits::ProjectStore for SqliteMissionStore {
+    async fn list_projects(&self) -> DbResult<Vec<crate::types::Project>> {
+        Ok(vec![])
+    }
+    async fn get_project(&self, _id: &str) -> DbResult<Option<crate::types::Project>> {
+        Ok(None)
+    }
+    async fn upsert_project(&self, id: &str, name: &str, path: &str) -> DbResult<crate::types::Project> {
+        let now = chrono::Utc::now().to_rfc3339();
+        Ok(crate::types::Project {
+            id: id.to_string(), name: name.to_string(), path: path.to_string(),
+            active: true, created_at: now.clone(), updated_at: now,
+        })
+    }
+    async fn set_project_active(&self, _id: &str, _active: bool) -> DbResult<Option<crate::types::Project>> {
+        Ok(None)
+    }
+}
