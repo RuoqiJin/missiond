@@ -5,19 +5,23 @@
 
 (intent missiond
   (granularity L3-Implementation)
-  (survey-hash "9facdfa-928da99-9a843c5-e141804-29f9e25-b0fa8df")
-  (survey-date "2026-04-07T00:00:00Z")
-  (last-updated "2026-04-07 — feat: worker-level override in ControlTree cascade (debug mode); refactor: decompose missiond-core into pty/semantic/shared; workers by LLM dep; db gen/ subdir")
+  (survey-hash "9facdfa-928da99-9a843c5-e141804-29f9e25-b0fa8df-a9517ec")
+  (survey-date "2026-04-09T00:00:00Z")
+  (last-updated "2026-04-09 — refactor: missiond-semantic → standalone semantic-terminal crate (external); feat: initial_prompt in SlotConfig + pty_spawn fix; refactor: BackgroundWorker trait unification (strategy/retro/ast-sync); fix: daemon UE state on shutdown")
 
   ;; ══════════════════════════════════════════════════════
   ;; DESIGN CONSTRAINTS
   ;; ══════════════════════════════════════════════════════
   (design-constraints
     (crate-boundary
-      (missiond-shared   "CliEngine enum + default_mission_home — zero-dep shared primitives")
-      (missiond-semantic "semantic terminal parser: fingerprints, state, confirm, title, tool, status, patterns")
+      (missiond-shared   "CliEngine enum + default_mission_home — re-exports CliEngine from semantic-terminal")
+      ;; ⚠ missiond-semantic REMOVED (commit 5a5f805) — now external crate:
+      ;;   workspace dep: semantic-terminal = { path = "../semantic-terminal/..." }
+      ;;   (github.com/ruoqijin/semantic-terminal, independent open-source crate)
+      ;;   pure_parsing/ (Forge GenGap) moved to missiond-core/src/semantic_parsing/
+      (semantic-terminal "[EXTERNAL] semantic terminal parser: fingerprints, state, confirm, title, tool, status, patterns")
       (missiond-pty      "PTY session management: PTYManager, PTYSession, IncrementalExtractor, screenshot")
-      (missiond-core     "types, DB traits, IPC, embedding, context — depends on pty+semantic+shared")
+      (missiond-core     "types, DB traits, IPC, embedding, context — depends on pty + semantic-terminal(external) + shared")
       (missiond-daemon   "business logic, handlers, engines, workers (sonnet/codex/gemini/local), LLM gateways")
       (missiond-mcp      "MCP JSON-RPC stdio server, tool schema + dispatch")
       (missiond-attach   "CLI PTY attach utility")
@@ -712,7 +716,7 @@
     (purpose "all finite state automata governing lifecycle transitions")
 
     (component pty-session-state
-      :target "crates/missiond-semantic/src/types.rs"
+      :target "semantic-terminal crate (external) — src/types.rs"
       (state-machine pty-session
         (states (Starting) (Idle) (SlashMenu) (Thinking) (Responding)
                 (ToolRunning) (Confirming) (Error))
@@ -801,7 +805,10 @@
 
     (component event-router
       :target "crates/missiond-daemon/src/event_router.rs"
-      (depends event-bus))
+      (depends event-bus)
+      ;; commit c8b76b0: demoted to Notify signal emitter — no longer spawns orphan coroutines
+      ;; strategy/retro/ast-sync moved to BackgroundWorker trait; event_router is now a thin broadcaster
+      (note "signal emitter only — use BackgroundWorker trait for all event-driven processing"))
 
     (component events-sync
       :target "crates/missiond-daemon/src/events_sync.rs"
@@ -813,7 +820,11 @@
       (trait BackgroundWorker
         (const KIND :type WorkerKind :enum (Sonnet Codex Gemini Local))
         (methods (name extra-deps run)))
-      (note "KIND must match the subdirectory the worker lives in; ControlTree provider deps auto-injected by spawn_worker"))
+      (note "KIND must match the subdirectory the worker lives in; ControlTree provider deps auto-injected by spawn_worker")
+      ;; commit c8b76b0: strategy-worker(Gemini), retro-worker(Sonnet), ast-sync-worker(Local)
+      ;; converted from loose async fns → BackgroundWorker implementations with ControlTree pause/resume.
+      ;; Closes ControlTree enforcement gap — all event-driven workers now respect cascade pause/resume.
+      )
 
     (component control-tree
       :target "crates/missiond-daemon/src/control_tree.rs"
@@ -871,7 +882,8 @@
       (worker retro-worker
         :target "crates/missiond-daemon/src/workers/sonnet/retro_worker.rs"
         :trigger on-session-end
-        :writes-to retrospective_results))
+        :writes-to retrospective_results
+        :note "commit c8b76b0: now BackgroundWorker impl, respects ControlTree pause/resume"))
 
     ;; workers/codex/ — Codex CLI / Claude Code PTY via SlotManager
     (component workers-codex
@@ -888,7 +900,8 @@
     (component workers-gemini
       (worker strategy-worker
         :target "crates/missiond-daemon/src/workers/gemini/strategy_worker.rs"
-        :trigger "interval 300s flag-gated"))
+        :trigger "interval 300s flag-gated"
+        :note "commit c8b76b0: now BackgroundWorker impl, respects ControlTree pause/resume"))
 
     ;; workers/local/ — pure computation, no LLM dependency
     (component workers-local
@@ -920,7 +933,8 @@
       (worker ast-sync-worker
         :target "crates/missiond-daemon/src/workers/local/ast_sync_worker.rs"
         :trigger "channel ast_sync_rx MPSC"
-        :writes-to (ast_nodes))
+        :writes-to (ast_nodes)
+        :note "commit c8b76b0: now BackgroundWorker impl, respects ControlTree pause/resume")
       (worker code-prefetch
         :target "crates/missiond-daemon/src/workers/local/code_prefetch.rs"
         :trigger on-demand)
@@ -978,6 +992,18 @@
       (engine-adapters
         (cc-controller    :target "crates/missiond-daemon/src/slot_orchestrator/cc_controller.rs")
         (gemini-controller :target "crates/missiond-daemon/src/slot_orchestrator/gemini_controller.rs"))
+      (spawner :target "crates/missiond-daemon/src/slot_orchestrator/spawner.rs"
+        ;; commit 20813d5 + a9517ec: SlotConfig now supports initial_prompt
+        ;; After slot reaches Idle, spawner injects initial_prompt as first message.
+        ;; Also fixes: serde aliases for dangerously_skip_permissions / mcp_config / auto_start
+        ;; (were silently ignored due to camelCase mismatch in YAML deserialization).
+        ;; Dynamic coder/ops slot templates now default to sonnet model.
+        ;; packages/dashboard removed (superseded by board).
+        (slot-config-fields
+          (initial_prompt :type "Option<String>" :doc "first message injected after slot reaches Idle")
+          (dangerously_skip_permissions :type bool :serde-alias "dangerouslySkipPermissions")
+          (mcp_config :type "Option<McpConfig>" :serde-alias "mcpConfig")
+          (auto_start :type bool :serde-alias "autoStart")))
       (depends (pty_manager slot_manager event_bus))))
 
   ;; ══════════════════════════════════════════════════════
@@ -986,34 +1012,41 @@
   (pillar semantic-parser
     (purpose "multi-layer recognizer: raw PTY screen → structured states")
 
+    ;; commit 5a5f805: missiond-semantic EXTRACTED → standalone open-source crate
+    ;; All targets below are in semantic-terminal crate (external workspace dep)
+    ;; Forge GenGap (pure_parsing/) moved to missiond-core/src/semantic_parsing/
     (component parser-pipeline
-      :target "crates/missiond-semantic/src/"
+      :target "semantic-terminal/src/ (external crate)"
       (pipeline
         pattern-config -> fingerprint-registry -> state-parser
         -> confirm-parser -> tool-output-parser)
       (shared-resource "Arc<CompiledPatterns> from YAML hot-reload"))
 
     (component pattern-config
-      :target "crates/missiond-semantic/src/patterns.rs"
+      :target "semantic-terminal/src/patterns.rs"
       (dispatch "CliEngine enum → engine-specific YAML + parser"))
 
     (component claude-code-parser
-      :target "crates/missiond-semantic/src/state.rs"
+      :target "semantic-terminal/src/state.rs"
       (detection-order
         trust-dialog -> confirm-dialog -> idle-or-slash
         -> processing -> responding -> error))
 
     (component gemini-parser
-      :target "crates/missiond-semantic/src/gemini_state.rs"
+      :target "semantic-terminal/src/gemini_state.rs"
       (detection-order
         error -> thinking -> responding -> tool-running
         -> idle -> idle-placeholder -> idle-transitional))
 
-    (component fingerprint :target "crates/missiond-semantic/src/fingerprint.rs")
-    (component confirm     :target "crates/missiond-semantic/src/confirm.rs")
-    (component tool-parser :target "crates/missiond-semantic/src/tool.rs")
-    (component status      :target "crates/missiond-semantic/src/status.rs")
-    (component title       :target "crates/missiond-semantic/src/title.rs"))
+    (component fingerprint :target "semantic-terminal/src/fingerprint.rs")
+    (component confirm     :target "semantic-terminal/src/confirm.rs")
+    (component tool-parser :target "semantic-terminal/src/tool.rs")
+    (component status      :target "semantic-terminal/src/status.rs")
+    (component title       :target "semantic-terminal/src/title.rs")
+
+    (component semantic-parsing-gengap
+      :target "crates/missiond-core/src/semantic_parsing/"
+      :note "Forge GenGap (generated.rs + custom.rs + mod.rs) — moved here from former missiond-semantic"))
 
   ;; ══════════════════════════════════════════════════════
   ;; PILLAR 9: LLM GATEWAYS + CONTEXT PIPELINE

@@ -81,6 +81,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 since: Option<String>,
                 until: Option<String>,
                 source: Option<String>,
+                project: Option<String>,
             }
             let Args {
                 status,
@@ -90,6 +91,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 since,
                 until,
                 source,
+                project,
             } = serde_json::from_value(args).unwrap_or(Args {
                 status: None,
                 limit: None,
@@ -98,6 +100,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 since: None,
                 until: None,
                 source: None,
+                project: None,
             });
 
             let mut query = missiond_core::db::conversation_query::ConversationQuery::new();
@@ -123,6 +126,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
             if let Some(src) = source {
                 query = query.source(src);
+            }
+            if let Some(proj) = project {
+                query = query.project(proj);
             }
 
             let manager = missiond_core::services::ConversationManager::new(std::sync::Arc::clone(

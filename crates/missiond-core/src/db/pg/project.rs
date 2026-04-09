@@ -1,7 +1,31 @@
 //! Project registry — PostgreSQL persistence layer.
 
+use async_trait::async_trait;
 use sqlx::PgPool;
+use crate::db::error::DbResult;
+use crate::db::traits::ProjectStore;
 use crate::types::ProjectConfig;
+use super::PgMissionStore;
+
+#[cfg(feature = "postgres")]
+#[async_trait]
+impl ProjectStore for PgMissionStore {
+    async fn list_projects(&self) -> DbResult<Vec<ProjectConfig>> {
+        Ok(list_projects(&self.pool).await?)
+    }
+
+    async fn get_project(&self, id: &str) -> DbResult<Option<ProjectConfig>> {
+        Ok(get_project(&self.pool, id).await?)
+    }
+
+    async fn upsert_project(&self, config: &ProjectConfig) -> DbResult<()> {
+        Ok(upsert_project(&self.pool, config).await?)
+    }
+
+    async fn set_project_active(&self, id: &str, active: bool) -> DbResult<bool> {
+        Ok(update_project_active(&self.pool, id, active).await?)
+    }
+}
 
 pub async fn upsert_project(pool: &PgPool, config: &ProjectConfig) -> Result<(), sqlx::Error> {
     sqlx::query(

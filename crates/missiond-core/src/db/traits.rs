@@ -325,6 +325,10 @@ pub trait KnowledgeStore: Send + Sync {
     async fn kb_search_fts_ranked(&self, query: &str, category: Option<&str>) -> DbResult<Vec<(String, usize, Option<String>)>>;
     async fn kb_search_like_ranked(&self, query: &str, category: Option<&str>) -> DbResult<Vec<(String, usize)>>;
 
+    // -- Search (project-scoped) --
+    async fn kb_search_fts_ranked_scoped(&self, query: &str, category: Option<&str>, project_id: Option<&str>) -> DbResult<Vec<(String, usize, Option<String>)>>;
+    async fn kb_search_like_ranked_scoped(&self, query: &str, category: Option<&str>, project_id: Option<&str>) -> DbResult<Vec<(String, usize)>>;
+
     // -- Embeddings --
     async fn kb_set_embedding(&self, id: &str, embedding: &[f32], provider: &str) -> DbResult<()>;
     async fn kb_load_embeddings(&self, category: &str) -> DbResult<Vec<(String, Vec<f32>)>>;
@@ -712,6 +716,18 @@ pub trait ObservabilityStore: Send + Sync {
 }
 
 // ============================================================================
+// ProjectStore
+// ============================================================================
+
+#[async_trait]
+pub trait ProjectStore: Send + Sync {
+    async fn list_projects(&self) -> DbResult<Vec<crate::types::ProjectConfig>>;
+    async fn get_project(&self, id: &str) -> DbResult<Option<crate::types::ProjectConfig>>;
+    async fn upsert_project(&self, config: &crate::types::ProjectConfig) -> DbResult<()>;
+    async fn set_project_active(&self, id: &str, active: bool) -> DbResult<bool>;
+}
+
+// ============================================================================
 // MissionStore — Super-trait aggregating all domain stores
 // ============================================================================
 
@@ -722,6 +738,7 @@ pub trait MissionStore:
     ConversationStore + MessageStore + ToolCallStore + EventStore
     + RetrospectiveStore + VisionStore + KnowledgeStore + BoardStore
     + TimelineStore + SlotStore + SkillStore + ObservabilityStore
+    + ProjectStore
     + Send + Sync
 {
     /// Schema initialization (called once at startup).
