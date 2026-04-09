@@ -304,6 +304,7 @@ async fn ensure_gemini_conversation(
     let conv = missiond_core::types::Conversation {
         id: session_id.to_string(),
         project: Some(project_path.to_string()),
+        project_id: None,
         slot_id: None,
         source: "gemini_cli".to_string(),
         model: None,

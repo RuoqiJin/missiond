@@ -1193,6 +1193,7 @@ impl MissionDB {
         Ok(Conversation {
             id: row.get("id")?,
             project: row.get("project")?,
+            project_id: row.get("project_id").unwrap_or(None),
             slot_id: row.get("slot_id")?,
             source: row.get("source")?,
             model: row.get("model")?,
