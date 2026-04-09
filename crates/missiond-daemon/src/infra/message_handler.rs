@@ -126,8 +126,13 @@ async fn ingest(
                     .map(|m| m.cwd.clone())
                     .unwrap_or_else(|| project_path.to_string()),
             ),
-            // TODO: resolve project_id via ProjectRegistry once available in AppState
-            project_id: None,
+            project_id: {
+                let cwd = first
+                    .map(|m| m.cwd.as_str())
+                    .unwrap_or(project_path);
+                let registry = state.project_registry.read().await;
+                registry.resolve(cwd).map(|s| s.to_string())
+            },
             slot_id: slot_id.map(|s| s.to_string()),
             source: source.to_string(),
             model: first.and_then(|m| m.message.model.clone()),

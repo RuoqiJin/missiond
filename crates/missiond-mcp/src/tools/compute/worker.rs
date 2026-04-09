@@ -29,7 +29,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "type": "object",
                 "required": ["target_type", "action"],
                 "properties": {
-                    "target_type": {"type": "string", "enum": ["global", "provider", "domain", "worker", "slot_role"]},
+                    "target_type": {"type": "string", "enum": ["global", "provider", "domain", "worker", "slot_role", "project"]},
                     "target_name": {"type": "string", "description": "名称(global 时可省略)"},
                     "action": {"type": "string", "enum": ["pause", "resume", "status"]}
                 }

@@ -587,6 +587,21 @@ async fn main() -> Result<()> {
     // Pre-clone Arcs needed for initialization (moved into AppState below)
     let slot_mgr_pty = Arc::clone(&pty);
     let slot_mgr_store = Arc::clone(&store);
+    // ── Project Registry: load from DB, build path→project_id index ──
+    let project_registry: missiond_core::types::SharedProjectRegistry = {
+        let projects = store
+            .list_projects()
+            .await
+            .unwrap_or_else(|e| {
+                warn!("Failed to load projects from DB: {}", e);
+                vec![]
+            });
+        info!(count = projects.len(), "Project registry loaded");
+        Arc::new(tokio::sync::RwLock::new(
+            missiond_core::types::ProjectRegistry::new(projects),
+        ))
+    };
+
     let slot_mgr_pty2 = Arc::clone(&pty);
     let slot_mgr_store2 = Arc::clone(&store);
     let pty_for_gemini_transport = Arc::clone(&pty);
@@ -777,6 +792,7 @@ async fn main() -> Result<()> {
         last_msg_span: Arc::new(std::sync::Mutex::new(HashMap::new())),
         worker_registry: Arc::new(workers::WorkerRegistry::new()),
         control_manager: Arc::clone(&control_manager_arc),
+        project_registry: project_registry.clone(),
         slot_dispatch: Arc::new(slot_dispatch::SlotDispatchGuard::new()),
         board_dispatch_notify: Arc::new(tokio::sync::Notify::new()),
         slot_manager: {
