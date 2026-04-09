@@ -46,7 +46,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use super::extractor::{IncrementalExtractor, StableTextOp, TextAssembler};
-use missiond_semantic::{
+use semantic_terminal::{
     ClaudeCodeConfirmParser, ClaudeCodeStateParser, ClaudeCodeStatusParser,
     ClaudeCodeToolOutputParser, GeminiCliStateParser,
     ConfirmParser, ParserContext, StateParser, StatusParser, ToolOutputParser,

@@ -1,31 +1,7 @@
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-// ============ CLI Engine ============
-
-/// CLI engine type for slot workstations.
-/// Determines which binary to spawn and which state parser to use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum CliEngine {
-    /// Anthropic Claude Code (interactive PTY mode)
-    #[default]
-    ClaudeCode,
-    /// Google Gemini CLI (interactive PTY or subprocess stream-json)
-    Gemini,
-    /// OpenAI Codex CLI (subprocess JSON mode)
-    Codex,
-}
-
-impl std::fmt::Display for CliEngine {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CliEngine::ClaudeCode => write!(f, "claude_code"),
-            CliEngine::Gemini => write!(f, "gemini"),
-            CliEngine::Codex => write!(f, "codex"),
-        }
-    }
-}
+// Re-export CliEngine from standalone semantic-terminal crate
+pub use semantic_terminal::CliEngine;
 
 // ============ Mission Home ============
 

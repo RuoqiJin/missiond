@@ -7,7 +7,7 @@ description = "PTY session management for missiond"
 [dependencies]
 # Internal crates
 missiond-shared.workspace = true
-missiond-semantic.workspace = true
+semantic-terminal = { workspace = true }
 
 # PTY
 portable-pty = { workspace = true }

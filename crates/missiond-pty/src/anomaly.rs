@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use missiond_semantic::State;
+use semantic_terminal::State;
 use missiond_shared::CliEngine;
 
 /// Anomaly detected by the PTY compatibility guardian
