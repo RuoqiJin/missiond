@@ -26,7 +26,61 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                 .list_projects()
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
-            Ok(ToolResult::json_pretty(&projects))
+            // Enrich with runtime info: github URL + lisp files
+            let enriched: Vec<serde_json::Value> = projects
+                .iter()
+                .map(|p| {
+                    let mut v = serde_json::to_value(p).unwrap_or_default();
+                    let path = std::path::Path::new(&p.path);
+                    // Git remote URL
+                    if let Ok(out) = std::process::Command::new("git")
+                        .args(["remote", "get-url", "origin"])
+                        .current_dir(path)
+                        .output()
+                    {
+                        let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        if !url.is_empty() {
+                            v["githubUrl"] = serde_json::Value::String(url);
+                        }
+                    }
+                    // Scan for *.lisp files (max depth 3)
+                    let mut lisps = Vec::new();
+                    for depth_dirs in &[
+                        vec![path.to_path_buf()],
+                        path.read_dir().ok().map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()).collect()).unwrap_or_default(),
+                    ] {
+                        for dir in depth_dirs {
+                            if let Ok(rd) = std::fs::read_dir(dir) {
+                                for entry in rd.filter_map(|e| e.ok()) {
+                                    let ep = entry.path();
+                                    if ep.extension().map(|e| e == "lisp").unwrap_or(false) {
+                                        let rel = ep.strip_prefix(path).unwrap_or(&ep);
+                                        lisps.push(rel.display().to_string());
+                                    }
+                                    // One more level
+                                    if ep.is_dir() {
+                                        if let Ok(rd2) = std::fs::read_dir(&ep) {
+                                            for e2 in rd2.filter_map(|e| e.ok()) {
+                                                let p2 = e2.path();
+                                                if p2.extension().map(|e| e == "lisp").unwrap_or(false) {
+                                                    let rel = p2.strip_prefix(path).unwrap_or(&p2);
+                                                    lisps.push(rel.display().to_string());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    lisps.sort();
+                    lisps.dedup();
+                    v["lispFiles"] = serde_json::json!(lisps);
+                    v["lispCount"] = serde_json::json!(lisps.len());
+                    v
+                })
+                .collect();
+            Ok(ToolResult::json_pretty(&enriched))
         }
         "get" => {
             let id = args
