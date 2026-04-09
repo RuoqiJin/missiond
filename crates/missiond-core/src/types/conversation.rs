@@ -234,6 +234,8 @@ pub struct ConversationTurn {
     pub files_read: Option<String>,
     pub files_changed: Option<String>,
     pub outcome: Option<String>,
+    /// JSON skeleton: compact index of tool calls with message IDs for on-demand retrieval.
+    pub skeleton: Option<String>,
 }
 
 /// Intermediate Turn representation before DB insertion (no id/session_id yet).
@@ -255,6 +257,8 @@ pub struct RawTurn {
     pub files_changed: String,
     /// Last assistant non-tool text (truncated), used as embedding outcome signal.
     pub outcome: String,
+    /// JSON skeleton for on-demand message retrieval.
+    pub skeleton: String,
 }
 
 // ============ User Intents ============
