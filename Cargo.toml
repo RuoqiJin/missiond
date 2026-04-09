@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "crates/missiond-shared",
-    "crates/missiond-semantic",
     "crates/missiond-pty",
     "crates/missiond-core",
     "crates/missiond-runner",
@@ -103,7 +102,7 @@ tree-sitter-python = "0.23"
 
 # Internal crates
 missiond-shared = { version = "0.1.0", path = "crates/missiond-shared" }
-missiond-semantic = { version = "0.1.0", path = "crates/missiond-semantic" }
+semantic-terminal = { path = "../semantic-terminal/crates/semantic-terminal" }
 missiond-pty = { version = "0.1.0", path = "crates/missiond-pty" }
 missiond-core = { version = "0.1.0", path = "crates/missiond-core" }
 missiond-runner = { version = "0.1.0", path = "crates/missiond-runner" }

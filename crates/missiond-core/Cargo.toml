@@ -20,7 +20,7 @@ code-context = ["dep:tree-sitter", "dep:tree-sitter-rust", "dep:tree-sitter-type
 [dependencies]
 # Internal crates
 missiond-shared.workspace = true
-missiond-semantic.workspace = true
+semantic-terminal = { workspace = true }
 missiond-pty.workspace = true
 
 # Async runtime

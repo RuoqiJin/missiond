@@ -3,7 +3,7 @@
 //! Run: cargo bench --bench split_args -p missiond-core
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use missiond_core::semantic::pure_parsing::{SemanticParsing, SemanticParsingImpl};
+use missiond_core::semantic_parsing::{SemanticParsing, SemanticParsingImpl};
 
 /// Copy of the production split_args for benchmarking.
 /// The AI's task is to optimize the ORIGINAL in custom.rs —

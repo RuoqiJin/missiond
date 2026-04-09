@@ -2675,12 +2675,12 @@ dependencies = [
  "gethostname",
  "libc",
  "missiond-pty",
- "missiond-semantic",
  "missiond-shared",
  "notify",
  "once_cell",
  "regex",
  "rusqlite",
+ "semantic-terminal",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2757,11 +2757,11 @@ dependencies = [
  "chrono",
  "image",
  "libc",
- "missiond-semantic",
  "missiond-shared",
  "once_cell",
  "portable-pty",
  "regex",
+ "semantic-terminal",
  "serde",
  "serde_json",
  "tokio",
@@ -2783,25 +2783,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "missiond-semantic"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "missiond-shared",
- "once_cell",
- "regex",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "tracing",
-]
-
-[[package]]
 name = "missiond-shared"
 version = "0.1.0"
 dependencies = [
  "dirs 5.0.1",
+ "semantic-terminal",
  "serde",
 ]
 
@@ -4324,6 +4310,17 @@ checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "semantic-terminal"
+version = "0.1.0"
+dependencies = [
+ "once_cell",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]
