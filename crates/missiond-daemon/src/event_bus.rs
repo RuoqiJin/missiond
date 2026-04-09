@@ -137,18 +137,6 @@ pub(crate) enum DaemonEvent {
         title: String,
     },
 
-    // ===== Git Activity =====
-    /// A new git commit was detected in a monitored repository.
-    GitCommitDetected {
-        repo: String,
-        hash: String,
-        short_hash: String,
-        author: String,
-        message: String,
-        /// Commit timestamp as ISO-8601 string.
-        committed_at: String,
-    },
-
     // ===== Slot Command Dispatch =====
     /// A task/prompt was dispatched to a slot for execution.
     SlotTaskDispatched {
@@ -412,6 +400,19 @@ pub(crate) enum DaemonEvent {
         summary: String,
     },
 
+    // ===== Contextual Commit Detection =====
+    /// A git commit was detected from a Claude Code conversation tool_result.
+    /// Enriched with conversation context (session, slot) for causal tracking.
+    ContextualCommitDetected {
+        commit_hash: String,
+        branch: String,
+        summary: String,
+        conversation_id: String,
+        message_id: i64,
+        session_id: String,
+        slot_id: Option<String>,
+    },
+
     // ===== Cascade Controller =====
     /// A cascade repair was triggered (before execution).
     CascadeTriggered {
@@ -462,8 +463,7 @@ impl DaemonEvent {
             Self::BoardTaskUpdated { .. } => "board_task_updated",
             Self::SlotStateChanged { .. } => "slot_state_changed",
             Self::InsightGenerated { .. } => "insight_generated",
-            Self::GitCommitDetected { .. } => "git_commit",
-            Self::SlotTaskDispatched { .. } => "slot_task_dispatched",
+Self::SlotTaskDispatched { .. } => "slot_task_dispatched",
             Self::ConversationMessageLogged { ref role, .. } => match role.as_str() {
                 "user" => "user_message",
                 "system" => "system_message",
@@ -496,6 +496,7 @@ impl DaemonEvent {
             Self::TurnExtracted { .. } => "turn_extracted",
             Self::IntentAnalyzed { .. } => "intent_analyzed",
             Self::JarvisProactivePush { .. } => "jarvis_proactive_push",
+            Self::ContextualCommitDetected { .. } => "contextual_commit_detected",
             Self::CascadeTriggered { .. } => "cascade_triggered",
             Self::CascadeCompleted { .. } => "cascade_completed",
         }
@@ -644,17 +645,7 @@ impl DaemonEvent {
                 priority,
                 title,
             } => json!({ "category": category, "priority": priority, "title": title }),
-            Self::GitCommitDetected {
-                repo,
-                hash,
-                short_hash,
-                author,
-                message,
-                committed_at,
-            } => {
-                json!({ "repo": repo, "hash": hash, "short_hash": short_hash, "author": author, "message": message, "committed_at": committed_at })
-            }
-            Self::SlotTaskDispatched {
+Self::SlotTaskDispatched {
                 slot_id,
                 task_id,
                 purpose,
@@ -930,6 +921,23 @@ impl DaemonEvent {
             } => {
                 json!({ "conversation_id": conversation_id, "trigger_reason": trigger_reason, "summary": summary })
             }
+            Self::ContextualCommitDetected {
+                commit_hash,
+                branch,
+                summary,
+                conversation_id,
+                message_id,
+                session_id,
+                slot_id,
+            } => json!({
+                "commit_hash": commit_hash,
+                "branch": branch,
+                "summary": summary,
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+                "session_id": session_id,
+                "slot_id": slot_id,
+            }),
             Self::CascadeTriggered { service, changed } => {
                 json!({ "service": service, "changed": changed, "action": "triggered" })
             }
