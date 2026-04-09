@@ -7,7 +7,7 @@
 //!
 //! Pure regex matching, zero LLM calls.
 
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 use regex::Regex;
 use tokio::sync::broadcast;
@@ -16,18 +16,17 @@ use tracing::{debug, error, info};
 use super::{BackgroundWorker, WorkerContext, WorkerKind};
 use crate::event_bus::{DaemonEvent, TimelineEvent};
 use crate::state::AppState;
+use std::sync::Arc;
 
 /// Regex to extract branch, commit hash, and summary from git commit output.
-/// Matches: `[main 9facdfa] refactor: some changes`
-/// Captures: (1) branch, (2) hash, (3) summary
+/// Matches standard:      `[main 9facdfa] refactor: some changes`
+/// Matches root:          `[main (root-commit) 9facdfa] initial commit`
+/// Matches detached HEAD: `[detached HEAD 56cbfdd] fix something`
+/// Captures: (1) branch/ref, (2) hash, (3) summary
 static GIT_COMMIT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\[([a-zA-Z0-9_\-/\.]+)\s+([a-f0-9]{7,40})\]\s+(.*)").unwrap()
+    Regex::new(r"\[([a-zA-Z0-9_\-/\.\s]+?)\s+(?:\([^\)]+\)\s+)?([a-f0-9]{7,40})\]\s+(.*)")
+        .unwrap()
 });
-
-/// Quick check substring — avoids regex on every Bash tool output.
-const COMMIT_HINT: &str = " files changed,";
-const COMMIT_HINT2: &str = " file changed,";
-const COMMIT_HINT3: &str = "create mode";
 
 pub(crate) struct EventAnalyzerWorker {
     pub timeline_rx: broadcast::Receiver<TimelineEvent>,
@@ -63,30 +62,19 @@ async fn run_event_analyzer(
                     ref slot_id,
                     ref tool_name,
                     ref output_summary,
-                    is_error,
                     ..
                 } = te.event
                 {
-                    // Fast-filter: only Bash tool, non-error results
-                    if tool_name != "Bash" || is_error {
+                    // Only Bash tool can produce git commits
+                    if tool_name != "Bash" {
                         continue;
                     }
 
-                    // Fast-filter: check for git commit output hints before regex
-                    if !output_summary.contains(COMMIT_HINT)
-                        && !output_summary.contains(COMMIT_HINT2)
-                        && !output_summary.contains(COMMIT_HINT3)
-                        && !output_summary.contains("insertions(+)")
-                        && !output_summary.contains("deletions(-)")
-                    {
-                        debug!(
-                            session_id = %session_id,
-                            "EventAnalyzer: Bash output skipped (no git commit hint)"
-                        );
-                        continue;
-                    }
+                    // Do NOT filter on is_error — commit can succeed while push fails
+                    // (exit code 1 from push, but commit line is still in output)
 
-                    // Regex extract: [branch hash] summary
+                    // Run regex directly — it's fast enough, no need for hint pre-filter
+                    // which could miss edge cases (empty commits, permission-only changes)
                     if let Some(caps) = GIT_COMMIT_RE.captures(output_summary) {
                         let branch = caps[1].to_string();
                         let commit_hash = caps[2].to_string();
@@ -113,6 +101,11 @@ async fn run_event_analyzer(
 
                         state.event_bus.publish(event);
                         ctx.record_success();
+                    } else {
+                        debug!(
+                            session_id = %session_id,
+                            "EventAnalyzer: Bash output — no commit signature"
+                        );
                     }
                 }
             }
