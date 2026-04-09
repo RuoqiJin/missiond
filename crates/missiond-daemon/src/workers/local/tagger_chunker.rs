@@ -473,8 +473,19 @@ fn collect_tool_labels(
 }
 
 /// Classify a Bash command by its prefix.
+/// Content format: `[Tool: Bash] command: "actual command here", description: "..."`
 fn classify_bash_command(content: &str) -> String {
-    let cmd = content.trim_start();
+    // Extract the actual command from the content format
+    let cmd = extract_bash_command(content);
+    let cmd = cmd.trim_start();
+
+    // Strip common prefixes like `cd /path &&` or `LC_ALL=C`
+    let cmd = if let Some(pos) = cmd.find("&& ") {
+        cmd[pos + 3..].trim_start()
+    } else {
+        cmd
+    };
+
     if cmd.starts_with("git ") {
         "git".to_string()
     } else if cmd.starts_with("grep ") || cmd.starts_with("rg ") {
@@ -496,6 +507,24 @@ fn classify_bash_command(content: &str) -> String {
     } else {
         "shell".to_string()
     }
+}
+
+/// Extract the actual command string from `[Tool: Bash] command: "...", description: "..."`
+fn extract_bash_command(content: &str) -> &str {
+    // Try to find `command: "` pattern
+    if let Some(start) = content.find("command: \"") {
+        let after = &content[start + 10..]; // skip `command: "`
+        // Find the closing quote (handle escaped quotes)
+        if let Some(end) = after.find("\", description:") {
+            return &after[..end];
+        }
+        // Fallback: just take the rest
+        if let Some(end) = after.rfind('"') {
+            return &after[..end];
+        }
+    }
+    // Fallback: raw content (plain command text)
+    content
 }
 
 /// Quick heuristic: high ratio of non-printable chars in first 500 bytes suggests binary/base64.
@@ -667,7 +696,11 @@ mod tests {
 
     #[test]
     fn test_tool_labels_bash_git() {
-        let mut msg = make_msg(1, "assistant", "git status");
+        let mut msg = make_msg(
+            1,
+            "assistant",
+            r#"[Tool: Bash] command: "git status", description: "Show working tree status""#,
+        );
         msg.has_tool_use = true;
         msg.tool_name = Some("Bash".to_string());
 
@@ -679,6 +712,31 @@ mod tests {
         assert_eq!(labels[0].1, "tool_class");
         assert_eq!(labels[0].2, "git");
         assert!(commits.is_empty());
+    }
+
+    #[test]
+    fn test_tool_labels_bash_cd_then_git() {
+        let mut msg = make_msg(
+            1,
+            "assistant",
+            r#"[Tool: Bash] command: "cd /Users/jinchen/Projects/missiond && git log --oneline -5", description: "Show recent commits""#,
+        );
+        msg.has_tool_use = true;
+        msg.tool_name = Some("Bash".to_string());
+
+        let msgs = vec![msg];
+        let (labels, _) = collect_tool_labels(&msgs, "test-session");
+
+        assert_eq!(labels[0].2, "git");
+    }
+
+    #[test]
+    fn test_extract_bash_command() {
+        assert_eq!(
+            extract_bash_command(r#"[Tool: Bash] command: "cargo build", description: "Build""#),
+            "cargo build"
+        );
+        assert_eq!(extract_bash_command("plain command"), "plain command");
     }
 
     #[test]
