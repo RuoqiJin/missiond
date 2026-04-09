@@ -319,6 +319,30 @@ static FILE_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"file_path:\s*"([^"]+)""#).unwrap()
 });
 
+/// One entry in the turn skeleton: a tool call with message IDs for on-demand retrieval.
+#[derive(Debug, Clone, serde::Serialize)]
+struct SkeletonEntry {
+    tool: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cmd: Option<String>,
+    req: i64,
+    /// Result message ID (filled when the next tool_result arrives).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    res: Option<i64>,
+}
+
+/// Compact skeleton for a turn: user message + tool calls + outcome message ID.
+#[derive(Debug, Clone, serde::Serialize)]
+struct TurnSkeleton {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user: Option<i64>,
+    calls: Vec<SkeletonEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<i64>,
+}
+
 struct TurnBuilder {
     start_message_id: i64,
     end_message_id: i64,
@@ -333,11 +357,15 @@ struct TurnBuilder {
     files_read: BTreeSet<String>,
     files_changed: BTreeSet<String>,
     outcome: String,
+    skeleton_calls: Vec<SkeletonEntry>,
+    skeleton_user: Option<i64>,
+    skeleton_outcome: Option<i64>,
 }
 
 impl TurnBuilder {
     fn new(msg: &ConversationMessage) -> Self {
-        let user_content = if matches!(msg.role.as_str(), "user" | "agent_user") {
+        let is_user = matches!(msg.role.as_str(), "user" | "agent_user");
+        let user_content = if is_user {
             truncate_str(&msg.content, USER_CONTENT_MAX_CHARS)
         } else {
             String::new()
@@ -356,6 +384,9 @@ impl TurnBuilder {
             files_read: BTreeSet::new(),
             files_changed: BTreeSet::new(),
             outcome: String::new(),
+            skeleton_calls: Vec::new(),
+            skeleton_user: if is_user { Some(msg.id) } else { None },
+            skeleton_outcome: None,
         }
     }
 
@@ -374,6 +405,9 @@ impl TurnBuilder {
             files_read: BTreeSet::new(),
             files_changed: BTreeSet::new(),
             outcome: String::new(),
+            skeleton_calls: Vec::new(),
+            skeleton_user: None,
+            skeleton_outcome: None,
         }
     }
 
@@ -396,12 +430,37 @@ impl TurnBuilder {
                 }
 
                 // Extract file path from tool content → short name
-                if let Some(short) = extract_file_short_name(&msg.content) {
+                let short = extract_file_short_name(&msg.content);
+                if let Some(ref s) = short {
                     if is_write_tool {
-                        self.files_changed.insert(short);
+                        self.files_changed.insert(s.clone());
                     } else if name == "Read" || name == "Grep" || name == "Glob" {
-                        self.files_read.insert(short);
+                        self.files_read.insert(s.clone());
                     }
+                }
+
+                // Skeleton: record tool call with message ID
+                let cmd = if name == "Bash" {
+                    // Extract short command hint for Bash (first 3 words)
+                    let full = extract_bash_command(&msg.content);
+                    let short: String = full.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
+                    if short.is_empty() { None } else { Some(short) }
+                } else {
+                    None
+                };
+                self.skeleton_calls.push(SkeletonEntry {
+                    tool: name.clone(),
+                    file: short,
+                    cmd,
+                    req: msg.id,
+                    res: None,
+                });
+            }
+        } else if msg.has_tool_result {
+            // Fill in the result message ID for the last skeleton entry
+            if let Some(last) = self.skeleton_calls.last_mut() {
+                if last.res.is_none() {
+                    last.res = Some(msg.id);
                 }
             }
         } else if msg.role == "assistant" && !msg.content.starts_with("[thinking]") {
@@ -409,11 +468,19 @@ impl TurnBuilder {
             let trimmed = msg.content.trim();
             if !trimmed.is_empty() && trimmed.len() > 10 {
                 self.outcome = truncate_str(trimmed, OUTCOME_MAX_CHARS);
+                self.skeleton_outcome = Some(msg.id);
             }
         }
     }
 
     fn build(self) -> RawTurn {
+        let skeleton = TurnSkeleton {
+            user: self.skeleton_user,
+            calls: self.skeleton_calls,
+            outcome: self.skeleton_outcome,
+        };
+        let skeleton_json = serde_json::to_string(&skeleton).unwrap_or_default();
+
         RawTurn {
             start_message_id: self.start_message_id,
             end_message_id: self.end_message_id,
@@ -428,6 +495,7 @@ impl TurnBuilder {
             files_read: self.files_read.into_iter().collect::<Vec<_>>().join(","),
             files_changed: self.files_changed.into_iter().collect::<Vec<_>>().join(","),
             outcome: self.outcome,
+            skeleton: skeleton_json,
         }
     }
 }

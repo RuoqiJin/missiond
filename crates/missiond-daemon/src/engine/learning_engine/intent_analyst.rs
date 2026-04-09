@@ -477,6 +477,7 @@ mod tests {
             files_read: None,
             files_changed: None,
             outcome: None,
+            skeleton: None,
         }
     }
 }
