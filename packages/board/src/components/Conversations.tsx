@@ -1231,7 +1231,7 @@ export function Conversations() {
     { id: string; path: string; active: boolean; conversation_count?: number }[]
   >([]);
   const [viewMode, setViewMode] = useState<
-    "conversations" | "workers" | "gemini"
+    "conversations" | "workers" | "gemini" | "jarvis"
   >(() => {
     const saved = sessionStorage.getItem("conv:viewMode");
     return saved === "conversations" ||
