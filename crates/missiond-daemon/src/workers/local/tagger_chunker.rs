@@ -514,8 +514,8 @@ impl TurnBuilder {
                     last.res = Some(msg.id);
                 }
             }
-        } else if msg.role == "assistant" && !msg.content.starts_with("[thinking]") {
-            // Track last assistant text as outcome (skip thinking blocks)
+        } else if msg.role == "assistant" && !is_thinking_leak(&msg.content) {
+            // Track last assistant text as outcome (skip thinking blocks + Gemini instruction leaks)
             let trimmed = msg.content.trim();
             if !trimmed.is_empty() && trimmed.len() > 10 {
                 self.outcome = truncate_str(trimmed, OUTCOME_MAX_CHARS);
@@ -696,6 +696,20 @@ fn extract_bash_command(content: &str) -> &str {
     }
     // Fallback: raw content (plain command text)
     content
+}
+
+/// Detect thinking/reasoning content leaked into assistant messages.
+/// Covers Claude Code `[thinking]` prefix and Gemini CLI instruction restating.
+fn is_thinking_leak(content: &str) -> bool {
+    let t = content.trim();
+    // Claude Code thinking
+    t.starts_with("[thinking]")
+        // Gemini CLI: restates system prompt / critical instructions as assistant output
+        || t.starts_with("**Reviewing Instructions**")
+        || t.starts_with("**Recalling Critical Instructions")
+        || t.starts_with("**Reviewing Rules")
+        // Gemini CLI: thinking-style status headers that aren't real content
+        || (t.starts_with("**") && t.contains("CRITICAL INSTRUCTION"))
 }
 
 /// Detect system command noise that should never be a turn boundary.
@@ -1066,5 +1080,21 @@ mod tests {
         let turns = extract_turns(&msgs);
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].message_count, 2);
+    }
+
+    #[test]
+    fn test_gemini_thinking_leak_skipped_for_outcome() {
+        // Gemini leaks "**Reviewing Instructions**" as assistant messages.
+        // These should NOT become the outcome — the real answer should.
+        let msgs = vec![
+            make_msg(1, "user", "审计最新 commit"),
+            make_msg(2, "assistant", "**Reviewing Instructions** \\n\\nI am recalling Critical Instructions 1 and 2.\nCRITICAL INSTRUCTION 1: ..."),
+            make_msg(3, "assistant", "**Recalling Critical Instructions and Executing Search**\nCRITICAL INSTRUCTION 1: ..."),
+            make_msg(4, "assistant", "审计结果：这个 commit 质量很高，架构优雅。"),
+        ];
+        let turns = extract_turns(&msgs);
+        assert_eq!(turns.len(), 1);
+        // Outcome should be the real answer, not the instruction leak
+        assert_eq!(turns[0].outcome, "审计结果：这个 commit 质量很高，架构优雅。");
     }
 }
