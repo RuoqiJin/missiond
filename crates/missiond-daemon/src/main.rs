@@ -31,7 +31,7 @@ use context::{claude_md_sync, context_budget, context_pipeline, slot_env, topolo
 use engine::{
     autopilot, decision_engine, decision_harvest, extraction, flow_engine, memory_scheduler,
 };
-use infra::{aiops, daemon_stats, git_watcher, ipc_handler, mcp_client};
+use infra::{aiops, daemon_stats, ipc_handler, mcp_client};
 use llm::{
     codex_cli, gemini_cli, gemini_client, llm_gate, llm_gateway, minimax_client, minimax_gateway,
     prompts, sonnet_gateway,
@@ -1231,25 +1231,6 @@ async fn main() -> Result<()> {
         });
     }
 
-    // --- Git Commit Watcher ---
-    // Polls monitored repos (from slot cwds) for new commits → timeline events.
-    {
-        let slot_cwds: Vec<String> = state
-            .mission
-            .list_slots()
-            .into_iter()
-            .filter_map(|s| s.config.cwd)
-            .collect();
-        let repos = git_watcher::collect_repo_roots(&slot_cwds);
-        if !repos.is_empty() {
-            let event_tx = state.event_bus.sender();
-            let ast_tx = state.ast_sync_tx.clone();
-            tokio::spawn(async move {
-                git_watcher::run_git_watcher(repos, event_tx, ast_tx).await;
-            });
-        }
-    }
-
     // --- AST Sync Worker (P2 HCE) ---
     // BackgroundWorker: unified lifecycle + ControlTree pause/resume
     workers::spawn_worker(
@@ -1269,7 +1250,7 @@ async fn main() -> Result<()> {
             .collect();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            let repos = git_watcher::collect_repo_roots(&slot_cwds2);
+            let repos = ast_sync_worker::collect_repo_roots(&slot_cwds2);
             for repo in repos {
                 let name = repo
                     .file_name()
@@ -1464,6 +1445,15 @@ async fn main() -> Result<()> {
     // Extracts structured Turns from flat messages, applies noise labels
     workers::spawn_worker(
         workers::local::tagger_chunker::TaggerChunkerWorker {
+            timeline_rx: timeline_broadcast_tx.subscribe(),
+        },
+        Arc::new(state.clone()),
+        shutdown_rx.clone(),
+    );
+
+    // Event Analyzer — detects git commits from Bash tool outputs
+    workers::spawn_worker(
+        workers::local::event_analyzer_worker::EventAnalyzerWorker {
             timeline_rx: timeline_broadcast_tx.subscribe(),
         },
         Arc::new(state.clone()),

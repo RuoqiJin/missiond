@@ -1,8 +1,9 @@
 //! Architecture Maintenance Worker — auto-updates YAML manifests when structural code changes land.
 //!
-//! Subscribes to `GitCommitDetected` events from the EventBus, filters for structural changes
-//! (new modules, trait changes, Cargo.toml edits, etc.), and routes through
-//! SlotManager → persistent Claude Code (Sonnet) slot to update the YAML manifest.
+//! Subscribes to `ContextualCommitDetected` events from the EventBus (emitted by
+//! EventAnalyzerWorker when a git commit is detected in conversation logs).
+//! Filters for structural changes (new modules, trait changes, Cargo.toml edits, etc.),
+//! and routes through SlotManager → persistent Claude Code (Sonnet) slot to update the YAML manifest.
 //!
 //! Design doc: `docs/designs/arch-maintenance-and-strategic-analysis.md`
 
@@ -25,7 +26,7 @@ const ARCH_COMMIT_AUTHOR: &str = "missiond-arch-worker <noreply@missiond>";
 const ARCH_COMMIT_PREFIX: &str = "chore(arch):";
 /// Maximum diff size sent to LLM (bytes). Truncated beyond this.
 const MAX_DIFF_SIZE: usize = 4_000_000;
-/// Debounce window — ignore commits for the same repo within this period.
+/// Debounce window — ignore commits for the same branch within this period.
 const DEBOUNCE_SECS: u64 = 30;
 
 pub(crate) struct ArchMaintenanceWorker {
@@ -50,55 +51,65 @@ impl BackgroundWorker for ArchMaintenanceWorker {
             ctx.wait_if_paused().await;
             match rx.recv().await {
                 Ok(te) => {
-                    if let DaemonEvent::GitCommitDetected {
-                        ref repo,
-                        ref hash,
-                        ref author,
-                        ref message,
+                    if let DaemonEvent::ContextualCommitDetected {
+                        ref commit_hash,
+                        ref branch,
+                        ref summary,
+                        ref session_id,
+                        ref slot_id,
                         ..
                     } = te.event
                     {
                         // Self-trigger filter: skip commits made by this worker
-                        if author == "missiond-arch-worker"
-                            || message.starts_with(ARCH_COMMIT_PREFIX)
-                        {
-                            debug!(repo = %repo, "arch_maintenance: skipping own commit");
+                        if summary.starts_with(ARCH_COMMIT_PREFIX) {
+                            debug!(branch = %branch, "arch_maintenance: skipping own commit");
                             continue;
                         }
 
-                        // Debounce: skip if same repo was processed recently
+                        // Debounce: skip if same branch was processed recently
                         let now = Instant::now();
-                        if let Some(last) = debounce.get(repo) {
+                        if let Some(last) = debounce.get(branch) {
                             if now.duration_since(*last) < Duration::from_secs(DEBOUNCE_SECS) {
-                                debug!(repo = %repo, "arch_maintenance: debounced");
+                                debug!(branch = %branch, "arch_maintenance: debounced");
                                 continue;
                             }
                         }
 
-                        // Concurrency guard: skip if already processing this repo
-                        if processing.contains(repo) {
-                            debug!(repo = %repo, "arch_maintenance: already processing");
+                        // Concurrency guard: skip if already processing this branch
+                        if processing.contains(branch) {
+                            debug!(branch = %branch, "arch_maintenance: already processing");
                             continue;
                         }
 
-                        debounce.insert(repo.clone(), now);
-                        processing.insert(repo.clone());
+                        // Resolve repo path from slot's configured cwd
+                        let repo_path = slot_id
+                            .as_deref()
+                            .and_then(|sid| state.mission.get_slot(sid))
+                            .and_then(|s| s.config.cwd.clone())
+                            .unwrap_or_default();
+                        if repo_path.is_empty() {
+                            debug!(session_id = %session_id, "arch_maintenance: no cwd for slot");
+                            continue;
+                        }
 
-                        match process_commit(&state, repo, hash).await {
+                        debounce.insert(branch.clone(), now);
+                        processing.insert(branch.clone());
+
+                        match process_commit(&state, &repo_path, commit_hash).await {
                             Ok(true) => {
-                                info!(repo = %repo, "arch_maintenance: YAML updated");
+                                info!(branch = %branch, commit = %commit_hash, "arch_maintenance: YAML updated");
                                 ctx.record_success();
                             }
                             Ok(false) => {
-                                debug!(repo = %repo, "arch_maintenance: NO_CHANGE");
+                                debug!(branch = %branch, "arch_maintenance: NO_CHANGE");
                             }
                             Err(e) => {
-                                warn!(error = %e, repo = %repo, "arch_maintenance: failed");
+                                warn!(error = %e, branch = %branch, "arch_maintenance: failed");
                                 ctx.record_failure();
                             }
                         }
 
-                        processing.remove(repo);
+                        processing.remove(branch);
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {

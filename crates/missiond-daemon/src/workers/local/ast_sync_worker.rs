@@ -7,6 +7,7 @@
 //!
 //! Part of P2: Holographic Context Engine.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -483,6 +484,44 @@ pub(crate) fn git_status_changed_files(repo: &Path) -> Vec<String> {
             }
         })
         .collect()
+}
+
+// --- Git repo root utilities (moved from git_watcher) ---
+
+/// Resolve the git repo root for a given path. Returns None if not a git repo.
+fn git_repo_root(path: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(root))
+    }
+}
+
+/// Deduplicate slot cwds to unique git repo roots.
+pub(crate) fn collect_repo_roots(slot_cwds: &[String]) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut roots = Vec::new();
+    for cwd in slot_cwds {
+        let path = Path::new(cwd);
+        if !path.exists() {
+            continue;
+        }
+        if let Some(root) = git_repo_root(path) {
+            if seen.insert(root.clone()) {
+                roots.push(root);
+            }
+        }
+    }
+    roots
 }
 
 /// Trigger embedding for AST node IDs via the existing embedding channel.
