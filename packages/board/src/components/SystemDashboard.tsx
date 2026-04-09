@@ -50,7 +50,9 @@ interface ProjectInfo {
   intentPath?: string;
   active: boolean;
   slots: string[];
-  conversationCount?: number;
+  githubUrl?: string;
+  lispFiles?: string[];
+  lispCount?: number;
 }
 
 function ProjectsPanel() {
@@ -62,21 +64,12 @@ function ProjectsPanel() {
       const res = await fetch('/api/projects');
       const data = await res.json();
       if (!Array.isArray(data)) return;
-      // Fetch conversation counts per project
-      const withCounts = await Promise.all(
-        data.map(async (p: ProjectInfo) => {
-          try {
-            const cr = await fetch(`/api/conversations?project=${p.id}&limit=1`);
-            const convs = await cr.json();
-            // The response is an array; the backend returns up to limit items
-            // We need total count — use a separate approach or just show "has data"
-            return { ...p, conversationCount: Array.isArray(convs) ? convs.length : 0 };
-          } catch {
-            return { ...p, conversationCount: 0 };
-          }
-        }),
-      );
-      setProjects(withCounts.sort((a, b) => (b.conversationCount ?? 0) - (a.conversationCount ?? 0)));
+      // Sort: active first, then by lispCount desc, then alphabetical
+      const sorted = data.sort((a: ProjectInfo, b: ProjectInfo) => {
+        if (a.active !== b.active) return a.active ? -1 : 1;
+        return (b.lispCount ?? 0) - (a.lispCount ?? 0) || a.id.localeCompare(b.id);
+      });
+      setProjects(sorted);
     } catch {
       // ignore
     } finally {
@@ -129,11 +122,17 @@ function ProjectsPanel() {
             <div className="text-[11px] text-neutral-500 truncate mb-2" title={p.path}>
               {p.path.replace(/^\/Users\/jinchen\//, '~/')}
             </div>
-            <div className="flex items-center gap-3 text-[11px]">
-              {p.intentPath && (
-                <span className="text-amber-500/70" title={p.intentPath}>
-                  ⚙ intent.lisp
-                </span>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] mb-2">
+              {p.githubUrl && (
+                <a
+                  href={p.githubUrl.replace(/^git@github\.com:/, 'https://github.com/').replace(/\.git$/, '')}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-400/80 hover:text-blue-300 transition-colors"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  ↗ GitHub
+                </a>
               )}
               {p.slots.length > 0 && (
                 <span className="text-cyan-500/70">
@@ -141,6 +140,18 @@ function ProjectsPanel() {
                 </span>
               )}
             </div>
+            {(p.lispCount ?? 0) > 0 && (
+              <div className="text-[11px] space-y-0.5">
+                <span className="text-amber-500/70">{p.lispCount} lisp</span>
+                <div className="flex flex-wrap gap-1">
+                  {(p.lispFiles ?? []).map((f) => (
+                    <span key={f} className="px-1.5 py-0.5 rounded bg-amber-500/5 text-amber-500/50 text-[10px] border border-amber-500/10">
+                      {f}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         ))}
       </div>
