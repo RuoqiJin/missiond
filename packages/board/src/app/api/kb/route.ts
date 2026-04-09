@@ -5,12 +5,14 @@ export async function GET(req: NextRequest) {
   try {
     const query = req.nextUrl.searchParams.get('query');
     const category = req.nextUrl.searchParams.get('category') || undefined;
+    const project = req.nextUrl.searchParams.get('project') || undefined;
 
     // Hybrid search via mission_kb_query
     if (query) {
       const limit = req.nextUrl.searchParams.get('limit') || '20';
       const args: Record<string, unknown> = { action: 'search', query, limit: Number(limit) };
       if (category) args.category = category;
+      if (project) args.project = project;
       const result = await callTool('mission_kb_query', args);
       return NextResponse.json(result);
     }
@@ -18,6 +20,7 @@ export async function GET(req: NextRequest) {
     // List all entries
     const args: Record<string, unknown> = {};
     if (category) args.category = category;
+    if (project) args.project = project;
     const entries = await callTool('mission_kb_list', args);
     return NextResponse.json(entries);
   } catch (err) {

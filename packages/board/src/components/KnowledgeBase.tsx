@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Brain, Search, ChevronDown, ChevronRight, Trash2, RefreshCw, Server, Settings, FolderKanban, CalendarClock } from 'lucide-react';
+import { Brain, Search, ChevronDown, ChevronRight, Trash2, RefreshCw, Server, Settings, FolderKanban, CalendarClock, GitBranch } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 
@@ -17,6 +17,12 @@ interface KBEntry {
   createdAt: string;
   updatedAt: string;
   contextSnippet?: string;
+}
+
+interface Project {
+  id: string;
+  path: string;
+  active: boolean;
 }
 
 const CATEGORY_CONFIG: Record<string, { label: string; icon: typeof Brain; color: string; bg: string }> = {
@@ -145,12 +151,17 @@ export function KnowledgeBase() {
   const [searchResults, setSearchResults] = useState<KBEntry[] | null>(null);
   const [searchMode, setSearchMode] = useState<'local' | 'hybrid'>('local');
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
+  const [activeProject, setActiveProject] = useState<string | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>('knowledge');
 
   const fetchEntries = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/kb');
+      const params = new URLSearchParams();
+      if (activeProject) params.set('project', activeProject);
+      const qs = params.toString();
+      const res = await fetch(`/api/kb${qs ? `?${qs}` : ''}`);
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data)) setEntries(data);
@@ -159,11 +170,18 @@ export function KnowledgeBase() {
       // silent
     }
     setLoading(false);
-  }, []);
+  }, [activeProject]);
 
   useEffect(() => {
     fetchEntries();
   }, [fetchEntries]);
+
+  useEffect(() => {
+    fetch('/api/projects')
+      .then((res) => res.ok ? res.json() : [])
+      .then((data) => { if (Array.isArray(data)) setProjects(data.filter((p: Project) => p.active)); })
+      .catch(() => {});
+  }, []);
 
   // Backend hybrid search (Enter key triggers)
   const handleSearch = useCallback(async () => {
@@ -177,6 +195,7 @@ export function KnowledgeBase() {
     try {
       const params = new URLSearchParams({ query: search, limit: '30' });
       if (activeCategory) params.set('category', activeCategory);
+      if (activeProject) params.set('project', activeProject);
       const res = await fetch(`/api/kb?${params}`);
       if (res.ok) {
         const data = await res.json();
@@ -186,7 +205,7 @@ export function KnowledgeBase() {
       setSearchResults([]);
     }
     setLoading(false);
-  }, [search, activeCategory]);
+  }, [search, activeCategory, activeProject]);
 
   const handleDelete = useCallback(async (key: string) => {
     setEntries((prev) => prev.filter((e) => e.key !== key));
@@ -316,7 +335,7 @@ export function KnowledgeBase() {
         </button>
       </div>
 
-      {/* Category pills */}
+      {/* Category pills + Project filter */}
       <div className="flex items-center gap-2 mb-4 flex-wrap">
         <button
           onClick={() => setActiveCategory(null)}
@@ -349,6 +368,39 @@ export function KnowledgeBase() {
             </button>
           );
         })}
+
+        {/* Project filter pills */}
+        {projects.length > 0 && (
+          <>
+            <div className="w-px h-4 bg-neutral-800 mx-1" />
+            <button
+              onClick={() => setActiveProject(null)}
+              className={cn(
+                'px-3 py-1 text-xs rounded-full border transition-colors flex items-center gap-1.5',
+                !activeProject
+                  ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20'
+                  : 'text-neutral-500 border-neutral-800 hover:text-neutral-300',
+              )}
+            >
+              <GitBranch className="w-3 h-3" />
+              全部项目
+            </button>
+            {projects.map((proj) => (
+              <button
+                key={proj.id}
+                onClick={() => setActiveProject(activeProject === proj.id ? null : proj.id)}
+                className={cn(
+                  'px-3 py-1 text-xs rounded-full border transition-colors flex items-center gap-1.5',
+                  activeProject === proj.id
+                    ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20'
+                    : 'text-neutral-500 border-neutral-800 hover:text-neutral-300',
+                )}
+              >
+                {proj.id}
+              </button>
+            ))}
+          </>
+        )}
       </div>
 
       {/* Entries grouped by category */}

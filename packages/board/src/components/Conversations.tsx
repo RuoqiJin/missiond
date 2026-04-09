@@ -27,6 +27,15 @@ import {
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/timeline/MarkdownContent";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { FolderOpen } from "lucide-react";
 
 interface Conversation {
   id: string;
@@ -1217,6 +1226,10 @@ export function Conversations() {
     any[] | null
   >(null);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
+  const [projectFilter, setProjectFilter] = useState<string>("all");
+  const [projects, setProjects] = useState<
+    { id: string; path: string; active: boolean; conversation_count?: number }[]
+  >([]);
   const [viewMode, setViewMode] = useState<
     "conversations" | "workers" | "gemini"
   >(() => {
@@ -1288,6 +1301,16 @@ export function Conversations() {
     sessionStorage.setItem("conv:viewMode", viewMode);
   }, [viewMode]);
 
+  // Fetch project list for filter dropdown
+  useEffect(() => {
+    fetch("/api/projects")
+      .then((res) => res.ok ? res.json() : [])
+      .then((data) => {
+        if (Array.isArray(data)) setProjects(data);
+      })
+      .catch(() => {});
+  }, []);
+
   // Track Virtuoso visible range for scroll persistence + minimap highlight
   const visibleRangeRef = useRef<{ startIndex: number }>({ startIndex: 0 });
   const [visibleStart, setVisibleStart] = useState(0);
@@ -1334,6 +1357,10 @@ export function Conversations() {
         params.set("conversationType", "user");
       }
 
+      if (projectFilter && projectFilter !== "all") {
+        params.set("project", projectFilter);
+      }
+
       const res = await fetch(`/api/conversations?${params}`);
       if (res.ok) {
         const data = await res.json();
@@ -1354,7 +1381,7 @@ export function Conversations() {
       // silent
     }
     setLoading(false);
-  }, [statusFilter, viewMode]);
+  }, [statusFilter, viewMode, projectFilter]);
 
   const PAGE_SIZE = 500;
 
@@ -1847,6 +1874,39 @@ export function Conversations() {
               className="w-full pl-9 pr-3 py-1.5 bg-neutral-900 border border-neutral-800 rounded-md text-xs text-neutral-300 placeholder:text-neutral-600 focus:outline-none focus:border-neutral-700"
             />
           </div>
+
+          {/* Project filter */}
+          {projects.length > 0 && (
+            <Select value={projectFilter} onValueChange={setProjectFilter}>
+              <SelectTrigger className="bg-neutral-900 border-neutral-800 text-neutral-300 h-7 text-xs w-full [&>svg]:w-3 [&>svg]:h-3">
+                <div className="flex items-center gap-1.5 truncate">
+                  <FolderOpen className="w-3 h-3 text-neutral-500 shrink-0" />
+                  <SelectValue placeholder="全部项目" />
+                </div>
+              </SelectTrigger>
+              <SelectContent className="bg-neutral-800 border-neutral-700 max-h-72">
+                <SelectItem value="all" className="text-neutral-300 focus:bg-neutral-700 focus:text-white text-xs">
+                  全部项目
+                </SelectItem>
+                <SelectSeparator className="bg-neutral-700" />
+                {projects
+                  .filter((p) => p.active)
+                  .sort((a, b) => (b.conversation_count ?? 0) - (a.conversation_count ?? 0))
+                  .map((p) => (
+                    <SelectItem
+                      key={p.id}
+                      value={p.id}
+                      className="text-neutral-300 focus:bg-neutral-700 focus:text-white text-xs"
+                    >
+                      {p.id}
+                      {p.conversation_count != null && (
+                        <span className="ml-1.5 text-neutral-500">({p.conversation_count})</span>
+                      )}
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+          )}
 
           {/* Filters */}
           <div className="flex items-center gap-1.5">
