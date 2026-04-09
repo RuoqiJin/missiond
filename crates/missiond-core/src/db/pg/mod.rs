@@ -117,3 +117,5 @@ mod message;
 mod tool_call;
 #[cfg(feature = "postgres")]
 mod knowledge;
+#[cfg(feature = "postgres")]
+pub mod project;
