@@ -133,7 +133,15 @@ async fn startup_backfill(state: &AppState) {
     let mut success = 0usize;
     for sid in &unprocessed {
         match process_session(state, sid).await {
-            Ok(count) if count > 0 => success += 1,
+            Ok(count) if count > 0 => {
+                success += 1;
+                // Trigger per-turn embedding (same as event-driven path)
+                if let Err(e) = state.embedding_tx.try_send(EmbeddingTask::ProcessTurns {
+                    session_id: sid.clone(),
+                }) {
+                    debug!(session = %sid, error = %e, "TaggerChunker: embedding_tx full or closed");
+                }
+            }
             Ok(_) => {}
             Err(e) => warn!(session = %sid, error = %e, "TaggerChunker: backfill failed"),
         }

@@ -1041,10 +1041,10 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                     }
                 }
                 EmbeddingTask::ProcessTurns { session_id } => {
-                    if let Err(e) =
-                        process_turns_for_session(&state, &session_id, &provider_id).await
-                    {
-                        warn!(session = %session_id, error = %e, "Per-turn embedding failed");
+                    info!(session = %session_id, "Processing per-turn embeddings");
+                    match process_turns_for_session(&state, &session_id, &provider_id).await {
+                        Ok(()) => {}
+                        Err(e) => warn!(session = %session_id, error = %e, "Per-turn embedding failed"),
                     }
                 }
                 EmbeddingTask::ProcessKBEntry(id) => {
