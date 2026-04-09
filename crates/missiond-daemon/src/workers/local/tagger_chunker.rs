@@ -295,6 +295,15 @@ fn extract_turns(messages: &[ConversationMessage]) -> Vec<RawTurn> {
         let is_turn_start = matches!(msg.role.as_str(), "user" | "agent_user" | "compact_summary");
 
         if is_turn_start {
+            // Merge rule: if previous turn has no assistant response (user sent but AI
+            // never responded — interrupted, image parse failure, or retry), absorb this
+            // new user message into it instead of creating a new turn.
+            if let Some(ref mut b) = builder {
+                if !b.has_assistant_reply {
+                    b.absorb_retry(msg);
+                    continue;
+                }
+            }
             // Flush previous turn
             if let Some(b) = builder.take() {
                 turns.push(b.build());
@@ -360,6 +369,7 @@ struct TurnBuilder {
     message_count: i32,
     has_code_change: bool,
     has_mcp_call: bool,
+    has_assistant_reply: bool,
     started_at: String,
     ended_at: String,
     files_read: BTreeSet<String>,
@@ -387,6 +397,7 @@ impl TurnBuilder {
             message_count: 1,
             has_code_change: false,
             has_mcp_call: false,
+            has_assistant_reply: false,
             started_at: msg.timestamp.clone(),
             ended_at: msg.timestamp.clone(),
             files_read: BTreeSet::new(),
@@ -408,6 +419,7 @@ impl TurnBuilder {
             message_count: 1,
             has_code_change: false,
             has_mcp_call: false,
+            has_assistant_reply: false,
             started_at: msg.timestamp.clone(),
             ended_at: msg.timestamp.clone(),
             files_read: BTreeSet::new(),
@@ -419,10 +431,31 @@ impl TurnBuilder {
         }
     }
 
+    /// Absorb a retry/interrupted user message into the current stub turn.
+    /// Replaces user_content with the newer message (the successful attempt),
+    /// updates skeleton_user, and bumps message_count.
+    fn absorb_retry(&mut self, msg: &ConversationMessage) {
+        self.end_message_id = msg.id;
+        self.ended_at = msg.timestamp.clone();
+        self.message_count += 1;
+        // Use the latest user message as the canonical intent
+        if matches!(msg.role.as_str(), "user" | "agent_user") {
+            let new_content = truncate_str(&msg.content, USER_CONTENT_MAX_CHARS);
+            if !new_content.is_empty() {
+                self.user_content = new_content;
+            }
+            self.skeleton_user = Some(msg.id);
+        }
+    }
+
     fn append(&mut self, msg: &ConversationMessage) {
         self.end_message_id = msg.id;
         self.ended_at = msg.timestamp.clone();
         self.message_count += 1;
+
+        if msg.role == "assistant" {
+            self.has_assistant_reply = true;
+        }
 
         if msg.has_tool_use {
             self.tool_call_count += 1;
@@ -745,21 +778,20 @@ mod tests {
     }
 
     #[test]
-    fn test_consecutive_user_messages() {
+    fn test_consecutive_user_messages_merged() {
+        // Consecutive user messages without assistant reply → absorbed into one turn
         let msgs = vec![
             make_msg(1, "user", "First"),
             make_msg(2, "user", "Second"),
             make_msg(3, "assistant", "Reply"),
         ];
         let turns = extract_turns(&msgs);
-        assert_eq!(turns.len(), 2);
-        // First turn: single user message with no response
+        assert_eq!(turns.len(), 1);
+        // Both user messages merged, user_content = last user message
         assert_eq!(turns[0].start_message_id, 1);
-        assert_eq!(turns[0].end_message_id, 1);
-        assert_eq!(turns[0].message_count, 1);
-        // Second turn: user + assistant
-        assert_eq!(turns[1].start_message_id, 2);
-        assert_eq!(turns[1].end_message_id, 3);
+        assert_eq!(turns[0].end_message_id, 3);
+        assert_eq!(turns[0].user_content, "Second");
+        assert_eq!(turns[0].message_count, 3);
     }
 
     #[test]
@@ -945,5 +977,40 @@ mod tests {
         assert_eq!(turns[0].files_read, "foo.rs");
         assert_eq!(turns[0].files_changed, "bar.rs");
         assert_eq!(turns[0].outcome, "I've fixed the bug in bar.rs by changing x to y.");
+    }
+
+    #[test]
+    fn test_absorb_retry_single_message_stubs() {
+        // Simulates: user sends msg, interrupts, retries, then AI responds
+        let msgs = vec![
+            make_msg(1, "user", "[Request interrupted by user]"),
+            make_msg(2, "user", "[Image parse failed]"),
+            make_msg(3, "user", "Fix the auth bug"),
+            make_msg(4, "assistant", "I'll fix it now"),
+        ];
+        let turns = extract_turns(&msgs);
+        // All 3 user messages + 1 assistant → single turn (not 3 stubs + 1 turn)
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].message_count, 4);
+        // user_content should be the LAST user message (the successful one)
+        assert_eq!(turns[0].user_content, "Fix the auth bug");
+        assert_eq!(turns[0].start_message_id, 1);
+        assert_eq!(turns[0].end_message_id, 4);
+    }
+
+    #[test]
+    fn test_absorb_retry_does_not_merge_after_response() {
+        // Turn with user + assistant response should NOT absorb the next user message
+        let msgs = vec![
+            make_msg(1, "user", "Question 1"),
+            make_msg(2, "assistant", "Answer 1"),
+            make_msg(3, "user", "Question 2"),
+            make_msg(4, "assistant", "Answer 2"),
+        ];
+        let turns = extract_turns(&msgs);
+        // Two complete turns, no merging
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].user_content, "Question 1");
+        assert_eq!(turns[1].user_content, "Question 2");
     }
 }
