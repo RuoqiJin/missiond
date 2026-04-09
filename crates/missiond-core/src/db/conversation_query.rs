@@ -58,6 +58,7 @@ pub struct ConversationQuery {
     pub until: Option<String>,
     pub source: Option<String>,
     pub project: Option<String>,
+    pub project_id: Option<String>,
     pub parent_session_id: Option<String>,
 }
 
@@ -103,6 +104,11 @@ impl ConversationQuery {
     
     pub fn source(mut self, source: impl Into<String>) -> Self {
         self.source = Some(source.into());
+        self
+    }
+
+    pub fn project_id(mut self, project_id: impl Into<String>) -> Self {
+        self.project_id = Some(project_id.into());
         self
     }
 }

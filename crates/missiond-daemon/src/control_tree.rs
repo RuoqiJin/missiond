@@ -104,6 +104,8 @@ pub struct ControlTree {
     pub workers: HashMap<String, bool>,
     #[serde(default)]
     pub slot_roles: HashMap<String, bool>,
+    #[serde(default)]
+    pub projects: HashMap<String, bool>,
     /// Timestamps when domains were paused (informational only).
     #[serde(default)]
     pub domain_paused_at: HashMap<CtlDomain, i64>,
@@ -117,6 +119,7 @@ impl Default for ControlTree {
             domains: HashMap::new(),
             workers: HashMap::new(),
             slot_roles: HashMap::new(),
+            projects: HashMap::new(),
             domain_paused_at: HashMap::new(),
         }
     }
@@ -144,6 +147,11 @@ impl ControlTree {
     /// Check if a slot role is paused.
     pub fn is_slot_role_paused(&self, role: &str) -> bool {
         self.global_paused || self.slot_roles.get(role).copied().unwrap_or(false)
+    }
+
+    /// Check if a project is paused.
+    pub fn is_project_paused(&self, project_id: &str) -> bool {
+        self.projects.get(project_id).copied().unwrap_or(false)
     }
 
     /// Cascade evaluation: is this worker effectively paused given its dependencies?
@@ -208,6 +216,10 @@ impl ControlTree {
                 .map(|(k, _)| k.as_str())
                 .collect::<Vec<_>>(),
             "slot_roles": self.slot_roles.iter()
+                .filter(|(_, &v)| v)
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>(),
+            "projects_paused": self.projects.iter()
                 .filter(|(_, &v)| v)
                 .map(|(k, _)| k.as_str())
                 .collect::<Vec<_>>(),
@@ -291,6 +303,17 @@ impl ControlManager {
             tree.slot_roles.insert(role.to_string(), paused);
         });
         info!(%paused, role, "ControlTree: slot_role changed");
+    }
+
+    pub fn set_project(&self, project_id: &str, paused: bool) {
+        self.mutate(|tree| {
+            if paused {
+                tree.projects.insert(project_id.to_string(), true);
+            } else {
+                tree.projects.remove(project_id);
+            }
+        });
+        info!(%paused, project = project_id, "ControlTree: project pause state changed");
     }
 
     // Domain pause is permanent until user explicitly resumes via mission_control.

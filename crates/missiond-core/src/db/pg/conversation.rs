@@ -28,6 +28,7 @@ impl PgMissionStore {
         Conversation {
             id: row.get("id"),
             project: row.get("project"),
+            project_id: row.try_get("project_id").unwrap_or(None),
             slot_id: row.get("slot_id"),
             source: row.get("source"),
             model: row.get("model"),
@@ -126,8 +127,8 @@ impl ConversationStore for PgMissionStore {
 
     async fn upsert_conversation(&self, conv: &Conversation) -> DbResult<()> {
         sqlx::query(
-            "INSERT INTO conversations (id, project, slot_id, source, model, git_branch, jsonl_path, parent_session_id, task_id, message_count, started_at, ended_at, status, analyzed_at, conversation_type)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            "INSERT INTO conversations (id, project, slot_id, source, model, git_branch, jsonl_path, parent_session_id, task_id, message_count, started_at, ended_at, status, analyzed_at, conversation_type, project_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
              ON CONFLICT (id) DO UPDATE SET
                 slot_id = COALESCE($3, conversations.slot_id),
                 model = COALESCE($5, conversations.model),
@@ -136,7 +137,8 @@ impl ConversationStore for PgMissionStore {
                 ended_at = $12,
                 status = $13,
                 parent_session_id = COALESCE(conversations.parent_session_id, $8),
-                conversation_type = COALESCE($15, conversations.conversation_type)"
+                conversation_type = COALESCE($15, conversations.conversation_type),
+                project_id = COALESCE($16, conversations.project_id)"
         )
         .bind(&conv.id)
         .bind(&conv.project)
@@ -153,6 +155,7 @@ impl ConversationStore for PgMissionStore {
         .bind(&conv.status)
         .bind(&conv.analyzed_at)
         .bind(&conv.conversation_type)
+        .bind(&conv.project_id)
         .execute(&self.pool)
         .await?;
         Ok(())
