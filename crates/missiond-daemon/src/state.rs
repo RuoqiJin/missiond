@@ -8,6 +8,8 @@ use missiond_core::{
 };
 use tokio::sync::Mutex;
 
+use missiond_core::types::SharedProjectRegistry;
+
 use crate::control_tree::ControlManager;
 use crate::daemon_stats::DaemonStats;
 use crate::event_bus::EventBus;
@@ -202,6 +204,8 @@ pub(crate) struct AppState {
     pub(crate) worker_registry: Arc<WorkerRegistry>,
     /// Unified control tree — centralized pause/resume for all components.
     pub(crate) control_manager: Arc<ControlManager>,
+    /// Project registry — path→project_id resolution + project metadata cache.
+    pub(crate) project_registry: SharedProjectRegistry,
     /// Per-slot dispatch guard — prevents concurrent dispatch to the same PTY slot.
     pub(crate) slot_dispatch: Arc<SlotDispatchGuard>,
     /// Wakeup signal for board dispatch when a slot becomes idle.

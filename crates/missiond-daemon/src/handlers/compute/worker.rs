@@ -162,9 +162,17 @@ async fn handle_control(state: &AppState, args: Value) -> Result<ToolResult> {
                 }
             }
         }
+        "project" => {
+            if target_name.is_empty() {
+                return Ok(ToolResult::error(
+                    "target_name is required for project control (project_id)",
+                ));
+            }
+            mgr.set_project(target_name, paused);
+        }
         _ => {
             return Ok(ToolResult::error(format!(
-                "Unknown target_type: '{}'. Use: global, provider, domain, worker, slot_role",
+                "Unknown target_type: '{}'. Use: global, provider, domain, worker, slot_role, project",
                 target_type
             )))
         }
