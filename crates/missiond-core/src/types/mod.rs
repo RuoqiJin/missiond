@@ -13,6 +13,7 @@ mod incident;
 mod infra;
 mod dynamic_slot;
 mod async_job;
+mod project;
 
 pub use slot::*;
 pub use task::*;
@@ -25,6 +26,7 @@ pub use incident::*;
 pub use infra::*;
 pub use dynamic_slot::*;
 pub use async_job::*;
+pub use project::*;
 
 #[cfg(test)]
 mod tests {
