@@ -1206,7 +1206,8 @@ impl ConversationStore for PgMissionStore {
             "INSERT INTO conversation_turns \
              (session_id, turn_idx, start_message_id, end_message_id, \
               user_content, tool_names, tool_call_count, message_count, \
-              has_code_change, has_mcp_call, started_at, ended_at) "
+              has_code_change, has_mcp_call, started_at, ended_at, \
+              files_read, files_changed, outcome) "
         );
         qb.push_values(turns.iter().enumerate(), |mut b, (i, turn)| {
             b.push_bind(session_id)
@@ -1220,7 +1221,10 @@ impl ConversationStore for PgMissionStore {
              .push_bind(turn.has_code_change)
              .push_bind(turn.has_mcp_call)
              .push_bind(&turn.started_at)
-             .push_bind(&turn.ended_at);
+             .push_bind(&turn.ended_at)
+             .push_bind(&turn.files_read)
+             .push_bind(&turn.files_changed)
+             .push_bind(&turn.outcome);
         });
         qb.push(" ON CONFLICT (session_id, turn_idx) DO NOTHING");
         let result = qb.build().execute(&self.pool).await?;
@@ -1271,7 +1275,8 @@ impl ConversationStore for PgMissionStore {
             "SELECT t.id, t.session_id, t.turn_idx, t.start_message_id, t.end_message_id,
                     t.user_content, t.tool_names, t.tool_call_count, t.message_count,
                     t.has_code_change, t.has_mcp_call, t.started_at, t.ended_at,
-                    t.topic, t.intent_group_id
+                    t.topic, t.intent_group_id,
+                    t.files_read, t.files_changed, t.outcome
              FROM conversation_turns t
              WHERE t.session_id = $1
                AND NOT EXISTS (
@@ -1404,7 +1409,8 @@ impl ConversationStore for PgMissionStore {
         let rows = sqlx::query_as::<_, ConversationTurn>(
             "SELECT id, session_id, turn_idx, start_message_id, end_message_id,
                     user_content, tool_names, tool_call_count, message_count,
-                    has_code_change, has_mcp_call, started_at, ended_at, topic, intent_group_id
+                    has_code_change, has_mcp_call, started_at, ended_at, topic, intent_group_id,
+                    files_read, files_changed, outcome
              FROM conversation_turns
              WHERE session_id = $1 AND turn_idx > $2
              ORDER BY turn_idx"

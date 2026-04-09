@@ -549,28 +549,33 @@ async fn process_turns_for_session(
         return Ok(());
     }
 
-    // 2. Preload all messages for this session (single DB query)
-    let all_messages = state
+    // 2. Resolve project short name from conversation record
+    let project_name = state
         .store
-        .get_conversation_messages(session_id, None, 5000)
+        .get_conversation(session_id)
         .await
-        .map_err(|e| anyhow!("get_conversation_messages: {}", e))?;
+        .ok()
+        .flatten()
+        .and_then(|c| c.project)
+        .and_then(|p| p.rsplit('/').next().map(|s| s.to_string()))
+        .unwrap_or_default();
 
     let mut topic_vectors: Vec<(String, i32, Vec<f32>)> = Vec::new();
     let mut topic_updates: Vec<(i64, String)> = Vec::new();
 
     for turn in &pending {
-        // 3. Slice messages for this turn's range
-        let turn_messages: Vec<_> = all_messages
-            .iter()
-            .filter(|m| m.id >= turn.start_message_id && m.id <= turn.end_message_id)
-            .collect();
+        // 3. Skip noise turns (task notifications, empty preambles)
+        if let Some(ref uc) = turn.user_content {
+            if uc.starts_with("<task-notification>") {
+                continue;
+            }
+        }
 
-        // 4. Build embedding text
-        let text = build_turn_embedding_text(turn, &turn_messages);
+        // 4. Build embedding text (keyword-dense digest for Claude Code retrieval)
+        let text = build_turn_embedding_text(turn, &project_name);
         if text.trim().len() < 20 {
             continue;
-        } // Skip empty turns (e.g., preamble)
+        }
 
         // 5. Generate embedding vector
         let svc = Arc::clone(embedding_service);
@@ -645,50 +650,70 @@ async fn process_turns_for_session(
     Ok(())
 }
 
-/// Build embedding input text for a single Turn.
-/// Core principle: user instruction + tools + AI final action, skip tool_result noise.
+/// Build keyword-dense embedding digest for a single Turn.
+///
+/// Optimized for Claude Code MCP retrieval: maximize keyword coverage
+/// so a single vector search returns the most relevant past experience.
+/// No natural language — pure structured keywords for embedding model consumption.
 fn build_turn_embedding_text(
     turn: &missiond_core::types::ConversationTurn,
-    messages: &[&missiond_core::types::ConversationMessage],
+    project_name: &str,
 ) -> String {
     let mut text = String::with_capacity(2048);
 
-    // 1. User instruction (core semantic)
-    if let Some(ref uc) = turn.user_content {
-        if !uc.is_empty() {
-            text.push_str("Q: ");
-            text.push_str(uc);
-            text.push('\n');
-        }
+    // 1. Project context
+    if !project_name.is_empty() {
+        text.push_str("project:");
+        text.push_str(project_name);
+        text.push('\n');
     }
 
-    // 2. Tool summary (structured signal)
+    // 2. Tools used
     if let Some(ref tools) = turn.tool_names {
         if !tools.is_empty() {
-            text.push_str("Tools: ");
+            text.push_str("tools:");
             text.push_str(tools);
             text.push('\n');
         }
     }
 
-    // 3. AI final response (last assistant message that is NOT a tool_use)
-    if let Some(final_reply) = messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "assistant" && !m.has_tool_use)
-    {
-        let reply = if final_reply.content.len() > 1500 {
-            &final_reply.content[..char_boundary_at(&final_reply.content, 1500)]
-        } else {
-            &final_reply.content
-        };
-        if !reply.trim().is_empty() {
-            text.push_str("A: ");
-            text.push_str(reply);
+    // 3. Files read
+    if let Some(ref fr) = turn.files_read {
+        if !fr.is_empty() {
+            text.push_str("files_read:");
+            text.push_str(fr);
+            text.push('\n');
         }
     }
 
-    // 4. Hard cap 3000 chars (embedding model 512 token window)
+    // 4. Files changed
+    if let Some(ref fc) = turn.files_changed {
+        if !fc.is_empty() {
+            text.push_str("files_changed:");
+            text.push_str(fc);
+            text.push('\n');
+        }
+    }
+
+    // 5. User intent (core semantic — keywords from user message)
+    if let Some(ref uc) = turn.user_content {
+        if !uc.is_empty() {
+            text.push_str("intent:");
+            text.push_str(uc);
+            text.push('\n');
+        }
+    }
+
+    // 6. Outcome (last assistant text — keywords from conclusion)
+    if let Some(ref oc) = turn.outcome {
+        if !oc.is_empty() {
+            text.push_str("outcome:");
+            text.push_str(oc);
+            text.push('\n');
+        }
+    }
+
+    // Hard cap 3000 chars (embedding model token window)
     if text.len() > 3000 {
         text.truncate(char_boundary_at(&text, 3000));
     }

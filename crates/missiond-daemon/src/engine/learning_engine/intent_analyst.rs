@@ -474,6 +474,9 @@ mod tests {
             ended_at: Some("2026-03-22T10:05:00Z".to_string()),
             topic: None,
             intent_group_id: None,
+            files_read: None,
+            files_changed: None,
+            outcome: None,
         }
     }
 }
