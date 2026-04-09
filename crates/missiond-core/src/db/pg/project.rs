@@ -25,6 +25,10 @@ impl ProjectStore for PgMissionStore {
     async fn set_project_active(&self, id: &str, active: bool) -> DbResult<bool> {
         Ok(update_project_active(&self.pool, id, active).await?)
     }
+
+    async fn backfill_project_id(&self, project_id: &str, path_pattern: &str) -> DbResult<u64> {
+        Ok(backfill_project_id(&self.pool, project_id, path_pattern).await?)
+    }
 }
 
 pub async fn upsert_project(pool: &PgPool, config: &ProjectConfig) -> Result<(), sqlx::Error> {
@@ -102,6 +106,17 @@ pub async fn update_project_slots(pool: &PgPool, id: &str, slots: &[String]) -> 
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
+}
+
+pub async fn backfill_project_id(pool: &PgPool, project_id: &str, path_pattern: &str) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE conversations SET project_id = $1 WHERE project_id IS NULL AND project LIKE $2"
+    )
+    .bind(project_id)
+    .bind(path_pattern)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 pub async fn delete_project(pool: &PgPool, id: &str) -> Result<bool, sqlx::Error> {

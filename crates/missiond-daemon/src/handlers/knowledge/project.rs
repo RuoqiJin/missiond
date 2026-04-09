@@ -166,8 +166,97 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                 "source": claude_projects_dir.display().to_string(),
             })))
         }
+        "init" => {
+            // One-shot project registration: path → auto-discover everything
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("path is required"))?;
+            let path = std::path::Path::new(path).canonicalize()
+                .map_err(|e| anyhow!("Invalid path: {}", e))?;
+            let path_str = path.display().to_string();
+
+            // 1. Derive project_id from last path component
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    path.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_lowercase()
+                });
+
+            // 2. Resolve github URL from git remote
+            let github_url = std::process::Command::new("git")
+                .args(["remote", "get-url", "origin"])
+                .current_dir(&path)
+                .output()
+                .ok()
+                .and_then(|out| {
+                    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if url.is_empty() { None } else { Some(url) }
+                });
+
+            // 3. Scan for intent.lisp (check common locations)
+            let intent_path = [".missiond/intent.lisp", ".jarvis/intent.lisp", "intent.lisp"]
+                .iter()
+                .find(|p| path.join(p).exists())
+                .map(|p| p.to_string());
+
+            // 4. Bind slots from args (optional)
+            let slots: Vec<String> = args
+                .get("slots")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_default();
+
+            // 5. Upsert project
+            let config = missiond_core::types::ProjectConfig {
+                id: id.clone(),
+                path: path_str.clone(),
+                intent_path: intent_path.clone(),
+                active: true,
+                slots,
+                github_url: github_url.clone(),
+                created_at: None,
+                updated_at: None,
+            };
+            state.store.upsert_project(&config)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+
+            // 6. Backfill project_id for existing conversations matching this path
+            let backfilled = state.store
+                .backfill_project_id(&id, &format!("{}%", path_str))
+                .await
+                .unwrap_or(0);
+
+            // Also match Claude Code project dir format
+            let claude_pattern = path_str.replace('/', "-");
+            let backfilled2 = state.store
+                .backfill_project_id(&id, &format!("%{}%", claude_pattern))
+                .await
+                .unwrap_or(0);
+
+            // 7. Reload project registry
+            if let Ok(projects) = state.store.list_projects().await {
+                let mut reg = state.project_registry.write().await;
+                *reg = missiond_core::types::ProjectRegistry::new(projects);
+            }
+
+            Ok(ToolResult::json(&serde_json::json!({
+                "id": id,
+                "path": path_str,
+                "githubUrl": github_url,
+                "intentPath": intent_path,
+                "backfilledConversations": backfilled + backfilled2,
+                "status": "registered"
+            })))
+        }
         _ => Ok(ToolResult::error(format!(
-            "Unknown project action: {}. Use: list, get, set_active, sync",
+            "Unknown project action: {}. Use: list, get, set_active, sync, init",
             action
         ))),
     }

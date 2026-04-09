@@ -79,4 +79,7 @@ impl super::traits::ProjectStore for SqliteMissionStore {
     async fn set_project_active(&self, _id: &str, _active: bool) -> DbResult<bool> {
         Ok(false)
     }
+    async fn backfill_project_id(&self, _project_id: &str, _path_pattern: &str) -> DbResult<u64> {
+        Ok(0)
+    }
 }

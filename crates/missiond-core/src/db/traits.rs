@@ -725,6 +725,8 @@ pub trait ProjectStore: Send + Sync {
     async fn get_project(&self, id: &str) -> DbResult<Option<crate::types::ProjectConfig>>;
     async fn upsert_project(&self, config: &crate::types::ProjectConfig) -> DbResult<()>;
     async fn set_project_active(&self, id: &str, active: bool) -> DbResult<bool>;
+    /// Backfill project_id on conversations matching the given path prefix pattern.
+    async fn backfill_project_id(&self, project_id: &str, path_pattern: &str) -> DbResult<u64>;
 }
 
 // ============================================================================
