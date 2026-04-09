@@ -292,6 +292,16 @@ fn extract_turns(messages: &[ConversationMessage]) -> Vec<RawTurn> {
     let mut builder: Option<TurnBuilder> = None;
 
     for msg in messages {
+        // Skip system command noise (compact, local-command, etc.) — never a turn boundary
+        if is_system_command_noise(&msg.content) {
+            if let Some(ref mut b) = builder {
+                b.end_message_id = msg.id;
+                b.ended_at = msg.timestamp.clone();
+                b.message_count += 1;
+            }
+            continue;
+        }
+
         let is_turn_start = matches!(msg.role.as_str(), "user" | "agent_user" | "compact_summary");
 
         if is_turn_start {
@@ -688,6 +698,17 @@ fn extract_bash_command(content: &str) -> &str {
     content
 }
 
+/// Detect system command noise that should never be a turn boundary.
+/// These are Claude Code internal commands (/compact, etc.) stored as role="user".
+fn is_system_command_noise(content: &str) -> bool {
+    let t = content.trim();
+    t.is_empty()
+        || t.starts_with("<local-command-")
+        || t.starts_with("<command-name>")
+        || t.starts_with("<command-message>")
+        || t.starts_with("<command-args>")
+}
+
 /// Quick heuristic: high ratio of non-printable chars in first 500 bytes suggests binary/base64.
 fn is_binary_like(content: &str) -> bool {
     let sample = missiond_core::util::safe_byte_truncate(content, 500);
@@ -1012,5 +1033,38 @@ mod tests {
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].user_content, "Question 1");
         assert_eq!(turns[1].user_content, "Question 2");
+    }
+
+    #[test]
+    fn test_system_command_noise_skipped() {
+        // /compact command noise should not create turns
+        let msgs = vec![
+            make_msg(1, "user", "Do something"),
+            make_msg(2, "assistant", "Done"),
+            make_msg(3, "user", "<local-command-caveat>Caveat: messages below...</local-command-caveat>"),
+            make_msg(4, "user", "<command-name>/compact</command-name>\n            <command-message>compact</command-message>"),
+            make_msg(5, "user", ""),
+            make_msg(6, "user", "<local-command-stdout>Compacted</local-command-stdout>"),
+            make_msg(7, "user", "Next question"),
+            make_msg(8, "assistant", "Next answer"),
+        ];
+        let turns = extract_turns(&msgs);
+        // Only 2 real turns: "Do something" + "Next question"
+        // The 4 compact messages (3-6) are noise, absorbed into turn boundaries
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].user_content, "Do something");
+        assert_eq!(turns[1].user_content, "Next question");
+    }
+
+    #[test]
+    fn test_system_command_noise_not_false_positive() {
+        // Normal messages with angle brackets should NOT be filtered
+        let msgs = vec![
+            make_msg(1, "user", "<task-notification>task result</task-notification>"),
+            make_msg(2, "assistant", "Got it"),
+        ];
+        let turns = extract_turns(&msgs);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].message_count, 2);
     }
 }
