@@ -26,24 +26,12 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                 .list_projects()
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
-            // Enrich with runtime info: github URL + lisp files
+            // Enrich with lisp file scan (local readdir, fast)
             let enriched: Vec<serde_json::Value> = projects
                 .iter()
                 .map(|p| {
                     let mut v = serde_json::to_value(p).unwrap_or_default();
                     let path = std::path::Path::new(&p.path);
-                    // Git remote URL
-                    if let Ok(out) = std::process::Command::new("git")
-                        .args(["remote", "get-url", "origin"])
-                        .current_dir(path)
-                        .output()
-                    {
-                        let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                        if !url.is_empty() {
-                            v["githubUrl"] = serde_json::Value::String(url);
-                        }
-                    }
-                    // Scan for *.lisp files (max depth 3)
                     let mut lisps = Vec::new();
                     for depth_dirs in &[
                         vec![path.to_path_buf()],
@@ -57,7 +45,6 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                                         let rel = ep.strip_prefix(path).unwrap_or(&ep);
                                         lisps.push(rel.display().to_string());
                                     }
-                                    // One more level
                                     if ep.is_dir() {
                                         if let Ok(rd2) = std::fs::read_dir(&ep) {
                                             for e2 in rd2.filter_map(|e| e.ok()) {
@@ -149,12 +136,23 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                     continue;
                 }
 
+                // Resolve github URL from git remote (one-time, on sync)
+                let github_url = std::process::Command::new("git")
+                    .args(["remote", "get-url", "origin"])
+                    .current_dir(&real_path)
+                    .output()
+                    .ok()
+                    .and_then(|out| {
+                        let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        if url.is_empty() { None } else { Some(url) }
+                    });
                 let config = missiond_core::types::ProjectConfig {
                     id: project_id,
                     path: real_path,
                     intent_path: None,
                     active: true,
                     slots: vec![],
+                    github_url,
                     created_at: None,
                     updated_at: None,
                 };

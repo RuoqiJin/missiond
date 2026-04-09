@@ -5,9 +5,9 @@
 
 (intent missiond
   (granularity L3-Implementation)
-  (survey-hash "9facdfa-928da99-9a843c5-e141804-29f9e25-b0fa8df-a9517ec")
-  (survey-date "2026-04-09T00:00:00Z")
-  (last-updated "2026-04-09 — refactor: missiond-semantic → standalone semantic-terminal crate (external); feat: initial_prompt in SlotConfig + pty_spawn fix; refactor: BackgroundWorker trait unification (strategy/retro/ast-sync); fix: daemon UE state on shutdown")
+  (survey-hash "e17db52-50a5296-76900d1-e18d0bf")
+  (survey-date "2026-04-10T00:00:00Z")
+  (last-updated "2026-04-10 — feat: wire ProjectRegistry into daemon runtime (P6): SharedProjectRegistry→AppState+daemon init从DB加载; message_handler.resolve(cwd)→自动填充project_id; mission_control target_type=project pause/resume; backfill迁移回填历史conversations.project_id+种子9个项目到projects表")
 
   ;; ══════════════════════════════════════════════════════
   ;; DESIGN CONSTRAINTS
@@ -63,7 +63,79 @@
   ;; PILLAR 1: DATABASE SCHEMA — CORE BUSINESS TABLES
   ;; ══════════════════════════════════════════════════════
   (pillar db-core
-    (purpose "primary business entities: board tasks, conversations, knowledge, compute")
+    (purpose "primary business entities: projects, board tasks, conversations, knowledge, compute")
+
+    ;; ── Project Registry (P1: 2026-04-10) ──────────────────────────────────
+    (component project-tables
+      :pattern crud-gateway
+      :target "crates/missiond-core/src/db/pg/project.rs"
+      :types-target "crates/missiond-core/src/types/project.rs"
+      :migration ("20260410000000_projects.sql" "20260410200000_backfill_project_id.sql")
+
+      (struct ProjectConfig
+        (field id          :type text :pk :comment "project identifier, e.g. project name or UUID")
+        (field path        :type text :unique :comment "root filesystem path of the project")
+        (field intent_path :type "Option<String>" :comment "optional path to .missiond/intent.lisp")
+        (field active      :type bool :default true)
+        (field slots       :type "Vec<String>" :comment "slot names associated with this project")
+        (field created_at  :type "Option<DateTime<Utc>>")
+        (field updated_at  :type "Option<DateTime<Utc>>"))
+
+      (struct ProjectRegistry
+        :note "in-memory cache with longest-prefix CWD resolution; loaded from PG at startup"
+        (field projects    :type "Vec<ProjectConfig>")
+        (field path_index  :type "Vec<(String, String)>" :comment "sorted by path length desc for longest-prefix match"))
+
+      (method resolve
+        :args "cwd: &str"
+        :returns "Option<&str>"
+        :doc "最长前置路径匹配：returns project_id if cwd starts_with any registered path")
+
+      (method exclusive_slots
+        :args "project_id: &str"
+        :returns "Vec<String>"
+        :doc "slots belonging exclusively to this project (not shared with other active projects)")
+
+      (type SharedProjectRegistry :alias "Arc<RwLock<ProjectRegistry>>")
+
+      (table projects
+        (col id          :type text :pk)
+        (col path        :type text :unique :not-null)
+        (col intent_path :type text :nullable)
+        (col active      :type boolean :not-null :default true)
+        (col slots       :type "text[]" :not-null :default "{}")
+        (col created_at  :type timestamptz :not-null :default now)
+        (col updated_at  :type timestamptz :not-null :default now)
+
+        (op list   :returns "Vec<ProjectConfig>")
+        (op get    :binds id :returns "Option<ProjectConfig>")
+        (op list-active :where "active=true")
+        (op upsert :binds (id path intent_path active slots) :conflict-on id)
+        (op set-active :binds (id active) :returns "bool (rows_affected>0)")
+        (op set-slots  :binds (id slots))
+        (op delete :binds id))
+
+      (trait ProjectStore
+        :target "crates/missiond-core/src/db/traits.rs"
+        (list_projects   :returns "DbResult<Vec<ProjectConfig>>")
+        (get_project     :binds id :returns "DbResult<Option<ProjectConfig>>")
+        (upsert_project  :binds "config: &ProjectConfig" :returns "DbResult<()>")
+        (set_project_active :binds (id active) :returns "DbResult<bool>"))
+
+      ;; ── Backfill Migration (20260410200000, commit e18d0bf) ──
+      (backfill backfill_project_id
+        :migration "20260410200000_backfill_project_id.sql"
+        :doc "一次性回填 + 种子: (1) conversations.project_id 通过 path 前缀匹配回填 9 个已知项目; (2) 向 projects 表 INSERT ON CONFLICT DO NOTHING 种子 9 行"
+        (seed-projects
+          ("missiond"            "<REPO_ROOT>"            :intent ".missiond/intent.lisp" :active true)
+          ("example-forge"        "<REPO_ROOT>/../example-forge"        :intent ".jarvis/intent.lisp"   :active true :slots ("lisp-surveyor"))
+          ("jarvis"              "<REPO_ROOT>/../jarvis"              :active true)
+          ("example-mechanic"     "<REPO_ROOT>/../example-mechanic"     :active false)
+          ("example-deploy"    "<REPO_ROOT>/../deploy-agent"    :active true)
+          ("example-b"    "<PROJECTS_ROOT>/example-b" :active true)
+          ("example-backend"  "<PROJECTS_ROOT>/example-c" :active true)
+          ("example-editor"           "<PROJECTS_ROOT>/example-d"         :active true)
+          ("example-cut"          "<PROJECTS_ROOT>/example-e/example-cut" :active false))))
 
     (component board-tables
       :pattern crud-gateway
@@ -89,6 +161,7 @@
         (col retry_count :type integer :default 0)
         (col autopilot :type boolean :default false)
         (col context :type jsonb)
+        (col project_id :type text :nullable :comment "project scope; NULL=global" :added "20260410100000")
         (col created_at :type timestamptz :not-null)
         (col updated_at :type timestamptz :not-null)
 
@@ -138,6 +211,7 @@
         (col slot_name :type text)
         (col source :type text :comment "claude-code|gemini-cli|codex")
         (col status :type text :default "active" :enum ("active" "completed"))
+        (col project_id :type text :nullable :comment "project scope; resolved from CWD via ProjectRegistry" :added "20260410100000")
         (col parent_id :type text :fk conversations.id)
         (col task_id :type text)
         (col summary :type text)
@@ -228,6 +302,7 @@
         (col source :type text)
         (col embedding :type bytea)
         (col linked_task_id :type text)
+        (col project_id :type text :nullable :comment "project scope; NULL=global knowledge accessible by all projects" :added "20260410100000")
         (col access_count :type integer :default 0)
         (col last_accessed_at :type timestamptz)
         (col created_at :type timestamptz :not-null)
@@ -241,6 +316,13 @@
         (op search-like (binds pattern category limit))
         (op search-ranked (binds query embedding category limit) :hybrid true)
         (op search (binds query category limit))
+        ;; P4+P5 (commit 76900d1): project-scoped search variants
+        (op search-fts-scoped  (binds query category project_id)
+          :where "AND (project_id = $X OR project_id IS NULL)"
+          :note "fallback to unscoped if project_id IS NULL")
+        (op search-like-scoped (binds query category project_id)
+          :where "AND (project_id = $X OR project_id IS NULL)"
+          :note "dynamic SQL with keyword expansion")
         (op list (binds category limit offset))
         (op list-paginated (binds category cursor limit))
         (op list-by-scope (binds scope))
@@ -837,6 +919,8 @@
         (field workers       :type "HashMap<String, bool>"
           :note "true=force-paused  false=force-resumed(debug override)  absent=follow cascade")
         (field slot_roles    :type "HashMap<String, bool>")
+        (field projects      :type "HashMap<String, bool>"
+          :note "project_id → paused; added P2+P3 (commit 50a5296). is_project_paused() = projects.get(id).copied().unwrap_or(false)")
         (field domain_paused_at :type "HashMap<CtlDomain, i64>" :note "informational only"))
 
       (cascade-priority
@@ -847,6 +931,8 @@
           :semantics "global_paused=true  → all workers paused unless worker override present")
         (3 provider-domain-cascade
           :semantics "each Dependency::Provider / Dependency::Domain checked; any true → paused"))
+      ;; project pause: is_project_paused(id) is checked independently by handlers,
+      ;; NOT part of is_effectively_paused() worker cascade — project gates data flow, not workers
 
       (method is_worker_paused
         :semantics "worker explicit override beats global; absent → follow global_paused")
@@ -860,7 +946,9 @@
 
       (struct ControlManager
         :note "mutation + tokio::watch broadcast + crash-recover from control_tree.json"
-        (mutations (set_global_paused set_provider set_domain set_worker set_slot_role))))
+        (mutations (set_global_paused set_provider set_domain set_worker set_slot_role set_project))
+        ;; set_project: paused=true → insert project_id; paused=false → remove (no false entry stored)
+        ))
 
     ;; workers/sonnet/ — Sonnet API via SonnetGateway
     (component workers-sonnet
@@ -1109,7 +1197,10 @@
       (tool mission_task_delegate  :handler "handlers::compute::task_delegate")
       (tool mission_compute_slot   :handler "handlers::compute::compute_slot")
       (tool mission_slots          :handler "handlers::compute::slot")
-      (tool mission_worker         :handler "handlers::compute::worker")
+      (tool mission_worker         :handler "handlers::compute::worker"
+        ;; commit e18d0bf: handle_control 新增 target_type="project" → ControlManager.set_project(id, paused)
+        ;; MCP schema enum: ["global","provider","domain","worker","slot_role","project"]
+        )
       (tool mission_job_poll       :handler "handlers::compute::job")
       (tool mission_sonnet_process :handler "handlers::compute::process")
       (tool mission_minimax_process :handler "handlers::compute::minimax")
@@ -1142,7 +1233,11 @@
       (tool mission_universe_graph :handler "handlers::knowledge::cascade")
       (tool mission_cascade_plan   :handler "handlers::knowledge::cascade")
       (tool mission_cascade_trigger :handler "handlers::knowledge::cascade")
-      (tool mission_cascade_lint   :handler "handlers::knowledge::cascade"))
+      (tool mission_cascade_lint   :handler "handlers::knowledge::cascade")
+      ;; P4+P5 (commit 76900d1): mission_project — 项目管理 MCP 工具
+      (tool mission_project        :handler "handlers::knowledge::project"
+        :actions (list get set_active sync)
+        :doc "list: 列出所有项目; get: 按id获取; set_active: 设置活跃状态; sync: 扫描 ~/.claude/projects/ 自动发现注册"))
 
     (component comm-tools
       :target "crates/missiond-mcp/src/tools/comm/"
@@ -1205,6 +1300,8 @@
       (init-order
         ;; Phase 1: Infrastructure
         db -> embed_model -> event_bus
+        ;; Phase 1.5: Project Registry (commit e18d0bf — loaded from PG before slot_manager)
+        -> project_registry
         ;; Phase 2: Core modules
         -> pty_manager -> slot_manager -> mission_control
         ;; Phase 3: Gateways
@@ -1217,6 +1314,8 @@
         -> autopilot -> ipc-handler -> ws-server)
 
       (depends-graph
+        (project_registry (db)
+          :note "store.list_projects() → ProjectRegistry::new(projects) → SharedProjectRegistry")
         (pty_manager     (event_bus))
         (slot_manager    (db pty_manager event_bus))
         (mission_control (db slot_manager event_bus))
@@ -1227,7 +1326,11 @@
         (autopilot       (db slot_manager event_bus llm_gateway context_pipeline))))
 
     (component state-management
-      :target "crates/missiond-daemon/src/state.rs")
+      :target "crates/missiond-daemon/src/state.rs"
+      ;; commit e18d0bf: AppState 新增 project_registry: SharedProjectRegistry
+      ;; Arc<RwLock<ProjectRegistry>> — path→project_id 解析 + 项目元数据缓存
+      (field project_registry :type SharedProjectRegistry
+        :doc "loaded from PG at daemon init, used by message_handler for CWD→project_id resolution"))
 
     (component supervisor
       :target "crates/missiond-daemon/src/supervisor.rs")
@@ -1239,7 +1342,10 @@
       (module ingestion-router  :target "crates/missiond-daemon/src/infra/ingestion_router.rs")
       (module ipc-handler       :target "crates/missiond-daemon/src/infra/ipc_handler.rs")
       (module mcp-client        :target "crates/missiond-daemon/src/infra/mcp_client.rs")
-      (module message-handler   :target "crates/missiond-daemon/src/infra/message_handler.rs")
+      (module message-handler   :target "crates/missiond-daemon/src/infra/message_handler.rs"
+        ;; commit e18d0bf: ingest() 内 project_id 从 state.project_registry.read().resolve(cwd) 自动填充
+        ;; 取第一条消息的 cwd 字段（fallback 到 project_path），对 ProjectRegistry 做最长前缀匹配
+        )
       (module session-util      :target "crates/missiond-daemon/src/infra/session_util.rs")))
 
   ;; ══════════════════════════════════════════════════════
@@ -1348,4 +1454,31 @@
       (description "LLM request → rate limiting → provider dispatch → logging")
       (steps
         handler-request -> llm-gate -> rate-check
-        -> gemini-client -> api-call -> gemini-logger -> response))))
+        -> gemini-client -> api-call -> gemini-logger -> response))
+
+    ;; ── Project 隔离体系流 (P1-P5, 2026-04-10) ──────────────────────────────
+    (flow project-scoped-kb-search
+      (description "带 project_id 的 KB 检索：项目知识 + 全局知识并集")
+      (steps
+        mcp-kb-query-with-project -> kb-handler-routes-to-scoped-variant
+        -> kb_search_fts_ranked_scoped
+        -> sql-WHERE-project_id-eq-OR-IS-NULL -> ranked-results-returned)
+      :note "project_id=NULL 条目对所有项目可见；项目专属条目仅对该项目可见")
+
+    (flow project-cwd-resolution
+      (description "从 CWD 自动解析 project_id — 已实现 (commit e18d0bf)")
+      :status done
+      (steps
+        message-arrives-with-cwd
+        -> message_handler.ingest-extracts-first-msg-cwd
+        -> state.project_registry.read()
+        -> ProjectRegistry.resolve(cwd)-longest-prefix-match
+        -> project_id-set-on-Conversation-struct
+        -> persisted-to-PG-via-upsert_conversation)
+      :note "daemon init 时从 PG list_projects() 加载 → SharedProjectRegistry 注入 AppState; message_handler 每次 ingest 时自动解析")
+
+    (flow project-sync
+      (description "自动发现并注册 ~/.claude/projects/ 下的项目")
+      (steps
+        mission_project-sync-action -> scan-~/.claude/projects/ -> for-each-dir
+        -> decode-dir-name-as-path -> skip-if-exists -> upsert_project-to-PG))))

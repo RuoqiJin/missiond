@@ -29,13 +29,14 @@ impl ProjectStore for PgMissionStore {
 
 pub async fn upsert_project(pool: &PgPool, config: &ProjectConfig) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO projects (id, path, intent_path, active, slots, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5::text[], COALESCE($6, NOW()), NOW())
+        "INSERT INTO projects (id, path, intent_path, active, slots, github_url, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::text[], $6, COALESCE($7, NOW()), NOW())
          ON CONFLICT (id) DO UPDATE SET
            path = EXCLUDED.path,
            intent_path = EXCLUDED.intent_path,
            active = EXCLUDED.active,
            slots = EXCLUDED.slots,
+           github_url = COALESCE(EXCLUDED.github_url, projects.github_url),
            updated_at = NOW()"
     )
     .bind(&config.id)
@@ -43,6 +44,7 @@ pub async fn upsert_project(pool: &PgPool, config: &ProjectConfig) -> Result<(),
     .bind(&config.intent_path)
     .bind(config.active)
     .bind(&config.slots)
+    .bind(&config.github_url)
     .bind(config.created_at)
     .execute(pool)
     .await?;
@@ -50,9 +52,9 @@ pub async fn upsert_project(pool: &PgPool, config: &ProjectConfig) -> Result<(),
 }
 
 pub async fn list_projects(pool: &PgPool) -> Result<Vec<ProjectConfig>, sqlx::Error> {
-    let rows: Vec<(String, String, Option<String>, bool, Vec<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> =
+    let rows: Vec<(String, String, Option<String>, bool, Vec<String>, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> =
         sqlx::query_as(
-            "SELECT id, path, intent_path, active, slots, created_at, updated_at FROM projects ORDER BY id"
+            "SELECT id, path, intent_path, active, slots, github_url, created_at, updated_at FROM projects ORDER BY id"
         )
         .fetch_all(pool)
         .await?;
@@ -60,7 +62,7 @@ pub async fn list_projects(pool: &PgPool) -> Result<Vec<ProjectConfig>, sqlx::Er
 }
 
 pub async fn list_active_projects(pool: &PgPool) -> Result<Vec<ProjectConfig>, sqlx::Error> {
-    let rows: Vec<(String, String, Option<String>, bool, Vec<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> =
+    let rows: Vec<(String, String, Option<String>, bool, Vec<String>, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> =
         sqlx::query_as(
             "SELECT id, path, intent_path, active, slots, created_at, updated_at FROM projects WHERE active = true ORDER BY id"
         )
@@ -70,9 +72,9 @@ pub async fn list_active_projects(pool: &PgPool) -> Result<Vec<ProjectConfig>, s
 }
 
 pub async fn get_project(pool: &PgPool, id: &str) -> Result<Option<ProjectConfig>, sqlx::Error> {
-    let row: Option<(String, String, Option<String>, bool, Vec<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> =
+    let row: Option<(String, String, Option<String>, bool, Vec<String>, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> =
         sqlx::query_as(
-            "SELECT id, path, intent_path, active, slots, created_at, updated_at FROM projects WHERE id = $1"
+            "SELECT id, path, intent_path, active, slots, github_url, created_at, updated_at FROM projects WHERE id = $1"
         )
         .bind(id)
         .fetch_optional(pool)
@@ -110,14 +112,15 @@ pub async fn delete_project(pool: &PgPool, id: &str) -> Result<bool, sqlx::Error
     Ok(result.rows_affected() > 0)
 }
 
-fn row_to_config(r: (String, String, Option<String>, bool, Vec<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)) -> ProjectConfig {
+fn row_to_config(r: (String, String, Option<String>, bool, Vec<String>, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)) -> ProjectConfig {
     ProjectConfig {
         id: r.0,
         path: r.1,
         intent_path: r.2,
         active: r.3,
         slots: r.4,
-        created_at: Some(r.5),
-        updated_at: Some(r.6),
+        github_url: r.5,
+        created_at: Some(r.6),
+        updated_at: Some(r.7),
     }
 }

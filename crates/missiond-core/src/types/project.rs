@@ -8,6 +8,7 @@ pub struct ProjectConfig {
     pub intent_path: Option<String>,
     pub active: bool,
     pub slots: Vec<String>,
+    pub github_url: Option<String>,
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
