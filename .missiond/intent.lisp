@@ -5,9 +5,9 @@
 
 (intent missiond
   (granularity L3-Implementation)
-  (survey-hash "e17db52-50a5296-76900d1-e18d0bf")
+  (survey-hash "e17db52-50a5296-76900d1-e18d0bf-5671c95-ac96b3c-eae9bbd-c15f363-5ec3517-84ac1a6")
   (survey-date "2026-04-10T00:00:00Z")
-  (last-updated "2026-04-10 — feat: wire ProjectRegistry into daemon runtime (P6): SharedProjectRegistry→AppState+daemon init从DB加载; message_handler.resolve(cwd)→自动填充project_id; mission_control target_type=project pause/resume; backfill迁移回填历史conversations.project_id+种子9个项目到projects表")
+  (last-updated "2026-04-10 — 6 commits: ProjectConfig新增github_url字段(DB持久化)+migration 20260410300000; ProjectStore trait新增backfill_project_id方法; mission_project新增init action(一步注册:path→git remote→intent扫描→upsert+backfill+reload); list action响应增加lispFiles/lispCount(本地readdir动态扫描); Board UI: Conversations/KnowledgeBase新增项目过滤器下拉/pill; SystemDashboard新增ProjectsPanel(卡片网格+githubUrl+slots+lisp文件); /api/projects 新增Next.js路由; /api/conversations+/api/kb支持project查询参数; viewMode union type新增jarvis")
 
   ;; ══════════════════════════════════════════════════════
   ;; DESIGN CONSTRAINTS
@@ -78,6 +78,7 @@
         (field intent_path :type "Option<String>" :comment "optional path to .missiond/intent.lisp")
         (field active      :type bool :default true)
         (field slots       :type "Vec<String>" :comment "slot names associated with this project")
+        (field github_url  :type "Option<String>" :comment "GitHub remote URL; persisted in DB via migration 20260410300000; resolved at init/sync via git remote get-url origin" :added "84ac1a6")
         (field created_at  :type "Option<DateTime<Utc>>")
         (field updated_at  :type "Option<DateTime<Utc>>"))
 
@@ -104,13 +105,16 @@
         (col intent_path :type text :nullable)
         (col active      :type boolean :not-null :default true)
         (col slots       :type "text[]" :not-null :default "{}")
+        (col github_url  :type text :nullable :added "20260410300000_project_github_url.sql"
+          :note "ALTER TABLE projects ADD COLUMN IF NOT EXISTS github_url TEXT; 含已知4项目初始值回填")
         (col created_at  :type timestamptz :not-null :default now)
         (col updated_at  :type timestamptz :not-null :default now)
 
-        (op list   :returns "Vec<ProjectConfig>")
+        (op list   :returns "Vec<ProjectConfig>" :note "list action响应额外附加lispFiles/lispCount(handler层readdir扫描,非DB字段)")
         (op get    :binds id :returns "Option<ProjectConfig>")
         (op list-active :where "active=true")
-        (op upsert :binds (id path intent_path active slots) :conflict-on id)
+        (op upsert :binds (id path intent_path active slots github_url) :conflict-on id
+          :note "github_url ON CONFLICT: COALESCE(EXCLUDED.github_url, projects.github_url) — 不覆盖已有值")
         (op set-active :binds (id active) :returns "bool (rows_affected>0)")
         (op set-slots  :binds (id slots))
         (op delete :binds id))
@@ -120,7 +124,10 @@
         (list_projects   :returns "DbResult<Vec<ProjectConfig>>")
         (get_project     :binds id :returns "DbResult<Option<ProjectConfig>>")
         (upsert_project  :binds "config: &ProjectConfig" :returns "DbResult<()>")
-        (set_project_active :binds (id active) :returns "DbResult<bool>"))
+        (set_project_active :binds (id active) :returns "DbResult<bool>")
+        (backfill_project_id :binds (project_id path_pattern) :returns "DbResult<u64>"
+          :sql "UPDATE conversations SET project_id=$1 WHERE project_id IS NULL AND project LIKE $2"
+          :added "84ac1a6"))
 
       ;; ── Backfill Migration (20260410200000, commit e18d0bf) ──
       (backfill backfill_project_id

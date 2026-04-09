@@ -134,6 +134,7 @@ impl ConversationStore for PgMissionStore {
                 model = COALESCE($5, conversations.model),
                 git_branch = COALESCE($6, conversations.git_branch),
                 message_count = $10,
+                started_at = CASE WHEN $11 != '' AND $11 != 'unknown' THEN $11 ELSE conversations.started_at END,
                 ended_at = $12,
                 status = $13,
                 parent_session_id = COALESCE(conversations.parent_session_id, $8),
@@ -161,10 +162,10 @@ impl ConversationStore for PgMissionStore {
         Ok(())
     }
 
-    async fn ensure_conversation_exists(&self, session_id: &str, project_path: &str, jsonl_path: &str, status: &str, conversation_type: &str, parent_session_id: Option<&str>) -> DbResult<()> {
+    async fn ensure_conversation_exists(&self, session_id: &str, project_path: &str, jsonl_path: &str, status: &str, conversation_type: &str, parent_session_id: Option<&str>, started_at: Option<&str>) -> DbResult<()> {
         sqlx::query(
             "INSERT INTO conversations (id, project, source, jsonl_path, message_count, started_at, status, conversation_type, parent_session_id)
-             VALUES ($1, $2, 'claude_cli', $3, 0, NOW(), $4, $5, $6)
+             VALUES ($1, $2, 'claude_cli', $3, 0, COALESCE($7::timestamptz, NOW()), $4, $5, $6)
              ON CONFLICT (id) DO UPDATE SET parent_session_id = COALESCE(conversations.parent_session_id, EXCLUDED.parent_session_id)"
         )
             .bind(session_id)
@@ -173,6 +174,7 @@ impl ConversationStore for PgMissionStore {
             .bind(status)
             .bind(conversation_type)
             .bind(parent_session_id)
+            .bind(started_at)
             .execute(&self.pool)
             .await?;
         Ok(())
