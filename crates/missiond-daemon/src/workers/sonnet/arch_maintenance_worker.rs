@@ -1,7 +1,7 @@
 //! Architecture Maintenance Worker — auto-updates YAML manifests when structural code changes land.
 //!
 //! Subscribes to `ContextualCommitDetected` events from the EventBus (emitted by
-//! EventAnalyzerWorker when a git commit is detected in conversation logs).
+//! TaggerChunkerWorker when a git commit is detected in conversation logs).
 //! Filters for structural changes (new modules, trait changes, Cargo.toml edits, etc.),
 //! and routes through SlotManager → persistent Claude Code (Sonnet) slot to update the YAML manifest.
 //!

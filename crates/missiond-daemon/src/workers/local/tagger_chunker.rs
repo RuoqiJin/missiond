@@ -10,8 +10,9 @@
 //! Design doc: `docs/designs/phase4-tagger-chunker.md`
 
 use std::collections::{BTreeSet, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
+use regex::Regex;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
@@ -40,6 +41,25 @@ const BINARY_RATIO_THRESHOLD: f64 = 0.3;
 
 /// Source tag for message_labels written by this worker.
 const LABEL_SOURCE: &str = "tagger_chunker";
+
+/// Regex to extract branch, commit hash, and summary from git commit output.
+/// Matches standard:      `[main 9facdfa] refactor: some changes`
+/// Matches root:          `[main (root-commit) 9facdfa] initial commit`
+/// Matches detached HEAD: `[detached HEAD 56cbfdd] fix something`
+/// Captures: (1) branch/ref, (2) hash, (3) summary
+static GIT_COMMIT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\[([a-zA-Z0-9_\-/\.\s]+?)\s+(?:\([^\)]+\)\s+)?([a-f0-9]{7,40})\]\s+(.*)")
+        .unwrap()
+});
+
+/// A git commit detected from conversation content.
+struct CommitDetection {
+    session_id: String,
+    message_id: i64,
+    branch: String,
+    commit_hash: String,
+    summary: String,
+}
 
 pub struct TaggerChunkerWorker {
     pub timeline_rx: broadcast::Receiver<TimelineEvent>,
@@ -202,6 +222,48 @@ async fn process_session(state: &AppState, session_id: &str) -> anyhow::Result<u
         }
     }
 
+    // 7b. Collect tool labels + detect commits
+    let (tool_labels, detected_commits) = collect_tool_labels(&messages, session_id);
+    if !tool_labels.is_empty() {
+        let label_refs: Vec<(i64, &str, &str, &str)> = tool_labels
+            .iter()
+            .map(|(id, label, value)| (*id, label.as_str(), value.as_str(), LABEL_SOURCE))
+            .collect();
+        if let Err(e) = state.store.insert_message_labels_batch(&label_refs).await {
+            warn!(error = %e, "TaggerChunker: tool label insert failed");
+        }
+    }
+
+    // 7c. Emit commit events
+    if !detected_commits.is_empty() {
+        let slot_id = state
+            .store
+            .get_conversation(session_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|c| c.slot_id);
+
+        for commit in detected_commits {
+            info!(
+                branch = %commit.branch,
+                commit_hash = %commit.commit_hash,
+                summary = %commit.summary,
+                session_id = %commit.session_id,
+                "TaggerChunker: git commit detected"
+            );
+            state.event_bus.publish(DaemonEvent::ContextualCommitDetected {
+                commit_hash: commit.commit_hash,
+                branch: commit.branch,
+                summary: commit.summary,
+                conversation_id: commit.session_id.clone(),
+                message_id: commit.message_id,
+                session_id: commit.session_id,
+                slot_id: slot_id.clone(),
+            });
+        }
+    }
+
     // 8. Insert turns
     let inserted = state
         .store
@@ -359,6 +421,81 @@ fn collect_noise_labels(messages: &[ConversationMessage]) -> Vec<(i64, String, S
     }
 
     labels
+}
+
+// ─── Tagger (tool labels + commit detection) ─────────────────────────────
+
+/// Classify tool calls and detect git commits from conversation messages.
+///
+/// Returns (labels_to_write, detected_commits).
+fn collect_tool_labels(
+    messages: &[ConversationMessage],
+    session_id: &str,
+) -> (Vec<(i64, String, String)>, Vec<CommitDetection>) {
+    let mut labels = Vec::new();
+    let mut commits = Vec::new();
+
+    for msg in messages {
+        // Tool classification: assistant messages with has_tool_use
+        if msg.has_tool_use {
+            if let Some(ref tool_name) = msg.tool_name {
+                let class = match tool_name.as_str() {
+                    "Bash" => classify_bash_command(&msg.content),
+                    other => other.to_lowercase(),
+                };
+                labels.push((msg.id, "tool_class".to_string(), class));
+            }
+        }
+
+        // Git commit detection: user messages (tool_results come as user messages)
+        if msg.role == "user" {
+            if let Some(caps) = GIT_COMMIT_RE.captures(&msg.content) {
+                let branch = caps[1].to_string();
+                let commit_hash = caps[2].to_string();
+                let summary = caps[3].trim().to_string();
+
+                labels.push((msg.id, "tool_action".to_string(), "commit".to_string()));
+                labels.push((msg.id, "commit_hash".to_string(), commit_hash.clone()));
+                labels.push((msg.id, "commit_branch".to_string(), branch.clone()));
+
+                commits.push(CommitDetection {
+                    session_id: session_id.to_string(),
+                    message_id: msg.id,
+                    branch,
+                    commit_hash,
+                    summary,
+                });
+            }
+        }
+    }
+
+    (labels, commits)
+}
+
+/// Classify a Bash command by its prefix.
+fn classify_bash_command(content: &str) -> String {
+    let cmd = content.trim_start();
+    if cmd.starts_with("git ") {
+        "git".to_string()
+    } else if cmd.starts_with("grep ") || cmd.starts_with("rg ") {
+        "search".to_string()
+    } else if cmd.starts_with("cargo ")
+        || cmd.starts_with("npm ")
+        || cmd.starts_with("make ")
+        || cmd.starts_with("docker ")
+    {
+        "build".to_string()
+    } else if cmd.starts_with("cat ")
+        || cmd.starts_with("ls ")
+        || cmd.starts_with("mkdir ")
+        || cmd.starts_with("rm ")
+        || cmd.starts_with("cp ")
+        || cmd.starts_with("mv ")
+    {
+        "fs".to_string()
+    } else {
+        "shell".to_string()
+    }
 }
 
 /// Quick heuristic: high ratio of non-printable chars in first 500 bytes suggests binary/base64.
@@ -526,5 +663,60 @@ mod tests {
         assert_eq!(labels.len(), 2);
         assert_eq!(labels[0].1, "noise_long_output");
         assert_eq!(labels[1].1, "thinking_long");
+    }
+
+    #[test]
+    fn test_tool_labels_bash_git() {
+        let mut msg = make_msg(1, "assistant", "git status");
+        msg.has_tool_use = true;
+        msg.tool_name = Some("Bash".to_string());
+
+        let msgs = vec![msg];
+        let (labels, commits) = collect_tool_labels(&msgs, "test-session");
+
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].0, 1);
+        assert_eq!(labels[0].1, "tool_class");
+        assert_eq!(labels[0].2, "git");
+        assert!(commits.is_empty());
+    }
+
+    #[test]
+    fn test_tool_labels_commit_detection() {
+        let msg = make_msg(
+            10,
+            "user",
+            "[main 9facdfa] refactor: unify workers\n 3 files changed, 42 insertions(+)",
+        );
+        let msgs = vec![msg];
+        let (labels, commits) = collect_tool_labels(&msgs, "test-session");
+
+        // Should produce 3 labels: tool_action, commit_hash, commit_branch
+        assert_eq!(labels.len(), 3);
+        assert_eq!(labels[0], (10, "tool_action".to_string(), "commit".to_string()));
+        assert_eq!(labels[1], (10, "commit_hash".to_string(), "9facdfa".to_string()));
+        assert_eq!(labels[2], (10, "commit_branch".to_string(), "main".to_string()));
+
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].commit_hash, "9facdfa");
+        assert_eq!(commits[0].branch, "main");
+        assert_eq!(commits[0].summary, "refactor: unify workers");
+        assert_eq!(commits[0].session_id, "test-session");
+        assert_eq!(commits[0].message_id, 10);
+    }
+
+    #[test]
+    fn test_tool_labels_no_false_positive() {
+        let msg = make_msg(
+            5,
+            "user",
+            "cargo build\n   Compiling missiond v0.1.0\n    Finished `dev` profile in 12.3s",
+        );
+        let msgs = vec![msg];
+        let (labels, commits) = collect_tool_labels(&msgs, "test-session");
+
+        // No commit labels, no commits detected
+        assert!(labels.is_empty());
+        assert!(commits.is_empty());
     }
 }
