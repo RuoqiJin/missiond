@@ -1451,15 +1451,6 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     );
 
-    // Event Analyzer — detects git commits from Bash tool outputs
-    workers::spawn_worker(
-        workers::local::event_analyzer_worker::EventAnalyzerWorker {
-            timeline_rx: timeline_broadcast_tx.subscribe(),
-        },
-        Arc::new(state.clone()),
-        shutdown_rx.clone(),
-    );
-
     info!("All event handlers started (isolated tasks)");
 
     // ---- Slots hot-reload: SIGHUP + fsnotify ----
