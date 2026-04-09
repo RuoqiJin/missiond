@@ -41,15 +41,17 @@ export async function GET(req: NextRequest) {
       return NextResponse.json(result);
     }
 
-    // List conversations — server-side filtering by conversationType + source
+    // List conversations — server-side filtering by conversationType + source + project
     const status = req.nextUrl.searchParams.get('status') || undefined;
     const limit = req.nextUrl.searchParams.get('limit') || '50';
     const conversationType = req.nextUrl.searchParams.get('conversationType') || undefined;
     const source = req.nextUrl.searchParams.get('source') || undefined;
+    const project = req.nextUrl.searchParams.get('project') || undefined;
     const args: Record<string, unknown> = { limit: Number(limit) };
     if (status) args.status = status;
     if (conversationType) args.conversationType = conversationType;
     if (source) args.source = source;
+    if (project) args.project = project;
     const conversations = await callTool('mission_conversation_list', args);
     return NextResponse.json(conversations);
   } catch (err) {
