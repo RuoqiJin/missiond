@@ -75,6 +75,7 @@ impl MissionDB {
                     context_snippet: None,
                     scope_task_id: None,
                     utility_score: 0.0,
+                    project_id: None,
                 },
                 action: "rejected".into(),
                 merged_key: None,
@@ -199,6 +200,7 @@ impl MissionDB {
             context_snippet: None,
             scope_task_id: None,
             utility_score: 0.5,
+            project_id: None,
         };
 
         Self::kb_sync_fts_with_conn(&conn, &entry)?;
@@ -1503,6 +1505,7 @@ impl MissionDB {
             context_snippet: None,
             scope_task_id: row.get("scope_task_id").unwrap_or(None),
             utility_score: row.get("utility_score").unwrap_or(0.5),
+            project_id: None,
         })
     }
 
@@ -1759,6 +1762,7 @@ impl MissionDB {
                 context_snippet: None,
                 scope_task_id: row.get(14)?,
                 utility_score: row.get::<_, Option<f64>>(15)?.unwrap_or(0.5),
+                project_id: None,
             };
             Ok((symbol, entry))
         })?;

@@ -37,6 +37,9 @@ pub struct KnowledgeEntry {
     /// Drives dynamic GC: low-utility entries get pruned regardless of age.
     #[serde(default = "default_utility_score")]
     pub utility_score: f64,
+    /// Project scope: None = global knowledge, Some(id) = project-specific.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 fn default_utility_score() -> f64 { 0.5 }
@@ -56,6 +59,8 @@ pub struct KBRememberInput {
     pub source: Option<String>,
     #[serde(default)]
     pub confidence: Option<f64>,
+    #[serde(default)]
+    pub project_id: Option<String>,
 }
 
 /// Result of a kb_remember operation

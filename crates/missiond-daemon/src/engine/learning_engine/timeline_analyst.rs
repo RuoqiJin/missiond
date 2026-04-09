@@ -386,6 +386,7 @@ async fn execute_insights(state: &AppState, insights: &[Insight]) -> usize {
                         detail: None,
                         source: Some("timeline-analyst".to_string()),
                         confidence: Some(0.7),
+                        project_id: None,
                     })
                     .await
                 {

@@ -15,7 +15,7 @@ fn row_to_knowledge_entry(
     access_count: i64, created_at: String, updated_at: String,
     last_accessed_at: Option<String>, linked_task_id: Option<String>,
     kb_type: Option<String>, scope_task_id: Option<String>,
-    utility_score: Option<f64>,
+    utility_score: Option<f64>, project_id: Option<String>,
 ) -> KnowledgeEntry {
     let detail_parsed = detail.and_then(|s| serde_json::from_str(&s).ok());
     KnowledgeEntry {
@@ -35,6 +35,7 @@ fn row_to_knowledge_entry(
         context_snippet: None,
         scope_task_id,
         utility_score: utility_score.unwrap_or(0.5),
+        project_id,
     }
 }
 
@@ -42,13 +43,13 @@ fn row_to_knowledge_entry(
 type KBRow = (
     String, String, String, String, Option<String>, String, f64,
     i64, String, String, Option<String>, Option<String>,
-    Option<String>, Option<String>, Option<f64>,
+    Option<String>, Option<String>, Option<f64>, Option<String>,
 );
 
 fn kb_row_to_entry(r: KBRow) -> KnowledgeEntry {
     row_to_knowledge_entry(
         r.0, r.1, r.2, r.3, r.4, r.5, r.6,
-        r.7, r.8, r.9, r.10, r.11, r.12, r.13, r.14,
+        r.7, r.8, r.9, r.10, r.11, r.12, r.13, r.14, r.15,
     )
 }
 
@@ -56,7 +57,7 @@ fn kb_row_to_entry(r: KBRow) -> KnowledgeEntry {
 const UTILITY_HIT_BOOST: f64 = 0.15;
 
 /// The common SELECT column list for knowledge entries.
-const KB_COLS: &str = "id, category, key, summary, detail, source, confidence, access_count, created_at, updated_at, last_accessed_at, linked_task_id, kb_type, scope_task_id, utility_score";
+const KB_COLS: &str = "id, category, key, summary, detail, source, confidence, access_count, created_at, updated_at, last_accessed_at, linked_task_id, kb_type, scope_task_id, utility_score, project_id";
 
 #[cfg(feature = "postgres")]
 #[async_trait]
@@ -89,6 +90,7 @@ impl KnowledgeStore for PgMissionStore {
                     context_snippet: None,
                     scope_task_id: None,
                     utility_score: 0.0,
+                    project_id: None,
                 },
                 action: "rejected".into(),
                 merged_key: None,
@@ -206,13 +208,14 @@ impl KnowledgeStore for PgMissionStore {
         let id = uuid::Uuid::new_v4().to_string();
         let kb_type = infer_kb_type(&input.category);
         sqlx::query(
-            "INSERT INTO knowledge (id, category, key, summary, detail, source, confidence, access_count, created_at, updated_at, kb_type)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, $10)
+            "INSERT INTO knowledge (id, category, key, summary, detail, source, confidence, access_count, created_at, updated_at, kb_type, project_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, $10, $11)
              ON CONFLICT (category, key) DO UPDATE SET
                 summary = EXCLUDED.summary, detail = EXCLUDED.detail,
                 source = EXCLUDED.source, confidence = EXCLUDED.confidence,
                 updated_at = EXCLUDED.updated_at,
-                utility_score = GREATEST(knowledge.utility_score, 0.8)"
+                utility_score = GREATEST(knowledge.utility_score, 0.8),
+                project_id = COALESCE(EXCLUDED.project_id, knowledge.project_id)"
         )
         .bind(&id)
         .bind(&input.category)
@@ -224,6 +227,7 @@ impl KnowledgeStore for PgMissionStore {
         .bind(&now)
         .bind(&now)
         .bind(kb_type)
+        .bind(&input.project_id)
         .execute(&self.pool)
         .await?;
 
@@ -244,6 +248,7 @@ impl KnowledgeStore for PgMissionStore {
             context_snippet: None,
             scope_task_id: None,
             utility_score: 0.5,
+            project_id: input.project_id.clone(),
         };
 
         Ok(KBRememberResult {
@@ -305,7 +310,7 @@ impl KnowledgeStore for PgMissionStore {
         Ok(row.map(|r| r.0))
     }
 
-    async fn kb_update(&self, key: &str, new_category: Option<&str>, new_summary: Option<&str>, new_detail: Option<&serde_json::Value>, new_confidence: Option<f64>, new_linked_task_id: Option<&str>) -> DbResult<Option<(KnowledgeEntry, bool)>> {
+    async fn kb_update(&self, key: &str, new_category: Option<&str>, new_summary: Option<&str>, new_detail: Option<&serde_json::Value>, new_confidence: Option<f64>, new_linked_task_id: Option<&str>, new_project_id: Option<&str>) -> DbResult<Option<(KnowledgeEntry, bool)>> {
         // Find existing entry
         let existing_row: Option<KBRow> = sqlx::query_as(&format!(
             "SELECT {} FROM knowledge WHERE key = $1", KB_COLS
@@ -331,6 +336,7 @@ impl KnowledgeStore for PgMissionStore {
         if detail_str.is_some() { sets.push(format!("detail = ${}", param_idx)); param_idx += 1; content_changed = true; }
         if new_confidence.is_some() { sets.push(format!("confidence = ${}", param_idx)); param_idx += 1; }
         if new_linked_task_id.is_some() { sets.push(format!("linked_task_id = ${}", param_idx)); param_idx += 1; }
+        if new_project_id.is_some() { sets.push(format!("project_id = ${}", param_idx)); param_idx += 1; }
 
         // Only updated_at — nothing else to change
         if param_idx == 2 {
@@ -348,6 +354,10 @@ impl KnowledgeStore for PgMissionStore {
         if let Some(v) = &detail_str { query = query.bind(v.clone()); }
         if let Some(v) = new_confidence { query = query.bind(v); }
         if let Some(v) = new_linked_task_id {
+            let val: Option<String> = if v.is_empty() { None } else { Some(v.to_string()) };
+            query = query.bind(val);
+        }
+        if let Some(v) = new_project_id {
             let val: Option<String> = if v.is_empty() { None } else { Some(v.to_string()) };
             query = query.bind(val);
         }
@@ -1452,7 +1462,7 @@ impl KnowledgeStore for PgMissionStore {
         let rows: Vec<KBRow> = sqlx::query_as(
             "SELECT k.id, k.category, k.key, k.summary, k.detail, k.source, k.confidence,
                     k.access_count, k.created_at, k.updated_at, k.last_accessed_at,
-                    k.linked_task_id, k.kb_type, k.scope_task_id, k.utility_score
+                    k.linked_task_id, k.kb_type, k.scope_task_id, k.utility_score, k.project_id
              FROM knowledge k
              JOIN kb_ast_links l ON l.kb_id = k.id
              WHERE l.symbol_name = $1
@@ -1466,6 +1476,7 @@ impl KnowledgeStore for PgMissionStore {
     }
 
     async fn kb_get_memories_for_file(&self, file_path: &str) -> DbResult<Vec<(String, KnowledgeEntry)>> {
+        // Note: project_id omitted to stay within sqlx 16-field tuple limit (symbol_name + 15 KB cols)
         let rows: Vec<(String, String, String, String, String, Option<String>, String, f64, i64, String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<f64>)> = sqlx::query_as(
             "SELECT l.symbol_name, k.id, k.category, k.key, k.summary, k.detail,
                     k.source, k.confidence, k.access_count, k.created_at, k.updated_at,
@@ -1483,7 +1494,7 @@ impl KnowledgeStore for PgMissionStore {
             let symbol = r.0;
             let entry = row_to_knowledge_entry(
                 r.1, r.2, r.3, r.4, r.5, r.6, r.7,
-                r.8, r.9, r.10, r.11, r.12, r.13, r.14, r.15,
+                r.8, r.9, r.10, r.11, r.12, r.13, r.14, r.15, None,
             );
             (symbol, entry)
         }).collect())

@@ -135,6 +135,8 @@ struct KBRememberArgs {
     source: Option<String>,
     #[serde(default)]
     confidence: Option<f64>,
+    #[serde(default)]
+    project: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -155,6 +157,8 @@ struct KBUpdateArgs {
     confidence: Option<f64>,
     #[serde(default)]
     linked_task_id: Option<String>,
+    #[serde(default)]
+    project_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -264,6 +268,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 detail: args.detail,
                 source: args.source,
                 confidence: args.confidence,
+                project_id: args.project.clone(),
             };
             let result = state
                 .store
@@ -460,6 +465,33 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 "requested_keys": keys.len(),
             })))
         }
+        "mission_kb_batch_set_project" => {
+            #[derive(Deserialize)]
+            struct Assignment {
+                key: String,
+                project_id: Option<String>,
+            }
+            #[derive(Deserialize)]
+            struct BatchArgs {
+                assignments: Vec<Assignment>,
+            }
+            let args: BatchArgs = serde_json::from_value(args)?;
+            let mut updated = 0usize;
+            let mut not_found = Vec::new();
+            for a in &args.assignments {
+                let pid = a.project_id.as_deref().filter(|s| !s.is_empty());
+                match state.store.kb_update(&a.key, None, None, None, None, None, pid).await {
+                    Ok(Some(_)) => updated += 1,
+                    Ok(None) => not_found.push(a.key.clone()),
+                    Err(_) => not_found.push(a.key.clone()),
+                }
+            }
+            Ok(ToolResult::json_pretty(&serde_json::json!({
+                "updated": updated,
+                "not_found": not_found,
+                "total": args.assignments.len(),
+            })))
+        }
         "mission_kb_update" => {
             let args: KBUpdateArgs = serde_json::from_value(args)?;
             // Content quality check only if summary is being updated
@@ -479,6 +511,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     args.detail.as_ref(),
                     args.confidence,
                     args.linked_task_id.as_deref(),
+                    args.project_id.as_deref(),
                 )
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
@@ -808,6 +841,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                             detail,
                             source: Some("import".to_string()),
                             confidence: Some(1.0),
+                            project_id: None,
                         };
                         state
                             .store
@@ -994,6 +1028,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 detail: Some(serde_json::Value::Object(detail.clone())),
                 source: Some("discovery".to_string()),
                 confidence: Some(1.0),
+                project_id: None,
             };
             state
                 .store
@@ -1609,6 +1644,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                                     detail: new_entry.and_then(|ne| ne.get("detail").cloned()),
                                     source: Some("consolidation".to_string()),
                                     confidence: new_entry.and_then(|ne| ne.get("confidence").and_then(|v| v.as_f64())),
+                                    project_id: None,
                                 };
                                 match state.store.kb_remember(&input).await {
                                     Ok(r) => Ok(format!("Updated key={} category={} action={}", key, cat, r.action)),

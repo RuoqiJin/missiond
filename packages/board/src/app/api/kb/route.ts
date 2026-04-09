@@ -28,6 +28,22 @@ export async function GET(req: NextRequest) {
   }
 }
 
+export async function PATCH(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const { key, project_id } = body;
+    if (!key) return NextResponse.json({ error: 'Missing key' }, { status: 400 });
+    // Use kb_update to set project_id (pass empty string to clear)
+    const result = await callTool('mission_kb_update', {
+      key,
+      project_id: project_id ?? '',
+    });
+    return NextResponse.json(result);
+  } catch (err) {
+    return NextResponse.json({ error: String(err) }, { status: 502 });
+  }
+}
+
 export async function DELETE(req: NextRequest) {
   try {
     // Prefer `key` (matches daemon contract), keep legacy `id` as fallback.

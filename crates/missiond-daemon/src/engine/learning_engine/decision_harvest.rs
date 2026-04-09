@@ -108,6 +108,7 @@ pub(crate) async fn harvest_decisions_for_task(state: &AppState, task_id: &str, 
             detail: detail.cloned(),
             source: Some("decision-harvester".to_string()),
             confidence: Some(0.8),
+            project_id: None,
         };
 
         match state.store.kb_remember(&input).await {
@@ -122,7 +123,7 @@ pub(crate) async fn harvest_decisions_for_task(state: &AppState, task_id: &str, 
                     if boosted > existing_confidence {
                         let _ = state
                             .store
-                            .kb_update(&result.entry.key, None, None, None, Some(boosted), None)
+                            .kb_update(&result.entry.key, None, None, None, Some(boosted), None, None)
                             .await;
                         reinforced += 1;
                         if boosted > 0.95 {
