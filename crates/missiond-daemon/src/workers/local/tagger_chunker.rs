@@ -171,10 +171,8 @@ async fn process_batch(state: &AppState, session_ids: &[String]) {
 }
 
 async fn process_session(state: &AppState, session_id: &str) -> anyhow::Result<usize> {
-    // 1. Determine incremental start point
+    // ── Stage 1: Fetch incremental messages ──
     let since_id = state.store.get_last_turn_end_message_id(session_id).await?;
-
-    // 2. Fetch incremental messages
     let messages = state
         .store
         .get_conversation_messages(session_id, since_id, MAX_MESSAGES_PER_SESSION)
@@ -184,38 +182,21 @@ async fn process_session(state: &AppState, session_id: &str) -> anyhow::Result<u
         return Ok(0);
     }
 
-    // 3. Get next turn_idx
-    let next_idx = state
-        .store
-        .get_max_turn_idx(session_id)
-        .await?
-        .map(|i| i + 1)
-        .unwrap_or(0);
+    // ── Stage 2: Message Analysis (labels + events) ──
+    // Independent of turn extraction. Always runs on every message batch.
+    analyze_messages(state, session_id, &messages).await;
 
-    // 4. Check if session is completed (for tail handling)
-    let is_completed = state
-        .store
-        .get_conversation(session_id)
-        .await?
-        .map(|c| c.status == "completed" || c.status == "compacted")
-        .unwrap_or(false);
+    // ── Stage 3: Turn Chunking (extract → tail-trim → insert) ──
+    chunk_turns(state, session_id, &messages).await
+}
 
-    // 5. Extract turns
-    let mut raw_turns = extract_turns(&messages);
-
-    // 6. Handle tail: drop last turn if session is still active and turn may be incomplete.
-    // An assistant message with has_tool_use means it's waiting for tool_result — still incomplete.
-    if !is_completed && !raw_turns.is_empty() {
-        let last = raw_turns.last().unwrap();
-        if let Some(last_msg) = messages.iter().rfind(|m| m.id == last.end_message_id) {
-            if last_msg.role != "assistant" || last_msg.has_tool_use {
-                raw_turns.pop();
-            }
-        }
-    }
-
-    // 7. Collect noise labels (always, even if turns empty — labels are per-message)
-    let noise_labels = collect_noise_labels(&messages);
+/// Stage 2: Per-message analysis — noise labels, tool classification, commit detection.
+///
+/// This pipeline is independent of turn extraction and must always run,
+/// even when the session is active and turns are incomplete.
+async fn analyze_messages(state: &AppState, session_id: &str, messages: &[ConversationMessage]) {
+    // Noise labels
+    let noise_labels = collect_noise_labels(messages);
     if !noise_labels.is_empty() {
         let label_refs: Vec<(i64, &str, &str, &str)> = noise_labels
             .iter()
@@ -226,8 +207,8 @@ async fn process_session(state: &AppState, session_id: &str) -> anyhow::Result<u
         }
     }
 
-    // 7b. Collect tool labels + detect commits (always, independent of turn extraction)
-    let (tool_labels, detected_commits) = collect_tool_labels(&messages, session_id);
+    // Tool classification + commit detection
+    let (tool_labels, detected_commits) = collect_tool_labels(messages, session_id);
     if !tool_labels.is_empty() {
         let label_refs: Vec<(i64, &str, &str, &str)> = tool_labels
             .iter()
@@ -238,7 +219,7 @@ async fn process_session(state: &AppState, session_id: &str) -> anyhow::Result<u
         }
     }
 
-    // 7c. Emit commit events
+    // Emit commit events
     if !detected_commits.is_empty() {
         let slot_id = state
             .store
@@ -267,12 +248,47 @@ async fn process_session(state: &AppState, session_id: &str) -> anyhow::Result<u
             });
         }
     }
+}
+
+/// Stage 3: Turn chunking — extract structured turns, trim active tail, persist.
+///
+/// Returns the number of turns inserted. Active sessions may produce 0 turns
+/// if the latest turn is still incomplete (waiting for tool_result).
+async fn chunk_turns(
+    state: &AppState,
+    session_id: &str,
+    messages: &[ConversationMessage],
+) -> anyhow::Result<usize> {
+    let next_idx = state
+        .store
+        .get_max_turn_idx(session_id)
+        .await?
+        .map(|i| i + 1)
+        .unwrap_or(0);
+
+    let is_completed = state
+        .store
+        .get_conversation(session_id)
+        .await?
+        .map(|c| c.status == "completed" || c.status == "compacted")
+        .unwrap_or(false);
+
+    let mut raw_turns = extract_turns(messages);
+
+    // Tail handling: drop last turn if session is active and turn may be incomplete.
+    if !is_completed && !raw_turns.is_empty() {
+        let last = raw_turns.last().unwrap();
+        if let Some(last_msg) = messages.iter().rfind(|m| m.id == last.end_message_id) {
+            if last_msg.role != "assistant" || last_msg.has_tool_use {
+                raw_turns.pop();
+            }
+        }
+    }
 
     if raw_turns.is_empty() {
         return Ok(0);
     }
 
-    // 8. Insert turns
     let inserted = state
         .store
         .insert_conversation_turns_batch(session_id, next_idx, &raw_turns)
