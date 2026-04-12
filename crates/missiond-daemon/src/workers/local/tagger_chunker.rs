@@ -214,11 +214,7 @@ async fn process_session(state: &AppState, session_id: &str) -> anyhow::Result<u
         }
     }
 
-    if raw_turns.is_empty() {
-        return Ok(0);
-    }
-
-    // 7. Collect noise labels
+    // 7. Collect noise labels (always, even if turns empty — labels are per-message)
     let noise_labels = collect_noise_labels(&messages);
     if !noise_labels.is_empty() {
         let label_refs: Vec<(i64, &str, &str, &str)> = noise_labels
@@ -230,7 +226,7 @@ async fn process_session(state: &AppState, session_id: &str) -> anyhow::Result<u
         }
     }
 
-    // 7b. Collect tool labels + detect commits
+    // 7b. Collect tool labels + detect commits (always, independent of turn extraction)
     let (tool_labels, detected_commits) = collect_tool_labels(&messages, session_id);
     if !tool_labels.is_empty() {
         let label_refs: Vec<(i64, &str, &str, &str)> = tool_labels
@@ -270,6 +266,10 @@ async fn process_session(state: &AppState, session_id: &str) -> anyhow::Result<u
                 slot_id: slot_id.clone(),
             });
         }
+    }
+
+    if raw_turns.is_empty() {
+        return Ok(0);
     }
 
     // 8. Insert turns
