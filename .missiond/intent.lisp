@@ -1,14 +1,14 @@
 ;; ══════════════════════════════════════════════════════
 ;; MissionD — Implementation Detail (Full System)
 ;; Generated: 2026-04-07 | Forge Deep Cartography v3
-;; Updated: 2026-04-12 (9684b50)
+;; Updated: 2026-04-12 (43c80f4)
 ;; ══════════════════════════════════════════════════════
 
 (intent missiond
   (granularity L3-Implementation)
-  (survey-hash "e17db52-50a5296-76900d1-e18d0bf-5671c95-ac96b3c-eae9bbd-c15f363-5ec3517-84ac1a6-0adbb18-3c10d21-dc45dcb-21a3b63-65c8b59-1ea1838-081b4f9-a9517ec-20813d5-5a5f805-ec269d7-79a877f-ad889d1-48a9834-b3f04a6-ce3f3ec-d8f47de-d75699e-9684b50")
+  (survey-hash "e17db52-50a5296-76900d1-e18d0bf-5671c95-ac96b3c-eae9bbd-c15f363-5ec3517-84ac1a6-0adbb18-3c10d21-dc45dcb-21a3b63-65c8b59-1ea1838-081b4f9-a9517ec-20813d5-5a5f805-ec269d7-79a877f-ad889d1-48a9834-b3f04a6-ce3f3ec-d8f47de-d75699e-9684b50-43c80f4")
   (survey-date "2026-04-12T00:00:00Z")
-  (last-updated "2026-04-12 — 7 new commits (incremental +9684b50): [ad889d1] fix: ConversationOrganizer 去除 agent-only 过滤 — 所有 session 均发 SessionOrganized(原仅 agent-* 会话触发，用户前台 session 从未发出 SessionOrganized 导致 TaggerChunker 不处理 → commit detection 静默失效); [48a9834] fix: ConversationOrganizer 新增诊断 debug 日志; [b3f04a6] test: 触发 commit detection 端到端验证 lisp_survey 事件链; [ce3f3ec] fix: TaggerChunker commit detection 移到 early-return 之前(原 collect_tool_labels 在 raw_turns.is_empty() return 之后，活跃 session 未完成最后 turn 时 commit 事件永远不触发); [d8f47de] refactor: TaggerChunker 拆分为 analyze_messages + chunk_turns 双独立流水线 — analyze_messages 处理 noise labels/tool 分类/commit 检测，chunk_turns 做 turn 提取/tail-trim/持久化，两管道共享同一 messages 数组，从架构上保证 turn early-return 不影响 message 分析; [d75699e] test: E2E 验证 refactored TaggerChunker commit detection; [9684b50] debug: analyze_messages 新增 commit detection tracing(user_msg 数/regex MATCH 日志)")
+  (last-updated "2026-04-12 — 8 new commits (incremental +43c80f4): [ad889d1] fix: ConversationOrganizer 去除 agent-only 过滤 — 所有 session 均发 SessionOrganized(原仅 agent-* 会话触发，用户前台 session 从未发出 SessionOrganized 导致 TaggerChunker 不处理 → commit detection 静默失效); [48a9834] fix: ConversationOrganizer 新增诊断 debug 日志; [b3f04a6] test: 触发 commit detection 端到端验证 lisp_survey 事件链; [ce3f3ec] fix: TaggerChunker commit detection 移到 early-return 之前(原 collect_tool_labels 在 raw_turns.is_empty() return 之后，活跃 session 未完成最后 turn 时 commit 事件永远不触发); [d8f47de] refactor: TaggerChunker 拆分为 analyze_messages + chunk_turns 双独立流水线 — analyze_messages 处理 noise labels/tool 分类/commit 检测，chunk_turns 做 turn 提取/tail-trim/持久化，两管道共享同一 messages 数组，从架构上保证 turn early-return 不影响 message 分析; [d75699e] test: E2E 验证 refactored TaggerChunker commit detection; [9684b50] debug: analyze_messages 新增 commit detection tracing(user_msg 数/regex MATCH 日志); [43c80f4] refactor: CodexIngestionWorker 新增 text message 提取(agent+user) + ParsedMessage struct + insert_conversation_messages_batch; poll interval 30s→10s; LLM gate check_interactive_exempt() — router_chat 等用户发起调用绕过 gate; Sonnet 模型名 cpapi-claude-sonnet→claude-sonnet; TaggerChunker 60s reconciliation sweep via sessions_recently_active_without_turns() 补处理 broadcast 丢失的 session; ConversationOrganizer broadcast lagged 语义明确为 permanently lost")
 
   ;; ══════════════════════════════════════════════════════
   ;; DESIGN CONSTRAINTS
@@ -270,7 +270,10 @@
         (op complete-stale (where status="active" updated_at < threshold))
         (op pending-deep-analysis)
         (op unscanned (where habit_scanned_at=NULL) (limit batch_size))
-        (op compaction-fragments (binds id)))
+        (op compaction-fragments (binds id))
+        ;; commit 43c80f4: reconciliation 查询
+        (op sessions-recently-active-without-turns (binds since_minutes limit)
+          :note "返回近 N 分钟内有 conversation_messages 但无 turns 记录的 session_id 列表; PG 实现; SQLite stub(返回空)"))
 
       (table conversation_messages
         (col id :type bigint :pk :autoincrement)
@@ -286,7 +289,9 @@
         (col realtime_forwarded_at :type timestamptz)
 
         (op insert (binds conversation_id role content tool_name tool_call_id token_usage))
-        (op insert-batch (binds "Vec<message>"))
+        (op insert-batch (binds "Vec<message>")
+          ;; commit 43c80f4: insert_conversation_messages_batch trait method — CodexIngestionWorker 用于批量写入 text messages
+          )
         (op select-one (binds id))
         (op select-by-conversation (binds conversation_id limit offset))
         (op get-around (binds id context_count))
@@ -1129,6 +1134,8 @@
         ;; commit ad889d1: 去除 agent-only 过滤 — 原仅处理 agent-* session，用户前台 session 被忽略
         ;; 修复后：所有 session_id 均进 dirty 集合，统一在 5s debounce 后 emit SessionOrganized
         ;; P0 compaction link 和 P1 orphan parent fix 仍仅对 agent-* 执行，非 agent session 跳过
+        ;; commit 43c80f4: broadcast lagged warning 语义明确为 "events permanently lost"
+        ;;   (TaggerChunker 的 reconcile sweep 可在 60s 内补处理这些丢失的 session)
         )
       (worker pty-event-worker
         :target "crates/missiond-daemon/src/workers/local/pty_event_worker.rs"
@@ -1151,6 +1158,11 @@
         ;;   - analyze_messages(stage2): noise-labels + tool分类 + commit detection — 必然执行
         ;;   - chunk_turns(stage3): turn提取/tail-trim/持久化 — 活跃session可返回0无副作用
         ;; commit 9684b50: analyze_messages 新增 tracing — user_msg count + regex MATCH 逐条日志
+        ;; commit 43c80f4: 新增 reconcile_tick(60s interval) + reconcile_missed_sessions()
+        ;;   - 调用 sessions_recently_active_without_turns(since_minutes=5, limit=50) 查漏补处理
+        ;;   - 修复 broadcast Lagged 场景导致 SessionOrganized 永久丢失时的 session 漏处理
+        ;;   - broadcast lagged → warn! "events permanently lost"
+        ;;   - embedding_tx 发送失败 → warn! (非 panic，graceful degradation logging)
         )
       ;; EventAnalyzerWorker (65c8b59) was added then absorbed into tagger-chunker (1ea1838)
       ;; Commit detection is now done at schema-on-write stage in tagger_chunker with full message content
@@ -1179,8 +1191,13 @@
         :target "crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs"
         :added "ec269d7"
         :trigger "polling ~/.codex/state_5.sqlite via rusqlite"
-        :writes-to "conversation timeline (system_timeline)"
-        :note "reads Codex CLI operation history from local SQLite DB; ingests operation logs into MissionD conversation timeline. rusqlite added to missiond-daemon Cargo.toml. spawned in main.rs at daemon boot.")
+        :writes-to "conversation timeline (system_timeline) + conversation_messages (text messages)"
+        :note "reads Codex CLI operation history from local SQLite DB; ingests operation logs into MissionD conversation timeline. rusqlite added to missiond-daemon Cargo.toml. spawned in main.rs at daemon boot."
+        ;; commit 43c80f4: parse_jsonl_tool_calls → parse_jsonl，新增 ParsedMessage struct
+        ;;   - 同时提取 tool calls + text messages (agent assistant + user 消息)
+        ;;   - insert_conversation_messages_batch 写入 conversation_messages 表
+        ;;   - poll interval 30s → 10s (POLL_INTERVAL_SECS=10)
+        )
       (worker gemini-logger
         :target "crates/missiond-daemon/src/workers/local/gemini_logger.rs"
         :trigger channel
@@ -1373,12 +1390,19 @@
       :target "crates/missiond-daemon/src/llm/llm_gateway.rs"
       (providers
         (gemini-gateway  :target "crates/missiond-daemon/src/llm/gemini_client.rs")
-        (sonnet-gateway  :target "crates/missiond-daemon/src/llm/sonnet_gateway.rs")
+        (sonnet-gateway  :target "crates/missiond-daemon/src/llm/sonnet_gateway.rs"
+          ;; commit 43c80f4: model name cpapi-claude-sonnet → claude-sonnet (SONNET_MODEL const + llm_gateway.rs)
+          )
         (minimax-gateway :target "crates/missiond-daemon/src/llm/minimax_gateway.rs")))
 
     (component llm-gate
       :target "crates/missiond-daemon/src/llm/llm_gate.rs"
-      (description "rate limiter + 429 backoff + quota tracking"))
+      (description "rate limiter + 429 backoff + quota tracking")
+      ;; commit 43c80f4: 新增 check_interactive_exempt(provider) — 用 REQUEST_CALLER task-local 判断
+      ;;   - REQUEST_CALLER == "router_chat" → is_interactive_caller() = true → 绕过 gate
+      ;;   - 语义：用户发起的 MCP 调用(router_chat 等)豁免 gate 限制；后台 worker 仍受 gate 约束
+      ;;   - gemini_client.rs 的 check() 已改为调用 check_interactive_exempt()
+      )
 
     (component gemini-driver  :target "crates/missiond-daemon/src/llm/gemini_driver.rs")
     (component gemini-file-api :target "crates/missiond-daemon/src/llm/gemini_file_api.rs")
