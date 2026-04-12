@@ -1,14 +1,14 @@
 ;; ══════════════════════════════════════════════════════
 ;; MissionD — Implementation Detail (Full System)
 ;; Generated: 2026-04-07 | Forge Deep Cartography v3
-;; Updated: 2026-04-12 (79a877f)
+;; Updated: 2026-04-12 (9684b50)
 ;; ══════════════════════════════════════════════════════
 
 (intent missiond
   (granularity L3-Implementation)
-  (survey-hash "e17db52-50a5296-76900d1-e18d0bf-5671c95-ac96b3c-eae9bbd-c15f363-5ec3517-84ac1a6-0adbb18-3c10d21-dc45dcb-21a3b63-65c8b59-1ea1838-081b4f9-a9517ec-20813d5-5a5f805-ec269d7-79a877f")
+  (survey-hash "e17db52-50a5296-76900d1-e18d0bf-5671c95-ac96b3c-eae9bbd-c15f363-5ec3517-84ac1a6-0adbb18-3c10d21-dc45dcb-21a3b63-65c8b59-1ea1838-081b4f9-a9517ec-20813d5-5a5f805-ec269d7-79a877f-ad889d1-48a9834-b3f04a6-ce3f3ec-d8f47de-d75699e-9684b50")
   (survey-date "2026-04-12T00:00:00Z")
-  (last-updated "2026-04-12 — 11 new commits (incremental Apr 9-12 +79a877f): [dc45dcb] feat: conversation_turns 新增 skeleton 列(JSON turn index, on-demand message retrieval); [21a3b63] feat: turn embedding digest — files_read/files_changed/outcome 列 + keyword-dense embedding text 重写(project:X files:Y intent:Z outcome:W); [65c8b59] feat: 用 EventAnalyzerWorker 替代 git_watcher 30s 轮询 — ContextualCommitDetected 事件携带 conversation/session/slot_id; git_watcher.rs REMOVED; [1ea1838] refactor: commit detection 移入 tagger-chunker; [081b4f9] fix: 解析真实 Bash 命令格式 [Tool: Bash]; [a9517ec] fix: SlotConfig.initial_prompt 通过 pty_spawn handler 传入; [20813d5] feat: SlotConfig 新增 initial_prompt + serde alias 修复(dangerously_skip_permissions/mcp_config/auto_start); [5a5f805] refactor: missiond-semantic 提取为独立 open-source crate (semantic-terminal); [ec269d7] feat: 权限持久化全链路(perm_injector新模块+LearnedPermissions.REQUIRES_PARAM_PATTERN+pty confirm Option(2)自动审批+sequential PTY writes) + mission_intent MCP工具(read/section/summary/list,模糊项目匹配) + mission_codex_ops MCP工具 + CodexIngestionWorker(读~/.codex/state_5.sqlite写会话时间线); [79a877f] feat: add LispSurveyWorker — commit-triggered intent.lisp maintenance (ContextualCommitDetected→debounce 60s→lisp-surveyor slot, self-trigger filtered, diff截断)")
+  (last-updated "2026-04-12 — 7 new commits (incremental +9684b50): [ad889d1] fix: ConversationOrganizer 去除 agent-only 过滤 — 所有 session 均发 SessionOrganized(原仅 agent-* 会话触发，用户前台 session 从未发出 SessionOrganized 导致 TaggerChunker 不处理 → commit detection 静默失效); [48a9834] fix: ConversationOrganizer 新增诊断 debug 日志; [b3f04a6] test: 触发 commit detection 端到端验证 lisp_survey 事件链; [ce3f3ec] fix: TaggerChunker commit detection 移到 early-return 之前(原 collect_tool_labels 在 raw_turns.is_empty() return 之后，活跃 session 未完成最后 turn 时 commit 事件永远不触发); [d8f47de] refactor: TaggerChunker 拆分为 analyze_messages + chunk_turns 双独立流水线 — analyze_messages 处理 noise labels/tool 分类/commit 检测，chunk_turns 做 turn 提取/tail-trim/持久化，两管道共享同一 messages 数组，从架构上保证 turn early-return 不影响 message 分析; [d75699e] test: E2E 验证 refactored TaggerChunker commit detection; [9684b50] debug: analyze_messages 新增 commit detection tracing(user_msg 数/regex MATCH 日志)")
 
   ;; ══════════════════════════════════════════════════════
   ;; DESIGN CONSTRAINTS
@@ -1046,7 +1046,11 @@
         :note "workers split into paused/force_resumed lists for debug visibility")
 
       (struct ControlManager
-        :note "mutation + tokio::watch broadcast + crash-recover from control_tree.json"
+        :pattern "push-based watch broadcast (NOT polling)"
+        :transport "tokio::watch::channel<ControlTree>"
+        :semantics "mutations → atomic update via send_modify() → all subscribers notified via changed().await"
+        :persistence "control_tree.json — crash recovery via spawn_blocking write"
+        :note "Workers await watch::Receiver::changed() in select! — zero-cost async push, not HashMap polling"
         (mutations (set_global_paused set_provider set_domain set_worker set_slot_role set_project))
         ;; set_project: paused=true → insert project_id; paused=false → remove (no false entry stored)
         ))
@@ -1120,7 +1124,12 @@
         :writes-to (conversations conversation_messages))
       (worker conversation-organizer
         :target "crates/missiond-daemon/src/workers/local/conversation_organizer.rs"
-        :listens-to MessagePersisted)
+        :listens-to ConversationMessageLogged
+        :emits SessionOrganized
+        ;; commit ad889d1: 去除 agent-only 过滤 — 原仅处理 agent-* session，用户前台 session 被忽略
+        ;; 修复后：所有 session_id 均进 dirty 集合，统一在 5s debounce 后 emit SessionOrganized
+        ;; P0 compaction link 和 P1 orphan parent fix 仍仅对 agent-* 执行，非 agent session 跳过
+        )
       (worker pty-event-worker
         :target "crates/missiond-daemon/src/workers/local/pty_event_worker.rs"
         :listens-to PtyStateChanged
@@ -1131,12 +1140,17 @@
         )
       (worker tagger-chunker
         :target "crates/missiond-daemon/src/workers/local/tagger_chunker.rs"
-        :listens-to MessagePersisted
+        :listens-to SessionOrganized
         ;; commit 21a3b63: TurnBuilder extracts files_read/files_changed/outcome from tool calls
         ;; build_turn_embedding_text: keyword-dense format (project:X files:Y intent:Z outcome:W)
         ;; filters <task-notification> noise turns; triggers per-turn embedding after backfill (dc45dcb)
         ;; commit 1ea1838: commit detection logic moved here from EventAnalyzerWorker
         ;; commit 081b4f9: parse actual command from [Tool: Bash] content format
+        ;; commit ce3f3ec: commit detection 移到 early-return 之前，活跃 session 不再丢失 commit 事件
+        ;; commit d8f47de: process_session 拆分为两独立流水线:
+        ;;   - analyze_messages(stage2): noise-labels + tool分类 + commit detection — 必然执行
+        ;;   - chunk_turns(stage3): turn提取/tail-trim/持久化 — 活跃session可返回0无副作用
+        ;; commit 9684b50: analyze_messages 新增 tracing — user_msg count + regex MATCH 逐条日志
         )
       ;; EventAnalyzerWorker (65c8b59) was added then absorbed into tagger-chunker (1ea1838)
       ;; Commit detection is now done at schema-on-write stage in tagger_chunker with full message content
@@ -1222,29 +1236,27 @@
         (cc-controller    :target "crates/missiond-daemon/src/slot_orchestrator/cc_controller.rs")
         (gemini-controller :target "crates/missiond-daemon/src/slot_orchestrator/gemini_controller.rs"))
       (spawner :target "crates/missiond-daemon/src/slot_orchestrator/spawner.rs"
-        ;; commit 20813d5 + a9517ec: SlotConfig now supports initial_prompt
-        ;; After slot reaches Idle, spawner injects initial_prompt as first message.
-        ;; Also fixes: serde aliases for dangerously_skip_permissions / mcp_config / auto_start
-        ;; (were silently ignored due to camelCase mismatch in YAML deserialization).
-        ;; Dynamic coder/ops slot templates now default to sonnet model.
-        ;; packages/dashboard removed (superseded by board).
+
+        (invariant sole-spawn-bottleneck
+          :function "spawn_tracked_slot"
+          :enforced "ALL 10 spawn paths go through this function; 0 direct pty.spawn() calls exist"
+          :callers ("pty::mission_pty_spawn" "compute_slot::create_slot" "process::spawn+restart"
+                    "task::auto_spawn_exited" "flow_engine::ensure_slot_for_task"
+                    "memory_scheduler::ensure_memory_slot" "gemini_driver::ensure_spawned"
+                    "main::handle_slots_reload" "cc_controller::spawn_and_register")
+          :pipeline (perm-inject → tracking-env → pty-spawn → uuid-capture → initial-prompt))
+
         (slot-config-fields
           (initial_prompt :type "Option<String>" :doc "first message injected after slot reaches Idle")
           (dangerously_skip_permissions :type bool :serde-alias "dangerouslySkipPermissions")
           (mcp_config :type "Option<McpConfig>" :serde-alias "mcpConfig")
           (auto_start :type bool :serde-alias "autoStart")))
 
-      ;; commit ec269d7: NEW — perm_injector module
-      ;; updated 2026-04-12 (Phase 1-5 architecture upgrade):
-      ;;   - Now invoked from INSIDE spawn_tracked_slot — one entry point for all 10
-      ;;     spawn paths (was: mission_pty_spawn + mission_compute_slot:create only)
-      ;;   - sync signature: (cwd, role, project_id, slot_id, learned) — reads union via get_for_spawn
       (perm-injector :target "crates/missiond-daemon/src/slot_orchestrator/perm_injector.rs"
         :added "ec269d7"
         :updated "2026-04-12"
-        :invoked-by ("slot_orchestrator::spawner::spawn_tracked_slot (all spawn paths)")
-        :doc "before each slot spawn, reads global+role+project+slot union from learned_permissions.yaml (LearnedPermissions::get_for_spawn) and merges into <cwd>/.claude/settings.local.json (idempotent, preserves existing entries, dedups on (tool_pattern, param_pattern))"
-        (note "closes the gap where 8 of 10 spawn paths (task/process/cc_controller/flow_engine/memory_scheduler/gemini_driver/slots_reload) previously bypassed perm injection"))
+        :invoked-by "spawn_tracked_slot (inside the sole-spawn-bottleneck, covers all 10 paths)"
+        :doc "before each slot spawn, reads global+role+project+slot union from learned_permissions.yaml (LearnedPermissions::get_for_spawn) and merges into <cwd>/.claude/settings.local.json (idempotent, preserves existing entries, dedups on (tool_pattern, param_pattern))")
 
       ;; commit 79a877f: added lisp_survey task (4th registered task in main.rs)
       (registered-tasks
