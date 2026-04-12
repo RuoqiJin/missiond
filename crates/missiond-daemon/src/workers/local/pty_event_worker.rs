@@ -505,11 +505,56 @@ async fn handle_confirm_required(
     };
 
     if should_auto_approve {
+        // Prefer Option(2) "Yes, don't ask again for X" over Option(1) "Yes, this time" so
+        // Claude Code persists the allowlist into project-level settings.local.json — avoids
+        // the same prompt re-firing on every subsequent identical tool call.
+        let opt2_text = tool_info
+            .as_ref()
+            .and_then(|info| info.options.get(1))
+            .cloned();
+        let use_allowlist = opt2_text
+            .as_deref()
+            .map(|opt2| {
+                // Normalize curly quotes (Claude Code TUI sometimes renders U+2019)
+                // to ASCII apostrophe before substring matching.
+                let normalized = opt2
+                    .to_lowercase()
+                    .replace('\u{2019}', "'")
+                    .replace('\u{2018}', "'");
+                normalized.contains("don't ask")
+                    || normalized.contains("dont ask")
+                    || normalized.contains("always")
+                    || normalized.contains("trust this")
+                    || normalized.contains("不再")
+            })
+            .unwrap_or(false);
+        let response = if use_allowlist {
+            missiond_core::ConfirmResponse::Option(2)
+        } else {
+            missiond_core::ConfirmResponse::Yes
+        };
+        info!(
+            slot_id = %slot_id,
+            tool = ?tool_name,
+            use_allowlist,
+            opt2_text = ?opt2_text,
+            "Auto-approve sending response"
+        );
+
         let pty = s.pty.clone();
         let sid = slot_id.to_string();
         tokio::spawn(async move {
-            if let Err(e) = pty.confirm(&sid, missiond_core::ConfirmResponse::Yes).await {
-                warn!(slot_id = %sid, error = %e, "Failed to auto-confirm tool");
+            // Brief delay to let Claude Code's TUI fully render the dialog and bind
+            // its keystroke handlers — without it, the arrow-key sequence used by
+            // Option(2) can land before the dialog is interactive (8ms is too fast).
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            match pty.confirm(&sid, response).await {
+                Ok(()) => {
+                    info!(slot_id = %sid, "Auto-confirm sent successfully");
+                }
+                Err(e) => {
+                    warn!(slot_id = %sid, error = %e, "Failed to auto-confirm tool");
+                }
             }
         });
     }

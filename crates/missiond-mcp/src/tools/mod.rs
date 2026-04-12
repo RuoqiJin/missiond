@@ -172,9 +172,9 @@ mod comm;
 mod sysinfra;
 
 // Domain aliases for readability
-use knowledge::{board, cascade, insight, kb, skill, memory, project};
+use knowledge::{board, cascade, insight, intent, kb, skill, memory, project};
 use compute::{task, task_delegate, process, pty, cc_tasks, minimax, worker, slot, compute_slot, job};
-use comm::{router_chat, question, conversation, timeline, audit};
+use comm::{router_chat, question, conversation, timeline, audit, codex_ops};
 use sysinfra::{infra, permission, power, system};
 
 /// Generate all tool definitions
@@ -187,6 +187,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
     tools.extend(memory::definitions());
     tools.extend(insight::definitions());
     tools.extend(cascade::definitions());
+    tools.extend(intent::definitions());
     tools.extend(project::definitions());
     // compute
     tools.extend(task::definitions());
@@ -205,6 +206,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
     tools.extend(conversation::definitions());
     tools.extend(timeline::definitions());
     tools.extend(audit::definitions());
+    tools.extend(codex_ops::definitions());
     // sysinfra
     tools.extend(infra::definitions());
     tools.extend(permission::definitions());
