@@ -2,6 +2,8 @@ use crate::context::slot_env::{build_slot_tracking_env, capture_slot_session_uui
 use anyhow::Result;
 use missiond_core::db::traits::MissionStore;
 use missiond_core::pty::{PTYAgentInfo, PTYManager};
+use missiond_core::types::SharedProjectRegistry;
+use missiond_core::LearnedPermissions;
 use missiond_core::{PTYSlot, PTYSpawnOptions};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -11,14 +13,40 @@ use tracing::{info, warn};
 /// A unified spawner for tracked slot PTY processes.
 /// This ensures that the session tracking environment and UUID capture
 /// are always correctly applied, preventing orphaned sessions.
+///
+/// Also runs the permission injector before spawn so any `learned_permissions.yaml`
+/// entries (global/role/project/slot scope union) are materialized into
+/// `<cwd>/.claude/settings.local.json`. This centralizes perm injection inside
+/// the single spawn bottleneck — eliminating the historical gap where 8 of 10
+/// spawn paths bypassed `sync_learned_to_local_settings`.
+#[allow(clippy::too_many_arguments)]
 pub async fn spawn_tracked_slot(
     pty: &Arc<PTYManager>,
     store: &Arc<dyn MissionStore>,
     pty_session_uuids: &Arc<RwLock<HashSet<String>>>,
+    project_registry: &SharedProjectRegistry,
+    learned: Option<&Arc<LearnedPermissions>>,
     pty_slot: &PTYSlot,
     mut options: PTYSpawnOptions,
     original_slot_env: Option<&HashMap<String, String>>,
 ) -> Result<PTYAgentInfo> {
+    // 0. Inject learned permissions into <cwd>/.claude/settings.local.json so Claude Code
+    //    picks up any earlier "don't ask again" decisions. Runs for every spawn path.
+    if let (Some(cwd), Some(learned)) = (pty_slot.cwd.as_deref(), learned) {
+        let project_id = project_registry
+            .read()
+            .await
+            .resolve(&cwd.display().to_string())
+            .map(|s| s.to_string());
+        crate::slot_orchestrator::perm_injector::sync_learned_to_local_settings(
+            cwd,
+            &pty_slot.role,
+            project_id.as_deref(),
+            Some(pty_slot.id.as_str()),
+            learned,
+        );
+    }
+
     // 1. Automatically build tracking environment and session file path
     let (tracking_env, session_file) =
         build_slot_tracking_env(&pty_slot.id, original_slot_env).await;

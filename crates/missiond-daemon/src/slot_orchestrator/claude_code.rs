@@ -16,7 +16,8 @@ use tracing::{info, warn};
 
 use missiond_core::db::traits::MissionStore;
 use missiond_core::pty::PTYManager;
-use missiond_core::types::{CliEngine, Lifecycle};
+use missiond_core::types::{CliEngine, Lifecycle, SharedProjectRegistry};
+use missiond_core::LearnedPermissions;
 
 use super::cc_controller::ClaudeCodeController;
 use super::controller::EngineController;
@@ -41,9 +42,17 @@ impl ClaudeCodeSlotManager {
         pty: Arc<PTYManager>,
         store: Arc<dyn MissionStore>,
         pty_session_uuids: Arc<RwLock<HashSet<String>>>,
+        project_registry: SharedProjectRegistry,
+        learned: Option<Arc<LearnedPermissions>>,
     ) -> Self {
         Self {
-            controller: ClaudeCodeController::new(pty, store, pty_session_uuids),
+            controller: ClaudeCodeController::new(
+                pty,
+                store,
+                pty_session_uuids,
+                project_registry,
+                learned,
+            ),
             persistent_locks: DashMap::new(),
             ephemeral_semaphore: Arc::new(Semaphore::new(EPHEMERAL_CAPACITY)),
         }

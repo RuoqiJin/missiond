@@ -80,6 +80,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 &state.pty,
                 &state.store,
                 &state.pty_session_uuids,
+                &state.project_registry,
+                state.permission.learned(),
                 &pty_slot,
                 PTYSpawnOptions {
                     auto_restart: auto_restart.unwrap_or(false),
@@ -130,6 +132,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 &state.pty,
                 &state.store,
                 &state.pty_session_uuids,
+                &state.project_registry,
+                state.permission.learned(),
                 &pty_slot,
                 PTYSpawnOptions {
                     auto_restart: auto_restart.unwrap_or(false),

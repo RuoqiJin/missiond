@@ -48,6 +48,8 @@ pub(crate) async fn ensure_memory_slot_by_id(state: &AppState, slot_id: &str) ->
         &state.pty,
         &state.store,
         &state.pty_session_uuids,
+        &state.project_registry,
+        state.permission.learned(),
         &pty_slot,
         PTYSpawnOptions {
             auto_restart: true,

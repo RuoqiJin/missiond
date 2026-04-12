@@ -247,19 +247,9 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         // Init slot in PTYManager first (registers agent_info)
         state_clone.pty.init_slot(&pty_slot).await;
 
-        // Sync any role-level learned permissions into the slot's
-        // .claude/settings.local.json before spawn so Claude Code reads them
-        // and skips re-prompting for tools the user (or auto-approve) already allowed.
-        if let (Some(cwd), Some(learned)) = (
-            slot_config.cwd.as_ref().map(PathBuf::from),
-            state_clone.permission.learned(),
-        ) {
-            crate::slot_orchestrator::perm_injector::sync_learned_to_local_settings(
-                &cwd,
-                &slot_config.role,
-                &learned,
-            );
-        }
+        // NOTE: perm_injector is now invoked from inside spawn_tracked_slot
+        // (Phase 3 of the permission persistence architecture upgrade) so every
+        // spawn path gets coverage. No need to call it here.
 
         let mcp_config = slot_config.mcp_config.as_ref().map(PathBuf::from);
 
@@ -267,6 +257,8 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             &state_clone.pty,
             &state_clone.store,
             &state_clone.pty_session_uuids,
+            &state_clone.project_registry,
+            state_clone.permission.learned(),
             &pty_slot,
             PTYSpawnOptions {
                 auto_restart: false,

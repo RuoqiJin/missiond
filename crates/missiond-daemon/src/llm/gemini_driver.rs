@@ -22,6 +22,8 @@ use tracing::{info, warn};
 
 use missiond_core::pty::{ManagerEvent, PTYManager, PTYSpawnOptions, SessionState};
 use missiond_core::types::CliEngine;
+use missiond_core::types::SharedProjectRegistry;
+use missiond_core::LearnedPermissions;
 
 /// Default Gemini model.
 const GEMINI_MODEL: &str = "gemini-3.1-pro-preview";
@@ -72,6 +74,8 @@ pub struct GeminiPtyDriver {
     pty: Arc<PTYManager>,
     store: Arc<dyn MissionStore>,
     pty_session_uuids: Arc<RwLock<HashSet<String>>>,
+    project_registry: SharedProjectRegistry,
+    learned: Option<Arc<LearnedPermissions>>,
 }
 
 impl GeminiPtyDriver {
@@ -79,11 +83,15 @@ impl GeminiPtyDriver {
         pty: Arc<PTYManager>,
         store: Arc<dyn MissionStore>,
         pty_session_uuids: Arc<RwLock<HashSet<String>>>,
+        project_registry: SharedProjectRegistry,
+        learned: Option<Arc<LearnedPermissions>>,
     ) -> Self {
         Self {
             pty,
             store,
             pty_session_uuids,
+            project_registry,
+            learned,
         }
     }
 
@@ -127,6 +135,8 @@ impl GeminiPtyDriver {
             &self.pty,
             &self.store,
             &self.pty_session_uuids,
+            &self.project_registry,
+            self.learned.as_ref(),
             &pty_slot,
             PTYSpawnOptions {
                 auto_restart: !is_ephemeral,

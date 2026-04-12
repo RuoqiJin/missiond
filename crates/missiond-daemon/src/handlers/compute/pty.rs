@@ -153,18 +153,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 engine: slot.config.engine,
             };
 
-            // Sync any role-level learned permissions into the slot's
-            // .claude/settings.local.json before spawn so Claude Code reads them.
-            if let (Some(cwd), Some(learned)) = (
-                slot.config.cwd.as_deref().map(PathBuf::from),
-                state.permission.learned(),
-            ) {
-                crate::slot_orchestrator::perm_injector::sync_learned_to_local_settings(
-                    &cwd,
-                    &slot.config.role,
-                    &learned,
-                );
-            }
+            // NOTE: perm_injector is now invoked from inside spawn_tracked_slot
+            // (Phase 3 of the permission persistence architecture upgrade) so every
+            // spawn path gets coverage. No need to call it here.
 
             // Resolve MCP config: arg > slot config > None
             let mcp_config = mcp_config_path
@@ -176,6 +167,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 &state.pty,
                 &state.store,
                 &state.pty_session_uuids,
+                &state.project_registry,
+                state.permission.learned(),
                 &pty_slot,
                 PTYSpawnOptions {
                     auto_restart: auto_restart.unwrap_or(false),
@@ -394,19 +387,23 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             // Learn permission from user's decision.
             // When user picked Option(2) "Yes, don't ask again for X", extract X as param_pattern
             // so Bash subcommand allowlists (e.g. python3:*) survive instead of being persisted as
-            // a blanket "allow ALL Bash" entry.
+            // a blanket "allow ALL Bash" entry. Also extract any "commands in <path>" hint and
+            // learn a second entry at project scope so cross-cwd spawns pick it up.
             if let Some(ref info) = pending {
                 if let Some(ref tool) = info.tool {
                     if let Some(learned) = state.permission.learned() {
                         let decision = if is_approval { "allow" } else { "deny" };
-                        let param_pattern = if is_allowlist_choice {
+                        let extracted = if is_allowlist_choice {
                             info.options
                                 .get(1)
-                                .and_then(|opt| extract_dont_ask_pattern(opt))
+                                .and_then(|opt| crate::permission_extract::extract_confirm(opt))
                         } else {
                             None
                         };
+                        let param_pattern = extracted.as_ref().map(|e| e.pattern.clone());
+                        let project_path = extracted.as_ref().and_then(|e| e.project_path.clone());
                         if let Some(status) = state.pty.get_status(&slot_id).await {
+                            // Always learn at role scope.
                             if let Err(e) = learned.learn(
                                 "role",
                                 &status.role,
@@ -414,7 +411,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                                 decision,
                                 param_pattern.as_deref(),
                             ) {
-                                tracing::warn!(error = %e, "Failed to record learned permission");
+                                tracing::warn!(error = %e, "Failed to record learned permission (role)");
                             } else {
                                 tracing::info!(
                                     role = %status.role,
@@ -422,8 +419,42 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                                     param = ?param_pattern,
                                     decision,
                                     slot_id = %slot_id,
-                                    "Permission learned from user confirmation"
+                                    "Permission learned from user confirmation (role scope)"
                                 );
+                            }
+                            // If the dialog carried a project hint, also learn at project scope.
+                            if let Some(path) = project_path.as_deref() {
+                                let project_id = state
+                                    .project_registry
+                                    .read()
+                                    .await
+                                    .resolve(path)
+                                    .map(|s| s.to_string());
+                                if let Some(pid) = project_id {
+                                    if let Err(e) = learned.learn(
+                                        "project",
+                                        &pid,
+                                        &tool.name,
+                                        decision,
+                                        param_pattern.as_deref(),
+                                    ) {
+                                        tracing::warn!(error = %e, "Failed to record learned permission (project)");
+                                    } else {
+                                        tracing::info!(
+                                            project_id = %pid,
+                                            tool = %tool.name,
+                                            param = ?param_pattern,
+                                            decision,
+                                            slot_id = %slot_id,
+                                            "Permission learned from user confirmation (project scope)"
+                                        );
+                                    }
+                                } else {
+                                    tracing::debug!(
+                                        path = %path,
+                                        "No registered project matches confirm dialog path; skipping project-scope learn"
+                                    );
+                                }
                             }
                         }
                     }
@@ -528,45 +559,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
     }
 }
 
-/// Parse the "Yes, and don't ask again for: <pattern>" option text from a Claude Code
-/// confirmation dialog and return the bare pattern (e.g. `python3:*`).
-/// Returns None when the option text doesn't match the expected shape.
-pub(crate) fn extract_dont_ask_pattern(option_text: &str) -> Option<String> {
-    // English: "Yes, and don't ask again for: python3:*"
-    // Chinese: "是，不再询问 python3:*"
-    // Claude Code TUI sometimes renders the apostrophe as U+2019 / U+2018; normalize first.
-    let normalized: String = option_text
-        .chars()
-        .map(|c| match c {
-            '\u{2018}' | '\u{2019}' => '\'',
-            other => other,
-        })
-        .collect();
-    let lower = normalized.to_lowercase();
-    let marker = if lower.contains("don't ask again for:") {
-        "don't ask again for:"
-    } else if lower.contains("dont ask again for:") {
-        "dont ask again for:"
-    } else if lower.contains("don't ask again for") {
-        "don't ask again for"
-    } else if lower.contains("不再询问") {
-        "不再询问"
-    } else {
-        return None;
-    };
-    let idx = lower.find(marker)?;
-    let after = normalized[idx + marker.len()..].trim();
-    let pattern = after.trim_start_matches(':').trim();
-    if pattern.is_empty() {
-        None
-    } else {
-        Some(pattern.to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permission_extract::extract_confirm;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -600,22 +596,23 @@ mod tests {
 
         // Step 2: extract param pattern from the second option text
         let option_text = "Yes, and don't ask again for: python3:*";
-        let param = extract_dont_ask_pattern(option_text);
-        assert_eq!(param.as_deref(), Some("python3:*"));
+        let extracted = extract_confirm(option_text).expect("extract");
+        assert_eq!(extracted.pattern.as_str(), "python3:*");
+        assert!(extracted.project_path.is_none());
 
         // Step 3: learn permission (simulates what mission_pty_confirm does)
         let dir = tempdir().unwrap();
         let yaml_path = dir.path().join("perms.yaml");
         let learned = Arc::new(missiond_core::LearnedPermissions::new(&yaml_path).unwrap());
         learned
-            .learn("role", "coder", "Bash", "allow", param.as_deref())
+            .learn("role", "coder", "Bash", "allow", Some(extracted.pattern.as_str()))
             .expect("learn should succeed");
 
         // Step 4: sync to settings.local.json (simulates next slot spawn)
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         crate::slot_orchestrator::perm_injector::sync_learned_to_local_settings(
-            &cwd, "coder", &learned,
+            &cwd, "coder", None, None, &learned,
         );
 
         // Step 5: verify the entry appears in settings.local.json
@@ -629,32 +626,5 @@ mod tests {
             "Bash(python3:*) not found in allowlist: {:?}",
             allow
         );
-    }
-
-    #[test]
-    fn extract_dont_ask_pattern_english() {
-        assert_eq!(
-            extract_dont_ask_pattern("Yes, and don't ask again for: python3:*"),
-            Some("python3:*".to_string())
-        );
-        assert_eq!(
-            extract_dont_ask_pattern("Yes, and don't ask again for: Read(/etc/passwd)"),
-            Some("Read(/etc/passwd)".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_dont_ask_pattern_chinese() {
-        assert_eq!(
-            extract_dont_ask_pattern("是，不再询问 python3:*"),
-            Some("python3:*".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_dont_ask_pattern_no_match() {
-        assert_eq!(extract_dont_ask_pattern("Yes"), None);
-        assert_eq!(extract_dont_ask_pattern("No"), None);
-        assert_eq!(extract_dont_ask_pattern(""), None);
     }
 }

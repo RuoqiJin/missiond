@@ -617,6 +617,8 @@ pub(crate) async fn ensure_autopilot_pty(
         &state.pty,
         &state.store,
         &state.pty_session_uuids,
+        &state.project_registry,
+        state.permission.learned(),
         &pty_slot,
         PTYSpawnOptions {
             auto_restart: false,

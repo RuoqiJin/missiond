@@ -541,6 +541,107 @@ async fn handle_confirm_required(
             "Auto-approve sending response"
         );
 
+        // Single-write-path: when choosing the allowlist option we must ALSO persist
+        // the learned entry here. `mission_pty_confirm` (the MCP manual path) only
+        // runs for user-driven confirms; auto-approve would otherwise silently skip
+        // learn() and leave `learned_permissions.yaml` empty, making perm_injector
+        // a no-op on next spawn.
+        if use_allowlist {
+            if let Some(learned) = s.permission.learned() {
+                let extracted = opt2_text
+                    .as_deref()
+                    .and_then(crate::permission_extract::extract_confirm);
+                if let Some(ext) = extracted {
+                    // Resolve the slot's role for scope_id.
+                    let role = s
+                        .pty
+                        .get_status(slot_id)
+                        .await
+                        .map(|st| st.role.clone())
+                        .unwrap_or_default();
+                    // Resolve the tool name from tool_info (guard against None).
+                    let tool_name_owned = tool_info
+                        .as_ref()
+                        .and_then(|info| info.tool.as_ref())
+                        .map(|t| t.name.clone());
+
+                    if let (false, Some(tool_name)) = (role.is_empty(), tool_name_owned) {
+                        // Always learn at role scope.
+                        match learned.learn(
+                            "role",
+                            &role,
+                            &tool_name,
+                            "allow",
+                            Some(ext.pattern.as_str()),
+                        ) {
+                            Ok(()) => info!(
+                                slot_id = %slot_id,
+                                role = %role,
+                                tool = %tool_name,
+                                pattern = %ext.pattern,
+                                "Auto-approve learned permission (role scope)"
+                            ),
+                            Err(e) => warn!(
+                                slot_id = %slot_id,
+                                error = %e,
+                                "Auto-approve failed to learn permission (role scope)"
+                            ),
+                        }
+                        // If the dialog text carried a "commands in <path>" hint,
+                        // also learn at project scope.
+                        if let Some(path) = ext.project_path.as_deref() {
+                            let project_id = s
+                                .project_registry
+                                .read()
+                                .await
+                                .resolve(path)
+                                .map(|s| s.to_string());
+                            if let Some(pid) = project_id {
+                                match learned.learn(
+                                    "project",
+                                    &pid,
+                                    &tool_name,
+                                    "allow",
+                                    Some(ext.pattern.as_str()),
+                                ) {
+                                    Ok(()) => info!(
+                                        slot_id = %slot_id,
+                                        project_id = %pid,
+                                        tool = %tool_name,
+                                        pattern = %ext.pattern,
+                                        "Auto-approve learned permission (project scope)"
+                                    ),
+                                    Err(e) => warn!(
+                                        slot_id = %slot_id,
+                                        error = %e,
+                                        "Auto-approve failed to learn permission (project scope)"
+                                    ),
+                                }
+                            } else {
+                                debug!(
+                                    slot_id = %slot_id,
+                                    path = %path,
+                                    "Auto-approve: no registered project matches confirm dialog path"
+                                );
+                            }
+                        }
+                    } else {
+                        debug!(
+                            slot_id = %slot_id,
+                            role_empty = role.is_empty(),
+                            "Auto-approve: missing role or tool name, skipping learn"
+                        );
+                    }
+                } else {
+                    debug!(
+                        slot_id = %slot_id,
+                        opt2_text = ?opt2_text,
+                        "Auto-approve: could not extract pattern from allowlist option"
+                    );
+                }
+            }
+        }
+
         let pty = s.pty.clone();
         let sid = slot_id.to_string();
         tokio::spawn(async move {
