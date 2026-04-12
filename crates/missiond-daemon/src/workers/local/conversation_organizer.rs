@@ -54,11 +54,12 @@ async fn run_organizer(
             event = rx.recv() => match event {
                 Ok(te) => {
                     if let DaemonEvent::ConversationMessageLogged { ref session_id, .. } = te.event {
+                        debug!(session_id = %session_id, "Organizer: received ConversationMessageLogged");
                         dirty.insert(session_id.clone());
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    debug!(skipped = n, "Organizer: broadcast lagged");
+                    warn!(skipped = n, "Organizer: broadcast lagged");
                     continue;
                 }
                 Err(_) => break,
@@ -110,19 +111,18 @@ async fn organize(state: &AppState, session_ids: &[String]) {
 
     // Emit SessionOrganized for all processed sessions
     for sid in session_ids {
+        info!(session_id = %sid, "Organizer: emitting SessionOrganized");
         state.event_bus.publish(DaemonEvent::SessionOrganized {
             session_id: sid.clone(),
         });
     }
 
-    if compaction_linked + parent_fixed > 0 {
-        info!(
-            compaction_linked,
-            parent_fixed,
-            sessions = session_ids.len(),
-            "Organizer: batch complete"
-        );
-    }
+    info!(
+        compaction_linked,
+        parent_fixed,
+        sessions = session_ids.len(),
+        "Organizer: batch complete"
+    );
 }
 
 /// Extract original session ID from compaction fragment.
