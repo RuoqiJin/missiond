@@ -22,26 +22,37 @@ fn perm_to_string(tool: &str, param: Option<&str>) -> String {
     }
 }
 
-/// Sync MissionD's role-level learned permissions into the slot's project-local
+/// Sync MissionD's learned permissions into the slot's project-local
 /// `.claude/settings.local.json`. Idempotent: existing entries are preserved and
 /// new entries are deduplicated.
+///
+/// Pulls the union across `global`, `role`, `project`, and `slot` scopes via
+/// `LearnedPermissions::get_for_spawn`.
 ///
 /// Failures are logged but never propagated — a settings sync error must not
 /// block the slot from spawning.
 pub fn sync_learned_to_local_settings(
     cwd: &Path,
     role: &str,
+    project_id: Option<&str>,
+    slot_id: Option<&str>,
     learned: &Arc<LearnedPermissions>,
 ) {
-    if let Err(e) = sync_inner(cwd, role, learned) {
+    if let Err(e) = sync_inner(cwd, role, project_id, slot_id, learned) {
         warn!(role, cwd = %cwd.display(), error = %e, "Failed to sync learned permissions to settings.local.json");
     }
 }
 
-fn sync_inner(cwd: &Path, role: &str, learned: &Arc<LearnedPermissions>) -> Result<()> {
+fn sync_inner(
+    cwd: &Path,
+    role: &str,
+    project_id: Option<&str>,
+    slot_id: Option<&str>,
+    learned: &Arc<LearnedPermissions>,
+) -> Result<()> {
     let entries = learned
-        .get_for_scope("role", role)
-        .context("get_for_scope failed")?;
+        .get_for_spawn(role, project_id, slot_id)
+        .context("get_for_spawn failed")?;
     let allow_entries: Vec<String> = entries
         .iter()
         .filter(|e| e.decision == "allow")
@@ -179,7 +190,7 @@ mod tests {
 
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
-        sync_learned_to_local_settings(&cwd, "coder", &learned);
+        sync_learned_to_local_settings(&cwd, "coder", None, None, &learned);
 
         let settings_path = cwd.join(".claude/settings.local.json");
         assert!(settings_path.exists());
@@ -211,7 +222,7 @@ mod tests {
         )
         .unwrap();
 
-        sync_learned_to_local_settings(&cwd, "coder", &learned);
+        sync_learned_to_local_settings(&cwd, "coder", None, None, &learned);
 
         let content = std::fs::read_to_string(cwd.join(".claude/settings.local.json")).unwrap();
         let v: Value = serde_json::from_str(&content).unwrap();
@@ -232,8 +243,8 @@ mod tests {
 
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
-        sync_learned_to_local_settings(&cwd, "coder", &learned);
-        sync_learned_to_local_settings(&cwd, "coder", &learned);
+        sync_learned_to_local_settings(&cwd, "coder", None, None, &learned);
+        sync_learned_to_local_settings(&cwd, "coder", None, None, &learned);
 
         let v: Value = serde_json::from_str(
             &std::fs::read_to_string(cwd.join(".claude/settings.local.json")).unwrap(),
@@ -242,5 +253,38 @@ mod tests {
         let allow = v["permissions"]["allow"].as_array().unwrap();
         let count = allow.iter().filter(|e| **e == "Bash(python3:*)").count();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn sync_multi_scope_union() {
+        // Learn at role AND project; sync with both scopes; verify both appear,
+        // and that learning the same entry at both scopes de-duplicates.
+        let dir = tempdir().unwrap();
+        let yaml_path = dir.path().join("perms.yaml");
+        let learned = Arc::new(LearnedPermissions::new(&yaml_path).unwrap());
+        // Duplicate (Bash, python3:*) at both role and project.
+        learned.learn("role", "coder", "Bash", "allow", Some("python3:*")).unwrap();
+        learned.learn("project", "missiond", "Bash", "allow", Some("python3:*")).unwrap();
+        // Project-only WebFetch allow.
+        learned.learn("project", "missiond", "WebFetch", "allow", None).unwrap();
+        // Role-only Read allow.
+        learned.learn("role", "coder", "Read", "allow", None).unwrap();
+
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        sync_learned_to_local_settings(&cwd, "coder", Some("missiond"), None, &learned);
+
+        let v: Value = serde_json::from_str(
+            &std::fs::read_to_string(cwd.join(".claude/settings.local.json")).unwrap(),
+        )
+        .unwrap();
+        let allow = v["permissions"]["allow"].as_array().unwrap();
+        // All three distinct entries present.
+        assert!(allow.iter().any(|e| e == "Bash(python3:*)"));
+        assert!(allow.iter().any(|e| e == "WebFetch"));
+        assert!(allow.iter().any(|e| e == "Read"));
+        // Duplicate learned at both scopes must appear exactly once.
+        let count_bash = allow.iter().filter(|e| **e == "Bash(python3:*)").count();
+        assert_eq!(count_bash, 1, "union must dedup cross-scope duplicates");
     }
 }

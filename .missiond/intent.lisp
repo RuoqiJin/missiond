@@ -1,13 +1,14 @@
 ;; ══════════════════════════════════════════════════════
 ;; MissionD — Implementation Detail (Full System)
 ;; Generated: 2026-04-07 | Forge Deep Cartography v3
+;; Updated: 2026-04-12
 ;; ══════════════════════════════════════════════════════
 
 (intent missiond
   (granularity L3-Implementation)
-  (survey-hash "e17db52-50a5296-76900d1-e18d0bf-5671c95-ac96b3c-eae9bbd-c15f363-5ec3517-84ac1a6-0adbb18-3c10d21")
-  (survey-date "2026-04-10T00:00:00Z")
-  (last-updated "2026-04-10 — 8 commits (+2 incremental): [0adbb18] fix: conversations.started_at 改用真实消息时间戳(而非NOW()) — 3条代码路径修复(ensure_conversation_exists新增started_at参数+COALESCE NOW()、ensure_gemini_conversation传入首条消息时间戳、upsert_conversation ON CONFLICT更新started_at), migration 20260410400000修复6623条历史坏记录(MIN(message.timestamp)); [3c10d21] feat: KB条目新增project_id字段 — KnowledgeEntry/KBRememberInput增加project_id, KB_COLS扩展, INSERT/UPDATE SQL支持project_id(COALESCE保留已有归属), kb_remember接受project参数, kb_update支持project_id修改, 新MCP工具mission_kb_batch_set_project(批量归属分配), Board UI: KBEntryCard内嵌项目选择器下拉+未分类pill过滤(__unclassified__客户端过滤), PATCH /api/kb端点(前端乐观更新→后端kb_update)")
+  (survey-hash "e17db52-50a5296-76900d1-e18d0bf-5671c95-ac96b3c-eae9bbd-c15f363-5ec3517-84ac1a6-0adbb18-3c10d21-dc45dcb-21a3b63-65c8b59-1ea1838-081b4f9-a9517ec-20813d5-5a5f805-ec269d7")
+  (survey-date "2026-04-12T00:00:00Z")
+  (last-updated "2026-04-12 — 10 new commits (incremental Apr 9-12): [dc45dcb] feat: conversation_turns 新增 skeleton 列(JSON turn index, on-demand message retrieval); [21a3b63] feat: turn embedding digest — files_read/files_changed/outcome 列 + keyword-dense embedding text 重写(project:X files:Y intent:Z outcome:W); [65c8b59] feat: 用 EventAnalyzerWorker 替代 git_watcher 30s 轮询 — ContextualCommitDetected 事件携带 conversation/session/slot_id; git_watcher.rs REMOVED; [1ea1838] refactor: commit detection 移入 tagger-chunker; [081b4f9] fix: 解析真实 Bash 命令格式 [Tool: Bash]; [a9517ec] fix: SlotConfig.initial_prompt 通过 pty_spawn handler 传入; [20813d5] feat: SlotConfig 新增 initial_prompt + serde alias 修复(dangerously_skip_permissions/mcp_config/auto_start); [5a5f805] refactor: missiond-semantic 提取为独立 open-source crate (semantic-terminal); [ec269d7] feat: 权限持久化全链路(perm_injector新模块+LearnedPermissions.REQUIRES_PARAM_PATTERN+pty confirm Option(2)自动审批+sequential PTY writes) + mission_intent MCP工具(read/section/summary/list,模糊项目匹配) + mission_codex_ops MCP工具 + CodexIngestionWorker(读~/.codex/state_5.sqlite写会话时间线)")
 
   ;; ══════════════════════════════════════════════════════
   ;; DESIGN CONSTRAINTS
@@ -596,7 +597,83 @@
   ;; PILLAR 3: DATABASE SCHEMA — PIPELINE & CODE INTEL
   ;; ══════════════════════════════════════════════════════
   (pillar db-pipeline
-    (purpose "AST sync, beacons, backfill phases, watermarks, translations")
+    (purpose "conversation turns, AST sync, beacons, backfill phases, watermarks, translations")
+
+    ;; ── Conversation Turns (S3 Tagger & Chunker pipeline stage) ──────────────
+    (component turn-tables
+      :target "crates/missiond-core/src/db/pg/conversation.rs"
+      :migration ("20260322100000_conversation_turns.sql"
+                  "20260409000000_turn_embedding_digest.sql"
+                  "20260409100000_turn_skeleton.sql")
+
+      (table conversation_turns
+        (col id              :type bigserial :pk)
+        (col session_id      :type text :not-null :fk conversations.id :on-delete cascade)
+        (col turn_idx        :type integer :not-null)
+        (col start_message_id :type bigint :not-null :fk conversation_messages.id)
+        (col end_message_id  :type bigint :not-null :fk conversation_messages.id)
+
+        ;; Pre-extracted summary fields (pure rules, no LLM)
+        (col user_content    :type text :comment "User message text, truncated 2000 chars")
+        (col tool_names      :type text :comment "CSV: Bash,Read,Edit")
+        (col tool_call_count :type integer :default 0)
+        (col message_count   :type integer :default 0)
+        (col has_code_change :type boolean :default false)
+        (col has_mcp_call    :type boolean :default false)
+        (col started_at      :type text)
+        (col ended_at        :type text)
+
+        ;; Downstream fields (S4 Embedder / Intent Analyst)
+        (col topic           :type text)
+        (col intent_group_id :type bigint)
+
+        ;; Embedding digest fields (commit 21a3b63 — 20260409000000)
+        (col files_read    :type text :nullable
+          :comment "short file names extracted from Read tool calls via regex")
+        (col files_changed :type text :nullable
+          :comment "short file names extracted from Write/Edit tool calls via regex")
+        (col outcome       :type text :nullable
+          :comment "last assistant non-tool text — embedding signal for what was accomplished")
+
+        ;; Turn skeleton (commit dc45dcb — 20260409100000)
+        (col skeleton      :type text :nullable
+          :comment "JSON index: {user_msg_id, tool_calls:[{tool,file,req_msg_id,res_msg_id}], outcome_msg_id}; enables on-demand selective message retrieval instead of loading all 68+ messages")
+
+        (unique (session_id turn_idx))
+        (index idx_ct_session      :cols (session_id))
+        (index idx_ct_session_idx  :cols (session_id turn_idx))
+        (index idx_ct_start_msg    :cols (start_message_id))
+        (index idx_ct_end_msg      :cols (end_message_id))
+
+        (op get-last-turn-end-msg (binds session_id) :returns "Option<i64>")
+        (op get-max-turn-idx      (binds session_id) :returns "Option<i32>")
+        (op insert-batch
+          (binds session_id base_idx "Vec<RawTurn>")
+          :note "INSERT ON CONFLICT (session_id, turn_idx) DO UPDATE — idempotent upsert")
+        (op missing-embeddings
+          :where "NOT EXISTS (SELECT 1 FROM conversation_turns ct WHERE ct.session_id = c.id)"
+          :returns "Vec<session_id>"))
+
+      ;; TurnBuilder — logic inside tagger_chunker.rs (commit 21a3b63 refactor)
+      (struct RawTurn
+        :target "crates/missiond-core/src/types/conversation.rs"
+        (field turn_idx      :type i32)
+        (field start_message_id :type i64)
+        (field end_message_id   :type i64)
+        (field user_content  :type "Option<String>")
+        (field tool_names    :type "Vec<String>")
+        (field tool_call_count :type i32)
+        (field message_count   :type i32)
+        (field has_code_change :type bool)
+        (field has_mcp_call    :type bool)
+        (field started_at    :type "Option<String>")
+        (field ended_at      :type "Option<String>")
+        (field files_read    :type "Option<String>" :added "21a3b63")
+        (field files_changed :type "Option<String>" :added "21a3b63")
+        (field outcome       :type "Option<String>" :added "21a3b63")
+        (field skeleton      :type "Option<String>" :added "dc45dcb"))
+
+      (note "build_turn_embedding_text (commit 21a3b63): rewrote from natural-language to structured keyword-dense format: 'project:X files:Y intent:Z outcome:W' — optimized for MCP vector search by Claude Code agents. Filters <task-notification> noise turns."))
 
     (component ast-tables
       :target "crates/missiond-core/src/db/ast.rs"
@@ -890,7 +967,8 @@
   ;; PILLAR 6: EVENT BUS + WORKER TOPOLOGY
   ;; ══════════════════════════════════════════════════════
   (pillar event-workers
-    (purpose "pub-sub event backbone + 18 background workers organized by LLM dependency: sonnet(5) codex(2) gemini(1) local(10)")
+    (purpose "pub-sub event backbone + 19 background workers organized by LLM dependency: sonnet(5) codex(2) gemini(1) local(11)")
+    ;; local count: +codex_ingestion_worker (ec269d7); EventAnalyzerWorker(65c8b59) absorbed into tagger-chunker(1ea1838)
 
     (component event-bus
       :target "crates/missiond-daemon/src/event_bus.rs"
@@ -903,7 +981,10 @@
         (slot-events      "SlotBecameIdle, SlotStuck, SlotSessionChanged")
         (knowledge-events "KbEntryCreated, KbEntryUpdated")
         (system-events    "WorkerStatusChanged, ShutdownRequested")
-        (cascade-events   "CascadeTriggered, CascadeCompleted")))
+        (cascade-events   "CascadeTriggered, CascadeCompleted")
+        ;; commit 65c8b59: ContextualCommitDetected 替换旧的 CommitDetected 事件
+        ;; 携带 conversation_id/session_id/slot_id — 桥接"哪个 commit" 与"哪个会话产生的"
+        (commit-events    "ContextualCommitDetected{conversation_id, session_id, slot_id, commit_hash, message}")))
 
     (component event-router
       :target "crates/missiond-daemon/src/event_router.rs"
@@ -985,8 +1066,9 @@
         :trigger on-demand)
       (worker arch-maintenance-worker
         :target "crates/missiond-daemon/src/workers/sonnet/arch_maintenance_worker.rs"
-        :trigger "interval 3600s"
-        :writes-to knowledge)
+        :trigger "ContextualCommitDetected event (commit 65c8b59: was interval 3600s polling)"
+        :writes-to knowledge
+        :note "commit 65c8b59: now consumes ContextualCommitDetected (richer event with conversation context) instead of polling git-log")
       (worker retro-worker
         :target "crates/missiond-daemon/src/workers/sonnet/retro_worker.rs"
         :trigger on-session-end
@@ -1012,6 +1094,7 @@
         :note "commit c8b76b0: now BackgroundWorker impl, respects ControlTree pause/resume"))
 
     ;; workers/local/ — pure computation, no LLM dependency
+    ;; count: 11 workers (was 10; +codex_ingestion_worker ec269d7; EventAnalyzerWorker added 65c8b59 then absorbed into tagger-chunker 1ea1838)
     (component workers-local
       (worker conversation-logger
         :target "crates/missiond-daemon/src/workers/local/conversation_logger.rs"
@@ -1023,10 +1106,22 @@
       (worker pty-event-worker
         :target "crates/missiond-daemon/src/workers/local/pty_event_worker.rs"
         :listens-to PtyStateChanged
-        :emits (SlotBecameIdle SlotStuck))
+        :emits (SlotBecameIdle SlotStuck)
+        ;; commit ec269d7: auto-approve confirm dialogs containing "don't ask again"/"always"/"trust"/"不再"
+        ;; sends ConfirmResponse::Option(2) as two sequential PTY writes (digit + Enter, 80ms apart)
+        ;; unicode curly apostrophe (U+2019) normalized so ' matches like ASCII '
+        )
       (worker tagger-chunker
         :target "crates/missiond-daemon/src/workers/local/tagger_chunker.rs"
-        :listens-to MessagePersisted)
+        :listens-to MessagePersisted
+        ;; commit 21a3b63: TurnBuilder extracts files_read/files_changed/outcome from tool calls
+        ;; build_turn_embedding_text: keyword-dense format (project:X files:Y intent:Z outcome:W)
+        ;; filters <task-notification> noise turns; triggers per-turn embedding after backfill (dc45dcb)
+        ;; commit 1ea1838: commit detection logic moved here from EventAnalyzerWorker
+        ;; commit 081b4f9: parse actual command from [Tool: Bash] content format
+        )
+      ;; EventAnalyzerWorker (65c8b59) was added then absorbed into tagger-chunker (1ea1838)
+      ;; Commit detection is now done at schema-on-write stage in tagger_chunker with full message content
       (worker experience-harvester
         :target "crates/missiond-daemon/src/workers/local/experience_harvester.rs"
         :trigger "interval 60s"
@@ -1048,6 +1143,12 @@
       (worker code-prefetch
         :target "crates/missiond-daemon/src/workers/local/code_prefetch.rs"
         :trigger on-demand)
+      (worker codex-ingestion-worker
+        :target "crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs"
+        :added "ec269d7"
+        :trigger "polling ~/.codex/state_5.sqlite via rusqlite"
+        :writes-to "conversation timeline (system_timeline)"
+        :note "reads Codex CLI operation history from local SQLite DB; ingests operation logs into MissionD conversation timeline. rusqlite added to missiond-daemon Cargo.toml. spawned in main.rs at daemon boot.")
       (worker gemini-logger
         :target "crates/missiond-daemon/src/workers/local/gemini_logger.rs"
         :trigger channel
@@ -1114,7 +1215,73 @@
           (dangerously_skip_permissions :type bool :serde-alias "dangerouslySkipPermissions")
           (mcp_config :type "Option<McpConfig>" :serde-alias "mcpConfig")
           (auto_start :type bool :serde-alias "autoStart")))
-      (depends (pty_manager slot_manager event_bus))))
+
+      ;; commit ec269d7: NEW — perm_injector module
+      ;; updated 2026-04-12 (Phase 1-5 architecture upgrade):
+      ;;   - Now invoked from INSIDE spawn_tracked_slot — one entry point for all 10
+      ;;     spawn paths (was: mission_pty_spawn + mission_compute_slot:create only)
+      ;;   - sync signature: (cwd, role, project_id, slot_id, learned) — reads union via get_for_spawn
+      (perm-injector :target "crates/missiond-daemon/src/slot_orchestrator/perm_injector.rs"
+        :added "ec269d7"
+        :updated "2026-04-12"
+        :invoked-by ("slot_orchestrator::spawner::spawn_tracked_slot (all spawn paths)")
+        :doc "before each slot spawn, reads global+role+project+slot union from learned_permissions.yaml (LearnedPermissions::get_for_spawn) and merges into <cwd>/.claude/settings.local.json (idempotent, preserves existing entries, dedups on (tool_pattern, param_pattern))"
+        (note "closes the gap where 8 of 10 spawn paths (task/process/cc_controller/flow_engine/memory_scheduler/gemini_driver/slots_reload) previously bypassed perm injection"))
+
+      (depends (pty_manager slot_manager event_bus)))
+
+    ;; commit ec269d7: NEW — LearnedPermissions authority
+    ;; updated 2026-04-12 — Phase 1-5 architecture upgrade
+    (component learned-permissions
+      :target "crates/missiond-core/src/core/learned_permissions.rs"
+      :updated "2026-04-12"
+      (change REQUIRES_PARAM_PATTERN
+        :semantics "bare Bash (no param_pattern) rejected as too dangerous; specific subcommand patterns (python3:*, npm test:*) persisted"
+        :extract-fn "permission_extract::extract_confirm() — parses 'Yes, don't ask again for: python3:*' → ExtractedConfirm{pattern, project_path} incl. 'commands in <path>' suffix")
+
+      ;; Multi-scope model: scope_type ∈ {global, role, project, slot}
+      ;; Precedence at spawn time: slot > project > role > global (more specific wins on dedup)
+      (scope-model
+        (global  "scope_id=\"\" — applies to every spawn")
+        (role    "scope_id=<role> — role-wide learned permissions")
+        (project "scope_id=<project_id> — resolved via ProjectRegistry::resolve(cwd)")
+        (slot    "scope_id=<slot_id> — per-slot overrides"))
+
+      (method get_for_spawn
+        :args "role: &str, project_id: Option<&str>, slot_id: Option<&str>"
+        :returns "Vec<LearnedPermission>"
+        :doc "union across all applicable scopes with later-wins dedup on (tool_pattern, param_pattern)")
+
+      ;; Single write path (Phase 1): handle_confirm_required is the source of truth
+      ;; for learning. mission_pty_confirm (manual MCP path) ALSO learns, for symmetry,
+      ;; but the auto-approve branch in pty_event_worker is the 99% case.
+      (flow permission-persistence
+        :steps
+        ("pty_event_worker::handle_confirm_required: auto-approve enabled"
+         "→ opt2 text contains 'don't ask again'/'always'/'trust'/'不再' → use_allowlist=true"
+         "→ permission_extract::extract_confirm(opt2) → ExtractedConfirm{pattern, project_path}"
+         "→ LearnedPermissions::learn(role, role_id, tool, allow, pattern) [always]"
+         "→ if project_path Some → ProjectRegistry::resolve → LearnedPermissions::learn(project, pid, tool, allow, pattern)"
+         "→ ConfirmResponse::Option(2) sent as two sequential PTY writes (digit + Enter, 80ms apart)"
+         "→ next spawn: perm_injector::sync_learned_to_local_settings(cwd, role, project_id, slot_id, learned)"
+         "→ allowlist persists across slot spawns"))
+      (tests "Phase 1-5 coverage: 10 permission_extract tests + 1 E2E pty confirm test + 1 get_for_spawn union/dedup test + 4 perm_injector tests (incl. multi_scope_union)")
+
+      ;; Shared extraction module (Phase 1)
+      (component permission-extract
+        :target "crates/missiond-daemon/src/permission_extract.rs"
+        :added "2026-04-12"
+        :doc "single source of truth for parsing Claude Code confirm dialog option text; consumed by both mission_pty_confirm (MCP) and pty_event_worker::handle_confirm_required (auto-approve)"))
+
+    ;; Phase 4: merged_for_slot MCP view
+    (component permission-mcp-merged-view
+      :target "crates/missiond-daemon/src/handlers/sysinfra/permission.rs"
+      :added "2026-04-12"
+      (tool mission_permission_query
+        :action merged_for_slot
+        :args (slot_id)
+        :returns "{slotId, role, cwd, projectId, learned: [LearnedPermission], staticRoleRule, staticSlotRule}"
+        :doc "shows the exact union of permission entries a given slot would see at spawn time — debugging/audit view")))
 
   ;; ══════════════════════════════════════════════════════
   ;; PILLAR 8: SEMANTIC PARSER
@@ -1263,6 +1430,17 @@
       (tool mission_cascade_plan   :handler "handlers::knowledge::cascade")
       (tool mission_cascade_trigger :handler "handlers::knowledge::cascade")
       (tool mission_cascade_lint   :handler "handlers::knowledge::cascade")
+      ;; commit ec269d7: read project intent.lisp from MCP
+      (tool mission_intent         :handler "handlers::knowledge::intent"
+        :added "ec269d7"
+        :actions (read section summary list)
+        :doc "read / query .missiond/intent.lisp for a registered project; fuzzy project lookup (substring match, single match auto-resolves, multiple matches return 'ambiguous' error listing candidates)"
+        (action read    :params (project :required section :optional)  :returns "raw lisp content")
+        (action section :params (project :required section-name :required) :returns "matching s-expression block")
+        (action summary :params (project :required)                    :returns "high-level summary from intent")
+        (action list    :params ()                                      :returns "Vec<{project_id, intent_path, exists}>")
+        :candidates (".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp"))
+
       ;; P4+P5 (commit 76900d1): mission_project — 项目管理 MCP 工具
       ;; commit 84ac1a6: 新增 init action; list 响应增加 lispFiles/lispCount
       (tool mission_project        :handler "handlers::knowledge::project"
@@ -1288,7 +1466,13 @@
       (tool mission_llm_trace              :handler "handlers::comm::audit")
       (tool mission_decision_stats         :handler "handlers::comm::conversation")
       (tool mission_slot_history           :handler "handlers::comm::timeline")
-      (tool mission_beacon                 :handler "handlers::comm::audit"))
+      (tool mission_beacon                 :handler "handlers::comm::audit")
+      ;; commit ec269d7: new Codex CLI integration tool
+      (tool mission_codex_ops             :handler "handlers::comm::codex_ops"
+        :added "ec269d7"
+        :actions (query history stats)
+        :source "~/.codex/state_5.sqlite (via CodexIngestionWorker)"
+        :doc "query Codex CLI operation history ingested into MissionD conversation timeline"))
 
     (component sysinfra-tools
       :target "crates/missiond-mcp/src/tools/sysinfra/"
@@ -1373,9 +1557,13 @@
     (component infra-modules
       (module aiops             :target "crates/missiond-daemon/src/infra/aiops.rs")
       (module daemon-stats      :target "crates/missiond-daemon/src/infra/daemon_stats.rs")
-      (module git-watcher       :target "crates/missiond-daemon/src/infra/git_watcher.rs")
+      ;; ⚠ git-watcher REMOVED (commit 65c8b59) — replaced by event_analyzer_worker (local BackgroundWorker)
+      ;; was: 30s git-log polling via crates/missiond-daemon/src/infra/git_watcher.rs
       (module ingestion-router  :target "crates/missiond-daemon/src/infra/ingestion_router.rs")
-      (module ipc-handler       :target "crates/missiond-daemon/src/infra/ipc_handler.rs")
+      (module ipc-handler       :target "crates/missiond-daemon/src/infra/ipc_handler.rs"
+        ;; commit ec269d7: added instruction to slots to use mission_conversation_query(action=get, sessionId=…, tail=N)
+        ;; for reading past turn content (auto-memory was defaulting to own memory directory)
+        )
       (module mcp-client        :target "crates/missiond-daemon/src/infra/mcp_client.rs")
       (module message-handler   :target "crates/missiond-daemon/src/infra/message_handler.rs"
         ;; commit e18d0bf: ingest() 内 project_id 从 state.project_registry.read().resolve(cwd) 自动填充

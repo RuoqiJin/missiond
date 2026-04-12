@@ -223,6 +223,8 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
                 &state.pty,
                 &state.store,
                 &state.pty_session_uuids,
+                &state.project_registry,
+                state.permission.learned(),
                 &pty_slot,
                 PTYSpawnOptions {
                     auto_restart: false,

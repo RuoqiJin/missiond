@@ -21,6 +21,7 @@ mod events_sync;
 mod handlers;
 mod helpers;
 mod lenient;
+mod permission_extract;
 mod slot_dispatch;
 mod slot_orchestrator;
 mod state;
@@ -712,6 +713,8 @@ async fn main() -> Result<()> {
                                     pty_for_gemini_transport,
                                     store.clone(),
                                     pty_session_uuids_arc.clone(),
+                                    project_registry.clone(),
+                                    learned.clone(),
                                 );
                             let pty_transport =
                                 std::sync::Arc::new(llm::gemini_pty::GeminiPtyTransport::new(
@@ -800,11 +803,15 @@ async fn main() -> Result<()> {
                 slot_mgr_pty,
                 slot_mgr_store,
                 pty_session_uuids_arc.clone(),
+                project_registry.clone(),
+                learned.clone(),
             ));
             let gemini_driver_for_slots = llm::gemini_driver::GeminiPtyDriver::new(
                 slot_mgr_pty2,
                 slot_mgr_store2.clone(),
                 pty_session_uuids_arc.clone(),
+                project_registry.clone(),
+                learned.clone(),
             );
             let gemini_mgr = Arc::new(slot_orchestrator::GeminiCliSlotManager::new(
                 gemini_driver_for_slots,
@@ -1508,6 +1515,8 @@ async fn main() -> Result<()> {
                                     &state.pty,
                                     &state.store,
                                     &state.pty_session_uuids,
+                                    &state.project_registry,
+                                    state.permission.learned(),
                                     &pty_slot,
                                     missiond_core::PTYSpawnOptions {
                                         auto_restart: true,

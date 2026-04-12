@@ -301,8 +301,15 @@ async fn daemon_update(args: Value) -> Result<ToolResult> {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let home = missiond_core::ipc::default_mission_home();
-    let binary_dest = home.join("missiond");
+    // Resolve `binary_dest` from the *currently running* binary path. This is the
+    // only correct answer regardless of how the daemon was launched (launchd plist,
+    // manual run, fallback script). Older code used `default_mission_home()`, which
+    // could pick `~/.missiond` while launchd was actually running `~/.xjp-mission/missiond`,
+    // so the cp would silently land at the wrong path and the kickstart would relaunch
+    // the stale binary every time.
+    let binary_dest = std::env::current_exe().map_err(|e| {
+        anyhow::anyhow!("daemon_update: could not resolve current executable path: {}", e)
+    })?;
 
     // Resolve workspace root from compile-time CARGO_MANIFEST_DIR
     // env!() is evaluated at compile time — always correct for this binary.
@@ -439,6 +446,7 @@ async fn daemon_update(args: Value) -> Result<ToolResult> {
     } else {
         // Fallback: detached bash script for non-launchd environments
         info!("daemon_update: launchd service not found, using script fallback");
+        let home = missiond_core::ipc::default_mission_home();
         let socket_path = home.join("missiond.sock");
         let log_dir = home.join("logs");
 

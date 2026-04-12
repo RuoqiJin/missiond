@@ -236,6 +236,69 @@ impl LearnedPermissions {
         Ok(result)
     }
 
+    /// Return the union of all permission entries visible to a spawning slot.
+    ///
+    /// Scope precedence (later wins on `(tool_pattern, param_pattern)` dedup):
+    /// 1. global (scope_id="")
+    /// 2. role=<role>
+    /// 3. project=<project_id> (if Some)
+    /// 4. slot=<slot_id> (if Some)
+    ///
+    /// The ordering matches "most specific last" so a slot-scoped deny can shadow
+    /// a broader role-scoped allow, while still surfacing the role entry when no
+    /// more specific rule exists. The returned Vec preserves insertion order so
+    /// downstream code writing to `settings.local.json` sees stable output.
+    pub fn get_for_spawn(
+        &self,
+        role: &str,
+        project_id: Option<&str>,
+        slot_id: Option<&str>,
+    ) -> Result<Vec<LearnedPermission>> {
+        let mut ordered: Vec<LearnedPermission> = Vec::new();
+        let mut index: HashMap<(String, String), usize> = HashMap::new();
+
+        let push_all = |entries: Vec<LearnedPermission>,
+                        ordered: &mut Vec<LearnedPermission>,
+                        index: &mut HashMap<(String, String), usize>| {
+            for entry in entries {
+                let key = (
+                    entry.tool_pattern.clone(),
+                    entry.param_pattern.clone().unwrap_or_default(),
+                );
+                if let Some(&pos) = index.get(&key) {
+                    // More-specific scope overwrites earlier entry.
+                    ordered[pos] = entry;
+                } else {
+                    index.insert(key, ordered.len());
+                    ordered.push(entry);
+                }
+            }
+        };
+
+        // global first — lowest precedence.
+        if let Ok(entries) = self.get_for_scope("global", "") {
+            push_all(entries, &mut ordered, &mut index);
+        }
+        // role next.
+        if let Ok(entries) = self.get_for_scope("role", role) {
+            push_all(entries, &mut ordered, &mut index);
+        }
+        // project next.
+        if let Some(pid) = project_id {
+            if let Ok(entries) = self.get_for_scope("project", pid) {
+                push_all(entries, &mut ordered, &mut index);
+            }
+        }
+        // slot last — most specific, overrides all.
+        if let Some(sid) = slot_id {
+            if let Ok(entries) = self.get_for_scope("slot", sid) {
+                push_all(entries, &mut ordered, &mut index);
+            }
+        }
+
+        Ok(ordered)
+    }
+
     pub fn check_learned(
         &self,
         scope_type: &str,
@@ -337,6 +400,70 @@ mod tests {
         // Other tools always learnable
         assert!(!LearnedPermissions::is_never_learn("Write", None));
         assert!(!LearnedPermissions::is_never_learn("Edit", None));
+    }
+
+    #[test]
+    fn test_get_for_spawn_union_and_dedup() {
+        let dir = tempdir().unwrap();
+        let yaml_path = dir.path().join("spawn.yaml");
+        let lp = LearnedPermissions::new(&yaml_path).unwrap();
+
+        // global → baseline (should always appear)
+        lp.learn("global", "", "Read", "allow", None).unwrap();
+        // role → coder-wide Bash(python3:*)
+        lp.learn("role", "coder", "Bash", "allow", Some("python3:*")).unwrap();
+        // project → missiond-wide Bash(python3:*) — duplicate; later scope must dedup.
+        lp.learn("project", "missiond", "Bash", "allow", Some("python3:*")).unwrap();
+        // project → WebFetch allow (unique to project scope)
+        lp.learn("project", "missiond", "WebFetch", "allow", None).unwrap();
+        // slot → slot-1 overrides Bash(python3:*) with deny.
+        lp.learn("slot", "slot-1", "Bash", "deny", Some("python3:*")).unwrap();
+
+        // Full union: role + project + slot.
+        let full = lp
+            .get_for_spawn("coder", Some("missiond"), Some("slot-1"))
+            .unwrap();
+
+        // Bash(python3:*) must appear once, and should reflect the slot-scoped deny
+        // (most specific wins).
+        let bash_entries: Vec<_> = full
+            .iter()
+            .filter(|e| {
+                e.tool_pattern == "Bash" && e.param_pattern.as_deref() == Some("python3:*")
+            })
+            .collect();
+        assert_eq!(bash_entries.len(), 1, "dedup should collapse to one entry");
+        assert_eq!(bash_entries[0].decision, "deny", "slot scope should win over role/project");
+
+        // Read must be present (from global).
+        assert!(full.iter().any(|e| e.tool_pattern == "Read"));
+        // WebFetch must be present (from project).
+        assert!(full.iter().any(|e| e.tool_pattern == "WebFetch"));
+
+        // No project_id or slot_id → only global + role visible.
+        let role_only = lp.get_for_spawn("coder", None, None).unwrap();
+        assert!(role_only.iter().any(|e| e.tool_pattern == "Read")); // global
+        assert!(role_only
+            .iter()
+            .any(|e| e.tool_pattern == "Bash" && e.decision == "allow"));
+        assert!(
+            !role_only.iter().any(|e| e.tool_pattern == "WebFetch"),
+            "without project_id, project-scoped entries must not appear"
+        );
+
+        // project but not slot → project-scoped entries visible, slot override not applied.
+        let proj = lp.get_for_spawn("coder", Some("missiond"), None).unwrap();
+        let bash_entries: Vec<_> = proj
+            .iter()
+            .filter(|e| {
+                e.tool_pattern == "Bash" && e.param_pattern.as_deref() == Some("python3:*")
+            })
+            .collect();
+        assert_eq!(bash_entries.len(), 1);
+        assert_eq!(
+            bash_entries[0].decision, "allow",
+            "without slot_id, slot-scoped deny must not apply"
+        );
     }
 
     #[test]
