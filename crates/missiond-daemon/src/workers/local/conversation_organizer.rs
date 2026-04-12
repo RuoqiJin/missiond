@@ -54,10 +54,7 @@ async fn run_organizer(
             event = rx.recv() => match event {
                 Ok(te) => {
                     if let DaemonEvent::ConversationMessageLogged { ref session_id, .. } = te.event {
-                        // Only track agent-* sessions (subagents + compactions)
-                        if session_id.starts_with("agent-") {
-                            dirty.insert(session_id.clone());
-                        }
+                        dirty.insert(session_id.clone());
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
