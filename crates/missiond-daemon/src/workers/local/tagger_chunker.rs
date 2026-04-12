@@ -195,6 +195,22 @@ async fn process_session(state: &AppState, session_id: &str) -> anyhow::Result<u
 /// This pipeline is independent of turn extraction and must always run,
 /// even when the session is active and turns are incomplete.
 async fn analyze_messages(state: &AppState, session_id: &str, messages: &[ConversationMessage]) {
+    let user_msgs: Vec<_> = messages.iter()
+        .filter(|m| m.role == "user")
+        .map(|m| (m.id, &m.content[..m.content.len().min(80)]))
+        .collect();
+    info!(
+        session_id,
+        total = messages.len(),
+        user_count = user_msgs.len(),
+        "TaggerChunker: analyze_messages batch"
+    );
+    for (id, preview) in &user_msgs {
+        if GIT_COMMIT_RE.is_match(preview) {
+            info!(message_id = id, preview, "TaggerChunker: commit regex MATCH");
+        }
+    }
+
     // Noise labels
     let noise_labels = collect_noise_labels(messages);
     if !noise_labels.is_empty() {
