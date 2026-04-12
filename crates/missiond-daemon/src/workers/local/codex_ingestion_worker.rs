@@ -29,7 +29,7 @@ use crate::state::AppState;
 use super::{BackgroundWorker, WorkerContext, WorkerKind};
 
 /// Poll interval between checks (seconds).
-const POLL_INTERVAL_SECS: u64 = 30;
+const POLL_INTERVAL_SECS: u64 = 10;
 
 /// Initial delay before first run.
 const STARTUP_DELAY_SECS: u64 = 15;
@@ -83,6 +83,14 @@ struct ParsedToolCall {
     /// Output from matching function_call_output (if found).
     output: Option<String>,
     output_timestamp: Option<String>,
+}
+
+/// Parsed text message (agent or user) from JSONL.
+#[derive(Debug, Clone)]
+struct ParsedMessage {
+    role: String,       // "assistant" or "user"
+    content: String,
+    timestamp: String,
 }
 
 // ── Worker ──
@@ -303,53 +311,102 @@ async fn process_thread(state: &AppState, thread: &CodexThread) -> Result<usize>
         // Non-fatal — tool calls can still be inserted if conversation already exists.
     }
 
-    // Parse JSONL and extract tool calls.
-    let tool_calls = tokio::task::spawn_blocking({
+    // Parse JSONL — extract tool calls + text messages.
+    let parsed = tokio::task::spawn_blocking({
         let path = rollout_path.clone();
         let thread_id = thread.id.clone();
-        move || parse_jsonl_tool_calls(&path, &thread_id)
+        move || parse_jsonl(&path, &thread_id)
     })
     .await
     .context("spawn_blocking join")??;
 
-    if tool_calls.is_empty() {
-        return Ok(0);
-    }
+    let mut total = 0usize;
 
-    // Convert to ToolCallRecord and batch insert.
     // Sanitize null bytes — Codex JSONL can contain 0x00 which PostgreSQL rejects.
     let sanitize = |s: &str| -> String { s.replace('\0', "") };
-    let records: Vec<missiond_core::types::ToolCallRecord> = tool_calls
-        .iter()
-        .map(|tc| missiond_core::types::ToolCallRecord {
-            id: tc.call_id.clone(),
-            session_id: thread.id.clone(),
-            message_id: None, // No FK to conversation_messages (Codex messages not ingested line-by-line)
-            tool_name: sanitize(&tc.tool_name),
-            input_summary: Some(sanitize(&summarize_input(&tc.tool_name, &tc.arguments))),
-            raw_input: Some(sanitize(&tc.arguments)),
-            output_summary: tc.output.as_ref().map(|o| sanitize(&truncate(o, 500))),
-            raw_output: tc.output.as_ref().map(|o| sanitize(o)),
-            status: if tc.output.is_some() {
-                "success".to_string()
-            } else {
-                "pending".to_string()
-            },
-            duration_ms: compute_duration_ms(&tc.timestamp, tc.output_timestamp.as_deref()),
-            timestamp: tc.timestamp.clone(),
-        })
-        .collect();
 
-    // Batch insert (INSERT OR IGNORE dedup by call_id PK).
-    let mut total = 0usize;
-    for chunk in records.chunks(TOOL_CALL_BATCH_SIZE) {
-        match state.store.insert_tool_calls_batch(chunk).await {
-            Ok(n) => total += n,
+    // ── Insert tool calls ──
+    if !parsed.tool_calls.is_empty() {
+        let records: Vec<missiond_core::types::ToolCallRecord> = parsed
+            .tool_calls
+            .iter()
+            .map(|tc| missiond_core::types::ToolCallRecord {
+                id: tc.call_id.clone(),
+                session_id: thread.id.clone(),
+                message_id: None,
+                tool_name: sanitize(&tc.tool_name),
+                input_summary: Some(sanitize(&summarize_input(&tc.tool_name, &tc.arguments))),
+                raw_input: Some(sanitize(&tc.arguments)),
+                output_summary: tc.output.as_ref().map(|o| sanitize(&truncate(o, 500))),
+                raw_output: tc.output.as_ref().map(|o| sanitize(o)),
+                status: if tc.output.is_some() {
+                    "success".to_string()
+                } else {
+                    "pending".to_string()
+                },
+                duration_ms: compute_duration_ms(&tc.timestamp, tc.output_timestamp.as_deref()),
+                timestamp: tc.timestamp.clone(),
+            })
+            .collect();
+
+        for chunk in records.chunks(TOOL_CALL_BATCH_SIZE) {
+            match state.store.insert_tool_calls_batch(chunk).await {
+                Ok(n) => total += n,
+                Err(e) => {
+                    warn!(
+                        thread_id = %&thread.id[..8.min(thread.id.len())],
+                        error = %e,
+                        "Codex ingestion: tool call batch insert failed"
+                    );
+                }
+            }
+        }
+    }
+
+    // ── Insert text messages (agent + user) ──
+    if !parsed.messages.is_empty() {
+        let msgs: Vec<missiond_core::types::ConversationMessage> = parsed
+            .messages
+            .iter()
+            .map(|m| missiond_core::types::ConversationMessage {
+                id: 0, // auto-increment
+                session_id: thread.id.clone(),
+                role: m.role.clone(),
+                content: sanitize(&m.content),
+                raw_content: None,
+                message_uuid: None,
+                parent_uuid: None,
+                model: thread.model.clone(),
+                timestamp: m.timestamp.clone(),
+                metadata: Some(r#"{"source":"codex_ingestion"}"#.to_string()),
+                tool_name: None,
+                raw_role: None,
+                content_types: Some(r#"["text"]"#.to_string()),
+                has_image: false,
+                has_tool_use: false,
+                has_tool_result: false,
+                token_count: None,
+                seq: None,
+                role_display: None,
+            })
+            .collect();
+
+        match state.store.insert_conversation_messages_batch(&msgs).await {
+            Ok(ids) => {
+                if !ids.is_empty() {
+                    debug!(
+                        thread_id = %&thread.id[..8.min(thread.id.len())],
+                        count = ids.len(),
+                        "Codex ingestion: messages inserted"
+                    );
+                }
+                total += ids.len();
+            }
             Err(e) => {
                 warn!(
                     thread_id = %&thread.id[..8.min(thread.id.len())],
                     error = %e,
-                    "Codex ingestion: batch insert failed"
+                    "Codex ingestion: message batch insert failed"
                 );
             }
         }
@@ -358,15 +415,21 @@ async fn process_thread(state: &AppState, thread: &CodexThread) -> Result<usize>
     Ok(total)
 }
 
-/// Parse JSONL file, pair function_call + function_call_output entries.
-fn parse_jsonl_tool_calls(path: &Path, _thread_id: &str) -> Result<Vec<ParsedToolCall>> {
+/// Parse result: tool calls + text messages.
+struct ParsedThread {
+    tool_calls: Vec<ParsedToolCall>,
+    messages: Vec<ParsedMessage>,
+}
+
+/// Parse JSONL file, extract tool calls + agent/user messages.
+fn parse_jsonl(path: &Path, _thread_id: &str) -> Result<ParsedThread> {
     use std::io::{BufRead, BufReader};
 
     let file = std::fs::File::open(path).context("open JSONL")?;
     let reader = BufReader::new(file);
 
-    // Collect all function_call entries, then match with function_call_output.
     let mut calls: Vec<ParsedToolCall> = Vec::new();
+    let mut messages: Vec<ParsedMessage> = Vec::new();
     let mut call_id_to_idx: HashMap<String, usize> = HashMap::new();
     let mut line_count = 0usize;
 
@@ -390,77 +453,161 @@ fn parse_jsonl_tool_calls(path: &Path, _thread_id: &str) -> Result<Vec<ParsedToo
             Err(_) => continue,
         };
 
-        if event.event_type != "response_item" {
-            continue;
-        }
-
-        let payload_type = event
-            .payload
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        match payload_type {
-            "function_call" => {
-                let name = event
+        match event.event_type.as_str() {
+            "response_item" => {
+                let payload_type = event
                     .payload
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-                let arguments = event
-                    .payload
-                    .get("arguments")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("{}")
-                    .to_string();
-                let call_id = event
-                    .payload
-                    .get("call_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                if call_id.is_empty() {
-                    continue;
-                }
-
-                let idx = calls.len();
-                calls.push(ParsedToolCall {
-                    call_id: call_id.clone(),
-                    tool_name: name,
-                    arguments,
-                    timestamp: event.timestamp,
-                    output: None,
-                    output_timestamp: None,
-                });
-                call_id_to_idx.insert(call_id, idx);
-            }
-            "function_call_output" => {
-                let call_id = event
-                    .payload
-                    .get("call_id")
+                    .get("type")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let output = event
-                    .payload
-                    .get("output")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
 
-                if let Some(&idx) = call_id_to_idx.get(call_id) {
-                    if let Some(tc) = calls.get_mut(idx) {
-                        tc.output = Some(output);
-                        tc.output_timestamp = Some(event.timestamp);
+                match payload_type {
+                    "function_call" => {
+                        let name = event
+                            .payload
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let arguments = event
+                            .payload
+                            .get("arguments")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("{}")
+                            .to_string();
+                        let call_id = event
+                            .payload
+                            .get("call_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+
+                        if call_id.is_empty() {
+                            continue;
+                        }
+
+                        let idx = calls.len();
+                        calls.push(ParsedToolCall {
+                            call_id: call_id.clone(),
+                            tool_name: name,
+                            arguments,
+                            timestamp: event.timestamp,
+                            output: None,
+                            output_timestamp: None,
+                        });
+                        call_id_to_idx.insert(call_id, idx);
                     }
+                    "function_call_output" => {
+                        let call_id = event
+                            .payload
+                            .get("call_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let output = event
+                            .payload
+                            .get("output")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+
+                        if let Some(&idx) = call_id_to_idx.get(call_id) {
+                            if let Some(tc) = calls.get_mut(idx) {
+                                tc.output = Some(output);
+                                tc.output_timestamp = Some(event.timestamp.clone());
+                            }
+                        }
+                    }
+                    "message" => {
+                        // Agent text message — extract from content array or direct string
+                        let text = extract_message_text(&event.payload);
+                        if !text.is_empty() {
+                            messages.push(ParsedMessage {
+                                role: "assistant".to_string(),
+                                content: text,
+                                timestamp: event.timestamp,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "event_msg" => {
+                let msg_type = event
+                    .payload
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                match msg_type {
+                    "user_message" => {
+                        let text = event
+                            .payload
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if !text.is_empty() {
+                            messages.push(ParsedMessage {
+                                role: "user".to_string(),
+                                content: text,
+                                timestamp: event.timestamp,
+                            });
+                        }
+                    }
+                    "agent_message" => {
+                        let text = event
+                            .payload
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if !text.is_empty() {
+                            messages.push(ParsedMessage {
+                                role: "assistant".to_string(),
+                                content: text,
+                                timestamp: event.timestamp,
+                            });
+                        }
+                    }
+                    _ => {}
                 }
             }
             _ => {}
         }
     }
 
-    Ok(calls)
+    Ok(ParsedThread {
+        tool_calls: calls,
+        messages,
+    })
+}
+
+/// Extract text content from a response_item/message payload.
+fn extract_message_text(payload: &Value) -> String {
+    // Try direct string first (some messages have text directly)
+    if let Some(text) = payload.as_str() {
+        return text.to_string();
+    }
+
+    // Try content array: [{"type": "output_text", "text": "..."}, ...]
+    if let Some(content) = payload.get("content").and_then(|v| v.as_array()) {
+        let mut parts = Vec::new();
+        for item in content {
+            if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                parts.push(text);
+            }
+        }
+        if !parts.is_empty() {
+            return parts.join("");
+        }
+    }
+
+    // Try top-level text field
+    if let Some(text) = payload.get("text").and_then(|v| v.as_str()) {
+        return text.to_string();
+    }
+
+    String::new()
 }
 
 // ── Helpers ──

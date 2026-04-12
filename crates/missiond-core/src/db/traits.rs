@@ -120,6 +120,8 @@ pub trait ConversationStore: Send + Sync {
     async fn insert_message_labels_batch(&self, labels: &[(i64, &str, &str, &str)]) -> DbResult<usize>;
     /// Get session IDs that have messages but no turns (for backfill).
     async fn sessions_pending_turn_extraction(&self, limit: i64) -> DbResult<Vec<String>>;
+    /// Get session IDs updated within `since_minutes` that have messages but no turns (reconciliation).
+    async fn sessions_recently_active_without_turns(&self, since_minutes: i64, limit: i64) -> DbResult<Vec<String>>;
 
     // -- conversation_turns: S4 per-turn embedding --
     /// Get turns that have no corresponding topic_vector entry yet (incremental).

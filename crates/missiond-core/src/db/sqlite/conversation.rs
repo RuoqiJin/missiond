@@ -302,6 +302,7 @@ impl ConversationStore for SqliteMissionStore {
     async fn insert_conversation_turns_batch(&self, _session_id: &str, _base_idx: i32, _turns: &[RawTurn]) -> DbResult<usize> { Ok(0) }
     async fn insert_message_labels_batch(&self, _labels: &[(i64, &str, &str, &str)]) -> DbResult<usize> { Ok(0) }
     async fn sessions_pending_turn_extraction(&self, _limit: i64) -> DbResult<Vec<String>> { Ok(vec![]) }
+    async fn sessions_recently_active_without_turns(&self, _since_minutes: i64, _limit: i64) -> DbResult<Vec<String>> { Ok(vec![]) }
 
     // -- S4 per-turn embedding — SQLite deprecated --
     async fn turns_pending_embedding(&self, _session_id: &str, _provider: &str) -> DbResult<Vec<ConversationTurn>> { Ok(vec![]) }

@@ -1,7 +1,7 @@
 //! SonnetGateway — centralized Actor for all Claude Sonnet API calls.
 //!
 //! Replaces MinimaxGateway: same priority-based actor model, different backend.
-//! Routes through xjp-router's cpapi-claude-sonnet endpoint.
+//! Routes through xjp-router's claude-sonnet endpoint.
 //!
 //! Architecture:
 //! - 4 priority channels (interactive > embedding > translation > briefing)
@@ -40,8 +40,8 @@ const MIN_INTER_REQUEST_MS: u64 = 300;
 /// Quota reservation threshold for low-priority requests.
 const QUOTA_RESERVE_THRESHOLD: usize = 200;
 
-/// Sonnet model name on xjp-router.
-const SONNET_MODEL: &str = "cpapi-claude-sonnet";
+/// Sonnet model name on xjp-router (cpapi deprecated → claude-sonnet).
+const SONNET_MODEL: &str = "claude-sonnet";
 
 // ── SonnetHandle (Clone, given to workers) ──────────────────────────
 
@@ -195,7 +195,7 @@ impl SonnetHandle {
 
 // ── Sonnet HTTP Backend ─────────────────────────────────────────────
 
-/// HTTP client for xjp-router's cpapi-claude-sonnet endpoint.
+/// HTTP client for xjp-router's claude-sonnet endpoint.
 struct SonnetBackend {
     http: reqwest::Client,
 }

@@ -1274,6 +1274,23 @@ impl ConversationStore for PgMissionStore {
         Ok(rows)
     }
 
+    async fn sessions_recently_active_without_turns(&self, since_minutes: i64, limit: i64) -> DbResult<Vec<String>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT c.id FROM conversations c
+             WHERE c.message_count > 0
+               AND c.updated_at IS NOT NULL
+               AND c.updated_at > to_char((NOW() - ($1 || ' minutes')::interval) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS')
+               AND NOT EXISTS (SELECT 1 FROM conversation_turns ct WHERE ct.session_id = c.id)
+             ORDER BY c.updated_at DESC
+             LIMIT $2"
+        )
+            .bind(since_minutes)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
     // -- S4 per-turn embedding --
 
     async fn turns_pending_embedding(&self, session_id: &str, provider: &str) -> DbResult<Vec<ConversationTurn>> {

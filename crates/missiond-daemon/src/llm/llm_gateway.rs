@@ -111,7 +111,7 @@ pub(crate) async fn call_gemini_for_flow(
     Ok(content)
 }
 
-/// Stateless Sonnet call via Router API (cpapi-claude-sonnet endpoint).
+/// Stateless Sonnet call via Router API (claude-sonnet endpoint).
 /// Direct HTTP POST — bypasses GeminiClient to avoid CLI mode hijacking.
 /// Retries on 429 with exponential backoff (max 3 attempts).
 pub(crate) async fn call_sonnet_stateless(
@@ -124,7 +124,7 @@ pub(crate) async fn call_sonnet_stateless(
     // Kill switch: reject immediately when sonnet gate is closed (AtomicBool — zero I/O)
     crate::llm_gate::check(crate::llm_gate::LlmProvider::Sonnet)?;
     let (base_url, mut jwt) = resolve_llm_credentials().await?;
-    let model = "cpapi-claude-sonnet";
+    let model = "claude-sonnet";
     let url = format!("{}/v1/chat/completions", base_url);
     let body = serde_json::json!({
         "model": model,
