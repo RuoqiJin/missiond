@@ -153,6 +153,19 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 engine: slot.config.engine,
             };
 
+            // Sync any role-level learned permissions into the slot's
+            // .claude/settings.local.json before spawn so Claude Code reads them.
+            if let (Some(cwd), Some(learned)) = (
+                slot.config.cwd.as_deref().map(PathBuf::from),
+                state.permission.learned(),
+            ) {
+                crate::slot_orchestrator::perm_injector::sync_learned_to_local_settings(
+                    &cwd,
+                    &slot.config.role,
+                    &learned,
+                );
+            }
+
             // Resolve MCP config: arg > slot config > None
             let mcp_config = mcp_config_path
                 .or(slot.config.mcp_config.clone())
@@ -373,23 +386,40 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                     | missiond_core::ConfirmResponse::Option(1)
                     | missiond_core::ConfirmResponse::Option(2)
             );
+            // Capture "is option 2 (allowlist)" before resp is moved into pty.confirm()
+            let is_allowlist_choice = matches!(resp, missiond_core::ConfirmResponse::Option(2));
 
             state.pty.confirm(&slot_id, resp).await?;
 
-            // Learn permission from user's decision
+            // Learn permission from user's decision.
+            // When user picked Option(2) "Yes, don't ask again for X", extract X as param_pattern
+            // so Bash subcommand allowlists (e.g. python3:*) survive instead of being persisted as
+            // a blanket "allow ALL Bash" entry.
             if let Some(ref info) = pending {
                 if let Some(ref tool) = info.tool {
                     if let Some(learned) = state.permission.learned() {
                         let decision = if is_approval { "allow" } else { "deny" };
+                        let param_pattern = if is_allowlist_choice {
+                            info.options
+                                .get(1)
+                                .and_then(|opt| extract_dont_ask_pattern(opt))
+                        } else {
+                            None
+                        };
                         if let Some(status) = state.pty.get_status(&slot_id).await {
-                            if let Err(e) =
-                                learned.learn("role", &status.role, &tool.name, decision, None)
-                            {
+                            if let Err(e) = learned.learn(
+                                "role",
+                                &status.role,
+                                &tool.name,
+                                decision,
+                                param_pattern.as_deref(),
+                            ) {
                                 tracing::warn!(error = %e, "Failed to record learned permission");
                             } else {
                                 tracing::info!(
                                     role = %status.role,
                                     tool = %tool.name,
+                                    param = ?param_pattern,
                                     decision,
                                     slot_id = %slot_id,
                                     "Permission learned from user confirmation"
@@ -495,5 +525,136 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         }
 
         _ => Err(anyhow!("Unknown pty tool: {name}")),
+    }
+}
+
+/// Parse the "Yes, and don't ask again for: <pattern>" option text from a Claude Code
+/// confirmation dialog and return the bare pattern (e.g. `python3:*`).
+/// Returns None when the option text doesn't match the expected shape.
+pub(crate) fn extract_dont_ask_pattern(option_text: &str) -> Option<String> {
+    // English: "Yes, and don't ask again for: python3:*"
+    // Chinese: "是，不再询问 python3:*"
+    // Claude Code TUI sometimes renders the apostrophe as U+2019 / U+2018; normalize first.
+    let normalized: String = option_text
+        .chars()
+        .map(|c| match c {
+            '\u{2018}' | '\u{2019}' => '\'',
+            other => other,
+        })
+        .collect();
+    let lower = normalized.to_lowercase();
+    let marker = if lower.contains("don't ask again for:") {
+        "don't ask again for:"
+    } else if lower.contains("dont ask again for:") {
+        "dont ask again for:"
+    } else if lower.contains("don't ask again for") {
+        "don't ask again for"
+    } else if lower.contains("不再询问") {
+        "不再询问"
+    } else {
+        return None;
+    };
+    let idx = lower.find(marker)?;
+    let after = normalized[idx + marker.len()..].trim();
+    let pattern = after.trim_start_matches(':').trim();
+    if pattern.is_empty() {
+        None
+    } else {
+        Some(pattern.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    /// E2E: verify that sending numeric `2` as the confirm response correctly maps
+    /// to ConfirmResponse::Option(2), extracts the "don't ask" pattern from the
+    /// option text, learns it via LearnedPermissions, and syncs the entry into
+    /// `.claude/settings.local.json` — the full chain from keystroke to file.
+    #[test]
+    fn option2_numeric_learns_and_syncs_to_settings_json() {
+        // Step 1: numeric 2 maps to ConfirmResponse::Option(2)
+        let response = Value::Number(serde_json::Number::from(2u64));
+        let resp = match response {
+            Value::Number(n) => {
+                let n = n.as_u64().unwrap_or(1) as usize;
+                if n == 1 {
+                    missiond_core::ConfirmResponse::Yes
+                } else if n == 3 {
+                    missiond_core::ConfirmResponse::No
+                } else {
+                    missiond_core::ConfirmResponse::Option(n)
+                }
+            }
+            _ => unreachable!(),
+        };
+        assert!(
+            matches!(resp, missiond_core::ConfirmResponse::Option(2)),
+            "numeric 2 must map to Option(2)"
+        );
+        let is_allowlist = matches!(resp, missiond_core::ConfirmResponse::Option(2));
+        assert!(is_allowlist);
+
+        // Step 2: extract param pattern from the second option text
+        let option_text = "Yes, and don't ask again for: python3:*";
+        let param = extract_dont_ask_pattern(option_text);
+        assert_eq!(param.as_deref(), Some("python3:*"));
+
+        // Step 3: learn permission (simulates what mission_pty_confirm does)
+        let dir = tempdir().unwrap();
+        let yaml_path = dir.path().join("perms.yaml");
+        let learned = Arc::new(missiond_core::LearnedPermissions::new(&yaml_path).unwrap());
+        learned
+            .learn("role", "coder", "Bash", "allow", param.as_deref())
+            .expect("learn should succeed");
+
+        // Step 4: sync to settings.local.json (simulates next slot spawn)
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        crate::slot_orchestrator::perm_injector::sync_learned_to_local_settings(
+            &cwd, "coder", &learned,
+        );
+
+        // Step 5: verify the entry appears in settings.local.json
+        let settings_path = cwd.join(".claude/settings.local.json");
+        assert!(settings_path.exists(), "settings.local.json must be created");
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let v: Value = serde_json::from_str(&content).unwrap();
+        let allow = v["permissions"]["allow"].as_array().expect("allow must be array");
+        assert!(
+            allow.iter().any(|e| e == "Bash(python3:*)"),
+            "Bash(python3:*) not found in allowlist: {:?}",
+            allow
+        );
+    }
+
+    #[test]
+    fn extract_dont_ask_pattern_english() {
+        assert_eq!(
+            extract_dont_ask_pattern("Yes, and don't ask again for: python3:*"),
+            Some("python3:*".to_string())
+        );
+        assert_eq!(
+            extract_dont_ask_pattern("Yes, and don't ask again for: Read(/etc/passwd)"),
+            Some("Read(/etc/passwd)".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_dont_ask_pattern_chinese() {
+        assert_eq!(
+            extract_dont_ask_pattern("是，不再询问 python3:*"),
+            Some("python3:*".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_dont_ask_pattern_no_match() {
+        assert_eq!(extract_dont_ask_pattern("Yes"), None);
+        assert_eq!(extract_dont_ask_pattern("No"), None);
+        assert_eq!(extract_dont_ask_pattern(""), None);
     }
 }

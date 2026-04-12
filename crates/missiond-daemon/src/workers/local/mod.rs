@@ -3,6 +3,7 @@
 
 pub(crate) mod ast_sync_worker;
 pub(crate) mod code_prefetch;
+pub(crate) mod codex_ingestion_worker;
 pub(crate) mod conversation_logger;
 pub(crate) mod conversation_organizer;
 pub(crate) mod experience_harvester;

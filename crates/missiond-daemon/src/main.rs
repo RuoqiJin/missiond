@@ -1447,6 +1447,13 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     );
 
+    // Codex ingestion worker — polls ~/.codex/state_5.sqlite for Codex operation logs
+    workers::spawn_worker(
+        workers::local::codex_ingestion_worker::CodexIngestionWorker,
+        Arc::new(state.clone()),
+        shutdown_rx.clone(),
+    );
+
     // Conversation Organizer — Stage 2 of Cognitive Pipeline
     // Repairs parent links, splices compaction fragments, emits SessionOrganized
     workers::spawn_worker(

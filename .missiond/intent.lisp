@@ -5,9 +5,9 @@
 
 (intent missiond
   (granularity L3-Implementation)
-  (survey-hash "e17db52-50a5296-76900d1-e18d0bf-5671c95-ac96b3c-eae9bbd-c15f363-5ec3517-84ac1a6")
+  (survey-hash "e17db52-50a5296-76900d1-e18d0bf-5671c95-ac96b3c-eae9bbd-c15f363-5ec3517-84ac1a6-0adbb18-3c10d21")
   (survey-date "2026-04-10T00:00:00Z")
-  (last-updated "2026-04-10 — 6 commits: ProjectConfig新增github_url字段(DB持久化)+migration 20260410300000; ProjectStore trait新增backfill_project_id方法; mission_project新增init action(一步注册:path→git remote→intent扫描→upsert+backfill+reload); list action响应增加lispFiles/lispCount(本地readdir动态扫描); Board UI: Conversations/KnowledgeBase新增项目过滤器下拉/pill; SystemDashboard新增ProjectsPanel(卡片网格+githubUrl+slots+lisp文件); /api/projects 新增Next.js路由; /api/conversations+/api/kb支持project查询参数; viewMode union type新增jarvis")
+  (last-updated "2026-04-10 — 8 commits (+2 incremental): [0adbb18] fix: conversations.started_at 改用真实消息时间戳(而非NOW()) — 3条代码路径修复(ensure_conversation_exists新增started_at参数+COALESCE NOW()、ensure_gemini_conversation传入首条消息时间戳、upsert_conversation ON CONFLICT更新started_at), migration 20260410400000修复6623条历史坏记录(MIN(message.timestamp)); [3c10d21] feat: KB条目新增project_id字段 — KnowledgeEntry/KBRememberInput增加project_id, KB_COLS扩展, INSERT/UPDATE SQL支持project_id(COALESCE保留已有归属), kb_remember接受project参数, kb_update支持project_id修改, 新MCP工具mission_kb_batch_set_project(批量归属分配), Board UI: KBEntryCard内嵌项目选择器下拉+未分类pill过滤(__unclassified__客户端过滤), PATCH /api/kb端点(前端乐观更新→后端kb_update)")
 
   ;; ══════════════════════════════════════════════════════
   ;; DESIGN CONSTRAINTS
@@ -235,7 +235,15 @@
         (col compacted_at :type timestamptz)
         (col habit_scanned_at :type timestamptz)
 
-        (op upsert (binds id slot_name source status jsonl_path))
+        ;; started_at fix (commit 0adbb18): 3 code paths were writing NOW() instead of real timestamp
+        ;; Fix: ensure_conversation_exists accepts started_at param, COALESCE(started_at::timestamptz, NOW())
+        ;; upsert ON CONFLICT: updates started_at=CASE WHEN $11 != '' AND $11 != 'unknown' THEN $11 ELSE conversations.started_at END
+        ;; Migration 20260410400000: fixed 6623 broken records via MIN(conversation_messages.timestamp)
+        (op upsert (binds id slot_name source status jsonl_path)
+          :on-conflict "updates started_at when real timestamp available (0adbb18)")
+        (op ensure-conversation-exists
+          (binds session_id project_path jsonl_path status conversation_type parent_session_id started_at)
+          :note "started_at: Option<&str>; COALESCE with NOW() if None (commit 0adbb18)")
         (op select-one (binds id))
         (op select-children (binds parent_id))
         (op list (binds status source limit offset since until conv_type task_id))
@@ -315,8 +323,13 @@
         (col created_at :type timestamptz :not-null)
         (col updated_at :type timestamptz :not-null)
 
-        (op remember (binds key category scope content source) :upsert-on key)
-        (op update (binds key content category scope source) (where key))
+        ;; commit 3c10d21: project_id 写入路径
+        ;; - remember: INSERT增加project_id列; ON CONFLICT: project_id = COALESCE(EXCLUDED.project_id, knowledge.project_id)
+        ;; - KBRememberInput.project_id: Option<String>, 透传自 mission_kb_remember 的 project 参数
+        ;; - kb_update: 新增 new_project_id: Option<&str> 参数; 空串→清除归属(设为NULL)
+        ;; - SQLite(MissionDB): project_id 字段返回 None (仅 PG 持久化)
+        (op remember (binds key category scope content source project_id) :upsert-on key)
+        (op update (binds key content category scope source project_id) (where key))
         (op select-one (binds id))
         (op get-id-by-key (binds key))
         (op search-fts (binds query category limit) :fts true)
@@ -1021,10 +1034,12 @@
       (worker reconcile-worker
         :target "crates/missiond-daemon/src/workers/local/reconcile_worker.rs"
         :trigger "interval 10s"
-        :writes-to slot_sessions)
+        :writes-to slot_sessions
+        :note "commit 0adbb18: ensure_conversation_exists 现传入 jsonl 中首条消息时间戳作为 started_at")
       (worker gemini-reconcile-worker
         :target "crates/missiond-daemon/src/workers/local/gemini_reconcile_worker.rs"
-        :trigger "interval 10s")
+        :trigger "interval 10s"
+        :note "commit 0adbb18: ensure_gemini_conversation 现传入首条消息时间戳(Utc::now()→real timestamp)")
       (worker ast-sync-worker
         :target "crates/missiond-daemon/src/workers/local/ast_sync_worker.rs"
         :trigger "channel ast_sync_rx MPSC"
@@ -1218,7 +1233,14 @@
       (tool mission_kb_query       :handler "handlers::knowledge::kb")
       (tool mission_kb_mutate      :handler "handlers::knowledge::kb")
       (tool mission_kb_ops         :handler "handlers::knowledge::kb")
-      (tool mission_kb_remember    :handler "handlers::knowledge::kb")
+      (tool mission_kb_remember    :handler "handlers::knowledge::kb"
+        :params-added "project: Option<String> — 所属项目 ID (commit 3c10d21)")
+      ;; commit 3c10d21: 批量设置 KB 条目项目归属
+      (tool mission_kb_batch_set_project :handler "handlers::knowledge::kb"
+        :added "3c10d21"
+        :params (assignments :"Vec<{key, project_id?}>")
+        :returns "{updated, not_found, total}"
+        :doc "一次性分配多条 KB 条目到指定项目; project_id 为空/null 表示清除归属(设为全局)")
       (tool mission_memory         :handler "handlers::knowledge::memory")
       (tool mission_board_query    :handler "handlers::knowledge::board")
       (tool mission_board_create   :handler "handlers::knowledge::board")
@@ -1399,8 +1421,14 @@
           :params (status limit conversationType source project)
           :note "project参数透传至mission_conversation_list; commit 5671c95")
         (route "/api/kb"               :handler "kb/route.ts"
+          :methods (GET DELETE PATCH)
           :params (query category project limit)
-          :note "project参数透传至mission_kb_query/mission_kb_list; commit 5671c95")
+          :note "project参数透传至mission_kb_query/mission_kb_list; commit 5671c95"
+          (method PATCH
+            :added "3c10d21"
+            :body "{key, project_id}"
+            :action "kb_update(key, project_id) — 空串清除归属"
+            :returns "ToolResult from mission_kb_update"))
         (route "/api/projects"         :handler "projects/route.ts"
           :method GET :calls "mission_project{action:list}"
           :returns "Vec<ProjectInfo>(含lispFiles/lispCount/githubUrl)"
@@ -1433,7 +1461,15 @@
           (widget project-filter-pills
             :style pill-buttons :separator divider-line
             :passes "project" to "/api/kb"
-            :added "5671c95"))
+            :added "5671c95"
+            :note "commit 3c10d21: '__unclassified__' pill为客户端过滤(不传后端), filter: !e.projectId")
+          (widget per-entry-project-selector
+            :added "3c10d21"
+            :location "KBEntryCard — 每张卡片底部 meta 行"
+            :type "<select> 下拉"
+            :options ("未分类(value='')" "各 ProjectConfig.id")
+            :style "无项目: border-neutral-700/text-neutral-500; 有项目: border-cyan-500/30 text-cyan-400"
+            :interaction "onChange → handleSetProject(key, projectId|null) → PATCH /api/kb → 乐观更新state; 失败时fetchEntries回滚"))
 
         (component SystemDashboard
           :target "packages/board/src/components/SystemDashboard.tsx"

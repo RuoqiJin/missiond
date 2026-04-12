@@ -2718,6 +2718,7 @@ dependencies = [
  "notify",
  "regex",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",

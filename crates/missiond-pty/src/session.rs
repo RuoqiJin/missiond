@@ -1629,18 +1629,30 @@ impl PTYSession {
             return Ok(());
         }
 
-        let input = match response {
-            ConfirmResponse::Yes => "\r",
-            ConfirmResponse::No => "\x1b[B\x1b[B\r", // down, down, enter
+        // Claude Code's tool-use confirm dialog accepts numeric selection
+        // ("1"/"2"/"3" then Enter), but the digit and Enter must arrive as
+        // two distinct PTY events with a small human-like gap — sending them
+        // in a single write batches them together and the TUI's input handler
+        // discards or mis-matches the chunk. Verified empirically 2026-04-12:
+        // sequential write with ~80ms gap works, single write does not.
+        match response {
+            ConfirmResponse::Yes => self.write("\r").await,
+            ConfirmResponse::No => self.press_digit_then_enter('3').await,
             ConfirmResponse::Option(n) => {
-                let downs = "\x1b[B".repeat(n.saturating_sub(1));
-                let input = format!("{}\r", downs);
-                self.write(&input).await?;
-                return Ok(());
+                let digit = std::char::from_digit(n as u32, 10).unwrap_or('1');
+                self.press_digit_then_enter(digit).await
             }
-        };
+        }
+    }
 
-        self.write(input).await
+    /// Send a digit followed by Enter as two separate writes with a brief
+    /// inter-key delay. Simulates a human pressing the keys.
+    async fn press_digit_then_enter(&self, digit: char) -> Result<()> {
+        let mut buf = [0u8; 4];
+        let s = digit.encode_utf8(&mut buf);
+        self.write(s).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        self.write("\r").await
     }
 
     /// Send interrupt (Ctrl+C)

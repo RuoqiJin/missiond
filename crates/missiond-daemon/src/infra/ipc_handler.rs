@@ -77,7 +77,9 @@ pub(crate) async fn handle_ipc_request(state: AppState, request: Request) -> Res
                             2. L3(Code): code_search / beacon_map \
                             3. L4(Details): kb_search for bugs/policies. \
                             Use mission_kb_search before guessing. Use mission_kb_remember when learning. \
-                            会话复盘 → mission_retrospective(sessionId, depth=quick/detailed/full)，不要手动拼 audit_trace。",
+                            读取历史会话原文(某 turn/某段对话) → mission_conversation_query(action=get, sessionId=…, tail=N)；\
+                            会话复盘 → mission_retrospective(sessionId, depth=quick/detailed/full)，不要手动拼 audit_trace。\
+                            调查/实现任务前 MUST 先 mission_intent(project=\"<id>\") 拉取项目 intent.lisp 全景图，可节省 50% 搜索步骤。",
                             parts.join(", ")
                         )
                     }

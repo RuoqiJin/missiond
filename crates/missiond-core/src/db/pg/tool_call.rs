@@ -36,12 +36,24 @@ impl ToolCallStore for PgMissionStore {
         if calls.is_empty() {
             return Ok(0);
         }
+        // Insert new calls; for already-existing calls, allow ONLY a
+        // pending → terminal transition. This handles ingestion sources (e.g.
+        // Codex JSONL) that write the function_call line first and the matching
+        // function_call_output later: the first ingest creates a pending row,
+        // the next ingest (after the output is appended) flips it to success/error
+        // with the actual output. Existing terminal rows are never overwritten.
         let mut count = 0usize;
         for tc in calls {
             let result = sqlx::query(
                 "INSERT INTO conversation_tool_calls (id, session_id, message_id, tool_name, input_summary, raw_input, output_summary, raw_output, status, duration_ms, timestamp)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                 ON CONFLICT (id) DO NOTHING"
+                 ON CONFLICT (id) DO UPDATE SET
+                    output_summary = EXCLUDED.output_summary,
+                    raw_output     = EXCLUDED.raw_output,
+                    status         = EXCLUDED.status,
+                    duration_ms    = EXCLUDED.duration_ms
+                 WHERE conversation_tool_calls.status = 'pending'
+                   AND EXCLUDED.status <> 'pending'"
             )
             .bind(&tc.id)
             .bind(&tc.session_id)

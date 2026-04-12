@@ -38,8 +38,10 @@ struct PermKey {
     param_pattern: String,
 }
 
-/// Tools that should never be auto-learned.
-const NEVER_LEARN_TOOLS: &[&str] = &["Bash"];
+/// Tools that can only be learned with a specific param_pattern, never as a blanket allow.
+/// Bash is here because "allow ALL Bash" is too dangerous, but specific subcommand patterns
+/// (e.g. `python3:*`, `npm test:*`) are exactly what users want to persist.
+const REQUIRES_PARAM_PATTERN: &[&str] = &["Bash"];
 
 /// Learned Permissions — in-memory store with YAML persistence.
 pub struct LearnedPermissions {
@@ -162,8 +164,14 @@ impl LearnedPermissions {
         }
     }
 
-    pub fn is_never_learn(tool_name: &str, _bash_command: Option<&str>) -> bool {
-        NEVER_LEARN_TOOLS.iter().any(|t| *t == tool_name)
+    /// Decide whether a tool can be auto-learned at all.
+    /// Tools listed in `REQUIRES_PARAM_PATTERN` (e.g. Bash) refuse blanket learns
+    /// (param_pattern == None) but allow specific patterns like `python3:*`.
+    pub fn is_never_learn(tool_name: &str, param_pattern: Option<&str>) -> bool {
+        if REQUIRES_PARAM_PATTERN.iter().any(|t| *t == tool_name) {
+            return param_pattern.map(|p| p.is_empty()).unwrap_or(true);
+        }
+        false
     }
 
     pub fn learn(
@@ -320,8 +328,13 @@ mod tests {
 
     #[test]
     fn test_never_learn() {
-        assert!(LearnedPermissions::is_never_learn("Bash", Some("rm -rf /tmp")));
+        // Bash without param_pattern → blanket allow not permitted
         assert!(LearnedPermissions::is_never_learn("Bash", None));
+        assert!(LearnedPermissions::is_never_learn("Bash", Some("")));
+        // Bash with specific param_pattern → learnable
+        assert!(!LearnedPermissions::is_never_learn("Bash", Some("python3:*")));
+        assert!(!LearnedPermissions::is_never_learn("Bash", Some("npm test:*")));
+        // Other tools always learnable
         assert!(!LearnedPermissions::is_never_learn("Write", None));
         assert!(!LearnedPermissions::is_never_learn("Edit", None));
     }
