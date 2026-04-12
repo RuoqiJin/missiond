@@ -1,14 +1,14 @@
 ;; ══════════════════════════════════════════════════════
 ;; MissionD — Implementation Detail (Full System)
 ;; Generated: 2026-04-07 | Forge Deep Cartography v3
-;; Updated: 2026-04-12
+;; Updated: 2026-04-12 (79a877f)
 ;; ══════════════════════════════════════════════════════
 
 (intent missiond
   (granularity L3-Implementation)
-  (survey-hash "e17db52-50a5296-76900d1-e18d0bf-5671c95-ac96b3c-eae9bbd-c15f363-5ec3517-84ac1a6-0adbb18-3c10d21-dc45dcb-21a3b63-65c8b59-1ea1838-081b4f9-a9517ec-20813d5-5a5f805-ec269d7")
+  (survey-hash "e17db52-50a5296-76900d1-e18d0bf-5671c95-ac96b3c-eae9bbd-c15f363-5ec3517-84ac1a6-0adbb18-3c10d21-dc45dcb-21a3b63-65c8b59-1ea1838-081b4f9-a9517ec-20813d5-5a5f805-ec269d7-79a877f")
   (survey-date "2026-04-12T00:00:00Z")
-  (last-updated "2026-04-12 — 10 new commits (incremental Apr 9-12): [dc45dcb] feat: conversation_turns 新增 skeleton 列(JSON turn index, on-demand message retrieval); [21a3b63] feat: turn embedding digest — files_read/files_changed/outcome 列 + keyword-dense embedding text 重写(project:X files:Y intent:Z outcome:W); [65c8b59] feat: 用 EventAnalyzerWorker 替代 git_watcher 30s 轮询 — ContextualCommitDetected 事件携带 conversation/session/slot_id; git_watcher.rs REMOVED; [1ea1838] refactor: commit detection 移入 tagger-chunker; [081b4f9] fix: 解析真实 Bash 命令格式 [Tool: Bash]; [a9517ec] fix: SlotConfig.initial_prompt 通过 pty_spawn handler 传入; [20813d5] feat: SlotConfig 新增 initial_prompt + serde alias 修复(dangerously_skip_permissions/mcp_config/auto_start); [5a5f805] refactor: missiond-semantic 提取为独立 open-source crate (semantic-terminal); [ec269d7] feat: 权限持久化全链路(perm_injector新模块+LearnedPermissions.REQUIRES_PARAM_PATTERN+pty confirm Option(2)自动审批+sequential PTY writes) + mission_intent MCP工具(read/section/summary/list,模糊项目匹配) + mission_codex_ops MCP工具 + CodexIngestionWorker(读~/.codex/state_5.sqlite写会话时间线)")
+  (last-updated "2026-04-12 — 11 new commits (incremental Apr 9-12 +79a877f): [dc45dcb] feat: conversation_turns 新增 skeleton 列(JSON turn index, on-demand message retrieval); [21a3b63] feat: turn embedding digest — files_read/files_changed/outcome 列 + keyword-dense embedding text 重写(project:X files:Y intent:Z outcome:W); [65c8b59] feat: 用 EventAnalyzerWorker 替代 git_watcher 30s 轮询 — ContextualCommitDetected 事件携带 conversation/session/slot_id; git_watcher.rs REMOVED; [1ea1838] refactor: commit detection 移入 tagger-chunker; [081b4f9] fix: 解析真实 Bash 命令格式 [Tool: Bash]; [a9517ec] fix: SlotConfig.initial_prompt 通过 pty_spawn handler 传入; [20813d5] feat: SlotConfig 新增 initial_prompt + serde alias 修复(dangerously_skip_permissions/mcp_config/auto_start); [5a5f805] refactor: missiond-semantic 提取为独立 open-source crate (semantic-terminal); [ec269d7] feat: 权限持久化全链路(perm_injector新模块+LearnedPermissions.REQUIRES_PARAM_PATTERN+pty confirm Option(2)自动审批+sequential PTY writes) + mission_intent MCP工具(read/section/summary/list,模糊项目匹配) + mission_codex_ops MCP工具 + CodexIngestionWorker(读~/.codex/state_5.sqlite写会话时间线); [79a877f] feat: add LispSurveyWorker — commit-triggered intent.lisp maintenance (ContextualCommitDetected→debounce 60s→lisp-surveyor slot, self-trigger filtered, diff截断)")
 
   ;; ══════════════════════════════════════════════════════
   ;; DESIGN CONSTRAINTS
@@ -967,7 +967,7 @@
   ;; PILLAR 6: EVENT BUS + WORKER TOPOLOGY
   ;; ══════════════════════════════════════════════════════
   (pillar event-workers
-    (purpose "pub-sub event backbone + 19 background workers organized by LLM dependency: sonnet(5) codex(2) gemini(1) local(11)")
+    (purpose "pub-sub event backbone + 20 background workers organized by LLM dependency: sonnet(6) codex(2) gemini(1) local(11)")
     ;; local count: +codex_ingestion_worker (ec269d7); EventAnalyzerWorker(65c8b59) absorbed into tagger-chunker(1ea1838)
 
     (component event-bus
@@ -1073,7 +1073,25 @@
         :target "crates/missiond-daemon/src/workers/sonnet/retro_worker.rs"
         :trigger on-session-end
         :writes-to retrospective_results
-        :note "commit c8b76b0: now BackgroundWorker impl, respects ControlTree pause/resume"))
+        :note "commit c8b76b0: now BackgroundWorker impl, respects ControlTree pause/resume")
+      ;; commit 79a877f: NEW
+      (worker lisp-survey-worker
+        :target "crates/missiond-daemon/src/workers/sonnet/lisp_survey_worker.rs"
+        :added "79a877f"
+        :trigger "ContextualCommitDetected event"
+        :routes-to "lisp-surveyor (persistent Sonnet slot, timeout=900s)"
+        :writes-to "project intent.lisp (via slot Edit tool)"
+        :debounce "60s per project_id"
+        :filters "self-trigger: skips commits where slot_id == lisp-surveyor"
+        :diff-truncation "max 8000 chars"
+        :flow ("ContextualCommitDetected{project_id, slot_id, commit_hash, diff}"
+               "→ self-trigger filter (slot_id == lisp-surveyor → skip)"
+               "→ ProjectRegistry::resolve(project_id) → intent_path lookup"
+               "→ skip if no intent.lisp configured for project"
+               "→ debounce 60s (HashMap<String, Instant>)"
+               "→ build incremental survey prompt (diff + intent.lisp path)"
+               "→ slot_manager.execute(\"lisp_survey\", prompt)"
+               "→ parse response: NO_CHANGE → skip; otherwise intent.lisp updated by slot")))
 
     ;; workers/codex/ — Codex CLI / Claude Code PTY via SlotManager
     (component workers-codex
@@ -1227,6 +1245,14 @@
         :invoked-by ("slot_orchestrator::spawner::spawn_tracked_slot (all spawn paths)")
         :doc "before each slot spawn, reads global+role+project+slot union from learned_permissions.yaml (LearnedPermissions::get_for_spawn) and merges into <cwd>/.claude/settings.local.json (idempotent, preserves existing entries, dedups on (tool_pattern, param_pattern))"
         (note "closes the gap where 8 of 10 spawn paths (task/process/cc_controller/flow_engine/memory_scheduler/gemini_driver/slots_reload) previously bypassed perm injection"))
+
+      ;; commit 79a877f: added lisp_survey task (4th registered task in main.rs)
+      (registered-tasks
+        ;; main.rs: "SlotManager: 4 tasks registered (arch_maintenance, strategy_analyst, gemini_router, lisp_survey)"
+        (task arch_maintenance  :slot-id "arch-surveyor"   :model sonnet  :timeout 900s)
+        (task strategy_analyst  :slot-id "strategy"        :model gemini  :timeout 900s)
+        (task gemini_router     :slot-id "gemini-router"   :model gemini  :timeout 900s)
+        (task lisp_survey       :slot-id "lisp-surveyor"   :model sonnet  :timeout 900s :added "79a877f"))
 
       (depends (pty_manager slot_manager event_bus)))
 
