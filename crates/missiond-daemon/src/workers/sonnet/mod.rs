@@ -4,6 +4,7 @@
 pub(crate) mod arch_maintenance_worker;
 pub(crate) mod briefing_worker;
 pub(crate) mod embedding_worker;
+pub(crate) mod lisp_survey_worker;
 pub(crate) mod retro_worker;
 pub(crate) mod translation_worker;
 

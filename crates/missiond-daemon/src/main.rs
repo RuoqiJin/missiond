@@ -904,8 +904,22 @@ async fn main() -> Result<()> {
                 skip_permissions: true,
             })
             .await?;
+        state
+            .slot_manager
+            .register(slot_orchestrator::SlotTaskConfig {
+                task_type: "lisp_survey".to_string(),
+                engine: CliEngine::ClaudeCode,
+                lifecycle: Lifecycle::Persistent,
+                slot_id: Some("lisp-surveyor".to_string()),
+                role: Some("coder".to_string()),
+                model: Some("claude-sonnet-4-6".to_string()),
+                timeout: std::time::Duration::from_secs(900),
+                cwd: std::path::PathBuf::from("<REPO_ROOT>"),
+                skip_permissions: true,
+            })
+            .await?;
         info!(
-            "SlotManager: 3 tasks registered (arch_maintenance, strategy_analyst, gemini_router)"
+            "SlotManager: 4 tasks registered (arch_maintenance, strategy_analyst, gemini_router, lisp_survey)"
         );
     }
 
@@ -1425,6 +1439,15 @@ async fn main() -> Result<()> {
     // Architecture maintenance worker — auto-updates YAML manifests on structural code changes
     workers::spawn_worker(
         workers::sonnet::arch_maintenance_worker::ArchMaintenanceWorker {
+            timeline_rx: timeline_broadcast_tx.subscribe(),
+        },
+        Arc::new(state.clone()),
+        shutdown_rx.clone(),
+    );
+
+    // Lisp survey worker — commit-triggered intent.lisp incremental maintenance
+    workers::spawn_worker(
+        workers::sonnet::lisp_survey_worker::LispSurveyWorker {
             timeline_rx: timeline_broadcast_tx.subscribe(),
         },
         Arc::new(state.clone()),
