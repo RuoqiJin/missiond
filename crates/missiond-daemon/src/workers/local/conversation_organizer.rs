@@ -59,7 +59,9 @@ async fn run_organizer(
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(skipped = n, "Organizer: broadcast lagged");
+                    // DATA LOSS: {n} ConversationMessageLogged events were permanently lost.
+                    // Affected sessions will not be organized until next activity triggers a new event.
+                    warn!(skipped = n, "Organizer: broadcast lagged — events permanently lost");
                     continue;
                 }
                 Err(_) => break,

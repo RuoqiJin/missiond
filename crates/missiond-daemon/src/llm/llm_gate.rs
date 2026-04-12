@@ -111,6 +111,27 @@ pub(crate) fn check(provider: LlmProvider) -> Result<(), LlmGateError> {
     }
 }
 
+/// Check gate with interactive-caller exemption.
+///
+/// User-initiated MCP calls (e.g. `router_chat`) bypass the gate — they are
+/// on-demand, not background polling.  Background workers still get blocked
+/// when the gate is closed.
+///
+/// Uses `REQUEST_CALLER` task-local set at IPC entry point.
+pub(crate) fn check_interactive_exempt(provider: LlmProvider) -> Result<(), LlmGateError> {
+    if is_interactive_caller() {
+        return Ok(());
+    }
+    check(provider)
+}
+
+/// Interactive callers that bypass LLM gates.
+fn is_interactive_caller() -> bool {
+    super::gemini_client::REQUEST_CALLER
+        .try_with(|c| c == "router_chat")
+        .unwrap_or(false)
+}
+
 /// Open or close a provider's gate. Updates AtomicBool + persists to flag file.
 pub(crate) fn set_disabled(provider: LlmProvider, disabled: bool) {
     GATES.atom(provider).store(disabled, Ordering::Relaxed);

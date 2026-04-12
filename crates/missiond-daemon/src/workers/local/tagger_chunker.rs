@@ -24,6 +24,15 @@ use missiond_core::types::{ConversationMessage, RawTurn};
 /// Fixed-window batch interval (same as S2 Organizer).
 const BATCH_INTERVAL_SECS: u64 = 5;
 
+/// Reconciliation sweep interval: catch sessions missed by lost broadcast events.
+const RECONCILE_INTERVAL_SECS: u64 = 60;
+
+/// How far back (in minutes) the reconciliation sweep looks for recently-active sessions.
+const RECONCILE_LOOKBACK_MINUTES: i64 = 5;
+
+/// Max sessions to recover in a single reconciliation sweep.
+const RECONCILE_BATCH_LIMIT: i64 = 50;
+
 /// Max messages to fetch per session in one pass.
 const MAX_MESSAGES_PER_SESSION: i64 = 10_000;
 
@@ -91,6 +100,7 @@ async fn run_tagger_chunker(
 
     let mut dirty: HashSet<String> = HashSet::new();
     let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(BATCH_INTERVAL_SECS));
+    let mut reconcile_tick = tokio::time::interval(tokio::time::Duration::from_secs(RECONCILE_INTERVAL_SECS));
 
     loop {
         ctx.wait_if_paused().await;
@@ -102,7 +112,10 @@ async fn run_tagger_chunker(
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    debug!(skipped = n, "TaggerChunker: broadcast lagged");
+                    // DATA LOSS: {n} events were permanently dropped by the broadcast channel.
+                    // These SessionOrganized events cannot be recovered via broadcast replay.
+                    // The reconcile_tick sweep below will catch missed sessions within 60s.
+                    warn!(skipped = n, "TaggerChunker: broadcast lagged — events permanently lost");
                     continue;
                 }
                 Err(_) => break,
@@ -110,6 +123,9 @@ async fn run_tagger_chunker(
             _ = tick.tick(), if !dirty.is_empty() => {
                 let batch: Vec<String> = dirty.drain().collect();
                 process_batch(&state, &batch).await;
+            }
+            _ = reconcile_tick.tick() => {
+                reconcile_missed_sessions(&state).await;
             }
         }
     }
@@ -139,7 +155,7 @@ async fn startup_backfill(state: &AppState) {
                 if let Err(e) = state.embedding_tx.try_send(EmbeddingTask::ProcessTurns {
                     session_id: sid.clone(),
                 }) {
-                    debug!(session = %sid, error = %e, "TaggerChunker: embedding_tx full or closed");
+                    warn!(session = %sid, error = %e, "embedding_tx full — backfill turns extracted but embedding NOT queued");
                 }
             }
             Ok(_) => {}
@@ -148,6 +164,50 @@ async fn startup_backfill(state: &AppState) {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
     info!(total, success, "TaggerChunker: startup backfill complete");
+}
+
+/// Periodic reconciliation: recover sessions that have recent messages but no turns,
+/// catching any sessions missed due to lost broadcast events (Lagged).
+async fn reconcile_missed_sessions(state: &AppState) {
+    let missed = match state
+        .store
+        .sessions_recently_active_without_turns(RECONCILE_LOOKBACK_MINUTES, RECONCILE_BATCH_LIMIT)
+        .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            warn!(error = %e, "TaggerChunker: reconciliation query failed");
+            return;
+        }
+    };
+
+    if missed.is_empty() {
+        return;
+    }
+
+    let mut recovered = 0usize;
+    for sid in &missed {
+        match process_session(state, sid).await {
+            Ok(count) if count > 0 => {
+                recovered += 1;
+                state.event_bus.publish(DaemonEvent::TurnExtracted {
+                    session_id: sid.clone(),
+                    turn_count: count,
+                });
+                if let Err(e) = state.embedding_tx.try_send(EmbeddingTask::ProcessTurns {
+                    session_id: sid.clone(),
+                }) {
+                    warn!(session = %sid, error = %e, "embedding_tx full — reconciled turns but embedding NOT queued");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => warn!(session = %sid, error = %e, "TaggerChunker: reconciliation process failed"),
+        }
+    }
+
+    if recovered > 0 {
+        info!(recovered, "TaggerChunker: reconciliation sweep recovered missed sessions");
+    }
 }
 
 async fn process_batch(state: &AppState, session_ids: &[String]) {
@@ -159,9 +219,11 @@ async fn process_batch(state: &AppState, session_ids: &[String]) {
                     turn_count: count,
                 });
                 // Trigger S4 per-turn embedding
-                let _ = state.embedding_tx.try_send(EmbeddingTask::ProcessTurns {
+                if let Err(e) = state.embedding_tx.try_send(EmbeddingTask::ProcessTurns {
                     session_id: sid.clone(),
-                });
+                }) {
+                    warn!(session = %sid, error = %e, "embedding_tx full — turns extracted but embedding NOT queued");
+                }
                 debug!(session = %sid, turns = count, "TaggerChunker: turns extracted");
             }
             Ok(_) => {}
