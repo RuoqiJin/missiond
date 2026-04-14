@@ -18,7 +18,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "project": {
                         "type": "string",
-                        "description": "[read/section/summary] 项目 ID（如 missiond, example-forge, example-p）。默认从 CWD 推断"
+                        "description": "[read/section/summary] 项目 ID（如 missiond）。默认从 CWD 推断"
                     },
                     "section": {
                         "type": "string",

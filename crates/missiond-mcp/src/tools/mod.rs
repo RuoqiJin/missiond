@@ -172,7 +172,7 @@ mod comm;
 mod sysinfra;
 
 // Domain aliases for readability
-use knowledge::{board, cascade, insight, intent, kb, skill, memory, project};
+use knowledge::{board, insight, intent, kb, skill, memory, project};
 use compute::{task, task_delegate, process, pty, cc_tasks, minimax, worker, slot, compute_slot, job, flow_run};
 use comm::{router_chat, question, conversation, timeline, audit, codex_ops};
 use sysinfra::{infra, permission, power, system};
@@ -186,7 +186,6 @@ pub fn all_tools() -> Vec<ToolDefinition> {
     tools.extend(skill::definitions());
     tools.extend(memory::definitions());
     tools.extend(insight::definitions());
-    tools.extend(cascade::definitions());
     tools.extend(intent::definitions());
     tools.extend(project::definitions());
     // compute
@@ -245,7 +244,6 @@ mod tests {
             "mission_task_query",
             "mission_pty_spawn",
             "mission_kb_remember",
-            "mission_cc_query",
         ] {
             assert!(names.contains(required), "missing required tool: {required}");
         }

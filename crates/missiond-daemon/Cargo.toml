@@ -48,7 +48,6 @@ tempfile = "3"
 async-trait.workspace = true
 dashmap = "6.1.0"
 libc = "0.2.183"
-example-graph = { path = "../../../example-forge/crates/example-graph" }
 rusqlite = { workspace = true }
 
 [lints]
