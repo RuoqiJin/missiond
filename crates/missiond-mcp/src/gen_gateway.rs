@@ -126,6 +126,7 @@ pub async fn dispatch_tool<H: MissiondMcp>(handler: &H, name: &str, args: Value)
         "mission_cc_query" | "mission_cc_swarm" => handler.handle_cc_tasks(name, args).await,
         "mission_worker" => handler.handle_worker(name, args).await,
         "mission_job_poll" => handler.handle_job(name, args).await,
+        "mission_flow_run" => handler.handle_worker(name, args).await,
         "mission_board_create" | "mission_board_query" | "mission_board_update" | "mission_board_delete" | "mission_board_claim" | "mission_board_decompose" | "mission_board_note_add" | "mission_board_retry" => handler.handle_board(name, args).await,
         "mission_skill_query" | "mission_skill_exec" | "mission_skill_mutate" | "mission_skill_context" => handler.handle_skill(name, args).await,
         "mission_memory" => handler.handle_memory(name, args).await,
@@ -174,6 +175,7 @@ pub async fn run_stdio<H: MissiondMcp>(handler: &H) -> Result<()> {
             }
         };
 
+        let is_notification = request.id.is_none();
         let id = request.id.clone().unwrap_or(RequestId::Null);
         let response = match request.method.as_str() {
             "initialize" => handler.handle_initialize(id.clone(), request.params.unwrap_or(Value::Null)).await,
@@ -183,6 +185,10 @@ pub async fn run_stdio<H: MissiondMcp>(handler: &H) -> Result<()> {
             "ping" => handler.handle_ping(id.clone(), request.params.unwrap_or(Value::Null)).await,
             other => Response::from_error(id, RpcError::MethodNotFound(other.to_string())),
         };
+
+        if is_notification {
+            continue;
+        }
 
         let json = serde_json::to_string(&response)?;
         stdout.write_all(json.as_bytes()).await?;

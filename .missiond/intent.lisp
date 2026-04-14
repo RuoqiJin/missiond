@@ -1,14 +1,14 @@
 ;; ══════════════════════════════════════════════════════
 ;; MissionD — Implementation Detail (Full System)
 ;; Generated: 2026-04-07 | Forge Deep Cartography v3
-;; Updated: 2026-04-12 (43c80f4)
+;; Updated: 2026-04-14 (working-tree: Flow Engine v2)
 ;; ══════════════════════════════════════════════════════
 
 (intent missiond
   (granularity L3-Implementation)
-  (survey-hash "e17db52-50a5296-76900d1-e18d0bf-5671c95-ac96b3c-eae9bbd-c15f363-5ec3517-84ac1a6-0adbb18-3c10d21-dc45dcb-21a3b63-65c8b59-1ea1838-081b4f9-a9517ec-20813d5-5a5f805-ec269d7-79a877f-ad889d1-48a9834-b3f04a6-ce3f3ec-d8f47de-d75699e-9684b50-43c80f4")
-  (survey-date "2026-04-12T00:00:00Z")
-  (last-updated "2026-04-12 — 8 new commits (incremental +43c80f4): [ad889d1] fix: ConversationOrganizer 去除 agent-only 过滤 — 所有 session 均发 SessionOrganized(原仅 agent-* 会话触发，用户前台 session 从未发出 SessionOrganized 导致 TaggerChunker 不处理 → commit detection 静默失效); [48a9834] fix: ConversationOrganizer 新增诊断 debug 日志; [b3f04a6] test: 触发 commit detection 端到端验证 lisp_survey 事件链; [ce3f3ec] fix: TaggerChunker commit detection 移到 early-return 之前(原 collect_tool_labels 在 raw_turns.is_empty() return 之后，活跃 session 未完成最后 turn 时 commit 事件永远不触发); [d8f47de] refactor: TaggerChunker 拆分为 analyze_messages + chunk_turns 双独立流水线 — analyze_messages 处理 noise labels/tool 分类/commit 检测，chunk_turns 做 turn 提取/tail-trim/持久化，两管道共享同一 messages 数组，从架构上保证 turn early-return 不影响 message 分析; [d75699e] test: E2E 验证 refactored TaggerChunker commit detection; [9684b50] debug: analyze_messages 新增 commit detection tracing(user_msg 数/regex MATCH 日志); [43c80f4] refactor: CodexIngestionWorker 新增 text message 提取(agent+user) + ParsedMessage struct + insert_conversation_messages_batch; poll interval 30s→10s; LLM gate check_interactive_exempt() — router_chat 等用户发起调用绕过 gate; Sonnet 模型名 cpapi-claude-sonnet→claude-sonnet; TaggerChunker 60s reconciliation sweep via sessions_recently_active_without_turns() 补处理 broadcast 丢失的 session; ConversationOrganizer broadcast lagged 语义明确为 permanently lost")
+  (survey-hash "e17db52-50a5296-76900d1-e18d0bf-5671c95-ac96b3c-eae9bbd-c15f363-5ec3517-84ac1a6-0adbb18-3c10d21-dc45dcb-21a3b63-65c8b59-1ea1838-081b4f9-a9517ec-20813d5-5a5f805-ec269d7-79a877f-ad889d1-48a9834-b3f04a6-ce3f3ec-d8f47de-d75699e-9684b50-43c80f4+WT-flow-v2")
+  (survey-date "2026-04-14T00:00:00Z")
+  (last-updated "2026-04-14 — 无新 commit（HEAD=75949d9）但工作区新增 Flow Engine v2: 通用声明式节点编排器，与旧 flow_engine.rs(项目生命周期耦合 autopilot)独立。新模块 crates/missiond-daemon/src/engine/flow/{mod.rs(139L),runner.rs(141L),handlers.rs(181L),loader.rs(37L)}, 定义 NodeType 四元组(LlmCall/SlotTask/McpTool/DaemonAction) + FlowDefinition/FlowContext + ErrorPolicy(Stop/Skip/Retry(N))。runner.rs 使用 Box::pin 显式断开 async 递归环(run_flow→execute_node→dispatch_tool→flow_run::handle→run_flow)。FlowContext 支持 ${key} 变量插值 + 序列化持久化到 BoardTask.flow_context(复用现有列). loader.rs 从 $MISSIOND_HOME/flows/{flow_id}.yaml 加载 serde_yaml. handlers.rs: LlmCall 分发到 llm_gateway::{call_gemini_for_flow,call_sonnet_stateless}, SlotTask 走 state.mission.list_slots() 过滤 EXCLUDED_ROLES=[memory,supervisor,strategy] 的首个候选并 pty.send_fire_and_forget(要求 slot 已 running 否则 fail-fast), McpTool 回调 dispatch_tool, DaemonAction 支持 read_intent_lisp+close_flow. 新工具 mission_flow_run(compute 域, actions: run/list/status) 创建 BoardTask 行并 inline 执行(注释注明 background spawn 延后, Send bound 跨 dispatch_tool 环未解). 连通性: engine/mod.rs +pub mod flow; handlers/compute/mod.rs +flow_run; handlers/mod.rs dispatch_tool +\"mission_flow_run\"; mcp/tools/compute/mod.rs +flow_run; mcp/tools/mod.rs all_tools +flow_run::definitions; mcp/gen_gateway.rs dispatch_tool \"mission_flow_run\"→handler.handle_worker(复用 worker pipe 通道).")
 
   ;; ══════════════════════════════════════════════════════
   ;; DESIGN CONSTRAINTS
@@ -1218,7 +1218,114 @@
 
     (component flow-engine
       :target "crates/missiond-daemon/src/engine/intent_engine/flow_engine.rs"
-      (depends (db slot_manager)))
+      (depends (db slot_manager))
+      (note "V1 flow engine — project-lifecycle phases tied to autopilot tick, NOT the new Flow Engine v2 below"))
+
+    ;; ── Flow Engine v2 (working-tree 2026-04-14, uncommitted) ────────
+    ;; General-purpose declarative node-based workflow orchestration,
+    ;; independent of autopilot + project lifecycle. YAML-driven.
+    (component flow-engine-v2
+      :target "crates/missiond-daemon/src/engine/flow/mod.rs"
+      :status uncommitted-working-tree
+      :purpose "Declarative YAML→node-sequence executor reusing existing LLM/slot/MCP primitives"
+
+      (module mod.rs
+        :lines 139
+        (type NodeType :tag "type" :variants
+          (LlmCall      :fields (provider prompt max_tokens=65536))
+          (SlotTask     :fields (model=opus prompt timeout_secs=3600))
+          (McpTool      :fields (tool_name params))
+          (DaemonAction :fields (action params)))
+        (type ErrorPolicy :variants (Stop Skip Retry(u32)) :default Stop)
+        (type FlowNode    :fields (id node_type save_as depends_on on_error))
+        (type FlowDefinition :fields (id name nodes))
+        (type FlowContext :fields (vars:HashMap<String,String> current_node completed_nodes last_error)
+          (method resolve_vars "template ${key} interpolation from ctx.vars")
+          (method set/get)))
+
+      (module runner.rs
+        :lines 141
+        :target "crates/missiond-daemon/src/engine/flow/runner.rs"
+        (function run_flow
+          :signature "fn run_flow<'a>(state, flow, ctx, task_id) -> Pin<Box<dyn Future>>"
+          :why-boxed "Box::pin breaks async recursion cycle: run_flow → execute_node → dispatch_tool → flow_run::handle → run_flow"
+          :loop "iterate flow.nodes skip(ctx.current_node), execute_with_retry, save_as→ctx.vars, completed_nodes.push, persist_context on each node"
+          :on-error "ctx.last_error = Some(e.to_string()); persist; return Err")
+        (function execute_with_retry
+          :retries "ErrorPolicy::Retry(N) → 2^attempt secs exponential backoff"
+          :skip "ErrorPolicy::Skip → warn + Ok(String::new())")
+        (function persist_context
+          :sink "store.update_board_task(task_id, UpdateBoardTaskInput { flow_context: Some(json), .. })"))
+
+      (module handlers.rs
+        :lines 181
+        :target "crates/missiond-daemon/src/engine/flow/handlers.rs"
+        (node-dispatch
+          (LlmCall
+            "gemini"  → "llm_gateway::call_gemini_for_flow(state, task_id, prompt)"
+            "sonnet"  → "llm_gateway::call_sonnet_stateless(state, 'architecture reviewer', prompt, max_tokens, 'flow_node')"
+            (fail-fast "unknown provider → anyhow err"))
+          (SlotTask
+            :selection "state.mission.list_slots() first non-excluded"
+            (const EXCLUDED_ROLES #("memory" "supervisor" "strategy"))
+            :precondition "slot must be running (SessionState != Exited) else fail-fast 'Start it first via mission_pty_spawn or slots.yaml auto_start'"
+            :send "state.pty.send_fire_and_forget(slot_id, prompt)"
+            :output "SlotTask dispatched to {slot_id} (timeout={n}s)")
+          (McpTool
+            :delegate "handlers::dispatch_tool(state, tool_name, params)"
+            :output "concat text contents, propagate is_error")
+          (DaemonAction
+            "read_intent_lisp" → "dispatch_tool('mission_intent', {action:'read', project})"
+            "close_flow"       → "update_board_task(task_id, status='done')"
+            (fail-fast "unknown action → anyhow err"))))
+
+      (module loader.rs
+        :lines 37
+        :target "crates/missiond-daemon/src/engine/flow/loader.rs"
+        (function load_flow :path "$MISSIOND_HOME/flows/{flow_id}.yaml" :parser "serde_yaml::from_str::<FlowDefinition>")
+        (function list_flows :scan "$MISSIOND_HOME/flows/*.{yaml,yml}"))
+
+      (db-reuse
+        :table board_tasks
+        :columns (flow_template flow_phase flow_context)
+        :note "v2 recycles existing flow_* columns; no migration needed")
+
+      (handler
+        :target "crates/missiond-daemon/src/handlers/compute/flow_run.rs"
+        :lines 98
+        (action list
+          :call "loader::list_flows()"
+          :output-json ({flows [...]} count))
+        (action status
+          :arg task_id
+          :call "store.get_board_task → task.flow_context JSON parse → FlowContext"
+          :output-json (task_id flow_phase status context))
+        (action run
+          :arg flow_id
+          :arg params
+          :pipeline (load_flow → create_board_task(category='flow',flow_template=id)
+                     → ctx.set from params
+                     → update_board_task(flow_phase='running',status='running',flow_context=json)
+                     → run_flow(inline-await)
+                     → on-ok update(flow_phase='completed',status='done')
+                     → on-err update(flow_phase='failed',status='failed'))
+          :known-limit "inline blocking — background spawn deferred pending Send bound resolution across dispatch_tool→run_flow→execute_node→dispatch_tool chain"))
+
+      (mcp-tool
+        :name mission_flow_run
+        :target "crates/missiond-mcp/src/tools/compute/flow_run.rs"
+        :description "Flow Engine v2: execute declarative node-based workflows. run=execute, list=available flows, status=check running flow"
+        :required (flow_id)
+        :properties (flow_id params action[run|list|status]=run task_id)
+        :gen-gateway-route "dispatch_tool: 'mission_flow_run' → handler.handle_worker(name,args) (reuses worker pipe transport)")
+
+      (depends (db slot_manager llm_gateway mcp_dispatch pty_manager))
+
+      (fail-fast-invariants
+        "Slot not running → immediate err (no auto-spawn)"
+        "Unknown LLM provider → immediate err (no fallback)"
+        "Unknown daemon action → immediate err (no noop)"
+        "Flow YAML not found → immediate err"))
 
     (component memory-scheduler
       :target "crates/missiond-daemon/src/engine/intent_engine/memory_scheduler.rs"
@@ -1453,6 +1560,11 @@
         ;; MCP schema enum: ["global","provider","domain","worker","slot_role","project"]
         )
       (tool mission_job_poll       :handler "handlers::compute::job")
+      (tool mission_flow_run       :handler "handlers::compute::flow_run"
+        ;; working-tree 2026-04-14 (uncommitted): Flow Engine v2 entrypoint
+        ;; actions: run | list | status — see (component flow-engine-v2)
+        ;; gen_gateway routes to handler.handle_worker (reuses worker transport)
+        )
       (tool mission_sonnet_process :handler "handlers::compute::process")
       (tool mission_minimax_process :handler "handlers::compute::minimax")
       (tool mission_agent          :handler "handlers::compute::cc_tasks"))

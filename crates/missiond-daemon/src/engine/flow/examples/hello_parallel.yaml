@@ -1,0 +1,16 @@
+id: hello-parallel
+name: "Hello Parallel POC — 三路并发 slot 派发测试"
+nodes:
+  - id: scatter
+    type: parallel_slot_tasks
+    save_as: scatter_results
+    parallelism: 3
+    tasks:
+      - id: task_a
+        prompt: "请回复：I am slot A, ready to investigate"
+      - id: task_b
+        prompt: "请回复：I am slot B, ready to investigate"
+      - id: task_c
+        prompt: "请回复：I am slot C, ready to investigate"
+    gather: aggregate
+    timeout_secs: 60

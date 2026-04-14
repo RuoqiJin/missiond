@@ -1,5 +1,6 @@
 pub(crate) mod cc_tasks;
 pub(crate) mod compute_slot;
+pub(crate) mod flow_run;
 pub(crate) mod job;
 pub(crate) mod minimax;
 pub(crate) mod process;
