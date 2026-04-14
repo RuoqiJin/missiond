@@ -173,7 +173,7 @@ mod sysinfra;
 
 // Domain aliases for readability
 use knowledge::{board, cascade, insight, intent, kb, skill, memory, project};
-use compute::{task, task_delegate, process, pty, cc_tasks, minimax, worker, slot, compute_slot, job};
+use compute::{task, task_delegate, process, pty, cc_tasks, minimax, worker, slot, compute_slot, job, flow_run};
 use comm::{router_chat, question, conversation, timeline, audit, codex_ops};
 use sysinfra::{infra, permission, power, system};
 
@@ -200,6 +200,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
     tools.extend(compute_slot::definitions());
     tools.extend(task_delegate::definitions());
     tools.extend(job::definitions());
+    tools.extend(flow_run::definitions());
     // comm
     tools.extend(router_chat::definitions());
     tools.extend(question::definitions());
