@@ -4,7 +4,9 @@
 
 project:
   name: missiond
-  path: <REPO_ROOT>
+  # path is intentionally unset — AI agents should use the repo they were
+  # spawned inside as the implicit root; hard-coding an operator-specific
+  # path here would break every other clone.
   lang: rust
   framework: tokio + axum (ws) + sqlx (sqlite/pg)
   description: "Claude Code 多实例编排系统：PTY 管理、语义解析、知识库、MCP 工具暴露"

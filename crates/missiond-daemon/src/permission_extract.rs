@@ -23,7 +23,7 @@ pub struct ExtractedConfirm {
 /// Shapes supported (case insensitive, curly quotes normalized):
 ///
 ///   "Yes, and don't ask again for: python3:*"
-///   "Yes, and don't ask again for python3 commands in <PROJECTS_ROOT>"
+///   "Yes, and don't ask again for python3 commands in /tmp/example"
 ///   "Yes, and don't ask again for Read(/etc/passwd)"
 ///   "是，不再询问 python3:*"
 ///
@@ -116,13 +116,13 @@ mod tests {
     #[test]
     fn english_with_project_path() {
         let got = extract_confirm(
-            "Yes, and don't ask again for python3 commands in <PROJECTS_ROOT>",
+            "Yes, and don't ask again for python3 commands in /tmp/example",
         );
         assert_eq!(
             got,
             Some(ExtractedConfirm {
                 pattern: "python3".to_string(),
-                project_path: Some("<PROJECTS_ROOT>".to_string()),
+                project_path: Some("/tmp/example".to_string()),
             })
         );
     }
@@ -185,13 +185,13 @@ mod tests {
     #[test]
     fn english_with_project_path_and_colon_pattern() {
         let got = extract_confirm(
-            "Yes, and don't ask again for python3:* commands in <REPO_ROOT>",
+            "Yes, and don't ask again for python3:* commands in /tmp/example/project",
         );
         assert_eq!(
             got,
             Some(ExtractedConfirm {
                 pattern: "python3:*".to_string(),
-                project_path: Some("<REPO_ROOT>".to_string()),
+                project_path: Some("/tmp/example/project".to_string()),
             })
         );
     }

@@ -60,18 +60,33 @@ fn default_max_cycles() -> usize {
 /// Resolve and validate manifest path against an allowed root directory.
 /// Returns the canonicalized path or an error string suitable for ToolResult::error.
 fn resolve_manifest_path(args_path: Option<&str>) -> Result<PathBuf, String> {
-    let default = std::env::var("UNIVERSE_MANIFEST")
-        .unwrap_or_else(|_| "<REPO_ROOT>/../universe.intent.lisp".into());
-    let raw = args_path.unwrap_or(&default);
-    let path = PathBuf::from(raw);
+    // Operators must opt in by setting either $UNIVERSE_MANIFEST (an absolute
+    // path to the universe.intent.lisp file) or by passing an explicit
+    // `manifestPath` argument. Fail fast rather than guessing.
+    let default = std::env::var("UNIVERSE_MANIFEST").ok();
+    let raw = match args_path.or(default.as_deref()) {
+        Some(p) => p.to_string(),
+        None => {
+            return Err(
+                "manifest path not configured: set $UNIVERSE_MANIFEST or pass manifestPath"
+                    .to_string(),
+            )
+        }
+    };
+    let path = PathBuf::from(&raw);
 
     let canonical = path
         .canonicalize()
         .map_err(|e| format!("manifest path not found: {}: {}", raw, e))?;
 
-    let allowed_root = std::env::var("UNIVERSE_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("<PROJECTS_ROOT>"));
+    let allowed_root = match std::env::var("UNIVERSE_ROOT").map(PathBuf::from) {
+        Ok(r) => r,
+        Err(_) => {
+            return Err(
+                "$UNIVERSE_ROOT not set: cannot enforce manifest path allowlist".to_string(),
+            )
+        }
+    };
 
     if let Ok(root) = allowed_root.canonicalize() {
         if !canonical.starts_with(&root) {

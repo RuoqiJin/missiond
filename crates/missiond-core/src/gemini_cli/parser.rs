@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn test_sha256_hex() {
-        let hash = sha256_hex("<REPO_ROOT>");
+        let hash = sha256_hex("/tmp/example-project");
         assert_eq!(hash.len(), 64);
     }
 
@@ -534,7 +534,7 @@ mod tests {
         assert!(!session.messages.is_empty());
 
         // Convert all messages
-        let lines = gemini_messages_to_cc(&session.messages, &session, "<REPO_ROOT>");
+        let lines = gemini_messages_to_cc(&session.messages, &session, "/tmp/example-project");
         assert!(!lines.is_empty());
         // Every line must have a non-empty session_id and uuid
         for line in &lines {
@@ -556,7 +556,7 @@ mod tests {
         let session = parse_session(&path).await.expect("Failed to parse large session");
         assert!(session.messages.len() > 5, "Expected many messages in large session");
 
-        let lines = gemini_messages_to_cc(&session.messages, &session, "<REPO_ROOT>");
+        let lines = gemini_messages_to_cc(&session.messages, &session, "/tmp/example-project");
         // Should expand to more lines than original messages (thoughts + tool calls)
         assert!(lines.len() >= session.messages.len());
 

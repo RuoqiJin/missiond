@@ -40,9 +40,10 @@ dist/
 notebookLLM 接入.md
 gemini-audit-request.md
 docs/designs/
-docs/architectures/example-app.yaml
-docs/architectures/example-backend.yaml
-docs/architectures/example-backend.yaml
+# Operator-specific architecture manifests live alongside missiond.yaml but
+# must never be committed. Only missiond.yaml ships in the public tree.
+docs/architectures/*.yaml
+!docs/architectures/missiond.yaml
 docs/audit/
 
 # One-off fix/migration scripts

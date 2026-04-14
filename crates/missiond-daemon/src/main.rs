@@ -862,6 +862,8 @@ async fn main() -> Result<()> {
     // Register SlotManager task configs
     {
         use missiond_core::types::{CliEngine, Lifecycle};
+        let daemon_cwd = std::env::current_dir()
+            .map_err(|e| anyhow!("failed to read current dir for slot registration: {}", e))?;
         state
             .slot_manager
             .register(slot_orchestrator::SlotTaskConfig {
@@ -872,7 +874,7 @@ async fn main() -> Result<()> {
                 role: Some("arch-maint".to_string()),
                 model: Some("claude-sonnet-4-6".to_string()),
                 timeout: std::time::Duration::from_secs(600),
-                cwd: std::path::PathBuf::from("<REPO_ROOT>"),
+                cwd: daemon_cwd.clone(),
                 skip_permissions: true,
             })
             .await?;
@@ -886,7 +888,7 @@ async fn main() -> Result<()> {
                 role: Some("strategy".to_string()),
                 model: None, // Uses GEMINI_MODEL constant in controller
                 timeout: std::time::Duration::from_secs(600),
-                cwd: std::path::PathBuf::from("<REPO_ROOT>"),
+                cwd: daemon_cwd.clone(),
                 skip_permissions: true,
             })
             .await?;
@@ -900,7 +902,7 @@ async fn main() -> Result<()> {
                 role: Some("gemini-router".to_string()),
                 model: None,
                 timeout: std::time::Duration::from_secs(120),
-                cwd: std::path::PathBuf::from("<REPO_ROOT>"),
+                cwd: daemon_cwd.clone(),
                 skip_permissions: true,
             })
             .await?;
@@ -914,7 +916,7 @@ async fn main() -> Result<()> {
                 role: Some("coder".to_string()),
                 model: Some("claude-sonnet-4-6".to_string()),
                 timeout: std::time::Duration::from_secs(900),
-                cwd: std::path::PathBuf::from("<REPO_ROOT>"),
+                cwd: daemon_cwd,
                 skip_permissions: true,
             })
             .await?;

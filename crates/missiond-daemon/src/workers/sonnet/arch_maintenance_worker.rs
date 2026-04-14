@@ -122,11 +122,13 @@ impl BackgroundWorker for ArchMaintenanceWorker {
 }
 
 /// Map repo name → YAML manifest path (relative to missiond project root).
+///
+/// Only the missiond self-manifest is bundled with the public build.
+/// Operators can add their own repo→yaml mappings here or via a sidecar
+/// config file consumed by this worker.
 fn yaml_for_repo(repo_name: &str) -> Option<&'static str> {
     match repo_name {
         "missiond" => Some("docs/architectures/missiond.yaml"),
-        "example-app" | "example-frontend" => Some("docs/architectures/example-app.yaml"),
-        "example-backend" => Some("docs/architectures/example-backend.yaml"),
         _ => None,
     }
 }
@@ -327,10 +329,12 @@ async fn process_commit(state: &AppState, repo: &str, hash: &str) -> Result<bool
         "arch_maintenance: structural change detected, calling LLM"
     );
 
-    // 4. Read current YAML manifest
-    // For missiond repo, the YAML is in the same repo
-    // For other repos, it's still in the missiond repo
-    let missiond_root = PathBuf::from("<REPO_ROOT>");
+    // 4. Read current YAML manifest.
+    //
+    // YAML manifests live inside the missiond repo itself (this process
+    // is always spawned with cwd at the repo root).
+    let missiond_root = std::env::current_dir()
+        .map_err(|e| anyhow!("failed to read current dir for arch manifest lookup: {}", e))?;
     let yaml_path = missiond_root.join(yaml_rel);
     let yaml_content = tokio::fs::read_to_string(&yaml_path)
         .await

@@ -130,20 +130,14 @@
           :sql "UPDATE conversations SET project_id=$1 WHERE project_id IS NULL AND project LIKE $2"
           :added "84ac1a6"))
 
-      ;; ── Backfill Migration (20260410200000, commit e18d0bf) ──
+      ;; ── Backfill Migration (20260410200000) ──
+      ;; Migration body was a one-time backfill that used to hard-code a
+      ;; list of operator-specific project paths. The public build ships
+      ;; this migration as a noop; project registration is now runtime-only
+      ;; via `mission_project init` and `ProjectRegistry`.
       (backfill backfill_project_id
         :migration "20260410200000_backfill_project_id.sql"
-        :doc "一次性回填 + 种子: (1) conversations.project_id 通过 path 前缀匹配回填 9 个已知项目; (2) 向 projects 表 INSERT ON CONFLICT DO NOTHING 种子 9 行"
-        (seed-projects
-          ("missiond"            "<REPO_ROOT>"            :intent ".missiond/intent.lisp" :active true)
-          ("example-forge"        "<REPO_ROOT>/../example-forge"        :intent ".jarvis/intent.lisp"   :active true :slots ("lisp-surveyor"))
-          ("jarvis"              "<REPO_ROOT>/../jarvis"              :active true)
-          ("example-mechanic"     "<REPO_ROOT>/../example-mechanic"     :active false)
-          ("example-deploy"    "<REPO_ROOT>/../deploy-agent"    :active true)
-          ("example-b"    "<PROJECTS_ROOT>/example-b" :active true)
-          ("example-backend"  "<PROJECTS_ROOT>/example-c" :active true)
-          ("example-editor"           "<PROJECTS_ROOT>/example-d"         :active true)
-          ("example-cut"          "<PROJECTS_ROOT>/example-e/example-cut" :active false))))
+        :doc "runtime: ProjectRegistry resolves cwd → project_id via longest-prefix match"))
 
     (component board-tables
       :pattern crud-gateway

@@ -1008,7 +1008,7 @@ mod tests {
         let mut msg = make_msg(
             1,
             "assistant",
-            r#"[Tool: Bash] command: "cd <REPO_ROOT> && git log --oneline -5", description: "Show recent commits""#,
+            r#"[Tool: Bash] command: "cd /tmp/example && git log --oneline -5", description: "Show recent commits""#,
         );
         msg.has_tool_use = true;
         msg.tool_name = Some("Bash".to_string());
@@ -1070,7 +1070,7 @@ mod tests {
     #[test]
     fn test_extract_file_short_name() {
         assert_eq!(
-            extract_file_short_name(r#"[Tool: Read] file_path: "<REPO_ROOT>/src/main.rs""#),
+            extract_file_short_name(r#"[Tool: Read] file_path: "/tmp/example/src/main.rs""#),
             Some("main.rs".to_string())
         );
         assert_eq!(

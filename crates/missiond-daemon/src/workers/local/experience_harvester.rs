@@ -241,12 +241,19 @@ async fn resolve_ast_candidates_async(
 }
 
 /// Strip project root prefix to get repo-relative path.
+///
+/// Uses the daemon's current working directory as the authoritative repo
+/// root — the daemon is always spawned with cwd at the repo root.
 fn strip_project_prefix(path: &str) -> String {
-    // Common prefixes in this project
-    for prefix in &["<REPO_ROOT>/", "missiond/"] {
-        if let Some(stripped) = path.strip_prefix(prefix) {
+    if let Ok(cwd) = std::env::current_dir() {
+        let cwd_str = cwd.to_string_lossy();
+        let with_trailing = format!("{}/", cwd_str);
+        if let Some(stripped) = path.strip_prefix(&*with_trailing) {
             return stripped.to_string();
         }
+    }
+    if let Some(stripped) = path.strip_prefix("missiond/") {
+        return stripped.to_string();
     }
     path.to_string()
 }
@@ -586,10 +593,11 @@ mod tests {
 
     #[test]
     fn test_strip_project_prefix() {
-        assert_eq!(
-            strip_project_prefix("<REPO_ROOT>/crates/foo/src/lib.rs"),
-            "crates/foo/src/lib.rs"
-        );
+        // Prefix stripping is cwd-relative, so the assertion must also use
+        // the current working directory as the test fixture root.
+        let cwd = std::env::current_dir().unwrap();
+        let sample = format!("{}/crates/foo/src/lib.rs", cwd.display());
+        assert_eq!(strip_project_prefix(&sample), "crates/foo/src/lib.rs");
         assert_eq!(strip_project_prefix("other/path.rs"), "other/path.rs");
     }
 }

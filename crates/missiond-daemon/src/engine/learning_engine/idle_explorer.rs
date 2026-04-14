@@ -193,8 +193,13 @@ async fn explore_kb_consistency(state: &AppState, assignee: &str) -> bool {
 
 /// Explore 1: stale dependencies — check Cargo.toml for outdated crates.
 async fn explore_stale_dependencies(state: &AppState, assignee: &str) -> bool {
-    // Only trigger if Cargo.toml exists in cwd
-    let cargo_path = std::path::Path::new("<REPO_ROOT>/Cargo.toml");
+    // Only trigger if Cargo.toml exists in the daemon's cwd
+    // (the daemon is expected to run from the missiond repo root).
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let cargo_path = cwd.join("Cargo.toml");
     if !cargo_path.exists() {
         return false;
     }

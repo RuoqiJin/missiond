@@ -661,10 +661,19 @@ fn extract_field(input: &str, field: &str) -> Option<String> {
     None
 }
 
-/// Shorten absolute paths for readability
+/// Shorten absolute paths for readability.
+///
+/// Strips the user's HOME prefix so log lines don't leak absolute filesystem
+/// paths, and also strips `/home/` and `/Users/` so multi-host traces stay
+/// compact.
 fn shorten_path(path: &str) -> String {
-    // Remove common prefixes
-    for prefix in &["<PROJECTS_ROOT>/", "/home/"] {
+    if let Some(home) = std::env::var_os("HOME") {
+        let home_str = home.to_string_lossy();
+        if let Some(rest) = path.strip_prefix(&*home_str) {
+            return rest.trim_start_matches('/').to_string();
+        }
+    }
+    for prefix in &["/home/", "/Users/"] {
         if let Some(rest) = path.strip_prefix(prefix) {
             return rest.to_string();
         }

@@ -12,7 +12,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "manifestPath": {
                         "type": "string",
-                        "description": "universe.intent.lisp 清单文件路径。默认 <REPO_ROOT>/../universe.intent.lisp"
+                        "description": "universe.intent.lisp 清单文件路径。未指定时从 $UNIVERSE_MANIFEST 读取"
                     },
                     "format": {
                         "type": "string",
@@ -34,7 +34,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "manifestPath": {
                         "type": "string",
-                        "description": "universe.intent.lisp 清单文件路径。默认 <REPO_ROOT>/../universe.intent.lisp"
+                        "description": "universe.intent.lisp 清单文件路径。未指定时从 $UNIVERSE_MANIFEST 读取"
                     },
                     "service": {
                         "type": "string",
@@ -59,7 +59,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "manifestPath": {
                         "type": "string",
-                        "description": "universe.intent.lisp 清单文件路径。默认 <REPO_ROOT>/../universe.intent.lisp"
+                        "description": "universe.intent.lisp 清单文件路径。未指定时从 $UNIVERSE_MANIFEST 读取"
                     },
                     "service": {
                         "type": "string",
@@ -88,7 +88,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "manifestPath": {
                         "type": "string",
-                        "description": "universe.intent.lisp 清单文件路径。默认 <REPO_ROOT>/../universe.intent.lisp"
+                        "description": "universe.intent.lisp 清单文件路径。未指定时从 $UNIVERSE_MANIFEST 读取"
                     }
                 }
             }),

@@ -18,34 +18,41 @@ const MAX_TTL_SECS: i64 = 28800;
 const MAX_EXTEND_SECS: i64 = 3600;
 
 /// Allowed cwd prefixes (path traversal prevention).
-const ALLOWED_CWD_PREFIXES: &[&str] = &[
-    "<PROJECTS_ROOT>",
-    "<HOME>/Documents",
-    "/tmp",
-];
+///
+/// The public build restricts dynamic slots to the daemon's current working
+/// directory by default. Operators who need broader access can set
+/// `MISSIOND_ALLOWED_CWD_PREFIXES` (colon-separated) or override
+/// `allowed_cwd_prefixes()` below.
+fn allowed_cwd_prefixes() -> Vec<String> {
+    if let Ok(raw) = std::env::var("MISSIOND_ALLOWED_CWD_PREFIXES") {
+        return raw.split(':').map(|s| s.to_string()).collect();
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        return vec![cwd.to_string_lossy().to_string()];
+    }
+    Vec::new()
+}
 
 /// Built-in templates — derived from slots.yaml patterns.
+///
+/// The public build exposes neutral template shells. The concrete mcp_config
+/// and default_cwd are resolved at spawn time from `$MISSIOND_HOME` and the
+/// operator's slots.yaml.
 fn get_template(name: &str) -> Option<TemplateConfig> {
     match name {
         "coder" => Some(TemplateConfig {
             role: "coder",
             description: "Dynamic coder slot (ephemeral)",
-            mcp_config: Some("<HOME>/.missiond/mcp-config.json"),
-            default_cwd: "<PROJECTS_ROOT>",
             model: Some("sonnet"),
         }),
         "ops" => Some(TemplateConfig {
             role: "operator",
             description: "Dynamic ops slot (ephemeral)",
-            mcp_config: Some("<HOME>/.missiond/mcp-config.json"),
-            default_cwd: "<PROJECTS_ROOT>",
             model: Some("sonnet"),
         }),
         "researcher" => Some(TemplateConfig {
             role: "coder",
             description: "Dynamic researcher slot (read-only analysis)",
-            mcp_config: Some("<HOME>/.missiond/mcp-config.json"),
-            default_cwd: "<PROJECTS_ROOT>",
             model: Some("sonnet"),
         }),
         _ => None,
@@ -55,8 +62,6 @@ fn get_template(name: &str) -> Option<TemplateConfig> {
 struct TemplateConfig {
     role: &'static str,
     description: &'static str,
-    mcp_config: Option<&'static str>,
-    default_cwd: &'static str,
     model: Option<&'static str>,
 }
 
@@ -124,11 +129,22 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         ));
     }
 
-    // Validate cwd
-    let cwd = args
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .unwrap_or(template.default_cwd);
+    // Validate cwd — must be explicit (fail fast, no silent default).
+    let cwd = match args.get("cwd").and_then(|v| v.as_str()) {
+        Some(c) if !c.is_empty() => c,
+        _ => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::MISSING_PARAM,
+                    "'cwd' is required for dynamic slot creation",
+                )
+                .with_suggestion(
+                    "Pass an absolute path under one of MISSIOND_ALLOWED_CWD_PREFIXES \
+                     (defaults to the daemon's current working directory)",
+                ),
+            ))
+        }
+    };
     let canonical_cwd = match std::fs::canonicalize(cwd) {
         Ok(p) => p.to_string_lossy().to_string(),
         Err(_) => {
@@ -139,8 +155,9 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         }
     };
 
+    let allowed_prefixes = allowed_cwd_prefixes();
     let canonical_path = std::path::Path::new(&canonical_cwd);
-    let cwd_allowed = ALLOWED_CWD_PREFIXES
+    let cwd_allowed = allowed_prefixes
         .iter()
         .any(|prefix| canonical_path.starts_with(prefix));
     if !cwd_allowed {
@@ -149,7 +166,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                 error_codes::PERMISSION_DENIED,
                 format!("cwd '{}' is not under allowed prefixes", cwd),
             )
-            .with_suggestion(format!("Allowed prefixes: {:?}", ALLOWED_CWD_PREFIXES)),
+            .with_suggestion(format!("Allowed prefixes: {:?}", allowed_prefixes)),
         ));
     }
 
@@ -178,7 +195,9 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         ),
         engine: Default::default(),
         cwd: Some(canonical_cwd),
-        mcp_config: template.mcp_config.map(|s| s.to_string()),
+        // mcp_config is resolved at spawn time by perm_injector from
+        // $MISSIOND_HOME/xjp-mcp-config.json; dynamic slots do not override it.
+        mcp_config: None,
         lifecycle: Some(Lifecycle::OnDemand),
         auto_start: None,
         dangerously_skip_permissions: Some(false), // ALWAYS false for dynamic slots
