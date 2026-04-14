@@ -12,6 +12,7 @@ pub(crate) mod gemini_reconcile_worker;
 pub(crate) mod pty_event_worker;
 pub(crate) mod reconcile_worker;
 pub(crate) mod tagger_chunker;
+pub(crate) mod xjpcode_briefing_worker;
 
 // Re-exports so workers can use `super::BackgroundWorker` etc.
 pub(crate) use super::{BackgroundWorker, WorkerContext, WorkerKind};

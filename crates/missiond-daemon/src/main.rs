@@ -1470,6 +1470,13 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     );
 
+    // XJPCode briefing worker — writes ~/.xjpcode/xjpcode.md every 60s
+    workers::spawn_worker(
+        workers::local::xjpcode_briefing_worker::XjpcodeBriefingWorker,
+        Arc::new(state.clone()),
+        shutdown_rx.clone(),
+    );
+
     // Gemini CLI reconcile worker — ~/.gemini/tmp/*/chats/*.json integrity checker
     workers::spawn_worker(
         workers::local::gemini_reconcile_worker::GeminiReconcileWorker,
