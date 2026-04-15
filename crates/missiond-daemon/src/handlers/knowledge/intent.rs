@@ -30,8 +30,12 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
             let section_name = args.get("section").and_then(|v| v.as_str());
             handle_read(state, action, project_id, section_name).await
         }
+        "paths" => {
+            let project_id = args.get("project").and_then(|v| v.as_str());
+            handle_paths(state, project_id).await
+        }
         _ => Ok(ToolResult::error(format!(
-            "Unknown action: {}. Use: read, section, summary, list",
+            "Unknown action: {}. Use: read, section, summary, list, paths",
             action
         ))),
     }
@@ -158,6 +162,89 @@ async fn handle_read(
         }
         _ => unreachable!(),
     }
+}
+
+/// Return all intent*.lisp file paths for a project, for parallel loading by Claude Code.
+async fn handle_paths(state: &AppState, project_id: Option<&str>) -> Result<ToolResult> {
+    let (resolved_id, project_path, _main_intent) = resolve_project(state, project_id).await?;
+
+    let base = Path::new(&project_path);
+
+    // Scan .missiond/ directory for all intent*.lisp files
+    let mut files: Vec<serde_json::Value> = Vec::new();
+
+    // Check .missiond/ directory
+    let missiond_dir = base.join(".missiond");
+    if missiond_dir.is_dir() {
+        if let Ok(rd) = std::fs::read_dir(&missiond_dir) {
+            for entry in rd.filter_map(|e| e.ok()) {
+                let p = entry.path();
+                let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                if name.starts_with("intent") && name.ends_with(".lisp") {
+                    let lines = std::fs::read_to_string(&p)
+                        .map(|c| c.lines().count())
+                        .unwrap_or(0);
+                    files.push(serde_json::json!({
+                        "path": p.display().to_string(),
+                        "name": name,
+                        "lines": lines,
+                    }));
+                }
+            }
+        }
+    }
+
+    // Also check .jarvis/ directory
+    let jarvis_dir = base.join(".jarvis");
+    if jarvis_dir.is_dir() {
+        if let Ok(rd) = std::fs::read_dir(&jarvis_dir) {
+            for entry in rd.filter_map(|e| e.ok()) {
+                let p = entry.path();
+                let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                if name.starts_with("intent") && name.ends_with(".lisp") {
+                    let lines = std::fs::read_to_string(&p)
+                        .map(|c| c.lines().count())
+                        .unwrap_or(0);
+                    files.push(serde_json::json!({
+                        "path": p.display().to_string(),
+                        "name": name,
+                        "lines": lines,
+                    }));
+                }
+            }
+        }
+    }
+
+    // Check root intent.lisp
+    let root_intent = base.join("intent.lisp");
+    if root_intent.exists() {
+        let lines = std::fs::read_to_string(&root_intent)
+            .map(|c| c.lines().count())
+            .unwrap_or(0);
+        files.push(serde_json::json!({
+            "path": root_intent.display().to_string(),
+            "name": "intent.lisp",
+            "lines": lines,
+        }));
+    }
+
+    // Sort by name for deterministic output
+    files.sort_by(|a, b| {
+        a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+    });
+
+    let total_lines: usize = files.iter()
+        .map(|f| f["lines"].as_u64().unwrap_or(0) as usize)
+        .sum();
+
+    Ok(ToolResult::json_pretty(&serde_json::json!({
+        "project": resolved_id,
+        "base_path": project_path,
+        "files": files,
+        "total_files": files.len(),
+        "total_lines": total_lines,
+        "hint": "Use Read tool to load each file path in parallel for full context injection"
+    })))
 }
 
 /// Resolve project ID → (id, project_path, intent_file_path)
