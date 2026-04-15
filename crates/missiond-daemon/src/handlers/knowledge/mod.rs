@@ -5,4 +5,5 @@ pub(crate) mod intent;
 pub(crate) mod kb;
 pub(crate) mod memory;
 pub(crate) mod project;
+pub(crate) mod project_memory;
 pub(crate) mod skill;

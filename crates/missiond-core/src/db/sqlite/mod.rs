@@ -82,4 +82,13 @@ impl super::traits::ProjectStore for SqliteMissionStore {
     async fn backfill_project_id(&self, _project_id: &str, _path_pattern: &str) -> DbResult<u64> {
         Ok(0)
     }
+    async fn conversation_stats_by_project(&self, _project_id: &str) -> DbResult<serde_json::Value> {
+        Ok(serde_json::json!({"total": 0, "active": 0, "completed": 0, "last_activity": null}))
+    }
+    async fn recent_conversations_by_project(&self, _project_id: &str, _limit: i64) -> DbResult<Vec<serde_json::Value>> {
+        Ok(vec![])
+    }
+    async fn kb_stats_by_project(&self, _project_id: &str) -> DbResult<serde_json::Value> {
+        Ok(serde_json::json!({"total": 0, "by_category": {}}))
+    }
 }

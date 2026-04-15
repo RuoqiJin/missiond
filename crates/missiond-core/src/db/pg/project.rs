@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use sqlx::PgPool;
+use serde_json::json;
 use crate::db::error::DbResult;
 use crate::db::traits::ProjectStore;
 use crate::types::ProjectConfig;
@@ -28,6 +29,18 @@ impl ProjectStore for PgMissionStore {
 
     async fn backfill_project_id(&self, project_id: &str, path_pattern: &str) -> DbResult<u64> {
         Ok(backfill_project_id(&self.pool, project_id, path_pattern).await?)
+    }
+
+    async fn conversation_stats_by_project(&self, project_id: &str) -> DbResult<serde_json::Value> {
+        Ok(conversation_stats_by_project(&self.pool, project_id).await?)
+    }
+
+    async fn recent_conversations_by_project(&self, project_id: &str, limit: i64) -> DbResult<Vec<serde_json::Value>> {
+        Ok(recent_conversations_by_project(&self.pool, project_id, limit).await?)
+    }
+
+    async fn kb_stats_by_project(&self, project_id: &str) -> DbResult<serde_json::Value> {
+        Ok(kb_stats_by_project(&self.pool, project_id).await?)
     }
 }
 
@@ -125,6 +138,65 @@ pub async fn delete_project(pool: &PgPool, id: &str) -> Result<bool, sqlx::Error
         .execute(pool)
         .await?;
     Ok(result.rows_affected() > 0)
+}
+
+pub async fn conversation_stats_by_project(pool: &PgPool, project_id: &str) -> Result<serde_json::Value, sqlx::Error> {
+    let row: (i64, i64, i64, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
+        "SELECT COUNT(*) as total,
+                COUNT(CASE WHEN status = 'active' THEN 1 END) as active,
+                COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed,
+                MAX(updated_at) as last_activity
+         FROM conversations WHERE project_id = $1"
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(json!({
+        "total": row.0,
+        "active": row.1,
+        "completed": row.2,
+        "last_activity": row.3,
+    }))
+}
+
+pub async fn recent_conversations_by_project(pool: &PgPool, project_id: &str, limit: i64) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+    let rows: Vec<(String, Option<String>, String, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT id, slot_name, status, summary, created_at, updated_at
+         FROM conversations WHERE project_id = $1
+         ORDER BY updated_at DESC LIMIT $2"
+    )
+    .bind(project_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|r| json!({
+        "id": r.0,
+        "slot_name": r.1,
+        "status": r.2,
+        "summary": r.3,
+        "created_at": r.4,
+        "updated_at": r.5,
+    })).collect())
+}
+
+pub async fn kb_stats_by_project(pool: &PgPool, project_id: &str) -> Result<serde_json::Value, sqlx::Error> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT category, COUNT(*) as cnt
+         FROM knowledge
+         WHERE project_id = $1 OR project_id IS NULL
+         GROUP BY category ORDER BY cnt DESC"
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await?;
+    let total: i64 = rows.iter().map(|r| r.1).sum();
+    let by_category: serde_json::Map<String, serde_json::Value> = rows.into_iter()
+        .map(|(cat, cnt)| (cat, serde_json::Value::from(cnt)))
+        .collect();
+    Ok(json!({
+        "total": total,
+        "by_category": by_category,
+    }))
 }
 
 fn row_to_config(r: (String, String, Option<String>, bool, Vec<String>, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)) -> ProjectConfig {

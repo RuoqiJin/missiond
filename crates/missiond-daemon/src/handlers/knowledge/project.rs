@@ -255,9 +255,172 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                 "status": "registered"
             })))
         }
+        "context" => {
+            let id = args.get("id").and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("id is required"))?;
+            let project = state.store.get_project(id).await
+                .map_err(|e| anyhow!("DB error: {}", e))?
+                .ok_or_else(|| anyhow!("Project not found: {}", id))?;
+
+            // 1. Intent summary — read file, extract metadata
+            let intent = build_intent_summary(&project);
+
+            // 2. GitHub — normalize git@ to https://
+            let github = build_github_info(&project.github_url);
+
+            // 3. Conversations — DB stats + recent
+            let conv_stats = state.store.conversation_stats_by_project(id).await
+                .unwrap_or_else(|_| serde_json::json!({}));
+            let recent = state.store.recent_conversations_by_project(id, 10).await
+                .unwrap_or_default();
+
+            // 4. Memories — filesystem scan
+            let memories = super::project_memory::list_memories(&project.path);
+            let mem_index = super::project_memory::read_memory_index(&project.path);
+            let mem_dir = super::project_memory::claude_memory_dir(&project.path);
+
+            // 5. KB stats
+            let kb = state.store.kb_stats_by_project(id).await
+                .unwrap_or_else(|_| serde_json::json!({}));
+
+            // 6. Slots — match project's configured slots against runtime state
+            let slots_info = build_slots_info(&project, state).await;
+
+            Ok(ToolResult::json_pretty(&serde_json::json!({
+                "project": project,
+                "intent": intent,
+                "github": github,
+                "conversations": {
+                    "stats": conv_stats,
+                    "recent": recent,
+                },
+                "memories": {
+                    "dir": mem_dir.display().to_string(),
+                    "count": memories.len(),
+                    "index": mem_index,
+                    "entries": memories,
+                },
+                "kb": kb,
+                "slots": slots_info,
+            })))
+        }
+        "memories" => {
+            let id = args.get("id").and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("id is required"))?;
+            let project = state.store.get_project(id).await
+                .map_err(|e| anyhow!("DB error: {}", e))?
+                .ok_or_else(|| anyhow!("Project not found: {}", id))?;
+
+            let file = args.get("file").and_then(|v| v.as_str());
+
+            if let Some(file_name) = file {
+                match super::project_memory::read_memory(&project.path, file_name) {
+                    Ok(content) => Ok(ToolResult::text(content)),
+                    Err(e) => Ok(ToolResult::error(format!("Failed to read {}: {}", file_name, e))),
+                }
+            } else {
+                let memories = super::project_memory::list_memories(&project.path);
+                let index = super::project_memory::read_memory_index(&project.path);
+                let dir = super::project_memory::claude_memory_dir(&project.path);
+                Ok(ToolResult::json_pretty(&serde_json::json!({
+                    "dir": dir.display().to_string(),
+                    "count": memories.len(),
+                    "index": index,
+                    "entries": memories,
+                })))
+            }
+        }
         _ => Ok(ToolResult::error(format!(
-            "Unknown project action: {}. Use: list, get, set_active, sync, init",
+            "Unknown project action: {}. Use: list, get, set_active, sync, init, context, memories",
             action
         ))),
     }
+}
+
+/// Extract intent.lisp metadata without loading the full file.
+fn build_intent_summary(project: &missiond_core::types::ProjectConfig) -> serde_json::Value {
+    let intent_path = match &project.intent_path {
+        Some(rel) => std::path::Path::new(&project.path).join(rel),
+        None => return serde_json::json!({"exists": false}),
+    };
+
+    let metadata = match std::fs::metadata(&intent_path) {
+        Ok(m) => m,
+        Err(_) => return serde_json::json!({"path": project.intent_path, "exists": false}),
+    };
+
+    let content = std::fs::read_to_string(&intent_path).unwrap_or_default();
+    let mut survey_date = None;
+    let mut last_updated = None;
+    let mut pillars = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("(survey-date ") {
+            survey_date = Some(rest.trim_matches(|c| c == '"' || c == ')').to_string());
+        }
+        if let Some(rest) = trimmed.strip_prefix("(last-updated ") {
+            last_updated = Some(rest.trim_matches(|c| c == '"' || c == ')').to_string());
+        }
+        if let Some(rest) = trimmed.strip_prefix("(pillar ") {
+            if let Some(name) = rest.split_whitespace().next() {
+                pillars.push(name.to_string());
+            }
+        }
+    }
+
+    serde_json::json!({
+        "path": project.intent_path,
+        "exists": true,
+        "size_bytes": metadata.len(),
+        "pillars": pillars,
+        "survey_date": survey_date,
+        "last_updated": last_updated,
+    })
+}
+
+/// Normalize GitHub URL: git@github.com:X/Y.git -> https://github.com/X/Y
+fn build_github_info(github_url: &Option<String>) -> serde_json::Value {
+    match github_url {
+        None => serde_json::json!(null),
+        Some(url) => {
+            let web_url = if url.starts_with("git@github.com:") {
+                let path = url.strip_prefix("git@github.com:").unwrap_or(url);
+                let path = path.strip_suffix(".git").unwrap_or(path);
+                Some(format!("https://github.com/{}", path))
+            } else if url.starts_with("https://") {
+                Some(url.strip_suffix(".git").unwrap_or(url).to_string())
+            } else {
+                None
+            };
+            serde_json::json!({
+                "url": url,
+                "web_url": web_url,
+            })
+        }
+    }
+}
+
+/// Build slots info: configured slots vs runtime state.
+async fn build_slots_info(
+    project: &missiond_core::types::ProjectConfig,
+    state: &AppState,
+) -> serde_json::Value {
+    let all_slots = state.mission.list_slots();
+    let configured: Vec<&str> = project.slots.iter().map(|s| s.as_str()).collect();
+
+    let mut active: Vec<serde_json::Value> = Vec::new();
+    for s in all_slots.iter().filter(|s| configured.contains(&s.config.id.as_str())) {
+        let pty_status = state.pty.get_status(&s.config.id).await;
+        active.push(serde_json::json!({
+            "id": s.config.id,
+            "session_id": s.session_id,
+            "status": pty_status.map(|info| format!("{:?}", info.state)),
+        }));
+    }
+
+    serde_json::json!({
+        "configured": configured,
+        "active": active,
+    })
 }

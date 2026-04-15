@@ -729,6 +729,15 @@ pub trait ProjectStore: Send + Sync {
     async fn set_project_active(&self, id: &str, active: bool) -> DbResult<bool>;
     /// Backfill project_id on conversations matching the given path prefix pattern.
     async fn backfill_project_id(&self, project_id: &str, path_pattern: &str) -> DbResult<u64>;
+
+    /// Get conversation statistics for a project.
+    async fn conversation_stats_by_project(&self, project_id: &str) -> DbResult<serde_json::Value>;
+
+    /// Get recent conversations for a project (most recent first).
+    async fn recent_conversations_by_project(&self, project_id: &str, limit: i64) -> DbResult<Vec<serde_json::Value>>;
+
+    /// Get KB entry count grouped by category for a project.
+    async fn kb_stats_by_project(&self, project_id: &str) -> DbResult<serde_json::Value>;
 }
 
 // ============================================================================
