@@ -363,7 +363,31 @@ impl PTYWebSocketServer {
         let bind_addr = std::env::var("MISSION_WS_BIND")
             .unwrap_or_else(|_| "0.0.0.0".to_string());
         let addr = format!("{}:{}", bind_addr, self.port);
-        let listener = TcpListener::bind(&addr).await?;
+
+        // Mirror IPC's stale-socket pattern: if bind fails with EADDRINUSE,
+        // probe the port — if a live WS server responds, bail (real conflict);
+        // if it's a stale listener from a dead process, wait for OS to reclaim.
+        let listener = match TcpListener::bind(&addr).await {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                // Probe: can we connect? If yes, another daemon is genuinely alive.
+                match tokio::net::TcpStream::connect(&format!("127.0.0.1:{}", self.port)).await {
+                    Ok(_) => {
+                        anyhow::bail!(
+                            "Another instance is already serving WebSocket on port {}",
+                            self.port
+                        );
+                    }
+                    Err(_) => {
+                        // Stale listener — OS hasn't reclaimed yet. Wait briefly and retry.
+                        warn!(port = self.port, "WS port in TIME_WAIT, waiting for OS to release...");
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        TcpListener::bind(&addr).await?
+                    }
+                }
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         info!(port = self.port, bind = %bind_addr, "PTY WebSocket server started");
 

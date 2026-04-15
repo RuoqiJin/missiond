@@ -503,8 +503,9 @@ async fn main() -> Result<()> {
         tool_count: all_tools().len(),
     });
     if let Err(e) = ws_server.start().await {
-        // Match Node behavior: continue running even if WS is unavailable (e.g. port in use).
-        warn!(port = ws_port, error = %e, "Failed to start WebSocket server");
+        // WS is required for Board UI — fail startup rather than running headless.
+        // The start() method already distinguishes live conflict (bail) from stale port (retry).
+        return Err(e.context("WebSocket server failed to start"));
     }
 
     // IPC server
