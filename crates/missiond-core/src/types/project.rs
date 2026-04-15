@@ -9,8 +9,19 @@ pub struct ProjectConfig {
     pub active: bool,
     pub slots: Vec<String>,
     pub github_url: Option<String>,
+    /// "managed" (self-owned, direct filesystem) or "reference" (third-party, vault-cached)
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// Vault cache directory for reference projects (e.g. ~/.missiond/vault/{name}/)
+    pub vault_path: Option<String>,
+    /// Monorepo parent project ID (sub-services point to parent)
+    pub parent_id: Option<String>,
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+fn default_kind() -> String {
+    "managed".to_string()
 }
 
 #[derive(Debug, Clone, Default)]

@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use chrono::Utc;
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
@@ -153,6 +154,9 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                     active: true,
                     slots: vec![],
                     github_url,
+                    kind: "managed".to_string(),
+                    vault_path: None,
+                    parent_id: None,
                     created_at: None,
                     updated_at: None,
                 };
@@ -220,6 +224,9 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                 active: true,
                 slots,
                 github_url: github_url.clone(),
+                kind: "managed".to_string(),
+                vault_path: None,
+                parent_id: None,
                 created_at: None,
                 updated_at: None,
             };
@@ -330,8 +337,261 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                 })))
             }
         }
+        "survey" => {
+            let id = args.get("id").and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("id is required"))?;
+            let project = state.store.get_project(id).await
+                .map_err(|e| anyhow!("DB error: {}", e))?
+                .ok_or_else(|| anyhow!("Project not found: {}", id))?;
+
+            let level = args.get("level").and_then(|v| v.as_str()).unwrap_or("L3");
+            let check_only = args.get("check").and_then(|v| v.as_bool()).unwrap_or(false);
+            let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            let project_path = &project.path;
+
+            // Build forge survey command
+            let mut cmd = std::process::Command::new("forge");
+            cmd.arg("survey").arg(project_path);
+            cmd.arg("--level").arg(level);
+            if check_only { cmd.arg("--check"); }
+            if dry_run { cmd.arg("--dry-run"); }
+
+            let output = cmd.output()
+                .map_err(|e| anyhow!("Failed to run forge survey: {} (is forge CLI installed?)", e))?;
+
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let success = output.status.success();
+
+            // If survey succeeded and not check-only, update intent_path
+            if success && !check_only && !dry_run {
+                let sp = std::path::Path::new(project_path);
+                let new_intent = [".missiond/intent.lisp", ".jarvis/intent.lisp", "intent.lisp"]
+                    .iter()
+                    .find(|p| sp.join(p).exists())
+                    .map(|p| p.to_string());
+                if new_intent.is_some() && new_intent != project.intent_path {
+                    let mut updated = project.clone();
+                    updated.intent_path = new_intent;
+                    let _ = state.store.upsert_project(&updated).await;
+                }
+            }
+
+            if success {
+                Ok(ToolResult::json(&serde_json::json!({
+                    "id": id,
+                    "level": level,
+                    "check_only": check_only,
+                    "dry_run": dry_run,
+                    "success": true,
+                    "output": if stdout.len() > 2000 { format!("{}...(truncated)", &stdout[..2000]) } else { stdout },
+                })))
+            } else {
+                Ok(ToolResult::json(&serde_json::json!({
+                    "id": id,
+                    "success": false,
+                    "exit_code": output.status.code(),
+                    "stdout": if stdout.len() > 2000 { format!("{}...(truncated)", &stdout[..2000]) } else { stdout },
+                    "stderr": if stderr.len() > 1000 { format!("{}...(truncated)", &stderr[..1000]) } else { stderr },
+                })))
+            }
+        }
+        "vault_sync" => {
+            let id = args.get("id").and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("id is required"))?;
+            let project = state.store.get_project(id).await
+                .map_err(|e| anyhow!("DB error: {}", e))?
+                .ok_or_else(|| anyhow!("Project not found: {}", id))?;
+
+            let source_root = std::path::Path::new(&project.path);
+            if !source_root.exists() {
+                return Ok(ToolResult::error(format!("Source path does not exist: {}", project.path)));
+            }
+
+            let vault_dir = dirs::home_dir().unwrap_or_default()
+                .join(".missiond/vault")
+                .join(id);
+            std::fs::create_dir_all(&vault_dir)
+                .map_err(|e| anyhow!("Failed to create vault dir: {}", e))?;
+
+            // Walk source for .lisp files in: root, .missiond/, .jarvis/
+            let mut synced = 0u32;
+            let scan_dirs = [
+                source_root.to_path_buf(),
+                source_root.join(".missiond"),
+                source_root.join(".jarvis"),
+            ];
+            for scan_dir in &scan_dirs {
+                if !scan_dir.exists() { continue; }
+                if let Ok(rd) = std::fs::read_dir(scan_dir) {
+                    for entry in rd.filter_map(|e| e.ok()) {
+                        let p = entry.path();
+                        if p.extension().map(|e| e == "lisp").unwrap_or(false) {
+                            let rel = p.strip_prefix(source_root).unwrap_or(&p);
+                            let dest = vault_dir.join(rel);
+                            if let Some(parent) = dest.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            if std::fs::copy(&p, &dest).is_ok() {
+                                synced += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Write _meta.json
+            let meta = serde_json::json!({
+                "source_path": project.path,
+                "synced_at": Utc::now().to_rfc3339(),
+                "file_count": synced,
+            });
+            let _ = std::fs::write(vault_dir.join("_meta.json"),
+                serde_json::to_string_pretty(&meta).unwrap_or_default());
+
+            // Update project vault_path in DB
+            let mut updated = project.clone();
+            updated.vault_path = Some(vault_dir.display().to_string());
+            updated.kind = "reference".to_string();
+            let _ = state.store.upsert_project(&updated).await;
+
+            Ok(ToolResult::json(&serde_json::json!({
+                "id": id,
+                "vault_dir": vault_dir.display().to_string(),
+                "synced_files": synced,
+            })))
+        }
+        "import_universe" => {
+            // Default manifest path, overridable via args
+            let manifest_path = args.get("manifest")
+                .and_then(|v| v.as_str())
+                .unwrap_or("~/Projects/universe.intent.lisp");
+            let manifest_path = manifest_path.replace("~", &dirs::home_dir().unwrap_or_default().display().to_string());
+            let manifest_path = std::path::Path::new(&manifest_path);
+
+            if !manifest_path.exists() {
+                return Ok(ToolResult::error(format!("Manifest not found: {}", manifest_path.display())));
+            }
+            let content = std::fs::read_to_string(manifest_path)
+                .map_err(|e| anyhow!("Failed to read manifest: {}", e))?;
+
+            // Simple line-based parsing for (service X :path "Y") and (monorepo X :path "Y" ...)
+            // Resolve paths relative to manifest's parent directory
+            let base_dir = manifest_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let mut imported = 0u32;
+            let mut updated = 0u32;
+            let mut reference_synced = 0u32;
+            let mut current_monorepo: Option<(String, String)> = None; // (monorepo_id, monorepo_path)
+
+            for line in content.lines() {
+                let trimmed = line.trim();
+
+                // Detect monorepo blocks: (monorepo NAME :path "PATH"
+                if let Some(rest) = trimmed.strip_prefix("(monorepo ") {
+                    let parts: Vec<&str> = rest.split_whitespace().collect();
+                    if parts.len() >= 3 && parts[1] == ":path" {
+                        let mono_id = parts[0].to_string();
+                        let mono_path = parts[2].trim_matches('"').to_string();
+                        let resolved = base_dir.join(&mono_path).canonicalize()
+                            .unwrap_or_else(|_| base_dir.join(&mono_path));
+                        current_monorepo = Some((mono_id, resolved.display().to_string()));
+                    }
+                    continue;
+                }
+
+                // Detect top-level services: (service NAME :path "PATH")
+                if let Some(rest) = trimmed.strip_prefix("(service ") {
+                    let parts: Vec<&str> = rest.split_whitespace().collect();
+                    if parts.is_empty() { continue; }
+                    let service_id = parts[0].to_lowercase();
+
+                    // Determine path and parent
+                    let (service_path, parent_id) = if parts.len() >= 3 && parts[1] == ":subpath" {
+                        // Sub-service inside monorepo
+                        if let Some((ref mono_id, ref mono_path)) = current_monorepo {
+                            let subpath = parts[2].trim_matches(|c| c == '"' || c == ')');
+                            let resolved = std::path::Path::new(mono_path).join(subpath);
+                            (resolved.display().to_string(), Some(mono_id.clone()))
+                        } else {
+                            continue;
+                        }
+                    } else if parts.len() >= 3 && parts[1] == ":path" {
+                        // Top-level service
+                        let path = parts[2].trim_matches(|c| c == '"' || c == ')');
+                        let resolved = base_dir.join(path).canonicalize()
+                            .unwrap_or_else(|_| base_dir.join(path));
+                        current_monorepo = None; // top-level service resets monorepo
+                        (resolved.display().to_string(), None)
+                    } else {
+                        continue;
+                    };
+
+                    // Determine kind: reference if path contains "reference"
+                    let is_reference = service_path.contains("reference") || service_id.ends_with("-ref");
+                    let kind = if is_reference { "reference" } else { "managed" };
+
+                    // Resolve github URL
+                    let github_url = std::process::Command::new("git")
+                        .args(["remote", "get-url", "origin"])
+                        .current_dir(&service_path)
+                        .output()
+                        .ok()
+                        .and_then(|out| {
+                            let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                            if url.is_empty() { None } else { Some(url) }
+                        });
+
+                    // Scan for intent.lisp
+                    let sp = std::path::Path::new(&service_path);
+                    let intent_path = [".missiond/intent.lisp", ".jarvis/intent.lisp", "intent.lisp"]
+                        .iter()
+                        .find(|p| sp.join(p).exists())
+                        .map(|p| p.to_string());
+
+                    let existed = state.store.get_project(&service_id).await
+                        .map(|p| p.is_some()).unwrap_or(false);
+
+                    let config = missiond_core::types::ProjectConfig {
+                        id: service_id.clone(),
+                        path: service_path,
+                        intent_path,
+                        active: true,
+                        slots: vec![],
+                        github_url,
+                        kind: kind.to_string(),
+                        vault_path: None,
+                        parent_id,
+                        created_at: None,
+                        updated_at: None,
+                    };
+                    let _ = state.store.upsert_project(&config).await;
+
+                    if existed { updated += 1; } else { imported += 1; }
+
+                    // Auto vault_sync for reference projects
+                    // (simplified: just note it, actual sync can be triggered separately)
+                    if is_reference {
+                        reference_synced += 1;
+                    }
+                }
+            }
+
+            // Reload project registry
+            if let Ok(projects) = state.store.list_projects().await {
+                let mut reg = state.project_registry.write().await;
+                *reg = missiond_core::types::ProjectRegistry::new(projects);
+            }
+
+            Ok(ToolResult::json(&serde_json::json!({
+                "imported": imported,
+                "updated": updated,
+                "reference_noted": reference_synced,
+                "manifest": manifest_path.display().to_string(),
+            })))
+        }
         _ => Ok(ToolResult::error(format!(
-            "Unknown project action: {}. Use: list, get, set_active, sync, init, context, memories",
+            "Unknown project action: {}. Use: list, get, set_active, sync, init, context, memories, vault_sync, import_universe, survey",
             action
         ))),
     }

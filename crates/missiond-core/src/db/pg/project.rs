@@ -46,14 +46,17 @@ impl ProjectStore for PgMissionStore {
 
 pub async fn upsert_project(pool: &PgPool, config: &ProjectConfig) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO projects (id, path, intent_path, active, slots, github_url, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5::text[], $6, COALESCE($7, NOW()), NOW())
+        "INSERT INTO projects (id, path, intent_path, active, slots, github_url, kind, vault_path, parent_id, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::text[], $6, $7, $8, $9, COALESCE($10, NOW()), NOW())
          ON CONFLICT (id) DO UPDATE SET
            path = EXCLUDED.path,
            intent_path = EXCLUDED.intent_path,
            active = EXCLUDED.active,
            slots = EXCLUDED.slots,
            github_url = COALESCE(EXCLUDED.github_url, projects.github_url),
+           kind = EXCLUDED.kind,
+           vault_path = COALESCE(EXCLUDED.vault_path, projects.vault_path),
+           parent_id = EXCLUDED.parent_id,
            updated_at = NOW()"
     )
     .bind(&config.id)
@@ -62,37 +65,38 @@ pub async fn upsert_project(pool: &PgPool, config: &ProjectConfig) -> Result<(),
     .bind(config.active)
     .bind(&config.slots)
     .bind(&config.github_url)
+    .bind(&config.kind)
+    .bind(&config.vault_path)
+    .bind(&config.parent_id)
     .bind(config.created_at)
     .execute(pool)
     .await?;
     Ok(())
 }
 
+type ProjectRow = (String, String, Option<String>, bool, Vec<String>, Option<String>, String, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>);
+
+const PROJECT_COLS: &str = "id, path, intent_path, active, slots, github_url, kind, vault_path, parent_id, created_at, updated_at";
+
 pub async fn list_projects(pool: &PgPool) -> Result<Vec<ProjectConfig>, sqlx::Error> {
-    let rows: Vec<(String, String, Option<String>, bool, Vec<String>, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> =
-        sqlx::query_as(
-            "SELECT id, path, intent_path, active, slots, github_url, created_at, updated_at FROM projects ORDER BY id"
-        )
+    let rows: Vec<ProjectRow> =
+        sqlx::query_as(&format!("SELECT {} FROM projects ORDER BY id", PROJECT_COLS))
         .fetch_all(pool)
         .await?;
     Ok(rows.into_iter().map(row_to_config).collect())
 }
 
 pub async fn list_active_projects(pool: &PgPool) -> Result<Vec<ProjectConfig>, sqlx::Error> {
-    let rows: Vec<(String, String, Option<String>, bool, Vec<String>, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> =
-        sqlx::query_as(
-            "SELECT id, path, intent_path, active, slots, created_at, updated_at FROM projects WHERE active = true ORDER BY id"
-        )
+    let rows: Vec<ProjectRow> =
+        sqlx::query_as(&format!("SELECT {} FROM projects WHERE active = true ORDER BY id", PROJECT_COLS))
         .fetch_all(pool)
         .await?;
     Ok(rows.into_iter().map(row_to_config).collect())
 }
 
 pub async fn get_project(pool: &PgPool, id: &str) -> Result<Option<ProjectConfig>, sqlx::Error> {
-    let row: Option<(String, String, Option<String>, bool, Vec<String>, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> =
-        sqlx::query_as(
-            "SELECT id, path, intent_path, active, slots, github_url, created_at, updated_at FROM projects WHERE id = $1"
-        )
+    let row: Option<ProjectRow> =
+        sqlx::query_as(&format!("SELECT {} FROM projects WHERE id = $1", PROJECT_COLS))
         .bind(id)
         .fetch_optional(pool)
         .await?;
@@ -199,7 +203,7 @@ pub async fn kb_stats_by_project(pool: &PgPool, project_id: &str) -> Result<serd
     }))
 }
 
-fn row_to_config(r: (String, String, Option<String>, bool, Vec<String>, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)) -> ProjectConfig {
+fn row_to_config(r: ProjectRow) -> ProjectConfig {
     ProjectConfig {
         id: r.0,
         path: r.1,
@@ -207,7 +211,10 @@ fn row_to_config(r: (String, String, Option<String>, bool, Vec<String>, Option<S
         active: r.3,
         slots: r.4,
         github_url: r.5,
-        created_at: Some(r.6),
-        updated_at: Some(r.7),
+        kind: r.6,
+        vault_path: r.7,
+        parent_id: r.8,
+        created_at: Some(r.9),
+        updated_at: Some(r.10),
     }
 }
