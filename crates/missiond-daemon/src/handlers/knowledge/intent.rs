@@ -98,13 +98,22 @@ async fn handle_read(
     let total_lines = content.lines().count();
 
     match action {
-        "read" => Ok(ToolResult::text(format!(
-            "# intent.lisp — {} ({} lines)\n# path: {}\n\n{}",
-            resolved_id,
-            total_lines,
-            intent_path.display(),
-            content
-        ))),
+        "read" => {
+            let base = std::path::Path::new(&project_path);
+            let has_split_files = has_intent_pillar_files(base);
+
+            if has_split_files || content.len() > 30_000 {
+                // Multi-file intent or single large file — return paths for parallel Read
+                return handle_paths(state, Some(&resolved_id)).await;
+            }
+            Ok(ToolResult::text(format!(
+                "# intent.lisp — {} ({} lines)\n# path: {}\n\n{}",
+                resolved_id,
+                total_lines,
+                intent_path.display(),
+                content
+            )))
+        }
         "section" => {
             let name = section_name.ok_or_else(|| {
                 anyhow!("section parameter is required for action=section")
@@ -481,6 +490,22 @@ fn extract_pillar_index(content: &str) -> String {
         }
     }
     index.join("\n")
+}
+
+/// Check if a project has split intent-pillar-*.lisp files.
+fn has_intent_pillar_files(project_root: &std::path::Path) -> bool {
+    for dir_name in &[".missiond", ".jarvis"] {
+        let dir = project_root.join(dir_name);
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for entry in rd.filter_map(|e| e.ok()) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("intent-pillar-") && name.ends_with(".lisp") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// List all top-level section names (forms at indent level 2+ inside the intent form).

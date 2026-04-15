@@ -181,7 +181,14 @@ struct KBSearchArgs {
 struct KBListArgs {
     #[serde(default)]
     category: Option<String>,
+    #[serde(default = "default_list_limit")]
+    limit: u32,
+    #[serde(default)]
+    offset: u32,
+    #[serde(default)]
+    compact: bool,
 }
+fn default_list_limit() -> u32 { 50 }
 
 #[derive(Deserialize)]
 struct KBImportArgs {
@@ -808,14 +815,37 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
         }
         "mission_kb_list" => {
-            let KBListArgs { category } =
-                serde_json::from_value(args).unwrap_or(KBListArgs { category: None });
+            let args_parsed: KBListArgs = serde_json::from_value(args).unwrap_or(KBListArgs {
+                category: None, limit: 50, offset: 0, compact: false,
+            });
             let entries = state
                 .store
-                .kb_list(category.as_deref())
+                .kb_list_paginated(args_parsed.category.as_deref(), args_parsed.limit, args_parsed.offset)
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
-            Ok(ToolResult::json_pretty(&entries))
+
+            if args_parsed.compact {
+                let compact: Vec<serde_json::Value> = entries.iter().map(|e| {
+                    serde_json::json!({
+                        "key": e.key,
+                        "category": e.category,
+                        "summary": if e.summary.chars().count() > 120 {
+                            format!("{}...", e.summary.chars().take(120).collect::<String>())
+                        } else {
+                            e.summary.clone()
+                        },
+                        "updatedAt": e.updated_at,
+                        "projectId": e.project_id,
+                    })
+                }).collect();
+                Ok(ToolResult::json_pretty(&serde_json::json!({
+                    "total": compact.len(),
+                    "compact": true,
+                    "entries": compact,
+                })))
+            } else {
+                Ok(ToolResult::json_pretty(&entries))
+            }
         }
         "mission_kb_import" => {
             let KBImportArgs { format, path } = serde_json::from_value(args)?;
