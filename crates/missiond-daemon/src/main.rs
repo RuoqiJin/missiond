@@ -1773,6 +1773,10 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     });
 
+    // Phase 0: Stop WebSocket listener — release port immediately so a
+    // new daemon instance can bind without EADDRINUSE race.
+    ws_server.stop().await;
+
     // Phase 1: Notify workers to stop
     let _ = shutdown_tx.send(true);
 
