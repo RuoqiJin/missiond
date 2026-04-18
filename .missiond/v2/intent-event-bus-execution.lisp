@@ -27,7 +27,8 @@
              :summary "schema 层落地 — 12 domain enum + DomainEvent trait,共 55 个 variant 覆盖 49 个 v1 DaemonEvent + 6 个新 variant(1 Slot::Stuck 占位 + 3 Observability + 2 Incident)。模块位于 crates/missiond-core/src/event/,与旧 event_bus.rs 并存。45 unit tests 全部 pass。I001 9 个遗漏 variant 全部归属(见 DC001)。")
     (phase-2 :status "completed" :owner "phase2-storage" :started "2026-04-19" :completed "2026-04-19"
              :summary "storage 层落地 — Log trait + LogWriter 任务 + BlobStore claim-check + 3 个新 migration。30 个新 unit test 覆盖 backpressure/dedup collision/batch flush/failed state/claim-check redirect/checksum roundtrip。6 个 integration test 骨架 (#[ignore],需要 Docker 才跑)。代码位于 crates/missiond-core/src/event/{log,blob_store}/,与 v1 run_timeline_writer / system_timeline 完全共存。")
-    (phase-3 :status "pending" :owner nil :started nil :completed nil :summary nil)
+    (phase-3 :status "completed" :owner "phase3-routing" :started "2026-04-19" :completed "2026-04-19"
+             :summary "routing 层落地 — Dispatcher + Topic<T> + TopicRegistry + 长轮询 tail loop + control-gate。代码在 crates/missiond-core/src/event/dispatcher/{mod,topic,registry,tail,control_gate}.rs。32 个新 unit test 覆盖:12 域注册/type 查询/broadcast fan-out/慢订阅者 Lagged 不传染/Domain→CtlDomain 映射总体完整/paused Memory 只阻 Memory/Observability+Incident 不受 pause/mock tail 100 条严格 seq 顺序 + cursor 单调/bad payload drop 不 crash/tail source error 上浮。2 个 integration test 骨架(#[ignore],同样需要 Docker)。I002 resolved: Domain→CtlDomain 映射函数位于 control_gate.rs;只 Memory/Board 映射,其他 10 域默认不 gate。I003 resolved: paused-domain 默认 drop 已是实现,Observability/Incident 永不 gated(WS 独立 Phase 7)。")
     (phase-4 :status "pending" :owner nil :started nil :completed nil :summary nil)
     (phase-5 :status "pending" :owner nil :started nil :completed nil :summary nil)
     (phase-6 :status "pending" :owner nil :started nil :completed nil :summary nil)
@@ -63,12 +64,12 @@
            :resolved-at "2026-04-19")
     (issue :id I002 :phase 3 :date "2026-04-19" :severity major
            :desc "frozen lisp §4.2.c control-gate 说'暂停域不进 topic',但 v1 CtlDomain 只有 4 值(Memory/Flow/Board/Strategy),v2 Domain 有 12 值。Dispatcher 如何映射 Domain→CtlDomain 未规定"
-           :resolution "Phase 3 在 control_tree.rs 加 Domain::to_ctl_domain() 多对一映射函数。映射表进 decisions"
-           :resolved-at nil)
+           :resolution "Phase 3 在 crates/missiond-core/src/event/dispatcher/control_gate.rs 定义 domain_to_ctl_domain() 多对一映射 + ControlGate trait(抽象,避免 core ← daemon 循环依赖)。Memory→Memory, Board→Board, 其余 10 域(Slot/Task/Question/Llm/Worker/Message/Session/System/Observability/Incident)返回 None ⇒ 永不 gate。Daemon 侧 Phase 8 提供 Adapter: impl ControlGate for watch::Receiver<ControlTree>。见 DC010+。"
+           :resolved-at "2026-04-19")
     (issue :id I003 :phase 7 :date "2026-04-19" :severity major
            :desc "控制闸语义变化风险:v1 paused domain 仍经过 Timeline Writer 入库并广播,consumer 自行 no-op;v2 paused domain 的事件不再 fan-out 给 subscriber。前端若依赖'暂停时仍能看到事件'会 break"
-           :resolution "Phase 7 上线前,前端代码 grep 确认无此依赖;或保留 v1 fan-out-then-gate 行为到 WS 层(让 frontend_events_tx 单独 topic,不受 pause 影响)"
-           :resolved-at nil)
+           :resolution "Phase 3 验证: Dispatcher 实现对 paused domain 默认 drop 已是 frozen lisp §4.2.c 正向契约(paused=true 时跳过该 domain 的所有投递)。事件仍 persist 到 event_log,订阅端自己做 live-resume。ObservabilityEvent/IncidentEvent 永远 domain_to_ctl_domain = None ⇒ 永不受 pause 影响(§4.4 bus self-emission)。Phase 7 WS 层若需继续在暂停时向前端发事件,可让 frontend_events_tx 作为独立 subscriber 绕过 Dispatcher control-gate(不在 Phase 3 范围)。"
+           :resolved-at "2026-04-19")
     (issue :id I004 :phase 6 :date "2026-04-19" :severity blocker
            :desc "前端 WS wire-format 契约耦合:47-ish wire_type 字符串 + 固定 JSON envelope (type/seq/trace_id/span_id/parent_span_id/payload) 由外部浏览器 client 消费。修改字段名/去掉字段会静默 break。sync 协议进一步耦合 timeline_latest_seq + query_timeline_since 两个 DB API"
            :resolution "Phase 6-7 上线需保持 wire envelope 不变或加版本字段,老 system_timeline 查询 API 在新 event_log 上 alias (view 或 query 重写),不能一次性 cut-over"
@@ -143,7 +144,37 @@
     (decision :id DC009 :phase 2 :date "2026-04-19"
               :topic "Ephemeral fast-path Seq 分配"
               :chose "进程内 AtomicI64 从 -1 递减,只作占位提示"
-              :rationale "Phase 2 dispatcher 未上线,ephemeral 路径暂无消费者。给出负 seq 让前端/metric 能区分 persistent vs volatile;Phase 3 dispatcher 接管后真实 seq 由它分配(可能通过 in-memory bus 单 writer 分 seq)。不让 ephemeral append 占用 DB BIGSERIAL 避免 seq 空洞。"))
+              :rationale "Phase 2 dispatcher 未上线,ephemeral 路径暂无消费者。给出负 seq 让前端/metric 能区分 persistent vs volatile;Phase 3 dispatcher 接管后真实 seq 由它分配(可能通过 in-memory bus 单 writer 分 seq)。不让 ephemeral append 占用 DB BIGSERIAL 避免 seq 空洞。")
+
+    (decision :id DC010 :phase 3 :date "2026-04-19"
+              :topic "ControlGate 抽象 vs 直用 ControlTree"
+              :chose "在 dispatcher/control_gate.rs 定义 ControlGate trait + CtlDomain(duplicated 枚举),不在 missiond-core 引入 missiond-daemon 依赖"
+              :rationale "ControlTree/CtlDomain 定义在 missiond-daemon,而 dispatcher 必须在 missiond-core(event_log/topic 都在 core)。core ← daemon 是反向依赖,不能直接 import。方案:core 侧复制 4-bucket CtlDomain enum + 定义 ControlGate trait,daemon 侧 Phase 8 写 Adapter 把 watch::Receiver<ControlTree> 实现成 ControlGate。变化小、零循环依赖、测试可以用 NeverPaused 或 mock impl。")
+
+    (decision :id DC011 :phase 3 :date "2026-04-19"
+              :topic "Tail 机制:长轮询 vs PG LISTEN/NOTIFY"
+              :chose "Phase 3 只实现长轮询(每 100ms SELECT WHERE seq > last_dispatched LIMIT 256);PG LISTEN/NOTIFY 留作未来优化"
+              :rationale "frozen lisp §4.2.c 允许两选一。长轮询简单可靠、与 sqlx 原生配合、无需 PG extension、mock 容易(MockTailSource)。100ms 对 MissionD 单机场景完全够用(典型事件率 <100/s)。LISTEN/NOTIFY 需要一个 LISTEN task + Notification Channel + fallback 逻辑,复杂度远高于价值。若未来 QPS >1k 或需要 <10ms dispatch lag,再引入。")
+
+    (decision :id DC012 :phase 3 :date "2026-04-19"
+              :topic "last_dispatched_seq 持久化策略"
+              :chose "只用进程内 AtomicI64,不持久化;重启视为从 0 开始"
+              :rationale "frozen lisp §4.2.c scope-invariant:'Dispatcher 不替离线 consumer 扫库,不维护 per-subscription 状态'。Dispatcher 重启后从 0 开始扫,会把已存在的历史事件重新扫一遍但不 fan-out(订阅者此时未连,broadcast 无 receiver),然后追上 head。订阅者的 cursor 才是真相来源(Phase 4 event_subscriptions 表)。若未来发现重复扫的 I/O 成本显著,可在 system_config 或新增 dispatcher_state 表存 last_dispatched_seq;Phase 3 不做。")
+
+    (decision :id DC013 :phase 3 :date "2026-04-19"
+              :topic "Tail SQL:跨域 vs 分域"
+              :chose "单次查询跨所有 12 域:SELECT WHERE seq > $1 ORDER BY seq LIMIT 256"
+              :rationale "frozen lisp §4.2.c tail-mechanism 要求'严格按 seq 升序派发'。按 seq 全局跨域扫最符合这个契约,O(1) state。Phase 2 的 LogReader::read_from 是 per-domain 的(给订阅者 catch-up 用),此处 Dispatcher 需要跨域,所以 tail.rs 新写了 PgTailSource 直接查表。idx_event_log_domain_seq 已有;未来若需加速可加 idx_event_log_seq BTREE(seq) — 但 BIGSERIAL PK 本就是 BTREE,当前索引已够用。")
+
+    (decision :id DC014 :phase 3 :date "2026-04-19"
+              :topic "Bad row 处理策略(unknown domain / payload deser fail)"
+              :chose "log WARN + 跳过 + advance cursor;不返回 error、不 panic"
+              :rationale "frozen lisp §4.2.c fault-isolation:'dispatcher panic 由 supervisor 重启对应 topic task;Dispatcher 全体崩从 last_dispatched 继续,不替人补发'。一条坏行不该拖垮整个总线。若坏行频繁出现,会在 rows_dropped_unknown_domain / rows_dropped_deserialize 指标上体现,ops 可见。这与 frozen lisp §4.4 observability 自报告精神一致(bug 暴露,不静默掩盖)。")
+
+    (decision :id DC015 :phase 3 :date "2026-04-19"
+              :topic "Fan-out transport:per-topic broadcast::Sender<Arc<T>>"
+              :chose "每域一条 tokio::sync::broadcast::Sender<Arc<T>>,buffer=1024"
+              :rationale "frozen lisp §4.2.c topic-registry 明确 per-topic broadcast + Arc<Event>。broadcast 语义符合'live fan-out 给所有当前订阅者';慢订阅触发 Lagged 在该订阅 local,不影响 tail 或其他订阅者(fault-isolation)。buffer=1024 是 frozen lisp 默认。Arc<T> 让多订阅者零拷贝。慢订阅者的 Lagged rewind 归 Phase 4 subscription API 处理,Phase 3 只保证自身不阻塞。"))
 
   ;; ─ 阶段完成记录 ─
   ;; 格式: (completion :phase N :date "..." :agent "name"
@@ -199,7 +230,20 @@
                      "crates/missiond-core/tests/event_log_integration.rs")
       :tests-added 30
       :verified-by "cargo build -p missiond-core OK; cargo test -p missiond-core event:: → 75 passed, 0 failed (45 phase-1 + 30 phase-2); cargo build --tests OK; integration tests build OK but require Docker at runtime (skipped here by #[ignore])"
-      :notes "Log trait + LogWriter 任务 + BlobStore claim-check 两后端 + 4 张新表 schema。writer 实现了完整的 frozen §4.2.b 语义:批量 INSERT (≤100/10ms)、UNIQUE dedupe_key 冲突回退到 SELECT existing seq 返回 AlreadyExists、exp backoff transient retry 超限进 failed state 拒新 append、CLAIM_CHECK_THRESHOLD=8192 分流到 blob_store 写 payload_ref。Retention cleanup 函数实现完毕但未 wire 进 daemon(Phase 8 任务)。整个模块未 touch v1 run_timeline_writer 或 DaemonEvent,完全共存。I005 cursor_ack_tx 未 touch,仍归 Phase 7 处理(见 DC005)。"))
+      :notes "Log trait + LogWriter 任务 + BlobStore claim-check 两后端 + 4 张新表 schema。writer 实现了完整的 frozen §4.2.b 语义:批量 INSERT (≤100/10ms)、UNIQUE dedupe_key 冲突回退到 SELECT existing seq 返回 AlreadyExists、exp backoff transient retry 超限进 failed state 拒新 append、CLAIM_CHECK_THRESHOLD=8192 分流到 blob_store 写 payload_ref。Retention cleanup 函数实现完毕但未 wire 进 daemon(Phase 8 任务)。整个模块未 touch v1 run_timeline_writer 或 DaemonEvent,完全共存。I005 cursor_ack_tx 未 touch,仍归 Phase 7 处理(见 DC005)。")
+
+    (completion
+      :phase 3 :date "2026-04-19" :agent "phase3-routing"
+      :deliverables ("crates/missiond-core/src/event/dispatcher/mod.rs"
+                     "crates/missiond-core/src/event/dispatcher/topic.rs"
+                     "crates/missiond-core/src/event/dispatcher/registry.rs"
+                     "crates/missiond-core/src/event/dispatcher/tail.rs"
+                     "crates/missiond-core/src/event/dispatcher/control_gate.rs"
+                     "crates/missiond-core/src/event/mod.rs (+ pub mod dispatcher;)"
+                     "crates/missiond-core/tests/event_dispatcher_integration.rs")
+      :tests-added 32
+      :verified-by "cargo build -p missiond-core OK; cargo test -p missiond-core event:: → 107 passed, 0 failed (75 phase-1+2 + 32 phase-3); cargo test --no-run 全部编译 OK;integration tests 骨架 #[ignore] 需要 Docker"
+      :notes "Dispatcher live-fan-out O(1) state;12 个 Topic<T> 按 TypeId + Domain 双索引查找;长轮询 tail(每 100ms SELECT LIMIT 256);control-gate 按 Domain→CtlDomain 映射检查(Memory/Board 映射,其余 10 域默认不 gate)。慢订阅者 Lagged 不传染、不阻塞 tail loop。坏行(unknown domain / payload deser fail)log WARN + drop + advance,不 panic。未 touch v1 event_bus.rs / event_router.rs / run_timeline_writer。ControlGate trait 避免 core→daemon 循环依赖;daemon 侧 Phase 8 提供 Adapter 把 ControlTree 接入。I002/I003 已 resolved。I007(ephemeral per-call)仍 pending,归 Phase 6 处理。"))
 
   ;; ─ 全局备忘(跨阶段需要记住的事) ─
   (global-notes
