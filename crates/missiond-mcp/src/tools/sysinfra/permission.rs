@@ -9,15 +9,14 @@ pub fn definitions() -> Vec<ToolDefinition> {
         // ===== mission_permission_query =====
         ToolDefinition::new(
             "mission_permission_query",
-            "权限查询。get: 获取配置; learned_list: 已学习的权限规则; merged_for_slot: 返回某工位 spawn 时可见的权限 union(global+role+project+slot)",
+            "权限查询。get: 获取配置; learned_list: 已学习的权限规则",
             json!({
                 "type": "object",
                 "required": ["action"],
                 "properties": {
-                    "action": {"type": "string", "enum": ["get", "learned_list", "merged_for_slot"]},
-                    "scopeType": {"type": "string", "description": "[learned_list] 作用域类型", "enum": ["role", "slot", "project", "global"]},
-                    "scopeId": {"type": "string", "description": "[learned_list] 作用域 ID"},
-                    "slotId": {"type": "string", "description": "[merged_for_slot] 工位 ID — 返回该工位角色+cwd→project+slot 维度的 learned union 以及静态规则"}
+                    "action": {"type": "string", "enum": ["get", "learned_list"]},
+                    "scopeType": {"type": "string", "description": "[learned_list] 作用域类型", "enum": ["role", "slot"]},
+                    "scopeId": {"type": "string", "description": "[learned_list] 作用域 ID"}
                 }
             }),
         ),

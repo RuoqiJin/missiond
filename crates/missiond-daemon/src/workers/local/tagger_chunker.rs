@@ -190,10 +190,12 @@ async fn reconcile_missed_sessions(state: &AppState) {
         match process_session(state, sid).await {
             Ok(count) if count > 0 => {
                 recovered += 1;
-                state.event_bus.publish(DaemonEvent::TurnExtracted {
+                let ev = DaemonEvent::TurnExtracted {
                     session_id: sid.clone(),
                     turn_count: count,
-                });
+                };
+                state.event_bus.publish(ev.clone());
+                let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
                 if let Err(e) = state.embedding_tx.try_send(EmbeddingTask::ProcessTurns {
                     session_id: sid.clone(),
                 }) {
@@ -214,10 +216,12 @@ async fn process_batch(state: &AppState, session_ids: &[String]) {
     for sid in session_ids {
         match process_session(state, sid).await {
             Ok(count) if count > 0 => {
-                state.event_bus.publish(DaemonEvent::TurnExtracted {
+                let ev = DaemonEvent::TurnExtracted {
                     session_id: sid.clone(),
                     turn_count: count,
-                });
+                };
+                state.event_bus.publish(ev.clone());
+                let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
                 // Trigger S4 per-turn embedding
                 if let Err(e) = state.embedding_tx.try_send(EmbeddingTask::ProcessTurns {
                     session_id: sid.clone(),
@@ -315,7 +319,7 @@ async fn analyze_messages(state: &AppState, session_id: &str, messages: &[Conver
                 session_id = %commit.session_id,
                 "TaggerChunker: git commit detected"
             );
-            state.event_bus.publish(DaemonEvent::ContextualCommitDetected {
+            let ev = DaemonEvent::ContextualCommitDetected {
                 commit_hash: commit.commit_hash,
                 branch: commit.branch,
                 summary: commit.summary,
@@ -323,7 +327,9 @@ async fn analyze_messages(state: &AppState, session_id: &str, messages: &[Conver
                 message_id: commit.message_id,
                 session_id: commit.session_id,
                 slot_id: slot_id.clone(),
-            });
+            };
+            state.event_bus.publish(ev.clone());
+            let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
         }
     }
 }

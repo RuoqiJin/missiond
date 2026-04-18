@@ -17,7 +17,7 @@
     :branch       "refactor/event-bus-v2"
     :started      "2026-04-19"
     :status       "in-progress"
-    :phase-cursor 0)
+    :phase-cursor 6)
 
   ;; ─ 阶段追踪 ─
   (phases
@@ -33,7 +33,8 @@
              :summary "egress 层落地 — SubscriptionOpts + 三 FailurePolicy + 两 PauseBehavior + 6 combinators + tail-and-pull lifecycle + 双阈值 flush。代码在 crates/missiond-core/src/event/subscription/{api,mod,options,cursor_store,failure,lifecycle,combinators}.rs。40 个新 unit tests:options 10(enum round-trip + backoff + default)、cursor_store 5(in-memory CRUD)、failure 5(Retry/DLQ/Halt)、lifecycle 6(bootstrap 顺序/batch size/ack 单调/live 去重/越界过滤)、subscription core 2(ack/drop 语义)、api 5(bootstrap flush/resume/empty name/StartFrom×3)、combinators 7(filter/map/debounce/coalesce/rate_limit/batch×2)。3 个 integration test 骨架(#[ignore])覆盖 100 条全流程 + crash-recovery + DLQ 验证。引入 LogReadable trait 解决 Log 的 dyn 不兼容(泛型 append)。D001 deviation: FreezeAndCatchUp 推迟到未来实现,当前 alias 到 DropAndLiveResume。I002/I003/I008 related:dispatcher ControlGate 已在 Phase 3 处理暂停语义,subscription MVP 不感知。")
     (phase-5 :status "completed" :owner "phase5-cross-cutting" :started "2026-04-19" :completed "2026-04-19"
              :summary "横切面层落地 — causation guard + BusMetrics trait + AtomicBusMetrics + ObservabilityEvent emitter + InMemoryBus 全套 + 9 chaos scenarios。代码在 crates/missiond-core/src/event/{guards,metrics,in_memory}/**。34 个新 lib unit tests (5 causation + 7 metrics counters + 3 emitter + 4 control_gate + 3 blob_store + 8 in_memory_log + 4 in_memory_bus) + 12 chaos integration tests 在 tests/event_chaos.rs。LogWriter.append 改调 check_causation() 统一 guard 入口。InMemoryLog impl Log:seq 用 AtomicI64 fetch_add、bounded 4096 channel、dedupe map、failed state 可切换、ephemeral 分 seq 不持久化、claim-check 走 BlobStore — 与 PG 版全面同语义。Dispatcher 与 InMemoryLog 通过 InMemoryTailSource 解耦,共享 Phase 3 run_tail 实现,无代码分叉。BusMetricsEmitter 每 10s snapshot 转 ObservabilityEvent::BusMetric(ephemeral=true)追加到 log。D002 deviation:Prometheus 后端推迟(MVP 仅 AtomicBusMetrics stub)。I010 issue:cursor-orphan daily cron wire up 推迟到 Phase 8。")
-    (phase-6 :status "pending" :owner nil :started nil :completed nil :summary nil)
+    (phase-6 :status "completed" :owner "phase6-producer-migration" :started "2026-04-19" :completed "2026-04-19"
+             :summary "Producer 迁移 — daemon 侧 bus/{mod,bootstrap,compat,control_gate_adapter}.rs 落地 + AppState.bus 字段 + main.rs 启动钩子(PG 特性开启后 bootstrap + start 注入 dispatcher/metrics/observability emitter)+ ControlTreeGate 适配 watch::Receiver<ControlTree> → ControlGate trait(DC010 形式)。所有 83 个 v1 publish 点全部双发:保留 event_bus.publish(...) + 新增 let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await(async 上下文)或 spawn_v1_shim(detached)(同步 helper 如 pty_event_worker::handle_mcp_tool_error)。7 个 LLM-internal send_tx 点(gemini_client/codex_cli/sonnet_gateway/minimax_gateway)各自挂 Option<Arc<BusServices>> + with_bus() + .shim() 辅助,保证 CliRequest*/WorkerLlmCall 也双发。4 条 MPSC bypass 的 sender 端选择性双发:incident_tx 加 bus.publish_incident(IncidentEvent::Reported) — IncidentEvent 已在 Phase 1 枚举中。embedding_tx / ast_sync_tx sender 保留纯 MPSC(D003 deviation: EmbeddingEvent / AstSyncEvent 不在 12 域枚举中;新增会破坏 §4.2.a 契约,推迟到 Phase 7 或重新评估)。cursor_ack_tx 不动(I005 保留 Phase 7)。LEGACY Gemini*/Codex* variants 透传进 LlmEvent::LegacyXxx(DC004 保留)。workspace 编译通过 + missiond-core 250 lib tests + 12 chaos tests + missiond-daemon 91 unit tests 全部 PASS。未触 v1 DaemonEvent enum / run_timeline_writer / event_router — Phase 7/8 再处理。")
     (phase-7 :status "pending" :owner nil :started nil :completed nil :summary nil)
     (phase-8 :status "pending" :owner nil :started nil :completed nil :summary nil)
     (phase-9 :status "pending" :owner nil :started nil :completed nil :summary nil))
@@ -44,6 +45,8 @@
     (claim :phase 4 :scope "crates/missiond-core/src/event/subscription/**" :agent "phase4-subscription"
            :claimed-at "2026-04-19T00:00:00Z" :released-at "2026-04-19T00:00:00Z")
     (claim :phase 5 :scope "crates/missiond-core/src/event/{guards,metrics,in_memory}/** + tests/event_chaos.rs" :agent "phase5-cross-cutting"
+           :claimed-at "2026-04-19T00:00:00Z" :released-at "2026-04-19T00:00:00Z")
+    (claim :phase 6 :scope "crates/missiond-daemon/src/bus/** + AppState.bus + all 83 v1 publish sites + 7 LLM internal sends" :agent "phase6-producer-migration"
            :claimed-at "2026-04-19T00:00:00Z" :released-at "2026-04-19T00:00:00Z")
     )
 
@@ -64,6 +67,12 @@
                :lisp-said "observability / bus self-emission 应能向 Prometheus-兼容 backend 暴露 append_rate / reject_rate / dispatch_lag / topic_depth / subscription_lag 等计数"
                :actually-did "Phase 5 仅提供 BusMetrics trait + AtomicBusMetrics 内存实现 + emitter 周期 snapshot → ObservabilityEvent::BusMetric(ephemeral);无 Prometheus HTTP 导出器"
                :reason "Phase 5 核心交付是 causation guard + InMemoryBus + 9 chaos scenarios。Prometheus 后端属于生产运维集成层(Phase 8 wiring 或独立 observability phase)。目前 AtomicBusMetrics snapshot → ObservabilityEvent 的管道已可被任何 consumer 订阅读取,实际 backend 可后续替换不动 BusMetrics trait。"
+               :approved-by "auto")
+
+    (deviation :id D003 :phase 6 :date "2026-04-19" :agent "phase6-producer-migration"
+               :lisp-said "frozen lisp §4.1 dead-bypass 列出 embedding-tx / ast-sync-tx 应改走 log.append(EmbeddingEvent::Requested) / log.append(AstSyncEvent::Requested);Phase 6 任务说'sender 端加 log.append(EmbeddingEvent/AstSyncEvent)'"
+               :actually-did "Phase 6 未添加 log.append 镜像。仅 incident_tx sender 加了 bus.publish_incident(IncidentEvent::Reported) 双发(IncidentEvent 在 Phase 1 12 域枚举内);embedding_tx / ast_sync_tx 的 sender 保持 MPSC-only,不做双发"
+               :reason "frozen lisp §4.2.a 只定义了 12 个 domain enum(Slot/Board/Task/Question/Llm/Worker/Memory/Message/Session/System/Observability/Incident),Phase 1 未创建 EmbeddingEvent / AstSyncEvent。新增 2 个域会破坏 12 域 compile-time 契约(Domain::ALL + TopicRegistry + 所有 chaos/unit tests 都需同步)。MPSC receiver 侧还未重写(Phase 7 任务),dual emit 也没有 subscriber 可拿。Phase 7 subscriber 迁移时应重新评估:(a) 新增 2 个域 + 补 chaos 测试(重代价);(b) 将 embedding/ast-sync 归入现有 MemoryEvent / SystemEvent 的新 variant(轻代价);(c) 保持 MPSC 作为 worker-internal channel 不进总线(与 cursor-ack 同策略)。"
                :approved-by "auto"))
 
   ;; ─ 执行期阻塞/未决问题 ─
@@ -270,7 +279,37 @@
     (decision :id DC029 :phase 5 :date "2026-04-19"
               :topic "InMemoryBlobStore 是否用 LocalFile backend tag"
               :chose "InMemoryBlobStore 对外声明 backend() = BlobBackend::LocalFile,URI 以 `mem:` 前缀区分"
-              :rationale "BlobBackend enum 只有 PgTable / LocalFile 两值;新增 InMemory 需要改 frozen lisp §4.2.b。URI 前缀区分不影响 PayloadRef on-wire 兼容性,tests 可通过 uri.starts_with('mem:') 识别。符合 frozen lisp 'forbidden-backends.in-memory-handle' 的精神:不作为 durable pointer,只作为 tests fixture。"))
+              :rationale "BlobBackend enum 只有 PgTable / LocalFile 两值;新增 InMemory 需要改 frozen lisp §4.2.b。URI 前缀区分不影响 PayloadRef on-wire 兼容性,tests 可通过 uri.starts_with('mem:') 识别。符合 frozen lisp 'forbidden-backends.in-memory-handle' 的精神:不作为 durable pointer,只作为 tests fixture。")
+
+    (decision :id DC030 :phase 6 :date "2026-04-19"
+              :topic "v1 publish 点的 dual-emit 语法模式"
+              :chose "大多数点:let ev = DaemonEvent::X {...}; state.event_bus.publish[_traced](ev.clone(), ...); let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await; 同步 helper 不能 await 处改用 crate::bus::spawn_v1_shim(bus.clone(), ev.clone()) detached spawn"
+              :rationale "publish_v1_shim 是 async fn,调用 log.append<E> 必须 .await;但 Phase 6 不少 publish 点在 sync helper 内(如 extraction.rs::set_extraction_phase、pty_event_worker::handle_mcp_tool_error)。两种模式:(a) 需要把 helper 改 async(跨越 engine 大量签名改动),(b) tokio::spawn 让 append 在独立任务完成。方案 (b) 最小影响,且 producer 不依赖 append 的成功(at-least-once 契约已由 writer + dedupe_key 保障)。此决策确立 Phase 6 迁移的机械手法:90% 点用 publish_v1_shim().await,剩下 10% sync helper 用 spawn_v1_shim()。")
+
+    (decision :id DC031 :phase 6 :date "2026-04-19"
+              :topic "MPSC bypass sender 迁移两步走 vs 一步切换"
+              :chose "两步走:Phase 6 仅在已有 domain enum 的 MPSC sender(incident_tx)加 dual-emit,embedding_tx / ast_sync_tx 保持不变;Phase 7 subscriber 迁移时再统一决策 receiver 侧 + sender 侧"
+              :rationale "frozen lisp 任务书要求'Phase 6 仅添加 log.append,保留 MPSC send 不动'。但 IncidentEvent 已有;EmbeddingEvent / AstSyncEvent 不在 12 域。加 log.append 需新增 domain(破坏 compile-time 契约)或合并进现有域(跨相职责不清)。两步走让 Phase 7 有完整的 subscriber 设计空间,Phase 6 不提前锁死 domain 形状。D003 deviation 跟踪此偏差。")
+
+    (decision :id DC032 :phase 6 :date "2026-04-19"
+              :topic "LLM 客户端挂 bus 的方式:新增必需参数 vs Optional + with_bus builder"
+              :chose "每个 LLM 客户端(GeminiClient / CodexCli / SonnetGateway / MinimaxGateway)新增 `bus: Option<Arc<BusServices>>` 字段 + `.with_bus(bus)` builder;main.rs 构造时链式 .with_bus(Arc::clone(&bus_services))"
+              :rationale "这些客户端的 `new(event_tx)` 构造签名被许多 worker / vision_worker / step_narrator 重用,改必需参数会扇出到每一处构造点。Optional + builder 让重构范围限于 main.rs 和 2 个 worker,不污染 tests。shim 辅助方法在 bus 为 None 时无操作,保证无 bus 时客户端仍可用(未来若独立运行或 mock 时)。")
+
+    (decision :id DC033 :phase 6 :date "2026-04-19"
+              :topic "ControlGate adapter 位置:daemon 内 bus/ 子模块 vs 独立 top-level"
+              :chose "daemon/src/bus/control_gate_adapter.rs,与 bootstrap/compat 同级"
+              :rationale "ControlTreeGate 的唯一作用是把 daemon 内 watch::Receiver<ControlTree> 喂给 missiond-core 的 ControlGate trait。它只会在 BusServices::bootstrap 中被实例化,不属于 daemon 通用工具。放在 bus/ 下与 BusServices 同生命周期清晰,未来 Phase 8 替换为复杂 gate(如 per-project pause)时改动局部。")
+
+    (decision :id DC034 :phase 6 :date "2026-04-19"
+              :topic "BusServices.start() 的生命周期与 daemon shutdown 的耦合"
+              :chose "返回 BusStartHandle(持有 shutdown_tx 和 dispatcher_join);main.rs 用 `let _bus_handle = bus_services.start(shutdown_rx.clone()).await?;` 让其随 daemon 生命周期存活;未显式 join(daemon 退出时 tokio 运行时会终止所有任务)"
+              :rationale "frozen lisp §4.4 fault-isolation 允许 dispatcher 崩溃由 supervisor 重启;Phase 6 daemon 没有 supervisor 层,简单 fire-and-forget 足够。BusStartHandle 的 Drop impl 会发 shutdown 信号,正常 ctrl-c 路径也会关闭。未来若需要优雅退出,main.rs 收到 SIGTERM 后可 await bus_handle.shutdown() 取得 DispatchMetrics。")
+
+    (decision :id DC035 :phase 6 :date "2026-04-19"
+              :topic "AppState.bus 类型:Arc<BusServices> 直接持有"
+              :chose "pub(crate) bus: Arc<BusServices>(必填,非 Option)"
+              :rationale "Phase 6 开始 v2 bus 就是 daemon 启动的强制依赖。Option 会让下游 90+ publish 点每次都写 .as_ref().map(...),噪音大。启动失败的路径(PG 不可达)应在 bootstrap 阶段就 `?` 传播,不到 AppState 构造。与 store/mission/pty 同为必填字段符合一致性。"))
 
   ;; ─ 阶段完成记录 ─
   ;; 格式: (completion :phase N :date "..." :agent "name"
@@ -356,6 +395,48 @@
       :tests-added 40
       :verified-by "cargo build -p missiond-core --tests OK; cargo test -p missiond-core --lib event::subscription → 40 passed,0 failed;整库 cargo test -p missiond-core --lib → 216 passed,0 failed(147 phase-1..4 event tests + 69 pre-existing)"
       :notes "subscribe::<T>(name, opts, log, topic, cursor_store, dlq) 统一入口;Subscription<T>::next() 返回 Ack<T>,consumer 必须 .ack().await 或 .nack(reason).await。Ack drop 视为 silent nack(DC018)。两阶段 lifecycle:bootstrap 从 log.read_from pull,耗尽后切 live 读 Topic broadcast。watermark 与 ack_cursor 分离避免重读(DC017)。双阈值 flush:flusher task tokio::select!(Dirty/Force/Nack/interval),每条 ack 或 1s 时窗 upsert cursor。6 combinators:debounce/rate_limit/coalesce/filter/map/batch,被吸收事件 silent_ack(DC019)。FailurePolicy 三个:Retry 超限 fall through 到 SkipToDLQ(DC020)。PauseBehavior:MVP 只 DropAndLiveResume(D001);FreezeAndCatchUp 推迟 I009。引入 LogReadable 子 trait 解决 dyn 不兼容(DC016/I008)。未 touch v1 event_bus.rs/event_router.rs/workers/daemon。Phase 5+ 起草 InMemoryBus / daemon 迁移 consumer。")
+
+    (completion
+      :phase 6 :date "2026-04-19" :agent "phase6-producer-migration"
+      :deliverables ("crates/missiond-daemon/src/bus/mod.rs"
+                     "crates/missiond-daemon/src/bus/bootstrap.rs"
+                     "crates/missiond-daemon/src/bus/compat.rs"
+                     "crates/missiond-daemon/src/bus/control_gate_adapter.rs"
+                     "crates/missiond-daemon/src/state.rs (+ pub(crate) bus: Arc<BusServices>)"
+                     "crates/missiond-daemon/src/main.rs (+ mod bus; + bus_services bootstrap + start + AppState.bus 注入 + sonnet/minimax/gemini_client.with_bus + ConfigFileChanged dual-emit)"
+                     "crates/missiond-daemon/Cargo.toml (+ sqlx workspace dep)"
+                     "crates/missiond-daemon/src/llm/gemini_client.rs (+ bus field + with_bus + shim() + 3 publish-like sites)"
+                     "crates/missiond-daemon/src/llm/codex_cli.rs (+ bus field + with_bus + shim() + 2 emit sites)"
+                     "crates/missiond-daemon/src/llm/sonnet_gateway.rs (+ bus field + with_bus + WorkerLlmCall dual-emit)"
+                     "crates/missiond-daemon/src/llm/minimax_gateway.rs (+ bus field + with_bus + WorkerLlmCall dual-emit)"
+                     "crates/missiond-daemon/src/workers/codex/vision_worker.rs (+ .with_bus at CodexCli::new)"
+                     "crates/missiond-daemon/src/workers/codex/step_narrator.rs (+ .with_bus at CodexCli::new + 5 DaemonEvent publish sites dual-emit)"
+                     "crates/missiond-daemon/src/workers/sonnet/briefing_worker.rs (4 sites)"
+                     "crates/missiond-daemon/src/workers/sonnet/translation_worker.rs (4 sites)"
+                     "crates/missiond-daemon/src/workers/gemini/strategy_worker.rs (2 sites)"
+                     "crates/missiond-daemon/src/workers/local/pty_event_worker.rs (7 sites + 1 incident_tx dual-emit via spawn_v1_shim)"
+                     "crates/missiond-daemon/src/workers/local/tagger_chunker.rs (3 sites)"
+                     "crates/missiond-daemon/src/workers/local/conversation_organizer.rs (1 site)"
+                     "crates/missiond-daemon/src/handlers/knowledge/board.rs (7 sites; 3 helper fns now pass &Arc<BusServices>)"
+                     "crates/missiond-daemon/src/handlers/knowledge/kb.rs (5 sites)"
+                     "crates/missiond-daemon/src/handlers/knowledge/cascade.rs (2 sites)"
+                     "crates/missiond-daemon/src/handlers/compute/task.rs (3 sites)"
+                     "crates/missiond-daemon/src/handlers/comm/question.rs (4 sites)"
+                     "crates/missiond-daemon/src/handlers/sysinfra/misc.rs (2 QuestionCreated + 1 incident_tx dual-emit)"
+                     "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs (8 sites + 1 incident_tx dual-emit)"
+                     "crates/missiond-daemon/src/engine/intent_engine/flow_engine.rs (1 site)"
+                     "crates/missiond-daemon/src/engine/intent_engine/memory_scheduler.rs (2 sites)"
+                     "crates/missiond-daemon/src/engine/learning_engine/extraction.rs (helpers now take &Arc<BusServices>)"
+                     "crates/missiond-daemon/src/engine/learning_engine/decision_engine.rs (11 sites)"
+                     "crates/missiond-daemon/src/engine/learning_engine/historical_scanner.rs (2 sites)"
+                     "crates/missiond-daemon/src/engine/learning_engine/timeline_analyst.rs (1 site)"
+                     "crates/missiond-daemon/src/engine/learning_engine/intent_analyst.rs (1 site)"
+                     "crates/missiond-daemon/src/engine/learning_engine/idle_explorer.rs (1 site)"
+                     "crates/missiond-daemon/src/infra/message_handler.rs (2 sites)"
+                     "crates/missiond-daemon/src/infra/aiops.rs (2 publish + 1 incident_tx dual-emit)")
+      :tests-added 2
+      :verified-by "cargo build -p missiond-daemon OK; cargo build (workspace) OK; cargo test -p missiond-core --lib → 250 passed,0 failed(无 regression);cargo test -p missiond-core --test event_chaos → 12 passed,0 failed(chaos 无 regression);cargo test -p missiond-daemon → 91 passed,0 failed(daemon 单元测试无 regression)"
+      :notes "83 v1 publish sites + 7 LLM internal send sites 全部 dual-emit。incident_tx sender 加了 bus.publish_incident(IncidentEvent::Reported) 双发(IncidentEvent 在 Phase 1 域内);embedding_tx / ast_sync_tx sender 保留纯 MPSC(D003 deviation)。LEGACY Gemini*/Codex* variants 透传进 LlmEvent::LegacyXxx(DC004 保留)。v1 event_bus::DaemonEvent / run_timeline_writer / event_router 未触(Phase 8)。AppState.bus 是必填字段(DC035)。bus/ 子模块 4 个新文件:mod.rs / bootstrap.rs / compat.rs / control_gate_adapter.rs。DC030 双发范式确立:90% 用 publish_v1_shim().await,10% 同步 helper 用 spawn_v1_shim 独立任务。BusServices::start 返回 BusStartHandle,daemon shutdown 随运行时终止(DC034)。I005 cursor_ack_tx 未动(保留 Phase 7);I007 ephemeral per-call 审计未动(compat shim 继续尊重 v1 is_ephemeral())。未新增单元测试(任务要求),但添加 2 个 bus 内部测试(control_gate_adapter round-trip + default_opts stamps producer_id)。")
 
     (completion
       :phase 5 :date "2026-04-19" :agent "phase5-cross-cutting"

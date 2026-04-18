@@ -1,0 +1,109 @@
+
+;; MissionD — 实现细节（完整系统）
+;; 首次生成: 2026-04-07 | Forge 深度制图 v3
+;; 更新: 2026-04-16（重构：3 层支柱分组 + 行内摘要）
+
+
+  ;; 声明：missiond 的意图文件
+  ;; 精度：实现级（函数/字段粒度）
+  ;; 测绘覆盖到此 commit 为止
+  ;; 测绘日期
+
+  ;; ── 设计约束 ──
+
+    ;; 子块：Crate 边界划分 — 每个 Rust 包管什么
+      ;; 公共枚举 CliEngine + 默认 mission 主目录 — 从 semantic-terminal 重新导出
+      ;; ⚠ missiond-semantic 已删除（提交 5a5f805）— 现在是外部 crate：
+      ;;   Cargo workspace 依赖: semantic-terminal = { path = "../semantic-terminal/..." }
+      ;;   （github.com/ruoqijin/semantic-terminal，独立开源仓库）
+      ;;   pure_parsing/（Forge 生成的）已搬到 missiond-core/src/semantic_parsing/
+      ;; [外部] 语义终端解析器：指纹、状态、确认、标题、工具、状态、模式
+      ;; PTY 会话管理：管理器、会话、增量提取器、截屏
+      ;; 类型、DB trait、IPC、embedding、上下文 — 依赖 pty + semantic-terminal(外部) + shared
+      ;; 业务逻辑、处理器、引擎、worker(sonnet/codex/gemini/local)、LLM 网关
+      ;; MCP JSON-RPC stdio 服务器，工具 schema + 请求分发
+      ;; CLI 终端附着工具
+      ;; Claude CLI 进程包装器
+      ;; 给 Node.js 调用语义解析器的 N-API 绑定
+      ;; 独立的 Skill 商店微服务
+
+    ;; 子块：通信方式
+      ;; 进程内：DaemonEvent 广播 + 每个 worker 一条 MPSC 管道
+      ;; 进程间：mcp↔daemon 走 Unix 套接字或 TCP
+      ;; 浏览器：WebSocket(tokio-tungstenite) 推送实时看板
+
+    ;; 子块：数据库访问规则
+      ;; 后端：PostgreSQL via sqlx::PgPool — 默认且唯一的生产后端（Cargo 默认 features=[postgres]）
+      ;; 抽象层：Arc<dyn MissionStore> — 聚合 13 个领域 store 的超 trait（db/traits.rs:750）
+      ;; 13 个领域 trait：Conversation 消息 工具调用 事件 复盘 视觉 知识 看板 时间线 槽位 技能 可观测性 项目
+      ;; 实现
+        ;; PG 实现：PgMissionStore(db/pg/mod.rs) — 原生 async sqlx，15 文件，约 1.2 万行
+        ;; SQLite 实现：SqliteMissionStore(db/sqlite/mod.rs) — 遗留代码，--features sqlite 开启；包装同步 MissionDB 经 DbExecutor/spawn_blocking；**仅为支持 pg::migrate_from_sqlite 迁移工具保留**
+      ;; 网关：missiond-core/src/db/ 是唯一数据库入口 — 消费方注入 Arc<dyn MissionStore>
+      ;; 迁移：crates/missiond-core/migrations/ 下 16 个 SQL 文件，daemon 启动时由 sqlx::migrate! 执行
+      ;; 孤儿产物
+        ;; ⚠ DB 层的 Forge 代码生成管线**没接入构建**：
+        ;;   - .missiond/intent-db*.lisp（8 个文件，都是 :backend sqlite）— 没被此文件 module-link
+        ;;   - db/gen/*.rs（8 个已提交文件）— db/mod.rs 没 mod gen 声明，永不编译
+        ;;   - db/gen_*.rs（根目录 8 个 untracked 文件）— 老 Forge 配置的僵尸输出
+        ;; 所有手写 DB 代码都在 db/pg/ 和 db/sqlite/ 里；Forge 管线要么重接要么删除
+        ;; "intent-db*.lisp 和 db/gen*/*.rs 存在但未使用"
+
+    ;; 子块：权威源 — 每个领域谁说了算
+      ;; 终端状态 → 语义解析器管线说了算
+      ;; 任务生命周期 → autopilot 定时循环说了算
+      ;; 槽位生命周期 → SlotManager 说了算
+      ;; 知识库内容 → PG 数据库表说了算
+      ;; 权限判断 → PermissionPolicy + LearnedPermissions 说了算
+
+  ;; ── 上游依赖（改它们会炸我） ──
+  ;; 上游依赖声明
+    ;; 依赖 Forge：构建 CLI、生成的 rs、Generation Gap 模式
+    ;;   改代码生成模板或 IR 白名单会炸
+    ;; 依赖 Mechanic：修复 CLI、治理模式修复
+    ;;   改修复 CLI 接口或治理模式会炸
+
+  ;; ── 第一层：数据 — schema、表、持久化 ──
+  ;; 4 个领域共 39 张表
+  ;; 数据层
+    ;; 核心业务表
+    ;;   13 张表：项目、看板任务、会话、消息、知识、计算槽位
+    ;; 可观测性表
+    ;;   10 张表：审计、工具调用、时间线、LLM 追踪、复盘、决策日志
+    ;; 流水线与代码智能
+    ;;   9 张表：会话回合、AST 同步、信标、水位线、翻译
+    ;; Agent 与技能
+    ;;   7 张表：Agent 提问、动态槽位、技能、路由聊天
+
+  ;; ── 第二层：运行时 — 状态、事件、引擎、LLM、解析 ──
+  ;; 心脏：worker 响应事件，引擎编排，解析器感知
+  ;; 运行时层
+    ;; 状态机
+    ;;   6 个状态机：PTY 会话、看板任务、槽位、会话
+    ;; 事件总线与 Worker
+    ;;   21 个 worker：事件总线、路由、6×sonnet、2×codex、1×gemini、12×本地
+    ;; 引擎
+    ;;   autopilot、flow-engine v1/v2、slot-manager
+    ;; 语义解析器
+    ;;   解析管线、模式配置、claude-code 解析、gemini 解析
+    ;; LLM 网关与上下文
+    ;;   3 个提供方：sonnet/gemini/minimax + 限流门 + 提示词
+
+  ;; ── 第三层：接口 — MCP 协议、传输、独立服务 ──
+  ;; 入口：78 个 MCP 工具、WebSocket、IPC、CLI 二进制
+  ;; 接口层
+    ;; MCP 分发
+    ;;   78 个工具、4 个领域：compute / sysinfra / knowledge / comm
+    ;; 传输层
+    ;;   WebSocket 服务器、IPC、PTY 管理、daemon 初始化
+    ;; 独立服务
+    ;;   skill-store、attach、runner、N-API 绑定
+
+  ;; ── 跨层流程 ──
+  ;; 12 条跨层数据流（详见 intent-flows.lisp）
+
+
+
+
+
+) ;; 意图声明结束

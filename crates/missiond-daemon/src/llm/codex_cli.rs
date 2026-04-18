@@ -67,6 +67,8 @@ pub(crate) struct CodexCli {
     event_tx: mpsc::UnboundedSender<TimelineEntry>,
     rate_limiter: Arc<GovernorLimiter>,
     semaphore: Arc<Semaphore>,
+    /// Phase 6 dual-emit: mirror every CliRequest* onto the v2 bus.
+    bus: Option<Arc<crate::bus::BusServices>>,
 }
 
 /// Response from a Codex CLI invocation.
@@ -132,6 +134,19 @@ impl CodexCli {
             event_tx,
             rate_limiter: Arc::new(RateLimiter::direct(quota)),
             semaphore: Arc::new(Semaphore::new(CODEX_MAX_CONCURRENT)),
+            bus: None,
+        }
+    }
+
+    /// Attach the v2 bus so every emitted event dual-emits (Phase 6).
+    pub fn with_bus(mut self, bus: Arc<crate::bus::BusServices>) -> Self {
+        self.bus = Some(bus);
+        self
+    }
+
+    fn shim(&self, ev: &DaemonEvent) {
+        if let Some(bus) = self.bus.clone() {
+            crate::bus::spawn_v1_shim(bus, ev.clone());
         }
     }
 
@@ -364,6 +379,7 @@ impl CodexCli {
                 "queue_wait_ms": queue_wait_ms,
             }),
         };
+        self.shim(&event);
         let entry = TimelineEntry {
             event,
             trace_id: Some("codex".to_string()),
@@ -438,6 +454,7 @@ impl CodexCli {
                 "queue_wait_ms": queue_wait_ms,
             }),
         };
+        self.shim(&event);
         let parent = current_parent_span_id();
         let entry = TimelineEntry {
             event,

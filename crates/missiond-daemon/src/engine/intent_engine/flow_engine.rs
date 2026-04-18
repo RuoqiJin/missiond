@@ -315,16 +315,16 @@ pub(crate) async fn execute_flow_task(
                 } else {
                     prompt.clone()
                 };
-                state
-                    .event_bus
-                    .publish(crate::event_bus::DaemonEvent::SlotTaskDispatched {
-                        slot_id: slot_id.to_string(),
-                        task_id: Some(task.id.to_string()),
-                        purpose: format!("flow_{}", phase_str),
-                        prompt_chars: prompt.len(),
-                        preview,
-                        cited_kb_ids: vec![],
-                    });
+                let ev = crate::event_bus::DaemonEvent::SlotTaskDispatched {
+                    slot_id: slot_id.to_string(),
+                    task_id: Some(task.id.to_string()),
+                    purpose: format!("flow_{}", phase_str),
+                    prompt_chars: prompt.len(),
+                    preview,
+                    cited_kb_ids: vec![],
+                };
+                state.event_bus.publish(ev.clone());
+                let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
             }
 
             match state.pty.send(slot_id, &prompt, timeout_ms).await {

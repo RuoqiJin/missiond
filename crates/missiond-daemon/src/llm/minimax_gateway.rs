@@ -262,9 +262,17 @@ pub(crate) struct MinimaxGateway {
     quota: Arc<RwLock<QuotaTracker>>,
     concurrency: Arc<Semaphore>,
     event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>,
+    /// Phase 6 dual-emit.
+    bus: Option<Arc<crate::bus::BusServices>>,
 }
 
 impl MinimaxGateway {
+    /// Attach the v2 bus so every emitted event dual-emits (Phase 6).
+    pub fn with_bus(mut self, bus: Arc<crate::bus::BusServices>) -> Self {
+        self.bus = Some(bus);
+        self
+    }
+
     /// Main loop: biased select ensures strict priority ordering.
     pub async fn run(mut self) {
         info!(
@@ -356,6 +364,7 @@ impl MinimaxGateway {
             // 5. Execute request (spawned for concurrency)
             let client = self.client.clone();
             let event_tx = self.event_tx.clone();
+            let bus = self.bus.clone();
             tokio::spawn(async move {
                 let api_start = std::time::Instant::now();
                 let prompt_chars: usize = req.messages.iter().map(|m| m.content.len()).sum();
@@ -393,6 +402,9 @@ impl MinimaxGateway {
                     duration_ms,
                     queue_wait_ms,
                 };
+                if let Some(ref bus) = bus {
+                    crate::bus::spawn_v1_shim(bus.clone(), event.clone());
+                }
                 // Use explicit trace context if provided (e.g. translation → thinking_message link),
                 // otherwise fall back to task_id as trace_id for backward compat.
                 let entry_trace_id = req.trace_id.or(req.task_id);
@@ -447,6 +459,7 @@ pub(crate) fn create_minimax_gateway(
         quota,
         concurrency: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
         event_tx,
+        bus: None,
     };
 
     Some((handle, gateway))

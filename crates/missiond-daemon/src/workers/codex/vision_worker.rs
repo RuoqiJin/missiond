@@ -249,7 +249,8 @@ impl super::BackgroundWorker for VisionWorker {
             "gpt-5.4".to_string(),
             Duration::from_secs(120),
             state.event_bus.sender(),
-        );
+        )
+        .with_bus(Arc::clone(&state.bus));
 
         info!(
             "Vision worker started (codex/gpt-5.4, poll interval: {}s)",

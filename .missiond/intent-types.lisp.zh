@@ -1,0 +1,449 @@
+(zh
+  :header (""
+           "MissionD 领域类型 — 枚举 + 核心结构体"
+           "Forge: Lisp → DomainTypesDecl → gen_types.rs"
+           "")
+
+  (domain-types
+    :zh "领域类型"
+    :notes ("" "带 as_str() / from_str() 的枚举" "")
+
+    (enum BoardTaskStatus
+      :zh "枚举: BoardTaskStatus 看板任务状态"
+      :doc-zh "看板任务执行状态"
+      (variant Open :zh "变体: Open 开放")
+      (variant Running :zh "变体: Running 运行中")
+      (variant Verifying :zh "变体: Verifying 验证中")
+      (variant Done :zh "变体: Done 已完成")
+      (variant Blocked :zh "变体: Blocked 已阻塞")
+      (variant Failed :zh "变体: Failed 已失败")
+      (variant Skipped :zh "变体: Skipped 已跳过"))
+
+    (enum BoardNoteType
+      :zh "枚举: BoardNoteType 看板笔记类型"
+      :doc-zh "看板任务笔记类型"
+      (variant Progress :zh "变体: Progress 进度")
+      (variant Summary :zh "变体: Summary 摘要")
+      (variant Note :zh "变体: Note 备注"))
+
+    (enum EngineeringPhase
+      :zh "枚举: EngineeringPhase 工程阶段"
+      :doc-zh "工程任务流状态机中的阶段"
+      (variant Investigate :zh "变体: Investigate 调研")
+      (variant ConsultGemini1 :zh "变体: ConsultGemini1 咨询 Gemini 第一次")
+      (variant Plan :zh "变体: Plan 规划")
+      (variant ConsultGemini2 :zh "变体: ConsultGemini2 咨询 Gemini 第二次")
+      (variant Execute :zh "变体: Execute 执行")
+      (variant Finalize :zh "变体: Finalize 收尾")
+      (variant Done :zh "变体: Done 完成"))
+
+    (enum TaskStatus
+      :zh "枚举: TaskStatus 任务状态"
+      :doc-zh "后台任务队列状态"
+      (variant Queued :zh "变体: Queued 排队中")
+      (variant Running :zh "变体: Running 运行中")
+      (variant Completed :zh "变体: Completed 已完成")
+      (variant Failed :zh "变体: Failed 已失败"))
+
+    (enum EventType
+      :zh "枚举: EventType 事件类型"
+      :doc-zh "任务事件类型"
+      (variant TaskCreated :zh "变体: TaskCreated 任务已创建")
+      (variant TaskStarted :zh "变体: TaskStarted 任务已启动")
+      (variant TaskCompleted :zh "变体: TaskCompleted 任务已完成")
+      (variant TaskFailed :zh "变体: TaskFailed 任务已失败")
+      (variant MessageSent :zh "变体: MessageSent 消息已发送")
+      (variant MessageReceived :zh "变体: MessageReceived 消息已接收"))
+
+    (enum AsyncJobStatus
+      :zh "枚举: AsyncJobStatus 异步作业状态"
+      :doc-zh "异步作业执行状态"
+      (variant Pending :zh "变体: Pending 待处理")
+      (variant Running :zh "变体: Running 运行中")
+      (variant Completed :zh "变体: Completed 已完成")
+      (variant Failed :zh "变体: Failed 已失败")
+      (variant Cancelled :zh "变体: Cancelled 已取消"))
+
+    (enum AgentQuestionStatus
+      :zh "枚举: AgentQuestionStatus Agent 问题状态"
+      :doc-zh "Agent 问题生命周期状态"
+      (variant Pending :zh "变体: Pending 待处理")
+      (variant Answered :zh "变体: Answered 已回答")
+      (variant Dismissed :zh "变体: Dismissed 已驳回")
+      (variant Expired :zh "变体: Expired 已过期")
+      (variant Harvested :zh "变体: Harvested 已收割"))
+
+    (enum IncidentSeverity
+      :zh "枚举: IncidentSeverity 故障严重级别"
+      :doc-zh "故障严重级别"
+      (variant Critical :zh "变体: Critical 严重")
+      (variant High :zh "变体: High 高")
+      (variant Medium :zh "变体: Medium 中")
+      (variant Low :zh "变体: Low 低")
+      (variant Info :zh "变体: Info 信息"))
+
+    (enum IncidentSource
+      :zh "枚举: IncidentSource 故障来源"
+      :doc-zh "故障来源系统"
+      (variant Monitoring :zh "变体: Monitoring 监控")
+      (variant AlertManager :zh "变体: AlertManager 告警管理器")
+      (variant Manual :zh "变体: Manual 手动")
+      (variant System :zh "变体: System 系统")
+      (variant Webhook :zh "变体: Webhook Webhook"))
+
+    (enum DependencyStatus
+      :zh "枚举: DependencyStatus 依赖状态"
+      :doc-zh "DAG 依赖解析结果")
+
+    (enum CliEngine
+      :zh "枚举: CliEngine CLI 引擎"
+      :doc-zh "PTY 槽位的 CLI 引擎"
+      (variant ClaudeCode :zh "变体: ClaudeCode Claude Code 引擎")
+      (variant ClaudeMd :zh "变体: ClaudeMd Claude Md 引擎"))
+
+    (enum Lifecycle
+      :zh "枚举: Lifecycle 生命周期"
+      :doc-zh "槽位生命周期模式"
+      (variant Persistent :zh "变体: Persistent 持久")
+      (variant Transient :zh "变体: Transient 临时"))
+
+    (enum SlotTrait
+      :zh "枚举: SlotTrait 槽位特性"
+      :doc-zh "槽位能力特性"
+      (variant Memory :zh "变体: Memory 记忆")
+      (variant Sonnet :zh "变体: Sonnet Sonnet 模型")
+      (variant AutoPilot :zh "变体: AutoPilot 自动驾驶")
+      (variant Decision :zh "变体: Decision 决策")
+      (variant Strategy :zh "变体: Strategy 策略"))
+
+    :notes ("" "核心结构体" "")
+
+    (struct FlowContext
+      :zh "结构体: FlowContext 流程上下文"
+      :doc-zh "工程流程各阶段之间传递的上下文"
+      (field investigation_report :zh "字段: investigation_report 调研报告")
+      (field gemini_advice_1 :zh "字段: gemini_advice_1 第一次 Gemini 建议")
+      (field execution_plan :zh "字段: execution_plan 执行计划")
+      (field gemini_advice_2 :zh "字段: gemini_advice_2 第二次 Gemini 建议")
+      (field execution_result :zh "字段: execution_result 执行结果")
+      (field commit_hash :zh "字段: commit_hash 提交哈希"))
+
+    (struct BoardTask
+      :zh "结构体: BoardTask 看板任务"
+      :doc-zh "个人任务看板条目"
+      (field id :zh "字段: id 任务 ID")
+      (field title :zh "字段: title 标题")
+      (field description :zh "字段: description 描述")
+      (field status :zh "字段: status 状态")
+      (field priority :zh "字段: priority 优先级")
+      (field category :zh "字段: category 分类")
+      (field project :zh "字段: project 项目")
+      (field server :zh "字段: server 服务器")
+      (field due_date :zh "字段: due_date 截止日期")
+      (field parent_id :zh "字段: parent_id 父任务 ID")
+      (field assignee :zh "字段: assignee 负责人")
+      (field auto_execute :zh "字段: auto_execute 自动执行")
+      (field prompt_template :zh "字段: prompt_template 提示词模板")
+      (field hidden :zh "字段: hidden 是否隐藏")
+      (field retry_count :zh "字段: retry_count 重试次数")
+      (field max_retries :zh "字段: max_retries 最大重试次数")
+      (field order_idx :zh "字段: order_idx 排序索引")
+      (field created_at :zh "字段: created_at 创建时间")
+      (field updated_at :zh "字段: updated_at 更新时间")
+      (field claim_executor_id :zh "字段: claim_executor_id 认领执行器 ID")
+      (field claim_executor_type :zh "字段: claim_executor_type 认领执行器类型")
+      (field claimed_at :zh "字段: claimed_at 认领时间")
+      (field flow_phase :zh "字段: flow_phase 流程阶段")
+      (field flow_context :zh "字段: flow_context 流程上下文")
+      (field flow_template :zh "字段: flow_template 流程模板")
+      (field depends_on :zh "字段: depends_on 依赖任务")
+      (field lease_expires_at :zh "字段: lease_expires_at 租约过期时间")
+      (field dedupe_key :zh "字段: dedupe_key 去重键")
+      (field timeout_secs :zh "字段: timeout_secs 超时秒数")
+      (field context_intent :zh "字段: context_intent 上下文意图")
+      (field notes_count :zh "字段: notes_count 笔记计数"))
+
+    (struct CompactBoardTask
+      :zh "结构体: CompactBoardTask 紧凑看板任务"
+      :doc-zh "用于搜索结果的紧凑看板任务"
+      (field id :zh "字段: id 任务 ID")
+      (field title :zh "字段: title 标题")
+      (field status :zh "字段: status 状态")
+      (field priority :zh "字段: priority 优先级")
+      (field parent_id :zh "字段: parent_id 父任务 ID")
+      (field project :zh "字段: project 项目")
+      (field category :zh "字段: category 分类"))
+
+    (struct BoardTaskNote
+      :zh "结构体: BoardTaskNote 看板任务笔记"
+      :doc-zh "附加到看板任务的笔记"
+      (field id :zh "字段: id 笔记 ID")
+      (field task_id :zh "字段: task_id 任务 ID")
+      (field content :zh "字段: content 内容")
+      (field note_type :zh "字段: note_type 笔记类型")
+      (field author :zh "字段: author 作者")
+      (field created_at :zh "字段: created_at 创建时间"))
+
+    (struct CreateBoardTaskInput
+      :zh "结构体: CreateBoardTaskInput 创建看板任务输入"
+      :doc-zh "创建看板任务的输入"
+      (field title :zh "字段: title 标题")
+      (field description :zh "字段: description 描述")
+      (field priority :zh "字段: priority 优先级")
+      (field category :zh "字段: category 分类")
+      (field project :zh "字段: project 项目")
+      (field server :zh "字段: server 服务器")
+      (field due_date :zh "字段: due_date 截止日期")
+      (field parent_id :zh "字段: parent_id 父任务 ID")
+      (field assignee :zh "字段: assignee 负责人")
+      (field auto_execute :zh "字段: auto_execute 自动执行")
+      (field prompt_template :zh "字段: prompt_template 提示词模板")
+      (field hidden :zh "字段: hidden 是否隐藏")
+      (field depends_on :zh "字段: depends_on 依赖任务")
+      (field dedupe_key :zh "字段: dedupe_key 去重键")
+      (field timeout_secs :zh "字段: timeout_secs 超时秒数")
+      (field context_intent :zh "字段: context_intent 上下文意图"))
+
+    (struct UpdateBoardTaskInput
+      :zh "结构体: UpdateBoardTaskInput 更新看板任务输入"
+      :doc-zh "更新看板任务的输入"
+      (field title :zh "字段: title 标题")
+      (field description :zh "字段: description 描述")
+      (field status :zh "字段: status 状态")
+      (field priority :zh "字段: priority 优先级")
+      (field category :zh "字段: category 分类")
+      (field project :zh "字段: project 项目")
+      (field server :zh "字段: server 服务器")
+      (field due_date :zh "字段: due_date 截止日期")
+      (field parent_id :zh "字段: parent_id 父任务 ID")
+      (field assignee :zh "字段: assignee 负责人")
+      (field auto_execute :zh "字段: auto_execute 自动执行")
+      (field prompt_template :zh "字段: prompt_template 提示词模板")
+      (field hidden :zh "字段: hidden 是否隐藏")
+      (field order_idx :zh "字段: order_idx 排序索引")
+      (field flow_phase :zh "字段: flow_phase 流程阶段")
+      (field flow_context :zh "字段: flow_context 流程上下文")
+      (field flow_template :zh "字段: flow_template 流程模板")
+      (field depends_on :zh "字段: depends_on 依赖任务")
+      (field claim_executor_id :zh "字段: claim_executor_id 认领执行器 ID")
+      (field claim_executor_type :zh "字段: claim_executor_type 认领执行器类型"))
+
+    (struct Conversation
+      :zh "结构体: Conversation 会话"
+      :doc-zh "Claude Code 会话"
+      (field id :zh "字段: id 会话 ID")
+      (field project :zh "字段: project 项目")
+      (field slot_id :zh "字段: slot_id 槽位 ID")
+      (field source :zh "字段: source 来源")
+      (field model :zh "字段: model 模型")
+      (field git_branch :zh "字段: git_branch Git 分支")
+      (field jsonl_path :zh "字段: jsonl_path JSONL 路径")
+      (field parent_session_id :zh "字段: parent_session_id 父会话 ID")
+      (field task_id :zh "字段: task_id 任务 ID")
+      (field message_count :zh "字段: message_count 消息计数")
+      (field started_at :zh "字段: started_at 开始时间")
+      (field ended_at :zh "字段: ended_at 结束时间")
+      (field status :zh "字段: status 状态")
+      (field analyzed_at :zh "字段: analyzed_at 分析时间")
+      (field analysis_version :zh "字段: analysis_version 分析版本")
+      (field analysis_retries :zh "字段: analysis_retries 分析重试次数")
+      (field deep_analyzed_message_id :zh "字段: deep_analyzed_message_id 深度分析消息 ID")
+      (field chat_type :zh "字段: chat_type 聊天类型")
+      (field conversation_type :zh "字段: conversation_type 会话类型")
+      (field updated_at :zh "字段: updated_at 更新时间")
+      (field llm_summary :zh "字段: llm_summary LLM 摘要")
+      (field embedding_provider :zh "字段: embedding_provider 向量化提供方")
+      (field session_timeline :zh "字段: session_timeline 会话时间线")
+      (field timeline_built_at :zh "字段: timeline_built_at 时间线构建时间"))
+
+    (struct ConversationMessage
+      :zh "结构体: ConversationMessage 会话消息"
+      :doc-zh "会话中的单条消息"
+      (field id :zh "字段: id 消息 ID")
+      (field session_id :zh "字段: session_id 会话 ID")
+      (field role :zh "字段: role 角色")
+      (field content :zh "字段: content 内容")
+      (field raw_content :zh "字段: raw_content 原始内容")
+      (field message_uuid :zh "字段: message_uuid 消息 UUID")
+      (field parent_uuid :zh "字段: parent_uuid 父消息 UUID")
+      (field model :zh "字段: model 模型")
+      (field timestamp :zh "字段: timestamp 时间戳")
+      (field metadata :zh "字段: metadata 元数据")
+      (field tool_name :zh "字段: tool_name 工具名")
+      (field raw_role :zh "字段: raw_role 原始角色")
+      (field content_types :zh "字段: content_types 内容类型")
+      (field has_image :zh "字段: has_image 含图片")
+      (field has_tool_use :zh "字段: has_tool_use 含工具调用")
+      (field has_tool_result :zh "字段: has_tool_result 含工具结果")
+      (field token_count :zh "字段: token_count Token 计数")
+      (field seq :zh "字段: seq 序号")
+      (field role_display :zh "字段: role_display 角色显示"))
+
+    (struct KnowledgeEntry
+      :zh "结构体: KnowledgeEntry 知识库条目"
+      :doc-zh "知识库条目"
+      (field id :zh "字段: id 条目 ID")
+      (field category :zh "字段: category 分类")
+      (field key :zh "字段: key 键")
+      (field summary :zh "字段: summary 摘要")
+      (field detail :zh "字段: detail 详情")
+      (field source :zh "字段: source 来源")
+      (field confidence :zh "字段: confidence 置信度")
+      (field access_count :zh "字段: access_count 访问次数")
+      (field created_at :zh "字段: created_at 创建时间")
+      (field updated_at :zh "字段: updated_at 更新时间")
+      (field last_accessed_at :zh "字段: last_accessed_at 最后访问时间")
+      (field linked_task_id :zh "字段: linked_task_id 关联任务 ID")
+      (field kb_type :zh "字段: kb_type 知识库类型")
+      (field context_snippet :zh "字段: context_snippet 上下文片段")
+      (field scope_task_id :zh "字段: scope_task_id 作用域任务 ID")
+      (field utility_score :zh "字段: utility_score 效用评分"))
+
+    (struct KBRememberInput
+      :zh "结构体: KBRememberInput 知识记忆输入"
+      :doc-zh "记忆知识的输入"
+      (field category :zh "字段: category 分类")
+      (field key :zh "字段: key 键")
+      (field summary :zh "字段: summary 摘要")
+      (field detail :zh "字段: detail 详情")
+      (field source :zh "字段: source 来源")
+      (field confidence :zh "字段: confidence 置信度"))
+
+    (struct KBEdge
+      :zh "结构体: KBEdge 知识图谱边"
+      :doc-zh "知识图谱边"
+      (field source_id :zh "字段: source_id 源节点 ID")
+      (field target_id :zh "字段: target_id 目标节点 ID")
+      (field relation_type :zh "字段: relation_type 关系类型")
+      (field weight :zh "字段: weight 权重")
+      (field created_at :zh "字段: created_at 创建时间"))
+
+    (struct Task
+      :zh "结构体: Task 任务"
+      :doc-zh "任务队列中的后台任务"
+      (field id :zh "字段: id 任务 ID")
+      (field role :zh "字段: role 角色")
+      (field prompt :zh "字段: prompt 提示词")
+      (field status :zh "字段: status 状态")
+      (field slot_id :zh "字段: slot_id 槽位 ID")
+      (field session_id :zh "字段: session_id 会话 ID")
+      (field result :zh "字段: result 结果")
+      (field error :zh "字段: error 错误")
+      (field created_at :zh "字段: created_at 创建时间")
+      (field started_at :zh "字段: started_at 开始时间")
+      (field finished_at :zh "字段: finished_at 完成时间"))
+
+    (struct InboxMessage
+      :zh "结构体: InboxMessage 收件箱消息"
+      :doc-zh "Agent 间收件箱消息"
+      (field id :zh "字段: id 消息 ID")
+      (field task_id :zh "字段: task_id 任务 ID")
+      (field from_role :zh "字段: from_role 发送方角色")
+      (field content :zh "字段: content 内容")
+      (field read :zh "字段: read 是否已读")
+      (field created_at :zh "字段: created_at 创建时间"))
+
+    (struct TaskEvent
+      :zh "结构体: TaskEvent 任务事件"
+      :doc-zh "任务生命周期事件"
+      (field id :zh "字段: id 事件 ID")
+      (field task_id :zh "字段: task_id 任务 ID")
+      (field event_type :zh "字段: event_type 事件类型")
+      (field data :zh "字段: data 数据")
+      (field timestamp :zh "字段: timestamp 时间戳"))
+
+    (struct AgentQuestion
+      :zh "结构体: AgentQuestion Agent 问题"
+      :doc-zh "Agent 决策点问题"
+      (field id :zh "字段: id 问题 ID")
+      (field task_id :zh "字段: task_id 任务 ID")
+      (field slot_id :zh "字段: slot_id 槽位 ID")
+      (field session_id :zh "字段: session_id 会话 ID")
+      (field question :zh "字段: question 问题")
+      (field context :zh "字段: context 上下文")
+      (field status :zh "字段: status 状态")
+      (field answer :zh "字段: answer 回答")
+      (field created_at :zh "字段: created_at 创建时间")
+      (field updated_at :zh "字段: updated_at 更新时间")
+      (field target :zh "字段: target 目标")
+      (field options :zh "字段: options 选项")
+      (field decision_type :zh "字段: decision_type 决策类型")
+      (field retry_count :zh "字段: retry_count 重试次数")
+      (field routing_trace :zh "字段: routing_trace 路由追踪"))
+
+    (struct IncidentRow
+      :zh "结构体: IncidentRow 故障记录"
+      :doc-zh "故障记录"
+      (field id :zh "字段: id 故障 ID")
+      (field severity :zh "字段: severity 严重级别")
+      (field source :zh "字段: source 来源")
+      (field title :zh "字段: title 标题")
+      (field description :zh "字段: description 描述")
+      (field server_id :zh "字段: server_id 服务器 ID")
+      (field raw_payload :zh "字段: raw_payload 原始负载")
+      (field board_task_id :zh "字段: board_task_id 看板任务 ID")
+      (field dedupe_key :zh "字段: dedupe_key 去重键")
+      (field created_at :zh "字段: created_at 创建时间"))
+
+    (struct DynamicSlot
+      :zh "结构体: DynamicSlot 动态槽位"
+      :doc-zh "动态派生的计算槽位"
+      (field id :zh "字段: id 槽位 ID")
+      (field parent_slot_id :zh "字段: parent_slot_id 父槽位 ID")
+      (field template :zh "字段: template 模板")
+      (field objective :zh "字段: objective 目标")
+      (field config :zh "字段: config 配置")
+      (field status :zh "字段: status 状态")
+      (field termination_reason :zh "字段: termination_reason 终止原因")
+      (field created_at :zh "字段: created_at 创建时间")
+      (field terminated_at :zh "字段: terminated_at 终止时间")
+      (field ttl_seconds :zh "字段: ttl_seconds TTL 秒数")
+      (field expires_at :zh "字段: expires_at 过期时间")
+      (field extend_count :zh "字段: extend_count 延长次数"))
+
+    (struct SkillTopic
+      :zh "结构体: SkillTopic 技能主题"
+      :doc-zh "技能主题定义"
+      (field topic :zh "字段: topic 主题")
+      (field description :zh "字段: description 描述")
+      (field aka :zh "字段: aka 别名")
+      (field allowed_tools :zh "字段: allowed_tools 允许工具")
+      (field file_path :zh "字段: file_path 文件路径")
+      (field hit_count :zh "字段: hit_count 命中次数")
+      (field last_hit_at :zh "字段: last_hit_at 最后命中时间")
+      (field fragment_count :zh "字段: fragment_count 片段计数")
+      (field total_lines :zh "字段: total_lines 总行数")
+      (field checksum :zh "字段: checksum 校验和")
+      (field created_at :zh "字段: created_at 创建时间")
+      (field updated_at :zh "字段: updated_at 更新时间")
+      (field requires_json :zh "字段: requires_json 依赖 JSON")
+      (field actions_json :zh "字段: actions_json 动作 JSON")
+      (field context_hooks_json :zh "字段: context_hooks_json 上下文钩子 JSON"))
+
+    (struct SkillBlock
+      :zh "结构体: SkillBlock 技能内容块"
+      :doc-zh "技能内容块"
+      (field id :zh "字段: id 块 ID")
+      (field topic :zh "字段: topic 主题")
+      (field block_type :zh "字段: block_type 块类型")
+      (field title :zh "字段: title 标题")
+      (field content :zh "字段: content 内容")
+      (field sort_order :zh "字段: sort_order 排序顺序")
+      (field status :zh "字段: status 状态")
+      (field created_at :zh "字段: created_at 创建时间")
+      (field updated_at :zh "字段: updated_at 更新时间"))
+
+    (struct ToolCallRecord
+      :zh "结构体: ToolCallRecord 工具调用记录"
+      :doc-zh "工具调用审计记录"
+      (field id :zh "字段: id 记录 ID")
+      (field session_id :zh "字段: session_id 会话 ID")
+      (field message_id :zh "字段: message_id 消息 ID")
+      (field tool_name :zh "字段: tool_name 工具名")
+      (field input_summary :zh "字段: input_summary 输入摘要")
+      (field raw_input :zh "字段: raw_input 原始输入")
+      (field output_summary :zh "字段: output_summary 输出摘要")
+      (field raw_output :zh "字段: raw_output 原始输出")
+      (field status :zh "字段: status 状态")
+      (field duration_ms :zh "字段: duration_ms 耗时毫秒")
+      (field timestamp :zh "字段: timestamp 时间戳"))))

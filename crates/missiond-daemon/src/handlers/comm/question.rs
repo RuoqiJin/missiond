@@ -161,10 +161,11 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             // Signal Decision Engine if target=master
             if q.target == "master" {
+                let ev = DaemonEvent::QuestionCreated {
+                    question_id: q.id.clone(),
+                };
                 state.event_bus.publish_traced(
-                    DaemonEvent::QuestionCreated {
-                        question_id: q.id.clone(),
-                    },
+                    ev.clone(),
                     TraceContext {
                         trace_id: q.task_id.clone(),
                         summary: Some(format!(
@@ -174,6 +175,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         ..Default::default()
                     },
                 );
+                let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
                 info!(question_id = %q.id, "Decision Engine notified: new master question");
             }
             Ok(ToolResult::json_pretty(&q))
@@ -217,20 +219,24 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             {
                 Some(q) => {
                     // Signal scheduler for instant slot recovery after question answered
-                    state.event_bus.publish(DaemonEvent::TaskCompleted {
+                    let ev_task = DaemonEvent::TaskCompleted {
                         task_id: String::new(),
-                    });
+                    };
+                    state.event_bus.publish(ev_task.clone());
+                    let _ = crate::bus::publish_v1_shim(&state.bus, &ev_task).await;
+                    let ev = DaemonEvent::QuestionResolved {
+                        question_id: id.clone(),
+                        resolution: "answered".to_string(),
+                    };
                     state.event_bus.publish_traced(
-                        DaemonEvent::QuestionResolved {
-                            question_id: id.clone(),
-                            resolution: "answered".to_string(),
-                        },
+                        ev.clone(),
                         TraceContext {
                             trace_id: REQUEST_SESSION_ID.try_with(|s| s.clone()).ok(),
                             summary: Some("Question answered by human".to_string()),
                             ..Default::default()
                         },
                     );
+                    let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
                     Ok(ToolResult::json_pretty(&q))
                 }
                 None => Ok(ToolResult::error("Question not found")),
@@ -245,17 +251,19 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 .map_err(|e| anyhow!("DB error: {}", e))?
             {
                 Some(q) => {
+                    let ev = DaemonEvent::QuestionResolved {
+                        question_id: id.clone(),
+                        resolution: "dismissed".to_string(),
+                    };
                     state.event_bus.publish_traced(
-                        DaemonEvent::QuestionResolved {
-                            question_id: id.clone(),
-                            resolution: "dismissed".to_string(),
-                        },
+                        ev.clone(),
                         TraceContext {
                             trace_id: REQUEST_SESSION_ID.try_with(|s| s.clone()).ok(),
                             summary: Some("Question dismissed by human".to_string()),
                             ..Default::default()
                         },
                     );
+                    let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
                     Ok(ToolResult::json_pretty(&q))
                 }
                 None => Ok(ToolResult::error("Question not found")),

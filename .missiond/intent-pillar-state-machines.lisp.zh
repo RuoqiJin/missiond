@@ -1,0 +1,88 @@
+(zh
+  :header ("MissionD — 支柱: state-machines"
+           "从 intent.lisp 拆分以支持并行加载"
+           "父文件: intent.lisp")
+
+  (pillar state-machines
+    :zh "支柱: state-machines"
+    (purpose :zh "管辖生命周期迁移的全部有限状态自动机")
+
+    (component pty-session-state
+      :zh "组件: pty-session-state"
+      (state-machine pty-session
+        :zh "状态机: pty-session"
+        (states :zh "状态: Starting / Idle / SlashMenu / Thinking / Responding / ToolRunning / Confirming / Error")
+        (transitions
+          :zh "迁移集"
+          (Starting -> Idle :trigger-zh "触发: 检测到提示符")
+          (Starting -> Error :trigger-zh "触发: 进程崩溃")
+          (Idle -> Thinking :trigger-zh "触发: 检测到转圈图标")
+          (Idle -> SlashMenu :trigger-zh "触发: 检测到斜杠菜单")
+          (Idle -> ToolRunning :trigger-zh "触发: 工具活动")
+          (Idle -> Confirming :trigger-zh "触发: 权限对话框")
+          (SlashMenu -> Idle :trigger-zh "触发: 菜单关闭")
+          (Thinking -> Responding :trigger-zh "触发: 输出开始")
+          (Thinking -> ToolRunning :trigger-zh "触发: 工具提示")
+          (Responding -> Idle :trigger-zh "触发: 提示符回归")
+          (Responding -> ToolRunning :trigger-zh "触发: 工具被调用")
+          (ToolRunning -> Idle :trigger-zh "触发: 提示符回归")
+          (ToolRunning -> Confirming :trigger-zh "触发: 权限对话框")
+          (Confirming -> ToolRunning :trigger-zh "触发: 已确认")
+          (Confirming -> Idle :trigger-zh "触发: 已拒绝"))))
+
+    (component board-task-status
+      :zh "组件: board-task-status"
+      (state-machine board-task
+        :zh "状态机: board-task"
+        (states :zh "状态: Open / Running / Done / Failed / Blocked")
+        (transitions
+          :zh "迁移集"
+          (Open -> Running :trigger-zh "触发: 已认领")
+          (Open -> Blocked :trigger-zh "触发: 依赖未满足")
+          (Running -> Done :trigger-zh "触发: 已完成")
+          (Running -> Failed :trigger-zh "触发: 出错")
+          (Blocked -> Open :trigger-zh "触发: 依赖已解决")))
+      (state-machine engineering-phase
+        :zh "状态机: engineering-phase"
+        (states :zh "状态: Investigate / Consult / Plan / Execute / Finalize")
+        (transitions
+          :zh "迁移集"
+          (Investigate -> Consult :trigger-zh "触发: 上下文已收集")
+          (Consult -> Plan :trigger-zh "触发: 审查完毕")
+          (Plan -> Execute :trigger-zh "触发: 方案获批")
+          (Execute -> Finalize :trigger-zh "触发: 实现完成")
+          (Finalize -> Investigate :trigger-zh "触发: 发现问题"))))
+
+    (component task-status
+      :zh "组件: task-status"
+      (state-machine task
+        :zh "状态机: task"
+        (states :zh "状态: Queued / Running / Completed / Failed")
+        (transitions
+          :zh "迁移集"
+          (Queued -> Running :trigger-zh "触发: 槽位已认领")
+          (Running -> Completed :trigger-zh "触发: 结果已收到")
+          (Running -> Failed :trigger-zh "触发: 出错或超时"))))
+
+    (component question-status
+      :zh "组件: question-status"
+      (state-machine question
+        :zh "状态机: question"
+        (states :zh "状态: Pending / Answered / Dismissed")
+        (transitions
+          :zh "迁移集"
+          (Pending -> Answered :trigger-zh "触发: 已给出回答")
+          (Pending -> Dismissed :trigger-zh "触发: 用户已忽略"))))
+
+    (component extraction-phase
+      :zh "组件: extraction-phase"
+      (state-machine extraction
+        :zh "状态机: extraction"
+        (states :zh "状态: Idle / Sending / WaitingForIdleness / Complete")
+        (transitions
+          :zh "迁移集"
+          (Idle -> Sending :trigger-zh "触发: 抽取已触发")
+          (Sending -> WaitingForIdleness :trigger-zh "触发: 内容已发送")
+          (WaitingForIdleness -> Complete :trigger-zh "触发: 槽位空闲")
+          (WaitingForIdleness -> Idle :trigger-zh "触发: 超时")
+          (Complete -> Idle :trigger-zh "触发: 重置"))))))

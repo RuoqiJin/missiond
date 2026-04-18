@@ -1,0 +1,785 @@
+(zh
+  :header (""
+           "模式: mcp-tool"
+           "项目: MissionD"
+           "24 个模块 · 67 个工具 · 4 个领域"
+           "从 Jarvis intent-mcp.lisp 冲压而来"
+           ""
+           ""
+           "── 参数类型词汇 ──"
+           "string | integer | number | boolean | array | object"
+           ":enum 限定固定取值"
+           ":required 标记字段为必填(进入 JSON Schema \"required\")"
+           ":default 为宽松提取提供默认值"
+           ""
+           "════════════════════════════════════════════════════════════"
+           " 领域: knowledge — 看板 · 知识库 · 技能 · 记忆 · 洞察"
+           "════════════════════════════════════════════════════════════")
+
+  (mcp-module board
+    :zh "MCP 模块: board"
+
+    (tool mission_board_query
+      :zh "工具: mission_board_query"
+      :description-zh "任务板统一查询。action: list(树形列表), get(详情), search(搜索), summary(统计), clear_done(批量清除已完成)"
+      (input
+        (action :description-zh "查询类型，默认 list")
+        (status :description-zh "[list/search] 状态: open/done/running/failed/blocked")
+        (includeHidden :description-zh "[list/search] 包含隐藏任务，默认 false")
+        (id :description-zh "[get] 单个任务 ID")
+        (ids :description-zh "[get] 批量任务 ID")
+        (includeChildren :description-zh "[get] 内嵌子任务详情，默认 false")
+        (query :description-zh "[search] 全文搜索 title+description")
+        (project :description-zh "[search] 项目过滤")
+        (category :description-zh "[search] 分类: deploy/dev/infra/test/other")
+        (parentId :description-zh "[search] 父任务 ID")
+        (limit :description-zh "[search] 最大返回条数")
+        (since :description-zh "[summary] 起始时间 ISO 8601")))
+
+    (tool mission_board_create
+      :zh "工具: mission_board_create"
+      :description-zh "创建新任务。支持子任务(parentId)、DAG 依赖(dependsOn)、Flow 模式(flowTemplate)"
+      (input
+        (title :description-zh "任务标题")
+        (description :description-zh "任务描述")
+        (priority)
+        (category)
+        (project :description-zh "关联项目")
+        (server :description-zh "关联服务器")
+        (dueDate :description-zh "截止日期 YYYY-MM-DD")
+        (parentId :description-zh "父任务 ID")
+        (assignee :description-zh "分配的 PTY 工位 ID")
+        (autoExecute :description-zh "due_date 到达时自动执行")
+        (promptTemplate :description-zh "自动执行 prompt 模板")
+        (hidden :description-zh "隐藏任务")
+        (flowTemplate :description-zh "Flow 模板名(如 engineering)")
+        (dependsOn :description-zh "DAG 依赖前置任务 ID 列表")))
+
+    (tool mission_board_update
+      :zh "工具: mission_board_update"
+      :description-zh "更新任务。传 id 更新单个，传 ids 批量更新"
+      (input
+        (id :description-zh "单个任务 ID(与 ids 二选一)")
+        (ids :description-zh "批量任务 ID(与 id 二选一)")
+        (title)
+        (description)
+        (status)
+        (priority)
+        (category)
+        (project)
+        (server)
+        (dueDate)
+        (parentId)
+        (assignee)
+        (autoExecute)
+        (promptTemplate)
+        (hidden)
+        (flowPhase)
+        (flowTemplate)
+        (dependsOn)))
+
+    (tool mission_board_delete
+      :zh "工具: mission_board_delete"
+      :description-zh "删除任务(级联删除子任务)"
+      (input
+        (id :description-zh "任务 ID")))
+
+    (tool mission_board_claim
+      :zh "工具: mission_board_claim"
+      :description-zh "认领任务。原子操作: 仅当 open 且未被认领时成功，成功后自动变为 running"
+      (input
+        (taskId :description-zh "要认领的任务 ID")
+        (executorId :description-zh "执行者标识，不填用 MCP session ID")
+        (executorType)))
+
+    (tool mission_board_note_add
+      :zh "工具: mission_board_note_add"
+      :description-zh "为任务添加进度笔记"
+      (input
+        (taskId)
+        (content :description-zh "笔记内容(支持 markdown)")
+        (noteType)
+        (author :description-zh "作者标识")))
+
+    (tool mission_board_decompose
+      :zh "工具: mission_board_decompose"
+      :description-zh "一键拆分任务。派工位调查代码后自动创建带 DAG 依赖链的子任务序列"
+      (input
+        (taskId :description-zh "要拆分的父任务 ID")
+        (slotId :description-zh "执行拆分的工位 ID")
+        (hints :description-zh "拆分方向提示")))
+
+    (tool mission_board_retry
+      :zh "工具: mission_board_retry"
+      :description-zh "重试失败/阻塞的任务。重置状态为 open 并解除 claim"
+      (input
+        (taskId)
+        (resetDownstream :description-zh "同时重置所有下游依赖任务")))
+
+    (tool mission_submit_phase_result
+      :zh "工具: mission_submit_phase_result"
+      :description-zh "Flow 任务阶段产出物提交。系统自动推进到下一阶段"
+      (input
+        (taskId :description-zh "Board 任务 ID")
+        (artifactType)
+        (content :description-zh "产出物内容")
+        (requiresMasterDecision :description-zh "困惑描述，触发 Decision Engine 审核"))))
+
+  (mcp-module kb
+    :zh "MCP 模块: kb"
+
+    (tool mission_kb_query
+      :zh "工具: mission_kb_query"
+      :description-zh "知识库查询(统一入口)。search: FTS5+Embedding 混合 RRF; get: 按 key 精确查询; list: 列出条目"
+      (input
+        (action)
+        (query :description-zh "[search] 搜索关键词")
+        (category :description-zh "[search/list] 分类过滤")
+        (limit :description-zh "[search] 返回条数上限(最大 50)")
+        (offset :description-zh "[search] 分页偏移")
+        (search_mode :description-zh "[search] exact=纯相关性; explore=含 MMR 多样性")
+        (key :description-zh "[get] 精确 key")))
+
+    (tool mission_kb_remember
+      :zh "工具: mission_kb_remember"
+      :description-zh "记录知识到长期记忆。key 已存在则更新。主动调用无需许可"
+      (input
+        (category)
+        (key :description-zh "唯一标识")
+        (summary :description-zh "结论性摘要 ≤400 字")
+        (detail :description-zh "结构化详情 JSON")
+        (source)
+        (confidence :description-zh "置信度 0.0-1.0")))
+
+    (tool mission_kb_mutate
+      :zh "工具: mission_kb_mutate"
+      :description-zh "知识库写操作。forget: 删除; update: 部分更新; import: 导入"
+      (input
+        (action)
+        (key :description-zh "[forget/update] 目标 key")
+        (keys :description-zh "[forget] 批量删除 key 列表(优先于 key)")
+        (category :description-zh "[update] 新分类")
+        (summary :description-zh "[update] 新摘要 ≤400 字")
+        (detail :description-zh "[update] 新详情 JSON")
+        (confidence :description-zh "[update] 新置信度")
+        (linked_task_id :description-zh "[update] 关联 Board 任务 ID(空串清除)")
+        (format :description-zh "[import] 导入格式")
+        (path :description-zh "[import] 文件路径")))
+
+    (tool mission_kb_ops
+      :zh "工具: mission_kb_ops"
+      :description-zh "知识库运维。gc: 治理; analyze: AI 分析; discover: SSH 探测; queue_status/execute_plan: 操作队列; compact: 清理低质量"
+      (input
+        (action)
+        (gc_action :description-zh "[gc] stats/stale/duplicates/clean_stale/clean_duplicates")
+        (days :description-zh "[gc] stale 天数阈值(默认 30)")
+        (mode :description-zh "[analyze] 分析模式")
+        (target_category :description-zh "[analyze] 按分类过滤(前缀匹配)")
+        (limit :description-zh "[analyze/execute_plan] 每次最大条目数")
+        (offset :description-zh "[analyze] 分页偏移")
+        (include_board_context :description-zh "[analyze] 注入 Board 任务上下文")
+        (custom_prompt :description-zh "[analyze] 自定义分析 prompt(mode=custom)")
+        (model :description-zh "[analyze] 使用的模型")
+        (max_tokens :description-zh "[analyze] 最大响应 token 数(默认 16384)")
+        (save_plan :description-zh "[analyze] consolidation_plan 自动保存到队列")
+        (task_id :description-zh "[analyze] 关联 Board 任务 ID")
+        (host :description-zh "[discover] SSH 目标: user@ip 或 infra key")
+        (port :description-zh "[discover] SSH 端口")
+        (password :description-zh "[discover] SSH 密码(不填用密钥)")
+        (plan_id :description-zh "[queue_status/execute_plan] 批次 ID")
+        (status :description-zh "[queue_status] pending/running/done/skipped/failed")
+        (dryRun :description-zh "[compact] 预览模式")))
+
+    (tool mission_beacon
+      :zh "工具: mission_beacon"
+      :description-zh "代码信标操作。list: 列出所有; map: 获取拓扑 L3; upsert: 打/更新标签"
+      (input
+        (action)
+        (name :description-zh "[map/upsert] 信标名称")
+        (file_path :description-zh "[upsert] 文件路径")
+        (symbol :description-zh "[upsert] 目标函数/结构体名称")
+        (feature :description-zh "[upsert] 信标名称(新建时必填)")
+        (annotation :description-zh "[upsert] 人工注释")))
+
+    (tool mission_code_search
+      :zh "工具: mission_code_search"
+      :description-zh "搜索代码结构 L3(AST 索引)。tree-sitter 提取的签名和调用关系"
+      (input
+        (query :description-zh "搜索查询(函数名/结构体名/自然语言)")
+        (repo :description-zh "限定仓库名")
+        (file_path :description-zh "限定文件路径前缀")
+        (node_type)
+        (limit))))
+
+  (mcp-module skill
+    :zh "MCP 模块: skill"
+
+    (tool mission_skill_query
+      :zh "工具: mission_skill_query"
+      :description-zh "Skill 知识库查询。list/search/topics/actions/stats"
+      (input
+        (action)
+        (query :description-zh "[search] 搜索关键词")
+        (skill :description-zh "按 Skill 名筛选")))
+
+    (tool mission_skill_context
+      :zh "工具: mission_skill_context"
+      :description-zh "Skill 上下文构建。build: 简单匹配; resolve: 递归聚合含 requires 依赖"
+      (input
+        (action)
+        (query :description-zh "任务关键词/描述")
+        (skill :description-zh "直接指定 skill name 跳过搜索")
+        (include_board :description-zh "[resolve] 包含 Board 相关任务")))
+
+    (tool mission_skill_mutate
+      :zh "工具: mission_skill_mutate"
+      :description-zh "Skill 写操作。upsert: 创建/更新章节; record: 记录碎片; render: 重建 .md; rollback: 回滚"
+      (input
+        (action)
+        (topic :description-zh "Skill 主题名")
+        (section_title :description-zh "[upsert] 章节标题")
+        (content :description-zh "[upsert/record] 内容")
+        (sort_order :description-zh "[upsert] 章节排序")
+        (skill :description-zh "[rollback] Skill 名称")
+        (version_id :description-zh "[rollback] 版本 ID")))
+
+    (tool mission_skill_exec
+      :zh "工具: mission_skill_exec"
+      :description-zh "执行 Skill 中定义的 workflow。顺序执行 MCP 工具步骤"
+      (input
+        (skill :description-zh "Skill 名称")
+        (action :description-zh "Action ID(workflow block id)")
+        (dry_run :description-zh "预览模式")
+        (params :description-zh "运行时参数覆盖(注入为 ${key})"))))
+
+  (mcp-module memory_ops
+    :zh "MCP 模块: memory_ops"
+
+    (tool mission_memory
+      :zh "工具: mission_memory"
+      :description-zh "记忆与 Token 管理。pending: 待分析对话; pause: 暂停/恢复; token_stats: Token 消耗统计"
+      (input
+        (action)
+        (paused :description-zh "[pause] true=暂停, false=恢复, 省略=toggle")
+        (sessionId :description-zh "[token_stats] 按会话 ID 过滤")
+        (slotId :description-zh "[token_stats] 按工位 ID 过滤")
+        (since :description-zh "[token_stats] 时间过滤 ISO 8601")
+        (groupBy :description-zh "[token_stats] 聚合维度"))))
+
+  (mcp-module insight
+    :zh "MCP 模块: insight"
+
+    (tool mission_insight
+      :zh "工具: mission_insight"
+      :description-zh "查看 MissionD 战略认知 — 开发轨迹、协作模式、反面模式、摩擦点。纯只读"
+      (input
+        (section))))
+
+  ;; ════════════════════════════════════════════════════════════════════
+  ;;  领域: compute — 任务 · 进程 · PTY · CC · Minimax · 工作器 · 工位 · Job
+  ;; ════════════════════════════════════════════════════════════════════
+
+  (mcp-module task
+    :zh "MCP 模块: task"
+
+    (tool mission_task_submit
+      :zh "工具: mission_task_submit"
+      :description-zh "提交任务给专家 Agent。async: 异步提交; sync: 同步等待结果"
+      (input
+        (action)
+        (role :description-zh "专家角色(如 secret/deploy/memory)")
+        (prompt :description-zh "[async] 任务提示词")
+        (question :description-zh "[sync] 问题")
+        (slotId :description-zh "指定目标工位 ID(跳过 role 匹配)")
+        (timeoutMs :description-zh "[sync] 超时毫秒数")))
+
+    (tool mission_task_query
+      :zh "工具: mission_task_query"
+      :description-zh "任务状态查询。status/list/ack/track"
+      (input
+        (action)
+        (taskId :description-zh "[status/track] 任务 ID")
+        (status :description-zh "[list] queued/running/done/failed")
+        (limit :description-zh "[list] 最大返回数")
+        (since :description-zh "[ack] finished_at > since(epoch ms)")))
+
+    (tool mission_task_cancel
+      :zh "工具: mission_task_cancel"
+      :description-zh "取消任务"
+      (input
+        (taskId))))
+
+  (mcp-module task_delegate
+    :zh "MCP 模块: task_delegate"
+
+    (tool mission_task_delegate
+      :zh "工具: mission_task_delegate"
+      :description-zh "声明式任务委派: 描述目标，Daemon 自主选 slot/创建/执行/回报"
+      (input
+        (objective :description-zh "任务目标(自然语言)")
+        (intent :description-zh "意图类型决定 slot 模板")
+        (cwd :description-zh "工作目录")
+        (timeout_secs :description-zh "超时秒数(上限 7200)")
+        (priority)
+        (depends_on :description-zh "前置任务 ID 列表(DAG)")
+        (context_hints :description-zh "上下文关键词，预加载 KB/Skill"))))
+
+  (mcp-module process
+    :zh "MCP 模块: process"
+
+    (tool mission_agent
+      :zh "工具: mission_agent"
+      :description-zh "Agent 进程管理。spawn/kill/restart/list"
+      (input
+        (action)
+        (slotId :description-zh "[spawn/kill/restart] 工位 ID")
+        (visible :description-zh "[spawn/restart] 打开终端窗口")
+        (autoRestart :description-zh "[spawn] 崩溃后自动重启")))
+
+    (tool mission_slots
+      :zh "工具: mission_slots"
+      :description-zh "列出所有工位配置"
+      (input))
+
+    (tool mission_inbox
+      :zh "工具: mission_inbox"
+      :description-zh "获取收件箱消息"
+      (input
+        (unreadOnly :description-zh "仅未读")
+        (limit))))
+
+  (mcp-module pty
+    :zh "MCP 模块: pty"
+
+    (tool mission_pty_spawn
+      :zh "工具: mission_pty_spawn"
+      :description-zh "启动 PTY 交互式会话。默认异步返回不等待 Idle"
+      (input
+        (slotId)
+        (waitForIdle :description-zh "等待 Claude 就绪")
+        (timeoutSecs :description-zh "Idle 超时秒数(waitForIdle=true 时生效)")
+        (autoRestart :description-zh "崩溃后自动重启")
+        (mcpConfigPath :description-zh "MCP 配置文件路径(JSON)")))
+
+    (tool mission_pty_send
+      :zh "工具: mission_pty_send"
+      :description-zh "向 PTY 发送消息。默认 fire-and-forget"
+      (input
+        (slotId)
+        (message)
+        (waitForResponse :description-zh "阻塞等待回复")
+        (timeoutMs :description-zh "[waitForResponse=true] 超时毫秒数")))
+
+    (tool mission_pty_read
+      :zh "工具: mission_pty_read"
+      :description-zh "读取 PTY 内容。screen/history/logs"
+      (input
+        (action)
+        (slotId)
+        (lines :description-zh "[screen] 最后 N 行")))
+
+    (tool mission_pty_signal
+      :zh "工具: mission_pty_signal"
+      :description-zh "向 PTY 发送信号。kill/interrupt"
+      (input
+        (action)
+        (slotId)))
+
+    (tool mission_pty_confirm
+      :zh "工具: mission_pty_confirm"
+      :description-zh "发送确认响应(工具使用确认对话框)"
+      (input
+        (slotId)
+        (response :description-zh "true/false 或选项编号或直接输入")))
+
+    (tool mission_pty_status
+      :zh "工具: mission_pty_status"
+      :description-zh "获取 PTY 会话状态"
+      (input
+        (slotId :description-zh "工位 ID(不填返回所有)")))
+
+    (tool mission_pty_screenshot
+      :zh "工具: mission_pty_screenshot"
+      :description-zh "截取 PTY 终端截图(PNG)，返回文件路径"
+      (input
+        (slotId))))
+
+  (mcp-module cc_tasks
+    :zh "MCP 模块: cc_tasks"
+
+    (tool mission_cc_query
+      :zh "工具: mission_cc_query"
+      :description-zh "Claude Code 任务监控。sessions/tasks/overview/in_progress"
+      (input
+        (action)
+        (sessionId :description-zh "[tasks] 会话 ID")
+        (projectPath :description-zh "[sessions/tasks] 项目路径")
+        (activeOnly :description-zh "[sessions] 仅活跃会话")))
+
+    (tool mission_cc_swarm
+      :zh "工具: mission_cc_swarm"
+      :description-zh "通过 PTY 触发 Claude Code Swarm 模式并行执行"
+      (input
+        (slotId :description-zh "PTY 工位 ID")
+        (tasks :description-zh "要执行的任务列表")
+        (teammateCount :description-zh "并行 Agent 数量")
+        (timeoutMs))))
+
+  (mcp-module minimax
+    :zh "MCP 模块: minimax"
+
+    (tool mission_minimax_process
+      :zh "工具: mission_minimax_process"
+      :description-zh "[已弃用 → mission_sonnet_process] 调用 Sonnet 处理文本"
+      (input
+        (text :description-zh "待处理文本")
+        (task)
+        (prompt :description-zh "[custom] 自定义 prompt")
+        (targetLang :description-zh "[translate] 目标语言")
+        (maxChars :description-zh "[summarize] 目标字数")))
+
+    (tool mission_sonnet_process
+      :zh "工具: mission_sonnet_process"
+      :description-zh "调用 Claude Sonnet 处理文本。直接 HTTP 调用无 PTY 开销"
+      (input
+        (text :description-zh "待处理文本")
+        (task)
+        (prompt :description-zh "[custom] 自定义 prompt")
+        (targetLang :description-zh "[translate] 目标语言")
+        (maxChars :description-zh "[summarize] 目标字数"))))
+
+  (mcp-module worker
+    :zh "MCP 模块: worker"
+
+    (tool mission_worker
+      :zh "工具: mission_worker"
+      :description-zh "后台 Worker + LLM 闸口管理。list: 列出状态+闸口; control: 暂停/恢复"
+      (input
+        (action)
+        (target :description-zh "[control] Worker 名或 LLM 闸口(gemini/sonnet/codex)")
+        (control_action :description-zh "[control] 操作")))
+
+    (tool mission_control
+      :zh "工具: mission_control"
+      :description-zh "统一调控闸口。级联机制: 关 provider=sonnet 自动暂停依赖 Sonnet 的 Worker"
+      (input
+        (target_type)
+        (target_name :description-zh "名称(global 时可省略)")
+        (action))))
+
+  (mcp-module slot
+    :zh "MCP 模块: slot"
+
+    (tool mission_slot_history
+      :zh "工具: mission_slot_history"
+      :description-zh "查询工位任务历史(realtime_extract/deep_analysis/kb_gc 等)"
+      (input
+        (slotId :description-zh "工位 ID(不传查所有)")
+        (taskType :description-zh "realtime_extract/deep_analysis/kb_gc")
+        (status :description-zh "pending/running/completed/failed")
+        (limit)
+        (stats :description-zh "true 时只返回汇总统计")))
+
+    (tool mission_pause
+      :zh "工具: mission_pause"
+      :description-zh "全局暂停/恢复所有工位的工作分派"
+      (input
+        (action))))
+
+  (mcp-module compute_slot
+    :zh "MCP 模块: compute_slot"
+
+    (tool mission_compute_slot
+      :zh "工具: mission_compute_slot"
+      :description-zh "动态计算工位管理。create/terminate/extend/list。TTL 生命周期，最多 5 个活跃"
+      (input
+        (action)
+        (template :description-zh "[create] 模板 ID: coder/ops")
+        (objective :description-zh "[create] 意图描述")
+        (cwd :description-zh "[create] 工作目录")
+        (max_ttl :description-zh "[create] 最大 TTL 秒(默认 4h, 上限 8h)")
+        (slot_id :description-zh "[terminate/extend] 动态 slot ID")
+        (additional_seconds :description-zh "[extend] 延长秒数(每次上限 3600)")
+        (status :description-zh "[list] active/terminated"))))
+
+  (mcp-module job
+    :zh "MCP 模块: job"
+
+    (tool mission_job_poll
+      :zh "工具: mission_job_poll"
+      :description-zh "轮询异步 Job 状态。返回 status(running/completed/failed) + result/error"
+      (input
+        (job_id :description-zh "Job ID")
+        (action))))
+
+  ;; ════════════════════════════════════════════════════════════════
+  ;;  领域: comm — RouterChat · Question · 对话 · 时间轴 · 审计
+  ;; ════════════════════════════════════════════════════════════════
+
+  (mcp-module router_chat
+    :zh "MCP 模块: router_chat"
+
+    (tool mission_router_chat
+      :zh "工具: mission_router_chat"
+      :description-zh "通过 AI 路由器与 Gemini 等模型多轮对话。传 task_id 自动持久化历史"
+      (input
+        (messages :description-zh "本轮新消息(传 task_id 时历史自动加载)")
+        (message :description-zh "单条 user 消息(便捷模式，与 messages 二选一)")
+        (task_id :description-zh "关联 Board 任务 ID(自动加载/保存历史)")
+        (context :description-zh "自动注入上下文")
+        (model :description-zh "模型(不传用 Router 默认)")
+        (max_tokens)
+        (search :description-zh "启用 Google 搜索增强")
+        (files :description-zh "本地文件路径列表(≤1MB 文本, ≤10MB 二进制)")
+        (idle_timeout :description-zh "CLI 模式空闲超时秒数")
+        (channel :description-zh "Gemini 认证渠道")
+        (api_key_alias :description-zh "指定 API key 别名")))
+
+    (tool mission_router_chat_manage
+      :zh "工具: mission_router_chat_manage"
+      :description-zh "Gemini 对话管理。history/list/delete/clear/delete_message/restore/stats/compress"
+      (input
+        (action)
+        (task_id :description-zh "[history/delete/clear/compress] Board 任务 ID")
+        (conversation_id :description-zh "[delete/clear/restore/compress] 对话 ID")
+        (message_id :description-zh "[delete_message] 消息 ID")
+        (count :description-zh "[clear] 清理最后 N 条(-1=全部)")
+        (limit :description-zh "[list] 最大返回数")
+        (batch_size :description-zh "[compress] 压缩批次大小")
+        (keep_recent :description-zh "[compress] 保留最近 N 条不压缩"))))
+
+  (mcp-module question
+    :zh "MCP 模块: question"
+
+    (tool mission_question
+      :zh "工具: mission_question"
+      :description-zh "Agent 待决策问题管理。create/list/get/answer/dismiss"
+      (input
+        (action)
+        (id :description-zh "[get/answer/dismiss] 问题 ID")
+        (question :description-zh "[create] 问题描述")
+        (context :description-zh "[create] 补充上下文")
+        (taskId :description-zh "[create] 关联 Board 任务 ID")
+        (slotId :description-zh "[create] 提问工位 ID")
+        (sessionId :description-zh "[create] 提问会话 ID")
+        (target :description-zh "决策目标")
+        (options :description-zh "[create] 结构化选项 JSON 数组")
+        (decisionType :description-zh "[create] 决策类型影响路由")
+        (answer :description-zh "[answer] 回答/指示")
+        (status :description-zh "[list] pending/answered/dismissed")
+        (limit :description-zh "[list] 返回条数")))
+
+    (tool mission_llm_trace
+      :zh "工具: mission_llm_trace"
+      :description-zh "LLM 调用链路追踪。gemini_trace/gemini_stats/gemini_watch/gemini_auth/jarvis_logs/jarvis_trace"
+      (input
+        (action)
+        (caller :description-zh "[gemini_trace] 调用方")
+        (session_id :description-zh "[gemini_trace] Claude Code session ID")
+        (status :description-zh "[gemini_trace/jarvis_logs] 状态过滤")
+        (limit :description-zh "返回条数")
+        (watch_action :description-zh "[gemini_watch] 操作")
+        (trace_id :description-zh "[jarvis_trace] Trace ID")
+        (mode :description-zh "[gemini_auth] 认证模式")))
+
+    (tool mission_decision_stats
+      :zh "工具: mission_decision_stats"
+      :description-zh "Decision Engine 统计: 各 Tier 命中率、待处理数、降级数"
+      (input
+        (hours :description-zh "统计时间窗口(小时)")))
+
+    (tool mission_gemini_auth
+      :zh "工具: mission_gemini_auth"
+      :description-zh "Gemini CLI 认证模式切换"
+      (input
+        (mode)))
+
+    (tool mission_incident
+      :zh "工具: mission_incident"
+      :description-zh "AIOps Incident 管理。test: 手动注入; list: 列出记录"
+      (input
+        (action)
+        (severity :description-zh "[test] critical/high/warning")
+        (title :description-zh "[test] Incident 标题")
+        (source :description-zh "[test] health_check/deploy_center/sentry/manual")
+        (server_id :description-zh "[test] 关联 infra server ID")
+        (limit :description-zh "[list] 返回条数(最大 100)"))))
+
+  (mcp-module conversation
+    :zh "MCP 模块: conversation"
+
+    (tool mission_conversation_query
+      :zh "工具: mission_conversation_query"
+      :description-zh "对话统一查询。list/get/search/message_search/context/events"
+      (input
+        (action)
+        (status :description-zh "[list] active/completed")
+        (conversationType :description-zh "[list] user/worker/meta/system/all")
+        (taskId :description-zh "[list] 按 Board 任务 ID 过滤")
+        (sessionId :description-zh "[get/search/events] 会话 ID")
+        (tail :description-zh "[get] 最近 N 条消息")
+        (sinceId :description-zh "[get] 增量拉取(ID 大于此值)")
+        (includeRaw :description-zh "[get] 完整消息含 rawContent/model")
+        (query :description-zh "[search/message_search] 搜索关键词")
+        (queryMode :description-zh "[search] 搜索模式")
+        (timeRange :description-zh "[search/message_search] 时间范围")
+        (project :description-zh "[search] 项目过滤")
+        (excludeSessionId :description-zh "[search] 排除特定会话")
+        (offset :description-zh "[search] 分页偏移")
+        (role :description-zh "[message_search] 消息角色")
+        (toolName :description-zh "[message_search] 工具名过滤")
+        (messageId :description-zh "[context] 锚点消息 ID")
+        (before :description-zh "[context] 锚点前取几条(最大 50)")
+        (after :description-zh "[context] 锚点后取几条(最大 50)")
+        (eventType :description-zh "[events] 事件类型过滤")
+        (limit :description-zh "[list/search/message_search/events] 最大返回数")
+        (since :description-zh "[list] 起始时间(ISO/相对格式)")
+        (until :description-zh "[list] 结束时间")))
+
+    (tool mission_conversation_analyze
+      :zh "工具: mission_conversation_analyze"
+      :description-zh "对话分析。retrospective: 会话复盘; trajectory: 子 Agent 思维链; activity: 活动报告"
+      (input
+        (action)
+        (sessionId :description-zh "[retrospective] 会话 ID")
+        (depth :description-zh "[retrospective] 分析深度")
+        (toolUseId :description-zh "[trajectory] 父 tool_use ID")
+        (since :description-zh "[activity] 起始时间")
+        (until :description-zh "[activity] 结束时间")
+        (limit :description-zh "[trajectory] 最大返回数")))
+
+    (tool mission_conversation_reconcile
+      :zh "工具: mission_conversation_reconcile"
+      :description-zh "JSONL-DB 对账。不传 sessionId 触发全量扫描"
+      (input
+        (sessionId :description-zh "指定会话 ID 立即对账")))
+
+    (tool mission_retrospective_manage
+      :zh "工具: mission_retrospective_manage"
+      :description-zh "复盘管理。list: 已完成复盘; backfill: 批量回填"
+      (input
+        (action)
+        (limit :description-zh "[list] 最大返回数")
+        (since :description-zh "[backfill] 起始时间 ISO datetime")))
+
+    (tool mission_embedding_ops
+      :zh "工具: mission_embedding_ops"
+      :description-zh "Embedding 操作。stats: 覆盖率统计; backfill: 触发回填"
+      (input
+        (action))))
+
+  (mcp-module timeline
+    :zh "MCP 模块: timeline"
+
+    (tool mission_timeline
+      :zh "工具: mission_timeline"
+      :description-zh "系统时间轴。query/trace/stats/search"
+      (input
+        (action)
+        (eventType :description-zh "[query] 事件类型过滤")
+        (traceId :description-zh "[query/trace] 因果链 trace_id")
+        (since :description-zh "起始时间(相对格式 1h/24h/7d 或 ISO)")
+        (until :description-zh "结束时间")
+        (limit :description-zh "[query/search] 返回条数")
+        (offset :description-zh "[query] 分页偏移")
+        (keyword :description-zh "[search] 搜索关键字"))))
+
+  (mcp-module audit
+    :zh "MCP 模块: audit"
+
+    (tool mission_audit
+      :zh "工具: mission_audit"
+      :description-zh "对话工具调用审计。trace/detail/stats/export"
+      (input
+        (action)
+        (sessionId :description-zh "[trace/stats] 会话 ID")
+        (toolId :description-zh "[detail] tool_use_id")
+        (taskId :description-zh "[export] Board 任务 ID")
+        (toolFilter :description-zh "[trace] 只看指定工具")
+        (includeReasoning :description-zh "[trace] 包含推理文本")
+        (includeMessages :description-zh "[export] 包含会话消息"))))
+
+  ;; ════════════════════════════════════════════════════════════
+  ;;  领域: sysinfra — 基础设施 · 权限 · 电源 · 系统
+  ;; ════════════════════════════════════════════════════════════
+
+  (mcp-module infra
+    :zh "MCP 模块: infra"
+
+    (tool mission_infra_query
+      :zh "工具: mission_infra_query"
+      :description-zh "基础设施查询。list: 列出服务器; get: 单个详情"
+      (input
+        (action)
+        (id :description-zh "[get] 服务器 ID")
+        (role :description-zh "[list] 角色: build/deploy/gpu/vpn/production")
+        (provider :description-zh "[list] 云厂商: gcp/aliyun/self-hosted")))
+
+    (tool mission_infra_ops
+      :zh "工具: mission_infra_ops"
+      :description-zh "基础设施运维。health/reachability/diagnose"
+      (input
+        (action)
+        (target :description-zh "[reachability/diagnose] Infra ID 或 user@host")
+        (channels :description-zh "[reachability] 探测通道: lan_ping/public_ping/tailscale/ssh/deploy_agent")
+        (checks :description-zh "[diagnose] 检查项: system/crashes/top_cpu/temperatures/journal_errors/docker/network/gpu"))))
+
+  (mcp-module permission
+    :zh "MCP 模块: permission"
+
+    (tool mission_permission_query
+      :zh "工具: mission_permission_query"
+      :description-zh "权限查询。get: 获取配置; learned_list: 已学习的权限规则"
+      (input
+        (action)
+        (scopeType :description-zh "[learned_list] 作用域类型")
+        (scopeId :description-zh "[learned_list] 作用域 ID")))
+
+    (tool mission_permission_mutate
+      :zh "工具: mission_permission_mutate"
+      :description-zh "权限写操作。set_role/set_slot/auto_allow/reload/revoke"
+      (input
+        (action)
+        (role :description-zh "[set_role/auto_allow] 角色名称")
+        (slotId :description-zh "[set_slot/auto_allow] 工位 ID")
+        (rule :description-zh "[set_role/set_slot] 权限规则 {auto_allow,require_confirm,deny}")
+        (pattern :description-zh "[auto_allow] 工具模式(如 secret_*)")
+        (scopeType :description-zh "[revoke] 作用域类型")
+        (scopeId :description-zh "[revoke] 作用域 ID")
+        (toolPattern :description-zh "[revoke] 工具名称或模式"))))
+
+  (mcp-module power
+    :zh "MCP 模块: power"
+
+    (tool mission_power_control
+      :zh "工具: mission_power_control"
+      :description-zh "物理服务器电源管控。wake(WoL/gcloud)/suspend/status"
+      (input
+        (target :description-zh "服务器 ID(如 win-3090ti/ecs/gcp-prod)")
+        (action))))
+
+  (mcp-module system
+    :zh "MCP 模块: system"
+
+    (tool mission_sys_logs
+      :zh "工具: mission_sys_logs"
+      :description-zh "读取 MissionD daemon 运行日志尾部"
+      (input
+        (lines :description-zh "返回尾部行数(默认 50, 最大 500)")
+        (level :description-zh "日志级别过滤")
+        (grep :description-zh "关键词过滤(大小写不敏感)")))
+
+    (tool mission_sys_config
+      :zh "工具: mission_sys_config"
+      :description-zh "结构化配置管理。读取/修改 slots.yaml/llm.yaml/permissions.yaml"
+      (input
+        (action)
+        (file :description-zh "[get/patch] 配置文件")
+        (path :description-zh "[patch] JSON Pointer(如 /slots/0/description)")
+        (value :description-zh "[patch] 新值(任意 JSON)")))
+
+    (tool mission_daemon_update
+      :zh "工具: mission_daemon_update"
+      :description-zh "一键更新 MissionD daemon。cargo build → 替换二进制 → 重启"
+      (input
+        (skip_build :description-zh "跳过 cargo build 直接重启")))))

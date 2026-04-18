@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 
 use missiond_core::types::SharedProjectRegistry;
 
+use crate::bus::BusServices;
 use crate::control_tree::ControlManager;
 use crate::daemon_stats::DaemonStats;
 use crate::event_bus::EventBus;
@@ -182,6 +183,9 @@ pub(crate) struct AppState {
     pub(crate) incident_tx: tokio::sync::mpsc::Sender<missiond_core::types::MissionIncident>,
     /// Centralized event bus for inter-module communication (replaces Notify signals).
     pub(crate) event_bus: Arc<EventBus>,
+    /// v2 event bus (Phase 6+) — producers dual-emit to Log while v1
+    /// `event_bus` continues to serve legacy subscribers until Phase 7.
+    pub(crate) bus: Arc<BusServices>,
     /// Process-level daemon statistics (counters + histograms).
     pub(crate) stats: Arc<DaemonStats>,
     /// Centralized LLM prompts with file-based hot-reload.

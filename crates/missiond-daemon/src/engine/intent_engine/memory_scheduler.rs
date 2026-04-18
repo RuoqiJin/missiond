@@ -191,16 +191,16 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
                 } else {
                     task.prompt.clone()
                 };
-                state
-                    .event_bus
-                    .publish(crate::event_bus::DaemonEvent::SlotTaskDispatched {
-                        slot_id: slot_id.clone(),
-                        task_id: Some(task.id.clone()),
-                        purpose: "submit".to_string(),
-                        prompt_chars: task.prompt.len(),
-                        preview,
-                        cited_kb_ids: vec![],
-                    });
+                let ev = crate::event_bus::DaemonEvent::SlotTaskDispatched {
+                    slot_id: slot_id.clone(),
+                    task_id: Some(task.id.clone()),
+                    purpose: "submit".to_string(),
+                    prompt_chars: task.prompt.len(),
+                    preview,
+                    cited_kb_ids: vec![],
+                };
+                state.event_bus.publish(ev.clone());
+                let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
                 info!(task_id = %task.id, slot_id = %slot_id, role = %task.role, "Autopilot: dispatched queued submit task");
                 state
                     .stats
@@ -287,11 +287,11 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
                 info!(slot_id = %target_slot_id, role = %task.role, task_id = %task.id, "Autopilot: auto-spawning slot for queued task (Wake-on-Demand)");
                 tokio::spawn(async move {
                     if ensure_memory_slot_by_id(&state_clone, &slot_id_clone).await {
-                        state_clone
-                            .event_bus
-                            .publish(crate::event_bus::DaemonEvent::TaskCreated {
-                                task_id: String::new(),
-                            });
+                        let ev = crate::event_bus::DaemonEvent::TaskCreated {
+                            task_id: String::new(),
+                        };
+                        state_clone.event_bus.publish(ev.clone());
+                        let _ = crate::bus::publish_v1_shim(&state_clone.bus, &ev).await;
                     }
                 });
             }

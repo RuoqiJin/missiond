@@ -1,0 +1,48 @@
+(zh
+  :header ("MissionD — 支柱: semantic-parser（语义解析器）"
+           "从 intent.lisp 拆分以支持并行加载"
+           "父文件: intent.lisp")
+
+  (pillar semantic-parser
+    :zh "支柱: semantic-parser（语义解析器）"
+    (purpose :zh "多层识别器: 原始 PTY 屏幕 → 结构化状态")
+    :notes ("commit 5a5f805: missiond-semantic 已提取 → 独立开源 crate"
+            "下列所有 target 均位于 semantic-terminal crate（外部 workspace 依赖）"
+            "Forge GenGap (pure_parsing/) 已迁至 missiond-core/src/semantic_parsing/")
+
+    (component parser-pipeline
+      :zh "组件: parser-pipeline（解析器管线）"
+      (pipeline
+        :zh "管线: pattern-config → fingerprint-registry → state-parser → confirm-parser → tool-output-parser")
+      (shared-resource
+        :zh "共享资源: Arc<CompiledPatterns>，来自 YAML 热重载"))
+
+    (component pattern-config
+      :zh "组件: pattern-config（模式配置）"
+      (dispatch
+        :zh "分发: CliEngine enum → 引擎专属 YAML + 解析器"))
+
+    (component claude-code-parser
+      :zh "组件: claude-code-parser（Claude Code 解析器）"
+      (detection-order
+        :zh "检测顺序: trust-dialog → confirm-dialog → idle-or-slash → processing → responding → error"))
+
+    (component gemini-parser
+      :zh "组件: gemini-parser（Gemini 解析器）"
+      (detection-order
+        :zh "检测顺序: error → thinking → responding → tool-running → idle → idle-placeholder → idle-transitional"))
+
+    (component fingerprint
+      :zh "组件: fingerprint（指纹识别）")
+    (component confirm
+      :zh "组件: confirm（确认对话）")
+    (component tool-parser
+      :zh "组件: tool-parser（工具输出解析器）")
+    (component status
+      :zh "组件: status（状态检测）")
+    (component title
+      :zh "组件: title（标题提取）")
+
+    (component semantic-parsing-gengap
+      :zh "组件: semantic-parsing-gengap（语义解析 Generation Gap）"
+      :note-zh "注: Forge GenGap（generated.rs + custom.rs + mod.rs）—— 从原 missiond-semantic 迁至此处")))

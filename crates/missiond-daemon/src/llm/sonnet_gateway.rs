@@ -279,6 +279,16 @@ pub(crate) struct SonnetGateway {
     quota: Arc<tokio::sync::RwLock<QuotaTracker>>,
     concurrency: Arc<Semaphore>,
     event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>,
+    /// Phase 6 dual-emit: mirror WorkerLlmCall events onto the v2 bus.
+    bus: Option<Arc<crate::bus::BusServices>>,
+}
+
+impl SonnetGateway {
+    /// Attach the v2 bus so every emitted event dual-emits (Phase 6).
+    pub fn with_bus(mut self, bus: Arc<crate::bus::BusServices>) -> Self {
+        self.bus = Some(bus);
+        self
+    }
 }
 
 impl SonnetGateway {
@@ -383,6 +393,7 @@ impl SonnetGateway {
             // 5. Execute request (spawned for concurrency)
             let backend = self.backend.http.clone();
             let event_tx = self.event_tx.clone();
+            let bus = self.bus.clone();
             tokio::spawn(async move {
                 let api_start = std::time::Instant::now();
                 let prompt_chars: usize = req.messages.iter().map(|m| m.content.len()).sum();
@@ -422,6 +433,9 @@ impl SonnetGateway {
                     duration_ms,
                     queue_wait_ms,
                 };
+                if let Some(ref bus) = bus {
+                    crate::bus::spawn_v1_shim(bus.clone(), event.clone());
+                }
                 let entry_trace_id = req.trace_id.or(req.task_id);
                 let entry = TimelineEntry {
                     event,
@@ -478,6 +492,7 @@ pub(crate) fn create_sonnet_gateway(
         quota,
         concurrency: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
         event_tx,
+        bus: None,
     };
 
     (handle, gateway)

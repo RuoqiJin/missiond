@@ -1,0 +1,42 @@
+(zh
+  :header ("MissionD — 支柱: llm-context"
+           "从 intent.lisp 拆分以支持并行加载"
+           "父文件: intent.lisp")
+
+  (pillar llm-context
+    :zh "支柱: llm-context"
+    (purpose :zh "多厂商 LLM 调度 + 预算约束下的 prompt 拼装")
+
+    (component llm-gateway
+      :zh "组件: llm-gateway"
+      (providers
+        :zh "厂商集"
+        (gemini-gateway :zh "gemini-gateway")
+        (sonnet-gateway
+          :zh "sonnet-gateway"
+          :notes ("commit 43c80f4: 模型名 cpapi-claude-sonnet → claude-sonnet (SONNET_MODEL 常量 + llm_gateway.rs)"))
+        (minimax-gateway :zh "minimax-gateway")))
+
+    (component llm-gate
+      :zh "组件: llm-gate"
+      (description :zh "限流器 + 429 退避 + 配额追踪")
+      :notes ("commit 43c80f4: 新增 check_interactive_exempt(provider) — 用 REQUEST_CALLER task-local 判断"
+              "  - REQUEST_CALLER == \"router_chat\" → is_interactive_caller() = true → 绕过 gate"
+              "  - 语义: 用户发起的 MCP 调用(router_chat 等)豁免 gate 限制; 后台 worker 仍受 gate 约束"
+              "  - gemini_client.rs 的 check() 已改为调用 check_interactive_exempt()"))
+
+    (component gemini-driver :zh "组件: gemini-driver")
+    (component gemini-file-api :zh "组件: gemini-file-api")
+    (component gemini-cli :zh "组件: gemini-cli")
+    (component codex-cli :zh "组件: codex-cli")
+    (component prompts :zh "组件: prompts")
+
+    (component context-pipeline
+      :zh "组件: context-pipeline"
+      (source-priority
+        :zh "来源优先级: slot-env → skill-context → kb-entries → conversation-history → topology-map → claude-md"))
+
+    (component context-budget :zh "组件: context-budget")
+    (component slot-env :zh "组件: slot-env")
+    (component topology-map :zh "组件: topology-map")
+    (component claude-md-sync :zh "组件: claude-md-sync")))

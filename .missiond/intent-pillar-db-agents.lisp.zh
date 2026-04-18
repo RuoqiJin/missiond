@@ -1,0 +1,104 @@
+(zh
+  :header ("MissionD — 支柱: db-agents"
+           "从 intent.lisp 拆分以支持并行加载"
+           "父文件: intent.lisp")
+
+  (pillar db-agents
+    :zh "支柱: db-agents"
+    (purpose :zh "问题、动态槽位、技能、Router 对话")
+
+    (component question-tables
+      :zh "组件: 问题表"
+
+      (table agent_questions
+        :zh "表: agent_questions — Agent 问题"
+        (col id :zh "列: id")
+        (col task_id :zh "列: task_id")
+        (col slot_name :zh "列: slot_name — 槽位名")
+        (col question :zh "列: question — 问题正文")
+        (col context :zh "列: context — 上下文")
+        (col status :zh "列: status — 状态 (pending/answered/dismissed)")
+        (col answer :zh "列: answer — 答复")
+        (col routing_trace :zh "列: routing_trace — 路由轨迹")
+        (col retry_count :zh "列: retry_count — 重试次数")
+        (col created_at :zh "列: created_at")
+        (col answered_at :zh "列: answered_at")
+        (op select-one :zh "操作: 按 id 查单条")
+        (op list-for-task :zh "操作: 列出某任务的全部问题")
+        (op increment-retry :zh "操作: 重试次数 +1")
+        (op set-routing-trace :zh "操作: 设置路由轨迹")
+        (op downgrade-to-user :zh "操作: 降级转给用户")))
+
+    (component dynamic-slot-tables
+      :zh "组件: 动态槽位表"
+
+      (table dynamic_slots
+        :zh "表: dynamic_slots — 动态槽位"
+        (col id :zh "列: id")
+        (col slot_name :zh "列: slot_name — 槽位名 (unique)")
+        (col config :zh "列: config — 配置")
+        (col status :zh "列: status — 状态，默认 active")
+        (col expires_at :zh "列: expires_at — 过期时间")
+        (col created_at :zh "列: created_at")
+        (op create :zh "操作: 新建动态槽位")
+        (op select-one :zh "操作: 按 id 查单条")
+        (op list :zh "操作: 按 status 列表")
+        (op count-active :zh "操作: 统计活跃槽位数")
+        (op terminate :zh "操作: 终止槽位")
+        (op extend :zh "操作: 延长过期时间")
+        (op find-expired :zh "操作: 查找已过期槽位")
+        (op find-expiring :zh "操作: 查找即将过期槽位")))
+
+    (component skill-tables
+      :zh "组件: 技能表"
+
+      (table skills
+        :zh "表: skills — 技能"
+        (col id :zh "列: id")
+        (col name :zh "列: name — 技能名 (unique)")
+        (col description :zh "列: description — 描述")
+        (col content :zh "列: content — 技能正文")
+        (col version :zh "列: version — 版本")
+        (col enabled :zh "列: enabled — 是否启用")
+        (col created_at :zh "列: created_at")
+        (col updated_at :zh "列: updated_at"))
+
+      (table skill_topics
+        :zh "表: skill_topics — 技能主题"
+        (col id :zh "列: id")
+        (col skill_id :zh "列: skill_id — 外键 skills.id")
+        (col topic :zh "列: topic — 主题关键字")
+        (col hit_count :zh "列: hit_count — 命中次数")
+        (col last_hit_at :zh "列: last_hit_at — 最近命中时间")
+        (op hit :zh "操作: 命中一次")
+        (op update-stats :zh "操作: 更新统计"))
+
+      (table skill_blocks
+        :zh "表: skill_blocks — 技能片段"
+        (col id :zh "列: id")
+        (col skill_id :zh "列: skill_id — 外键 skills.id")
+        (col block_type :zh "列: block_type — 片段类型")
+        (col content :zh "列: content — 片段正文")
+        (col status :zh "列: status — 状态，默认 active")
+        (op set-status :zh "操作: 设置状态")))
+
+    (component router-chat-tables
+      :zh "组件: Router 对话表"
+
+      (table router_chat_sessions
+        :zh "表: router_chat_sessions — Router 对话会话"
+        (col id :zh "列: id")
+        (col title :zh "列: title — 标题")
+        (col model :zh "列: model — 模型")
+        (col created_at :zh "列: created_at")
+        (col updated_at :zh "列: updated_at"))
+
+      (table router_chat_messages
+        :zh "表: router_chat_messages — Router 对话消息"
+        (col id :zh "列: id")
+        (col session_id :zh "列: session_id — 外键 router_chat_sessions.id")
+        (col role :zh "列: role — 角色")
+        (col content :zh "列: content — 正文")
+        (col model :zh "列: model — 模型")
+        (col tokens :zh "列: tokens — token 数")
+        (col created_at :zh "列: created_at")))))

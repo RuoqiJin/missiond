@@ -1,0 +1,219 @@
+(zh
+  :header ("MissionD — 支柱: engines"
+           "从 intent.lisp 拆分以支持并行加载"
+           "父文件: intent.lisp")
+
+  (pillar engines
+    :zh "支柱: engines"
+    (purpose :zh "复合编排: autopilot + learning + 槽位生命周期")
+
+    (component autopilot-engine
+      :zh "组件: autopilot-engine"
+      (tick-pipeline
+        :zh "tick 流水线: memory-scheduler → extraction-check → board-task-dispatch → flow-progression → supervision-check"))
+
+    (component flow-engine
+      :zh "组件: flow-engine"
+      (note :zh "V1 flow engine — 项目生命周期阶段绑定 autopilot tick，不是下面的新 Flow Engine v2"))
+
+    (component flow-engine-v2
+      :zh "组件: flow-engine-v2"
+      :purpose-zh "声明式 YAML → 节点序列执行器，复用已有 LLM/槽位/MCP 原语"
+      :notes ("── Flow Engine v2 (commit 49bd316, 2026-04-14) ────────"
+              "通用声明式节点化工作流编排，独立于 autopilot + 项目生命周期，YAML 驱动")
+
+      (module mod.rs
+        :zh "模块: mod.rs"
+        (type NodeType
+          :zh "类型: NodeType"
+          (LlmCall :zh "变体: LlmCall")
+          (SlotTask :zh "变体: SlotTask")
+          (McpTool :zh "变体: McpTool")
+          (DaemonAction :zh "变体: DaemonAction")
+          (ParallelSlotTasks
+            :zh "变体: ParallelSlotTasks"
+            :doc-zh "将 N 条 prompt 以有界并发分发到 M 个运行中的槽位；POC 阶段 fire-and-forget"))
+        (type ParallelTaskSpec :zh "类型: ParallelTaskSpec")
+        (type GatherStrategy
+          :zh "类型: GatherStrategy"
+          :doc-zh "Aggregate=收集全部；AllSuccess=任一失败即失败；AnySuccess=全部失败才失败")
+        (type ErrorPolicy :zh "类型: ErrorPolicy")
+        (type FlowNode :zh "类型: FlowNode")
+        (type FlowDefinition :zh "类型: FlowDefinition")
+        (type FlowContext
+          :zh "类型: FlowContext"
+          (method resolve_vars :zh "方法: resolve_vars — 模板 ${key} 从 ctx.vars 插值")
+          (method set/get :zh "方法: set/get")))
+
+      (module runner.rs
+        :zh "模块: runner.rs"
+        (function run_flow
+          :zh "函数: run_flow"
+          :why-boxed-zh "Box::pin 打破 async 递归环: run_flow → execute_node → dispatch_tool → flow_run::handle → run_flow"
+          :loop-zh "遍历 flow.nodes skip(ctx.current_node)，execute_with_retry，save_as→ctx.vars，completed_nodes.push，每个节点 persist_context"
+          :on-error-zh "ctx.last_error = Some(e.to_string())；持久化；返回 Err")
+        (function execute_with_retry
+          :zh "函数: execute_with_retry"
+          :retries-zh "ErrorPolicy::Retry(N) → 2^attempt 秒指数退避"
+          :skip-zh "ErrorPolicy::Skip → warn + Ok(String::new())")
+        (function persist_context
+          :zh "函数: persist_context"
+          :sink-zh "store.update_board_task(task_id, UpdateBoardTaskInput { flow_context: Some(json), .. })"))
+
+      (module handlers.rs
+        :zh "模块: handlers.rs"
+        (node-dispatch
+          :zh "节点派发"
+          (LlmCall
+            :zh "LlmCall 分支"
+            (fail-fast :zh "快速失败: 未知 provider → anyhow err"))
+          (SlotTask
+            :zh "SlotTask 分支"
+            :selection-zh "state.mission.list_slots() 取首个非排除槽位"
+            :precondition-zh "槽位必须处于运行中 (SessionState != Exited)，否则快速失败 'Start it first via mission_pty_spawn or slots.yaml auto_start'"
+            :send-zh "state.pty.send_fire_and_forget(slot_id, prompt)"
+            :output-zh "SlotTask dispatched to {slot_id} (timeout={n}s)")
+          (ParallelSlotTasks
+            :zh "ParallelSlotTasks 分支"
+            :selection-zh "list_slots() → 过滤非排除 + 运行中 (SessionState != Exited)"
+            :parallelism-zh "effective = min(parallelism, candidates.len(), tasks.len()).max(1) — 防止槽位饥饿死锁"
+            :dispatch-zh "JoinSet + Arc<Semaphore>(effective) → 轮询式槽位分配 (idx % candidates.len())"
+            :send-zh "每任务 pty.send_fire_and_forget (POC 阶段 fire-and-forget；Phase 2: tokio::time::timeout + SlotBecameIdle 结果回流)"
+            :gather-zh "GatherStrategy: Aggregate→json 数组；AllSuccess→任一 None 即失败；AnySuccess→全部失败才失败"
+            :output-zh "逐任务派发回执的 JSON 数组，保持任务顺序")
+          (McpTool
+            :zh "McpTool 分支"
+            :delegate-zh "handlers::dispatch_tool(state, tool_name, params)"
+            :output-zh "拼接文本内容，传播 is_error")
+          (DaemonAction
+            :zh "DaemonAction 分支"
+            (fail-fast :zh "快速失败: 未知 action → anyhow err"))))
+
+      (module loader.rs
+        :zh "模块: loader.rs"
+        (function load_flow :zh "函数: load_flow")
+        (function list_flows :zh "函数: list_flows"))
+
+      (db-reuse
+        :zh "数据库复用"
+        :note-zh "v2 复用已有的 flow_* 列；无需迁移")
+
+      (handler
+        :zh "handler"
+        (action list
+          :zh "action: list"
+          :call-zh "loader::list_flows()")
+        (action status
+          :zh "action: status"
+          :call-zh "store.get_board_task → task.flow_context JSON 解析 → FlowContext")
+        (action run
+          :zh "action: run"
+          :pipeline-zh "load_flow → create_board_task(category='flow',flow_template=id) → ctx.set from params → update_board_task(flow_phase='running',status='running',flow_context=json) → run_flow(内联 await) → 成功 update(flow_phase='completed',status='done') → 失败 update(flow_phase='failed',status='failed')"
+          :known-limit-zh "内联阻塞 — 后台 spawn 推迟，待 dispatch_tool→run_flow→execute_node→dispatch_tool 链路上的 Send bound 解决"))
+
+      (mcp-tool
+        :zh "MCP 工具"
+        :description-zh "Flow Engine v2: 执行声明式节点化工作流。run=执行，list=可用 flow，status=查询运行中的 flow"
+        :gen-gateway-route-zh "dispatch_tool: 'mission_flow_run' → handler.handle_worker(name,args) (复用 worker 管道传输)")
+
+      (fail-fast-invariants
+        :zh "快速失败不变量: 槽位未运行→立即 err (不自动 spawn)；未知 LLM provider→立即 err (无 fallback)；未知 daemon action→立即 err (无 noop)；Flow YAML 找不到→立即 err；ParallelSlotTasks 空 tasks→立即 err；ParallelSlotTasks 无运行中非排除槽位→立即 err"))
+
+    (component memory-scheduler
+      :zh "组件: memory-scheduler")
+
+    (component workflow-executor
+      :zh "组件: workflow-executor")
+
+    (component learning-engine
+      :zh "组件: learning-engine"
+      (sub-engines
+        :zh "子引擎"
+        (decision-engine
+          :zh "decision-engine"
+          (decision-cascade :zh "决策级联: kb-lookup → gemini-consult → decision-slot → human-escalation"))
+        (extraction :zh "extraction")
+        (decision-harvest :zh "decision-harvest")
+        (intent-analyst :zh "intent-analyst")
+        (timeline-analyst :zh "timeline-analyst")
+        (idle-explorer :zh "idle-explorer")
+        (historical-scanner :zh "historical-scanner")))
+
+    (component slot-orchestrator
+      :zh "组件: slot-orchestrator"
+      (engine-adapters
+        :zh "引擎适配器"
+        (cc-controller :zh "cc-controller")
+        (gemini-controller :zh "gemini-controller"))
+      (spawner
+        :zh "spawner"
+
+        (invariant sole-spawn-bottleneck
+          :zh "不变量: sole-spawn-bottleneck (唯一 spawn 瓶颈)"
+          :enforced-zh "全部 10 条 spawn 路径都经此函数；0 条直接调用 pty.spawn()"
+          :pipeline-zh "流水线: perm-inject → tracking-env → pty-spawn → uuid-capture → initial-prompt")
+
+        (slot-config-fields
+          :zh "槽位配置字段"
+          (initial_prompt
+            :zh "字段: initial_prompt"
+            :doc-zh "槽位进入 Idle 后注入的首条消息")
+          (dangerously_skip_permissions :zh "字段: dangerously_skip_permissions")
+          (mcp_config :zh "字段: mcp_config")
+          (auto_start :zh "字段: auto_start")))
+
+      (perm-injector
+        :zh "perm-injector"
+        :invoked-by-zh "spawn_tracked_slot (处于 sole-spawn-bottleneck 内部，覆盖全部 10 条路径)"
+        :doc-zh "每次槽位 spawn 前，从 learned_permissions.yaml 读取 global+role+project+slot 并集 (LearnedPermissions::get_for_spawn)，合并入 <cwd>/.claude/settings.local.json (幂等，保留已有条目，按 (tool_pattern, param_pattern) 去重)")
+
+      (registered-tasks
+        :zh "已注册任务"
+        :notes ("commit 79a877f: 新增 lisp_survey 任务 (main.rs 第 4 个注册任务)"
+                "main.rs: \"SlotManager: 4 tasks registered (arch_maintenance, strategy_analyst, gemini_router, lisp_survey)\"")
+        (task arch_maintenance :zh "任务: arch_maintenance")
+        (task strategy_analyst :zh "任务: strategy_analyst")
+        (task gemini_router :zh "任务: gemini_router")
+        (task lisp_survey :zh "任务: lisp_survey")))
+
+    (component learned-permissions
+      :zh "组件: learned-permissions"
+      :notes ("commit ec269d7: 新增 — LearnedPermissions 权威源"
+              "updated 2026-04-12 — Phase 1-5 架构升级")
+      (change REQUIRES_PARAM_PATTERN
+        :zh "变更: REQUIRES_PARAM_PATTERN"
+        :semantics-zh "裸 Bash (无 param_pattern) 因过于危险被拒；特定子命令模式 (python3:*, npm test:*) 被持久化"
+        :extract-fn-zh "permission_extract::extract_confirm() — 解析 'Yes, don't ask again for: python3:*' → ExtractedConfirm{pattern, project_path}，含 'commands in <path>' 后缀")
+
+      (scope-model
+        :zh "作用域模型"
+        :notes ("多作用域模型: scope_type ∈ {global, role, project, slot}"
+                "spawn 时优先级: slot > project > role > global (越具体越胜，用于去重)")
+        (global :zh "global: scope_id=\"\" — 对每次 spawn 生效")
+        (role :zh "role: scope_id=<role> — 整个 role 的学习权限")
+        (project :zh "project: scope_id=<project_id> — 通过 ProjectRegistry::resolve(cwd) 解析")
+        (slot :zh "slot: scope_id=<slot_id> — 单槽位覆盖"))
+
+      (method get_for_spawn
+        :zh "方法: get_for_spawn"
+        :doc-zh "跨所有适用作用域取并集，按 (tool_pattern, param_pattern) 后写胜去重")
+
+      (flow permission-persistence
+        :zh "流程: permission-persistence"
+        :notes ("单一写入路径 (Phase 1): handle_confirm_required 是学习的权威源"
+                "mission_pty_confirm (手动 MCP 路径) 也学习，保持对称性；pty_event_worker 的自动批准分支是 99% 常态")
+        :steps-zh "pty_event_worker::handle_confirm_required: 自动批准启用 → opt2 文本含 'don't ask again'/'always'/'trust'/'不再' → use_allowlist=true → permission_extract::extract_confirm(opt2) → ExtractedConfirm{pattern, project_path} → LearnedPermissions::learn(role, role_id, tool, allow, pattern) [总是执行] → 若 project_path Some → ProjectRegistry::resolve → LearnedPermissions::learn(project, pid, tool, allow, pattern) → ConfirmResponse::Option(2) 作为两次连续 PTY 写入发送 (数字 + Enter，间隔 80ms) → 下次 spawn: perm_injector::sync_learned_to_local_settings(cwd, role, project_id, slot_id, learned) → allowlist 跨槽位 spawn 持久化")
+      (tests :zh "测试: Phase 1-5 覆盖 — 10 个 permission_extract 测试 + 1 个 E2E pty confirm 测试 + 1 个 get_for_spawn union/dedup 测试 + 4 个 perm_injector 测试 (含 multi_scope_union)")
+
+      (component permission-extract
+        :zh "组件: permission-extract"
+        :notes ("共享提取模块 (Phase 1)")
+        :doc-zh "解析 Claude Code 确认对话选项文本的唯一权威源；mission_pty_confirm (MCP) 与 pty_event_worker::handle_confirm_required (自动批准) 共同消费"))
+
+    (component permission-mcp-merged-view
+      :zh "组件: permission-mcp-merged-view"
+      :notes ("Phase 4: merged_for_slot MCP 视图")
+      (tool mission_permission_query
+        :zh "工具: mission_permission_query"
+        :returns-zh "{slotId, role, cwd, projectId, learned: [LearnedPermission], staticRoleRule, staticSlotRule}"
+        :doc-zh "展示指定槽位在 spawn 时将看到的权限条目精确并集 — 调试/审计视图"))))

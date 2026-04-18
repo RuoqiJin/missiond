@@ -263,10 +263,12 @@ async fn handle_cascade_trigger(state: &AppState, args: Value) -> Result<ToolRes
     };
 
     // Bug 3: Emit CascadeTriggered event before execution
-    state.event_bus.publish(DaemonEvent::CascadeTriggered {
+    let v1_ev = DaemonEvent::CascadeTriggered {
         service: args.service.clone(),
         changed: args.changed.clone(),
-    });
+    };
+    state.event_bus.publish(v1_ev.clone());
+    let _ = crate::bus::publish_v1_shim(&state.bus, &v1_ev).await;
 
     // Execute in a blocking task since cascade runs external commands
     let report = tokio::task::spawn_blocking(move || {
@@ -277,13 +279,15 @@ async fn handle_cascade_trigger(state: &AppState, args: Value) -> Result<ToolRes
     .map_err(|e| anyhow!("cascade execution panicked: {e}"))?;
 
     // Bug 3: Emit CascadeCompleted event after execution
-    state.event_bus.publish(DaemonEvent::CascadeCompleted {
+    let v1_ev = DaemonEvent::CascadeCompleted {
         service: args.service.clone(),
         services_repaired: report.services_repaired,
         services_failed: report.services_failed,
         hard_halted: report.hard_halted,
         duration_ms: report.total_duration.as_millis(),
-    });
+    };
+    state.event_bus.publish(v1_ev.clone());
+    let _ = crate::bus::publish_v1_shim(&state.bus, &v1_ev).await;
 
     let phases: Vec<serde_json::Value> = report
         .plan

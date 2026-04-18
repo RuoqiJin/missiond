@@ -111,12 +111,12 @@ pub(crate) async fn run_pending_analysis(state: &AppState) {
                         warn!(error = %e, "strategy_analyst: failed to mark complete");
                     }
                     // Phase 3: Emit DeepAnalysisCompleted for KB consolidation consumer
-                    state
-                        .event_bus
-                        .publish(crate::event_bus::DaemonEvent::DeepAnalysisCompleted {
-                            session_id: session_id.to_string(),
-                            kb_entries_created: 0, // exact count not tracked here; consumer uses as trigger
-                        });
+                    let ev = crate::event_bus::DaemonEvent::DeepAnalysisCompleted {
+                        session_id: session_id.to_string(),
+                        kb_entries_created: 0, // exact count not tracked here; consumer uses as trigger
+                    };
+                    state.event_bus.publish(ev.clone());
+                    let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
                 }
                 // (WorkerContext stats removed — consumer-driven now)
             }
@@ -722,11 +722,13 @@ async fn apply_strategic_output(
                 info!(message = %msg, "strategy_analyst: proactive notification");
 
                 // Path 1: EventBus → WS → frontend Toast/notification panel
-                state.event_bus.publish(DaemonEvent::InsightGenerated {
+                let ev = DaemonEvent::InsightGenerated {
                     category: "strategy".to_string(),
                     priority: "medium".to_string(),
                     title: msg.clone(),
-                });
+                };
+                state.event_bus.publish(ev.clone());
+                let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
 
                 // Path 2: Inbox → pulled by Context Pipeline on next user turn
                 let formatted = format!("[战略洞察] {}", msg);

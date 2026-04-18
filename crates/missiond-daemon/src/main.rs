@@ -13,6 +13,7 @@ mod llm;
 mod workers;
 
 // ── Root-level modules ──
+mod bus;
 #[allow(dead_code)]
 mod control_tree;
 mod event_bus;
@@ -356,6 +357,11 @@ async fn main() -> Result<()> {
         })
     };
 
+    // Preserve the PG pool for the v2 event bus bootstrap (Phase 6). The
+    // dynamic `MissionStore` trait object doesn't expose the pool directly.
+    #[cfg(feature = "postgres")]
+    let mut pg_pool_for_bus: Option<sqlx::PgPool> = None;
+
     let store: Arc<dyn missiond_core::db::traits::MissionStore> = {
         #[cfg(feature = "postgres")]
         {
@@ -369,6 +375,7 @@ async fn main() -> Result<()> {
             pg_store.fix_identity_sequences().await;
             info!("PostgreSQL store ready");
             let _ = db_stats_callback; // PG mode: latency tracked by sqlx instrumentation
+            pg_pool_for_bus = Some(pg_store.pool().clone());
             Arc::new(pg_store)
         }
 
@@ -584,6 +591,27 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Phase 6: bootstrap the v2 event bus (Log + BlobStore + CursorStore +
+    // Dispatcher + ControlGate adapter + metrics). The dispatcher tail loop
+    // and metrics emitter are started later once the global shutdown signal
+    // is in scope.
+    #[cfg(feature = "postgres")]
+    let bus_services = {
+        let pool = pg_pool_for_bus
+            .as_ref()
+            .ok_or_else(|| anyhow!("v2 event bus requires the PG pool; postgres feature missing"))?
+            .clone();
+        bus::BusServices::bootstrap(pool, &control_manager_arc)
+            .await
+            .map_err(|e| anyhow!("BusServices::bootstrap failed: {}", e))?
+    };
+    #[cfg(not(feature = "postgres"))]
+    let bus_services: Arc<bus::BusServices> = {
+        return Err(anyhow!(
+            "Phase 6 v2 event bus requires the postgres feature"
+        ));
+    };
+
     let state_cc_tasks = Arc::clone(&cc_tasks);
 
     // Pre-clone Arcs needed for initialization (moved into AppState below)
@@ -734,23 +762,25 @@ async fn main() -> Result<()> {
                                 .with_pty(pty_transport),
                                 event_tx,
                             )
+                            .with_bus(Arc::clone(&bus_services))
                         } else {
                             info!(provider = %config.provider, "LLM provider: HTTP router");
-                            gemini_client::GeminiClient::new(event_tx)
+                            gemini_client::GeminiClient::new(event_tx).with_bus(Arc::clone(&bus_services))
                         }
                     } else {
-                        gemini_client::GeminiClient::new(event_tx)
+                        gemini_client::GeminiClient::new(event_tx).with_bus(Arc::clone(&bus_services))
                     }
                 } else {
-                    gemini_client::GeminiClient::new(event_tx)
+                    gemini_client::GeminiClient::new(event_tx).with_bus(Arc::clone(&bus_services))
                 }
             } else {
-                gemini_client::GeminiClient::new(event_tx)
+                gemini_client::GeminiClient::new(event_tx).with_bus(Arc::clone(&bus_services))
             }
         },
         minimax: {
             let gw = minimax_gateway::create_minimax_gateway(event_bus_instance.sender());
             if let Some((handle, gateway)) = gw {
+                let gateway = gateway.with_bus(Arc::clone(&bus_services));
                 info!("MinimaxGateway initialized");
                 tokio::spawn(gateway.run());
                 Some(handle)
@@ -762,6 +792,7 @@ async fn main() -> Result<()> {
         sonnet: {
             let (handle, gateway) =
                 sonnet_gateway::create_sonnet_gateway(event_bus_instance.sender());
+            let gateway = gateway.with_bus(Arc::clone(&bus_services));
             info!("SonnetGateway initialized");
             tokio::spawn(gateway.run());
             Some(handle)
@@ -786,6 +817,7 @@ async fn main() -> Result<()> {
         embedding_tx: embedding_tx,
         incident_tx: incident_tx.clone(),
         event_bus: Arc::clone(&event_bus_instance),
+        bus: Arc::clone(&bus_services),
         stats: Arc::clone(&daemon_stats),
         prompts: Arc::new(prompts::PromptStore::load()),
         briefing_notify: Arc::new(tokio::sync::Notify::new()),
@@ -1112,6 +1144,15 @@ async fn main() -> Result<()> {
 
     // --- Background Workers (unified lifecycle via BackgroundWorker trait) ---
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // Phase 6: start the v2 event-bus dispatcher + metrics emitter now that
+    // the shutdown signal is available. Held handle keeps the tasks alive
+    // until daemon exit (Phase 7 subscribers will attach to the topics).
+    let _bus_handle = bus_services
+        .start(shutdown_rx.clone())
+        .await
+        .map_err(|e| anyhow!("BusServices::start failed: {}", e))?;
+    info!("v2 event bus: dispatcher + metrics emitter started");
 
     // Embedding Worker: event-driven actor (KB/Skill/Conv/AST embeddings + backfill)
     workers::spawn_worker(
@@ -1719,12 +1760,12 @@ async fn main() -> Result<()> {
                                 let events = std::mem::take(&mut pending_config_events);
                                 for (path, kind) in events {
                                     info!(path = %path, kind = %kind, "Config file changed");
-                                    watch_state.event_bus.publish(
-                                        event_bus::DaemonEvent::ConfigFileChanged {
-                                            path: path.clone(),
-                                            kind: kind.clone(),
-                                        },
-                                    );
+                                    let ev = event_bus::DaemonEvent::ConfigFileChanged {
+                                        path: path.clone(),
+                                        kind: kind.clone(),
+                                    };
+                                    watch_state.event_bus.publish(ev.clone());
+                                    let _ = bus::publish_v1_shim(&watch_state.bus, &ev).await;
 
                                     // Hot-reload prompts if a prompt file changed
                                     if path.contains("/prompts/") {

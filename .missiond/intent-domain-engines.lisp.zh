@@ -1,0 +1,124 @@
+(zh
+  :header (""
+           "MissionD 领域引擎声明"
+           "模式: domain-engine (零内部逻辑，仅外壳)"
+           "状态: Phase 3 — 核心引擎封装"
+           "")
+
+  ;; --- Slot Orchestrator ---
+  (domain-engine slot-orchestrator
+    :zh "领域引擎: slot-orchestrator (槽位编排器)"
+    :notes ("── 槽位编排器 ──"
+            "多引擎 agent 生命周期管理器。"
+            "按 CliEngine 把任务路由到子管理器 (Claude/Gemini/Codex)。")
+    (depends-on
+      :zh "依赖"
+      (control
+        :zh "control: Arc<ControlManager>"))
+    (state
+      :zh "状态"
+      (registry
+        :zh "registry: 槽位任务配置注册表")
+      (managers
+        :zh "managers: 按引擎分发的子管理器集合"))
+    (exports
+      :zh "导出"
+      (fn register
+        :zh "fn register: 注册一个槽位配置用于任务分发"
+        :doc-zh "注册槽位配置用于任务分发")
+      (fn execute
+        :zh "fn execute: 在最佳可用引擎槽位上执行任务"
+        :doc-zh "在最佳可用引擎槽位上执行任务")
+      (fn status
+        :zh "fn status: 获取所有受管引擎槽位的状态"
+        :doc-zh "获取所有受管引擎槽位的状态")
+      (fn is_registered
+        :zh "fn is_registered: 检查某个任务类型是否已注册"
+        :doc-zh "检查某个任务类型是否已注册")))
+
+  ;; --- LLM Gateway ---
+  (domain-engine llm-gateway
+    :zh "领域引擎: llm-gateway (LLM 网关)"
+    :notes ("── LLM 网关 ──"
+            "多 provider LLM 分发，带优先通道与限流。")
+    (depends-on
+      :zh "依赖"
+      (gemini
+        :zh "gemini: GeminiGateway")
+      (sonnet
+        :zh "sonnet: SonnetHandle")
+      (minimax
+        :zh "minimax: Option<MinimaxHandle>"))
+    (state
+      :zh "状态"
+      (request_count
+        :zh "request_count: 原子请求计数器"))
+    (exports
+      :zh "导出"
+      (fn route_interactive
+        :zh "fn route_interactive: 将交互式 LLM 请求路由到最佳 provider"
+        :doc-zh "将交互式 LLM 请求路由到最佳 provider")
+      (fn route_embedding
+        :zh "fn route_embedding: 经 embedding 通道生成嵌入向量"
+        :doc-zh "经 embedding 通道生成嵌入向量")
+      (fn route_translation
+        :zh "fn route_translation: 路由一个翻译请求"
+        :doc-zh "路由一个翻译请求")))
+
+  ;; --- Autopilot Tick Engine ---
+  (domain-engine autopilot
+    :zh "领域引擎: autopilot (自动驾驶 tick 引擎)"
+    :notes ("── 自动驾驶 Tick 引擎 ──"
+            "组合型编排 tick 循环: memory → extraction → task → decision → flow。")
+    (depends-on
+      :zh "依赖"
+      (db
+        :zh "db: DbExecutor")
+      (slots
+        :zh "slots: Arc<SlotOrchestrator>")
+      (event_bus
+        :zh "event_bus: EventBus")
+      (llm
+        :zh "llm: LlmGateway")
+      (context
+        :zh "context: ContextPipeline"))
+    (exports
+      :zh "导出"
+      (fn tick
+        :zh "fn tick: 执行一次完整 tick 周期: memory → extraction → task → decision → flow"
+        :doc-zh "执行一次完整 tick 周期: memory → extraction → task → decision → flow")
+      (fn pause
+        :zh "fn pause: 暂停 tick 循环"
+        :doc-zh "暂停 tick 循环")
+      (fn resume
+        :zh "fn resume: 恢复 tick 循环"
+        :doc-zh "恢复 tick 循环")))
+
+  ;; --- Learning Engine ---
+  (domain-engine learning-engine
+    :zh "领域引擎: learning-engine (学习引擎)"
+    :notes ("── 学习引擎 ──"
+            "决策级联 + 从会话历史中抽取知识。")
+    (depends-on
+      :zh "依赖"
+      (db
+        :zh "db: DbExecutor")
+      (llm
+        :zh "llm: LlmGateway")
+      (event_bus
+        :zh "event_bus: EventBus"))
+    (state
+      :zh "状态"
+      (extraction_phase
+        :zh "extraction_phase: 抽取阶段状态，默认 Idle"))
+    (exports
+      :zh "导出"
+      (fn decide
+        :zh "fn decide: 通过 KB → LLM → 人类 级联路由一个问题"
+        :doc-zh "通过 KB → LLM → 人类 级联路由一个问题")
+      (fn extract_memory
+        :zh "fn extract_memory: 从一个会话中抽取知识条目"
+        :doc-zh "从一个会话中抽取知识条目")
+      (fn tick
+        :zh "fn tick: 运行一次学习引擎 tick"
+        :doc-zh "运行一次学习引擎 tick"))))

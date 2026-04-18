@@ -70,6 +70,10 @@ pub(crate) struct GeminiClient {
     semaphore: Arc<Semaphore>,
     cli: Option<Arc<GeminiCli>>,
     event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>,
+    /// Phase 6 dual-emit handle: mirrors every v1 `DaemonEvent` onto the v2
+    /// bus so Phase 7 subscribers have something to attach to. Optional to
+    /// keep tests / early-boot paths that never touch the bus working.
+    bus: Option<Arc<crate::bus::BusServices>>,
     /// Atomic counters for DaemonStats aggregation.
     pub(crate) request_count: Arc<AtomicU64>,
     pub(crate) error_count: Arc<AtomicU64>,
@@ -142,9 +146,23 @@ impl GeminiClient {
             semaphore: Arc::new(Semaphore::new(3)),
             cli: None,
             event_tx,
+            bus: None,
             request_count: Arc::new(AtomicU64::new(0)),
             error_count: Arc::new(AtomicU64::new(0)),
             retry_count: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Attach the v2 `BusServices` so every `DaemonEvent` emitted by this
+    /// client is mirrored onto the new log (Phase 6 dual-emit).
+    pub fn with_bus(mut self, bus: Arc<crate::bus::BusServices>) -> Self {
+        self.bus = Some(bus);
+        self
+    }
+
+    fn shim(&self, ev: &DaemonEvent) {
+        if let Some(bus) = self.bus.clone() {
+            crate::bus::spawn_v1_shim(bus, ev.clone());
         }
     }
 
@@ -165,6 +183,7 @@ impl GeminiClient {
             semaphore: Arc::new(Semaphore::new(concurrency)),
             cli: Some(Arc::new(cli)),
             event_tx,
+            bus: None,
             request_count: Arc::new(AtomicU64::new(0)),
             error_count: Arc::new(AtomicU64::new(0)),
             retry_count: Arc::new(AtomicU64::new(0)),
@@ -285,6 +304,7 @@ impl GeminiClient {
         let span_id_clone = guard.span_id.clone();
         let session_id_clone = guard.session_id.clone();
         let event_tx_clone = self.event_tx.clone();
+        let bus_clone = self.bus.clone();
 
         let result: Result<serde_json::Value> = async move {
             if let Some(cli) = &self.cli {
@@ -335,6 +355,7 @@ impl GeminiClient {
                 let fwd_span_id = span_id_clone;
                 let fwd_session_id = session_id_clone;
                 let fwd_event_tx = event_tx_clone;
+                let fwd_bus = bus_clone;
                 let collected_tools: Arc<StdMutex<Vec<serde_json::Value>>> =
                     Arc::new(StdMutex::new(Vec::new()));
                 let collected_tools_clone = collected_tools.clone();
@@ -386,13 +407,16 @@ impl GeminiClient {
                             ),
                         };
                         let entry = TimelineEntry {
-                            event,
+                            event: event.clone(),
                             trace_id: fwd_session_id.clone(),
                             span_id: uuid::Uuid::new_v4().to_string(),
                             parent_span_id: Some(fwd_span_id.clone()),
                             summary: Some(summary),
                         };
                         let _ = fwd_event_tx.send(entry);
+                        if let Some(ref bus) = fwd_bus {
+                            crate::bus::spawn_v1_shim(bus.clone(), event);
+                        }
                     }
                 });
 
@@ -525,6 +549,7 @@ impl GeminiClient {
             prompt_text,
             extra: serde_json::Value::Object(Default::default()),
         };
+        self.shim(&event);
         let entry = TimelineEntry {
             event,
             trace_id,
@@ -612,6 +637,7 @@ impl GeminiClient {
                 "retry_count": retry_count,
             }),
         };
+        self.shim(&event);
         // Use same span_id as the started event so they are linked as a pair
         let entry = TimelineEntry {
             event,

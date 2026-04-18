@@ -265,11 +265,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 match state.store.create_agent_question(&q_input).await {
                     Ok(q) => {
                         info!(task_id = %task.id, question_id = %q.id, "Hard intercept: Plan→Execute risk review created");
-                        state
-                            .event_bus
-                            .publish(crate::event_bus::DaemonEvent::QuestionCreated {
-                                question_id: q.id.clone(),
-                            });
+                        let ev = crate::event_bus::DaemonEvent::QuestionCreated {
+                            question_id: q.id.clone(),
+                        };
+                        state.event_bus.publish(ev.clone());
+                        let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
                     }
                     Err(e) => warn!(error = %e, "Failed to create hard intercept question"),
                 }
@@ -299,11 +299,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 match state.store.create_agent_question(&q_input).await {
                     Ok(q) => {
                         info!(task_id = %task.id, question_id = %q.id, "Soft intercept: created master decision question");
-                        state
-                            .event_bus
-                            .publish(crate::event_bus::DaemonEvent::QuestionCreated {
-                                question_id: q.id.clone(),
-                            });
+                        let ev = crate::event_bus::DaemonEvent::QuestionCreated {
+                            question_id: q.id.clone(),
+                        };
+                        state.event_bus.publish(ev.clone());
+                        let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
                     }
                     Err(e) => warn!(error = %e, "Failed to create soft intercept question"),
                 }
@@ -401,6 +401,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 warn!("Incident channel full, dropping incident: {}", e);
                 Ok(ToolResult::error(format!("Incident channel full: {}", e)))
             } else {
+                // Phase 6 dual-emit: mirror onto the v2 bus for future
+                // IncidentEvent subscribers. MPSC send stays (Phase 7 cut).
+                let _ = state
+                    .bus
+                    .publish_incident(crate::bus::compat::incident_reported(incident.clone()))
+                    .await;
                 Ok(ToolResult::json_pretty(&json!({
                     "status": "injected",
                     "incident_id": incident.id,

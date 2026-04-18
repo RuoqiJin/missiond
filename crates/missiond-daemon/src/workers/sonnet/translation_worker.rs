@@ -80,14 +80,13 @@ async fn translate_message(state: &AppState, ctx: &ThinkingTraceCtx, content: &s
     };
 
     // Publish TranslationStarted
-    state.event_bus.publish_traced(
-        DaemonEvent::TranslationStarted {
-            message_id: ctx.message_id,
-            slot_id: TRANSLATION_SLOT_ID.to_string(),
-            content_chars,
-        },
-        trace_ctx(),
-    );
+    let ev_started = DaemonEvent::TranslationStarted {
+        message_id: ctx.message_id,
+        slot_id: TRANSLATION_SLOT_ID.to_string(),
+        content_chars,
+    };
+    state.event_bus.publish_traced(ev_started.clone(), trace_ctx());
+    let _ = crate::bus::publish_v1_shim(&state.bus, &ev_started).await;
 
     let start = std::time::Instant::now();
 
@@ -134,15 +133,14 @@ async fn translate_message(state: &AppState, ctx: &ThinkingTraceCtx, content: &s
             // Preview: first ~80 chars
             let preview: String = translation.chars().take(80).collect();
 
-            state.event_bus.publish_traced(
-                DaemonEvent::TranslationCompleted {
-                    message_id: ctx.message_id,
-                    slot_id: TRANSLATION_SLOT_ID.to_string(),
-                    preview,
-                    duration_ms,
-                },
-                trace_ctx(),
-            );
+            let ev = DaemonEvent::TranslationCompleted {
+                message_id: ctx.message_id,
+                slot_id: TRANSLATION_SLOT_ID.to_string(),
+                preview,
+                duration_ms,
+            };
+            state.event_bus.publish_traced(ev.clone(), trace_ctx());
+            let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
 
             info!(
                 message_id = ctx.message_id,
@@ -154,14 +152,13 @@ async fn translate_message(state: &AppState, ctx: &ThinkingTraceCtx, content: &s
         }
         Ok(_) => {
             let err = "empty translation returned";
-            state.event_bus.publish_traced(
-                DaemonEvent::TranslationFailed {
-                    message_id: ctx.message_id,
-                    slot_id: TRANSLATION_SLOT_ID.to_string(),
-                    error: err.to_string(),
-                },
-                trace_ctx(),
-            );
+            let ev = DaemonEvent::TranslationFailed {
+                message_id: ctx.message_id,
+                slot_id: TRANSLATION_SLOT_ID.to_string(),
+                error: err.to_string(),
+            };
+            state.event_bus.publish_traced(ev.clone(), trace_ctx());
+            let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
             warn!(
                 message_id = ctx.message_id,
                 "Translation: empty response from MiniMax"
@@ -169,14 +166,13 @@ async fn translate_message(state: &AppState, ctx: &ThinkingTraceCtx, content: &s
             Err(anyhow::anyhow!(err))
         }
         Err(e) => {
-            state.event_bus.publish_traced(
-                DaemonEvent::TranslationFailed {
-                    message_id: ctx.message_id,
-                    slot_id: TRANSLATION_SLOT_ID.to_string(),
-                    error: e.to_string(),
-                },
-                trace_ctx(),
-            );
+            let ev = DaemonEvent::TranslationFailed {
+                message_id: ctx.message_id,
+                slot_id: TRANSLATION_SLOT_ID.to_string(),
+                error: e.to_string(),
+            };
+            state.event_bus.publish_traced(ev.clone(), trace_ctx());
+            let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
             warn!(message_id = ctx.message_id, error = %e, "Translation failed");
             Err(e)
         }

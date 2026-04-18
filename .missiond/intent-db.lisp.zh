@@ -1,0 +1,206 @@
+(zh
+  :header (""
+           "MissionD 数据库层 — CRUD 网关 (SQLite 后端)"
+           "Forge: Lisp → IR → rusqlite 代码生成"
+           "")
+
+  (pattern crud-gateway
+    :zh "模式: crud-gateway"
+    :gateway-zh "网关: MissionDB"
+    :pool-zh "连接池: Mutex<Connection>"
+    :backend-zh "后端: sqlite"
+    :notes (""
+            "┌──────────────────────────────────────────────────────────┐"
+            "│ 表: board_tasks                                          │"
+            "└──────────────────────────────────────────────────────────┘")
+
+    (table board_tasks
+      :zh "表: board_tasks"
+
+      (row-type BoardTaskRow
+        :zh "行类型: BoardTaskRow")
+
+      :notes ("── 机械式 CRUD 操作 ──")
+
+      (op insert_board_task
+        :zh "操作: insert_board_task"
+        :kind-zh "类型: 插入结构体")
+
+      (op get_board_task_by_id
+        :zh "操作: get_board_task_by_id"
+        :kind-zh "类型: 单条查询")
+
+      (op list_board_tasks_by_status
+        :zh "操作: list_board_tasks_by_status"
+        :kind-zh "类型: 多条查询"
+        :order-zh "排序: order_idx 升序")
+
+      (op find_open_task_by_dedupe_key
+        :zh "操作: find_open_task_by_dedupe_key"
+        :kind-zh "类型: 单条查询"
+        :where-fixed-zh "固定条件: 状态不属于 done/failed/skipped")
+
+      (op set_board_task_lease
+        :zh "操作: set_board_task_lease"
+        :kind-zh "类型: 更新")
+
+      (op release_board_claims_by_executor
+        :zh "操作: release_board_claims_by_executor"
+        :kind-zh "类型: 更新")
+
+      (op list_autopilot_tasks
+        :zh "操作: list_autopilot_tasks"
+        :kind-zh "类型: 多条查询"
+        :where-fixed-zh "固定条件: auto_execute = 1 且 status = 'open'"
+        :order-zh "排序: 有指派人优先，再按 order_idx 升序")
+
+      (op list_running_autopilot_tasks
+        :zh "操作: list_running_autopilot_tasks"
+        :kind-zh "类型: 多条查询"
+        :where-fixed-zh "固定条件: auto_execute = 1、status = 'running'、claim_executor_id 非空"
+        :order-zh "排序: claimed_at 升序")
+
+      (op clear_done_board_tasks
+        :zh "操作: clear_done_board_tasks"
+        :kind-zh "类型: 删除"
+        :where-fixed-zh "固定条件: status = 'done'")
+
+      (op count_tasks_by_category
+        :zh "操作: count_tasks_by_category"
+        :kind-zh "类型: 计数"
+        :where-fixed-zh "固定条件: status 属于 open/running 且 hidden = 0")
+
+      :notes ("" "── 复杂操作 → Generation Gap (Custom trait) ──")
+
+      (op create_board_task
+        :zh "操作: create_board_task"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: 解析 parent_id、计算 max order_idx、构造结构体、插入")
+
+      (op update_board_task
+        :zh "操作: update_board_task"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: 用 push_field 宏动态 SET、解析 parent_id/depends_on、自动清理认领")
+
+      (op resolve_board_task_id
+        :zh "操作: resolve_board_task_id"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: 先精确匹配，对 ≥ 6 字符的短 ID 再做前缀匹配")
+
+      (op get_board_task
+        :zh "操作: get_board_task"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: resolve_board_task_id → get_board_task_by_id")
+
+      (op claim_board_task
+        :zh "操作: claim_board_task"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: CAS：UPDATE WHERE status='open' 且 claim_executor_id IS NULL")
+
+      (op delete_board_task
+        :zh "操作: delete_board_task"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: 递归收集后代 + 级联删除备注")
+
+      (op toggle_board_task
+        :zh "操作: toggle_board_task"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: 读-改-写：open↔done 切换")
+
+      (op close_task_by_dedupe_key
+        :zh "操作: close_task_by_dedupe_key"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: 按 dedupe_key 找到 open → 更新为 done")
+
+      (op recover_stale_running_tasks
+        :zh "操作: recover_stale_running_tasks"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: 双阶段——租约过期 + 兜底时间恢复")
+
+      (op check_dependencies
+        :zh "操作: check_dependencies"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: DAG 遍历：逐个检查依赖状态 (done=ok, failed/skipped=blocked, 其余=pending)")
+
+      (op find_downstream_tasks
+        :zh "操作: find_downstream_tasks"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: 基于 depends_on JSON 数组的 BFS 图遍历")
+
+      (op retry_board_task
+        :zh "操作: retry_board_task"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: 重置目标，可选级联重置所有下游")
+
+      (op board_summary
+        :zh "操作: board_summary"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: 多表聚合：状态计数、待处理问题、新增知识库条目")
+
+      (op search_board_tasks
+        :zh "操作: search_board_tasks"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: 动态 SQL 构造器，支持 query/project/category/status/parent_id 过滤")
+
+      (op get_board_tasks_with_context
+        :zh "操作: get_board_tasks_with_context"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: 3 查询批处理：主任务 → 子任务 → 备注，组装成树")
+
+      (op count_open_tasks_by_priority
+        :zh "操作: count_open_tasks_by_priority"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: 从优先级列表构造动态 IN 子句")
+
+      (op query_board_tasks_in_range
+        :zh "操作: query_board_tasks_in_range"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: 白名单校验列名、动态 SQL、行 JSON 序列化")
+
+      (op query_board_tasks_in_range_with_status
+        :zh "操作: query_board_tasks_in_range_with_status"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: 固定 SQL 带 3 个参数、行 JSON 序列化"))
+
+    :notes ("┌──────────────────────────────────────────────────────────┐"
+            "│ 表: board_task_notes                                     │"
+            "└──────────────────────────────────────────────────────────┘")
+
+    (table board_task_notes
+      :zh "表: board_task_notes"
+
+      (row-type BoardTaskNoteRow
+        :zh "行类型: BoardTaskNoteRow")
+
+      (op insert_board_task_note
+        :zh "操作: insert_board_task_note"
+        :kind-zh "类型: 插入")
+
+      (op get_board_task_notes
+        :zh "操作: get_board_task_notes"
+        :kind-zh "类型: 多条查询"
+        :order-zh "排序: created_at 升序")
+
+      (op get_board_task_with_notes
+        :zh "操作: get_board_task_with_notes"
+        :kind-zh "类型: 自定义"
+        :logic-zh "逻辑: get_board_task → get_board_task_notes → 组合"))
+
+    :notes ("┌──────────────────────────────────────────────────────────┐"
+            "│ 辅助函数: 枚举 ↔ 字符串转换                              │"
+            "└──────────────────────────────────────────────────────────┘")
+
+    (helpers
+      :zh "辅助函数组"
+
+      (fn board_task_status_to_str
+        :zh "函数: board_task_status_to_str — 枚举转字符串")
+
+      (fn board_task_status_from_str
+        :zh "函数: board_task_status_from_str — 字符串转枚举，默认 Open")
+
+      (fn board_note_type_to_str
+        :zh "函数: board_note_type_to_str — 备注类型枚举转字符串")
+
+      (fn board_note_type_from_str
+        :zh "函数: board_note_type_from_str — 字符串转备注类型枚举，默认 Note"))))

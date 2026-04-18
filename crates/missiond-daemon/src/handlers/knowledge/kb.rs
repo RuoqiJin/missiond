@@ -342,13 +342,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
 
             // Phase 3: Emit KBBatchMutated for event-driven FTS rebuild / consolidation triggers
-            state
-                .event_bus
-                .publish(crate::event_bus::DaemonEvent::KBBatchMutated {
-                    count: 1,
-                    categories: vec![input.category.clone()],
-                    action: result.action.clone(),
-                });
+            let ev = crate::event_bus::DaemonEvent::KBBatchMutated {
+                count: 1,
+                categories: vec![input.category.clone()],
+                action: result.action.clone(),
+            };
+            state.event_bus.publish(ev.clone());
+            let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
 
             // Conflict detection: for new entries, check semantic similarity against existing KB
             let conflicts = if result.action == "created" {
@@ -418,13 +418,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             }
             // Phase 3: Emit KBBatchMutated for event-driven FTS rebuild
             if deleted {
-                state
-                    .event_bus
-                    .publish(crate::event_bus::DaemonEvent::KBBatchMutated {
-                        count: 1,
-                        categories: vec![],
-                        action: "deleted".to_string(),
-                    });
+                let ev = crate::event_bus::DaemonEvent::KBBatchMutated {
+                    count: 1,
+                    categories: vec![],
+                    action: "deleted".to_string(),
+                };
+                state.event_bus.publish(ev.clone());
+                let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
             }
             Ok(ToolResult::json(&serde_json::json!({
                 "deleted": deleted,
@@ -459,13 +459,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             // Phase 3: Emit KBBatchMutated for event-driven consumers
             if count > 0 {
-                state
-                    .event_bus
-                    .publish(crate::event_bus::DaemonEvent::KBBatchMutated {
-                        count: count as u32,
-                        categories: vec![],
-                        action: "deleted".to_string(),
-                    });
+                let ev = crate::event_bus::DaemonEvent::KBBatchMutated {
+                    count: count as u32,
+                    categories: vec![],
+                    action: "deleted".to_string(),
+                };
+                state.event_bus.publish(ev.clone());
+                let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
             }
             Ok(ToolResult::json(&serde_json::json!({
                 "deleted_count": count,
@@ -531,13 +531,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                             .try_send(EmbeddingTask::ProcessKBEntry(entry.id.clone()));
                     }
                     // Phase 3: Emit KBBatchMutated for event-driven consumers
-                    state
-                        .event_bus
-                        .publish(crate::event_bus::DaemonEvent::KBBatchMutated {
-                            count: 1,
-                            categories: vec![entry.category.clone()],
-                            action: "updated".to_string(),
-                        });
+                    let ev = crate::event_bus::DaemonEvent::KBBatchMutated {
+                        count: 1,
+                        categories: vec![entry.category.clone()],
+                        action: "updated".to_string(),
+                    };
+                    state.event_bus.publish(ev.clone());
+                    let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
                     Ok(ToolResult::json_pretty(&serde_json::json!({
                         "updated": true,
                         "content_changed": content_changed,
@@ -1781,11 +1781,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .iter()
                 .any(|r| r.get("status").and_then(|s| s.as_str()) == Some("dispatched"))
             {
-                state
-                    .event_bus
-                    .publish(crate::event_bus::DaemonEvent::TaskCreated {
-                        task_id: String::new(),
-                    });
+                let ev = crate::event_bus::DaemonEvent::TaskCreated {
+                    task_id: String::new(),
+                };
+                state.event_bus.publish(ev.clone());
+                let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
             }
 
             // Get remaining count

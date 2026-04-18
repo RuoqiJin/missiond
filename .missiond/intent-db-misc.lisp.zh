@@ -1,0 +1,170 @@
+(zh
+  :header ("══════════════════════════════════════════════════════════════"
+           "MissionD 数据库层 — 其余模块 (SQLite)"
+           "ast、timeline、router_chat、question、gemini_log、"
+           "narration、dynamic_slot、incident、vision"
+           "══════════════════════════════════════════════════════════════")
+
+  (pattern crud-gateway
+    :zh "模式: crud-gateway"
+    :gateway-zh "网关: MissionDB"
+    :pool-zh "连接池: Mutex<Connection>"
+    :backend-zh "后端: sqlite"
+
+    (table ast_nodes
+      :zh "表: ast_nodes"
+      (op ast_sync_file :zh "操作 ast_sync_file: 删除旧节点 + 插入新节点 + FTS 同步 + 更新 ast_file_meta")
+      (op ast_delete_file :zh "操作 ast_delete_file: 删除节点 + FTS 清理 + 删除 ast_file_meta")
+      (op ast_search :zh "操作 ast_search: FTS5 基于 name+signature+stub 搜索并返回 snippet")
+      (op ast_get_file_nodes :zh "操作 ast_get_file_nodes: 按 repo 和 file_path 查询，按 start_line 排序")
+      (op ast_find_related :zh "操作 ast_find_related: 基于 name/calls/stub LIKE 查询相关节点")
+      (op ast_get_file_commit :zh "操作 ast_get_file_commit: 从 ast_file_meta 读取 commit_hash")
+      (op ast_stats :zh "操作 ast_stats: 按 repo、node_type 计数并汇总文件数")
+      (op ast_set_embedding :zh "操作 ast_set_embedding: 更新 embedding blob 与 provider")
+      (op ast_find_unembedded :zh "操作 ast_find_unembedded: 返回 embedding 为空的 id/name/signature")
+      (op ast_load_all_embeddings :zh "操作 ast_load_all_embeddings: 反序列化所有 ast embedding blob")
+      (op ast_search_ranked :zh "操作 ast_search_ranked: FTS5 排名搜索，返回 (id, rank)")
+      (op ast_get_search_hit :zh "操作 ast_get_search_hit: 按结构体映射查单条")
+      (op ast_get_node :zh "操作 ast_get_node: 按 id 查询节点")
+      (op ast_module_summaries :zh "操作 ast_module_summaries: 按 file_path 分组，汇总名称列表、函数/结构体数量"))
+
+    (table ast_file_meta
+      :zh "表: ast_file_meta")
+
+    (table system_timeline
+      :zh "表: system_timeline"
+      (op insert_timeline_batch :zh "操作 insert_timeline_batch: 事务批量 INSERT")
+      (op query_timeline_since :zh "操作 query_timeline_since: seq 大于阈值，按 seq 升序 LIMIT")
+      (op timeline_latest_seq :zh "操作 timeline_latest_seq: SELECT MAX(seq)")
+      (op cleanup_timeline_ttl :zh "操作 cleanup_timeline_ttl: 删除 N 天前数据")
+      (op find_timeline_needing_briefing :zh "操作 find_timeline_needing_briefing: summary 为空且 payload 长度 >= 阈值")
+      (op update_timeline_summary :zh "操作 update_timeline_summary: 按 seq 更新 summary")
+      (op query_timeline_filtered :zh "操作 query_timeline_filtered: 5 个可选过滤器的动态 WHERE")
+      (op query_timeline_stratified :zh "操作 query_timeline_stratified: 按事件类型比例采样")
+      (op query_timeline_by_trace :zh "操作 query_timeline_by_trace: 按 trace_id 查询，按 seq 升序")
+      (op query_timeline_stats :zh "操作 query_timeline_stats: 多维聚合 by_type、总数、时间范围")
+      (op query_timeline_search :zh "操作 query_timeline_search: FTS5 + LIKE 兜底，含可选类型/时间过滤")
+      (op get_briefing_summaries_for_session :zh "操作 get_briefing_summaries_for_session: 按 session 匹配 trace_id 获取 seq 与 summary"))
+
+    (table agent_questions
+      :zh "表: agent_questions"
+      (row-type AgentQuestionRow :zh "行类型 AgentQuestionRow: 通过 row_to_agent_question 转换为 AgentQuestion")
+      (op create_agent_question :zh "操作 create_agent_question: 自动生成 id 与时间戳并 INSERT")
+      (op get_agent_question :zh "操作 get_agent_question: 按 id 查单条")
+      (op list_agent_questions :zh "操作 list_agent_questions: 带可选过滤器的动态 WHERE")
+      (op list_questions_for_task :zh "操作 list_questions_for_task: 按 task_id 查询，按 created_at 升序")
+      (op answer_agent_question :zh "操作 answer_agent_question: 更新状态为 answered，设置 answer 与 updated_at，若关联则解除 board task claim")
+      (op dismiss_agent_question :zh "操作 dismiss_agent_question: 更新状态为 dismissed 与 updated_at")
+      (op increment_question_retry :zh "操作 increment_question_retry: retry_count + 1")
+      (op set_question_routing_trace :zh "操作 set_question_routing_trace: 设置 routing_trace")
+      (op downgrade_question_to_user :zh "操作 downgrade_question_to_user: 将 target 降级为 user")
+      (op find_stale_master_questions :zh "操作 find_stale_master_questions: target=master 且 status=pending 且超过阈值")
+      (op find_tasks_with_unharvested_decisions :zh "操作 find_tasks_with_unharvested_decisions: 按 task_id 分组，answered_count >= min_count 且无 kb 沉淀")
+      (op decision_stats :zh "操作 decision_stats: 多维统计 by_status、by_target、by_decision_type、平均响应时间"))
+
+    (table gemini_requests
+      :zh "表: gemini_requests"
+      (op gemini_log_insert_started :zh "操作 gemini_log_insert_started: 以 status=started 插入记录")
+      (op gemini_log_update_completed :zh "操作 gemini_log_update_completed: 按 id 更新全部响应字段")
+      (op gemini_log_get_content :zh "操作 gemini_log_get_content: 将 prompt_text 和 response_text 查出为 JSON 对象")
+      (op gemini_log_query :zh "操作 gemini_log_query: 4 个可选过滤器的动态 WHERE，JSON 行映射")
+      (op gemini_log_stats :zh "操作 gemini_log_stats: 多维统计 by_caller、by_model、by_status、平均时长、token 总量")
+      (op gemini_log_cleanup :zh "操作 gemini_log_cleanup: 删除 N 天前记录"))
+
+    (table gemini_file_uploads
+      :zh "表: gemini_file_uploads"
+      (op gemini_file_cache_get :zh "操作 gemini_file_cache_get: 查询未过期的 file_uri")
+      (op gemini_file_cache_put :zh "操作 gemini_file_cache_put: upsert 缓存")
+      (op gemini_file_cache_gc :zh "操作 gemini_file_cache_gc: 删除 expires_at < 当前 epoch 的记录"))
+
+    (table message_narrations
+      :zh "表: message_narrations"
+      (op insert_narrations :zh "操作 insert_narrations: 事务批量 INSERT OR IGNORE")
+      (op get_narrations_for_session :zh "操作 get_narrations_for_session: 按 message_id 顺序查 session 全量 narration")
+      (op get_last_narration :zh "操作 get_last_narration: 按 message_id 降序取第 1 条")
+      (op fetch_narration_batch :zh "操作 fetch_narration_batch: 查 session 中 id > after_id 的消息，限制 batch_size"))
+
+    (table narration_cursors
+      :zh "表: narration_cursors"
+      (op get_or_create_narration_cursor :zh "操作 get_or_create_narration_cursor: INSERT OR IGNORE 后查 (last_processed_id, batch_index, status, total_messages, retry_count)")
+      (op get_sessions_needing_narration :zh "操作 get_sessions_needing_narration: msg_count - last_processed_id >= min_unnarrated 的 session")
+      (op commit_narration_batch :zh "操作 commit_narration_batch: 更新 cursor 的 last_processed_id、batch_index、total_messages，status=idle")
+      (op mark_narration_cursor_processing :zh "操作 mark_narration_cursor_processing: 将 status 标记为 processing")
+      (op mark_narration_cursor_failed :zh "操作 mark_narration_cursor_failed: retry_count+1，超过上限则状态标记为 failed"))
+
+    (table dynamic_slots
+      :zh "表: dynamic_slots"
+      (row-type DynamicSlotRow :zh "行类型 DynamicSlotRow: 通过 row_to_dynamic_slot 转换为 DynamicSlot")
+      (op create_dynamic_slot :zh "操作 create_dynamic_slot: insert-struct")
+      (op get_dynamic_slot :zh "操作 get_dynamic_slot: 按 id 查单条")
+      (op list_dynamic_slots :zh "操作 list_dynamic_slots: 可选 status WHERE，按 created_at 降序")
+      (op count_active_dynamic_slots :zh "操作 count_active_dynamic_slots: 统计 status='active'")
+      (op terminate_dynamic_slot :zh "操作 terminate_dynamic_slot: 活跃状态下更新为 terminated，设置 reason 与 terminated_at")
+      (op extend_dynamic_slot :zh "操作 extend_dynamic_slot: 活跃状态下延长 expires_at 并累加 extend_count，返回新的 expires_at")
+      (op find_expired_dynamic_slots :zh "操作 find_expired_dynamic_slots: status=active 且 expires_at < 当前时间")
+      (op find_expiring_dynamic_slots :zh "操作 find_expiring_dynamic_slots: status=active 且 expires_at < 当前时间 + within"))
+
+    (table incidents
+      :zh "表: incidents"
+      (op insert_incident :zh "操作 insert_incident: insert-struct")
+      (op has_recent_incident :zh "操作 has_recent_incident: 在窗口期内 dedupe_key 是否存在")
+      (op list_incidents :zh "操作 list_incidents: 按 created_at 降序 LIMIT"))
+
+    (table token_usage_ledger
+      :zh "表: token_usage_ledger"
+      (op insert_token_usage :zh "操作 insert_token_usage: 按 message_id 去重 INSERT")
+      (op token_stats :zh "操作 token_stats: 多维聚合 by_model、by_slot、总量、时间序列"))
+
+    (table image_descriptions
+      :zh "表: image_descriptions"
+      (op get_image_description :zh "操作 get_image_description: 按 image_hash 查 description")
+      (op save_image_description :zh "操作 save_image_description: upsert 图片描述")
+      (op image_description_count :zh "操作 image_description_count: count")
+      (op find_unprocessed_image_messages :zh "操作 find_unprocessed_image_messages: 包含图片但无描述的消息 id 与 content")
+      (op mark_vision_permanently_failed :zh "操作 mark_vision_permanently_failed: 插入占位描述阻止重试")
+      (op update_message_content :zh "操作 update_message_content: 按 id 更新 conversation_messages.content")
+      (op get_message_raw_content :zh "操作 get_message_raw_content: 按 id 查 conversation_messages.raw_content"))
+
+    (table router_chat_archive
+      :zh "表: router_chat_archive"
+      :notes ("Router chat 操作 (跨越 conversations + conversation_messages + archive 三表)")
+      (op router_chat_get_or_create :zh "操作 router_chat_get_or_create: 按 task_id 查找已有会话，否则新建，返回会话 id")
+      (op router_chat_load_history :zh "操作 router_chat_load_history: 将消息查出为 JSON 数组")
+      (op router_chat_get_summary :zh "操作 router_chat_get_summary: 查 rolling_summary 和 last_summarized_msg_id")
+      (op router_chat_load_active_history :zh "操作 router_chat_load_active_history: 查 id > after_id 的消息")
+      (op router_chat_unsummarized_count :zh "操作 router_chat_unsummarized_count: 统计 id > after_id 的消息数")
+      (op router_chat_load_compressible :zh "操作 router_chat_load_compressible: 查最老未汇总的消息")
+      (op router_chat_update_summary :zh "操作 router_chat_update_summary: 更新 rolling_summary 与 last_summarized_msg_id")
+      (op router_chat_append_messages :zh "操作 router_chat_append_messages: 批量 INSERT 消息并返回 id 列表")
+      (op router_chat_list :zh "操作 router_chat_list: 列出会话并附带 msg_count 和最后一条消息预览")
+      (op router_chat_stats :zh "操作 router_chat_stats: 多维统计 总会话数、总消息数、by_model、活跃 session")
+      (op router_chat_clear :zh "操作 router_chat_clear: 归档消息后删除，返回 (archived, remaining)")
+      (op router_chat_clear_by_task :zh "操作 router_chat_clear_by_task: 按 task 找到会话并清理")
+      (op router_chat_delete_message :zh "操作 router_chat_delete_message: 归档并删除单条消息，返回 session_id")
+      (op router_chat_delete :zh "操作 router_chat_delete: 全部归档后删除会话与消息")
+      (op router_chat_delete_by_task :zh "操作 router_chat_delete_by_task: 按 task 找到会话并删除")
+      (op router_chat_restore :zh "操作 router_chat_restore: 从归档恢复消息到 conv_messages")
+      (op jarvis_get_or_create :zh "操作 jarvis_get_or_create: 查找或新建 jarvis 会话")
+      (op jarvis_save_exchange :zh "操作 jarvis_save_exchange: 同时 INSERT user 与 assistant 两条消息")
+      (op jarvis_update_title :zh "操作 jarvis_update_title: 更新标题")
+      (op find_latest_jarvis_conversation :zh "操作 find_latest_jarvis_conversation: 按 started_at 降序取 type=jarvis 的第 1 条"))
+
+    (table board_tasks
+      :zh "表: board_tasks"
+      (op increment_board_task_retry :zh "操作 increment_board_task_retry: 更新 retry_count")
+      (op unclaim_board_task :zh "操作 unclaim_board_task: 按 id 置 claim_executor=NULL 且 status=open"))
+
+    :notes ("" "" "表: ast_nodes" "" "" ""
+            "表: ast_file_meta" "" "" ""
+            "表: system_timeline" "" "" ""
+            "表: agent_questions" "" "" ""
+            "表: gemini_requests" "" "" ""
+            "表: gemini_file_uploads" "" "" ""
+            "表: message_narrations" "" "" ""
+            "表: narration_cursors" "" "" ""
+            "表: dynamic_slots" "" "" ""
+            "表: incidents" "" "" ""
+            "表: token_usage_ledger" "" "" ""
+            "表: image_descriptions" "" "" ""
+            "表: router_chat_archive" "" ""
+            "Board task 辅助操作 (位于 question.rs 但操作 board_tasks 表)")))

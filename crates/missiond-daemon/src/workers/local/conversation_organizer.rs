@@ -114,9 +114,11 @@ async fn organize(state: &AppState, session_ids: &[String]) {
     // Emit SessionOrganized for all processed sessions
     for sid in session_ids {
         info!(session_id = %sid, "Organizer: emitting SessionOrganized");
-        state.event_bus.publish(DaemonEvent::SessionOrganized {
+        let ev = DaemonEvent::SessionOrganized {
             session_id: sid.clone(),
-        });
+        };
+        state.event_bus.publish(ev.clone());
+        let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
     }
 
     info!(

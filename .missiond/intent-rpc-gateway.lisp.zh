@@ -1,0 +1,133 @@
+(zh
+  :header (""
+           "MissionD RPC 网关声明"
+           "模式: rpc-gateway (通用接口层)"
+           "状态: Phase 2 — MCP 协议层"
+           "")
+
+  (rpc-gateway missiond-mcp
+    :zh "RPC 网关: missiond-mcp"
+
+    (transports
+      :zh "支持的传输: MCP 用 stdio, daemon 用 IPC")
+
+    (methods
+      :zh "JSON-RPC 方法路由"
+
+      (method "initialize"
+        :zh "方法: initialize"
+        :description-zh "MCP 协议初始化握手")
+
+      (method "notifications/initialized"
+        :zh "方法: notifications/initialized"
+        :description-zh "客户端确认初始化完成")
+
+      (method "tools/list"
+        :zh "方法: tools/list"
+        :description-zh "列出所有可用工具定义及其 JSON Schema")
+
+      (method "tools/call"
+        :zh "方法: tools/call"
+        :description-zh "按名称执行工具并传入参数")
+
+      (method "ping"
+        :zh "方法: ping"
+        :description-zh "健康检查 ping/pong"))
+
+    (dispatch
+      :zh "工具分发路由 — tool_name → handler 模块"
+      :notes ("计算域"
+              ""
+              ""
+              ""
+              ""
+              ""
+              "知识域"
+              ""
+              ""
+              ""
+              ""
+              ""
+              "通信域"
+              ""
+              ""
+              ""
+              ""
+              ""
+              ""
+              "系统/基础设施域"
+              ""
+              ""
+              "外部 MCP 代理")
+
+      (group task
+        :zh "分组: task")
+
+      (group pty
+        :zh "分组: pty")
+
+      (group slot
+        :zh "分组: slot")
+
+      (group cc_tasks
+        :zh "分组: cc_tasks")
+
+      (group worker
+        :zh "分组: worker")
+
+      (group job
+        :zh "分组: job")
+
+      (group kb
+        :zh "分组: kb")
+
+      (group board
+        :zh "分组: board")
+
+      (group skill
+        :zh "分组: skill")
+
+      (group memory
+        :zh "分组: memory")
+
+      (group insight
+        :zh "分组: insight")
+
+      (group embedding
+        :zh "分组: embedding")
+
+      (group conversation
+        :zh "分组: conversation")
+
+      (group question
+        :zh "分组: question")
+
+      (group router_chat
+        :zh "分组: router_chat")
+
+      (group timeline
+        :zh "分组: timeline")
+
+      (group audit
+        :zh "分组: audit")
+
+      (group retrospective
+        :zh "分组: retrospective")
+
+      (group decision
+        :zh "分组: decision")
+
+      (group infra
+        :zh "分组: infra")
+
+      (group permission
+        :zh "分组: permission")
+
+      (group system
+        :zh "分组: system")
+
+      (group external
+        :zh "分组: external"))
+
+    (error-codes
+      :zh "错误码常量")))

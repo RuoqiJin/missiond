@@ -171,16 +171,16 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
             } else {
                 prompt.clone()
             };
-            state
-                .event_bus
-                .publish(crate::event_bus::DaemonEvent::SlotTaskDispatched {
-                    slot_id: candidate_id.to_string(),
-                    task_id: Some(task_id.clone()),
-                    purpose: "submit".to_string(),
-                    prompt_chars: prompt.len(),
-                    preview,
-                    cited_kb_ids: vec![],
-                });
+            let ev = crate::event_bus::DaemonEvent::SlotTaskDispatched {
+                slot_id: candidate_id.to_string(),
+                task_id: Some(task_id.clone()),
+                purpose: "submit".to_string(),
+                prompt_chars: prompt.len(),
+                preview,
+                cited_kb_ids: vec![],
+            };
+            state.event_bus.publish(ev.clone());
+            let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
             dispatched_to = Some(candidate_id.to_string());
             info!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: dispatched to idle slot");
             break;
@@ -287,16 +287,16 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
                 } else {
                     prompt.clone()
                 };
-                state
-                    .event_bus
-                    .publish(crate::event_bus::DaemonEvent::SlotTaskDispatched {
-                        slot_id: candidate_id.to_string(),
-                        task_id: Some(task_id.clone()),
-                        purpose: "submit".to_string(),
-                        prompt_chars: prompt.len(),
-                        preview,
-                        cited_kb_ids: vec![],
-                    });
+                let ev = crate::event_bus::DaemonEvent::SlotTaskDispatched {
+                    slot_id: candidate_id.to_string(),
+                    task_id: Some(task_id.clone()),
+                    purpose: "submit".to_string(),
+                    prompt_chars: prompt.len(),
+                    preview,
+                    cited_kb_ids: vec![],
+                };
+                state.event_bus.publish(ev.clone());
+                let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
                 dispatched_to = Some(candidate_id.to_string());
                 info!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: spawned + dispatched");
                 break;
@@ -312,16 +312,18 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
         result["dispatched"] = serde_json::json!(false);
         result["hint"] =
             serde_json::json!("No idle slot found, task queued for autopilot dispatch");
+        let ev = crate::event_bus::DaemonEvent::TaskCreated {
+            task_id: task_id.clone(),
+        };
         state.event_bus.publish_traced(
-            crate::event_bus::DaemonEvent::TaskCreated {
-                task_id: task_id.clone(),
-            },
+            ev.clone(),
             crate::event_bus::TraceContext {
                 trace_id: Some(task_id.clone()),
                 summary: Some("Submit task queued for autopilot".to_string()),
                 ..Default::default()
             },
         );
+        let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
     }
     Ok(ToolResult::json(&result))
 }

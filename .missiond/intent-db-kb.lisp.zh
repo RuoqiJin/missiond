@@ -1,0 +1,339 @@
+(zh
+  :header ("══════════════════════════════════════════════════════════════"
+           "MissionD DB 层 — 知识库 (SQLite)"
+           "6 张表: knowledge, knowledge_edges, kb_access_log,"
+           "        kb_operation_queue, kb_ast_links, prompt_snapshots"
+           "══════════════════════════════════════════════════════════════")
+
+  (pattern crud-gateway
+    :zh "模式: CRUD 网关"
+    :gateway-zh "网关: MissionDB"
+    :pool-zh "连接池: Mutex<Connection>"
+    :backend-zh "后端: sqlite"
+
+    :notes ("┌──────────────────────────────────────────────────────────┐"
+            "│ 表: knowledge                                            │"
+            "└──────────────────────────────────────────────────────────┘")
+
+    (table knowledge
+      :zh "表: knowledge (知识条目主表)"
+
+      (row-type KnowledgeEntryRow
+        :zh "行类型: KnowledgeEntryRow，通过 row_to_knowledge_entry 转为 KnowledgeEntry")
+
+      :notes ("── 机械式 CRUD ──")
+
+      (op kb_get_by_id
+        :zh "操作: kb_get_by_id — 按 id 单条查询"
+        :returns-zh "返回: Option<KnowledgeEntry>")
+
+      (op kb_get_id_by_key
+        :zh "操作: kb_get_id_by_key — 按 key 查 id"
+        :returns-zh "返回: Option<String>")
+
+      (op kb_forget
+        :zh "操作: kb_forget — 按 key 删除"
+        :returns-zh "返回: bool")
+
+      (op kb_set_linked_task_id
+        :zh "操作: kb_set_linked_task_id — 按 key 更新关联任务 id"
+        :returns-zh "返回: bool")
+
+      (op kb_clear_scope
+        :zh "操作: kb_clear_scope — 清空 scope_task_id 并刷新 updated_at"
+        :returns-zh "返回: ()")
+
+      (op kb_list_by_scope
+        :zh "操作: kb_list_by_scope — 按 scope_task_id 列表查询"
+        :returns-zh "返回: Vec<KnowledgeEntry>")
+
+      (op kb_summary
+        :zh "操作: kb_summary — 按 category 分组统计"
+        :returns-zh "返回: Vec<(String, i64)>"
+        :logic-zh "逻辑: SELECT category, COUNT(*) GROUP BY category ORDER BY cnt DESC")
+
+      (op kb_hot_keys
+        :zh "操作: kb_hot_keys — 热门 key 列表"
+        :returns-zh "返回: Vec<String>"
+        :logic-zh "逻辑: SELECT key ORDER BY access_count DESC, updated_at DESC LIMIT")
+
+      (op kb_find_stale
+        :zh "操作: kb_find_stale — 查找陈旧条目"
+        :returns-zh "返回: Vec<KnowledgeEntry>"
+        :logic-zh "逻辑: access_count=0 且 julianday 年龄 > N 天")
+
+      (op kb_list_low_confidence
+        :zh "操作: kb_list_low_confidence — 列出低置信度条目"
+        :returns-zh "返回: Vec<KnowledgeEntry>"
+        :logic-zh "逻辑: WHERE confidence < threshold ORDER BY confidence ASC")
+
+      (op kb_list_low_utility
+        :zh "操作: kb_list_low_utility — 列出低效用条目"
+        :returns-zh "返回: Vec<KnowledgeEntry>"
+        :logic-zh "逻辑: WHERE utility < threshold 且 access >= min")
+
+      (op kb_list_stale_state_entries
+        :zh "操作: kb_list_stale_state_entries — 列出陈旧 state 类条目"
+        :returns-zh "返回: Vec<KnowledgeEntry>"
+        :logic-zh "逻辑: kb_type=state 且 last_accessed_at 陈旧")
+
+      :notes ("── 复杂/多步操作 ──")
+
+      (op kb_remember
+        :zh "操作: kb_remember — 记忆条目"
+        :returns-zh "返回: KBRememberResult"
+        :logic-zh "逻辑: 4 阶段 upsert: 精确 category+key → key 换类 → 模糊合并 (Jaccard≥0.5) → 新插")
+
+      (op kb_update
+        :zh "操作: kb_update — 动态更新"
+        :returns-zh "返回: Option<(KnowledgeEntry, bool)>"
+        :logic-zh "逻辑: 动态 SET 子句，返回 (条目, 内容是否变更)")
+
+      (op kb_get
+        :zh "操作: kb_get — 按 key 查询"
+        :returns-zh "返回: Option<KnowledgeEntry>"
+        :logic-zh "逻辑: SELECT + 副作用: 递增 access_count 和 utility_score")
+
+      (op kb_list
+        :zh "操作: kb_list — 按类别列表"
+        :returns-zh "返回: Vec<KnowledgeEntry>"
+        :logic-zh "逻辑: 可选 category 过滤，用 LIKE 匹配子类别")
+
+      (op kb_list_paginated
+        :zh "操作: kb_list_paginated — 分页列表"
+        :returns-zh "返回: Vec<KnowledgeEntry>"
+        :logic-zh "逻辑: kb_list + LIMIT OFFSET")
+
+      (op kb_search
+        :zh "操作: kb_search — 混合搜索"
+        :returns-zh "返回: Vec<KnowledgeEntry>"
+        :logic-zh "逻辑: FTS5 + LIKE 降级搜索混合")
+
+      (op kb_search_ranked
+        :zh "操作: kb_search_ranked — 带排名位置的搜索"
+        :returns-zh "返回: Vec<(KnowledgeEntry, usize)>"
+        :logic-zh "逻辑: kb_search 并返回排名位置")
+
+      (op kb_search_fts_ranked
+        :zh "操作: kb_search_fts_ranked — FTS5 排名搜索"
+        :returns-zh "返回: Vec<(String, usize, Option<String>)>"
+        :logic-zh "逻辑: FTS5 MATCH + snippet() + BM25")
+
+      (op kb_search_like_ranked
+        :zh "操作: kb_search_like_ranked — LIKE 排名搜索"
+        :returns-zh "返回: Vec<(String, usize)>"
+        :logic-zh "逻辑: 按关键词动态 LIKE，多列搜索")
+
+      (op kb_set_embedding
+        :zh "操作: kb_set_embedding — 设置 embedding"
+        :returns-zh "返回: ()"
+        :logic-zh "逻辑: UPDATE embedding blob 和 provider")
+
+      (op kb_entries_missing_embedding
+        :zh "操作: kb_entries_missing_embedding — 查找缺失 embedding 的条目"
+        :returns-zh "返回: Vec<(String, String, String)>"
+        :logic-zh "逻辑: id, summary, detail WHERE embedding IS NULL")
+
+      (op kb_entries_stale_embedding
+        :zh "操作: kb_entries_stale_embedding — 查找陈旧 embedding 的条目"
+        :returns-zh "返回: Vec<(String, String, String)>"
+        :logic-zh "逻辑: id, summary, detail WHERE provider != current")
+
+      (op kb_load_embeddings
+        :zh "操作: kb_load_embeddings — 按类别加载 embedding"
+        :returns-zh "返回: Vec<(String, Vec<f32>)>"
+        :logic-zh "逻辑: 按 category 反序列化 embedding blob")
+
+      (op kb_load_all_embeddings
+        :zh "操作: kb_load_all_embeddings — 加载全部 embedding"
+        :returns-zh "返回: Vec<(String, Vec<f32>)>"
+        :logic-zh "逻辑: 反序列化所有 embedding blob")
+
+      (op kb_batch_forget
+        :zh "操作: kb_batch_forget — 批量删除"
+        :returns-zh "返回: usize"
+        :logic-zh "逻辑: 循环 DELETE + FTS 重建")
+
+      (op kb_update_access_stats
+        :zh "操作: kb_update_access_stats — 批量更新访问统计"
+        :returns-zh "返回: ()"
+        :logic-zh "逻辑: 批量 UPDATE access_count + utility_score，含防刷 (1 小时冷却)")
+
+      (op kb_adjust_confidence
+        :zh "操作: kb_adjust_confidence — 调整置信度"
+        :returns-zh "返回: Option<f64>"
+        :logic-zh "逻辑: UPDATE confidence = MAX(0.1, MIN(1.0, confidence + delta))")
+
+      (op kb_batch_apply_utility_feedback
+        :zh "操作: kb_batch_apply_utility_feedback — 批量应用效用反馈"
+        :returns-zh "返回: usize"
+        :logic-zh "逻辑: 事务化批量效用增益/衰减")
+
+      (op kb_mark_needs_re_extraction
+        :zh "操作: kb_mark_needs_re_extraction — 标记需重抽取"
+        :returns-zh "返回: usize"
+        :logic-zh "逻辑: 循环 UPDATE needs_re_extraction = 1")
+
+      (op kb_find_duplicates
+        :zh "操作: kb_find_duplicates — 查找重复条目"
+        :returns-zh "返回: Vec<(KnowledgeEntry, KnowledgeEntry, f64)>"
+        :logic-zh "逻辑: 内存中跨类别 Jaccard 相似度计算 (阈值 0.6)")
+
+      (op kb_auto_gc
+        :zh "操作: kb_auto_gc — 自动垃圾回收"
+        :returns-zh "返回: usize"
+        :logic-zh "逻辑: 3 阶段: 删除基础设施条目 → 达尔文式衰减 GC → 清理边 + FTS 重建")
+
+      (op kb_stats
+        :zh "操作: kb_stats — KB 统计"
+        :returns-zh "返回: serde_json::Value"
+        :logic-zh "逻辑: 复杂聚合: total, by_category, by_source, by_type, 效用分布")
+
+      (op embedding_stats
+        :zh "操作: embedding_stats — embedding 统计"
+        :returns-zh "返回: serde_json::Value"
+        :logic-zh "逻辑: 跨 provider 统计 KB/Skill/Conversation embedding 覆盖率"))
+
+    :notes ("┌──────────────────────────────────────────────────────────┐"
+            "│ 表: knowledge_edges                                      │"
+            "└──────────────────────────────────────────────────────────┘")
+
+    (table knowledge_edges
+      :zh "表: knowledge_edges (知识图谱边表)"
+
+      (op kb_add_edge
+        :zh "操作: kb_add_edge — upsert 添加边"
+        :on-conflict-zh "冲突处理: (source_id, target_id, relation_type) DO UPDATE SET weight = ?4"
+        :returns-zh "返回: ()")
+
+      (op kb_get_edges
+        :zh "操作: kb_get_edges — 获取某节点的边"
+        :returns-zh "返回: Vec<KBEdge>"
+        :logic-zh "逻辑: WHERE source_id = ?1 OR target_id = ?1")
+
+      (op kb_delete_edges_for
+        :zh "操作: kb_delete_edges_for — 删除某节点相关边"
+        :returns-zh "返回: ()"
+        :logic-zh "逻辑: DELETE WHERE source_id OR target_id")
+
+      (op kb_expand_related
+        :zh "操作: kb_expand_related — 扩展关联节点"
+        :returns-zh "返回: Vec<String>"
+        :logic-zh "逻辑: 逐 id 查邻居，去重，按 weight 排序，限 max_extra"))
+
+    :notes ("┌──────────────────────────────────────────────────────────┐"
+            "│ 表: kb_access_log                                        │"
+            "└──────────────────────────────────────────────────────────┘")
+
+    (table kb_access_log
+      :zh "表: kb_access_log (KB 访问日志)"
+
+      (op kb_log_co_access
+        :zh "操作: kb_log_co_access — 记录共同访问"
+        :returns-zh "返回: ()"
+        :logic-zh "逻辑: 对每个 kb_id: INSERT INTO kb_access_log")
+
+      (op get_session_cited_kb_ids
+        :zh "操作: get_session_cited_kb_ids — 获取会话引用的 kb_id"
+        :returns-zh "返回: Vec<String>"
+        :logic-zh "逻辑: SELECT DISTINCT kb_id WHERE session_id")
+
+      (op kb_compute_cooccurrence
+        :zh "操作: kb_compute_cooccurrence — 计算共现关系"
+        :returns-zh "返回: HashMap<String, Vec<String>>"
+        :logic-zh "逻辑: 清理旧日志 + 拉取近期 + 构建频次映射"))
+
+    :notes ("┌──────────────────────────────────────────────────────────┐"
+            "│ 表: kb_operation_queue                                   │"
+            "└──────────────────────────────────────────────────────────┘")
+
+    (table kb_operation_queue
+      :zh "表: kb_operation_queue (KB 操作队列)"
+
+      (op kb_ops_save_plan
+        :zh "操作: kb_ops_save_plan — 保存操作计划"
+        :returns-zh "返回: usize"
+        :logic-zh "逻辑: 对每个操作循环 INSERT OR REPLACE")
+
+      (op kb_ops_list
+        :zh "操作: kb_ops_list — 列出操作"
+        :returns-zh "返回: Vec<KBOperationRow>"
+        :logic-zh "逻辑: 动态 WHERE，可选过滤器")
+
+      (op kb_ops_update_status
+        :zh "操作: kb_ops_update_status — 更新操作状态"
+        :returns-zh "返回: bool"
+        :logic-zh "逻辑: UPDATE SET status, result, error, executed_at")
+
+      (op kb_ops_complete_by_task_id
+        :zh "操作: kb_ops_complete_by_task_id — 按 task_id 完成操作"
+        :returns-zh "返回: bool"
+        :logic-zh "逻辑: UPDATE WHERE status=dispatched 且 result LIKE 任务模式")
+
+      (op kb_ops_expire_stale
+        :zh "操作: kb_ops_expire_stale — 过期陈旧操作"
+        :returns-zh "返回: usize"
+        :logic-zh "逻辑: UPDATE pending → expired WHERE created_at < TTL")
+
+      (op kb_ops_plan_summary
+        :zh "操作: kb_ops_plan_summary — 计划摘要"
+        :returns-zh "返回: serde_json::Value"
+        :logic-zh "逻辑: SELECT status, COUNT(*) GROUP BY status"))
+
+    :notes ("┌──────────────────────────────────────────────────────────┐"
+            "│ 表: kb_ast_links                                         │"
+            "└──────────────────────────────────────────────────────────┘")
+
+    (table kb_ast_links
+      :zh "表: kb_ast_links (KB 与 AST 节点关联表)"
+
+      (op kb_add_ast_link
+        :zh "操作: kb_add_ast_link — 添加 AST 链接"
+        :returns-zh "返回: ()"
+        :logic-zh "逻辑: INSERT ON CONFLICT DO NOTHING")
+
+      (op kb_get_memories_for_symbol
+        :zh "操作: kb_get_memories_for_symbol — 按符号名获取记忆"
+        :returns-zh "返回: Vec<KnowledgeEntry>"
+        :logic-zh "逻辑: JOIN knowledge ON kb_id ORDER BY utility DESC LIMIT 10")
+
+      (op kb_get_memories_for_file
+        :zh "操作: kb_get_memories_for_file — 按文件路径获取记忆"
+        :returns-zh "返回: Vec<(String, KnowledgeEntry)>"
+        :logic-zh "逻辑: JOIN knowledge ON kb_id ORDER BY symbol_name, utility LIMIT 30")
+
+      (op kb_delete_ast_links_for
+        :zh "操作: kb_delete_ast_links_for — 删除 AST 链接"
+        :returns-zh "返回: ()"
+        :logic-zh "逻辑: DELETE WHERE kb_id")
+
+      (op kb_ast_lazy_resolve
+        :zh "操作: kb_ast_lazy_resolve — 懒解析 AST 节点"
+        :returns-zh "返回: Option<String>"
+        :logic-zh "逻辑: 按名查 ast_nodes → UPDATE kb_ast_links.ast_node_id"))
+
+    :notes ("┌──────────────────────────────────────────────────────────┐"
+            "│ 表: prompt_snapshots                                     │"
+            "└──────────────────────────────────────────────────────────┘")
+
+    (table prompt_snapshots
+      :zh "表: prompt_snapshots (Prompt 快照表)"
+
+      (op save_prompt_snapshot
+        :zh "操作: save_prompt_snapshot — 保存 prompt 快照"
+        :on-conflict-zh "冲突处理: (task_id) DO UPDATE SET prompt, cited_kb_ids, category, created_at"
+        :returns-zh "返回: ()")
+
+      (op update_prompt_snapshot_outcome
+        :zh "操作: update_prompt_snapshot_outcome — 更新任务结果"
+        :returns-zh "返回: ()")
+
+      (op list_prompt_snapshots
+        :zh "操作: list_prompt_snapshots — 列出 prompt 快照"
+        :returns-zh "返回: Vec<(String, String, String)>"
+        :logic-zh "逻辑: WHERE category 且 task_outcome IS NOT NULL ORDER BY created_at DESC")
+
+      (op list_modified_snapshots
+        :zh "操作: list_modified_snapshots — 列出已修改快照"
+        :returns-zh "返回: Vec<(String, String, String, String)>"
+        :logic-zh "逻辑: 多表 JOIN: 成功的快照且引用的 KB 在快照后被修改"))))

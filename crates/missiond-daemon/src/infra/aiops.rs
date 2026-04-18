@@ -120,9 +120,15 @@ pub(crate) async fn health_scan(state: &AppState) {
                 created_at: chrono::Utc::now().to_rfc3339(),
             };
 
+            let incident_clone = incident.clone();
             if let Err(e) = state.incident_tx.try_send(incident) {
                 warn!(server_id = %server_id, "Incident channel full, dropping health check: {}", e);
             }
+            // Phase 6 dual-emit to the v2 bus. MPSC kept until Phase 7.
+            let _ = state
+                .bus
+                .publish_incident(crate::bus::incident_reported(incident_clone))
+                .await;
         }
     }
 }
@@ -311,11 +317,11 @@ pub(crate) async fn process_incident(
                     "AIOps: incident → board task created"
                 );
                 // Notify autopilot
-                state
-                    .event_bus
-                    .publish(crate::event_bus::DaemonEvent::TaskCreated {
-                        task_id: String::new(),
-                    });
+                let ev = crate::event_bus::DaemonEvent::TaskCreated {
+                    task_id: String::new(),
+                };
+                state.event_bus.publish(ev.clone());
+                let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
                 Some(task.id.to_string())
             }
             Err(e) => {
@@ -404,11 +410,11 @@ pub(crate) async fn create_pty_remediation_task(
                 "PTY remediation: Board task created for Opus slot"
             );
             // Notify autopilot to pick up immediately
-            state
-                .event_bus
-                .publish(crate::event_bus::DaemonEvent::TaskCreated {
-                    task_id: String::new(),
-                });
+            let ev = crate::event_bus::DaemonEvent::TaskCreated {
+                task_id: String::new(),
+            };
+            state.event_bus.publish(ev.clone());
+            let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
         }
         Err(e) => {
             error!(error = %e, "PTY remediation: failed to create Board task");

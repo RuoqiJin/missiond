@@ -1,5 +1,6 @@
 use tracing::{debug, info, warn};
 
+use crate::bus::BusServices;
 use crate::engine::intent_engine::{request_default_slot, request_execution_slot};
 use crate::event_bus::{DaemonEvent, EventBus, TraceContext};
 use crate::state::{AppState, ExtractionPhase, ExtractionState};
@@ -16,26 +17,38 @@ fn set_extraction_phase(
     phase: ExtractionPhase,
     active_type: Option<&str>,
     event_bus: &EventBus,
+    bus: &Arc<BusServices>,
     slot_id: &str,
     trace_id: Option<&str>,
 ) {
     es.phase = phase;
+    let ev = DaemonEvent::MemoryPhaseChanged {
+        slot_id: slot_id.to_string(),
+        phase: format!("{:?}", phase),
+        active_type: active_type.map(|s| s.to_string()),
+    };
     event_bus.publish_traced(
-        DaemonEvent::MemoryPhaseChanged {
-            slot_id: slot_id.to_string(),
-            phase: format!("{:?}", phase),
-            active_type: active_type.map(|s| s.to_string()),
-        },
+        ev.clone(),
         TraceContext {
             trace_id: trace_id.map(|s| s.to_string()),
             summary: Some(format!("{} → {:?}", slot_id, phase)),
             ..Default::default()
         },
     );
+    let bus_arc = Arc::clone(bus);
+    tokio::spawn(async move {
+        let _ = crate::bus::publish_v1_shim(&bus_arc, &ev).await;
+    });
 }
 
 /// Helper: emit SlotTaskDispatched event for timeline visibility.
-fn emit_dispatch_event(event_bus: &EventBus, slot_id: &str, purpose: &str, prompt: &str) {
+fn emit_dispatch_event(
+    event_bus: &EventBus,
+    bus: &Arc<BusServices>,
+    slot_id: &str,
+    purpose: &str,
+    prompt: &str,
+) {
     let preview = if prompt.len() > 200 {
         let mut end = 200;
         while end > 0 && !prompt.is_char_boundary(end) {
@@ -45,13 +58,18 @@ fn emit_dispatch_event(event_bus: &EventBus, slot_id: &str, purpose: &str, promp
     } else {
         prompt.to_string()
     };
-    event_bus.publish(DaemonEvent::SlotTaskDispatched {
+    let ev = DaemonEvent::SlotTaskDispatched {
         slot_id: slot_id.to_string(),
         task_id: None,
         purpose: purpose.to_string(),
         prompt_chars: prompt.len(),
         preview,
         cited_kb_ids: vec![],
+    };
+    event_bus.publish(ev.clone());
+    let bus_arc = Arc::clone(bus);
+    tokio::spawn(async move {
+        let _ = crate::bus::publish_v1_shim(&bus_arc, &ev).await;
     });
 }
 
@@ -193,6 +211,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
             ExtractionPhase::Sending,
             Some("realtime"),
             &state.event_bus,
+            &state.bus,
             MEMORY_SLOT_ID,
             Some(&task_id),
         );
@@ -207,7 +226,7 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
     info!("Triggering realtime extraction via MCP pull");
 
     // Emit dispatch event for timeline visibility
-    emit_dispatch_event(&state.event_bus, MEMORY_SLOT_ID, "extraction", &prompt);
+    emit_dispatch_event(&state.event_bus, &state.bus, MEMORY_SLOT_ID, "extraction", &prompt);
 
     let pty = Arc::clone(&state.pty);
     let extraction_state = Arc::clone(&state.extraction_state);
@@ -492,6 +511,7 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
                 ExtractionPhase::Sending,
                 Some("deep_analysis"),
                 &state.event_bus,
+                &state.bus,
                 MEMORY_SLOW_SLOT_ID,
                 Some(&conv.id),
             );
@@ -506,6 +526,7 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
         // Emit dispatch event for timeline visibility
         emit_dispatch_event(
             &state.event_bus,
+            &state.bus,
             MEMORY_SLOW_SLOT_ID,
             "deep_analysis",
             &prompt,
@@ -691,6 +712,7 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
             ExtractionPhase::Sending,
             Some("kb_consolidation"),
             &state.event_bus,
+            &state.bus,
             MEMORY_SLOW_SLOT_ID,
             Some(&task_id),
         );
@@ -702,6 +724,7 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
     // Emit dispatch event for timeline visibility
     emit_dispatch_event(
         &state.event_bus,
+        &state.bus,
         MEMORY_SLOW_SLOT_ID,
         "consolidation",
         prompt,

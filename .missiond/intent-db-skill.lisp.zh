@@ -1,0 +1,138 @@
+(zh
+  :header (""
+           "MissionD 数据库层 — 技能与 AST (SQLite)"
+           "skill_topics、skill_blocks、skill_versions、skill_executions、"
+           "ast_nodes、ast_file_meta"
+           "")
+
+  (pattern crud-gateway
+    :zh "模式: crud-gateway"
+
+    ;; ┌──────────────────────────────────────────────────────────┐
+    ;; │ Table: skill_topics                                      │
+    ;; └──────────────────────────────────────────────────────────┘
+    (table skill_topics
+      :zh "表: skill_topics"
+      :notes ("" "│ 表: skill_topics                                         │" "")
+
+      (op skill_topic_upsert
+        :zh "操作: skill_topic_upsert"
+        :logic-zh "INSERT OR REPLACE，含时间戳管理")
+
+      (op skill_topic_upsert_full
+        :zh "操作: skill_topic_upsert_full"
+        :logic-zh "完整 INSERT OR REPLACE，包含所有扩展字段")
+
+      (op skill_topic_get
+        :zh "操作: skill_topic_get"
+        :logic-zh "SELECT * 并映射到 struct")
+
+      (op skill_topic_list
+        :zh "操作: skill_topic_list"
+        :logic-zh "SELECT * ORDER BY topic 并映射到 struct")
+
+      (op skill_topic_hit
+        :zh "操作: skill_topic_hit")
+
+      (op skill_topic_update_stats
+        :zh "操作: skill_topic_update_stats")
+
+      (op skill_set_topic_embedding
+        :zh "操作: skill_set_topic_embedding"
+        :logic-zh "UPDATE embedding blob + provider WHERE topic")
+
+      (op skill_load_topic_embeddings
+        :zh "操作: skill_load_topic_embeddings"
+        :logic-zh "反序列化所有 topic 的 embedding blob")
+
+      (op skill_topics_missing_embedding
+        :zh "操作: skill_topics_missing_embedding"
+        :logic-zh "取 topic 与 description,WHERE embedding IS NULL")
+
+      (op skill_topics_stale_embedding
+        :zh "操作: skill_topics_stale_embedding"
+        :logic-zh "取 topic 与 description,WHERE provider != current")
+
+      (op skill_search_topics
+        :zh "操作: skill_search_topics"
+        :logic-zh "对 topic + description + aka 执行 LIKE 搜索"))
+
+    ;; ┌──────────────────────────────────────────────────────────┐
+    ;; │ Table: skill_blocks                                      │
+    ;; └──────────────────────────────────────────────────────────┘
+    (table skill_blocks
+      :zh "表: skill_blocks"
+      :notes ("" "│ 表: skill_blocks                                         │" "")
+
+      (op skill_block_insert
+        :zh "操作: skill_block_insert"
+        :logic-zh "INSERT 并同步 FTS")
+
+      (op skill_block_update
+        :zh "操作: skill_block_update"
+        :logic-zh "UPDATE content 并同步 FTS")
+
+      (op skill_block_set_status
+        :zh "操作: skill_block_set_status")
+
+      (op skill_blocks_for_topic
+        :zh "操作: skill_blocks_for_topic"
+        :logic-zh "SELECT * WHERE topic AND status=active ORDER BY sort_order")
+
+      (op skill_blocks_delete_topic
+        :zh "操作: skill_blocks_delete_topic"
+        :logic-zh "DELETE blocks 并清理 FTS,WHERE topic")
+
+      (op skill_search_fts
+        :zh "操作: skill_search_fts"
+        :logic-zh "FTS5 搜索,含 snippet 并 JOIN topic")
+
+      (op skill_rebuild_fts
+        :zh "操作: skill_rebuild_fts"
+        :logic-zh "DROP 并从 skill_blocks 重建 FTS 表"))
+
+    ;; ┌──────────────────────────────────────────────────────────┐
+    ;; │ Table: skill_versions                                    │
+    ;; └──────────────────────────────────────────────────────────┘
+    (table skill_versions
+      :zh "表: skill_versions"
+      :notes ("" "│ 表: skill_versions                                       │" "")
+
+      (op skill_version_save
+        :zh "操作: skill_version_save"
+        :logic-zh "INSERT,含自增 ID 与时间戳")
+
+      (op skill_version_list
+        :zh "操作: skill_version_list"
+        :logic-zh "SELECT * WHERE topic ORDER BY id DESC LIMIT")
+
+      (op skill_version_get
+        :zh "操作: skill_version_get"
+        :logic-zh "SELECT * WHERE id"))
+
+    ;; ┌──────────────────────────────────────────────────────────┐
+    ;; │ Table: skill_executions                                  │
+    ;; └──────────────────────────────────────────────────────────┘
+    (table skill_executions
+      :zh "表: skill_executions"
+      :notes ("" "│ 表: skill_executions                                     │" "")
+
+      (op skill_execution_insert
+        :zh "操作: skill_execution_insert"
+        :logic-zh "INSERT,自动填充时间戳")
+
+      (op skill_execution_update
+        :zh "操作: skill_execution_update"
+        :logic-zh "UPDATE status + steps + 可选 error + 完成时间戳")
+
+      (op skill_execution_update_with_duration
+        :zh "操作: skill_execution_update_with_duration"
+        :logic-zh "同上,额外显式写入 duration_ms")
+
+      (op skill_execution_stats
+        :zh "操作: skill_execution_stats"
+        :logic-zh "GROUP BY skill_topic:total、completed、failed、avg_duration")
+
+      (op skill_execution_is_running
+        :zh "操作: skill_execution_is_running"
+        :logic-zh "EXISTS WHERE status=running AND topic AND action_id"))))

@@ -311,18 +311,20 @@ async fn execute_insights(state: &AppState, insights: &[Insight]) -> usize {
 
     for insight in insights {
         // Publish InsightGenerated to Timeline (feedback loop: insights enter the timeline)
+        let ev = DaemonEvent::InsightGenerated {
+            category: insight.category.clone(),
+            priority: insight.priority.clone(),
+            title: insight.title.clone(),
+        };
         state.event_bus.publish_traced(
-            DaemonEvent::InsightGenerated {
-                category: insight.category.clone(),
-                priority: insight.priority.clone(),
-                title: insight.title.clone(),
-            },
+            ev.clone(),
             TraceContext {
                 trace_id: Some(trace_id.clone()),
                 summary: Some(format!("[L4] {}", insight.title)),
                 ..Default::default()
             },
         );
+        let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
 
         match insight.action.as_str() {
             "create_task" => {
