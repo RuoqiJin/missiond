@@ -13,7 +13,6 @@ use missiond_core::types::SharedProjectRegistry;
 use crate::bus::BusServices;
 use crate::control_tree::ControlManager;
 use crate::daemon_stats::DaemonStats;
-use crate::event_bus::EventBus;
 use crate::gemini_client::GeminiClient;
 use crate::mcp_client::McpProcessClient;
 use crate::minimax_gateway::MinimaxHandle;
@@ -178,13 +177,10 @@ pub(crate) struct AppState {
     /// In-memory embedding cache for ALL KB entries (for hybrid search).
     pub(crate) kb_search_cache: missiond_core::embedding::EmbeddingCache,
     /// Embedding worker channel: event-driven summary + embedding generation.
+    /// Kept as an internal worker queue (not a bus event) per the v2 frozen
+    /// lisp §4.2.a 12-domain contract (no `EmbeddingEvent` domain exists).
     pub(crate) embedding_tx: tokio::sync::mpsc::Sender<EmbeddingTask>,
-    /// AIOps: incident event bus sender (try_send only, capacity 100).
-    pub(crate) incident_tx: tokio::sync::mpsc::Sender<missiond_core::types::MissionIncident>,
-    /// Centralized event bus for inter-module communication (replaces Notify signals).
-    pub(crate) event_bus: Arc<EventBus>,
-    /// v2 event bus (Phase 6+) — producers dual-emit to Log while v1
-    /// `event_bus` continues to serve legacy subscribers until Phase 7.
+    /// v2 event bus — every producer in the daemon publishes through this.
     pub(crate) bus: Arc<BusServices>,
     /// Process-level daemon statistics (counters + histograms).
     pub(crate) stats: Arc<DaemonStats>,
@@ -253,9 +249,11 @@ pub(crate) struct AppState {
     /// IngestionRouter claims these when a new session appears in the matching project.
     pub(crate) pending_slot_spawns:
         Arc<tokio::sync::RwLock<Vec<(String, String, String, tokio::time::Instant)>>>,
-    /// Cursor ack channel: message_handler sends (jsonl_path, byte_offset) after successful INSERT.
-    /// Only ack'd cursors are persisted to DB — prevents data loss on crash.
-    pub(crate) cursor_ack_tx: tokio::sync::mpsc::UnboundedSender<(String, u64)>,
+    /// Shared watcher-cursor map: `jsonl_path → highest-acked byte offset`.
+    /// `conversation_logger` writes to this (replacing the old
+    /// `cursor_ack_tx` MPSC) and the watcher persists by reading drains.
+    pub(crate) conversation_cursor_map:
+        Arc<tokio::sync::Mutex<HashMap<String, u64>>>,
 }
 
 /// M4: Async task submission — replaces MissionControl::submit() to avoid split-brain.

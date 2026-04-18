@@ -17,9 +17,9 @@ use std::time::Duration;
 use anyhow::Result;
 use tracing::{debug, info, warn};
 
-use crate::event_bus::DaemonEvent;
 use crate::minimax_client::ChatMessage;
 use crate::state::AppState;
+use missiond_core::event::events::WorkerEvent;
 
 /// Minimum content length (chars) to trigger briefing.
 const MIN_CONTENT_CHARS: usize = 300;
@@ -67,13 +67,14 @@ async fn process_entry(
             _ => "[思考] ...".to_string(),
         };
         state.store.update_timeline_summary(seq, &summary).await?;
-        let ev = DaemonEvent::BriefingSummaryGenerated {
-            target_seq: seq,
-            summary: summary.clone(),
-            method: "static_rule".into(),
-        };
-        state.event_bus.publish(ev.clone());
-        let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+        let _ = state
+            .bus
+            .publish_worker(WorkerEvent::BriefingSummaryGenerated {
+                target_seq: seq,
+                summary: summary.clone(),
+                method: "static_rule".into(),
+            })
+            .await;
         debug!(seq, "Briefing: thinking message — static rule");
         return Ok(ProcessResult::Local);
     }
@@ -89,13 +90,14 @@ async fn process_entry(
         // to match forever (WHERE summary = preview), creating infinite loop.
         let briefed = format!("⚙ {}", preview);
         state.store.update_timeline_summary(seq, &briefed).await?;
-        let ev = DaemonEvent::BriefingSummaryGenerated {
-            target_seq: seq,
-            summary: briefed.clone(),
-            method: "tool_skip".into(),
-        };
-        state.event_bus.publish(ev.clone());
-        let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+        let _ = state
+            .bus
+            .publish_worker(WorkerEvent::BriefingSummaryGenerated {
+                target_seq: seq,
+                summary: briefed.clone(),
+                method: "tool_skip".into(),
+            })
+            .await;
         debug!(seq, preview = %preview, "Briefing: tool-only message, marked as briefed");
         return Ok(ProcessResult::Local);
     }
@@ -180,13 +182,14 @@ async fn process_entry(
     let summary = truncate_at_boundary(&summary, max_chars + 30);
 
     state.store.update_timeline_summary(seq, &summary).await?;
-    let ev = DaemonEvent::BriefingSummaryGenerated {
-        target_seq: seq,
-        summary: summary.clone(),
-        method: "sonnet".into(),
-    };
-    state.event_bus.publish(ev.clone());
-    let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+    let _ = state
+        .bus
+        .publish_worker(WorkerEvent::BriefingSummaryGenerated {
+            target_seq: seq,
+            summary: summary.clone(),
+            method: "sonnet".into(),
+        })
+        .await;
     info!(
         seq,
         chars = summary.len(),
@@ -294,11 +297,12 @@ impl super::BackgroundWorker for BriefingWorker {
             }
 
             let batch_size = pending.len();
-            let ev = DaemonEvent::BriefingBatchStarted {
-                pending_count: batch_size,
-            };
-            state.event_bus.publish(ev.clone());
-            let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+            let _ = state
+                .bus
+                .publish_worker(WorkerEvent::BriefingBatchStarted {
+                    pending_count: batch_size,
+                })
+                .await;
             let mut processed = 0;
             let mut llm_calls = 0;
 

@@ -6,10 +6,10 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::decision_harvest::harvest_decisions_for_task;
-use crate::event_bus::{DaemonEvent, TraceContext};
 use crate::lenient;
 use crate::llm::gemini_client::current_session_id;
 use crate::state::{AppState, SessionTaskBinding};
+use missiond_core::event::events::{BoardEvent, SlotEvent};
 
 /// Record implicit session→task binding for auto-progress extraction.
 /// Called when Claude Code interacts with a Board task via MCP.
@@ -78,43 +78,27 @@ async fn board_get(state: &AppState, args: Value) -> Result<ToolResult> {
 
 /// Publish BoardTaskCreated event.
 fn publish_board_created(state: &AppState, task: &missiond_core::types::BoardTask) {
-    let ev = DaemonEvent::BoardTaskCreated {
+    let ev = BoardEvent::TaskCreated {
         task_id: task.id.to_string(),
         title: task.title.clone(),
         category: task.category.clone(),
     };
-    state.event_bus.publish_traced(
-        ev.clone(),
-        TraceContext {
-            trace_id: Some(task.id.to_string()),
-            summary: Some(format!("board: created {}", task.title)),
-            ..Default::default()
-        },
-    );
     let bus = Arc::clone(&state.bus);
     tokio::spawn(async move {
-        let _ = crate::bus::publish_v1_shim(&bus, &ev).await;
+        let _ = bus.publish_board(ev).await;
     });
 }
 
 /// Publish BoardTaskUpdated event (generic field update).
 fn publish_board_update(state: &AppState, task: &missiond_core::types::BoardTask) {
-    let ev = DaemonEvent::BoardTaskUpdated {
+    let ev = BoardEvent::Updated {
         task_id: task.id.to_string(),
         status: format!("{:?}", task.status),
         category: task.category.clone(),
     };
-    state.event_bus.publish_traced(
-        ev.clone(),
-        TraceContext {
-            trace_id: Some(task.id.to_string()),
-            summary: Some(format!("board: {} → {:?}", task.title, task.status)),
-            ..Default::default()
-        },
-    );
     let bus = Arc::clone(&state.bus);
     tokio::spawn(async move {
-        let _ = crate::bus::publish_v1_shim(&bus, &ev).await;
+        let _ = bus.publish_board(ev).await;
     });
 }
 
@@ -124,22 +108,14 @@ fn publish_board_status_changed(
     task: &missiond_core::types::BoardTask,
     old_status: &str,
 ) {
-    let ev = DaemonEvent::BoardTaskStatusChanged {
+    let ev = BoardEvent::StatusChanged {
         task_id: task.id.to_string(),
         old_status: old_status.to_string(),
         new_status: format!("{:?}", task.status),
     };
-    state.event_bus.publish_traced(
-        ev.clone(),
-        TraceContext {
-            trace_id: Some(task.id.to_string()),
-            summary: Some(format!("board: {} → {:?}", task.title, task.status)),
-            ..Default::default()
-        },
-    );
     let bus = Arc::clone(&state.bus);
     tokio::spawn(async move {
-        let _ = crate::bus::publish_v1_shim(&bus, &ev).await;
+        let _ = bus.publish_board(ev).await;
     });
 }
 
@@ -445,19 +421,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             if deleted > 0 {
-                let ev = DaemonEvent::BoardTaskDeleted {
+                let ev = BoardEvent::Deleted {
                     task_id: id.clone(),
                     title: task_title.clone(),
                 };
-                state.event_bus.publish_traced(
-                    ev.clone(),
-                    TraceContext {
-                        trace_id: Some(id.clone()),
-                        summary: Some(format!("board: deleted {}", task_title)),
-                        ..Default::default()
-                    },
-                );
-                let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+                let _ = state.bus.publish_board(ev).await;
             }
             Ok(ToolResult::json(&serde_json::json!({
                 "deleted": deleted,
@@ -488,22 +456,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             {
                 Ok(Some(task)) => {
                     record_session_task_binding(state, task.id.as_str(), &task.title);
-                    let ev = DaemonEvent::BoardTaskClaimed {
+                    let ev = BoardEvent::Claimed {
                         task_id: task.id.to_string(),
                         slot_id: executor_id.to_string(),
                     };
-                    state.event_bus.publish_traced(
-                        ev.clone(),
-                        TraceContext {
-                            trace_id: Some(task.id.to_string()),
-                            summary: Some(format!(
-                                "board: {} claimed by {}",
-                                task.title, executor_id
-                            )),
-                            ..Default::default()
-                        },
-                    );
-                    let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+                    let _ = state.bus.publish_board(ev).await;
                     Ok(ToolResult::json_pretty(&task))
                 }
                 Ok(None) => {
@@ -549,20 +506,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             if let Ok(Some(task)) = state.store.get_board_task(&task_id).await {
                 record_session_task_binding(state, task.id.as_str(), &task.title);
             }
-            let ev = DaemonEvent::BoardTaskNoteAdded {
+            let ev = BoardEvent::NoteAdded {
                 task_id: task_id.clone(),
                 note_id: note.id.clone(),
                 content_preview: content_preview.clone(),
             };
-            state.event_bus.publish_traced(
-                ev.clone(),
-                TraceContext {
-                    trace_id: Some(task_id),
-                    summary: Some(format!("board note: {}", content_preview)),
-                    ..Default::default()
-                },
-            );
-            let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+            let _ = state.bus.publish_board(ev).await;
             Ok(ToolResult::json_pretty(&note))
         }
 
@@ -728,7 +677,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                         } else {
                             decompose_prompt.clone()
                         };
-                        let ev = crate::event_bus::DaemonEvent::SlotTaskDispatched {
+                        let ev = SlotEvent::TaskDispatched {
                             slot_id: slot_id.clone(),
                             task_id: Some(submit_task_id.clone()),
                             purpose: "decompose".to_string(),
@@ -736,8 +685,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                             preview,
                             cited_kb_ids: vec![],
                         };
-                        state.event_bus.publish(ev.clone());
-                        let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+                        let _ = state.bus.publish_slot(ev).await;
                     }
                 }
             }

@@ -7,8 +7,8 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use crate::engine::intent_engine::request_execution_slot;
-use crate::event_bus::DaemonEvent;
 use crate::state::{AppState, MEMORY_SLOW_SLOT_ID};
+use missiond_core::event::events::{MemoryEvent, SlotEvent};
 use missiond_core::SessionState;
 
 /// Cadence guard key for daemon_state.
@@ -117,23 +117,23 @@ pub(crate) async fn check_historical_scan(state: &AppState) {
     );
 
     // Dispatch to slow memory slot
-    let ev_dispatch = DaemonEvent::SlotTaskDispatched {
-        slot_id: MEMORY_SLOW_SLOT_ID.to_string(),
-        task_id: None,
-        purpose: "habit_scan".to_string(),
-        prompt_chars: prompt.len(),
-        preview: format!(
-            "Habit scan: {} sessions ({} remaining)",
-            batch_size, unscanned
-        ),
-        cited_kb_ids: vec![],
-    };
-    state.event_bus.publish(ev_dispatch.clone());
-    let _ = crate::bus::publish_v1_shim(&state.bus, &ev_dispatch).await;
+    let _ = state
+        .bus
+        .publish_slot(SlotEvent::TaskDispatched {
+            slot_id: MEMORY_SLOW_SLOT_ID.to_string(),
+            task_id: None,
+            purpose: "habit_scan".to_string(),
+            prompt_chars: prompt.len(),
+            preview: format!(
+                "Habit scan: {} sessions ({} remaining)",
+                batch_size, unscanned
+            ),
+            cited_kb_ids: vec![],
+        })
+        .await;
 
     let pty = Arc::clone(&state.pty);
     let store = Arc::clone(&state.store);
-    let event_bus = state.event_bus.clone();
     let bus = Arc::clone(&state.bus);
     let ids = session_ids.clone();
 
@@ -152,13 +152,13 @@ pub(crate) async fn check_historical_scan(state: &AppState) {
                         warn!(session_id = id, error = %e, "Failed to mark habit scanned");
                     }
                 }
-                let ev = DaemonEvent::MemoryPhaseChanged {
-                    slot_id: MEMORY_SLOW_SLOT_ID.to_string(),
-                    phase: "Idle".to_string(),
-                    active_type: Some("habit_scan_complete".to_string()),
-                };
-                event_bus.publish(ev.clone());
-                let _ = crate::bus::publish_v1_shim(&bus, &ev).await;
+                let _ = bus
+                    .publish_memory(MemoryEvent::PhaseChanged {
+                        slot_id: MEMORY_SLOW_SLOT_ID.to_string(),
+                        phase: "Idle".to_string(),
+                        active_type: Some("habit_scan_complete".to_string()),
+                    })
+                    .await;
             }
             Err(e) => {
                 warn!(error = %e, "Habit scan batch failed");

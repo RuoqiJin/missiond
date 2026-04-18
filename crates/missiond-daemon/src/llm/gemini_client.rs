@@ -27,8 +27,8 @@ use governor::{
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
-use crate::event_bus::{DaemonEvent, TimelineEntry};
 use crate::gemini_cli::{GeminiCli, GeminiCliProgress};
+use missiond_core::event::events::{LlmEvent, Provider};
 
 type GovernorLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
@@ -69,10 +69,8 @@ pub(crate) struct GeminiClient {
     rate_limiter: Arc<GovernorLimiter>,
     semaphore: Arc<Semaphore>,
     cli: Option<Arc<GeminiCli>>,
-    event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>,
-    /// Phase 6 dual-emit handle: mirrors every v1 `DaemonEvent` onto the v2
-    /// bus so Phase 7 subscribers have something to attach to. Optional to
-    /// keep tests / early-boot paths that never touch the bus working.
+    /// Phase 8: every LLM event goes through the v2 bus. Optional so tests
+    /// can construct a client without a live bus.
     bus: Option<Arc<crate::bus::BusServices>>,
     /// Atomic counters for DaemonStats aggregation.
     pub(crate) request_count: Arc<AtomicU64>,
@@ -139,13 +137,12 @@ impl RequestGuard<'_> {
 
 impl GeminiClient {
     /// Create a new HTTP-mode client with 20 RPM limit and 3 max concurrent requests.
-    pub fn new(event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>) -> Self {
+    pub fn new() -> Self {
         let quota = Quota::per_minute(NonZeroU32::new(20).unwrap());
         Self {
             rate_limiter: Arc::new(RateLimiter::direct(quota)),
             semaphore: Arc::new(Semaphore::new(3)),
             cli: None,
-            event_tx,
             bus: None,
             request_count: Arc::new(AtomicU64::new(0)),
             error_count: Arc::new(AtomicU64::new(0)),
@@ -153,26 +150,26 @@ impl GeminiClient {
         }
     }
 
-    /// Attach the v2 `BusServices` so every `DaemonEvent` emitted by this
-    /// client is mirrored onto the new log (Phase 6 dual-emit).
+    /// Attach the v2 `BusServices` so every LLM event emitted by this client
+    /// flows through the log.
     pub fn with_bus(mut self, bus: Arc<crate::bus::BusServices>) -> Self {
         self.bus = Some(bus);
         self
     }
 
-    fn shim(&self, ev: &DaemonEvent) {
+    /// Spawn a detached task that publishes `ev` on the bus if one is attached.
+    fn publish(&self, ev: LlmEvent) {
         if let Some(bus) = self.bus.clone() {
-            crate::bus::spawn_v1_shim(bus, ev.clone());
+            tokio::spawn(async move {
+                let _ = bus.publish_llm(ev).await;
+            });
         }
     }
 
     /// Create a CLI-mode client that routes through Gemini CLI subprocess or PTY.
     ///
     /// Semaphore is 1 when PTY transport is active (PTY sessions are serial).
-    pub fn with_cli(
-        cli: GeminiCli,
-        event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>,
-    ) -> Self {
+    pub fn with_cli(cli: GeminiCli) -> Self {
         // CLI mode: relax rate limit (Google One AI Pro has generous limits)
         let quota = Quota::per_minute(NonZeroU32::new(60).unwrap());
         // PTY mode: 1 concurrent (spawn-per-call, serial queue)
@@ -182,7 +179,6 @@ impl GeminiClient {
             rate_limiter: Arc::new(RateLimiter::direct(quota)),
             semaphore: Arc::new(Semaphore::new(concurrency)),
             cli: Some(Arc::new(cli)),
-            event_tx,
             bus: None,
             request_count: Arc::new(AtomicU64::new(0)),
             error_count: Arc::new(AtomicU64::new(0)),
@@ -301,9 +297,8 @@ impl GeminiClient {
         // 4. All work in async move block — ? returns are captured here,
         //    never bypassing the guard in the outer scope.
         let request_id_clone = guard.request_id.clone();
-        let span_id_clone = guard.span_id.clone();
-        let session_id_clone = guard.session_id.clone();
-        let event_tx_clone = self.event_tx.clone();
+        let _span_id_clone = guard.span_id.clone();
+        let _session_id_clone = guard.session_id.clone();
         let bus_clone = self.bus.clone();
 
         let result: Result<serde_json::Value> = async move {
@@ -349,12 +344,9 @@ impl GeminiClient {
                 let (progress_tx, mut progress_rx) =
                     tokio::sync::mpsc::unbounded_channel::<GeminiCliProgress>();
 
-                // Spawn forwarder: converts GeminiCliProgress → DaemonEvent::CliToolActivity
+                // Spawn forwarder: converts GeminiCliProgress → LlmEvent::ToolActivity.
                 // Also collects tool calls for inclusion in the response.
                 let fwd_request_id = request_id_clone;
-                let fwd_span_id = span_id_clone;
-                let fwd_session_id = session_id_clone;
-                let fwd_event_tx = event_tx_clone;
                 let fwd_bus = bus_clone;
                 let collected_tools: Arc<StdMutex<Vec<serde_json::Value>>> =
                     Arc::new(StdMutex::new(Vec::new()));
@@ -384,8 +376,8 @@ impl GeminiClient {
                             }
                         }
 
-                        let event = DaemonEvent::CliToolActivity {
-                            engine: missiond_core::CliEngine::Gemini,
+                        let ev = LlmEvent::ToolActivity {
+                            provider: Provider::Gemini,
                             request_id: fwd_request_id.clone(),
                             tool_seq: prog.tool_seq,
                             activity: prog.activity.clone(),
@@ -394,28 +386,11 @@ impl GeminiClient {
                             result_preview: prog.result_preview.clone(),
                             is_error: prog.is_error,
                         };
-                        let summary = match prog.activity.as_str() {
-                            "tool_use" => format!(
-                                "#{} → {}",
-                                prog.tool_seq,
-                                prog.tool_name.as_deref().unwrap_or("?")
-                            ),
-                            _ => format!(
-                                "#{} ← {}",
-                                prog.tool_seq,
-                                if prog.is_error { "error" } else { "ok" }
-                            ),
-                        };
-                        let entry = TimelineEntry {
-                            event: event.clone(),
-                            trace_id: fwd_session_id.clone(),
-                            span_id: uuid::Uuid::new_v4().to_string(),
-                            parent_span_id: Some(fwd_span_id.clone()),
-                            summary: Some(summary),
-                        };
-                        let _ = fwd_event_tx.send(entry);
                         if let Some(ref bus) = fwd_bus {
-                            crate::bus::spawn_v1_shim(bus.clone(), event);
+                            let bus = bus.clone();
+                            tokio::spawn(async move {
+                                let _ = bus.publish_llm(ev).await;
+                            });
                         }
                     }
                 });
@@ -537,10 +512,10 @@ impl GeminiClient {
             .and_then(|m| m.get("content").and_then(|c| c.as_str()))
             .map(|s| s.to_string());
 
-        let trace_id = session_id.clone();
-        let parent = current_parent_span_id(); // Cross-lane causal link
-        let event = DaemonEvent::CliRequestStarted {
-            engine: missiond_core::CliEngine::Gemini,
+        let _ = current_parent_span_id(); // future: thread through SpanContext
+        let _ = span_id;
+        self.publish(LlmEvent::RequestStarted {
+            provider: Provider::Gemini,
             request_id: request_id.to_string(),
             caller: caller.to_string(),
             session_id,
@@ -548,19 +523,7 @@ impl GeminiClient {
             prompt_chars,
             prompt_text,
             extra: serde_json::Value::Object(Default::default()),
-        };
-        self.shim(&event);
-        let entry = TimelineEntry {
-            event,
-            trace_id,
-            span_id: span_id.to_string(),
-            parent_span_id: parent,
-            summary: Some(format!(
-                "{} → {} (prompt {}ch)",
-                caller, model, prompt_chars
-            )),
-        };
-        let _ = self.event_tx.send(entry);
+        });
     }
 
     /// Emit "request completed" event — fires when the LLM response arrives.
@@ -617,10 +580,10 @@ impl GeminiClient {
             "gemini_request"
         );
 
-        let trace_id = session_id.clone();
-        let parent = current_parent_span_id(); // Cross-lane causal link (same as started)
-        let event = DaemonEvent::CliRequestCompleted {
-            engine: missiond_core::CliEngine::Gemini,
+        let _ = current_parent_span_id();
+        let _ = span_id;
+        self.publish(LlmEvent::RequestCompleted {
+            provider: Provider::Gemini,
             request_id: request_id.to_string(),
             caller: caller.to_string(),
             session_id,
@@ -636,22 +599,7 @@ impl GeminiClient {
                 "queue_wait_ms": queue_wait.as_millis() as u64,
                 "retry_count": retry_count,
             }),
-        };
-        self.shim(&event);
-        // Use same span_id as the started event so they are linked as a pair
-        let entry = TimelineEntry {
-            event,
-            trace_id,
-            span_id: span_id.to_string(),
-            parent_span_id: parent,
-            summary: Some(format!(
-                "{} → {} ({}ms)",
-                caller,
-                model,
-                api_duration.as_millis()
-            )),
-        };
-        let _ = self.event_tx.send(entry);
+        });
     }
 
     async fn retry_with_backoff(

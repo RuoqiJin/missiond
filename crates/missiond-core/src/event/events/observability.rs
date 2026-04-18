@@ -44,6 +44,11 @@ pub enum ObservabilityEvent {
         lag_seq: i64,
         dropped_count: u64,
     },
+    /// Daily retention cron summary. Emitted once per run.
+    RetentionReport {
+        /// Arbitrary JSON summary: counts of events/blobs/orphans deleted.
+        summary: serde_json::Value,
+    },
 }
 
 impl DomainEvent for ObservabilityEvent {
@@ -56,6 +61,7 @@ impl DomainEvent for ObservabilityEvent {
             Self::HealthSnapshot { .. } => "health_snapshot",
             Self::BusMetric { .. } => "bus_metric",
             Self::SlowConsumer { .. } => "slow_consumer",
+            Self::RetentionReport { .. } => "retention_report",
         }
     }
 
@@ -63,6 +69,7 @@ impl DomainEvent for ObservabilityEvent {
         match self {
             // Snapshots bundle slot state + worker stats → a few KB.
             Self::HealthSnapshot { .. } => 4096,
+            Self::RetentionReport { .. } => 1024,
             _ => 256,
         }
     }
@@ -94,6 +101,9 @@ mod tests {
                 domain: "memory".into(),
                 lag_seq: 0,
                 dropped_count: 0,
+            },
+            ObservabilityEvent::RetentionReport {
+                summary: serde_json::json!({}),
             },
         ];
         for c in &cases {

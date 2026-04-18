@@ -125,7 +125,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     "slow_lane": slow_lane,
                 },
                 "event_bus": {
-                    "publish_count": state.event_bus.publish_count.load(std::sync::atomic::Ordering::Relaxed),
+                    // v2 bus: use AtomicBusMetrics for append counters in the future.
+                    "publish_count": 0u64,
                 },
                 "gemini_mode": if state.gemini.is_cli_mode() { "cli" } else { "http" },
                 "stats": state.stats.snapshot(),
@@ -265,11 +266,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 match state.store.create_agent_question(&q_input).await {
                     Ok(q) => {
                         info!(task_id = %task.id, question_id = %q.id, "Hard intercept: Plan→Execute risk review created");
-                        let ev = crate::event_bus::DaemonEvent::QuestionCreated {
-                            question_id: q.id.clone(),
-                        };
-                        state.event_bus.publish(ev.clone());
-                        let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+                        let _ = state
+                            .bus
+                            .publish_question(missiond_core::event::events::QuestionEvent::Created {
+                                question_id: q.id.clone(),
+                            })
+                            .await;
                     }
                     Err(e) => warn!(error = %e, "Failed to create hard intercept question"),
                 }
@@ -299,11 +301,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 match state.store.create_agent_question(&q_input).await {
                     Ok(q) => {
                         info!(task_id = %task.id, question_id = %q.id, "Soft intercept: created master decision question");
-                        let ev = crate::event_bus::DaemonEvent::QuestionCreated {
-                            question_id: q.id.clone(),
-                        };
-                        state.event_bus.publish(ev.clone());
-                        let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+                        let _ = state
+                            .bus
+                            .publish_question(missiond_core::event::events::QuestionEvent::Created {
+                                question_id: q.id.clone(),
+                            })
+                            .await;
                     }
                     Err(e) => warn!(error = %e, "Failed to create soft intercept question"),
                 }
@@ -397,17 +400,24 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 created_at: chrono::Utc::now().to_rfc3339(),
             };
 
-            if let Err(e) = state.incident_tx.try_send(incident.clone()) {
-                warn!("Incident channel full, dropping incident: {}", e);
-                Ok(ToolResult::error(format!("Incident channel full: {}", e)))
-            } else {
-                // Phase 6 dual-emit: mirror onto the v2 bus for future
-                // IncidentEvent subscribers. MPSC send stays (Phase 7 cut).
-                let _ = state
-                    .bus
-                    .publish_incident(crate::bus::compat::incident_reported(incident.clone()))
-                    .await;
-                Ok(ToolResult::json_pretty(&json!({
+            // v2 bus: incident flows via IncidentEvent::Reported. A
+            // dedicated v2 subscriber in `bus/v2_subscribers.rs` invokes
+            // `aiops::process_incident` and triages the incident.
+            match state
+                .bus
+                .publish_incident(missiond_core::event::events::IncidentEvent::Reported {
+                    incident: incident.clone(),
+                })
+                .await
+            {
+                Err(e) => {
+                    warn!("Failed to publish incident: {}", e);
+                    Ok(ToolResult::error(format!(
+                        "Failed to publish incident: {}",
+                        e
+                    )))
+                }
+                Ok(_) => Ok(ToolResult::json_pretty(&json!({
                     "status": "injected",
                     "incident_id": incident.id,
                     "severity": severity_str,

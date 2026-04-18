@@ -7,9 +7,9 @@
 use std::collections::HashSet;
 use tracing::{error, info, warn};
 
-use crate::event_bus::{DaemonEvent, TraceContext};
 use crate::events_sync;
 use crate::state::AppState;
+use missiond_core::event::events::{MessageEvent, SystemEvent};
 
 // ════════════════════════════════════════════════════════════════════════════
 // Orchestrator: coordinates the three layers
@@ -539,24 +539,18 @@ async fn emit(
                 .message_uuid
                 .clone()
                 .unwrap_or_else(|| format!("msg-{}", msg_id));
-            let ev = DaemonEvent::ConversationMessageLogged {
-                message_id: msg_id,
-                session_id: session_id.to_string(),
-                parent_session_id: parent_session_id.map(|s| s.to_string()),
-                slot_id: slot_id.map(|s| s.to_string()),
-                role: db_msg.role.clone(),
-                content_chars,
-                preview,
-            };
-            state.event_bus.publish_traced(
-                ev.clone(),
-                TraceContext {
-                    trace_id: Some(session_id.to_string()),
-                    span_id: Some(msg_span_id.clone()),
-                    ..Default::default()
-                },
-            );
-            let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+            let _ = state
+                .bus
+                .publish_message(MessageEvent::Logged {
+                    message_id: msg_id,
+                    session_id: session_id.to_string(),
+                    parent_session_id: parent_session_id.map(|s| s.to_string()),
+                    slot_id: slot_id.map(|s| s.to_string()),
+                    role: db_msg.role.clone(),
+                    content_chars,
+                    preview,
+                })
+                .await;
             if db_msg.role == "assistant" {
                 state
                     .last_msg_span
@@ -634,25 +628,20 @@ async fn emit_tool_completions(
                         s
                     }
                 };
-                let ev = DaemonEvent::ToolCompleted {
-                    session_id: session_id.to_string(),
-                    slot_id: slot_id.map(|s| s.to_string()),
-                    tool_name: tc.tool_name.clone(),
-                    status: status.clone(),
-                    is_error,
-                    input_summary: tc.input_summary.clone(),
-                    output_summary: summary.clone(),
-                };
-                state.event_bus.publish_traced(
-                    ev.clone(),
-                    TraceContext {
-                        trace_id: Some(session_id.to_string()),
-                        span_id: Some(tool_use_id.clone()),
-                        summary: Some(tool_summary),
-                        ..Default::default()
-                    },
-                );
-                let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+                let _ = state
+                    .bus
+                    .publish_system(SystemEvent::ToolCompleted {
+                        session_id: session_id.to_string(),
+                        slot_id: slot_id.map(|s| s.to_string()),
+                        tool_name: tc.tool_name.clone(),
+                        status: status.clone(),
+                        is_error,
+                        input_summary: tc.input_summary.clone(),
+                        output_summary: summary.clone(),
+                    })
+                    .await;
+                let _ = tool_summary; // drop unused var to keep warnings quiet.
+                let _ = tool_use_id;
             }
         }
     }

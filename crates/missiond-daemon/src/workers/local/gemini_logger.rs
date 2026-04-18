@@ -5,15 +5,13 @@
 //! only stores request_id references.
 
 use std::sync::Arc;
-use tokio::sync::broadcast;
 use tracing::{info, warn};
 
-use crate::event_bus::{self, TimelineEvent};
 use crate::state::AppState;
+use missiond_core::event::events::LlmEvent;
+use missiond_core::event::subscription::SubscriptionOpts;
 
-pub(crate) struct GeminiLoggerWorker {
-    pub timeline_rx: broadcast::Receiver<TimelineEvent>,
-}
+pub(crate) struct GeminiLoggerWorker;
 
 impl super::BackgroundWorker for GeminiLoggerWorker {
     const KIND: super::WorkerKind = super::WorkerKind::Local;
@@ -23,8 +21,6 @@ impl super::BackgroundWorker for GeminiLoggerWorker {
     }
 
     async fn run(self, state: Arc<AppState>, _ctx: super::WorkerContext) {
-        let mut rx = self.timeline_rx;
-
         // Startup cleanup: remove logs older than 7 days
         if let Ok(deleted) = state.store.gemini_log_cleanup(7).await {
             if deleted > 0 {
@@ -32,30 +28,35 @@ impl super::BackgroundWorker for GeminiLoggerWorker {
             }
         }
 
-        loop {
-            match rx.recv().await {
-                Ok(te) => handle_event(&state, &te.event).await,
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(
-                        skipped = n,
-                        "Gemini log subscriber lagged, some requests not logged"
-                    );
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    info!("Gemini log subscriber: event bus closed");
-                    break;
-                }
+        let mut sub = match state
+            .bus
+            .subscribe::<LlmEvent>("gemini_logger", SubscriptionOpts::named("gemini_logger"))
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "gemini_logger: bus subscribe failed, worker exiting");
+                return;
             }
+        };
+
+        loop {
+            let Some(ack) = sub.next().await else {
+                info!("Gemini log subscriber: subscription closed");
+                break;
+            };
+            handle_event(&state, ack.event()).await;
+            ack.ack().await;
         }
     }
 }
 
-async fn handle_event(state: &AppState, event: &event_bus::DaemonEvent) {
+async fn handle_event(state: &AppState, event: &LlmEvent) {
     let store = state.store.as_ref();
     match event {
         // Unified CLI engine events
-        event_bus::DaemonEvent::CliRequestStarted {
-            engine,
+        LlmEvent::RequestStarted {
+            provider,
             request_id,
             caller,
             session_id,
@@ -75,11 +76,11 @@ async fn handle_event(state: &AppState, event: &event_bus::DaemonEvent) {
                 )
                 .await
             {
-                warn!(error = %e, engine = %engine, "CLI log: failed to insert started");
+                warn!(error = %e, provider = ?provider, "CLI log: failed to insert started");
             }
         }
-        event_bus::DaemonEvent::CliRequestCompleted {
-            engine,
+        LlmEvent::RequestCompleted {
+            provider,
             request_id,
             response_chars,
             duration_ms,
@@ -89,7 +90,7 @@ async fn handle_event(state: &AppState, event: &event_bus::DaemonEvent) {
             extra,
             ..
         } => {
-            let api_mode_default = format!("{}-cli", engine);
+            let api_mode_default = format!("{:?}-cli", provider);
             let api_mode = extra
                 .get("api_mode")
                 .and_then(|v| v.as_str())
@@ -116,11 +117,11 @@ async fn handle_event(state: &AppState, event: &event_bus::DaemonEvent) {
                 )
                 .await
             {
-                warn!(error = %e, engine = %engine, "CLI log: failed to update completed");
+                warn!(error = %e, provider = ?provider, "CLI log: failed to update completed");
             }
         }
         // Legacy engine-specific events
-        event_bus::DaemonEvent::GeminiRequestStarted {
+        LlmEvent::LegacyGeminiRequestStarted {
             request_id,
             caller,
             session_id,
@@ -142,7 +143,7 @@ async fn handle_event(state: &AppState, event: &event_bus::DaemonEvent) {
                 warn!(error = %e, "Gemini log: failed to insert started");
             }
         }
-        event_bus::DaemonEvent::GeminiRequestCompleted {
+        LlmEvent::LegacyGeminiRequestCompleted {
             request_id,
             api_mode,
             response_chars,
@@ -171,7 +172,7 @@ async fn handle_event(state: &AppState, event: &event_bus::DaemonEvent) {
                 warn!(error = %e, "Gemini log: failed to update completed");
             }
         }
-        event_bus::DaemonEvent::CodexRequestStarted {
+        LlmEvent::LegacyCodexRequestStarted {
             request_id,
             caller,
             model,
@@ -193,7 +194,7 @@ async fn handle_event(state: &AppState, event: &event_bus::DaemonEvent) {
                 warn!(error = %e, "Codex log: failed to insert started");
             }
         }
-        event_bus::DaemonEvent::CodexRequestCompleted {
+        LlmEvent::LegacyCodexRequestCompleted {
             request_id,
             response_chars,
             duration_ms,

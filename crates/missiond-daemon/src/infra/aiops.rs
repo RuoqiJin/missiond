@@ -120,15 +120,15 @@ pub(crate) async fn health_scan(state: &AppState) {
                 created_at: chrono::Utc::now().to_rfc3339(),
             };
 
-            let incident_clone = incident.clone();
-            if let Err(e) = state.incident_tx.try_send(incident) {
-                warn!(server_id = %server_id, "Incident channel full, dropping health check: {}", e);
-            }
-            // Phase 6 dual-emit to the v2 bus. MPSC kept until Phase 7.
-            let _ = state
+            // v2 bus: IncidentEvent::Reported → IncidentEvent subscriber
+            // triages via `aiops::process_incident`.
+            if let Err(e) = state
                 .bus
-                .publish_incident(crate::bus::incident_reported(incident_clone))
-                .await;
+                .publish_incident(missiond_core::event::events::IncidentEvent::Reported { incident })
+                .await
+            {
+                warn!(server_id = %server_id, error = %e, "Failed to publish health-check incident");
+            }
         }
     }
 }
@@ -317,11 +317,12 @@ pub(crate) async fn process_incident(
                     "AIOps: incident → board task created"
                 );
                 // Notify autopilot
-                let ev = crate::event_bus::DaemonEvent::TaskCreated {
-                    task_id: String::new(),
-                };
-                state.event_bus.publish(ev.clone());
-                let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+                let _ = state
+                    .bus
+                    .publish_task(missiond_core::event::events::TaskEvent::Created {
+                        task_id: String::new(),
+                    })
+                    .await;
                 Some(task.id.to_string())
             }
             Err(e) => {
@@ -410,11 +411,12 @@ pub(crate) async fn create_pty_remediation_task(
                 "PTY remediation: Board task created for Opus slot"
             );
             // Notify autopilot to pick up immediately
-            let ev = crate::event_bus::DaemonEvent::TaskCreated {
-                task_id: String::new(),
-            };
-            state.event_bus.publish(ev.clone());
-            let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+            let _ = state
+                .bus
+                .publish_task(missiond_core::event::events::TaskEvent::Created {
+                    task_id: String::new(),
+                })
+                .await;
         }
         Err(e) => {
             error!(error = %e, "PTY remediation: failed to create Board task");

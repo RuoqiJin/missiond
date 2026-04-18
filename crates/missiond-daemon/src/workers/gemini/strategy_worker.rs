@@ -22,7 +22,7 @@ use std::sync::{Arc, LazyLock};
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
-use crate::event_bus::DaemonEvent;
+use missiond_core::event::events::{MemoryEvent, SystemEvent};
 use crate::state::AppState;
 
 use super::{BackgroundWorker, WorkerContext, WorkerKind};
@@ -110,13 +110,14 @@ pub(crate) async fn run_pending_analysis(state: &AppState) {
                     {
                         warn!(error = %e, "strategy_analyst: failed to mark complete");
                     }
-                    // Phase 3: Emit DeepAnalysisCompleted for KB consolidation consumer
-                    let ev = crate::event_bus::DaemonEvent::DeepAnalysisCompleted {
-                        session_id: session_id.to_string(),
-                        kb_entries_created: 0, // exact count not tracked here; consumer uses as trigger
-                    };
-                    state.event_bus.publish(ev.clone());
-                    let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+                    // Emit DeepAnalysisCompleted for KB consolidation consumer
+                    let _ = state
+                        .bus
+                        .publish_memory(MemoryEvent::DeepAnalysisCompleted {
+                            session_id: session_id.to_string(),
+                            kb_entries_created: 0,
+                        })
+                        .await;
                 }
                 // (WorkerContext stats removed — consumer-driven now)
             }
@@ -721,14 +722,15 @@ async fn apply_strategic_output(
             if let Some(msg) = &comm.message {
                 info!(message = %msg, "strategy_analyst: proactive notification");
 
-                // Path 1: EventBus → WS → frontend Toast/notification panel
-                let ev = DaemonEvent::InsightGenerated {
-                    category: "strategy".to_string(),
-                    priority: "medium".to_string(),
-                    title: msg.clone(),
-                };
-                state.event_bus.publish(ev.clone());
-                let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+                // Path 1: bus → WS → frontend Toast/notification panel
+                let _ = state
+                    .bus
+                    .publish_system(SystemEvent::InsightGenerated {
+                        category: "strategy".to_string(),
+                        priority: "medium".to_string(),
+                        title: msg.clone(),
+                    })
+                    .await;
 
                 // Path 2: Inbox → pulled by Context Pipeline on next user turn
                 let formatted = format!("[战略洞察] {}", msg);

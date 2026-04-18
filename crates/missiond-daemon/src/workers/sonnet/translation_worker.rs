@@ -19,12 +19,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
-use crate::event_bus::{DaemonEvent, TimelineEvent, TraceContext};
 use crate::minimax_client::ChatMessage;
 use crate::state::AppState;
+use missiond_core::event::events::{MessageEvent, WorkerEvent};
+use missiond_core::event::subscription::SubscriptionOpts;
 
 /// Virtual slot_id for translation events — routes them to the Slot swimlane.
 const TRANSLATION_SLOT_ID: &str = "translation-worker";
@@ -72,21 +72,18 @@ async fn translate_message(state: &AppState, ctx: &ThinkingTraceCtx, content: &s
 
     // Single span_id for the entire translation lifecycle (Started + Completed/Failed)
     let translation_span_id = uuid::Uuid::new_v4().to_string();
-    let trace_ctx = || TraceContext {
-        trace_id: ctx.trace_id.clone(),
-        span_id: Some(translation_span_id.clone()),
-        parent_span_id: ctx.span_id.clone(), // Links back to thinking_message
-        ..Default::default()
-    };
+    let _ = ctx.span_id.clone(); // retained for future SpanContext wiring
+    let _ = ctx.trace_id.clone();
 
     // Publish TranslationStarted
-    let ev_started = DaemonEvent::TranslationStarted {
-        message_id: ctx.message_id,
-        slot_id: TRANSLATION_SLOT_ID.to_string(),
-        content_chars,
-    };
-    state.event_bus.publish_traced(ev_started.clone(), trace_ctx());
-    let _ = crate::bus::publish_v1_shim(&state.bus, &ev_started).await;
+    let _ = state
+        .bus
+        .publish_worker(WorkerEvent::TranslationStarted {
+            message_id: ctx.message_id,
+            slot_id: TRANSLATION_SLOT_ID.to_string(),
+            content_chars,
+        })
+        .await;
 
     let start = std::time::Instant::now();
 
@@ -133,14 +130,15 @@ async fn translate_message(state: &AppState, ctx: &ThinkingTraceCtx, content: &s
             // Preview: first ~80 chars
             let preview: String = translation.chars().take(80).collect();
 
-            let ev = DaemonEvent::TranslationCompleted {
-                message_id: ctx.message_id,
-                slot_id: TRANSLATION_SLOT_ID.to_string(),
-                preview,
-                duration_ms,
-            };
-            state.event_bus.publish_traced(ev.clone(), trace_ctx());
-            let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+            let _ = state
+                .bus
+                .publish_worker(WorkerEvent::TranslationCompleted {
+                    message_id: ctx.message_id,
+                    slot_id: TRANSLATION_SLOT_ID.to_string(),
+                    preview,
+                    duration_ms,
+                })
+                .await;
 
             info!(
                 message_id = ctx.message_id,
@@ -152,13 +150,14 @@ async fn translate_message(state: &AppState, ctx: &ThinkingTraceCtx, content: &s
         }
         Ok(_) => {
             let err = "empty translation returned";
-            let ev = DaemonEvent::TranslationFailed {
-                message_id: ctx.message_id,
-                slot_id: TRANSLATION_SLOT_ID.to_string(),
-                error: err.to_string(),
-            };
-            state.event_bus.publish_traced(ev.clone(), trace_ctx());
-            let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+            let _ = state
+                .bus
+                .publish_worker(WorkerEvent::TranslationFailed {
+                    message_id: ctx.message_id,
+                    slot_id: TRANSLATION_SLOT_ID.to_string(),
+                    error: err.to_string(),
+                })
+                .await;
             warn!(
                 message_id = ctx.message_id,
                 "Translation: empty response from MiniMax"
@@ -166,36 +165,21 @@ async fn translate_message(state: &AppState, ctx: &ThinkingTraceCtx, content: &s
             Err(anyhow::anyhow!(err))
         }
         Err(e) => {
-            let ev = DaemonEvent::TranslationFailed {
-                message_id: ctx.message_id,
-                slot_id: TRANSLATION_SLOT_ID.to_string(),
-                error: e.to_string(),
-            };
-            state.event_bus.publish_traced(ev.clone(), trace_ctx());
-            let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+            let _ = state
+                .bus
+                .publish_worker(WorkerEvent::TranslationFailed {
+                    message_id: ctx.message_id,
+                    slot_id: TRANSLATION_SLOT_ID.to_string(),
+                    error: e.to_string(),
+                })
+                .await;
             warn!(message_id = ctx.message_id, error = %e, "Translation failed");
             Err(e)
         }
     }
 }
 
-/// Extract trace context from a thinking_message TimelineEvent.
-fn extract_thinking_ctx(event: &TimelineEvent) -> Option<ThinkingTraceCtx> {
-    if event.event.wire_type() != "thinking_message" {
-        return None;
-    }
-    let payload = event.event.to_frontend_payload();
-    let message_id = payload.get("message_id").and_then(|v| v.as_i64())?;
-    Some(ThinkingTraceCtx {
-        message_id,
-        trace_id: event.trace_id.clone(),
-        span_id: Some(event.span_id.clone()),
-    })
-}
-
-pub(crate) struct TranslationWorker {
-    pub timeline_rx: broadcast::Receiver<TimelineEvent>,
-}
+pub(crate) struct TranslationWorker;
 
 impl super::BackgroundWorker for TranslationWorker {
     const KIND: super::WorkerKind = super::WorkerKind::Sonnet;
@@ -210,17 +194,30 @@ impl super::BackgroundWorker for TranslationWorker {
         // Initial delay to let daemon stabilize
         tokio::time::sleep(Duration::from_secs(15)).await;
 
-        run_loop(state, self.timeline_rx, ctx).await;
+        run_loop(state, ctx).await;
     }
 }
 
-async fn run_loop(
-    state: Arc<AppState>,
-    mut timeline_rx: broadcast::Receiver<TimelineEvent>,
-    mut wctx: super::WorkerContext,
-) {
-    let mut last_poll = tokio::time::Instant::now() - Duration::from_secs(POLL_COOLDOWN_SECS + 1);
+async fn run_loop(state: Arc<AppState>, mut wctx: super::WorkerContext) {
     let mut consecutive_failures: u32 = 0;
+
+    // v2 subscription: MessageEvent::Logged(role="thinking") drives translation.
+    let mut sub = match state
+        .bus
+        .subscribe::<MessageEvent>(
+            "translation_worker",
+            SubscriptionOpts::named("translation_worker"),
+        )
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "Translation worker: bus subscribe failed, falling back to poll");
+            run_loop_poll_only(state, wctx).await;
+            return;
+        }
+    };
+    let mut last_poll = tokio::time::Instant::now() - Duration::from_secs(POLL_COOLDOWN_SECS + 1);
 
     loop {
         // Cooperative pause: block here if externally paused via WorkerRegistry
@@ -237,22 +234,27 @@ async fn run_loop(
             consecutive_failures = 0;
         }
 
-        // Only thinking_message events trigger process_single.
-        // All other events (including our own translation_started/failed) are ignored.
-        // poll_pending is ONLY triggered by idle timeout, never by broadcast events.
         let maybe_ctx = tokio::select! {
-            result = timeline_rx.recv() => {
-                match result {
-                    Ok(event) => extract_thinking_ctx(&event),
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(skipped = n, "Translation worker: broadcast lagged");
+            ack = sub.next() => {
+                let Some(ack) = ack else {
+                    info!("Translation worker: subscription closed, shutting down");
+                    return;
+                };
+                let ctx_opt = if let MessageEvent::Logged { message_id, role, .. } = ack.event() {
+                    if role == "thinking" {
+                        Some(ThinkingTraceCtx {
+                            message_id: *message_id,
+                            trace_id: None,
+                            span_id: None,
+                        })
+                    } else {
                         None
                     }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        info!("Translation worker: broadcast closed, shutting down");
-                        return;
-                    }
-                }
+                } else {
+                    None
+                };
+                ack.ack().await;
+                ctx_opt
             }
             _ = tokio::time::sleep(Duration::from_secs(IDLE_POLL_SECS)) => {
                 if last_poll.elapsed() >= Duration::from_secs(POLL_COOLDOWN_SECS) {
@@ -261,7 +263,6 @@ async fn run_loop(
                 }
                 continue;
             }
-            // Allow external pause to interrupt sleep/recv immediately
             _ = wctx.wait_until_paused() => {
                 continue;
             }
@@ -277,6 +278,16 @@ async fn run_loop(
                 wctx.record_failure();
             }
         }
+    }
+}
+
+/// Degraded loop when the v2 subscription cannot be established. Pure poll.
+async fn run_loop_poll_only(state: Arc<AppState>, mut wctx: super::WorkerContext) {
+    let mut consecutive_failures: u32 = 0;
+    loop {
+        wctx.wait_if_paused().await;
+        poll_pending(&state, &mut consecutive_failures).await;
+        tokio::time::sleep(Duration::from_secs(IDLE_POLL_SECS)).await;
     }
 }
 

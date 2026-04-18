@@ -11,13 +11,15 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
-use crate::event_bus;
 use crate::infra::message_handler::handle_pty_text_complete;
 use crate::state::{
     AppState, EmbeddingTask, ExtractionPhase, CURRENT_ANALYSIS_VERSION, MEMORY_SLOT_ID,
     MEMORY_SLOW_SLOT_ID,
 };
 use crate::supervisor::get_task_jsonl_path;
+use missiond_core::event::events::{
+    IncidentEvent, MemoryEvent, SessionEndStatus, SessionEvent, SlotEvent, TaskEvent,
+};
 
 pub(crate) struct PtyEventWorker {
     pub pty_rx: broadcast::Receiver<missiond_core::ManagerEvent>,
@@ -135,31 +137,22 @@ async fn handle_exited(s: &AppState, slot_id: &str, exit_code: i32) {
             })
             .unwrap_or((0, 0));
         let end_status = if exit_code == 0 {
-            event_bus::SessionEndStatus::Success
+            SessionEndStatus::Success
         } else if exit_code == -1 || exit_code == 130 {
-            event_bus::SessionEndStatus::Aborted // SIGINT or force kill
+            SessionEndStatus::Aborted // SIGINT or force kill
         } else {
-            event_bus::SessionEndStatus::Error
+            SessionEndStatus::Error
         };
-        let ev = event_bus::DaemonEvent::SessionCompleted {
-            session_id: uuid.clone(),
-            slot_id: Some(slot_id.to_string()),
-            message_count: msg_count,
-            duration_secs: duration,
-            status: end_status,
-        };
-        s.event_bus.publish_traced(
-            ev.clone(),
-            event_bus::TraceContext {
-                trace_id: Some(uuid.clone()),
-                summary: Some(format!(
-                    "{}: session completed (exit={})",
-                    slot_id, exit_code
-                )),
-                ..Default::default()
-            },
-        );
-        let _ = crate::bus::publish_v1_shim(&s.bus, &ev).await;
+        let _ = s
+            .bus
+            .publish_session(SessionEvent::Completed {
+                session_id: uuid.clone(),
+                slot_id: Some(slot_id.to_string()),
+                message_count: msg_count,
+                duration_secs: duration,
+                status: end_status,
+            })
+            .await;
 
         s.pty_session_uuids.write().await.remove(uuid);
     }
@@ -172,22 +165,15 @@ async fn handle_state_change(
     new_state: missiond_core::SessionState,
     prev_state: missiond_core::SessionState,
 ) {
-    // Publish slot state change with trace context
-    let trace_id = s.store.get_slot_session(slot_id).await.ok().flatten();
-    let ev = event_bus::DaemonEvent::SlotStateChanged {
-        slot_id: slot_id.to_string(),
-        new_state: format!("{:?}", new_state),
-        prev_state: format!("{:?}", prev_state),
-    };
-    s.event_bus.publish_traced(
-        ev.clone(),
-        event_bus::TraceContext {
-            trace_id,
-            summary: Some(format!("{}: {:?} → {:?}", slot_id, prev_state, new_state)),
-            ..Default::default()
-        },
-    );
-    let _ = crate::bus::publish_v1_shim(&s.bus, &ev).await;
+    // Publish slot state change
+    let _ = s
+        .bus
+        .publish_slot(SlotEvent::StateChanged {
+            slot_id: slot_id.to_string(),
+            new_state: format!("{:?}", new_state),
+            prev_state: format!("{:?}", prev_state),
+        })
+        .await;
 
     // Route memory slot state changes to the correct lane
     handle_memory_lane_state(s, slot_id, new_state, prev_state).await;
@@ -202,11 +188,12 @@ async fn handle_state_change(
         // Memory slots already emit via handle_memory_lane_state; non-memory slots need this
         // to trigger event-driven board dispatch instead of waiting for 60s autopilot tick.
         if slot_id != MEMORY_SLOT_ID && slot_id != MEMORY_SLOW_SLOT_ID {
-            let ev = event_bus::DaemonEvent::SlotBecameIdle {
-                slot_id: slot_id.to_string(),
-            };
-            s.event_bus.publish(ev.clone());
-            let _ = crate::bus::publish_v1_shim(&s.bus, &ev).await;
+            let _ = s
+                .bus
+                .publish_slot(SlotEvent::BecameIdle {
+                    slot_id: slot_id.to_string(),
+                })
+                .await;
         }
         // Signal autopilot to try board dispatch immediately
         s.board_dispatch_notify.notify_one();
@@ -294,20 +281,16 @@ async fn handle_memory_lane_state(
                     .current_deep_conv_id
                     .clone()
                     .or_else(|| es.current_task_id.clone());
-                let ev = event_bus::DaemonEvent::MemoryPhaseChanged {
-                    slot_id: slot_id.to_string(),
-                    phase: "Idle".to_string(),
-                    active_type: es.active_type.map(|s| s.to_string()),
-                };
-                s.event_bus.publish_traced(
-                    ev.clone(),
-                    event_bus::TraceContext {
-                        trace_id: mem_trace_id,
-                        summary: Some(format!("{}: {:?} → Idle", slot_id, es.active_type)),
-                        ..Default::default()
-                    },
-                );
-                let _ = crate::bus::publish_v1_shim(&s.bus, &ev).await;
+                let active_type = es.active_type.map(|a| a.to_string());
+                let _ = mem_trace_id; // retained for future SpanContext wiring
+                let _ = s
+                    .bus
+                    .publish_memory(MemoryEvent::PhaseChanged {
+                        slot_id: slot_id.to_string(),
+                        phase: "Idle".to_string(),
+                        active_type,
+                    })
+                    .await;
                 es.phase = ExtractionPhase::Idle;
                 es.active_type = None;
                 es.current_task_id = None;
@@ -315,11 +298,12 @@ async fn handle_memory_lane_state(
                 es.is_checkpoint = false;
                 es.checkpoint_message_id = None;
                 es.pending_served = false;
-                let ev_idle = event_bus::DaemonEvent::SlotBecameIdle {
-                    slot_id: slot_id.to_string(),
-                };
-                s.event_bus.publish(ev_idle.clone());
-                let _ = crate::bus::publish_v1_shim(&s.bus, &ev_idle).await;
+                let _ = s
+                    .bus
+                    .publish_slot(SlotEvent::BecameIdle {
+                        slot_id: slot_id.to_string(),
+                    })
+                    .await;
             }
         }
     } else if prev_state == missiond_core::SessionState::Idle {
@@ -433,27 +417,22 @@ async fn handle_submit_task_closure(s: &AppState, slot_id: &str) {
                 info!(task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,
                     jsonl_result = jsonl_resp.is_some(),
                     "Submit task closed: slot returned to Idle");
-                let ev = event_bus::DaemonEvent::TaskCompleted {
-                    task_id: task.id.clone(),
-                };
-                s.event_bus.publish_traced(
-                    ev.clone(),
-                    event_bus::TraceContext {
-                        trace_id: Some(task.id.clone()),
-                        summary: Some(format!("Task completed on {}", slot_id)),
-                        ..Default::default()
-                    },
-                );
-                let _ = crate::bus::publish_v1_shim(&s.bus, &ev).await;
+                let _ = s
+                    .bus
+                    .publish_task(TaskEvent::Completed {
+                        task_id: task.id.clone(),
+                    })
+                    .await;
             }
         }
     }
     // Always signal submit dispatcher when any slot becomes Idle
-    let ev = event_bus::DaemonEvent::TaskCompleted {
-        task_id: String::new(),
-    };
-    s.event_bus.publish(ev.clone());
-    let _ = crate::bus::publish_v1_shim(&s.bus, &ev).await;
+    let _ = s
+        .bus
+        .publish_task(TaskEvent::Completed {
+            task_id: String::new(),
+        })
+        .await;
 }
 
 async fn handle_confirm_required(
@@ -723,14 +702,10 @@ fn handle_mcp_tool_error(s: &AppState, slot_id: &str, tool_name: &str, error: &s
         }),
         created_at: chrono::Utc::now().to_rfc3339(),
     };
-    let incident_clone = incident.clone();
-    if let Err(e) = s.incident_tx.try_send(incident) {
-        warn!("Incident channel full, dropping MCP error incident: {}", e);
-    }
     let bus = std::sync::Arc::clone(&s.bus);
     tokio::spawn(async move {
         let _ = bus
-            .publish_incident(crate::bus::incident_reported(incident_clone))
+            .publish_incident(IncidentEvent::Reported { incident })
             .await;
     });
 }

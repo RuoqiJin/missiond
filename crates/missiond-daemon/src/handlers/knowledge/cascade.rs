@@ -9,8 +9,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::path::PathBuf;
 
-use crate::event_bus::DaemonEvent;
 use crate::state::AppState;
+use missiond_core::event::events::TaskEvent;
 
 // ---- Input structs ----
 
@@ -262,13 +262,14 @@ async fn handle_cascade_trigger(state: &AppState, args: Value) -> Result<ToolRes
         ..Default::default()
     };
 
-    // Bug 3: Emit CascadeTriggered event before execution
-    let v1_ev = DaemonEvent::CascadeTriggered {
-        service: args.service.clone(),
-        changed: args.changed.clone(),
-    };
-    state.event_bus.publish(v1_ev.clone());
-    let _ = crate::bus::publish_v1_shim(&state.bus, &v1_ev).await;
+    // Emit CascadeTriggered event before execution
+    let _ = state
+        .bus
+        .publish_task(TaskEvent::CascadeTriggered {
+            service: args.service.clone(),
+            changed: args.changed.clone(),
+        })
+        .await;
 
     // Execute in a blocking task since cascade runs external commands
     let report = tokio::task::spawn_blocking(move || {
@@ -278,16 +279,17 @@ async fn handle_cascade_trigger(state: &AppState, args: Value) -> Result<ToolRes
     .await
     .map_err(|e| anyhow!("cascade execution panicked: {e}"))?;
 
-    // Bug 3: Emit CascadeCompleted event after execution
-    let v1_ev = DaemonEvent::CascadeCompleted {
-        service: args.service.clone(),
-        services_repaired: report.services_repaired,
-        services_failed: report.services_failed,
-        hard_halted: report.hard_halted,
-        duration_ms: report.total_duration.as_millis(),
-    };
-    state.event_bus.publish(v1_ev.clone());
-    let _ = crate::bus::publish_v1_shim(&state.bus, &v1_ev).await;
+    // Emit CascadeCompleted event after execution
+    let _ = state
+        .bus
+        .publish_task(TaskEvent::CascadeCompleted {
+            service: args.service.clone(),
+            services_repaired: report.services_repaired,
+            services_failed: report.services_failed,
+            hard_halted: report.hard_halted,
+            duration_ms: report.total_duration.as_millis(),
+        })
+        .await;
 
     let phases: Vec<serde_json::Value> = report
         .plan

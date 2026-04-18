@@ -18,9 +18,9 @@ use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
-use crate::event_bus::TimelineEntry;
 use crate::minimax_client::ChatMessage;
 use crate::minimax_gateway::{GatewayRequest, Priority, QuotaTracker};
+use missiond_core::event::events::WorkerEvent;
 
 // ── Constants ──────────────────────────────────────────────────────
 
@@ -278,13 +278,12 @@ pub(crate) struct SonnetGateway {
     backend: SonnetBackend,
     quota: Arc<tokio::sync::RwLock<QuotaTracker>>,
     concurrency: Arc<Semaphore>,
-    event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>,
-    /// Phase 6 dual-emit: mirror WorkerLlmCall events onto the v2 bus.
+    /// v2 bus: every `WorkerEvent::LlmCall` is published here.
     bus: Option<Arc<crate::bus::BusServices>>,
 }
 
 impl SonnetGateway {
-    /// Attach the v2 bus so every emitted event dual-emits (Phase 6).
+    /// Attach the v2 bus so every emitted event flows through it.
     pub fn with_bus(mut self, bus: Arc<crate::bus::BusServices>) -> Self {
         self.bus = Some(bus);
         self
@@ -392,7 +391,6 @@ impl SonnetGateway {
 
             // 5. Execute request (spawned for concurrency)
             let backend = self.backend.http.clone();
-            let event_tx = self.event_tx.clone();
             let bus = self.bus.clone();
             tokio::spawn(async move {
                 let api_start = std::time::Instant::now();
@@ -419,12 +417,8 @@ impl SonnetGateway {
                     "sonnet_gateway_call"
                 );
 
-                // Emit timeline event
-                let summary = format!(
-                    "Sonnet {:?}/{} → {}ch ({}ms, q:{}ms)",
-                    req.priority, req.caller, response_chars, duration_ms, queue_wait_ms
-                );
-                let event = crate::event_bus::DaemonEvent::WorkerLlmCall {
+                // Emit LlmCall event via v2 bus.
+                let ev = WorkerEvent::LlmCall {
                     caller: req.caller.to_string(),
                     task_id: req.task_id.clone(),
                     status: status.to_string(),
@@ -433,18 +427,11 @@ impl SonnetGateway {
                     duration_ms,
                     queue_wait_ms,
                 };
-                if let Some(ref bus) = bus {
-                    crate::bus::spawn_v1_shim(bus.clone(), event.clone());
+                if let Some(bus) = bus {
+                    let _ = bus.publish_worker(ev).await;
                 }
-                let entry_trace_id = req.trace_id.or(req.task_id);
-                let entry = TimelineEntry {
-                    event,
-                    trace_id: entry_trace_id,
-                    span_id: uuid::Uuid::new_v4().to_string(),
-                    parent_span_id: req.parent_span_id,
-                    summary: Some(summary),
-                };
-                let _ = event_tx.send(entry);
+                let _ = req.trace_id;
+                let _ = req.parent_span_id;
 
                 // Reply to caller
                 let _ = req.reply_tx.send(result);
@@ -458,9 +445,7 @@ impl SonnetGateway {
 
 /// Create the Sonnet gateway and its handle. Call once at startup.
 /// Always succeeds (credentials resolved lazily per-request).
-pub(crate) fn create_sonnet_gateway(
-    event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>,
-) -> (SonnetHandle, SonnetGateway) {
+pub(crate) fn create_sonnet_gateway() -> (SonnetHandle, SonnetGateway) {
     let backend = SonnetBackend::new();
 
     let (tx_interactive, rx_interactive) = mpsc::channel(CHANNEL_CAPACITY);
@@ -491,7 +476,6 @@ pub(crate) fn create_sonnet_gateway(
         backend,
         quota,
         concurrency: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
-        event_tx,
         bus: None,
     };
 

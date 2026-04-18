@@ -4,9 +4,9 @@ use anyhow::{anyhow, Result};
 use tracing::{debug, info, warn};
 
 use crate::engine::intent_engine::request_execution_slot;
-use crate::event_bus::{DaemonEvent, TraceContext};
 use crate::llm_gateway::call_gemini_for_flow;
 use crate::state::AppState;
+use missiond_core::event::events::{QuestionEvent, TaskEvent};
 
 pub(crate) struct TierResult {
     hit: bool,
@@ -94,19 +94,13 @@ pub(crate) async fn process_pending_master_questions(state: &AppState) {
                 "Decision Engine: retry limit reached, downgrading to user");
             path.push(serde_json::json!({"tier": "anti-loop", "status": "downgraded", "reason": format!("retry_count={}", question.retry_count)}));
             let _ = state.store.downgrade_question_to_user(&question.id).await;
-            let ev = DaemonEvent::QuestionResolved {
-                question_id: question.id.clone(),
-                resolution: "downgraded".to_string(),
-            };
-            state.event_bus.publish_traced(
-                ev.clone(),
-                TraceContext {
-                    trace_id: question.task_id.clone(),
-                    summary: Some("Anti-loop: retry limit reached".to_string()),
-                    ..Default::default()
-                },
-            );
-            let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+            let _ = state
+                .bus
+                .publish_question(QuestionEvent::Resolved {
+                    question_id: question.id.clone(),
+                    resolution: "downgraded".to_string(),
+                })
+                .await;
             save_routing_trace(
                 state,
                 &question.id,
@@ -189,19 +183,13 @@ pub(crate) async fn process_pending_master_questions(state: &AppState) {
                             info!(question_id = %question.id, "Tier 1 miss for preference → downgrade to user");
                             path.push(serde_json::json!({"tier": "preference", "status": "downgraded", "reason": "t1_miss_preference_exclusive"}));
                             let _ = state.store.downgrade_question_to_user(&question.id).await;
-                            let ev = DaemonEvent::QuestionResolved {
-                                question_id: question.id.clone(),
-                                resolution: "downgraded".to_string(),
-                            };
-                            state.event_bus.publish_traced(
-                                ev.clone(),
-                                TraceContext {
-                                    trace_id: question.task_id.clone(),
-                                    summary: Some("Preference miss → downgrade".to_string()),
-                                    ..Default::default()
-                                },
-                            );
-                            let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+                            let _ = state
+                                .bus
+                                .publish_question(QuestionEvent::Resolved {
+                                    question_id: question.id.clone(),
+                                    resolution: "downgraded".to_string(),
+                                })
+                                .await;
                             save_routing_trace(
                                 state,
                                 &question.id,
@@ -215,19 +203,13 @@ pub(crate) async fn process_pending_master_questions(state: &AppState) {
                     Err(_) => {
                         path.push(serde_json::json!({"tier": "T1", "status": "error"}));
                         let _ = state.store.downgrade_question_to_user(&question.id).await;
-                        let ev = DaemonEvent::QuestionResolved {
-                            question_id: question.id.clone(),
-                            resolution: "downgraded".to_string(),
-                        };
-                        state.event_bus.publish_traced(
-                            ev.clone(),
-                            TraceContext {
-                                trace_id: question.task_id.clone(),
-                                summary: Some("T1 error → downgrade".to_string()),
-                                ..Default::default()
-                            },
-                        );
-                        let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+                        let _ = state
+                            .bus
+                            .publish_question(QuestionEvent::Resolved {
+                                question_id: question.id.clone(),
+                                resolution: "downgraded".to_string(),
+                            })
+                            .await;
                         save_routing_trace(
                             state,
                             &question.id,
@@ -511,26 +493,19 @@ pub(crate) async fn decision_tier1_kb(
                 .await
                 .map_err(|e| anyhow!("Failed to answer: {}", e))?;
             // Scheduling signal (wake submit consumer)
-            let ev_tc = DaemonEvent::TaskCreated {
-                task_id: String::new(),
-            };
-            state.event_bus.publish(ev_tc.clone());
-            let _ = crate::bus::publish_v1_shim(&state.bus, &ev_tc).await;
+            let _ = state
+                .bus
+                .publish_task(TaskEvent::Created { task_id: String::new() })
+                .await;
             // Semantic trace: decision resolved
-            let ev_dr = DaemonEvent::DecisionResolved {
-                question_id: question.id.clone(),
-                tier: "T1".to_string(),
-                duration_ms: tier_start.elapsed().as_millis() as u64,
-            };
-            state.event_bus.publish_traced(
-                ev_dr.clone(),
-                TraceContext {
-                    trace_id: question.task_id.clone(),
-                    summary: Some(format!("T1 hybrid hit: {}", entry.key)),
-                    ..Default::default()
-                },
-            );
-            let _ = crate::bus::publish_v1_shim(&state.bus, &ev_dr).await;
+            let _ = state
+                .bus
+                .publish_question(QuestionEvent::DecisionResolved {
+                    question_id: question.id.clone(),
+                    tier: "T1".to_string(),
+                    duration_ms: tier_start.elapsed().as_millis() as u64,
+                })
+                .await;
 
             return Ok(TierResult {
                 hit: true,
@@ -603,25 +578,18 @@ pub(crate) async fn decision_tier1_kb(
         .answer_agent_question(&question.id, &answer)
         .await
         .map_err(|e| anyhow!("Failed to answer: {}", e))?;
-    let ev_tc = DaemonEvent::TaskCreated {
-        task_id: String::new(),
-    };
-    state.event_bus.publish(ev_tc.clone());
-    let _ = crate::bus::publish_v1_shim(&state.bus, &ev_tc).await;
-    let ev_dr = DaemonEvent::DecisionResolved {
-        question_id: question.id.clone(),
-        tier: "T1".to_string(),
-        duration_ms: tier_start.elapsed().as_millis() as u64,
-    };
-    state.event_bus.publish_traced(
-        ev_dr.clone(),
-        TraceContext {
-            trace_id: question.task_id.clone(),
-            summary: Some(format!("T1 FTS hit: {}", top.key)),
-            ..Default::default()
-        },
-    );
-    let _ = crate::bus::publish_v1_shim(&state.bus, &ev_dr).await;
+    let _ = state
+        .bus
+        .publish_task(TaskEvent::Created { task_id: String::new() })
+        .await;
+    let _ = state
+        .bus
+        .publish_question(QuestionEvent::DecisionResolved {
+            question_id: question.id.clone(),
+            tier: "T1".to_string(),
+            duration_ms: tier_start.elapsed().as_millis() as u64,
+        })
+        .await;
     Ok(TierResult {
         hit: true,
         detail: serde_json::json!({
@@ -714,28 +682,18 @@ pub(crate) async fn decision_tier2_gemini(
                         .answer_agent_question(&question.id, &answer)
                         .await
                         .map_err(|e| anyhow!("Failed to answer: {}", e))?;
-                    let ev_tc = DaemonEvent::TaskCreated {
-                        task_id: String::new(),
-                    };
-                    state.event_bus.publish(ev_tc.clone());
-                    let _ = crate::bus::publish_v1_shim(&state.bus, &ev_tc).await;
-                    let ev_dr = DaemonEvent::DecisionResolved {
-                        question_id: question.id.clone(),
-                        tier: "T2".to_string(),
-                        duration_ms: tier_start.elapsed().as_millis() as u64,
-                    };
-                    state.event_bus.publish_traced(
-                        ev_dr.clone(),
-                        TraceContext {
-                            trace_id: question.task_id.clone(),
-                            summary: Some(format!(
-                                "T2 Gemini: {}",
-                                decision.chars().take(60).collect::<String>()
-                            )),
-                            ..Default::default()
-                        },
-                    );
-                    let _ = crate::bus::publish_v1_shim(&state.bus, &ev_dr).await;
+                    let _ = state
+                        .bus
+                        .publish_task(TaskEvent::Created { task_id: String::new() })
+                        .await;
+                    let _ = state
+                        .bus
+                        .publish_question(QuestionEvent::DecisionResolved {
+                            question_id: question.id.clone(),
+                            tier: "T2".to_string(),
+                            duration_ms: tier_start.elapsed().as_millis() as u64,
+                        })
+                        .await;
                     return Ok(TierResult {
                         hit: true,
                         detail: serde_json::json!({"tier": "T2", "status": "decided", "action": "DECIDE", "reasoning": reasoning}),
@@ -852,20 +810,14 @@ pub(crate) async fn decision_tier3_dispatch(
         Ok(_) => {
             info!(question_id = %question.id, slot_task_id = %slot_task.id,
                 "Tier 3: dispatched to slot-decision");
-            let ev = DaemonEvent::DecisionResolved {
-                question_id: question.id.clone(),
-                tier: "T3".to_string(),
-                duration_ms: 0, // dispatch is async, real duration unknown
-            };
-            state.event_bus.publish_traced(
-                ev.clone(),
-                TraceContext {
-                    trace_id: question.task_id.clone(),
-                    summary: Some("T3 dispatched to slot-decision".to_string()),
-                    ..Default::default()
-                },
-            );
-            let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+            let _ = state
+                .bus
+                .publish_question(QuestionEvent::DecisionResolved {
+                    question_id: question.id.clone(),
+                    tier: "T3".to_string(),
+                    duration_ms: 0, // dispatch is async, real duration unknown
+                })
+                .await;
             Ok(TierResult {
                 hit: true,
                 detail: serde_json::json!({"tier": "T3", "status": "dispatched", "slot_task_id": slot_task.id}),
@@ -923,19 +875,13 @@ pub(crate) async fn reap_stale_decision_tasks(state: &AppState) {
         if let Err(e) = state.store.downgrade_question_to_user(&question.id).await {
             warn!(question_id = %question.id, error = %e, "Decision reaper: downgrade failed");
         }
-        let ev = DaemonEvent::QuestionResolved {
-            question_id: question.id.clone(),
-            resolution: "downgraded".to_string(),
-        };
-        state.event_bus.publish_traced(
-            ev.clone(),
-            TraceContext {
-                trace_id: question.task_id.clone(),
-                summary: Some("Stale decision: 15min timeout → downgrade".to_string()),
-                ..Default::default()
-            },
-        );
-        let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+        let _ = state
+            .bus
+            .publish_question(QuestionEvent::Resolved {
+                question_id: question.id.clone(),
+                resolution: "downgraded".to_string(),
+            })
+            .await;
 
         // 2. Write warning note to associated board task
         if let Some(ref task_id) = question.task_id {

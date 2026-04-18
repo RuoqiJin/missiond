@@ -25,25 +25,24 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use missiond_core::event::{
     blob_store::{BlobStore, PgBlobStore},
     dispatcher::{
-        register_all_domains, ControlGate, DispatchError, DispatchMetrics, Dispatcher,
-        DispatcherBuilder, TailSource,
+        register_all_domains, DispatchError, DispatchMetrics, Dispatcher, DispatcherBuilder,
+        TailSource,
     },
     events::{
         BoardEvent, IncidentEvent, LlmEvent, MemoryEvent, MessageEvent, ObservabilityEvent,
         QuestionEvent, SessionEvent, SlotEvent, SystemEvent, TaskEvent, WorkerEvent,
     },
     log::{
-        self, AppendAck, AppendError, AppendOpts, Log, LogWriterHandle, Seq,
-        writer::spawn_log_writer,
+        writer::spawn_log_writer, AppendAck, AppendError, AppendOpts, Log, LogWriterHandle, Seq,
     },
     metrics::{
-        spawn_bus_metrics_emitter, AtomicBusMetrics, BusMetrics, BusMetricsEmitterHandle,
-        emitter::ObservabilityAppender,
+        emitter::ObservabilityAppender, spawn_bus_metrics_emitter, AtomicBusMetrics,
+        BusMetricsEmitterHandle,
     },
     subscription::{
         cursor_store::{CursorStore, PgCursorStore},
@@ -244,19 +243,43 @@ impl BusServices {
     }
 
     pub async fn publish_worker(&self, ev: WorkerEvent) -> Result<AppendAck, AppendError> {
-        self.publish(ev, default_opts("worker")).await
+        // I007 ephemeral audit: mirror the v1 `is_ephemeral()` decisions for
+        // high-volume telemetry so we don't bloat `event_log`.
+        let ephemeral = matches!(
+            ev,
+            WorkerEvent::LlmCall { .. }
+                | WorkerEvent::BriefingBatchStarted { .. }
+                | WorkerEvent::BriefingSummaryGenerated { .. }
+                | WorkerEvent::TranslationStarted { .. }
+                | WorkerEvent::NarrationBatchCompleted { .. }
+        );
+        let mut opts = default_opts("worker");
+        opts.ephemeral = ephemeral;
+        self.publish(ev, opts).await
     }
 
     pub async fn publish_memory(&self, ev: MemoryEvent) -> Result<AppendAck, AppendError> {
-        self.publish(ev, default_opts("memory")).await
+        let ephemeral = matches!(
+            ev,
+            MemoryEvent::TurnExtracted { .. } | MemoryEvent::IntentAnalyzed { .. }
+        );
+        let mut opts = default_opts("memory");
+        opts.ephemeral = ephemeral;
+        self.publish(ev, opts).await
     }
 
     pub async fn publish_message(&self, ev: MessageEvent) -> Result<AppendAck, AppendError> {
-        self.publish(ev, default_opts("message")).await
+        let ephemeral = matches!(ev, MessageEvent::ImageInserted { .. });
+        let mut opts = default_opts("message");
+        opts.ephemeral = ephemeral;
+        self.publish(ev, opts).await
     }
 
     pub async fn publish_session(&self, ev: SessionEvent) -> Result<AppendAck, AppendError> {
-        self.publish(ev, default_opts("session")).await
+        let ephemeral = matches!(ev, SessionEvent::Organized { .. });
+        let mut opts = default_opts("session");
+        opts.ephemeral = ephemeral;
+        self.publish(ev, opts).await
     }
 
     pub async fn publish_system(&self, ev: SystemEvent) -> Result<AppendAck, AppendError> {
@@ -392,6 +415,6 @@ mod tests {
     #[test]
     fn log_re_export_types_are_visible() {
         // Just ensure the re-exports compile; no behavior.
-        let _ = log::writer::APPEND_CHANNEL_CAPACITY;
+        let _ = missiond_core::event::log::writer::APPEND_CHANNEL_CAPACITY;
     }
 }

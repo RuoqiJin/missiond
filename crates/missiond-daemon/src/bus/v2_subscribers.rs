@@ -43,18 +43,16 @@
 //!       ```
 //!   * On shutdown we drop the Subscription so the flusher exits cleanly.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use missiond_core::event::events::{
-    LlmEvent, MemoryEvent, MessageEvent, QuestionEvent, SessionEndStatus, SessionEvent, SlotEvent,
-    SystemEvent, TaskEvent, WorkerEvent,
+    IncidentEvent, MemoryEvent, MessageEvent, QuestionEvent, SessionEndStatus, SessionEvent,
+    SlotEvent, TaskEvent, WorkerEvent,
 };
-use missiond_core::event::subscription::{
-    Subscription, SubscriptionOpts,
-};
+use missiond_core::event::subscription::{Subscription, SubscriptionOpts};
 use missiond_core::event::DomainEvent;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
@@ -87,16 +85,35 @@ pub(crate) fn start_v2_subscribers(
         spawn_intent_analyst_sub(bus.clone(), state.clone(), shutdown_rx.clone());
     }
 
-    // Group B — worker observers (6 subs). Passive: ack only, no side-
-    // effects duplicated alongside the v1 worker.
-    spawn_gemini_logger_observer(bus.clone(), shutdown_rx.clone());
-    spawn_translation_observer(bus.clone(), shutdown_rx.clone());
-    spawn_arch_maintenance_observer(bus.clone(), shutdown_rx.clone());
-    spawn_lisp_survey_observer(bus.clone(), shutdown_rx.clone());
-    spawn_conversation_organizer_observer(bus.clone(), shutdown_rx.clone());
-    spawn_tagger_chunker_observer(bus.clone(), shutdown_rx.clone());
+    // Incident reactor: every `IncidentEvent::Reported` → aiops::process_incident.
+    spawn_incident_reactor(bus.clone(), state.clone(), shutdown_rx.clone());
 
-    info!("v2 event-bus subscribers started (8 router consumers + 6 worker observers)");
+    info!("v2 event-bus subscribers started (8 router consumers + 1 incident reactor)");
+}
+
+/// Incident reactor — subscribes to IncidentEvent and triages via
+/// `aiops::process_incident`. Replaces the old `incident_rx` MPSC consumer.
+fn spawn_incident_reactor(bus: Arc<BusServices>, state: AppState, mut shutdown: watch::Receiver<bool>) {
+    tokio::spawn(async move {
+        let Some(mut sub) = subscribe_or_warn::<IncidentEvent>(&bus, "v2_incident_reactor", "incident_reactor").await else {
+            return;
+        };
+        info!("v2[incident_reactor]: subscription live");
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                ack = sub.next() => {
+                    let Some(ack) = ack else { break; };
+                    if let IncidentEvent::Reported { incident } = ack.event() {
+                        crate::aiops::process_incident(&state, incident.clone()).await;
+                    }
+                    ack.ack().await;
+                }
+            }
+        }
+        info!("v2[incident_reactor]: shutdown");
+    });
 }
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -383,161 +400,22 @@ fn spawn_intent_analyst_sub(bus: Arc<BusServices>, state: AppState, mut shutdown
                 if state.control_manager.current().is_provider_paused(crate::control_tree::CtlProvider::Sonnet) {
                     continue;
                 }
-                // v1 intent_analyst::process_session_intents is private; the
-                // v2 observer path just logs — actual work stays on v1 until
-                // Phase 8 flips the active path.
-                debug!(session = %session_id, "v2[intent_analyst]: would process (v1 handles action)");
+                match crate::engine::learning_engine::intent_analyst::process_session_intents(&state, &session_id).await {
+                    Ok(count) if count > 0 => {
+                        debug!(session = %session_id, intents = count, "v2[intent_analyst]: analysis complete");
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        debug!(session = %session_id, error = %e, "v2[intent_analyst]: analysis failed");
+                    }
+                }
             }
         }
         info!("v2[intent_analyst]: shutdown");
     });
 }
 
-// ═════════════════════════════════════════════════════════════════════════
-// B — worker observers (passive, ack-only)
-// ═════════════════════════════════════════════════════════════════════════
-
-fn spawn_gemini_logger_observer(bus: Arc<BusServices>, mut shutdown: watch::Receiver<bool>) {
-    tokio::spawn(async move {
-        let Some(mut sub) = subscribe_or_warn::<LlmEvent>(&bus, "v2_worker_gemini_logger", "worker_gemini_logger").await else {
-            return;
-        };
-        info!("v2[obs:gemini_logger]: subscription live");
-        loop {
-            tokio::select! {
-                biased;
-                _ = shutdown.changed() => break,
-                ack = sub.next() => {
-                    let Some(ack) = ack else { break; };
-                    debug!(kind = %ack.event().kind(), "v2[obs:gemini_logger]: event observed");
-                    ack.ack().await;
-                }
-            }
-        }
-        info!("v2[obs:gemini_logger]: shutdown");
-    });
-}
-
-fn spawn_translation_observer(bus: Arc<BusServices>, mut shutdown: watch::Receiver<bool>) {
-    tokio::spawn(async move {
-        // TranslationWorker v1 listens to MessageEvent::Logged (role=thinking)
-        // — we subscribe to the Message topic so the flow is mirrored.
-        let Some(mut sub) = subscribe_or_warn::<MessageEvent>(&bus, "v2_worker_translation", "worker_translation").await else {
-            return;
-        };
-        info!("v2[obs:translation]: subscription live");
-        loop {
-            tokio::select! {
-                biased;
-                _ = shutdown.changed() => break,
-                ack = sub.next() => {
-                    let Some(ack) = ack else { break; };
-                    if let MessageEvent::Logged { role, .. } = ack.event() {
-                        if role == "thinking" {
-                            debug!("v2[obs:translation]: thinking message observed");
-                        }
-                    }
-                    ack.ack().await;
-                }
-            }
-        }
-        info!("v2[obs:translation]: shutdown");
-    });
-}
-
-fn spawn_arch_maintenance_observer(bus: Arc<BusServices>, mut shutdown: watch::Receiver<bool>) {
-    tokio::spawn(async move {
-        let Some(mut sub) = subscribe_or_warn::<SystemEvent>(&bus, "v2_worker_arch_maintenance", "worker_arch_maintenance").await else {
-            return;
-        };
-        info!("v2[obs:arch_maintenance]: subscription live");
-        loop {
-            tokio::select! {
-                biased;
-                _ = shutdown.changed() => break,
-                ack = sub.next() => {
-                    let Some(ack) = ack else { break; };
-                    if let SystemEvent::ContextualCommitDetected { commit_hash, branch, .. } = ack.event() {
-                        debug!(commit = %commit_hash, branch = %branch, "v2[obs:arch_maintenance]: commit observed");
-                    }
-                    ack.ack().await;
-                }
-            }
-        }
-        info!("v2[obs:arch_maintenance]: shutdown");
-    });
-}
-
-fn spawn_lisp_survey_observer(bus: Arc<BusServices>, mut shutdown: watch::Receiver<bool>) {
-    tokio::spawn(async move {
-        let Some(mut sub) = subscribe_or_warn::<SystemEvent>(&bus, "v2_worker_lisp_survey", "worker_lisp_survey").await else {
-            return;
-        };
-        info!("v2[obs:lisp_survey]: subscription live");
-        loop {
-            tokio::select! {
-                biased;
-                _ = shutdown.changed() => break,
-                ack = sub.next() => {
-                    let Some(ack) = ack else { break; };
-                    if let SystemEvent::ContextualCommitDetected { commit_hash, .. } = ack.event() {
-                        debug!(commit = %commit_hash, "v2[obs:lisp_survey]: commit observed");
-                    }
-                    ack.ack().await;
-                }
-            }
-        }
-        info!("v2[obs:lisp_survey]: shutdown");
-    });
-}
-
-fn spawn_conversation_organizer_observer(bus: Arc<BusServices>, mut shutdown: watch::Receiver<bool>) {
-    tokio::spawn(async move {
-        let Some(mut sub) = subscribe_or_warn::<MessageEvent>(&bus, "v2_worker_conversation_organizer", "worker_conversation_organizer").await else {
-            return;
-        };
-        info!("v2[obs:conversation_organizer]: subscription live");
-        let mut dirty: HashSet<String> = HashSet::new();
-        loop {
-            tokio::select! {
-                biased;
-                _ = shutdown.changed() => break,
-                ack = sub.next() => {
-                    let Some(ack) = ack else { break; };
-                    if let MessageEvent::Logged { session_id, .. } = ack.event() {
-                        dirty.insert(session_id.clone());
-                    }
-                    ack.ack().await;
-                }
-            }
-        }
-        if !dirty.is_empty() {
-            debug!(sessions = dirty.len(), "v2[obs:conversation_organizer]: shutdown with pending");
-        }
-        info!("v2[obs:conversation_organizer]: shutdown");
-    });
-}
-
-fn spawn_tagger_chunker_observer(bus: Arc<BusServices>, mut shutdown: watch::Receiver<bool>) {
-    tokio::spawn(async move {
-        let Some(mut sub) = subscribe_or_warn::<SessionEvent>(&bus, "v2_worker_tagger_chunker", "worker_tagger_chunker").await else {
-            return;
-        };
-        info!("v2[obs:tagger_chunker]: subscription live");
-        loop {
-            tokio::select! {
-                biased;
-                _ = shutdown.changed() => break,
-                ack = sub.next() => {
-                    let Some(ack) = ack else { break; };
-                    if let SessionEvent::Organized { session_id } = ack.event() {
-                        debug!(session = %session_id, "v2[obs:tagger_chunker]: session organized observed");
-                    }
-                    ack.ack().await;
-                }
-            }
-        }
-        info!("v2[obs:tagger_chunker]: shutdown");
-    });
-}
+// Workers (translation / arch_maintenance / lisp_survey / conversation_organizer /
+// tagger_chunker / gemini_logger) now own their own v2 subscriptions directly
+// (Phase 8 flip). No passive observers remain in this module.
 

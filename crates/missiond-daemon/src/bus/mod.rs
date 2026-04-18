@@ -18,11 +18,12 @@
 //! so no consumer gets cut off mid-refactor.
 
 pub mod bootstrap;
-pub mod compat;
 pub mod control_gate_adapter;
+pub mod retention_cron;
 pub mod v2_subscribers;
+pub mod ws_bridge;
 
-pub use bootstrap::{BusServices, BusStartHandle};
-pub use compat::{incident_reported, publish_v1_shim, spawn_v1_shim};
-pub use control_gate_adapter::ControlTreeGate;
+pub use bootstrap::BusServices;
+pub(crate) use retention_cron::spawn_retention_cron;
 pub(crate) use v2_subscribers::start_v2_subscribers;
+pub(crate) use ws_bridge::spawn_ws_bridge;

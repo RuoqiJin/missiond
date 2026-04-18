@@ -8,119 +8,23 @@
 //!
 //! Design doc: `docs/designs/phase6-intent-analyst.md`
 
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
-use tokio::sync::broadcast;
-use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::watch;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
-use crate::event_bus::{DaemonEvent, TimelineEvent};
 use crate::helpers::char_boundary_at;
 use crate::minimax_client::ChatMessage;
 use crate::state::AppState;
+use missiond_core::event::events::MemoryEvent;
 use missiond_core::types::ConversationTurn;
 
-const DEBOUNCE_SECS: u64 = 300; // 5 minutes
-const MAX_ACCUMULATION: usize = 5; // fire after 5 unseen turns
+/// Number of turns accumulated before triggering analysis. Exposed so
+/// `bus::v2_subscribers` keeps parity with v1 semantics.
+pub(crate) const MAX_ACCUMULATION: usize = 5; // fire after 5 unseen turns
+/// Debounce window for the intent-analyst subscription in seconds.
+pub(crate) const DEBOUNCE_SECS: u64 = 300; // 5 minutes
 const MIN_TURNS_FOR_ANALYSIS: usize = 2; // need >=2 turns to detect patterns
-
-/// Spawn the Intent Analyst consumer. Listens to TurnExtracted events,
-/// accumulates per-session, fires analysis on debounce timeout or accumulation threshold.
-pub(crate) fn spawn_intent_consumer(
-    state: &AppState,
-    timeline_tx: &broadcast::Sender<TimelineEvent>,
-    shutdown_rx: watch::Receiver<bool>,
-) {
-    // Check config: intent_analyst.enabled (default false)
-    if !state.intent_analyst_enabled {
-        info!("IntentAnalyst: disabled by config, skipping consumer spawn");
-        return;
-    }
-
-    let s = state.clone();
-    let mut rx = timeline_tx.subscribe();
-    let shutdown = shutdown_rx;
-
-    tokio::spawn(async move {
-        info!(
-            "IntentAnalyst consumer started (debounce={}s, max_accum={})",
-            DEBOUNCE_SECS, MAX_ACCUMULATION
-        );
-
-        // (last_event_time, accumulated_turn_count)
-        let mut pending: HashMap<String, (Instant, usize)> = HashMap::new();
-        let debounce_window = Duration::from_secs(DEBOUNCE_SECS);
-
-        loop {
-            // Drain TurnExtracted events with 30s poll interval
-            match tokio::time::timeout(Duration::from_secs(30), rx.recv()).await {
-                Ok(Ok(te)) => {
-                    if let DaemonEvent::TurnExtracted {
-                        ref session_id,
-                        turn_count,
-                    } = te.event
-                    {
-                        let entry = pending
-                            .entry(session_id.clone())
-                            .or_insert_with(|| (Instant::now(), 0));
-                        entry.0 = Instant::now(); // trailing-edge update
-                        entry.1 += turn_count; // accumulate turn count
-                    }
-                }
-                Ok(Err(RecvError::Lagged(n))) => {
-                    warn!(skipped = n, "IntentAnalyst: lagged, events dropped");
-                }
-                Ok(Err(RecvError::Closed)) => {
-                    info!("IntentAnalyst: broadcast closed, shutting down");
-                    return;
-                }
-                Err(_) => {} // Timeout — check debounce expiry below
-            }
-
-            // Check: debounce timeout OR max accumulation
-            let now = Instant::now();
-            let expired: Vec<String> = pending
-                .iter()
-                .filter(|(_, (ts, count))| {
-                    now.duration_since(*ts) >= debounce_window || *count >= MAX_ACCUMULATION
-                })
-                .map(|(id, _)| id.clone())
-                .collect();
-
-            for session_id in expired {
-                pending.remove(&session_id);
-
-                // ControlTree gate: check Sonnet provider
-                if s.control_manager
-                    .current()
-                    .is_provider_paused(crate::control_tree::CtlProvider::Sonnet)
-                {
-                    debug!(session = %session_id, "IntentAnalyst: Sonnet gate closed, skipping");
-                    continue;
-                }
-
-                match process_session_intents(&s, &session_id).await {
-                    Ok(count) if count > 0 => {
-                        info!(session = %session_id, intents = count, "IntentAnalyst: analysis complete");
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        warn!(session = %session_id, error = %e, "IntentAnalyst: analysis failed");
-                    }
-                }
-            }
-
-            // Graceful shutdown
-            if *shutdown.borrow() {
-                info!("IntentAnalyst: shutdown signal received");
-                return;
-            }
-        }
-    });
-}
 
 /// Startup backfill: process completed sessions that have turns but no intents.
 #[allow(dead_code)]
@@ -155,7 +59,7 @@ pub(crate) async fn intent_startup_backfill(state: &AppState) {
 }
 
 /// Core analysis: fetch uncovered turns, call Sonnet, write intents.
-async fn process_session_intents(state: &AppState, session_id: &str) -> Result<usize> {
+pub(crate) async fn process_session_intents(state: &AppState, session_id: &str) -> Result<usize> {
     // 1. Incremental cursor: get max turn_range_end already analyzed
     let covered_end = state
         .store
@@ -244,12 +148,13 @@ async fn process_session_intents(state: &AppState, session_id: &str) -> Result<u
             .await;
 
         // Emit event
-        let ev = DaemonEvent::IntentAnalyzed {
-            session_id: session_id.to_string(),
-            intent_type: intent.intent_type.clone(),
-        };
-        state.event_bus.publish(ev.clone());
-        let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await;
+        let _ = state
+            .bus
+            .publish_memory(MemoryEvent::IntentAnalyzed {
+                session_id: session_id.to_string(),
+                intent_type: intent.intent_type.clone(),
+            })
+            .await;
 
         count += 1;
     }

@@ -26,6 +26,13 @@ pub enum IncidentEvent {
         /// Free-form reason: "manual", "auto_recovery", "expired", etc.
         reason: String,
     },
+    /// A subscription cursor was considered stale (no ack for >30 days) and
+    /// got archived. Emitted by the retention cron. Wraps a full
+    /// `MissionIncident` so ops tooling that consumes `Reported` can handle
+    /// this variant uniformly.
+    StaleSubscription {
+        incident: MissionIncident,
+    },
 }
 
 impl DomainEvent for IncidentEvent {
@@ -37,6 +44,7 @@ impl DomainEvent for IncidentEvent {
         match self {
             Self::Reported { .. } => "reported",
             Self::Resolved { .. } => "resolved",
+            Self::StaleSubscription { .. } => "stale_subscription",
         }
     }
 
@@ -44,6 +52,7 @@ impl DomainEvent for IncidentEvent {
         match self {
             // `raw_payload` is arbitrary JSON (webhook body) + description.
             Self::Reported { .. } => 8192,
+            Self::StaleSubscription { .. } => 2048,
             Self::Resolved { .. } => 256,
         }
     }
@@ -81,6 +90,9 @@ mod tests {
             IncidentEvent::Resolved {
                 incident_id: "inc-1".into(),
                 reason: "manual".into(),
+            },
+            IncidentEvent::StaleSubscription {
+                incident: sample_incident(),
             },
         ];
         for c in &cases {

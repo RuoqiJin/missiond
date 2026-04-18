@@ -20,8 +20,8 @@ use tokio::sync::{mpsc, oneshot, RwLock, Semaphore};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
-use crate::event_bus::TimelineEntry;
 use crate::minimax_client::{ChatMessage, MiniMaxClient};
+use missiond_core::event::events::WorkerEvent;
 
 // ── Constants ──────────────────────────────────────────────────────
 
@@ -261,13 +261,12 @@ pub(crate) struct MinimaxGateway {
     client: MiniMaxClient,
     quota: Arc<RwLock<QuotaTracker>>,
     concurrency: Arc<Semaphore>,
-    event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>,
-    /// Phase 6 dual-emit.
+    /// v2 bus: every `WorkerEvent::LlmCall` is published here.
     bus: Option<Arc<crate::bus::BusServices>>,
 }
 
 impl MinimaxGateway {
-    /// Attach the v2 bus so every emitted event dual-emits (Phase 6).
+    /// Attach the v2 bus so every emitted event flows through it.
     pub fn with_bus(mut self, bus: Arc<crate::bus::BusServices>) -> Self {
         self.bus = Some(bus);
         self
@@ -363,7 +362,6 @@ impl MinimaxGateway {
 
             // 5. Execute request (spawned for concurrency)
             let client = self.client.clone();
-            let event_tx = self.event_tx.clone();
             let bus = self.bus.clone();
             tokio::spawn(async move {
                 let api_start = std::time::Instant::now();
@@ -388,12 +386,8 @@ impl MinimaxGateway {
                     "minimax_gateway_call"
                 );
 
-                // Emit timeline event
-                let summary = format!(
-                    "MiniMax {} → {}ch ({}ms, q:{}ms)",
-                    req.caller, response_chars, duration_ms, queue_wait_ms
-                );
-                let event = crate::event_bus::DaemonEvent::WorkerLlmCall {
+                // Emit LlmCall event via v2 bus.
+                let ev = WorkerEvent::LlmCall {
                     caller: req.caller.to_string(),
                     task_id: req.task_id.clone(),
                     status: status.to_string(),
@@ -402,20 +396,11 @@ impl MinimaxGateway {
                     duration_ms,
                     queue_wait_ms,
                 };
-                if let Some(ref bus) = bus {
-                    crate::bus::spawn_v1_shim(bus.clone(), event.clone());
+                if let Some(bus) = bus {
+                    let _ = bus.publish_worker(ev).await;
                 }
-                // Use explicit trace context if provided (e.g. translation → thinking_message link),
-                // otherwise fall back to task_id as trace_id for backward compat.
-                let entry_trace_id = req.trace_id.or(req.task_id);
-                let entry = TimelineEntry {
-                    event,
-                    trace_id: entry_trace_id,
-                    span_id: uuid::Uuid::new_v4().to_string(),
-                    parent_span_id: req.parent_span_id,
-                    summary: Some(summary),
-                };
-                let _ = event_tx.send(entry);
+                let _ = req.trace_id;
+                let _ = req.parent_span_id;
 
                 // Reply to caller
                 let _ = req.reply_tx.send(result);
@@ -429,9 +414,7 @@ impl MinimaxGateway {
 
 /// Create the gateway and its handle. Call once at startup.
 /// Returns (handle_for_AppState, gateway_actor_to_spawn).
-pub(crate) fn create_minimax_gateway(
-    event_tx: tokio::sync::mpsc::UnboundedSender<TimelineEntry>,
-) -> Option<(MinimaxHandle, MinimaxGateway)> {
+pub(crate) fn create_minimax_gateway() -> Option<(MinimaxHandle, MinimaxGateway)> {
     let api_key = crate::minimax_client::load_api_key()?;
     let client = MiniMaxClient::new(api_key);
 
@@ -458,7 +441,6 @@ pub(crate) fn create_minimax_gateway(
         client,
         quota,
         concurrency: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
-        event_tx,
         bus: None,
     };
 
