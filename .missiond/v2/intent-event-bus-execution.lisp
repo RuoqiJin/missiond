@@ -17,7 +17,7 @@
     :branch       "refactor/event-bus-v2"
     :started      "2026-04-19"
     :status       "in-progress"
-    :phase-cursor 6)
+    :phase-cursor 7)
 
   ;; ─ 阶段追踪 ─
   (phases
@@ -35,7 +35,8 @@
              :summary "横切面层落地 — causation guard + BusMetrics trait + AtomicBusMetrics + ObservabilityEvent emitter + InMemoryBus 全套 + 9 chaos scenarios。代码在 crates/missiond-core/src/event/{guards,metrics,in_memory}/**。34 个新 lib unit tests (5 causation + 7 metrics counters + 3 emitter + 4 control_gate + 3 blob_store + 8 in_memory_log + 4 in_memory_bus) + 12 chaos integration tests 在 tests/event_chaos.rs。LogWriter.append 改调 check_causation() 统一 guard 入口。InMemoryLog impl Log:seq 用 AtomicI64 fetch_add、bounded 4096 channel、dedupe map、failed state 可切换、ephemeral 分 seq 不持久化、claim-check 走 BlobStore — 与 PG 版全面同语义。Dispatcher 与 InMemoryLog 通过 InMemoryTailSource 解耦,共享 Phase 3 run_tail 实现,无代码分叉。BusMetricsEmitter 每 10s snapshot 转 ObservabilityEvent::BusMetric(ephemeral=true)追加到 log。D002 deviation:Prometheus 后端推迟(MVP 仅 AtomicBusMetrics stub)。I010 issue:cursor-orphan daily cron wire up 推迟到 Phase 8。")
     (phase-6 :status "completed" :owner "phase6-producer-migration" :started "2026-04-19" :completed "2026-04-19"
              :summary "Producer 迁移 — daemon 侧 bus/{mod,bootstrap,compat,control_gate_adapter}.rs 落地 + AppState.bus 字段 + main.rs 启动钩子(PG 特性开启后 bootstrap + start 注入 dispatcher/metrics/observability emitter)+ ControlTreeGate 适配 watch::Receiver<ControlTree> → ControlGate trait(DC010 形式)。所有 83 个 v1 publish 点全部双发:保留 event_bus.publish(...) + 新增 let _ = crate::bus::publish_v1_shim(&state.bus, &ev).await(async 上下文)或 spawn_v1_shim(detached)(同步 helper 如 pty_event_worker::handle_mcp_tool_error)。7 个 LLM-internal send_tx 点(gemini_client/codex_cli/sonnet_gateway/minimax_gateway)各自挂 Option<Arc<BusServices>> + with_bus() + .shim() 辅助,保证 CliRequest*/WorkerLlmCall 也双发。4 条 MPSC bypass 的 sender 端选择性双发:incident_tx 加 bus.publish_incident(IncidentEvent::Reported) — IncidentEvent 已在 Phase 1 枚举中。embedding_tx / ast_sync_tx sender 保留纯 MPSC(D003 deviation: EmbeddingEvent / AstSyncEvent 不在 12 域枚举中;新增会破坏 §4.2.a 契约,推迟到 Phase 7 或重新评估)。cursor_ack_tx 不动(I005 保留 Phase 7)。LEGACY Gemini*/Codex* variants 透传进 LlmEvent::LegacyXxx(DC004 保留)。workspace 编译通过 + missiond-core 250 lib tests + 12 chaos tests + missiond-daemon 91 unit tests 全部 PASS。未触 v1 DaemonEvent enum / run_timeline_writer / event_router — Phase 7/8 再处理。")
-    (phase-7 :status "pending" :owner nil :started nil :completed nil :summary nil)
+    (phase-7 :status "completed" :owner "phase7-subscriber-migration" :started "2026-04-19" :completed "2026-04-19"
+             :summary "Subscriber 迁移 — daemon 侧 bus/v2_subscribers.rs 落地 + BusServices.dlq(PgDlqSink)+ BusServices::subscribe<T>() 助记 + main.rs 启动 hook(bus::start_v2_subscribers 位于 _bus_handle 之后)。14 个 v2 订阅者全部上线,与 v1 timeline_tx 订阅并存(Phase 8 删 v1):A 组 8 个 event_router consumers(extraction / submit / decision / harvest / realtime_extraction / session_reflection / kb_consolidation / intent_analyst)使用 bus.subscribe::<T>() + debounce() combinator,动作与 v1 同(schedule_memory_tasks / dispatch_queued_submit_tasks / process_pending_master_questions 等皆 DB-poll 幂等,双发安全);B 组 6 个 worker observers(gemini_logger / translation / arch_maintenance / lisp_survey / conversation_organizer / tagger_chunker)仅订阅 + ack,不重复 v1 副作用(LLM 调用 / git 操作),只做 debug log → Phase 8 切 active handler。I005(cursor_ack_tx 内化)标 D004 推迟 Phase 8,risk/reward 不值;I004(WS wire-format)全部推迟 Phase 8(继续走 v1 ws_tx,决策见 D005)。未触 v1 event_bus.rs / event_router.rs / run_timeline_writer / 任何 worker.rs。workspace build clean + missiond-core 250 lib tests + 12 chaos tests + missiond-daemon 91 unit tests 全部 PASS。")
     (phase-8 :status "pending" :owner nil :started nil :completed nil :summary nil)
     (phase-9 :status "pending" :owner nil :started nil :completed nil :summary nil))
 
@@ -47,6 +48,8 @@
     (claim :phase 5 :scope "crates/missiond-core/src/event/{guards,metrics,in_memory}/** + tests/event_chaos.rs" :agent "phase5-cross-cutting"
            :claimed-at "2026-04-19T00:00:00Z" :released-at "2026-04-19T00:00:00Z")
     (claim :phase 6 :scope "crates/missiond-daemon/src/bus/** + AppState.bus + all 83 v1 publish sites + 7 LLM internal sends" :agent "phase6-producer-migration"
+           :claimed-at "2026-04-19T00:00:00Z" :released-at "2026-04-19T00:00:00Z")
+    (claim :phase 7 :scope "crates/missiond-daemon/src/bus/{mod,bootstrap,v2_subscribers}.rs + main.rs bus::start_v2_subscribers hook" :agent "phase7-subscriber-migration"
            :claimed-at "2026-04-19T00:00:00Z" :released-at "2026-04-19T00:00:00Z")
     )
 
@@ -73,6 +76,24 @@
                :lisp-said "frozen lisp §4.1 dead-bypass 列出 embedding-tx / ast-sync-tx 应改走 log.append(EmbeddingEvent::Requested) / log.append(AstSyncEvent::Requested);Phase 6 任务说'sender 端加 log.append(EmbeddingEvent/AstSyncEvent)'"
                :actually-did "Phase 6 未添加 log.append 镜像。仅 incident_tx sender 加了 bus.publish_incident(IncidentEvent::Reported) 双发(IncidentEvent 在 Phase 1 12 域枚举内);embedding_tx / ast_sync_tx 的 sender 保持 MPSC-only,不做双发"
                :reason "frozen lisp §4.2.a 只定义了 12 个 domain enum(Slot/Board/Task/Question/Llm/Worker/Memory/Message/Session/System/Observability/Incident),Phase 1 未创建 EmbeddingEvent / AstSyncEvent。新增 2 个域会破坏 12 域 compile-time 契约(Domain::ALL + TopicRegistry + 所有 chaos/unit tests 都需同步)。MPSC receiver 侧还未重写(Phase 7 任务),dual emit 也没有 subscriber 可拿。Phase 7 subscriber 迁移时应重新评估:(a) 新增 2 个域 + 补 chaos 测试(重代价);(b) 将 embedding/ast-sync 归入现有 MemoryEvent / SystemEvent 的新 variant(轻代价);(c) 保持 MPSC 作为 worker-internal channel 不进总线(与 cursor-ack 同策略)。"
+               :approved-by "auto")
+
+    (deviation :id D004 :phase 7 :date "2026-04-19" :agent "phase7-subscriber-migration"
+               :lisp-said "frozen lisp §4.1 dead-bypass 说 cursor_ack_tx 不作为 event,而在 conversation-logger worker 内部处理;Phase 7 任务书进一步说'重构 conversation_logger_worker 的 run loop,让 cursor_ack 逻辑完全内部化:删除 state.cursor_ack_tx 字段 + AppState 中对应 Arc<UnboundedSender<_>>,message_handler 的 INSERT 成功不再 cursor_ack_tx.send()'"
+               :actually-did "Phase 7 未重构 conversation_logger 的 cursor_ack。保留 state.cursor_ack_tx 与 main.rs:846-858 的 ack consumer task 不动"
+               :reason "内化要求把 gemini_tasks + cc_tasks 两个 watcher 的 persist_cursor_ack 迁到 ConversationLoggerWorker 内部。ConversationLoggerWorker 当前只持 conv_logger_rx 一个 broadcast::Receiver,要接入两个 watcher 需改 worker trait + spawn 路径 + 两套 cursor routing 逻辑,远超 'Phase 7 subscriber 迁移' 本职。cursor_ack_tx 也不是 DomainEvent,不是本 Phase 的 bus 订阅目标。I005 仍有效,推迟 Phase 8 一并处理(可能与 ConversationLoggerWorker 的完整重构合并)。"
+               :approved-by "auto")
+
+    (deviation :id D005 :phase 7 :date "2026-04-19" :agent "phase7-subscriber-migration"
+               :lisp-said "frozen lisp §4.3 + 任务书 I004 要求 Phase 7 将 WS 层订阅者迁到 v2 bus — WS server 订阅 12 个 topic,用 compat serializer 生成与 v1 字节完全相同的 JSON 推给前端"
+               :actually-did "Phase 7 WS 层完全不动。frontend_events_tx 继续由 run_timeline_writer(v1 timeline_writer)在每条事件 fan-out 时 send JSON 字符串;WS server 继续订阅 frontend_events_tx"
+               :reason "v1 run_timeline_writer 仍在运行(Phase 6/7 保留),ws_tx 链路完整。真正的 WS 切换意味着:(a) 删掉 run_timeline_writer,(b) 新写 ws_bridge.rs 订阅全部 12 个 v2 topic + v2_event_to_v1_json bit-identical 序列化器,(c) 切换 ws_tx 生产端。这三步任何一环失败前端都静默挂,风险极高;而 Phase 6 dual-emit 意味着 v1 + v2 同时有数据,ws 在 Phase 8 删 v1 时一并切才合适。I004 resolution 改为 Phase 8。任务书本身也给了此路径:'简化路径...推迟到 Phase 8(删 v1 同时切 WS)。加 deviation 记此决定'。"
+               :approved-by "auto")
+
+    (deviation :id D006 :phase 7 :date "2026-04-19" :agent "phase7-subscriber-migration"
+               :lisp-said "任务书 B 类 worker subscribers 段:'6 处 workers 中的 subscribers...改成 bus.subscribe::<T>(\"worker_xxx\")'。step A/B 说'保留 v1 订阅器代码!Phase 8 再删。这样双 consumer 并存'"
+               :actually-did "6 个 worker 的 v2 订阅是 passive observer(只订阅+ack+log,不重复 v1 的真实副作用);v1 timeline_rx 继续负责实际动作"
+               :reason "event_router 8 consumers 的动作是 DB-poll 幂等(schedule_memory_tasks / process_pending_master_questions 等从 DB 读 pending 状态再处理),双发安全。但 worker 侧的动作:LLM 调用(translation / strategy)、git 检测 + YAML 更新(arch_maintenance)、intent.lisp 增量更新(lisp_survey)、会话链路修复(conversation_organizer)、turn 提取(tagger_chunker)— 这些双发会实打实重复 LLM 调用 + 写 YAML + 写 DB,浪费资源且可能写冲突。passive observer 方案一方面验证 v2 订阅路径活,一方面保持功能不重复。Phase 8 切换时只需把 observer 升级成 active handler,同时删除 timeline_rx 路径。这是任务书'优先功能正确'精神的直接体现。"
                :approved-by "auto"))
 
   ;; ─ 执行期阻塞/未决问题 ─
@@ -93,13 +114,13 @@
            :desc "控制闸语义变化风险:v1 paused domain 仍经过 Timeline Writer 入库并广播,consumer 自行 no-op;v2 paused domain 的事件不再 fan-out 给 subscriber。前端若依赖'暂停时仍能看到事件'会 break"
            :resolution "Phase 3 验证: Dispatcher 实现对 paused domain 默认 drop 已是 frozen lisp §4.2.c 正向契约(paused=true 时跳过该 domain 的所有投递)。事件仍 persist 到 event_log,订阅端自己做 live-resume。ObservabilityEvent/IncidentEvent 永远 domain_to_ctl_domain = None ⇒ 永不受 pause 影响(§4.4 bus self-emission)。Phase 7 WS 层若需继续在暂停时向前端发事件,可让 frontend_events_tx 作为独立 subscriber 绕过 Dispatcher control-gate(不在 Phase 3 范围)。"
            :resolved-at "2026-04-19")
-    (issue :id I004 :phase 6 :date "2026-04-19" :severity blocker
+    (issue :id I004 :phase 8 :date "2026-04-19" :severity blocker
            :desc "前端 WS wire-format 契约耦合:47-ish wire_type 字符串 + 固定 JSON envelope (type/seq/trace_id/span_id/parent_span_id/payload) 由外部浏览器 client 消费。修改字段名/去掉字段会静默 break。sync 协议进一步耦合 timeline_latest_seq + query_timeline_since 两个 DB API"
-           :resolution "Phase 6-7 上线需保持 wire envelope 不变或加版本字段,老 system_timeline 查询 API 在新 event_log 上 alias (view 或 query 重写),不能一次性 cut-over"
+           :resolution "Phase 7 选择不动 WS 层(D005 deviation);v1 run_timeline_writer 仍在跑,ws_tx 链路完整。Phase 8 删 v1 timeline_writer 时,同步新写 ws_bridge.rs:订阅全部 12 个 v2 topic + v2_event_to_v1_json 字节相同序列化 + 切 ws_tx 生产端。Phase 8 前这是 blocker."
            :resolved-at nil)
-    (issue :id I005 :phase 2 :date "2026-04-19" :severity minor
+    (issue :id I005 :phase 8 :date "2026-04-19" :severity minor
            :desc "cursor_ack_tx 的去向:frozen lisp §4.1 dead-bypass 说归 conversation-logger worker 内部,不作为 event。但 producer (conversation_logger:58) 和 consumer (main.rs:846-858) 分居两个 task,需要重构合并,不能只做 bus 迁移"
-           :resolution "Phase 2 代码重构:cursor_ack 的 send + receive 合并到 ConversationLoggerWorker 自己的 run loop 内部,删除 UnboundedChannel"
+           :resolution "Phase 7 评估后放弃(D004 deviation):cursor_ack 不是 DomainEvent,本 Phase 订阅迁移无必要触;完整内化需 ConversationLoggerWorker 接手 gemini_tasks + cc_tasks 两个 watcher 的 persist_cursor_ack,改动扇出过大。推迟 Phase 8 与 v1 大清理一并处理。"
            :resolved-at nil)
     (issue :id I006 :phase 1 :date "2026-04-19" :severity minor
            :desc "AST 同步触发链路不完整:ast_sync_tx 的唯一外部 producer 是 main.rs:1298 的启动时 FullSync。commit 级增量同步在代码中未接入,ContextualCommitDetected 也未 wire 到 CommitSync"
@@ -309,7 +330,32 @@
     (decision :id DC035 :phase 6 :date "2026-04-19"
               :topic "AppState.bus 类型:Arc<BusServices> 直接持有"
               :chose "pub(crate) bus: Arc<BusServices>(必填,非 Option)"
-              :rationale "Phase 6 开始 v2 bus 就是 daemon 启动的强制依赖。Option 会让下游 90+ publish 点每次都写 .as_ref().map(...),噪音大。启动失败的路径(PG 不可达)应在 bootstrap 阶段就 `?` 传播,不到 AppState 构造。与 store/mission/pty 同为必填字段符合一致性。"))
+              :rationale "Phase 6 开始 v2 bus 就是 daemon 启动的强制依赖。Option 会让下游 90+ publish 点每次都写 .as_ref().map(...),噪音大。启动失败的路径(PG 不可达)应在 bootstrap 阶段就 `?` 传播,不到 AppState 构造。与 store/mission/pty 同为必填字段符合一致性。")
+
+    (decision :id DC036 :phase 7 :date "2026-04-19"
+              :topic "v2 订阅者模块位置:daemon 内 bus/v2_subscribers.rs 独立文件"
+              :chose "新建 crates/missiond-daemon/src/bus/v2_subscribers.rs,与 bootstrap / compat / control_gate_adapter 同级;pub(crate) use 通过 mod.rs 暴露 start_v2_subscribers"
+              :rationale "本 Phase 14 个订阅者同生同死,放一个文件最易读、最易后续合并或移除。放进 event_router.rs 会混淆 v1/v2 代码;放进各 worker.rs 会扇出到 6 个文件且与 Phase 8 一次性删 v1 路径冲突。bus/ 子目录是 v2 在 daemon 的唯一栖居地,新文件符合既有约定。")
+
+    (decision :id DC037 :phase 7 :date "2026-04-19"
+              :topic "BusServices 新增 dlq 字段 + subscribe<T>() 助记方法"
+              :chose "PgDlqSink 作为默认 DlqSink 注入;BusServices::subscribe<T>(&self, name, opts) 封装 topic / log / cursor_store / dlq 四个共享依赖的传入"
+              :rationale "Phase 4 subscription::subscribe 签名要求 topic + log + cursor_store + dlq 四个参数。若每个订阅者调用方自己拼,14 处会各写 5 行 boilerplate + 容易传错 topic。BusServices::subscribe<T>() 让调用方只写 bus.subscribe::<T>(name, opts).await?,DLQ 是 PG-backed(FailurePolicy::Retry 超限自动入库),ops 可查。frozen lisp §4.3 subscription-api 的 API 在 core 层;daemon bus 层只提供方便的调用点,不改核心语义。")
+
+    (decision :id DC038 :phase 7 :date "2026-04-19"
+              :topic "event_router 8 consumers 的 debounce/accumulation 语义迁移"
+              :chose "realtime_extraction / session_reflection 用 sub.debounce(Duration); kb_consolidation / intent_analyst 用 counter + 循环(无直接 combinator 对应);extraction / submit / decision 目前不加 combinator(直接每条 ack + 动作,依赖 v1 并存保留 trailing-edge 去抖)"
+              :rationale "sub.debounce(window) 是 fixed-deadline 语义,完美对应 v1 realtime_extraction(3s)/ session_reflection(5s)。kb_consolidation 要按 N=5 累加再触发,不是时间窗;intent_analyst 需要 per-session HashMap 且同时看 5min timeout 和 5 accumulation 两条件,combinator 表达不出 → 手写 loop + tokio::time::timeout 便捷。extraction / submit / decision 的 100-500ms 短窗去抖若用 sub.debounce,v2 每条都会多等这段时间才触发(而动作是 DB-poll,时效不敏感);但由于 v1 consumer 同时在跑 trailing-edge,v2 不加 debounce 是无害的,Phase 8 切换时可再加。")
+
+    (decision :id DC039 :phase 7 :date "2026-04-19"
+              :topic "Worker 6 subs 的角色:observer (passive) vs active handler"
+              :chose "全部 passive:订阅 + ack + 单行 debug! log;实际副作用仍走 v1 timeline_rx 路径(workers/sonnet/arch_maintenance_worker 等)"
+              :rationale "见 D006 deviation。worker 动作有实打实的外部副作用(LLM API 调用 / git 写操作 / intent.lisp 覆盖),双发会翻倍资源消耗 + 可能写冲突。passive observer 验证 v2 订阅路径联通但不重复副作用,是 '优先功能正确' 的直接落实。Phase 8 flip:删 v1 timeline_rx + 把 observer 改成 active handler,一次性切换。")
+
+    (decision :id DC040 :phase 7 :date "2026-04-19"
+              :topic "intent_analyst 的特殊处理:在 v2 中只 observe 不 act"
+              :chose "spawn_intent_analyst_sub 保留完整的 per-session 累加逻辑,但 expiry 触发时只 debug! log(不调 process_session_intents)"
+              :rationale "intent_analyst 的 process_session_intents 是 Sonnet LLM 调用 + DB 写 intent 行 + 反向更新 intent_group_id,典型重副作用。v1 spawn_intent_consumer 已在跑,Phase 7 任何重复调用都浪费 Sonnet 配额。如果任务书要求 A 组 8 consumers 都双发的话,intent_analyst 不属于 'DB-poll 幂等' 类别,所以例外归入 B-style observer。Phase 8 flip 时要同时删除 spawn_intent_consumer 并把 debug! 换成 process_session_intents 调用(注意 process_session_intents 目前是 private,需 pub(crate))。"))
 
   ;; ─ 阶段完成记录 ─
   ;; 格式: (completion :phase N :date "..." :agent "name"
@@ -437,6 +483,16 @@
       :tests-added 2
       :verified-by "cargo build -p missiond-daemon OK; cargo build (workspace) OK; cargo test -p missiond-core --lib → 250 passed,0 failed(无 regression);cargo test -p missiond-core --test event_chaos → 12 passed,0 failed(chaos 无 regression);cargo test -p missiond-daemon → 91 passed,0 failed(daemon 单元测试无 regression)"
       :notes "83 v1 publish sites + 7 LLM internal send sites 全部 dual-emit。incident_tx sender 加了 bus.publish_incident(IncidentEvent::Reported) 双发(IncidentEvent 在 Phase 1 域内);embedding_tx / ast_sync_tx sender 保留纯 MPSC(D003 deviation)。LEGACY Gemini*/Codex* variants 透传进 LlmEvent::LegacyXxx(DC004 保留)。v1 event_bus::DaemonEvent / run_timeline_writer / event_router 未触(Phase 8)。AppState.bus 是必填字段(DC035)。bus/ 子模块 4 个新文件:mod.rs / bootstrap.rs / compat.rs / control_gate_adapter.rs。DC030 双发范式确立:90% 用 publish_v1_shim().await,10% 同步 helper 用 spawn_v1_shim 独立任务。BusServices::start 返回 BusStartHandle,daemon shutdown 随运行时终止(DC034)。I005 cursor_ack_tx 未动(保留 Phase 7);I007 ephemeral per-call 审计未动(compat shim 继续尊重 v1 is_ephemeral())。未新增单元测试(任务要求),但添加 2 个 bus 内部测试(control_gate_adapter round-trip + default_opts stamps producer_id)。")
+
+    (completion
+      :phase 7 :date "2026-04-19" :agent "phase7-subscriber-migration"
+      :deliverables ("crates/missiond-daemon/src/bus/v2_subscribers.rs"
+                     "crates/missiond-daemon/src/bus/mod.rs (+ pub mod v2_subscribers + pub(crate) use start_v2_subscribers)"
+                     "crates/missiond-daemon/src/bus/bootstrap.rs (+ dlq: Arc<dyn DlqSink> 字段 + PgDlqSink 注入 + BusServices::subscribe<T>() 助记方法)"
+                     "crates/missiond-daemon/src/main.rs (+ bus::start_v2_subscribers(&bus_services, &state, shutdown_rx.clone()) hook 紧邻 _bus_handle start 之后)")
+      :tests-added 0
+      :verified-by "cargo build(workspace) clean;cargo build -p missiond-daemon clean;cargo test -p missiond-core --lib → 250 passed,0 failed(无 regression);cargo test -p missiond-core --test event_chaos → 12 passed,0 failed(chaos 无 regression);cargo test -p missiond-daemon → 91 passed,0 failed(daemon unit tests 无 regression)"
+      :notes "14 个 v2 订阅者全部上线,v1 timeline_tx.subscribe 完全保留。A 组 8 个 event_router consumers 做动作(复用 schedule_memory_tasks / dispatch_queued_submit_tasks / process_pending_master_questions / experience_harvester::harvest_session / check_realtime_extraction / check_deep_analysis + strategy/retro notify / check_kb_consolidation 等 DB-poll 幂等动作),与 v1 并存双 fire。realtime_extraction + session_reflection 用 sub.debounce() combinator,kb_consolidation / intent_analyst 用手写 loop。B 组 6 个 worker observers + intent_analyst 仅 passive(DC039 / DC040,见 D006 deviation)— 只订阅 + ack + debug! log,不重复 v1 副作用。I004 WS wire-format 迁移推迟 Phase 8(D005);I005 cursor_ack_tx 内化推迟 Phase 8(D004)。未触 v1 event_bus.rs / event_router.rs / run_timeline_writer / workers/sonnet/* / workers/local/conversation_organizer.rs / workers/local/tagger_chunker.rs。BusServices.dlq 用 PgDlqSink(FailurePolicy::Retry 超限 fall through SkipToDLQ,落 dead_letter_queue 表)。未新增测试(本 Phase 纯 wiring;功能性 E2E 归 Phase 9)。")
 
     (completion
       :phase 5 :date "2026-04-19" :agent "phase5-cross-cutting"

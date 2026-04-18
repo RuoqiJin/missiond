@@ -45,7 +45,10 @@ use missiond_core::event::{
         spawn_bus_metrics_emitter, AtomicBusMetrics, BusMetrics, BusMetricsEmitterHandle,
         emitter::ObservabilityAppender,
     },
-    subscription::cursor_store::{CursorStore, PgCursorStore},
+    subscription::{
+        cursor_store::{CursorStore, PgCursorStore},
+        failure::{DlqSink, PgDlqSink},
+    },
     DomainEvent,
 };
 use sqlx::PgPool;
@@ -64,6 +67,10 @@ pub struct BusServices {
     pub dispatcher: Dispatcher,
     pub control_gate: ControlTreeGate,
     pub metrics: Arc<AtomicBusMetrics>,
+    /// Dead-letter queue sink used by Phase 7 subscribers. Shared so every
+    /// `bus.subscribe::<T>` call can hand the same backend to its
+    /// `FailureRouter`.
+    pub dlq: Arc<dyn DlqSink>,
     /// Tail source shared with the dispatcher loop. Stored so `start()` can
     /// spawn the tail task without re-constructing it.
     tail_source: Arc<dyn TailSource>,
@@ -132,6 +139,10 @@ impl BusServices {
         // Cursor store — used by Phase 4 subscribers (Phase 7 will wire them).
         let cursor_store: Arc<dyn CursorStore> = Arc::new(PgCursorStore::new(pool.clone()));
 
+        // Dead-letter queue sink — Phase 7 subscribers route retry-exhausted
+        // failures here instead of blocking the subscription forever.
+        let dlq: Arc<dyn DlqSink> = Arc::new(PgDlqSink::new(pool.clone()));
+
         // Metrics collector — stays NoopMetrics-equivalent until we wire
         // counters inside the LogWriter; AtomicBusMetrics is cheap enough
         // to always instantiate.
@@ -160,6 +171,7 @@ impl BusServices {
             dispatcher,
             control_gate,
             metrics,
+            dlq,
             tail_source,
             pg_pool: pool,
         }))
@@ -276,6 +288,38 @@ impl BusServices {
         opts: AppendOpts,
     ) -> Result<AppendAck, AppendError> {
         self.log.append(event, opts).await
+    }
+
+    // ── Subscribe convenience ───────────────────────────────────────────
+    //
+    // Phase 7 consumers call `bus.subscribe::<T>(name, opts).await?` to get a
+    // live Subscription<T> pre-wired to the dispatcher topic + cursor store +
+    // DLQ. Combinators (`.debounce`, `.coalesce`, …) are exposed on
+    // Subscription<T> and stack on top of the returned handle.
+
+    /// Subscribe to a typed domain topic. Returns a `Subscription<T>` pre-
+    /// wired to the shared log / topic / cursor store / DLQ. Combinators
+    /// attach on top of the returned handle.
+    pub async fn subscribe<T>(
+        &self,
+        name: &str,
+        opts: missiond_core::event::subscription::SubscriptionOpts,
+    ) -> Result<missiond_core::event::subscription::Subscription<T>, missiond_core::event::subscription::SubscribeError>
+    where
+        T: DomainEvent,
+    {
+        use missiond_core::event::log::LogReadable;
+        let log: Arc<dyn LogReadable> = self.log.clone();
+        let topic = self.dispatcher.topic::<T>();
+        missiond_core::event::subscription::subscribe::<T>(
+            name,
+            opts,
+            log,
+            topic,
+            self.cursor_store.clone(),
+            self.dlq.clone(),
+        )
+        .await
     }
 }
 

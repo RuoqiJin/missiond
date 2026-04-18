@@ -20,7 +20,9 @@
 pub mod bootstrap;
 pub mod compat;
 pub mod control_gate_adapter;
+pub mod v2_subscribers;
 
 pub use bootstrap::{BusServices, BusStartHandle};
 pub use compat::{incident_reported, publish_v1_shim, spawn_v1_shim};
 pub use control_gate_adapter::ControlTreeGate;
+pub(crate) use v2_subscribers::start_v2_subscribers;

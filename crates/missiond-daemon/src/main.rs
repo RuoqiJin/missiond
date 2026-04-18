@@ -1154,6 +1154,11 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow!("BusServices::start failed: {}", e))?;
     info!("v2 event bus: dispatcher + metrics emitter started");
 
+    // Phase 7: spawn v2 subscribers (8 router consumers + 6 worker
+    // observers). They run alongside the v1 timeline subscribers until
+    // Phase 8 removes the v1 path.
+    bus::start_v2_subscribers(&bus_services, &state, shutdown_rx.clone());
+
     // Embedding Worker: event-driven actor (KB/Skill/Conv/AST embeddings + backfill)
     workers::spawn_worker(
         workers::sonnet::embedding_worker::EmbeddingLoopWorker { rx: embedding_rx },
