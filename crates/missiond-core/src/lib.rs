@@ -15,6 +15,7 @@ pub mod core;
 pub mod gemini_cli;
 pub mod db;
 pub mod embedding;
+pub mod event;
 pub mod ipc;
 pub use missiond_pty as pty;
 pub use semantic_terminal as semantic;
