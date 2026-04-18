@@ -25,7 +25,8 @@
              :summary "Inventory of v1 bus surface: 52 variants, 83 publish points, 14 subscribers, 4 MPSC bypasses, 1 central timeline writer. 7 top risks flagged.")
     (phase-1 :status "completed" :owner "phase1-schema" :started "2026-04-19" :completed "2026-04-19"
              :summary "schema 层落地 — 12 domain enum + DomainEvent trait,共 55 个 variant 覆盖 49 个 v1 DaemonEvent + 6 个新 variant(1 Slot::Stuck 占位 + 3 Observability + 2 Incident)。模块位于 crates/missiond-core/src/event/,与旧 event_bus.rs 并存。45 unit tests 全部 pass。I001 9 个遗漏 variant 全部归属(见 DC001)。")
-    (phase-2 :status "pending" :owner nil :started nil :completed nil :summary nil)
+    (phase-2 :status "completed" :owner "phase2-storage" :started "2026-04-19" :completed "2026-04-19"
+             :summary "storage 层落地 — Log trait + LogWriter 任务 + BlobStore claim-check + 3 个新 migration。30 个新 unit test 覆盖 backpressure/dedup collision/batch flush/failed state/claim-check redirect/checksum roundtrip。6 个 integration test 骨架 (#[ignore],需要 Docker 才跑)。代码位于 crates/missiond-core/src/event/{log,blob_store}/,与 v1 run_timeline_writer / system_timeline 完全共存。")
     (phase-3 :status "pending" :owner nil :started nil :completed nil :summary nil)
     (phase-4 :status "pending" :owner nil :started nil :completed nil :summary nil)
     (phase-5 :status "pending" :owner nil :started nil :completed nil :summary nil)
@@ -117,7 +118,32 @@
     (decision :id DC004 :phase 1 :date "2026-04-19"
               :topic "LEGACY Gemini*/Codex* variant 处理"
               :chose "保留为独立 variant(LegacyGeminiRequestStarted 等),不 deprecate"
-              :rationale "frozen lisp 未让我们立即抛弃 legacy 语义,Phase 6 才会折叠。保留完整字段确保 v1 DB 行 round-trip 可行(Phase 2 shim 必须无损双向映射)。Phase 6 会引入 From impl 把 legacy 折叠入 RequestStarted { provider: Gemini/Codex, .. }。"))
+              :rationale "frozen lisp 未让我们立即抛弃 legacy 语义,Phase 6 才会折叠。保留完整字段确保 v1 DB 行 round-trip 可行(Phase 2 shim 必须无损双向映射)。Phase 6 会引入 From impl 把 legacy 折叠入 RequestStarted { provider: Gemini/Codex, .. }。")
+
+    (decision :id DC005 :phase 2 :date "2026-04-19"
+              :topic "Phase 2 对 I005 cursor_ack_tx 的态度"
+              :chose "不动 conversation_logger,Log trait 不提供 cursor_ack 相关 API,等 Phase 7 subscriber 迁移时由 ConversationLoggerWorker 自行处理"
+              :rationale "Phase 2 范围严格限定在 storage(log + blob + migration),touch conversation_logger 会越界进入 subscriber refactor。I005 的 resolution 保持'Phase 7 处理'不变;frozen lisp §4.1 dead-bypass 已明确 cursor_ack 不作为 event,Phase 2 的 Log trait 无需为其设计任何入口。")
+
+    (decision :id DC006 :phase 2 :date "2026-04-19"
+              :topic "Blob backend 默认选择"
+              :chose "PgBlobStore 作为默认 BlobStore,LocalFileBlobStore 作为可选后端;两者共享 trait,由 daemon 构造时选择"
+              :rationale "frozen lisp §4.2.b claim-check.backends 明确 blob-table 为默认(同 DB 一致性/备份简单)、local-file 为可选(>1MB payload)。Phase 2 只提供两个实现和 trait,daemon 侧在 Phase 8 启动时根据配置挑选,不在 core 层硬编码。")
+
+    (decision :id DC007 :phase 2 :date "2026-04-19"
+              :topic "PayloadRef 的 on-wire 编码"
+              :chose "PayloadRef 序列化为 JSON 字符串写入 event_log.payload_ref TEXT 列,checksum 以 hex 而非 bytes 呈现"
+              :rationale "TEXT 列比自定义 BYTEA+长度前缀可读、可在 psql 中直接检查,故序列化时 checksum hex-encode。Python 甚至 ops 脚本只用 serde_json 即可解码,不依赖 Rust。")
+
+    (decision :id DC008 :phase 2 :date "2026-04-19"
+              :topic "PG INSERT 批量策略"
+              :chose "同一 tx 内逐行 INSERT RETURNING seq,而非多值 INSERT"
+              :rationale "多值 INSERT 在 UUID/JSONB 含 NULL 混合时 sqlx 绑定参数数组困难;batch 上限 100 行,一次 tx 内逐行的成本在百毫秒级,可接受。若 observed QPS >10k 再优化为 COPY IN 或 unnest 批量。")
+
+    (decision :id DC009 :phase 2 :date "2026-04-19"
+              :topic "Ephemeral fast-path Seq 分配"
+              :chose "进程内 AtomicI64 从 -1 递减,只作占位提示"
+              :rationale "Phase 2 dispatcher 未上线,ephemeral 路径暂无消费者。给出负 seq 让前端/metric 能区分 persistent vs volatile;Phase 3 dispatcher 接管后真实 seq 由它分配(可能通过 in-memory bus 单 writer 分 seq)。不让 ephemeral append 占用 DB BIGSERIAL 避免 seq 空洞。"))
 
   ;; ─ 阶段完成记录 ─
   ;; 格式: (completion :phase N :date "..." :agent "name"
@@ -154,7 +180,26 @@
                      "crates/missiond-core/src/lib.rs (+ pub mod event;)")
       :tests-added 45
       :verified-by "cargo build -p missiond-core OK; cargo test -p missiond-core event:: → 45 passed, 0 failed"
-      :notes "12 domain enum + DomainEvent trait + Domain enum。Variant 总数 55 = v1 49 variants 完整覆盖(含 LEGACY Gemini×3/Codex×2 保留)+ 6 new(SlotEvent::Stuck 占位 + ObservabilityEvent×3 新引入 + IncidentEvent×2 新引入)。I001 的 9 个遗漏 variant 全部解决(映射见 DC001)。未触碰 missiond-daemon::event_bus::DaemonEvent,与 v1 完全共存。serde 采用默认 externally tagged(见 DC002 原因)。Provider enum 独立于 CliEngine(DC003)。"))
+      :notes "12 domain enum + DomainEvent trait + Domain enum。Variant 总数 55 = v1 49 variants 完整覆盖(含 LEGACY Gemini×3/Codex×2 保留)+ 6 new(SlotEvent::Stuck 占位 + ObservabilityEvent×3 新引入 + IncidentEvent×2 新引入)。I001 的 9 个遗漏 variant 全部解决(映射见 DC001)。未触碰 missiond-daemon::event_bus::DaemonEvent,与 v1 完全共存。serde 采用默认 externally tagged(见 DC002 原因)。Provider enum 独立于 CliEngine(DC003)。")
+
+    (completion
+      :phase 2 :date "2026-04-19" :agent "phase2-storage"
+      :deliverables ("crates/missiond-core/migrations/20260419000000_event_log.sql"
+                     "crates/missiond-core/migrations/20260419000001_event_subscriptions.sql"
+                     "crates/missiond-core/migrations/20260419000002_blob_storage.sql"
+                     "crates/missiond-core/src/event/log/mod.rs"
+                     "crates/missiond-core/src/event/log/writer.rs"
+                     "crates/missiond-core/src/event/log/reader.rs"
+                     "crates/missiond-core/src/event/log/retention.rs"
+                     "crates/missiond-core/src/event/blob_store/mod.rs"
+                     "crates/missiond-core/src/event/blob_store/claim_check.rs"
+                     "crates/missiond-core/src/event/blob_store/pg_backend.rs"
+                     "crates/missiond-core/src/event/blob_store/local_file_backend.rs"
+                     "crates/missiond-core/src/event/mod.rs (+ pub mod log; pub mod blob_store;)"
+                     "crates/missiond-core/tests/event_log_integration.rs")
+      :tests-added 30
+      :verified-by "cargo build -p missiond-core OK; cargo test -p missiond-core event:: → 75 passed, 0 failed (45 phase-1 + 30 phase-2); cargo build --tests OK; integration tests build OK but require Docker at runtime (skipped here by #[ignore])"
+      :notes "Log trait + LogWriter 任务 + BlobStore claim-check 两后端 + 4 张新表 schema。writer 实现了完整的 frozen §4.2.b 语义:批量 INSERT (≤100/10ms)、UNIQUE dedupe_key 冲突回退到 SELECT existing seq 返回 AlreadyExists、exp backoff transient retry 超限进 failed state 拒新 append、CLAIM_CHECK_THRESHOLD=8192 分流到 blob_store 写 payload_ref。Retention cleanup 函数实现完毕但未 wire 进 daemon(Phase 8 任务)。整个模块未 touch v1 run_timeline_writer 或 DaemonEvent,完全共存。I005 cursor_ack_tx 未 touch,仍归 Phase 7 处理(见 DC005)。"))
 
   ;; ─ 全局备忘(跨阶段需要记住的事) ─
   (global-notes
