@@ -29,7 +29,8 @@
              :summary "storage 层落地 — Log trait + LogWriter 任务 + BlobStore claim-check + 3 个新 migration。30 个新 unit test 覆盖 backpressure/dedup collision/batch flush/failed state/claim-check redirect/checksum roundtrip。6 个 integration test 骨架 (#[ignore],需要 Docker 才跑)。代码位于 crates/missiond-core/src/event/{log,blob_store}/,与 v1 run_timeline_writer / system_timeline 完全共存。")
     (phase-3 :status "completed" :owner "phase3-routing" :started "2026-04-19" :completed "2026-04-19"
              :summary "routing 层落地 — Dispatcher + Topic<T> + TopicRegistry + 长轮询 tail loop + control-gate。代码在 crates/missiond-core/src/event/dispatcher/{mod,topic,registry,tail,control_gate}.rs。32 个新 unit test 覆盖:12 域注册/type 查询/broadcast fan-out/慢订阅者 Lagged 不传染/Domain→CtlDomain 映射总体完整/paused Memory 只阻 Memory/Observability+Incident 不受 pause/mock tail 100 条严格 seq 顺序 + cursor 单调/bad payload drop 不 crash/tail source error 上浮。2 个 integration test 骨架(#[ignore],同样需要 Docker)。I002 resolved: Domain→CtlDomain 映射函数位于 control_gate.rs;只 Memory/Board 映射,其他 10 域默认不 gate。I003 resolved: paused-domain 默认 drop 已是实现,Observability/Incident 永不 gated(WS 独立 Phase 7)。")
-    (phase-4 :status "pending" :owner nil :started nil :completed nil :summary nil)
+    (phase-4 :status "completed" :owner "phase4-subscription" :started "2026-04-19" :completed "2026-04-19"
+             :summary "egress 层落地 — SubscriptionOpts + 三 FailurePolicy + 两 PauseBehavior + 6 combinators + tail-and-pull lifecycle + 双阈值 flush。代码在 crates/missiond-core/src/event/subscription/{api,mod,options,cursor_store,failure,lifecycle,combinators}.rs。40 个新 unit tests:options 10(enum round-trip + backoff + default)、cursor_store 5(in-memory CRUD)、failure 5(Retry/DLQ/Halt)、lifecycle 6(bootstrap 顺序/batch size/ack 单调/live 去重/越界过滤)、subscription core 2(ack/drop 语义)、api 5(bootstrap flush/resume/empty name/StartFrom×3)、combinators 7(filter/map/debounce/coalesce/rate_limit/batch×2)。3 个 integration test 骨架(#[ignore])覆盖 100 条全流程 + crash-recovery + DLQ 验证。引入 LogReadable trait 解决 Log 的 dyn 不兼容(泛型 append)。D001 deviation: FreezeAndCatchUp 推迟到未来实现,当前 alias 到 DropAndLiveResume。I002/I003/I008 related:dispatcher ControlGate 已在 Phase 3 处理暂停语义,subscription MVP 不感知。")
     (phase-5 :status "pending" :owner nil :started nil :completed nil :summary nil)
     (phase-6 :status "pending" :owner nil :started nil :completed nil :summary nil)
     (phase-7 :status "pending" :owner nil :started nil :completed nil :summary nil)
@@ -39,7 +40,8 @@
   ;; ─ 并行锁表(防 agent 冲突) ─
   ;; 格式: (claim :phase N :scope "path/description" :agent "name" :claimed-at "..." :released-at "..."|nil)
   (claims
-    ;; active claims here
+    (claim :phase 4 :scope "crates/missiond-core/src/event/subscription/**" :agent "phase4-subscription"
+           :claimed-at "2026-04-19T00:00:00Z" :released-at "2026-04-19T00:00:00Z")
     )
 
   ;; ─ 偏离 frozen lisp 的记录 ─
@@ -49,8 +51,11 @@
   ;;                  :reason "为什么偏离"
   ;;                  :approved-by "user|auto|agent-consensus")
   (deviations
-    ;; none yet
-    )
+    (deviation :id D001 :phase 4 :date "2026-04-19" :agent "phase4-subscription"
+               :lisp-said "PauseBehavior::FreezeAndCatchUp opt-in:paused 期间 cursor 冻结不前推;resume 时 subscription 触发 pull catch-up(batch_size 节流)"
+               :actually-did "Phase 4 MVP 仅实现 DropAndLiveResume(默认);FreezeAndCatchUp 变体在 API 存在,但运行时行为等同 DropAndLiveResume"
+               :reason "FreezeAndCatchUp 需要与 ControlGate 状态机双向协作(订阅轮询 paused 状态切断 live + resume 主动 catch-up)。Phase 4 MVP 首要目标是落地 tail-and-pull + cursor + combinators + failure policy;Freeze 语义与现有 Dispatcher-gated drop 语义在实际行为上极其接近(paused 期间 Dispatcher 不 fan-out ⇒ 订阅者天然等在 live 的 recv().await,resume 时自动恢复)。I009 追踪未来补齐"
+               :approved-by "auto"))
 
   ;; ─ 执行期阻塞/未决问题 ─
   ;; 格式: (issue :id I001 :phase N :date "..." :severity blocker|major|minor
@@ -85,6 +90,14 @@
     (issue :id I007 :phase 3 :date "2026-04-19" :severity minor
            :desc "ephemeral 语义从 per-variant 硬编码 (is_ephemeral()) 改为 per-call (AppendOpts.ephemeral) 时,83 个 publish 点需要逐个审计。当前 8 个 ephemeral variant 多数会保留 ephemeral,但有些 (ImageMessageInserted, NarrationBatchCompleted) 实际 payload 较小,可能应转持久化"
            :resolution "Phase 3 迁移时,默认保持 v1 ephemeral 语义;后续按实际观察调整,非本次重构阻塞"
+           :resolved-at nil)
+    (issue :id I008 :phase 4 :date "2026-04-19" :severity minor
+           :desc "Log trait 的 append<E> 方法阻止 dyn-compatibility,因此 subscription 无法直接 Arc<dyn Log>。Phase 4 引入了只读子 trait LogReadable 并给它一个 blanket impl over Log,使 Arc<dyn LogReadable> 可用于 subscription 运行时。生产者继续用具体 Log(含泛型 append);订阅者用 LogReadable"
+           :resolution "已通过 LogReadable split 解决;不是 frozen lisp 偏差,而是实现分层。可选优化:将来 async-trait 支持 dyn with generic methods 后可统一"
+           :resolved-at "2026-04-19")
+    (issue :id I009 :phase 4 :date "2026-04-19" :severity minor
+           :desc "D001: FreezeAndCatchUp 未在 MVP 实现。需要 Subscription 持有 ControlGate 状态观察,paused 时切断 live 并主动轮询;resume 时 batch_size 节流 catch-up 到 head"
+           :resolution "未来按需补齐:Subscription::new 接受可选 ControlGate 引用 + 新增 phase Frozen + resume 触发 bootstrap replay loop。优先级低:DropAndLiveResume 覆盖 95% 场景"
            :resolved-at nil))
 
   ;; ─ frozen lisp 未覆盖的次要决策 ─
@@ -174,7 +187,32 @@
     (decision :id DC015 :phase 3 :date "2026-04-19"
               :topic "Fan-out transport:per-topic broadcast::Sender<Arc<T>>"
               :chose "每域一条 tokio::sync::broadcast::Sender<Arc<T>>,buffer=1024"
-              :rationale "frozen lisp §4.2.c topic-registry 明确 per-topic broadcast + Arc<Event>。broadcast 语义符合'live fan-out 给所有当前订阅者';慢订阅触发 Lagged 在该订阅 local,不影响 tail 或其他订阅者(fault-isolation)。buffer=1024 是 frozen lisp 默认。Arc<T> 让多订阅者零拷贝。慢订阅者的 Lagged rewind 归 Phase 4 subscription API 处理,Phase 3 只保证自身不阻塞。"))
+              :rationale "frozen lisp §4.2.c topic-registry 明确 per-topic broadcast + Arc<Event>。broadcast 语义符合'live fan-out 给所有当前订阅者';慢订阅触发 Lagged 在该订阅 local,不影响 tail 或其他订阅者(fault-isolation)。buffer=1024 是 frozen lisp 默认。Arc<T> 让多订阅者零拷贝。慢订阅者的 Lagged rewind 归 Phase 4 subscription API 处理,Phase 3 只保证自身不阻塞。")
+
+    (decision :id DC016 :phase 4 :date "2026-04-19"
+              :topic "Log dyn-compat:拆出 LogReadable 子 trait"
+              :chose "新增 pub trait LogReadable: Send + Sync,只含 read_from / head_seq;blanket impl<T: Log> LogReadable for T;Subscription 接受 Arc<dyn LogReadable>"
+              :rationale "Log::append<E> 泛型阻止 Arc<dyn Log>。Phase 4 订阅者不需要 append,只需读。子 trait 拆分让生产者继续用具体 Log(含泛型 append 零成本),订阅者用 LogReadable dyn 通道。见 I008。")
+
+    (decision :id DC017 :phase 4 :date "2026-04-19"
+              :topic "watermark 与 ack_cursor 分离"
+              :chose "Lifecycle<T> 同时维护 watermark(已投递的最高 seq)和 ack_cursor(已 ack 的最高 seq);bootstrap 下次拉用 seq > watermark,而非 seq > cursor"
+              :rationale "若用 ack_cursor 作 bootstrap watermark,第一批事件投递但尚未 ack 时,第二次拉取会重复读同一批 → 死循环。分离后 bootstrap 按投递进度推进、ack 按消费者确认推进,互不干涉。at-least-once 语义靠 ack_cursor 持久化保障")
+
+    (decision :id DC018 :phase 4 :date "2026-04-19"
+              :topic "Ack 被 drop 视为 silent nack"
+              :chose "Drop for Ack<T> 发 FlushSignal::Nack { reason='ack dropped' };consumer 必须显式 ack() 或 nack()"
+              :rationale "frozen lisp §4.3 delivery-semantics 要求 at-least-once。若 drop 被视为 auto-ack,consumer 崩溃时 cursor 已推进 → 事件丢失。反之 silent nack 触发 FailurePolicy:Retry 走 retry queue;SkipToDLQ 入库 DLQ;Halt 停 subscription。符合 fail-fast/at-least-once 契约")
+
+    (decision :id DC019 :phase 4 :date "2026-04-19"
+              :topic "Combinator 的 ack 保真策略"
+              :chose "debounce / coalesce / batch 把被吸收的前面事件 silent_ack 掉,只让尾事件(或合成事件)surface 给 consumer。filter 把过滤掉的事件 silent_ack。map 保持 seq 透传。每条都是 silent_ack,不走 nack 路径"
+              :rationale "consumer 用 combinator 就是想合并/过滤,这些'中间'事件已由 combinator 语义'接纳'。silent_ack 让 cursor 持续前推;如果用 nack 会误触 FailurePolicy(Retry 无穷循环)。frozen lisp §4.3 subscription-combinators 未细化 ack 行为,此处沿最少惊讶原则")
+
+    (decision :id DC020 :phase 4 :date "2026-04-19"
+              :topic "Retry 超限 fallthrough 到 SkipToDLQ(而非 Halt)"
+              :chose "FailurePolicy::Retry { max: N, .. } 用满 N 次后,FailureRouter 自动转 SkipToDLQ,不 halt subscription"
+              :rationale "frozen lisp §4.3 subscription-api 给出三个 policy 但未规定 Retry 超限后走哪个。选 SkipToDLQ 是 safe default:subscription 持续向前,坏事件入 DLQ 让 ops 离线修复。若 consumer 显式要 Halt,应 opt-in FailurePolicy::Halt 而不是靠 Retry 超限。tests failure.rs 覆盖此行为"))
 
   ;; ─ 阶段完成记录 ─
   ;; 格式: (completion :phase N :date "..." :agent "name"
@@ -243,7 +281,23 @@
                      "crates/missiond-core/tests/event_dispatcher_integration.rs")
       :tests-added 32
       :verified-by "cargo build -p missiond-core OK; cargo test -p missiond-core event:: → 107 passed, 0 failed (75 phase-1+2 + 32 phase-3); cargo test --no-run 全部编译 OK;integration tests 骨架 #[ignore] 需要 Docker"
-      :notes "Dispatcher live-fan-out O(1) state;12 个 Topic<T> 按 TypeId + Domain 双索引查找;长轮询 tail(每 100ms SELECT LIMIT 256);control-gate 按 Domain→CtlDomain 映射检查(Memory/Board 映射,其余 10 域默认不 gate)。慢订阅者 Lagged 不传染、不阻塞 tail loop。坏行(unknown domain / payload deser fail)log WARN + drop + advance,不 panic。未 touch v1 event_bus.rs / event_router.rs / run_timeline_writer。ControlGate trait 避免 core→daemon 循环依赖;daemon 侧 Phase 8 提供 Adapter 把 ControlTree 接入。I002/I003 已 resolved。I007(ephemeral per-call)仍 pending,归 Phase 6 处理。"))
+      :notes "Dispatcher live-fan-out O(1) state;12 个 Topic<T> 按 TypeId + Domain 双索引查找;长轮询 tail(每 100ms SELECT LIMIT 256);control-gate 按 Domain→CtlDomain 映射检查(Memory/Board 映射,其余 10 域默认不 gate)。慢订阅者 Lagged 不传染、不阻塞 tail loop。坏行(unknown domain / payload deser fail)log WARN + drop + advance,不 panic。未 touch v1 event_bus.rs / event_router.rs / run_timeline_writer。ControlGate trait 避免 core→daemon 循环依赖;daemon 侧 Phase 8 提供 Adapter 把 ControlTree 接入。I002/I003 已 resolved。I007(ephemeral per-call)仍 pending,归 Phase 6 处理。")
+
+    (completion
+      :phase 4 :date "2026-04-19" :agent "phase4-subscription"
+      :deliverables ("crates/missiond-core/src/event/subscription/mod.rs"
+                     "crates/missiond-core/src/event/subscription/api.rs"
+                     "crates/missiond-core/src/event/subscription/options.rs"
+                     "crates/missiond-core/src/event/subscription/cursor_store.rs"
+                     "crates/missiond-core/src/event/subscription/failure.rs"
+                     "crates/missiond-core/src/event/subscription/lifecycle.rs"
+                     "crates/missiond-core/src/event/subscription/combinators.rs"
+                     "crates/missiond-core/src/event/mod.rs (+ pub mod subscription;)"
+                     "crates/missiond-core/src/event/log/mod.rs (+ trait LogReadable)"
+                     "crates/missiond-core/tests/event_subscription_integration.rs")
+      :tests-added 40
+      :verified-by "cargo build -p missiond-core --tests OK; cargo test -p missiond-core --lib event::subscription → 40 passed,0 failed;整库 cargo test -p missiond-core --lib → 216 passed,0 failed(147 phase-1..4 event tests + 69 pre-existing)"
+      :notes "subscribe::<T>(name, opts, log, topic, cursor_store, dlq) 统一入口;Subscription<T>::next() 返回 Ack<T>,consumer 必须 .ack().await 或 .nack(reason).await。Ack drop 视为 silent nack(DC018)。两阶段 lifecycle:bootstrap 从 log.read_from pull,耗尽后切 live 读 Topic broadcast。watermark 与 ack_cursor 分离避免重读(DC017)。双阈值 flush:flusher task tokio::select!(Dirty/Force/Nack/interval),每条 ack 或 1s 时窗 upsert cursor。6 combinators:debounce/rate_limit/coalesce/filter/map/batch,被吸收事件 silent_ack(DC019)。FailurePolicy 三个:Retry 超限 fall through 到 SkipToDLQ(DC020)。PauseBehavior:MVP 只 DropAndLiveResume(D001);FreezeAndCatchUp 推迟 I009。引入 LogReadable 子 trait 解决 dyn 不兼容(DC016/I008)。未 touch v1 event_bus.rs/event_router.rs/workers/daemon。Phase 5+ 起草 InMemoryBus / daemon 迁移 consumer。"))
 
   ;; ─ 全局备忘(跨阶段需要记住的事) ─
   (global-notes

@@ -176,6 +176,45 @@ pub trait Log: Send + Sync {
     async fn head_seq(&self) -> Result<Seq, LogError>;
 }
 
+/// Read-only slice of [`Log`] used by the subscription layer.
+///
+/// Split out because [`Log::append`] is generic and therefore prevents
+/// dyn-compatibility. The subscription only ever needs `read_from` and
+/// `head_seq`; making this a separate trait keeps the producer-facing
+/// `Log::append<E>` zero-cost while allowing `Arc<dyn LogReadable>` to
+/// flow through the subscription runtime.
+#[async_trait]
+pub trait LogReadable: Send + Sync {
+    async fn read_from(
+        &self,
+        domain: Domain,
+        after_seq: Seq,
+        limit: usize,
+    ) -> Result<Vec<LoggedEvent>, LogError>;
+
+    async fn head_seq(&self) -> Result<Seq, LogError>;
+}
+
+/// Blanket: every [`Log`] is automatically a [`LogReadable`].
+#[async_trait]
+impl<T> LogReadable for T
+where
+    T: Log + ?Sized,
+{
+    async fn read_from(
+        &self,
+        domain: Domain,
+        after_seq: Seq,
+        limit: usize,
+    ) -> Result<Vec<LoggedEvent>, LogError> {
+        Log::read_from(self, domain, after_seq, limit).await
+    }
+
+    async fn head_seq(&self) -> Result<Seq, LogError> {
+        Log::head_seq(self).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
