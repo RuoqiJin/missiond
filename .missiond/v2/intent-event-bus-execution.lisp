@@ -31,7 +31,8 @@
              :summary "routing 层落地 — Dispatcher + Topic<T> + TopicRegistry + 长轮询 tail loop + control-gate。代码在 crates/missiond-core/src/event/dispatcher/{mod,topic,registry,tail,control_gate}.rs。32 个新 unit test 覆盖:12 域注册/type 查询/broadcast fan-out/慢订阅者 Lagged 不传染/Domain→CtlDomain 映射总体完整/paused Memory 只阻 Memory/Observability+Incident 不受 pause/mock tail 100 条严格 seq 顺序 + cursor 单调/bad payload drop 不 crash/tail source error 上浮。2 个 integration test 骨架(#[ignore],同样需要 Docker)。I002 resolved: Domain→CtlDomain 映射函数位于 control_gate.rs;只 Memory/Board 映射,其他 10 域默认不 gate。I003 resolved: paused-domain 默认 drop 已是实现,Observability/Incident 永不 gated(WS 独立 Phase 7)。")
     (phase-4 :status "completed" :owner "phase4-subscription" :started "2026-04-19" :completed "2026-04-19"
              :summary "egress 层落地 — SubscriptionOpts + 三 FailurePolicy + 两 PauseBehavior + 6 combinators + tail-and-pull lifecycle + 双阈值 flush。代码在 crates/missiond-core/src/event/subscription/{api,mod,options,cursor_store,failure,lifecycle,combinators}.rs。40 个新 unit tests:options 10(enum round-trip + backoff + default)、cursor_store 5(in-memory CRUD)、failure 5(Retry/DLQ/Halt)、lifecycle 6(bootstrap 顺序/batch size/ack 单调/live 去重/越界过滤)、subscription core 2(ack/drop 语义)、api 5(bootstrap flush/resume/empty name/StartFrom×3)、combinators 7(filter/map/debounce/coalesce/rate_limit/batch×2)。3 个 integration test 骨架(#[ignore])覆盖 100 条全流程 + crash-recovery + DLQ 验证。引入 LogReadable trait 解决 Log 的 dyn 不兼容(泛型 append)。D001 deviation: FreezeAndCatchUp 推迟到未来实现,当前 alias 到 DropAndLiveResume。I002/I003/I008 related:dispatcher ControlGate 已在 Phase 3 处理暂停语义,subscription MVP 不感知。")
-    (phase-5 :status "pending" :owner nil :started nil :completed nil :summary nil)
+    (phase-5 :status "completed" :owner "phase5-cross-cutting" :started "2026-04-19" :completed "2026-04-19"
+             :summary "横切面层落地 — causation guard + BusMetrics trait + AtomicBusMetrics + ObservabilityEvent emitter + InMemoryBus 全套 + 9 chaos scenarios。代码在 crates/missiond-core/src/event/{guards,metrics,in_memory}/**。34 个新 lib unit tests (5 causation + 7 metrics counters + 3 emitter + 4 control_gate + 3 blob_store + 8 in_memory_log + 4 in_memory_bus) + 12 chaos integration tests 在 tests/event_chaos.rs。LogWriter.append 改调 check_causation() 统一 guard 入口。InMemoryLog impl Log:seq 用 AtomicI64 fetch_add、bounded 4096 channel、dedupe map、failed state 可切换、ephemeral 分 seq 不持久化、claim-check 走 BlobStore — 与 PG 版全面同语义。Dispatcher 与 InMemoryLog 通过 InMemoryTailSource 解耦,共享 Phase 3 run_tail 实现,无代码分叉。BusMetricsEmitter 每 10s snapshot 转 ObservabilityEvent::BusMetric(ephemeral=true)追加到 log。D002 deviation:Prometheus 后端推迟(MVP 仅 AtomicBusMetrics stub)。I010 issue:cursor-orphan daily cron wire up 推迟到 Phase 8。")
     (phase-6 :status "pending" :owner nil :started nil :completed nil :summary nil)
     (phase-7 :status "pending" :owner nil :started nil :completed nil :summary nil)
     (phase-8 :status "pending" :owner nil :started nil :completed nil :summary nil)
@@ -41,6 +42,8 @@
   ;; 格式: (claim :phase N :scope "path/description" :agent "name" :claimed-at "..." :released-at "..."|nil)
   (claims
     (claim :phase 4 :scope "crates/missiond-core/src/event/subscription/**" :agent "phase4-subscription"
+           :claimed-at "2026-04-19T00:00:00Z" :released-at "2026-04-19T00:00:00Z")
+    (claim :phase 5 :scope "crates/missiond-core/src/event/{guards,metrics,in_memory}/** + tests/event_chaos.rs" :agent "phase5-cross-cutting"
            :claimed-at "2026-04-19T00:00:00Z" :released-at "2026-04-19T00:00:00Z")
     )
 
@@ -55,6 +58,12 @@
                :lisp-said "PauseBehavior::FreezeAndCatchUp opt-in:paused 期间 cursor 冻结不前推;resume 时 subscription 触发 pull catch-up(batch_size 节流)"
                :actually-did "Phase 4 MVP 仅实现 DropAndLiveResume(默认);FreezeAndCatchUp 变体在 API 存在,但运行时行为等同 DropAndLiveResume"
                :reason "FreezeAndCatchUp 需要与 ControlGate 状态机双向协作(订阅轮询 paused 状态切断 live + resume 主动 catch-up)。Phase 4 MVP 首要目标是落地 tail-and-pull + cursor + combinators + failure policy;Freeze 语义与现有 Dispatcher-gated drop 语义在实际行为上极其接近(paused 期间 Dispatcher 不 fan-out ⇒ 订阅者天然等在 live 的 recv().await,resume 时自动恢复)。I009 追踪未来补齐"
+               :approved-by "auto")
+
+    (deviation :id D002 :phase 5 :date "2026-04-19" :agent "phase5-cross-cutting"
+               :lisp-said "observability / bus self-emission 应能向 Prometheus-兼容 backend 暴露 append_rate / reject_rate / dispatch_lag / topic_depth / subscription_lag 等计数"
+               :actually-did "Phase 5 仅提供 BusMetrics trait + AtomicBusMetrics 内存实现 + emitter 周期 snapshot → ObservabilityEvent::BusMetric(ephemeral);无 Prometheus HTTP 导出器"
+               :reason "Phase 5 核心交付是 causation guard + InMemoryBus + 9 chaos scenarios。Prometheus 后端属于生产运维集成层(Phase 8 wiring 或独立 observability phase)。目前 AtomicBusMetrics snapshot → ObservabilityEvent 的管道已可被任何 consumer 订阅读取,实际 backend 可后续替换不动 BusMetrics trait。"
                :approved-by "auto"))
 
   ;; ─ 执行期阻塞/未决问题 ─
@@ -98,6 +107,10 @@
     (issue :id I009 :phase 4 :date "2026-04-19" :severity minor
            :desc "D001: FreezeAndCatchUp 未在 MVP 实现。需要 Subscription 持有 ControlGate 状态观察,paused 时切断 live 并主动轮询;resume 时 batch_size 节流 catch-up 到 head"
            :resolution "未来按需补齐:Subscription::new 接受可选 ControlGate 引用 + 新增 phase Frozen + resume 触发 bootstrap replay loop。优先级低:DropAndLiveResume 覆盖 95% 场景"
+           :resolved-at nil)
+    (issue :id I010 :phase 8 :date "2026-04-19" :severity minor
+           :desc "cursor-orphan cleanup daily cron 未 wire。Frozen lisp §4.3 orphan-cleanup 要求 last_seen_at > 30 天的 cursor 被归档 + 发 IncidentEvent::StaleSubscription。Phase 5 只在 chaos_9 验证数据模型支持 stale 检测(predicate query)"
+           :resolution "Phase 8 daemon 启动时 spawn 一个每日 tick task:SELECT FROM event_subscriptions WHERE last_seen_at < now() - '30 days' → DELETE + 对每行 append IncidentEvent::Reported。当前 Phase 5 InMemoryCursorStore 无 TTL 字段遮蔽,PG 侧 event_subscriptions 表已有 last_seen_at 列供 cron 查询"
            :resolved-at nil))
 
   ;; ─ frozen lisp 未覆盖的次要决策 ─
@@ -212,7 +225,52 @@
     (decision :id DC020 :phase 4 :date "2026-04-19"
               :topic "Retry 超限 fallthrough 到 SkipToDLQ(而非 Halt)"
               :chose "FailurePolicy::Retry { max: N, .. } 用满 N 次后,FailureRouter 自动转 SkipToDLQ,不 halt subscription"
-              :rationale "frozen lisp §4.3 subscription-api 给出三个 policy 但未规定 Retry 超限后走哪个。选 SkipToDLQ 是 safe default:subscription 持续向前,坏事件入 DLQ 让 ops 离线修复。若 consumer 显式要 Halt,应 opt-in FailurePolicy::Halt 而不是靠 Retry 超限。tests failure.rs 覆盖此行为"))
+              :rationale "frozen lisp §4.3 subscription-api 给出三个 policy 但未规定 Retry 超限后走哪个。选 SkipToDLQ 是 safe default:subscription 持续向前,坏事件入 DLQ 让 ops 离线修复。若 consumer 显式要 Halt,应 opt-in FailurePolicy::Halt 而不是靠 Retry 超限。tests failure.rs 覆盖此行为")
+
+    (decision :id DC021 :phase 5 :date "2026-04-19"
+              :topic "guards/causation.rs 独立模块 vs inline 到 LogWriter"
+              :chose "独立 pub mod guards + pub fn check_causation(&AppendOpts) → Result<(), AppendError>;LogWriter 与 InMemoryLog 各调一次"
+              :rationale "frozen lisp §4.4 把 causation-loop-guard 划为 cross-cutting,跨 log 实现;若 inline 到某一个 writer,换实现就会遗漏。guards 模块也给将来的 (schema-guard / producer-token-guard) 留了位置。")
+
+    (decision :id DC022 :phase 5 :date "2026-04-19"
+              :topic "MAX_CAUSATION_DEPTH 常量位置"
+              :chose "guards/causation.rs 定义 + log/mod.rs 继续 re-export 同值 + unit test 断言二者相等"
+              :rationale "既保持 Phase 2 对 log::MAX_CAUSATION_DEPTH 的调用兼容,又让 guards 模块自持源。单测 max_matches_log_module_const 锁死不漂移。")
+
+    (decision :id DC023 :phase 5 :date "2026-04-19"
+              :topic "InMemoryLog 的 seq 分配位置"
+              :chose "在 WriterTask::handle_one 内 AtomicI64::fetch_add,而非 InMemoryLog::append 返回前分配"
+              :rationale "frozen lisp §4.2.b writer-semantics 要求 single writer 分 seq。若 append() 直接 fetch_add,多 producer 并发调用会乱序。放到 writer task 里逐条处理保证'按入队顺序分 seq',与 PG BIGSERIAL + INSERT RETURNING 同语义。")
+
+    (decision :id DC024 :phase 5 :date "2026-04-19"
+              :topic "InMemoryLog 的 batching 语义"
+              :chose "writer 每条独立处理,不做批窗合并"
+              :rationale "frozen lisp §4.2.b batching 是 PG 路径为摊平 INSERT 成本的优化;InMemoryLog 无 DB round-trip,批合并无收益。契约说 'append Ok ⟺ 进入 log' 仍成立:进 Vec 即 commit。Chaos 测试若需断言批行为,跑 PG 版 LogWriter 而非 InMemoryLog。")
+
+    (decision :id DC025 :phase 5 :date "2026-04-19"
+              :topic "BusMetrics trait 粒度"
+              :chose "8 方法(append / reject / dispatch_lag / topic_depth / subscription_lag / lagged / slow_consumer / control_gate_dropped),全按 frozen lisp §4.4 observability 列表"
+              :rationale "每一项都是 frozen lisp 明确列出的指标;少一个就会在 emitter 的 snapshot 里缺口 → Phase 8 写 Grafana dashboard 时不得不改 trait。一次定义齐全。")
+
+    (decision :id DC026 :phase 5 :date "2026-04-19"
+              :topic "BusMetricsEmitter 周期"
+              :chose "默认 METRICS_EMIT_INTERVAL = 10s,可配置(构造时传 Duration)"
+              :rationale "frozen lisp §4.4 observability 未指定频率。10s 是 Prometheus 常见 scrape 间隔的整数倍,在 1000 events/s 下 snapshot 体量 < 1% 总量,不形成自观测血洗。")
+
+    (decision :id DC027 :phase 5 :date "2026-04-19"
+              :topic "ObservabilityEvent 发射路径"
+              :chose "ObservabilityAppender trait 作为 narrowed Log(只接 ObservabilityEvent),避开 Log::append<E> 泛型 dyn-incompat"
+              :rationale "Log trait 为 dyn-compat 拆出了 LogReadable,但 append 仍泛型。emitter 只需追加一种类型,用 ObservabilityAppender 接口即可;InMemoryLog / PgLogWriter 各自 impl 一次。代价 = 每实现 3 行 wrapper。")
+
+    (decision :id DC028 :phase 5 :date "2026-04-19"
+              :topic "Chaos test #9 cursor-orphan — stub vs real cron"
+              :chose "只验 cursor 数据模型支持 stale predicate;真 cron 推迟到 Phase 8,issue I010 追踪"
+              :rationale "frozen lisp §4.3 orphan-cleanup 是 daemon 启动时的后台任务,属 Phase 8 wiring 范畴。Phase 5 把 event_subscriptions.last_seen_at 列 + InMemoryCursorStore.snapshot() 的谓词过滤 pattern 锁住,Phase 8 只需要把 Arc<dyn CursorStore> + tokio::interval 粘起来。")
+
+    (decision :id DC029 :phase 5 :date "2026-04-19"
+              :topic "InMemoryBlobStore 是否用 LocalFile backend tag"
+              :chose "InMemoryBlobStore 对外声明 backend() = BlobBackend::LocalFile,URI 以 `mem:` 前缀区分"
+              :rationale "BlobBackend enum 只有 PgTable / LocalFile 两值;新增 InMemory 需要改 frozen lisp §4.2.b。URI 前缀区分不影响 PayloadRef on-wire 兼容性,tests 可通过 uri.starts_with('mem:') 识别。符合 frozen lisp 'forbidden-backends.in-memory-handle' 的精神:不作为 durable pointer,只作为 tests fixture。"))
 
   ;; ─ 阶段完成记录 ─
   ;; 格式: (completion :phase N :date "..." :agent "name"
@@ -297,7 +355,25 @@
                      "crates/missiond-core/tests/event_subscription_integration.rs")
       :tests-added 40
       :verified-by "cargo build -p missiond-core --tests OK; cargo test -p missiond-core --lib event::subscription → 40 passed,0 failed;整库 cargo test -p missiond-core --lib → 216 passed,0 failed(147 phase-1..4 event tests + 69 pre-existing)"
-      :notes "subscribe::<T>(name, opts, log, topic, cursor_store, dlq) 统一入口;Subscription<T>::next() 返回 Ack<T>,consumer 必须 .ack().await 或 .nack(reason).await。Ack drop 视为 silent nack(DC018)。两阶段 lifecycle:bootstrap 从 log.read_from pull,耗尽后切 live 读 Topic broadcast。watermark 与 ack_cursor 分离避免重读(DC017)。双阈值 flush:flusher task tokio::select!(Dirty/Force/Nack/interval),每条 ack 或 1s 时窗 upsert cursor。6 combinators:debounce/rate_limit/coalesce/filter/map/batch,被吸收事件 silent_ack(DC019)。FailurePolicy 三个:Retry 超限 fall through 到 SkipToDLQ(DC020)。PauseBehavior:MVP 只 DropAndLiveResume(D001);FreezeAndCatchUp 推迟 I009。引入 LogReadable 子 trait 解决 dyn 不兼容(DC016/I008)。未 touch v1 event_bus.rs/event_router.rs/workers/daemon。Phase 5+ 起草 InMemoryBus / daemon 迁移 consumer。"))
+      :notes "subscribe::<T>(name, opts, log, topic, cursor_store, dlq) 统一入口;Subscription<T>::next() 返回 Ack<T>,consumer 必须 .ack().await 或 .nack(reason).await。Ack drop 视为 silent nack(DC018)。两阶段 lifecycle:bootstrap 从 log.read_from pull,耗尽后切 live 读 Topic broadcast。watermark 与 ack_cursor 分离避免重读(DC017)。双阈值 flush:flusher task tokio::select!(Dirty/Force/Nack/interval),每条 ack 或 1s 时窗 upsert cursor。6 combinators:debounce/rate_limit/coalesce/filter/map/batch,被吸收事件 silent_ack(DC019)。FailurePolicy 三个:Retry 超限 fall through 到 SkipToDLQ(DC020)。PauseBehavior:MVP 只 DropAndLiveResume(D001);FreezeAndCatchUp 推迟 I009。引入 LogReadable 子 trait 解决 dyn 不兼容(DC016/I008)。未 touch v1 event_bus.rs/event_router.rs/workers/daemon。Phase 5+ 起草 InMemoryBus / daemon 迁移 consumer。")
+
+    (completion
+      :phase 5 :date "2026-04-19" :agent "phase5-cross-cutting"
+      :deliverables ("crates/missiond-core/src/event/guards/mod.rs"
+                     "crates/missiond-core/src/event/guards/causation.rs"
+                     "crates/missiond-core/src/event/metrics/mod.rs"
+                     "crates/missiond-core/src/event/metrics/emitter.rs"
+                     "crates/missiond-core/src/event/in_memory/mod.rs"
+                     "crates/missiond-core/src/event/in_memory/log.rs"
+                     "crates/missiond-core/src/event/in_memory/blob_store.rs"
+                     "crates/missiond-core/src/event/in_memory/cursor_store.rs"
+                     "crates/missiond-core/src/event/in_memory/control_gate.rs"
+                     "crates/missiond-core/src/event/mod.rs (+ pub mod guards; pub mod metrics; pub mod in_memory;)"
+                     "crates/missiond-core/src/event/log/writer.rs (改调 check_causation)"
+                     "crates/missiond-core/tests/event_chaos.rs (12 tests)")
+      :tests-added 46
+      :verified-by "cargo build -p missiond-core OK; cargo test -p missiond-core --lib → 250 passed,0 failed(216 phase-1..4 + 34 phase-5 unit);cargo test -p missiond-core --test event_chaos → 12 passed,0 failed"
+      :notes "Causation guard 抽到独立 pub mod guards(DC021) + Phase 2 LogWriter 改调 check_causation 单入口(frozen lisp §4.4 跨相契约)。BusMetrics trait 8 个方法全覆盖 frozen lisp §4.4 observability 列表(DC025);AtomicBusMetrics 用 AtomicU64 + Mutex<HashMap> 做内存 MVP 收集;NoopMetrics 给 tests/daemon 启动前用。BusMetricsEmitter 每 10s snapshot → 多条 ObservabilityEvent::BusMetric(ephemeral=true)通过 ObservabilityAppender trait 发射(DC027)。InMemoryLog 严格对齐 PG 版语义:single writer task 分 seq(AtomicI64 fetch_add,DC023)、bounded mpsc cap 4096(frozen §4.2.b 同值)、dedupe HashMap 模拟 UNIQUE 索引、failed state 可程式化切换供 chaos#6 使用、ephemeral 分 seq 但不入 rows Vec、claim-check 超 8KB 走 BlobStore。Dispatcher 直接复用 Phase 3 run_tail(Arc<dyn TailSource>),InMemoryTailSource 适配器扫 Vec 按 seq 升序返回。InMemoryBus 聚合 log+blob+cursor+dispatcher+control_gate+metrics 一站式启动,start() spawn dispatcher tail task 返回 Handle。9 Chaos scenarios(+ 3 辅助 = 12 tests)在 tests/event_chaos.rs 全部不用 Docker 就跑:log-writer-timeout / log-writer-panic / dispatcher-panic / subscriber-panic / slow-subscriber-lag / db-disconnect / causation-loop / dedup-retry / cursor-orphan-stub + sanity-full-flow + 7b-guard-shared-contract + metrics-record。D002 deviation:Prometheus backend 推迟;I010 issue:cursor orphan daily cron wire up 推迟 Phase 8。InMemoryBlobStore 用 LocalFile backend tag + 'mem:' URI 前缀(DC029)避免扩 BlobBackend enum。未 touch v1 bus/daemon/workers(Phase 6+)。"))
 
   ;; ─ 全局备忘(跨阶段需要记住的事) ─
   (global-notes

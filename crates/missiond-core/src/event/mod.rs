@@ -9,8 +9,11 @@
 //! fans out events to per-domain [`dispatcher::Topic<T>`] channels.
 //! Phase 4 adds egress — the [`subscription`] module implements the
 //! two-phase tail-and-pull subscriber with cursor persistence, failure
-//! routing, and declarative combinators. Phase 8 deletes the v1
-//! `DaemonEvent` god-enum; until then this module coexists with
+//! routing, and declarative combinators.
+//! Phase 5 adds the cross-cutting layer — [`guards`] (causation check),
+//! [`metrics`] (bus self-telemetry), and [`in_memory`] (PG-free bus for
+//! tests + chaos scenarios). Phase 8 deletes the v1 `DaemonEvent`
+//! god-enum; until then this module coexists with
 //! `crates/missiond-daemon/src/event_bus.rs`.
 
 pub mod blob_store;
@@ -18,7 +21,10 @@ pub mod dispatcher;
 pub mod domain;
 pub mod event_trait;
 pub mod events;
+pub mod guards;
+pub mod in_memory;
 pub mod log;
+pub mod metrics;
 pub mod subscription;
 
 pub use domain::Domain;
@@ -47,4 +53,12 @@ pub use subscription::{
     Cursor, CursorFlush, CursorStore, DebouncedSubscription, FailurePolicy, FilteredSubscription,
     InMemoryCursorStore, InMemoryDlq, MappedSubscription, PauseBehavior, RateLimitedSubscription,
     StartFrom, SubscribeError, Subscription, SubscriptionOpts,
+};
+
+// Cross-cutting layer — Phase 5. Causation guard, metrics, and InMemoryBus.
+pub use guards::{check_causation, MAX_CAUSATION_DEPTH};
+pub use in_memory::{InMemoryBlobStore, InMemoryBus, InMemoryBusHandle, InMemoryControlGate, InMemoryLog};
+pub use metrics::{
+    spawn_bus_metrics_emitter, AtomicBusMetrics, BusMetrics, BusMetricsEmitterHandle,
+    MetricsSnapshot, NoopMetrics,
 };

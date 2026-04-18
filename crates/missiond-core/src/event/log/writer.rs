@@ -39,8 +39,9 @@ use uuid::Uuid;
 use super::super::blob_store::{BlobStore, CLAIM_CHECK_THRESHOLD};
 use super::super::domain::Domain;
 use super::super::event_trait::DomainEvent;
+use super::super::guards::check_causation;
 use super::reader::{LogReader, LoggedEvent};
-use super::{AppendAck, AppendError, AppendOpts, Log, LogError, MAX_CAUSATION_DEPTH, Seq};
+use super::{AppendAck, AppendError, AppendOpts, Log, LogError, Seq};
 
 /// Bound on the append channel. Frozen lisp §4.2.b backpressure.
 pub const APPEND_CHANNEL_CAPACITY: usize = 4096;
@@ -100,11 +101,9 @@ impl Log for LogWriterHandle {
     where
         E: DomainEvent,
     {
-        if opts.causation_depth > MAX_CAUSATION_DEPTH {
-            return Err(AppendError::CausalLoop {
-                depth: opts.causation_depth,
-            });
-        }
+        // Frozen lisp §4.4 causation-loop-guard — enforced at both the PG
+        // writer and the InMemoryLog so behavior is uniform.
+        check_causation(&opts)?;
 
         let kind: &'static str = event.kind();
         let domain = E::domain();
