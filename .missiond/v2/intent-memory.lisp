@@ -23,7 +23,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.14")
+  (version "draft-v0.4.15")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -45,7 +45,8 @@
     (v0.4.11 "project-management 按 'memory=库' 精简: lisp-survey-worker → cross-ref pillar 二 2.3; scope-propagation 从 ingress 'writer' 重构为 plumbing scope-mechanism 下的 write-propagation-convention (不是 writer 而是跨模块约定); vault-md-edit 加 :library-pov")
     (v0.4.12 "野生逻辑清理 Phase 1: L1 修正 (agent-questions auto-unblock 实际已实现) + L1 移除摘要 (message_narrations/cursors 下线 + step-narrator 删) + L2 TBD 修正 (kb_operation_queue 有 consumer / message_embedding_skips 是 audit trail) + L2 设计 (project-claudemd / agent-execution-coordination / prompt-snapshot 三个 MCP tool interface)")
     (v0.4.13 "Phase 2 第一步: 新增 module llm-support (3 表: gemini_requests / gemini_file_uploads / token_usage_ledger, 从 category system-support 分离); 调查确认 3 writer 实际路径 (token 纠正为 message_handler.rs, 不是 gateway); 确认 observability-consumer 存在 (timeline.rs enrichment); cross-module-trait-sharing 诚实披露 ObservabilityStore 跨模块使用")
-    (v0.4.14 "Phase 2 第二步: 新增 module slot-support (3 表: slot_sessions / slot_tasks / dynamic_slots, 从 category system-support :: compute-runtime 分离); 校正 slot_tasks 实际语义为 learning engine 的 AI 任务 (extraction + decision), 不是通用 slot 任务; cross-module-trait-sharing 披露 SlotStore 跨模块 (daemon_state + legacy tasks/inbox/events)"))
+    (v0.4.14 "Phase 2 第二步: 新增 module slot-support (3 表: slot_sessions / slot_tasks / dynamic_slots, 从 category system-support :: compute-runtime 分离); 校正 slot_tasks 实际语义为 learning engine 的 AI 任务 (extraction + decision), 不是通用 slot 任务; cross-module-trait-sharing 披露 SlotStore 跨模块 (daemon_state + legacy tasks/inbox/events)")
+    (v0.4.15 "Phase 2 第三步: category system-support upgrade 为 module (14 张表 = 10 active + 4 legacy). 10 active 分: 观测 3 + infra 游标 4 + backfill 2 + daemon_state 1. legacy-zone 4 张 drop 决策: tasks keep / inbox deprecate / events drop / credentials drop (v0.4.15 新发现 dead schema). 关键校正: backfill_* 不是一次性迁移, 是 embedding-worker 持续 phased 作业; router_chat_archive 是 side-table, 主数据在 conversations (chat_type='router_chat'); 每 writer 定位到具体代码行"))
   (status "草稿 — 大多数 module 已稳定, 可演进")
 
   (purpose "系统长期记忆 — 4 个业务模块自治 + 底层系统支持层 + 横切")
@@ -1430,56 +1431,306 @@
 
 
   ;; ═════════════════════════════════════════════════════════════
-  ;;  分类: System Support (系统支持层)
-  ;;  非业务语义的基础表 — 被所有模块使用或支撑
+  ;;  Support 模块 7: System Support Manager
+  ;;  系统级基础表 — 观测 / infra 游标 / backfill / legacy zone
   ;; ═════════════════════════════════════════════════════════════
-  (category system-support
-    (desc "系统级基础表 — 14 张 (v0.4.13: LLM 3 表 → llm-support; slot 3 表 → slot-support)")
-    (maturity "基础层 — 结构稳定, 部分 legacy 待清理")
+  (module system-support
+    (desc "系统级基础数据支持 — 告警 / 路由归档 / vision 缓存 / 多种游标 / backfill / daemon_state + 4 张 legacy 表")
+    (maturity "成熟 (10 张 active) + 4 张 legacy 待清理")
+    :migrated-from "v0.4.15: 从 category 升级到 module (LLM 3 + slot 3 分离后的留存)"
 
-    (component global-observability
-      (desc "跨项目的观测 / 审计 — 不按项目分")
-      :note "v0.4.1: system_timeline 已移除 — event_log (pillar 四) 作为 timeline SSOT, 直接服务 mission_timeline / WS timeline-stream (经 projection)"
-      :migrated-out-v0.4.13 "gemini_requests / gemini_file_uploads / token_usage_ledger 3 表迁到 module llm-support (独立 manager)"
-      (table incidents
-        :purpose "告警/异常聚合"
-        :writer "pillar 四 :: incident-writer"
-        :dedup "dedupe_key + 时间窗口"
-        :scoping-candidate true)
-      (table router_chat_archive
-        :purpose "Router 聊天历史归档"))
+    (primary-goals
+      (goal-1 system-level-observability
+        :problem  "告警 / router 归档 / vision 缓存 分散, 需统一留痕"
+        :solution "3 张观测表: incidents (event-bus 集中) / router_chat_archive (压缩归档) / image_descriptions (按 hash 缓存)"
+        :benefit  "跨项目 / 跨模块的系统可观测性")
+      (goal-2 infra-state-continuity
+        :problem  "各增量 worker / consumer 的游标 + embedding backfill 进度需持久化, daemon 重启不丢"
+        :solution "7 张 infra 表: 4 watermark/cursor + 2 backfill + daemon_state KV"
+        :benefit  "崩溃恢复基础 — 每 worker 从自己的游标继续")
+      (goal-3 legacy-cleanup
+        :problem  "4 张老版 schema 活跃度不一, 需逐个判决"
+        :solution "legacy-zone 明确 4 表状态 (tasks keep / inbox deprecate / events drop / credentials drop 新发现)"
+        :benefit  "下轮 migration 可定向 DROP"))
 
-    (component infrastructure
-      (desc "daemon 级基础状态 + 凭据 + 游标")
-      (tables daemon_state credentials
-              reconcile_watermarks gemini_cli_watermarks watcher_cursors consumer_watermarks
-              backfill_progress backfill_failures)
-      :note "游标类表是各种增量处理的进度记录")
+    (module-ingress
+      (desc "观测 + infra + legacy 3 类写入")
+      :principle "memory = 库. worker / handler / event-bus fanout 各管时机 + 业务"
 
-    (component compute-runtime
-      :migrated-out-v0.4.13 "slot_sessions / slot_tasks / dynamic_slots 3 表迁到 module slot-support (独立 manager)"
-      :replaced-by "module slot-support (本 lisp 中上方)"
-      :note "v0.4.13 之前: compute-runtime 暂存 3 slot 表 + 备注 '本应归 pillar 二'. v0.4.13 明确: memory 侧管 schema + 查询 (slot-support), pillar 二 2.1 SlotManager 管 lifecycle")
+      ;; ── 观测 writers (3) ──
+      (writer aiops-incident-reactor
+        :cross-ref "daemon/src/infra/aiops.rs:145 process_incident (写入点 192 / 338)"
+        :trigger "event-bus IncidentEvent::Reported subscriber (bus/v2_subscribers.rs:98 v2_incident_reactor)"
+        :writes "incidents (含 dedupe_key 去重)"
+        :trait-methods "ObservabilityStore::insert_incident / has_recent_incident / list_incidents"
+        :library-pov "库暴露 insert + dedup check; triage 逻辑在 aiops")
 
-    (component legacy-tables
-      (desc "老版 schema 疑似不再活跃")
-      (tables tasks inbox events)
-      :action-needed "实地确认使用情况; 若确认 deprecated 则 drop")
+      (writer router-chat-archiver
+        :cross-ref "daemon/src/handlers/comm/router_chat.rs + pg/observability.rs router_chat_clear 族"
+        :trigger "router_chat_clear / _clear_by_task 等时机 — 归档被删除 / 压缩的旧消息"
+        :writes "router_chat_archive (original_id / session_id / role / content / archive_reason)"
+        :trait-methods "ObservabilityStore::router_chat_* (22 方法族)"
+        :library-pov "库暴露 router_chat_* 方法族; archive 策略在 handler")
 
-    (component vision-assets
-      (desc "图片描述缓存 — 独立无外键, 按 image_hash 去重")
-      (table image_descriptions
-        :schema "image_hash / media_type / description / char_count / created_at"
-        :writer "pillar 二 workers/codex/vision_worker.rs :: save_image_description"
-        :reader "message enrichment 时按 hash 查询"
-        :note "非 conversation-scoped (无 session_id FK); 是全局图片 → 文本 cache"))
+      (writer vision-worker
+        :cross-ref "pillar 二 2.3 :: workers/codex/vision_worker.rs :: save_image_description"
+        :writes "image_descriptions (upsert by image_hash)"
+        :library-pov "库暴露按 hash upsert; vision LLM 调用 + 去重决策在 worker")
+
+      ;; ── infra 游标 + backfill writers (7) ──
+      (writer watcher-cursor-writers
+        :cross-ref "多个 file-watcher 类 worker (具体 worker 待补 — 方法签名是 batch upsert)"
+        :writes "watcher_cursors (file_path PK / byte_offset / session_id)"
+        :trait-methods "ObservabilityStore::load_watcher_cursors / upsert_watcher_cursors_batch / delete_watcher_cursor"
+        :library-pov "库暴露 load/batch-upsert/delete; watcher 算法在 worker")
+
+      (writer reconcile-worker-watermarks
+        :cross-ref "pillar 二 2.3 :: workers/local/reconcile_worker.rs"
+        :writes "reconcile_watermarks (jsonl_path PK / last_reconciled_size / last_reconciled_at)"
+        :trait-methods "ObservabilityStore::get_reconcile_watermark / upsert_reconcile_watermark / get_all_reconcile_watermarks")
+
+      (writer gemini-reconcile-watermarks
+        :cross-ref "pillar 二 2.3 :: workers/local/gemini_reconcile_worker.rs"
+        :writes "gemini_cli_watermarks (session_file PK / session_id / last_msg_count)"
+        :trait-methods "ObservabilityStore::load_gemini_cursors / save_gemini_cursor")
+
+      (writer consumer-watermarks-writers
+        :cross-ref "多 consumer 通过 watermark_* API 更新 (具体 consumers 散在多 worker)"
+        :writes "consumer_watermarks (consumer_name + session_id 复合 PK / last_processed_msg_id / extra)"
+        :trait-methods "ObservabilityStore::watermark_get / _advance_time / _advance_msg_id / _advance_full / _list")
+
+      (writer embedding-worker-backfill
+        :cross-ref "pillar 二 2.3 :: workers/sonnet/embedding_worker.rs (写入点 1236 / 1322 / 1327 / 1343 / 1544 / 1597 / 1663 / 1912 / 1936 / 1953)"
+        :writes "backfill_progress (phase 进度) + backfill_failures (重试记录)"
+        :known-phases "conv_topic_vectors / conv_summary (session-level embedding backfill)"
+        :trait-methods "MissionDB inherent: backfill_start_phase / _update_progress / _complete_phase / _record_failure / _retryable_failures / _retryable_failures_no_cooldown / _clear_failure / _get_phase / _list_phases"
+        :correction-v0.4.15 "原以为是一次性迁移表 — 实际是 embedding-worker 持续的 phased 作业状态管理, active")
+
+      (writer daemon-state-writer
+        :cross-ref "daemon bootstrap + 各 state 更新处 (多处)"
+        :writes "daemon_state (key PK / value / updated_at)"
+        :trait-methods "SlotStore::daemon_state_get / _set"
+        :note "trait 归 SlotStore (db/slot.rs 同文件), 实际用途是 daemon 全局 KV")
+
+      ;; ── Legacy zone writers (2 active + 2 dead) ──
+      (writer legacy-task-api-writers
+        :cross-ref "crates/missiond-core/src/db/task.rs + db/pg/slot.rs (legacy v1 slot API 路径)"
+        :writes "tasks (active) / inbox (轻度) / events (疑似 dead, 仅 legacy 写入)"
+        :status "⚠ tasks/inbox 尚在 — events 仅 legacy 写"
+        :note "详见 core :: legacy-zone 每表状态")
+
+      (writer-removed credentials-writers
+        :removed-finding "v0.4.15 调查发现 — credentials 表零 Rust CRUD"
+        :was "无实际 writer (仅创建 schema)"
+        :investigation "grep 全 crates/ 只找到 resolve_llm_credentials() 函数名字符串 (不操作此表)"
+        :action "推荐 DROP — 见 legacy-zone 下 credentials"))
+
+    (module-core
+      (desc "观测 (3) + infra 游标 + backfill (7) + legacy-zone (4)")
+
+      ;; ── 观测类 plumbing (3) ──
+      (plumbing observability-incidents
+        (desc "告警 / 异常聚合 — event-bus IncidentEvent 集中落库")
+        :table "incidents"
+        :schema-cols "id (PK) / severity / source / title / description / server_id / raw_payload / board_task_id / dedupe_key / created_at"
+        :indexes "(created_at), (dedupe_key, created_at)"
+        :scoping-candidate "加 project_id 可按项目告警分级"
+        :trait-methods "ObservabilityStore: insert_incident / has_recent_incident / list_incidents"
+        :code "crates/missiond-core/src/db/incident.rs + pg/observability.rs")
+
+      (plumbing router-chat-archive
+        (desc "路由聊天的压缩历史归档 side-table (主数据在 conversations with chat_type='router_chat')")
+        :table "router_chat_archive"
+        :schema-cols "id (PK auto) / original_id / session_id / role / content / timestamp / archived_at / archive_reason"
+        :indexes "(session_id), (archived_at)"
+        :relationship "与 conversations 表主数据配套 — archive 是压缩后的历史; archive_reason 记录触发场景"
+        :code "pg/observability.rs (多处 INSERT INTO router_chat_archive)")
+
+      (plumbing vision-image-cache
+        (desc "图片描述缓存 — 独立无 FK, 按 image_hash 去重")
+        :table "image_descriptions"
+        :schema-cols "image_hash (PK) / media_type / description / char_count / created_at"
+        :scoping "global (非 conversation-scoped; 同一图片跨 session 复用)"
+        :migrated-from "v0.4.4 从 conversation-logs 迁入 (无 FK, 是全局图片 → 文本 cache)")
+
+      ;; ── infra 游标 plumbing (4) ──
+      (plumbing watcher-cursors
+        (desc "文件监听器的字节偏移游标")
+        :table "watcher_cursors"
+        :schema-cols "file_path (PK) / byte_offset BIGINT / session_id? / updated_at"
+        :purpose "文件 tail 式 watcher 的断点续读"
+        :trait-methods "load_watcher_cursors / upsert_watcher_cursors_batch / delete_watcher_cursor")
+
+      (plumbing reconcile-watermarks
+        (desc "JSONL 对账 worker 的文件游标")
+        :table "reconcile_watermarks"
+        :schema-cols "jsonl_path (PK) / last_reconciled_size BIGINT / last_reconciled_at TIMESTAMPTZ"
+        :migration "20260320000000_reconcile_watermarks.sql")
+
+      (plumbing gemini-cli-watermarks
+        (desc "Gemini CLI 会话文件的消息数水位")
+        :table "gemini_cli_watermarks"
+        :schema-cols "session_file (PK) / session_id / last_msg_count BIGINT / last_reconciled_at"
+        :indexes "(session_id)"
+        :migration "20260321000000_gemini_cli_watermarks.sql")
+
+      (plumbing consumer-watermarks
+        (desc "通用消费者水位 — 复合 PK 支持多 consumer × 多 session")
+        :table "consumer_watermarks"
+        :schema-cols "consumer_name + session_id (复合 PK) / last_processed_msg_id / last_processed_time / extra (JSON)"
+        :indexes "(consumer_name)")
+
+      ;; ── backfill plumbing (2, active via embedding-worker) ──
+      (plumbing backfill-progress
+        (desc "embedding-worker 的 phased 作业进度 — 每 phase 一行")
+        :table "backfill_progress"
+        :schema-cols "phase (PK) / status (default 'pending') / last_cursor BIGINT / total_estimated / processed / failed / started_at / completed_at / updated_at"
+        :known-phases "conv_topic_vectors / conv_summary (session-level embedding)"
+        :code "crates/missiond-core/src/db/backfill.rs (9 inherent 方法)")
+
+      (plumbing backfill-failures
+        (desc "embedding-worker 的 phase 内失败重试记录")
+        :table "backfill_failures"
+        :schema-cols "session_id + phase (复合 PK) / retry_count / last_error / updated_at")
+
+      ;; ── daemon 级 KV plumbing (1) ──
+      (plumbing daemon-state-kv
+        (desc "daemon 级 key-value 状态")
+        :table "daemon_state"
+        :schema-cols "key (PK) / value TEXT / updated_at"
+        :trait "SlotStore::daemon_state_get / _set"
+        :note "trait 归 SlotStore (同文件 db/slot.rs), 实际用途是 daemon 全局 KV")
+
+      ;; ── Legacy zone (4 表, 含调查后分级) ──
+      (legacy-zone
+        (desc "v0.4.15 实地调查后的 4 张老版 schema 分级")
+
+        (table tasks
+          :status "✓ KEEP — legacy slot API 仍在使用"
+          :writers "crates/missiond-core/src/db/task.rs + db/pg/slot.rs"
+          :schema-cols "id (PK) / role / prompt / status (default 'queued') / manual / slot_id / session_id / result / error / created_at / started_at / finished_at / notified_at"
+          :indexes "4: (status), (role), (created_at), (manual)"
+          :trait "SlotStore trait (insert_task / update_task / get_task / get_tasks_by_status / get_queued_tasks_by_role / requeue_running_tasks_for_slot / get_all_tasks / ack_completed_tasks)"
+          :action "保留; 若未来 slot API 全换 board_tasks, 可再 drop")
+
+        (table inbox
+          :status "⚠ DEPRECATE — 轻度使用"
+          :writers "crates/missiond-core/src/db/task.rs (insert_inbox_message / get_inbox_messages / mark_inbox_read)"
+          :schema-cols "id (PK) / task_id / from_role / content / read / created_at"
+          :indexes "(read), (created_at)"
+          :trait "SlotStore trait (3 inbox 方法)"
+          :mcp "mission_inbox (共用 misc handler)"
+          :action "标 deprecated; 下轮清理时 drop")
+
+        (table events
+          :status "❌ DROP-CANDIDATE — dead (pillar 四 event_log 已取代)"
+          :writers "仅 task.rs :: insert_event (legacy 路径, 无外部 active 消费)"
+          :schema-cols "id (PK auto) / task_id / type / data / timestamp"
+          :indexes "(task_id), (timestamp)"
+          :trait "SlotStore trait (insert_event / get_events_by_task, 标 legacy)"
+          :action "推荐下个 migration DROP; 需确认无外部系统查询"
+          :superseded-by "pillar 四 event_log (SSOT)")
+
+        (table credentials
+          :status "❌ DROP-CANDIDATE — dead schema (v0.4.15 新发现)"
+          :writers "无 Rust CRUD 代码"
+          :readers "无"
+          :schema-cols "id (PK) / knowledge_id (FK → knowledge ON DELETE CASCADE) / name / value_encrypted / created_at / updated_at"
+          :investigation "grep 全 crates/ 显示 'credentials' 在代码中仅作函数名字符串 (resolve_llm_credentials 不操作此表); 表创建但零 CRUD"
+          :action "推荐下个 migration DROP — 除非有未发现的运行时写入")))
+
+    (module-egress
+      (desc "MCP 读 + daemon 内部 consumer")
+
+      ;; ── MCP readers (5) ──
+      (reader mcp-incident
+        :tool "mission_incident"
+        :reads "incidents"
+        :code "daemon/src/handlers/comm/question.rs (共用 handler, 与 mission_question / llm_trace 等)")
+
+      (reader mcp-router-chat
+        :tools "mission_router_chat / mission_router_chat_manage"
+        :reads "router_chat_archive + conversations (chat_type='router_chat')"
+        :code "daemon/src/handlers/comm/router_chat.rs")
+
+      (reader mcp-sys-config-logs
+        :tools "mission_sys_config / mission_sys_logs / mission_daemon_update"
+        :reads "daemon_state + 各种 watermark 表 + backfill_progress"
+        :code "daemon/src/handlers/system.rs")
+
+      (reader mcp-infra-query
+        :tools "mission_infra_query / mission_infra_ops"
+        :reads "reconcile_watermarks / gemini_cli_watermarks / consumer_watermarks / watcher_cursors"
+        :code "daemon/src/handlers/sysinfra/infra.rs")
+
+      (reader mcp-inbox-legacy
+        :tool "mission_inbox"
+        :reads "inbox (legacy v1 API)"
+        :code "daemon/src/handlers/sysinfra/misc.rs (共用 misc handler)")
+
+      ;; ── daemon 内部 readers (4) ──
+      (reader vision-enrichment
+        :cross-ref "daemon 内消息 enrichment 流程"
+        :reads "image_descriptions (按 image_hash 查)"
+        :purpose "消息含图片时查找缓存的 LLM 描述")
+
+      (reader backfill-resume
+        :cross-ref "embedding_worker.rs 启动时恢复"
+        :reads "backfill_progress (get_phase) + backfill_failures (retryable_failures)"
+        :purpose "daemon 重启后从上次 phase 继续")
+
+      (reader watermark-consumers-readers
+        :cross-ref "多 consumer workers"
+        :reads "consumer_watermarks / watcher_cursors / reconcile_watermarks / gemini_cli_watermarks"
+        :purpose "每 worker 启动时读自己的游标做增量处理")
+
+      (reader incident-enrichment
+        :cross-ref "handlers/comm/timeline.rs (类似 gemini_requests enrichment 模式, 待确认)"
+        :reads "incidents (可能 enrich 部分 Timeline 事件)"
+        :status "🚧 待确认 — 类比 llm-support timeline-enrichment 模式"))
 
     (module-tables-owned
-      (desc "此分类持有 14 张表 — 待后续 system-support → module 升级 + legacy drop")
+      (desc "本模块独占 14 张表 (10 active + 4 legacy)")
+      (tables
+        ;; active 观测 (3)
+        (incidents              :status "✓ active")
+        (router_chat_archive    :status "✓ active")
+        (image_descriptions     :status "✓ active")
+        ;; active infra (7)
+        (watcher_cursors        :status "✓ active")
+        (reconcile_watermarks   :status "✓ active")
+        (gemini_cli_watermarks  :status "✓ active")
+        (consumer_watermarks    :status "✓ active")
+        (backfill_progress      :status "✓ active (embedding-worker 持续使用)")
+        (backfill_failures      :status "✓ active")
+        (daemon_state           :status "✓ active")
+        ;; legacy (4)
+        (tasks                  :status "⚠ keep — legacy slot API")
+        (inbox                  :status "⚠ deprecate")
+        (events                 :status "❌ drop-candidate (event_log 取代)")
+        (credentials            :status "❌ drop-candidate (v0.4.15 新发现 dead schema)"))
       (count 14)
-      (added-in-v0.4-revision "image_descriptions 从 conversation-logs 迁入 (该表无 FK, 非会话附属)")
-      (removed-in-v0.4.1-revision "system_timeline 合并进 pillar 四 event_log (SSOT); timeline-writer 订阅者 + mission_timeline 改读 event_log")
-      (removed-in-v0.4.13 "gemini_requests / gemini_file_uploads / token_usage_ledger 3 表 → module llm-support; slot_sessions / slot_tasks / dynamic_slots 3 表 → module slot-support")))
+      (active-count 10)
+      (legacy-count 4)
+
+      (migration-history
+        "v0.4.11: category 持 20 张表"
+        "v0.4.1: system_timeline 合并到 pillar 四 event_log (SSOT)"
+        "v0.4.13: gemini_requests / gemini_file_uploads / token_usage_ledger → module llm-support"
+        "v0.4.14: slot_sessions / slot_tasks / dynamic_slots → module slot-support"
+        "v0.4.15: category 升级为 module + legacy-zone 明确 4 张 drop 状态 + credentials 新发现 dead"))
+
+    (cross-module-trait-sharing
+      (desc "本 module 涉及的 trait 跨模块共享关系 — 同 llm-support / slot-support 的阻抗不匹配模式")
+      :primary-traits
+        ("ObservabilityStore (db/traits.rs:614) — 大 trait, 本模块用其中的: incident 方法 (3) + watcher_cursors (3) + reconcile_watermarks (3) + gemini_cli_watermarks (2) + consumer_watermarks via watermark_* (5) + router_chat (22)"
+         "SlotStore (db/traits.rs:478) — 大 trait, 本模块用其中的: daemon_state (2) + legacy tasks (8) + inbox (3) + events (2)")
+      :inherent-methods "backfill.rs 9 方法是 MissionDB inherent 方法, 不在 trait"
+      :other-modules-use-same-traits
+        ("llm-support: ObservabilityStore 的 gemini_log + gemini_file_cache + token_usage + token_stats 方法"
+         "conversation-logs: ObservabilityStore 的 label_* + conversations_missing_summary_* 方法"
+         "slot-support: SlotStore 的 slot_sessions + slot_tasks + dynamic_slots 方法")
+      :design-note "trait 按实现文件切分 (slot.rs + observability.rs + gemini_log.rs + incident.rs 等) — 同 llm-support / slot-support 的阻抗不匹配模式, 接受"))
 
 
   ;; ═════════════════════════════════════════════════════════════
