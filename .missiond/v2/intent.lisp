@@ -1,12 +1,13 @@
 ;; ══════════════════════════════════════════════════════
 ;; MissionD — Intent v2
-;; 按指挥官心智模型收拢: 六大板块
-;;   一 · 记忆          — 系统记得什么
-;;   二 · worker        — PTY + LLM 接入 + 21 后台 worker + 编排
+;; 按指挥官心智模型收拢: 七大板块
+;;   一 · 记忆          — 系统记得什么 (库: schema + 状态)
+;;   二 · worker        — PTY + LLM 接入 + 21 后台 worker + 编排 + engine (计算)
 ;;   三 · 工具          — 对外暴露的能力
 ;;   四 · 事件总线      — 进程内神经网络(入点 / 核心 / 出点)
-;;   五 · 意图层        — 系统的自我描述
-;;   六 · 系统层        — DB CRUD + 类型 + 传输 + 启动 + 观测 + 工具
+;;   五 · 意图层        — 系统的自我描述 + 全局指令 + 动作/指令规约
+;;   六 · 系统层        — 类型 + 传输 + RPC Gateway + 工具
+;;   七 · 流程 (flow)   — 跨 pillar 的动作前后流程: memory 静态 + worker 计算 的编排
 ;; ══════════════════════════════════════════════════════
 
 (intent missiond-v2
@@ -747,5 +748,162 @@
         :target "crates/missiond-daemon/src/context/gen_budget.rs"
         :functions "estimate_tokens (英文 /4, 中文 /2) / allocate_budget (N 源 + 边际递减)"
         :consumer "context 窗口规划")))
+
+
+  ;; ═══════════════════════════════════════════════════
+  ;;  七 · 流程 (Flow)
+  ;;  跨 pillar 的动作前后流程 — 把 memory 静态与 worker 计算串联成 narrative
+  ;; ═══════════════════════════════════════════════════
+  (pillar flow
+    (purpose "跨 pillar 的动作前后流程 — 把 memory 静态与 worker 计算串联成 narrative")
+    (rationale "v0.4.7 从 board 拆出 autopilot/flow-engine 后, 丢失了 end-to-end narrative; 本 pillar 补上")
+
+    (principle
+      :memory "状态 (snapshot) — 记什么是什么"
+      :worker "机制 (engine) — 做怎么做"
+      :flow   "编排 (choreography) — 串什么时候什么顺序做什么")
+
+    (naming-convention
+      :stage-id "s1 / s2 / ..."
+      :at-target "pillar-X :: module/section :: component (跨 pillar 跳点)"
+      :writes    "产生什么数据变动"
+      :emits     "产生什么 DomainEvent (可选)")
+
+    (flows-catalog
+      :scope "当前 board-centric; 可扩展到 KB mutation / conversation ingestion / retro / context assembly"
+      :count 5
+
+      ;; ── Flow 1: 任务主生命周期 ──
+      (flow board-task-main-lifecycle
+        (desc "任务从创建到完成 — board 最核心的 end-to-end")
+        (trigger "mission_board_create / decomposed child / autopilot scan auto_execute=1")
+
+        (stages
+          (s1 create
+            :at     "pillar 一 memory :: board :: mcp-board-lifecycle"
+            :writes "board_tasks status=open"
+            :emits  "BoardTaskCreated")
+
+          (s2 scan-decide
+            :at      "pillar 二 2.4 :: autopilot"
+            :reads   "board_tasks WHERE auto_execute=1 AND status=open"
+            :decides "是否 claim + 派给哪个 slot / worker")
+
+          (s3 atomic-claim
+            :at     "pillar 一 memory :: board :: state-machine"
+            :writes "status=running + claim_executor_id + lease_expires_at"
+            :atomicity "SQL CAS — open→running 原子操作"
+            :emits  "BoardTaskClaimed + BoardTaskStatusChanged")
+
+          (s4 execute
+            :at     "pillar 二 2.1 PTY slot / 2.3 workers / 2.4 flow-engine-v2"
+            :action "实际执行任务; 有 flow_template 则走 flow-engine 逐节点"
+            :side-effects "autopilot.save_prompt_snapshot → prompt_snapshots"
+            :flow-ref "flow-engine-v2-node-execution (若走节点模式)")
+
+          (s5 report-completion
+            :at     "pillar 一 memory :: board :: core-operations"
+            :writes "status=done/failed + claim_executor_id 清除 + lease 释放"
+            :emits  "BoardTaskStatusChanged")
+
+          (s6 downstream-cascade
+            :at     "pillar 二 2.4 :: autopilot"
+            :action "检查 depends_on 的下游 → unblock 或 retry-cascade"
+            :optional true))
+
+        (alternative-path lease-recovery
+          :trigger   "autopilot tick 发现 lease_expires_at < now() 且 status=running"
+          :at        "pillar 二 2.4 :: autopilot"
+          :action    "调 BoardStore::recover_stale_running_tasks"
+          :writes    "status=open + claim 清除"
+          :rationale "executor 崩溃不留僵尸任务"))
+
+      ;; ── Flow 2: 任务拆解 ──
+      (flow board-task-decompose
+        (desc "父任务 AI 分析 → 子任务 DAG")
+        (trigger "mission_board_decompose(task_id, slot_id, hints)")
+        (stages
+          (s1 request
+            :at     "pillar 一 memory :: board :: mcp-board-lifecycle"
+            :action "派 slot 做分析")
+          (s2 analyze
+            :at     "pillar 二 2.1 :: PTY slot"
+            :action "slot LLM 执行 AI 分析, 产出结构化 subtask plan")
+          (s3 write-dag
+            :at     "pillar 一 memory :: board :: core-operations"
+            :writes "新 board_tasks rows (parent_id + depends_on JSONB)"
+            :emits  "BoardTaskCreated (每个子任务一次)"))
+        (result "Parent task + DAG of children with dependency links"))
+
+      ;; ── Flow 3: Agent 提问阻塞 ──
+      (flow agent-question-block-resume
+        (desc "Agent 卡住 → 提问 → task 被 block → 回答后 unblock")
+        (trigger "mission_question create with task_id")
+        (stages
+          (s1 question-create
+            :at     "pillar 一 memory :: board :: helper agent-questions"
+            :writes "agent_questions status=pending"
+            :side-effect "CAS UPDATE board_tasks SET status=blocked WHERE id=task_id"
+            :serves "flow 暂停 — executor 不再 claim 此任务")
+
+          (s2 human-answer
+            :at     "用户手动 / 其他 agent / Claude Code 交互"
+            :writes "agent_questions status=answered + answer text")
+
+          (s3 unblock
+            :at     "⚠ TBD — 当前需手动 mission_board_update"
+            :desc   "检测 question answered → board_task status=blocked→open 重新 claim"
+            :gap    "已知缺口 — 自动 unblock 路径未实现"))
+        (known-gap "s3 未自动化 — agent 回答后, 需手动把 task 从 blocked 改回 open"))
+
+      ;; ── Flow 4: Autopilot tick 流水线 ──
+      (flow autopilot-tick-pipeline
+        (desc "autopilot 每 5-10s 的完整 tick — 多个子流程依次跑")
+        (trigger "autopilot 计时器 (5-10s)")
+        (stages
+          (s1 memory-scheduler
+            :at "pillar 二 2.4 :: autopilot"
+            :action "扫待唤醒的 reminder / 提醒 (若有)")
+          (s2 extraction-check
+            :at "pillar 二 2.4 :: autopilot"
+            :action "检查 extract-worker 状态 + 进度")
+          (s3 board-task-dispatch
+            :at "pillar 二 2.4 :: autopilot"
+            :flow-ref "board-task-main-lifecycle s2-s4 (scan + claim + 派发)")
+          (s4 flow-progression
+            :at "pillar 二 2.4 :: flow-engine-v2"
+            :action "推进所有 flow_template 非空的 running task 一个节点")
+          (s5 supervision-check
+            :at "pillar 二 2.4 :: autopilot"
+            :action "lease recovery (见 Flow 1 alternative-path) + 僵尸 slot 检测")))
+
+      ;; ── Flow 5: Flow-engine 节点执行 ──
+      (flow flow-engine-v2-node-execution
+        (desc "flow_template YAML 节点的运行时执行 — board 的可选子流")
+        (trigger "board_task.status=running 且 flow_template 非空")
+        (stages
+          (s1 load-yaml
+            :at    "pillar 二 2.4 :: flow-engine-v2 :: loader"
+            :reads "$MISSIOND_HOME/flows/<flow_template>.yaml"
+            :parses-to "FlowDefinition (serde_yaml)")
+          (s2 execute-node
+            :at    "pillar 二 2.4 :: flow-engine-v2 :: runner"
+            :types "LlmCall / SlotTask / McpTool / DaemonAction / ParallelSlotTasks"
+            :action "按节点类型分派, 变量插值 + 执行")
+          (s3 persist-context
+            :at     "pillar 一 memory :: board :: data-model"
+            :writes "board_tasks.flow_context (JSONB) — 节点产出 + 状态"
+            :invariant "每节点完成必须 persist — 崩溃恢复基础")
+          (s4 advance-or-complete
+            :at "pillar 二 2.4 :: flow-engine-v2 :: runner"
+            :decides "flow_phase++ / 分支 / 全部完成则 report (→ Flow 1 s5)")))
+
+      ;; ── 未覆盖的候选 (待扩展) ──
+      (future-flows
+        (kb-mutation-to-indexed      "mission_kb_mutate → knowledge 写 → embedding-worker → HNSW 索引")
+        (conversation-jsonl-ingest   "PTY JSONL → conversation-logger → DB → briefing → embedding")
+        (retrospective-trigger       "会话结束信号 → retro-worker → retrospective_results")
+        (context-assembly            "LLM 调用前 → ContextPipeline → KB + conversations 拼 prompt")
+        (project-init                "mission_project init → projects row + intent_path 解析 + 初始 lisp-survey"))))
 
 ) ;; end intent missiond-v2
