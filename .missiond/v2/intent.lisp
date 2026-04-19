@@ -477,15 +477,15 @@
   ;;  系统的自我描述 + 自感知 + 自演化
   ;; ═══════════════════════════════════════════════════
   (pillar intent-layer
-    (purpose "元层: 系统如何描述自己,如何感知变化,如何演进")
+    (purpose "元层: 系统如何描述自己, 如何感知变化, 如何演进, 以及全局用户指令")
 
     (component intent-files
-      (desc ".missiond/*.lisp 意图声明,按主题拆分并行加载")
+      (desc ".missiond/*.lisp 意图声明, 按主题拆分并行加载")
       :granularities "L1-Blueprint / L2-Topology / L3-Implementation"
       :count "27 files (v1) + this v2 draft")
 
     (component intent-graph
-      (desc "文件间 module-link 关系,构成有向图,可供可视化 / 治理")
+      (desc "文件间 module-link 关系, 构成有向图, 可供可视化 / 治理")
       :target "forge-daemon/src/intent_graph.rs")
 
     (component forge
@@ -501,7 +501,29 @@
 
     (component governance
       (desc "治理规则 / lint / 模式声明: strict-codegen / descriptive / experimental")
-      :target "forge-daemon/src/governance.rs"))
+      :target "forge-daemon/src/governance.rs")
+
+    ;; ── 全局 CLAUDE.md · 跨项目永久用户指令 ──
+    (component global-claudemd
+      (desc "全域总纲 — 指挥官对 Claude 的跨项目永久指令")
+      :path "~/.claude/CLAUDE.md"
+      :scope global-user
+      :format "Markdown + 可选 YAML frontmatter"
+      :purpose "全局偏好 / 行为约束 / 宇宙总纲 — 每次会话必加载"
+      :loaded-by "Claude Code 系统启动自动加载进 system prompt"
+      :writer "用户手动编辑 / Claude Code Edit tool"
+      :nature "元层约束 — 非业务记忆 (项目级约束见 memory pillar :: project-management :: helper project-claudemd-manager)"
+      :rationale "放 pillar 五 而非 memory pillar: 此文件是"系统如何被指挥"的声明, 属元层")
+
+    (component global-claudemd-manager
+      (desc "全局 ~/.claude/CLAUDE.md 的读/写/reload 管理")
+      :actions "read / edit / reload"
+      :code "TBD — 目前 Claude Code 直接读, 无 daemon 侧 MCP manager"
+      :future "未来可补 mission_global_instruction (read/edit/reload) MCP tool"
+      :readers "Claude Code 每次会话启动"
+      :writers "用户手动 / Claude Code Edit tool (文件层)"
+      :status "文件层存在, daemon/MCP 层无 manager — 待实现"
+      :cross-ref "项目级 <project>/CLAUDE.md 的 manager 在 memory pillar :: project-management :: helper project-claudemd-manager"))
 
 
   ;; ═══════════════════════════════════════════════════

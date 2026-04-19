@@ -23,7 +23,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.1")
+  (version "draft-v0.4.3")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -32,7 +32,9 @@
     (v0.3   "3 成熟模块 + 平铺 + 横切 (embedding/gen-crud 迁出)")
     (v0.3.1 "搜索引擎迁出到 pillar 二 2.6 (搜索是计算不是数据)")
     (v0.4   "4 成熟模块各管自己的表: kb-manager + conversation-logs 两个新模块; skill/specs 归 project-management; event-bus 4 表归 pillar 四")
-    (v0.4.1 "SSOT 合并: system_timeline 移除, pillar 四 event_log 成 timeline SSOT (v1.3.0); 总表 61→60"))
+    (v0.4.1 "SSOT 合并: system_timeline 移除, pillar 四 event_log 成 timeline SSOT (v1.3.0); 总表 61→60")
+    (v0.4.2 "4 模块 in/core/out harmonization: board/kb/conv core 统一用 (path/plumbing/helper) 三分法语义")
+    (v0.4.3 "CLAUDE.md 分层: 全局 ~/.claude/CLAUDE.md + manager → pillar 五 intent-layer; 项目级 <project>/CLAUDE.md + manager → memory :: project-management"))
   (status "草稿 — 大多数 module 已稳定, 可演进")
 
   (purpose "系统长期记忆 — 4 个业务模块自治 + 底层系统支持层 + 横切")
@@ -223,21 +225,19 @@
       :executor "pillar 二 2.4 orchestration :: flow-engine-v2")
 
     (form markdown-handwritten-memories
-      (desc "Markdown + YAML frontmatter 人工手写")
-      (variant user-global-claudemd
-        :path "~/.claude/CLAUDE.md"
-        :scope global-user
-        :purpose "全局用户指令 (跨项目永久)")
+      (desc "Markdown + YAML frontmatter 人工手写 — 项目级 + auto-memory vault")
+      :note "全局 ~/.claude/CLAUDE.md 已迁到 pillar 五 intent-layer (元层, 不属业务记忆)"
       (variant project-claudemd
         :path "<project>/CLAUDE.md"
         :scope per-project
-        :purpose "项目级 Claude 指令 (随项目 git)")
+        :purpose "项目级 Claude 指令 (随项目 git 版本化, 每会话加载)"
+        :managed-by "module project-management :: helper project-claudemd-manager")
       (variant auto-memory-vault
         :path "~/.claude/projects/{encoded}/memory/*.md"
         :index "~/.claude/projects/{encoded}/memory/MEMORY.md"
         :types "user / feedback / project / reference"
         :purpose "Agent 跨会话持久记忆"
-        :see "module project-management :: helper project-memories-vault"))
+        :managed-by "module project-management :: helper project-memories-vault"))
 
     (form external-source-streams
       (desc "外部原始流, worker 消费入 DB")
@@ -398,7 +398,18 @@
         :storage "~/.claude/projects/{encoded}/memory/*.md"
         :format "Markdown + YAML frontmatter(name/type/description)"
         :code "daemon/src/handlers/knowledge/project_memory.rs"
-        :invariant "path-traversal 防护; 独立于 DB"))
+        :invariant "path-traversal 防护; 独立于 DB")
+
+      (helper project-claudemd-manager
+        (desc "项目级 <project>/CLAUDE.md 的读/写/reload 管理 — Claude 每会话加载")
+        :path "<project>/CLAUDE.md"
+        :scope per-project
+        :nature "Markdown 明文, 随项目 git 版本化"
+        :readers "Claude Code 系统启动时读, 拼 system prompt"
+        :writers "用户手动 / Claude Code 文件编辑 (Edit tool)"
+        :code "TBD — 目前 Claude Code 直接读文件, 无 daemon 侧 manager; 未来可补 MCP tool (mission_project_claudemd read/edit/reload)"
+        :status "文件层存在, DB 层无 manager"
+        :cross-ref "全局 ~/.claude/CLAUDE.md 在 pillar 五 intent-layer :: global-claudemd (非本模块)"))
 
     (module-egress
       (desc "项目级别的读取")
@@ -459,6 +470,8 @@
         :benefit  "支撑 autopilot 自主编排"))
 
     (module-ingress
+      (desc "任务创建 + 状态推进 + 级联 + 问题 + 执行存档的写入路径")
+
       (writer mcp-board-lifecycle
         :tools "mission_board_create / update / claim / decompose / retry / note_add / delete"
         :count 7
@@ -486,33 +499,45 @@
         :note "PK 是 task_id, 故归本模块"))
 
     (module-core
-      (component data-model
+      (desc "主路径 (path) + 数据/FSM/操作/事件 (plumbing) + 附属 (helper)")
+
+      ;; ── 主路径: 任务生命周期 (serves goal-1 + goal-2) ──
+      (path task-queue-lifecycle
+        :serves (goal-1 goal-2)
+        :flow  "create → claim (CAS) → running → verifying / done / failed → optional retry (DAG cascade)"
+        :entry "mission_board_* (7 个) + autopilot tick + flow-engine 节点推进"
+        :tables "board_tasks + board_task_notes"
+        :see-plumbing "data-model / state-machine / core-operations / events-emitted")
+
+      ;; ── plumbing: 支撑主路径的数据 + 逻辑 ──
+      (plumbing data-model
         :table "board_tasks"
         :columns 27
         :grouping "身份 / 内容 / 生命周期 / 占用 / 层级 / 执行 / 流程 / 作用域 / 去重 / UI"
         :indexes 5
         :code "crates/missiond-core/src/db/board.rs")
 
-      (component state-machine
+      (plumbing state-machine
         :states (open running verifying done failed blocked skipped)
         :transitions "open→running(CAS) / open→blocked / running→verifying/done/failed / blocked→open / terminal→open(retry)"
         :atomicity "open→running 是 SQL CAS"
         :recovery "lease_expires_at 超期 → recover_stale_running_tasks")
 
-      (component core-operations
+      (plumbing core-operations
         :operations 8 "create / claim / update / decompose / retry / note-add / delete / query"
         :code "crates/missiond-core/src/db/board.rs + handlers/knowledge/board.rs")
 
-      (component events-emitted
+      (plumbing events-emitted
         :variants "BoardTaskCreated / StatusChanged / NoteAdded / Claimed / Deleted / Updated"
         :persisted-via "pillar 四 event_log (SSOT; v0.4.1 合并后不再走 system_timeline)")
 
-      (component task-notes
+      ;; ── helper: 附属表 + 独立生命周期 bridge ──
+      (helper task-notes
         :table "board_task_notes"
         :scoping "inherited via board_tasks.id"
         :purpose "附注不改 status")
 
-      (component agent-questions
+      (helper agent-questions
         :table "agent_questions"
         :schema "task_id TEXT REFERENCES board_tasks(id) NULLABLE + status (pending/answered/dismissed) + target (user/master)"
         :purpose "Agent 卡住时提问, 等待用户或其他 agent 回答"
@@ -520,7 +545,7 @@
         :creation-side-effect "创建问题时 CAS UPDATE board_tasks SET status='blocked' WHERE id=task_id"
         :mcp "mission_question (独立 MCP 工具, 非 board 工具面)")
 
-      (component prompt-snapshot
+      (helper prompt-snapshot
         :table "prompt_snapshots"
         :schema "task_id PRIMARY KEY / prompt / cited_kb_ids / category / task_outcome / created_at"
         :purpose "task 执行时的 prompt 快照 + KB 引用审计"
@@ -529,6 +554,8 @@
         :cross-module-note "cited_kb_ids 关联 kb-manager :: knowledge; 但 PK 是 task_id 故归 board"))
 
     (module-egress
+      (desc "MCP 查询 + 前端 WS 流 + autopilot 内部扫描")
+
       (reader mcp-board-query
         :tool "mission_board_query"
         :actions "list / get / search / summary / clear_done")
@@ -621,40 +648,44 @@
         :note "不是通用 middleware, 只在 context-pipeline prefetch 路径触发"))
 
     (module-core
-      (desc "KB 主表 + 图 + 代码索引 + 审计 + 队列 + prompt 存档")
+      (desc "主路径 (path) + KB 表族 (plumbing) + 代码索引 (plumbing) + helper (audit/queue)")
 
-      (component knowledge-store
+      ;; ── 主路径: 2 条, 各对应 goal ──
+      (path kb-semantic-recall
+        :serves goal-1
+        :flow  "write → knowledge (+ embedding via worker) → search (三路融合) → read"
+        :entry "mission_kb_mutate/remember (write) + mission_kb_query/search (read)"
+        :tables "knowledge + knowledge_edges"
+        :delegates-search-to "pillar 二 2.6 search-engines")
+
+      (path kb-code-awareness
+        :serves goal-2
+        :flow  "代码变更 → ast-sync-worker 更新索引 → kb_ast_links 关联 → mission_code_search"
+        :entry "mission_code_search / mission_universe_graph"
+        :tables "ast_nodes + ast_file_meta + beacons + beacon_nodes + kb_ast_links"
+        :maintained-by "worker-ast-sync (local)")
+
+      ;; ── plumbing: KB 表族 ──
+      (plumbing knowledge-store
         (desc "语义级记忆主表 — 40+ category, 每条独立知识片段")
         :table "knowledge"
         :schema-cols "id / key / category / content / embedding_vec(512) / project_id / tags / access_count / created_at / updated_at"
         :code "crates/missiond-core/src/db/knowledge.rs"
         :scoping "has project_id column (primary scoped)")
 
-      (component knowledge-graph
+      (plumbing knowledge-graph
         (desc "KB 条目之间的关系图 — 支撑 universe_graph")
         :table "knowledge_edges"
         :schema-cols "id / from_id / to_id / relation_type / weight / created_at"
         :scoping "inherited via knowledge.id")
 
-      (component access-audit
-        (desc "KB 访问审计 — 谁读了什么, 用于使用模式分析")
-        :table "kb_access_log"
-        :scoping "inherited"
-        :retention "append-only; 按时间 DELETE (待策略)")
-
-      (component operation-queue
-        (desc "KB 变更异步队列 — 大规模 mutate 走队列避开阻塞")
-        :table "kb_operation_queue"
-        :scoping "inherited"
-        :consumer "后台批处理 worker (待确认)")
-
-      (component kb-ast-linkage
+      (plumbing kb-ast-linkage
         (desc "KB 条目 ↔ AST 节点的双向关联")
         :table "kb_ast_links"
         :purpose "支撑 mission_code_search 从 KB 跳到代码, 或从代码跳到相关 KB")
 
-      (component code-indexing
-        (desc "代码结构化索引 — 支撑 KB ↔ 代码关联 + code_search")
+      (plumbing code-indexing
+        (desc "代码结构化索引 — ast_nodes / ast_file_meta / beacons / beacon_nodes")
         :tables (ast_nodes ast_file_meta beacons beacon_nodes)
         :code "crates/missiond-core/src/db/ast.rs"
         :maintained-by "worker-ast-sync"
@@ -670,7 +701,23 @@
       (plumbing project-scope-consumption
         (desc "使用 module project-management :: scope-mechanism 过滤 KB 查询")
         :rule "WHERE knowledge.project_id = $X OR IS NULL"
-        :owner "scope-mechanism 所有权在 project-management, 本模块只消费"))
+        :owner "scope-mechanism 所有权在 project-management, 本模块只消费")
+
+      ;; ── helper: 审计 + 异步队列 (serves goal-3) ──
+      (helper access-audit
+        :serves goal-3
+        (desc "KB 访问审计 — 记录共访问关系, 用于相关性挖掘")
+        :table "kb_access_log"
+        :writer "context_pipeline.rs :: kb_log_co_access (非通用 middleware)"
+        :scoping "inherited"
+        :retention "append-only; 按时间 DELETE (待策略)")
+
+      (helper operation-queue
+        :serves goal-3
+        (desc "KB 变更异步队列 — 大规模 mutate 走队列避开阻塞")
+        :table "kb_operation_queue"
+        :scoping "inherited"
+        :consumer "后台批处理 worker (待确认)"))
 
     (module-egress
       (desc "KB 查询 + 搜索 + 代码搜索 + Context 拼接")
@@ -816,58 +863,78 @@
         :code   "daemon/src/handlers/comm/conversation.rs"))
 
     (module-core
-      (desc "15 张表 — 会话全生命周期的结构化表示")
+      (desc "主路径 (path) × 3 + 原始层 plumbing + 派生层 helper + 源与作用域")
 
-      ;; ── 原始层 ──
-      (component session-master
+      ;; ── 主路径 × 3 (各对应一个 goal) ──
+      (path pty-to-structured-db
+        :serves goal-1
+        :flow  "PTY JSONL → conversation-logger 解包 → conversations/messages/turns/events"
+        :entry "worker-conversation-logger (local, tail jsonl)"
+        :tables "conversations + conversation_messages + conversation_turns + conversation_events + conversation_tool_calls"
+        :idempotency "(session_id, turn_id) 去重")
+
+      (path multi-engine-dispatch
+        :serves goal-2
+        :flow  "conversations.engine_type 区分 claude-code / gemini / codex"
+        :entry "conversation-logger (Claude Code) + codex-ingestion + gemini-logger + gemini-reconcile"
+        :invariant "统一 schema, engine-specific ingestion worker")
+
+      (path derived-analysis-layer
+        :serves goal-3
+        :flow  "原始消息 → 多个派生 worker → 向量 / 摘要 / 翻译 / 标签 / 复盘"
+        :entries "worker-embedding / briefing / translation / retro / step-narrator"
+        :see-helpers "semantic-vectors / narration-briefing / translation-multilingual / labels-tags / retrospective")
+
+      ;; ── plumbing: 原始层 (path pty-to-structured-db 的底层) ──
+      (plumbing session-master
         (desc "会话主表 — session_id / summary / project_id / engine_type / timestamps")
         :table "conversations"
         :scoping "has project_id column (secondary scoped)"
         :engines "claude-code / gemini / codex")
 
-      (component raw-messages
+      (plumbing raw-messages
         (desc "消息原始记录 — 从 PTY JSONL 解包")
         :table "conversation_messages"
         :scoping "inherited via conversations.session_id")
 
-      (component turn-structure
+      (plumbing turn-structure
         (desc "turn 级切分 — user ↔ assistant 交替")
         :table "conversation_turns"
         :scoping "inherited")
 
-      (component session-events
+      (plumbing session-events
         (desc "会话内结构化事件 — tool use / status change")
         :table "conversation_events"
         :scoping "inherited")
 
-      (component tool-call-log
+      (plumbing tool-call-log
         (desc "工具调用详情 — 每次 tool call 的 input/output/status")
         :table "conversation_tool_calls"
         :scoping "inherited")
 
-      ;; ── 派生层 ──
-      (component semantic-vectors
+      ;; ── helper: 派生层 (path derived-analysis-layer 的产物) ──
+      (helper semantic-vectors
         (desc "消息 + 话题向量")
         :tables (conversation_topic_vectors message_embeddings message_embedding_skips)
         :generator "worker-embedding (sonnet)"
         :consumer "pillar 二 2.6 search-engines :: vector-hnsw")
 
-      (component narration-briefing
+      (helper narration-briefing
         (desc "LLM 生成的摘要 + 游标 (防重处理)")
         :tables (message_narrations narration_cursors)
         :generator "worker-briefing (sonnet) + worker-step-narrator (codex)"
         :scoping "inherited")
 
-      (component translation-multilingual
+      (helper translation-multilingual
         (desc "消息翻译 (多语种)")
         :table "message_translations"
         :generator "worker-translation (sonnet)")
 
-      (component labels-tags
+      (helper labels-tags
         (desc "会话级 + 消息级打标 (主题 / 质量 / 分类)")
         :tables (conversation_labels message_labels))
 
-      (component retrospective
+      (helper retrospective
         (desc "会话复盘 — JSON 结构化总结")
         :table "retrospective_results"
         :schema "session_id PRIMARY KEY → conversation-scoped (天然关联会话)"
@@ -875,7 +942,7 @@
         :consumer "mission_retrospective_manage"
         :scoping-candidate "缺 project_id 列, 可通过 session_id → conversations.project_id 推断")
 
-      ;; ── 源与作用域 ──
+      ;; ── 源与作用域机制 ──
       (non-db-source pty-jsonl
         (desc "PTY JSONL 是 conversations 的唯一 ingestion 源")
         :path "~/.claude/projects/{encoded-path}/*.jsonl"
@@ -1063,7 +1130,26 @@
       "    pillar 四 升级到 v1.3.0, 正式锁定 event_log = timeline SSOT"
       "    UI readers (mission_timeline + WS timeline-stream) 目标改读 event_log (via projection)"
       "    代码 cutover (drop 表 + 移除 timeline-writer + 迁 reader + FTS 索引) 待后续执行"
-      "    总表数 61 → 60")
+      "    总表数 61 → 60"
+      "v0.4.2 (2026-04-19 — 4 模块 in/core/out 结构 harmonization):"
+      "(I) board 模块: 3 section 补 (desc) + core 从纯 (component) 改用 (path/plumbing/helper) 三分法"
+      "    主路径: task-queue-lifecycle (serves goal-1+2)"
+      "    plumbing: data-model / state-machine / core-operations / events-emitted"
+      "    helper: task-notes / agent-questions / prompt-snapshot"
+      "(J) kb-manager 模块: core 从 6 component + 2 plumbing 改为 2 path + 5 plumbing + 2 helper"
+      "    path: kb-semantic-recall (goal-1) / kb-code-awareness (goal-2)"
+      "    helper: access-audit / operation-queue (serves goal-3)"
+      "(K) conversation-logs 模块: core 从 10 component 改为 3 path + 5 plumbing (原始层) + 5 helper (派生层)"
+      "    path: pty-to-structured-db (goal-1) / multi-engine-dispatch (goal-2) / derived-analysis-layer (goal-3)"
+      "    plumbing: 原始 5 表 (session/raw/turn/events/tool_calls)"
+      "    helper: 派生 5 类 (vectors/narration/translation/labels/retrospective)"
+      "(L) 4 模块语义标签统一: (path) 主路径服务 primary-goal / (plumbing) 共用基础 / (helper) 附属"
+      "    与 project-management 风格完全对齐, 每个 path 条目标 :serves goal-N"
+      "v0.4.3 (2026-04-19 — CLAUDE.md 分层):"
+      "(M) 全局 ~/.claude/CLAUDE.md + manager 从 memory pillar non-db-forms 移到 pillar 五 intent-layer"
+      "    rationale: 全局 CLAUDE.md 是'系统如何被指挥'的元层声明, 非业务记忆"
+      "(N) 项目级 <project>/CLAUDE.md 留在 memory pillar, 新增 project-management :: helper project-claudemd-manager"
+      "    明确 per-project CLAUDE.md 的读/写/reload 归属")
 
     (ownership-summary
       (module-project-management   9 "projects + 4 specs (dead schema) + 4 skills")
