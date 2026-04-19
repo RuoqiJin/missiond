@@ -23,7 +23,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.13")
+  (version "draft-v0.4.14")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -44,7 +44,8 @@
     (v0.4.10 "kb-manager 按 'memory=库' 精简: 5 worker + 1 context-pipeline writer → cross-ref; 2 egress compute 消费者 → cross-ref; core plumbing 的 :maintained-by 改 cross-ref; helper access-audit + operation-queue 加 :library-pov 分清接口 vs 时机")
     (v0.4.11 "project-management 按 'memory=库' 精简: lisp-survey-worker → cross-ref pillar 二 2.3; scope-propagation 从 ingress 'writer' 重构为 plumbing scope-mechanism 下的 write-propagation-convention (不是 writer 而是跨模块约定); vault-md-edit 加 :library-pov")
     (v0.4.12 "野生逻辑清理 Phase 1: L1 修正 (agent-questions auto-unblock 实际已实现) + L1 移除摘要 (message_narrations/cursors 下线 + step-narrator 删) + L2 TBD 修正 (kb_operation_queue 有 consumer / message_embedding_skips 是 audit trail) + L2 设计 (project-claudemd / agent-execution-coordination / prompt-snapshot 三个 MCP tool interface)")
-    (v0.4.13 "Phase 2 第一步: 新增 module llm-support (3 表: gemini_requests / gemini_file_uploads / token_usage_ledger, 从 category system-support 分离); 调查确认 3 writer 实际路径 (token 纠正为 message_handler.rs, 不是 gateway); 确认 observability-consumer 存在 (timeline.rs enrichment); cross-module-trait-sharing 诚实披露 ObservabilityStore 跨模块使用"))
+    (v0.4.13 "Phase 2 第一步: 新增 module llm-support (3 表: gemini_requests / gemini_file_uploads / token_usage_ledger, 从 category system-support 分离); 调查确认 3 writer 实际路径 (token 纠正为 message_handler.rs, 不是 gateway); 确认 observability-consumer 存在 (timeline.rs enrichment); cross-module-trait-sharing 诚实披露 ObservabilityStore 跨模块使用")
+    (v0.4.14 "Phase 2 第二步: 新增 module slot-support (3 表: slot_sessions / slot_tasks / dynamic_slots, 从 category system-support :: compute-runtime 分离); 校正 slot_tasks 实际语义为 learning engine 的 AI 任务 (extraction + decision), 不是通用 slot 任务; cross-module-trait-sharing 披露 SlotStore 跨模块 (daemon_state + legacy tasks/inbox/events)"))
   (status "草稿 — 大多数 module 已稳定, 可演进")
 
   (purpose "系统长期记忆 — 4 个业务模块自治 + 底层系统支持层 + 横切")
@@ -1256,11 +1257,184 @@
 
 
   ;; ═════════════════════════════════════════════════════════════
+  ;;  Support 模块 6: Slot Support Manager
+  ;;  对 slot (工位) 的数据支持 — session 绑定 + AI 任务 + 动态 slot 生命周期
+  ;; ═════════════════════════════════════════════════════════════
+  (module slot-support
+    (desc "slot 运行时数据层 — slot↔session 绑定 + learning engine AI 任务 + 动态 slot 生命周期")
+    (maturity "成熟 (3 张表均有 active 读写, 多 writer 多 reader)")
+    :migrated-from "v0.4.13: 从 category system-support :: compute-runtime 分离 (用户决策: 独立 manager)"
+
+    (primary-goals
+      (goal-1 slot-session-binding
+        :problem  "slot 和 PTY session 1:1 绑定, daemon 重启后需恢复; 多处 ingestion worker 都需 session→slot 反查"
+        :solution "slot_sessions 表维护 slot_id (PK) ↔ session_id, 双向查询 (get_slot_session / get_slot_for_session)"
+        :benefit  "daemon 重启后 binding 可恢复; reconcile workers 可精准对账")
+      (goal-2 slot-ai-task-queue
+        :problem  "learning engine 的 AI 任务 (extraction / decision) 需持久化进度 + 支持 reap stale"
+        :solution "slot_tasks 表记录 task_type + status + prompt_summary + conversation_id + 时长"
+        :benefit  "任务崩溃可恢复; 历史可查询 (mission_slot_history); 僵尸任务可自动回收"
+        :correction-v0.4.13 "之前以为是通用 slot 内任务, 实际是 learning engine 专属 (extraction + decision)")
+      (goal-3 dynamic-slot-lifecycle
+        :problem  "某些 flow 需临时 slot + TTL + 可 extend; 重启/过期需清理"
+        :solution "dynamic_slots 表管 (create / extend / terminate), 索引 (status, expires_at) 支撑 GC 扫描"
+        :benefit  "支持 slot 树 (parent_slot_id); TTL 默认 14400s (4 小时)"))
+
+    (module-ingress
+      (desc "多路 writer — session 绑定 / AI 任务创建 / dynamic slot lifecycle")
+      :principle "memory = 库. 本模块只列'谁来写我的表'; SlotManager 的 lifecycle 逻辑见 pillar 二 2.1"
+
+      ;; ── slot_sessions writers (4 处) ──
+      (writer slot-orchestrator-bind
+        :cross-ref "pillar 二 2.1 :: daemon/src/slot_orchestrator/mod.rs:42"
+        :writes    "slot_sessions (slot 启动时绑定 session)"
+        :library-pov "库暴露 set_slot_session (upsert on conflict); orchestrator 决定何时绑定")
+
+      (writer slot-env-bind
+        :cross-ref "pillar 二 2.1 :: daemon/src/context/slot_env.rs:197"
+        :writes    "slot_sessions (slot 环境构建时同步)")
+
+      (writer ingestion-router-bind
+        :cross-ref "daemon/src/infra/ingestion_router.rs:79,104"
+        :writes    "slot_sessions (JSONL 摄入发现新 session 时更新)")
+
+      ;; ── slot_tasks writers (learning engine 专属) ──
+      (writer learning-engine-extraction
+        :cross-ref "pillar 二 :: daemon/src/engine/learning_engine/extraction.rs (3 call sites)"
+        :writes    "slot_tasks (task_type=extraction 类, 3 种场景)"
+        :library-pov "库暴露 insert_slot_task + status 转换接口 (set_running / set_completed / set_failed); 触发 + 派发在 extraction engine")
+
+      (writer learning-engine-decision
+        :cross-ref "pillar 二 :: daemon/src/engine/learning_engine/decision_engine.rs:805"
+        :writes    "slot_tasks (task_type=decision)")
+
+      ;; ── dynamic_slots writers (MCP + 清理) ──
+      (writer mcp-compute-slot
+        :tools     "mission_compute_slot (actions: create / terminate / extend / list)"
+        :code      "daemon/src/handlers/compute/compute_slot.rs"
+        :writes    "dynamic_slots (create:216 / terminate:293,339 / extend:385)"
+        :library-pov "库暴露 create/terminate/extend/list 接口 + (status, expires_at) 索引; MCP handler 做业务编排")
+
+      (writer daemon-restart-cleanup
+        :cross-ref "daemon/src/main.rs:297"
+        :writes    "dynamic_slots (terminate on 'daemon_restart')"
+        :library-pov "库暴露 terminate_dynamic_slot; 重启策略 (全部强制终止 active slot) 在 daemon bootstrap")
+
+      (writer autopilot-ttl-gc
+        :cross-ref "pillar 二 2.4 :: autopilot (daemon/src/engine/intent_engine/autopilot.rs:1357)"
+        :writes    "dynamic_slots (terminate on 'ttl_expired')"
+        :library-pov "库暴露 find_expired_dynamic_slots 扫描接口 + terminate; tick 频率 + 决策在 autopilot"))
+
+    (module-core
+      (desc "3 张 slot 运行时表 — schema + 语义; 统一通过 SlotStore super-trait 访问")
+      :trait "SlotStore (crates/missiond-core/src/db/traits.rs:478) — 注: 此 trait 还管 daemon_state + legacy tasks/inbox/events, 跨 slot-support / system-support / legacy 多模块"
+
+      (plumbing slot-sessions
+        (desc "slot ↔ PTY session 的 1:1 绑定表")
+        :table "slot_sessions"
+        :schema-cols "slot_id (PK) / session_id NOT NULL / updated_at BIGINT"
+        :write-pattern "upsert on conflict (slot_id) DO UPDATE"
+        :trait-methods "get_slot_session / set_slot_session / delete_slot_session / get_all_slot_sessions / get_slot_for_session / cleanup_pty_placeholder"
+        :bidirectional "slot→session (get_slot_session) + session→slot (get_slot_for_session, 用于 reconcile)"
+        :code "crates/missiond-core/src/db/slot.rs:28")
+
+      (plumbing slot-tasks
+        (desc "learning engine AI 任务队列 (extraction + decision 两类)")
+        :table "slot_tasks"
+        :schema-cols "id (PK) / slot_id / task_type / status (default 'pending') / prompt_summary / source_sessions / output_count / created_at / started_at / completed_at / duration_ms / error / conversation_id"
+        :indexes "3 个: (slot_id) / (task_type) / (created_at)"
+        :state-machine "pending → running → completed / failed"
+        :trait-methods "insert_slot_task / slot_task_set_running / _set_completed / _set_failed / list_slot_tasks / slot_task_stats / reap_stale_slot_tasks / find_stale_decision_tasks / cleanup_orphan_slot_tasks / last_completed_slot_task_at / get_running_slot_task"
+        :note "task_type 实际 values 由 learning engine 决定 (extraction / decision 是已知两类)"
+        :code "crates/missiond-core/src/db/slot.rs:96-137")
+
+      (plumbing dynamic-slots
+        (desc "按需创建的临时 slot + TTL + parent 继承")
+        :table "dynamic_slots"
+        :schema-cols "id (PK) / parent_slot_id / template / objective / config (JSON) / status (default 'active') / termination_reason / created_at / terminated_at / ttl_seconds (default 14400 = 4h) / expires_at / extend_count"
+        :indexes "idx_dynamic_slots_active on (status, expires_at) — 支撑 find_expired 扫描"
+        :structure "支持 slot 树 (parent_slot_id 可嵌套)"
+        :ttl-strategy "ttl_seconds 默认 4 小时; 可 extend (extend_count 递增); expires_at < now() 进 find_expired_dynamic_slots"
+        :trait-methods "create_dynamic_slot / get_dynamic_slot / list_dynamic_slots / count_active_dynamic_slots / terminate_dynamic_slot / extend_dynamic_slot / find_expired_dynamic_slots / find_expiring_dynamic_slots"
+        :code "crates/missiond-core/src/db/dynamic_slot.rs"))
+
+    (module-egress
+      (desc "MCP 查询 + daemon 内部 (reconcile / startup / events_sync)")
+
+      ;; ── MCP readers ──
+      (reader mcp-slots
+        :tool "mission_slots"
+        :reads "slot_sessions + dynamic_slots"
+        :code "daemon/src/handlers/sysinfra/misc.rs (与 mission_slot_history / mission_inbox 共用 handler)"
+        :purpose "列当前 slot + session 绑定 + active dynamic slots")
+
+      (reader mcp-slot-history
+        :tool "mission_slot_history"
+        :reads "slot_tasks"
+        :code "daemon/src/handlers/sysinfra/misc.rs:349 (调 list_slot_tasks)"
+        :purpose "slot 内 AI 任务历史 (含 pending / running / completed / failed)")
+
+      (reader mcp-compute-slot-query
+        :tool "mission_compute_slot (action=list)"
+        :reads "dynamic_slots"
+        :code "daemon/src/handlers/compute/compute_slot.rs:413 (调 list_dynamic_slots)")
+
+      (reader mission-memory-task-trail
+        :tool "mission_memory (附加 slot task 快照)"
+        :code "daemon/src/handlers/knowledge/memory.rs:269"
+        :reads "slot_tasks (按 slot_id 拉最近 10 条)"
+        :purpose "项目 memory 查询时附带 slot 执行轨迹")
+
+      ;; ── daemon 内部 readers ──
+      (reader daemon-startup-recovery
+        :cross-ref "daemon/src/main.rs:294,423"
+        :reads "list_dynamic_slots('active') + get_all_slot_sessions"
+        :purpose "daemon 启动时: (1) 扫 active 动态 slot 做 terminate 清理 (2) 恢复现有 slot↔session 映射")
+
+      (reader reconcile-workers
+        :cross-ref "daemon/src/workers/local/reconcile_worker.rs + gemini_reconcile_worker.rs"
+        :reads "get_slot_for_session (session → slot 反查)"
+        :purpose "对账 workers 发现 session 时反查 slot 做归属判断")
+
+      (reader events-sync-lookup
+        :cross-ref "daemon/src/events_sync.rs:948"
+        :reads "get_slot_for_session"
+        :purpose "PTY 事件同步时 session → slot 反查")
+
+      (reader ingestion-router-lookup
+        :cross-ref "daemon/src/infra/ingestion_router.rs:123"
+        :reads "get_slot_for_session"
+        :purpose "JSONL 摄入路由时反查")
+
+      (reader session-util
+        :cross-ref "daemon/src/infra/session_util.rs:25"
+        :reads "get_all_slot_sessions"
+        :purpose "infra 工具读全部绑定"))
+
+    (module-tables-owned
+      (desc "本模块独占 3 张表")
+      (tables slot_sessions slot_tasks dynamic_slots)
+      (count 3)
+      (migrated-from "v0.4.11 category system-support :: compute-runtime component"))
+
+    (cross-module-trait-sharing
+      (desc "SlotStore super-trait 横跨多模块, 本模块只用其中一部分")
+      :shared-trait "SlotStore (db/traits.rs:478)"
+      :this-module-uses "slot_sessions 方法 (6) + slot_tasks 方法 (11) + dynamic_slots 方法 (8) = 25 方法"
+      :other-modules-use
+        ("daemon_state 方法 (daemon_state_get / _set) → module system-support"
+         "generic tasks 方法 (insert_task / update_task / get_task / get_tasks_by_status / ack_completed_tasks / ...) → module system-support :: legacy-zone :: tasks"
+         "inbox 方法 (insert_inbox_message / get_inbox_messages / mark_inbox_read) → module system-support :: legacy-zone :: inbox"
+         "events (legacy) 方法 (insert_event / get_events_by_task) → module system-support :: legacy-zone :: events")
+      :design-note "trait 按实现文件切分 (slot.rs + dynamic_slot.rs + task.rs) — 同 ObservabilityStore 的阻抗不匹配模式, 接受"))
+
+
+  ;; ═════════════════════════════════════════════════════════════
   ;;  分类: System Support (系统支持层)
   ;;  非业务语义的基础表 — 被所有模块使用或支撑
   ;; ═════════════════════════════════════════════════════════════
   (category system-support
-    (desc "系统级基础表 — 17 张 (v0.4.13: LLM 3 表迁出到 llm-support)")
+    (desc "系统级基础表 — 14 张 (v0.4.13: LLM 3 表 → llm-support; slot 3 表 → slot-support)")
     (maturity "基础层 — 结构稳定, 部分 legacy 待清理")
 
     (component global-observability
@@ -1283,10 +1457,9 @@
       :note "游标类表是各种增量处理的进度记录")
 
     (component compute-runtime
-      (desc "slot / 任务的运行时状态 — 本应归 pillar 二 worker")
-      (tables slot_sessions slot_tasks dynamic_slots)
-      :owner-alt "pillar 二 worker"
-      :note "v0.4 暂留, 待与 pillar 二 协调后决定归属")
+      :migrated-out-v0.4.13 "slot_sessions / slot_tasks / dynamic_slots 3 表迁到 module slot-support (独立 manager)"
+      :replaced-by "module slot-support (本 lisp 中上方)"
+      :note "v0.4.13 之前: compute-runtime 暂存 3 slot 表 + 备注 '本应归 pillar 二'. v0.4.13 明确: memory 侧管 schema + 查询 (slot-support), pillar 二 2.1 SlotManager 管 lifecycle")
 
     (component legacy-tables
       (desc "老版 schema 疑似不再活跃")
@@ -1302,11 +1475,11 @@
         :note "非 conversation-scoped (无 session_id FK); 是全局图片 → 文本 cache"))
 
     (module-tables-owned
-      (desc "此分类持有 17 张表 — 待后续模块分离后进一步瘦身")
-      (count 17)
+      (desc "此分类持有 14 张表 — 待后续 system-support → module 升级 + legacy drop")
+      (count 14)
       (added-in-v0.4-revision "image_descriptions 从 conversation-logs 迁入 (该表无 FK, 非会话附属)")
       (removed-in-v0.4.1-revision "system_timeline 合并进 pillar 四 event_log (SSOT); timeline-writer 订阅者 + mission_timeline 改读 event_log")
-      (removed-in-v0.4.13 "gemini_requests / gemini_file_uploads / token_usage_ledger 3 表 → module llm-support (独立 LLM manager)")))
+      (removed-in-v0.4.13 "gemini_requests / gemini_file_uploads / token_usage_ledger 3 表 → module llm-support; slot_sessions / slot_tasks / dynamic_slots 3 表 → module slot-support")))
 
 
   ;; ═════════════════════════════════════════════════════════════
