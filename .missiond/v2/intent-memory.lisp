@@ -23,7 +23,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.16")
+  (version "draft-v0.4.17")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -110,7 +110,7 @@
         (agent_questions       :benefit "项目级 agent 问题集" :owner-note "module board; 可经 task_id → board_tasks.project_id 推断")
         (slot_tasks            :benefit "项目级 slot 任务"   :owner-note "category system-support compute-runtime; 可能应归 pillar 二")
         (user_intents          :benefit "项目级意图识别"     :owner-note "module conversation-logs (v0.4.16 校正: 实际从未真正迁出, ConversationStore trait 仍拥有 6 个方法); 缺 project_id 列")
-        (intent plan workflow  :benefit "specs 三表应加 project_id" :owner-note "pillar 五 intent-layer (v0.4.4 迁出); v0.4.16 确认 dead-schema — zero writer/reader/trait, drop-candidate")
+        (intent plan workflow  :benefit "specs 三表应加 project_id" :owner-note "module intent-layer (v0.4.17): schema-ready-pending-implementation, writer/reader 待 pillar 五 actor 启用")
         (ast_nodes ast_file_meta beacons beacon_nodes :benefit "项目级代码索引" :owner-note "module kb-manager; 缺列")
         (skill_topics skill_blocks skill_versions skill_executions :benefit "项目私有技能库" :owner-note "module project-management; 缺列")
         (image_descriptions    :benefit "项目级图片注释"    :owner-note "category system-support; 独立按 hash 去重")
@@ -133,15 +133,16 @@
       (skill_blocks     :purpose "技能内容块")
       (skill_versions   :purpose "技能版本")
       (skill_executions :purpose "技能执行记录")
-      (moved-out-v0.4.4 "intent / plan / workflow 3 张迁到 pillar 五 intent-layer (user_intents v0.4.16 校正: 从未真正迁出, ConversationStore 仍拥有)"))
+      (moved-out-v0.4.4 "intent / plan / workflow 3 张先迁到 pillar 五, v0.4.17 认识到是待实现 schema 不是 dead, 划给新 module intent-layer 管 schema+trait")
+      (v0.4.16-correction "user_intents 本就在 conversation-logs, 未迁出 (详见 v0.4.16 history)"))
 
-    (by-owner pillar-five-intent-layer (count 3)
-      :owned-section ".missiond/v2/intent.lisp :: pillar intent-layer :: section action-instruction-specs"
-      :note "v0.4.4 从 memory project-management 迁入 — action/instruction 层, 非项目数据"
-      :v0.4.16-verdict "3 张均 zero writer/reader/trait, 为 drop-candidate — 若 v0.5 前未实现 pillar 五 actor 则 drop migration"
-      (intent       :purpose "项目 intent 规约 DB 表 (20260420, schema-only)"       :status "drop-candidate" :evidence "grep: 0 writer, 0 reader, 0 Store trait")
-      (plan         :purpose "执行计划 DB 表 (20260420, schema-only)"                :status "drop-candidate" :evidence "grep: 0 writer, 0 reader, 0 Store trait")
-      (workflow     :purpose "工作流模板 DB 表 (20260420, schema-only)"              :status "drop-candidate" :evidence "grep: 0 writer, 0 reader, 0 Store trait"))
+    (by-owner module-intent-layer (count 3)
+      :owned-section ".missiond/v2/intent-memory.lisp :: module intent-layer"
+      :status "schema-ready-pending-implementation — migration 已就位, writer/reader 待 pillar 五 actor 启用"
+      :v0.4.17-rationale "这 3 张是刚建的 intent→plan→workflow 三段式编译 pipeline 的 DB 层; 按 'memory=库' 原则先把 schema+trait 接口立起来, writer/reader TBD 等其他 pillar 整理时填"
+      (intent    :purpose "user utterance → sexp 编译记录 (带 FSM draft→compiled→archived + version)")
+      (plan      :purpose "intent sexp 编译出的执行 DAG (pinned to board_task, 带 approval + FSM)")
+      (workflow  :purpose "从成功 plan 蒸馏的可复用模板 (带 match_rules + 执行统计)"))
 
     (by-owner module-board (count 4)
       (board_tasks      :purpose "任务队列 — 27 列, 7 态 FSM"                    :scoping secondary)
@@ -1155,6 +1156,159 @@
 
 
   ;; ═════════════════════════════════════════════════════════════
+  ;;  业务模块 5: Intent-Layer Store (intent → plan → workflow 三段编译 pipeline)
+  ;;  schema-ready-pending-implementation — writer/reader 待 pillar 五 actor
+  ;; ═════════════════════════════════════════════════════════════
+  (module intent-layer
+    (desc "user utterance → sexp intent → executable plan DAG → reusable workflow template 三段式编译 pipeline 的持久化层")
+    (maturity "schema-ready — migration 已就位 (20260420000000), writer/reader 待 pillar 五 actor 启用")
+    :created "v0.4.17 (2026-04-19)"
+    :rationale "v0.4.4 原计划迁 pillar 五, v0.4.16 误判为 dead, v0.4.17 用户澄清是'刚建未启用'的预留 schema; 按 memory=库 原则, 先把 schema+trait 接口立起来, writer/reader 留 TBD cross-ref"
+
+    (primary-goals
+      (goal-1 intent-compilation-audit
+        :problem  "LLM 对用户 utterance 编译出的 sexp intent 需要版本追踪 + 状态 FSM + 审阅痕迹 + compiler_model 元数据"
+        :solution "intent 表: utterance_text / sexp_text / version / status (draft|refining|approved|compiled|archived) / compiler_model / references_json"
+        :benefit  "每次 intent 编译可追溯; status 机控制可见性; UNIQUE(id, version) 保证版本不冲突")
+      (goal-2 plan-persistence
+        :problem  "intent 编译出的执行 DAG 需要和 board_task 绑定, 支持 approval gate + 失败回滚 + 多版本迭代"
+        :solution "plan 表: board_task_id FK → board_tasks + source_intent_id FK → intent + sexp_text/hash + version + FSM (draft→awaiting_approval→approved→executing→succeeded/failed/superseded)"
+        :benefit  "每个 board_task 有多版本 plan (UNIQUE(board_task_id, version)); FK 级联删除; compiled_from 追溯 intent sexp_hash 血统")
+      (goal-3 workflow-distillation
+        :problem  "成功的 plan 应该沉淀为可复用的模板; 下次匹配到类似 utterance 可直接套用"
+        :solution "workflow 表: name UNIQUE + sexp_text + match_rules JSONB + learned_from FK → plan + executions/success_count/avg_cost_usd/last_used_at"
+        :benefit  "plan → workflow 蒸馏闭环; LRU + 成功率指标支持 workflow 推荐"))
+
+    (module-ingress
+      (desc "写入 3 张表的路径 — v0.4.17: 全部 TBD, 待 pillar 五 actor 或 MCP 工具启用")
+      :principle "memory = 库. 本模块只声明 schema + trait 接口形态; writer 暂未存在, 接口设计必须能承载未来的 compile/approve/execute/distill 四组动作"
+      :status-note "ingress 具体组件 TBD — 可能的 writer 形态 (3 选 1 或组合):"
+      :option-A "pillar 二 新 worker (类似 intent_analyst 之于 user_intents)"
+      :option-B "pillar 五 intent-layer actor (目前 pillar 五 只有 intent-files/graph/forge/governance 元层组件, 需新增 actor)"
+      :option-C "MCP 工具直写 (mission_intent(action=upsert) / mission_plan / mission_workflow 三族)"
+
+      ;; ── 未来 writer 占位 (待 pillar 整理时替换为真实 cross-ref) ──
+      (writer TBD-intent-compiler
+        :status "未实现"
+        :expected-writes "intent (create / update status / set approved_at / set compiler_model)"
+        :expected-trigger "user utterance 到达 (可能经 MCP 或 autopilot tick)"
+        :expected-api "IntentLayerStore::intent_insert / intent_update_status / intent_approve"
+        :library-pov "库暴露原子写入接口 + 版本语义; utterance 解析 / LLM 调编译 / approval 策略在 actor/worker 侧")
+
+      (writer TBD-plan-compiler
+        :status "未实现"
+        :expected-writes "plan (create from intent / update status / set executing/succeeded/failed / superseded-chain)"
+        :expected-trigger "intent status → compiled 时触发 plan 生成; 或 board_task 创建时编译"
+        :expected-api "IntentLayerStore::plan_insert / plan_update_status / plan_supersede"
+        :library-pov "库暴露 plan 版本 + FSM 迁移接口 + sexp_hash 幂等; 编译逻辑 / FK 完整性校验在 actor")
+
+      (writer TBD-workflow-distiller
+        :status "未实现"
+        :expected-writes "workflow (create from successful plan / 累加 executions+success_count / update last_used_at / upsert match_rules)"
+        :expected-trigger "plan status → succeeded 时触发蒸馏; 或定期后台扫 top-N plan 抽取模板"
+        :expected-api "IntentLayerStore::workflow_insert / workflow_record_execution / workflow_find_by_match"
+        :library-pov "库暴露 workflow CRUD + match_rules 查询原语; 蒸馏算法 / 匹配阈值 / 推荐排序在 actor"))
+
+    (module-core
+      (desc "3 张表 schema + trait 接口 — 三段式 pipeline 的持久化约束")
+      :trait "IntentLayerStore (TBD — crates/missiond-core/src/db/traits.rs 待新增; 建议独立 trait 不和 ConversationStore 混)"
+      :migration "crates/missiond-core/migrations/20260420000000_intent_plan_workflow.sql"
+
+      (plumbing intent-compilation
+        (desc "user utterance → sexp 编译记录 + 版本/状态追踪")
+        :table "intent"
+        :schema-cols "id UUID PK / utterance_text / sexp_text / version INT / status TEXT / compiler_model / references_json JSONB / created_at / approved_at"
+        :fsm "draft → refining → approved → compiled → archived"
+        :invariant "UNIQUE(id, version) — 同一 intent 多版本演进保留历史"
+        :expected-trait-methods "intent_insert / intent_get / intent_update_status / intent_approve / intent_list_by_status / intent_get_version_chain"
+        :scoping-candidate "加 project_id 列 — 项目级意图隔离")
+
+      (plumbing plan-execution
+        (desc "intent 编译出的执行 DAG — 绑 board_task + 版本 + FSM")
+        :table "plan"
+        :schema-cols "id UUID PK / board_task_id TEXT FK→board_tasks / source_intent_id UUID FK→intent / version INT / sexp_text / sexp_hash / status TEXT / compiler_model / compiled_from TEXT / created_at / approved_at / finished_at"
+        :fsm "draft → awaiting_approval → approved → executing → succeeded / failed / superseded"
+        :invariants "UNIQUE(board_task_id, version); ON DELETE CASCADE from board_tasks; compiled_from = 源 intent 的 sexp_hash (血统追溯)"
+        :expected-trait-methods "plan_insert / plan_get / plan_update_status / plan_supersede / plan_list_by_task / plan_get_latest"
+        :cross-module-note "board_tasks.source_intent_id 列 (v0.4.4 ALTER TABLE) 是 board → intent 的反向指针; 见 cross-module-invariants")
+
+      (plumbing workflow-templates
+        (desc "从成功 plan 蒸馏的可复用模板 — 带匹配规则 + 执行统计")
+        :table "workflow"
+        :schema-cols "id UUID PK / name UNIQUE / sexp_text / match_rules JSONB / learned_from UUID FK→plan / executions INT / success_count INT / avg_cost_usd NUMERIC(10,4) / last_used_at / created_at"
+        :invariant "name UNIQUE; learned_from 可为 NULL (手写模板); executions/success_count 单调递增"
+        :expected-trait-methods "workflow_insert / workflow_get_by_name / workflow_find_by_match / workflow_record_execution / workflow_list_top_n"
+        :scoping-candidate "加 project_id 列 — 项目私有 workflow 库 (区别全局模板)")
+
+      ;; ── 跨模块约束 ──
+      (cross-module-invariants
+        (invariant board_tasks-reverse-pointer
+          :desc "board_tasks.source_intent_id UUID FK→intent(id) 是 board module 拥有的列, 但指向本 module 的 intent 表"
+          :added-by-migration "同一 migration 20260420000000 的 ALTER TABLE"
+          :owner-of-column "module board (board_tasks 表)"
+          :owner-of-target "module intent-layer (intent 表)"
+          :semantic "board_task 记录其 originating intent; 允许反向查询'这个 task 源自哪次 utterance'"
+          :impact "board module 若 drop intent_id 需通知本 module; 本 module drop intent 会 ON DELETE 影响 board_tasks (但 FK 是 NULL-able, CASCADE 未声明)")
+
+        (invariant plan-chain-provenance
+          :desc "plan.compiled_from (TEXT sexp_hash) vs plan.source_intent_id (UUID FK) 双重血统追溯"
+          :semantic "UUID FK 给查询用, sexp_hash 给防 intent 变更时旧 plan 仍保留血统快照; 即 intent 改版后 plan 仍知自己来源哪个 hash")))
+
+    (module-egress
+      (desc "读取 3 张表 — v0.4.17: 全部 TBD, 等 MCP 工具或 consumer actor 实现")
+      :principle "memory = 库. egress 暴露查询原语, 消费策略在外"
+
+      (reader TBD-mcp-intent
+        :status "未实现"
+        :expected-tool "mission_intent (action=list / get / get-version-chain / by-status)"
+        :expected-reads "intent (按 status / version / utterance 模糊查)"
+        :expected-api "IntentLayerStore::intent_list_by_status / intent_get_version_chain")
+
+      (reader TBD-mcp-plan
+        :status "未实现"
+        :expected-tool "mission_plan (action=list / get / by-task / provenance)"
+        :expected-reads "plan (按 board_task_id 查版本链 / 按 status 查 awaiting_approval / 按 sexp_hash 查 provenance)"
+        :expected-api "IntentLayerStore::plan_list_by_task / plan_get_latest")
+
+      (reader TBD-mcp-workflow
+        :status "未实现"
+        :expected-tool "mission_workflow (action=list / match / top-n / apply)"
+        :expected-reads "workflow (按 match_rules 查匹配 / 按 executions 排 top-n / 按 name get)"
+        :expected-api "IntentLayerStore::workflow_find_by_match / workflow_list_top_n")
+
+      (reader TBD-autopilot-workflow-match
+        :status "未实现 (潜在 consumer)"
+        :expected-cross-ref "pillar 二 :: engine/intent_engine/autopilot — tick 时拿 utterance 查 workflow 匹配"
+        :expected-reads "workflow (match_rules JSONB 查询)"
+        :library-pov "库暴露 workflow_find_by_match 原语; 匹配策略 / 阈值 / fallback 在 autopilot"))
+
+    (module-tables-owned
+      (desc "本模块独占 3 张表 + 1 个跨模块反向指针列")
+      (tables intent plan workflow)
+      (count 3)
+      (cross-module-column "board_tasks.source_intent_id UUID FK→intent(id) — 列由 board module 持有, FK 目标归本 module")
+      (schema-source "crates/missiond-core/migrations/20260420000000_intent_plan_workflow.sql")
+      (non-db-forms-owned
+        (per-project-intent-file "<project>/.missiond/intent.lisp — 注: 这是 memory :: project-management 管的文件, 记 factual 代码快照, 不是本 module; 本 module 的 intent 表是 instruction 规约 DB 镜像")
+        (system-intent-files "pillar 五 :: component intent-files — .missiond/v2/*.lisp 系统级规约文件, 不是本 module; 但未来 forge 冲压链路可能把 lisp → intent 表做双向同步")))
+
+    (cross-module-trait-sharing
+      (desc "本 module 暂不与其他 trait 共享 — 建议 IntentLayerStore 独立 trait (不和 ConversationStore 混), 原因:")
+      :reason-1 "3 张表语义是 instruction/prescription (应该做什么), conversation-logs 的 user_intents 是 fact (做过什么) — 分层原则"
+      :reason-2 "未来可能按 .rs 文件切 trait (intent_store.rs / plan_store.rs / workflow_store.rs 各一个), 或合一个 intent_layer.rs"
+      :future-decision "待 pillar 二/五 actor 设计时决定 trait 切分粒度")
+
+    (pending-implementation-checklist
+      (desc "启用本 module 需要的代码侧动作 — 按依赖顺序")
+      "1. crates/missiond-core/src/db/traits.rs 新增 trait IntentLayerStore (约 15 方法)"
+      "2. crates/missiond-core/src/db/pg/intent_layer.rs 新建 PG impl"
+      "3. crates/missiond-core/src/types/ 新增 Intent / Plan / Workflow struct + status enum"
+      "4. pillar 二 或 五 决定 actor 归属后新增 writer (compile / approve / distill 三路)"
+      "5. MCP 工具 mission_intent / mission_plan / mission_workflow 三族 handler"
+      "6. (可选) 加 project_id 列做项目级 scoping — 详见 candidates-for-promotion"))
+
+
+  ;; ═════════════════════════════════════════════════════════════
   ;;  Support 模块 5: LLM Support Manager
   ;;  对 LLM worker 的数据支持 — 请求日志 / 文件引用 / 成本追踪
   ;; ═════════════════════════════════════════════════════════════
@@ -1995,19 +2149,36 @@
       "     module-tables-owned conversation-logs 12→13 (tables 列表 + user_intents)"
       "     ingress 新增 worker-intent-analyst writer, egress 新增 2 reader (self + autopilot)"
       "(PP) intent.lisp 同步修正: pillar 五 action-instruction-specs user-intents-db component 移除"
-      "     intent/plan/workflow 3 component 加 :drop-candidate 状态标记")
+      "     intent/plan/workflow 3 component 加 :drop-candidate 状态标记"
+      "v0.4.17 (2026-04-19 — intent-layer module 新建, 撤回 v0.4.16 drop-candidate 误判):"
+      "(QQ) 用户澄清: intent/plan/workflow 3 张是 '刚建未启用' 的预留 schema, 非 dead"
+      "     (migration 20260420000000 是新建的 intent→plan→workflow 三段编译 pipeline)"
+      "     按 'memory=库' 原则, 即使 writer/reader 暂未实现, schema + trait 接口也应由 memory 管"
+      "(RR) 新建 module intent-layer (memory pillar 第 8 个 module, 5 business + 3 support)"
+      "     拥有 intent / plan / workflow 3 张表"
+      "     3 plumbing: intent-compilation / plan-execution / workflow-templates"
+      "     ingress 3 writer 均 TBD (option A/B/C 待 pillar 整理时决定)"
+      "     egress 3 MCP reader + 1 autopilot consumer 均 TBD"
+      "     cross-module-invariants: board_tasks.source_intent_id 反向指针显式披露"
+      "     新 trait IntentLayerStore (待新增, 建议独立不混 ConversationStore)"
+      "     pending-implementation-checklist 列 6 步启用路径"
+      "(SS) table-catalog by-owner pillar-five-intent-layer (count 3→0); 新增 by-owner module-intent-layer (count 3)"
+      "     ownership-summary: pillar-five 4→0, memory 新增 intent-layer 3; memory 总量 53→56"
+      "(TT) intent.lisp 同步: pillar 五 action-instruction-specs 改 cross-ref 到 memory intent-layer"
+      "     drop-candidate 标记全撤, 改为 schema-ready-pending-implementation")
 
     (ownership-summary
       (module-project-management   5 "projects + 4 skills (specs 4 张迁走)")
       (module-board                4 "board_tasks + board_task_notes + agent_questions + prompt_snapshots")
       (module-kb-manager           9 "knowledge + 4 kb_* + 4 ast/beacon")
       (module-conversation-logs   15 "conversations + 10 conv/message 派生 + retrospective_results + user_intents (v0.4.16 校正)")
+      (module-intent-layer         3 "intent + plan + workflow (v0.4.17 新建: schema-ready-pending-implementation; 三段式编译 pipeline)")
       (pillar-four-event-bus       4 "event_log (also SSOT for timeline v1.3.0+) + event_subscriptions + blob_storage + dlq")
-      (pillar-five-intent-layer    3 "intent + plan + workflow (v0.4.4 迁入, action/instruction 层; v0.4.16 user_intents 移回 conversation-logs, 3 张均 drop-candidate)")
+      (pillar-five-intent-layer    0 "v0.4.17: 3 张表从 pillar 五 action-instruction-specs 剥离到 memory intent-layer module; pillar 五 仅保留非 DB 的 intent-files/graph/forge/governance/workflows 组件")
       (category-system-support    20 "observability + image_descriptions + infrastructure + compute-runtime + legacy")
       (total 60)
-      (memory-pillar-subtotal 53 "memory 管 5+4+9+15+20 = 53 张 (v0.4.16: +1 user_intents 校正回归)")
-      (total-delta-from-v0.4.3 "-4 in memory (specs 迁 pillar 五), +1 v0.4.16 (user_intents 移回), 净 -3"))
+      (memory-pillar-subtotal 56 "memory 管 5+4+9+15+3+20 = 56 张 (v0.4.17: +3 intent-layer 新建)")
+      (total-delta-from-v0.4.3 "-4 in memory (v0.4.4 specs 迁 pillar 五), +1 v0.4.16 (user_intents 校正回归), +3 v0.4.17 (intent-layer 从 pillar 五 拿回), 净 0"))
 
     (pending-actions
       "A. 给 candidates-for-promotion 中的高价值表加 project_id (token_usage / prompt_snapshots / specs / skills)"

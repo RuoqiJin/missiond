@@ -46,7 +46,8 @@
         :target "intent-memory.lisp :: module project-management"
         :owned-tables 5
         :v0.4.4-change "specs 4 表 (intent/plan/workflow/user_intents) 迁到 pillar 五 action-instruction-specs"
-        :v0.4.16-correction "user_intents 实际从未迁出, 仍在 conversation-logs (trait=ConversationStore); 其余 3 张为 drop-candidate"
+        :v0.4.16-correction "user_intents 实际从未迁出, 仍在 conversation-logs (trait=ConversationStore)"
+        :v0.4.17-change "intent/plan/workflow 3 张从 pillar 五 回归 memory 新建 module intent-layer (schema-ready-pending-implementation)"
         :mcp    "mission_project / mission_intent (只读 FILE) / mission_skill_*")
 
       (module board
@@ -596,30 +597,32 @@
       :migrated-from "memory pillar :: project-management (4 tables) + non-db-forms (3 variants + 1 form) in v0.4.4"
       :rationale "memory 记'是什么'(facts); 本层记'应该做什么'(prescriptions) — 分层原则"
 
-      ;; ── DB 表 (v0.4.4: 4 张; v0.4.16 校正: 3 张 + 都是 drop-candidate) ──
+      ;; ── DB 表 (v0.4.17: schema 归 memory intent-layer module, 本 section 只概念性描述) ──
       ;; v0.4.16: user_intents 移回 memory :: conversation-logs (writer=intent_analyst, trait=ConversationStore)
+      ;; v0.4.17: intent/plan/workflow 3 张从 pillar 五 action-specs 剥离到 memory :: intent-layer
+      ;;          原因: 按 'memory=库' 原则, schema + trait 接口归 memory; pillar 五 actor 是未来 writer
+      ;;          撤回 v0.4.16 drop-candidate 误判 — 用户澄清这是 '刚建未启用' 预留 schema
       (component intent-spec-db
-        (desc "项目 intent 规约 DB 镜像 — 描述项目应该做什么")
-        :table "intent"
-        :migration "20260420000000_intent_plan_workflow.sql"
-        :status "❌ schema-only — 无 Rust reader/writer"
-        :drop-candidate "v0.4.16: grep 确认 zero writer/reader/trait; 若 v0.5 前未实现 pillar 五 actor 则 drop migration"
-        :moved-from "memory :: project-management :: module-tables-owned (v0.4.4)"
-        :vs-per-project-intent "memory 里的 <project>/.missiond/intent.lisp 是 factual 代码快照; 本表是 instruction 规约")
+        (desc "user utterance → sexp 编译记录 — 三段式 pipeline 第一段")
+        :schema-owned-by "memory :: module intent-layer :: plumbing intent-compilation"
+        :cross-ref "intent-memory.lisp :: module intent-layer"
+        :status "schema-ready-pending-implementation"
+        :future-writer "pillar 五 actor (TBD) 或 pillar 二 worker 或 MCP 工具直写"
+        :vs-per-project-intent "memory :: project-management 里的 <project>/.missiond/intent.lisp 是 factual 代码快照; 本表是 instruction 规约 DB 镜像")
 
       (component plan-spec-db
-        (desc "执行计划 DB 表 — 描述 action 步骤")
-        :table "plan"
-        :status "❌ schema-only"
-        :drop-candidate "v0.4.16: 同 intent-spec-db"
-        :moved-from "memory (v0.4.4)")
+        (desc "intent 编译出的执行 DAG — 绑 board_task + 版本 + FSM")
+        :schema-owned-by "memory :: module intent-layer :: plumbing plan-execution"
+        :cross-ref "intent-memory.lisp :: module intent-layer"
+        :status "schema-ready-pending-implementation"
+        :future-writer "pillar 五 actor (TBD) — plan 编译 / FSM 迁移 / supersede-chain 策略")
 
       (component workflow-spec-db
-        (desc "工作流模板 DB 表 — 可复用的 action 组合")
-        :table "workflow"
-        :status "❌ schema-only"
-        :drop-candidate "v0.4.16: 同 intent-spec-db"
-        :moved-from "memory (v0.4.4)")
+        (desc "从成功 plan 蒸馏的可复用模板 — 带 match_rules + 统计")
+        :schema-owned-by "memory :: module intent-layer :: plumbing workflow-templates"
+        :cross-ref "intent-memory.lisp :: module intent-layer"
+        :status "schema-ready-pending-implementation"
+        :future-writer "pillar 五 actor (TBD) — distillation 算法 / 匹配阈值 / LRU 策略")
 
       ;; v0.4.16: user-intents-db component 已删除 — 该表归属 memory :: conversation-logs
       ;; writer: engine/learning_engine/intent_analyst.rs
