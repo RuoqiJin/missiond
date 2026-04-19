@@ -380,14 +380,76 @@
 
 
   ;; ═══════════════════════════════════════════════════
-  ;;  四 · 事件总线 (Event Bus)
-  ;;  进程内神经网络 — 入点 / 处理分析核心 / 出点
+  ;;  四 · 事件总线 (Event Bus) — Log-as-Bus
+  ;;  追加式日志即总线,7 步流水线处理 + tail-and-pull 订阅
   ;; ═══════════════════════════════════════════════════
-  ;; 详细定义已抽离到独立文件以便并行加载和聚焦浏览
+  ;; 详细规格在独立的冻结 lisp(v1.1.0 锁定),本处只作导航摘要
   (pillar event-bus
-    :file "intent-event-bus.lisp"
-    :purpose "两层事件模型 + Timeline Writer 枢纽 + 双通道广播扇出"
-    :structure "4.1 入点 (Ingress) / 4.2 核心 (Core) / 4.3 出点 (Egress)"
+    :file ".missiond/v2/intent-event-bus.lisp"
+    :execution-log ".missiond/v2/intent-event-bus-execution.lisp"
+    :lock-status "frozen v1.1.0 — ask-before-edit"
+    :paradigm "Log-as-Bus(追加式日志是唯一真理源,不是 broadcast + 补漏)"
+
+    (purpose "进程内神经网络 — 追加式日志 + 类型化 topic 路由 + 游标式订阅")
+
+    (one-line-spec
+      "DB seq + 12 domain topic + at-least-once + batch-ack cursor (双阈值) "
+      "+ subscription-name PK + pause=drop/live-resume + >8KB side-channel "
+      "+ producer-ack-after-commit + no-global-min-replay + tail-and-pull catch-up")
+
+    ;; ── 结构 ──
+    (structure
+      (section-4.1 ingress
+        :desc    "唯一入口 log.append(event, opts)"
+        :target  "crates/missiond-core/src/event/log/mod.rs")
+
+      (section-4.2 core
+        :desc    "7 步流水线(上到下对应执行顺序,前 4 同步 / 后 3 异步)"
+        :target  "crates/missiond-core/src/event/pipeline/"
+        (step-1 guard   :at "pipeline/step1_guard/"   :does "因果深度 ≤ 10 + 类型解析")
+        (step-2 decide  :at "pipeline/step2_decide/"  :does "claim-check 8KB 阈值 + ephemeral 决策")
+        (step-3 commit  :at "pipeline/step3_commit/"  :does "批处理 INSERT + BIGSERIAL seq + dedup")
+        (step-4 ack     :at "pipeline/step4_ack/"     :does "oneshot 回 producer")
+        (step-5 tail    :at "pipeline/step5_tail/"    :does "Dispatcher 长轮询 event_log")
+        (step-6 gate    :at "pipeline/step6_gate/"    :does "control-plane 暂停域过滤")
+        (step-7 fanout  :at "pipeline/step7_fanout/"  :does "Topic<T> broadcast 扇出"))
+
+      (section-4.3 egress
+        :desc    "tail-and-pull 两阶段 + cursor + 6 个 combinators"
+        :target  "crates/missiond-core/src/event/subscription/")
+
+      (section-4.4 cross-cutting
+        :desc    "causation-guard + metrics + 9 chaos tests + InMemoryBus"
+        :targets
+          ("crates/missiond-core/src/event/pipeline/step1_guard/causation.rs"
+           "crates/missiond-core/src/event/metrics/"
+           "crates/missiond-core/tests/event_chaos.rs"
+           "crates/missiond-core/src/event/in_memory/"))
+
+      (section-4.5 deferred
+        :desc "FreezeAndCatchUp + Prometheus backend 已声明未实现"))
+
+    ;; ── 关键基础设施位置(快速导航)──
+    (key-locations
+      (log-schema         :at "crates/missiond-core/migrations/20260419000000_event_log.sql")
+      (domain-types       :at "crates/missiond-core/src/event/events/ (12 个 domain enum)")
+      (log-trait          :at "crates/missiond-core/src/event/log/mod.rs")
+      (log-writer         :at "crates/missiond-core/src/event/pipeline/step3_commit/log_writer.rs")
+      (dispatcher         :at "crates/missiond-core/src/event/pipeline/step5_tail/")
+      (subscription-api   :at "crates/missiond-core/src/event/subscription/api.rs")
+      (daemon-bus-glue    :at "crates/missiond-daemon/src/bus/")
+      (ws-bridge          :at "crates/missiond-daemon/src/bus/ws_bridge.rs  — 前端 wire-format 字节级保留")
+      (retention-cron     :at "crates/missiond-daemon/src/bus/retention_cron.rs"))
+
+    ;; ── 重构来龙去脉 ──
+    (refactor-lineage
+      :migrated-from "v1: DaemonEvent god enum + Timeline Writer + event_router 8 consumers + 4 MPSC bypass + sweeper"
+      :migrated-to   "v2: 12 domain enum + event_log 单一真理源 + Dispatcher live-only + 14 typed subscribers"
+      :branch        "refactor/event-bus-v2 (merged to main commit e139ecf, 2026-04-19)"
+      :refactor-commits 16
+      :refactor-summary ".missiond/v2/_refactor-summary.md"
+      :methodology-template ".missiond/workflows/bus-refactor.lisp")
+
     :note "worker 集群 / worker-registry / control-tree 在 pillar 二;此 pillar 只管事件基础设施")
 
 
