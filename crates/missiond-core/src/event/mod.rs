@@ -2,29 +2,45 @@
 //!
 //! Frozen lisp: `.missiond/v2/intent-event-bus.lisp`.
 //!
+//! # Layout
+//!
+//! The `event/` tree is organized to mirror the frozen lisp sections 1:1:
+//!
+//! | Directory            | Frozen lisp section                              |
+//! |----------------------|--------------------------------------------------|
+//! | `domain.rs` + `event_trait.rs` + `events/` | §4.2 prerequisite event-types |
+//! | `pipeline/step{1..7}_*/` | §4.2 core · 7-step flow                   |
+//! | `blob_store/`        | services used by step-2 claim-check              |
+//! | `log/`               | pull-read surface (§4.3 phase-1-bootstrap) + append API types |
+//! | `dispatcher/`        | thin orchestrator composing step-5/6/7           |
+//! | `subscription/`      | §4.3 egress                                      |
+//! | `in_memory/`         | §4.4 testing-story — PG-free parity bus          |
+//! | `metrics/`           | §4.4 observability                                |
+//! | `lifecycle/`         | §4.2 lifecycle-maintenance — retention cron      |
+//!
+//! # Phase history
+//!
 //! Phase 1 added schema (12 domain enums + [`DomainEvent`] trait).
-//! Phase 2 added storage — [`log::Log`] trait, [`log::LogWriter`] task, and
-//! the [`blob_store::BlobStore`] claim-check layer.
-//! Phase 3 adds routing — the [`dispatcher`] module tails the log and
-//! fans out events to per-domain [`dispatcher::Topic<T>`] channels.
-//! Phase 4 adds egress — the [`subscription`] module implements the
-//! two-phase tail-and-pull subscriber with cursor persistence, failure
-//! routing, and declarative combinators.
-//! Phase 5 adds the cross-cutting layer — [`guards`] (causation check),
-//! [`metrics`] (bus self-telemetry), and [`in_memory`] (PG-free bus for
-//! tests + chaos scenarios). Phase 8 deletes the v1 `DaemonEvent`
-//! god-enum; until then this module coexists with
-//! `crates/missiond-daemon/src/event_bus.rs`.
+//! Phase 2 added storage — the single-writer `LogWriter` + the
+//! [`blob_store::BlobStore`] claim-check layer.
+//! Phase 3 added routing — tail loop + per-domain topic broadcast.
+//! Phase 4 added egress — tail-and-pull subscriber + combinators.
+//! Phase 5 added cross-cutting — causation guard + BusMetrics + InMemoryBus.
+//! Phase 6-8 migrated all producers and subscribers off the v1 bus.
+//! Phase 9 E2E-validated the migration.
+//! Phase 10 reorganized the pipeline files into `pipeline/step{1..7}_*/`
+//! with each step mapped 1:1 to the frozen lisp §4.2 execution-flow.
 
 pub mod blob_store;
 pub mod dispatcher;
 pub mod domain;
 pub mod event_trait;
 pub mod events;
-pub mod guards;
 pub mod in_memory;
+pub mod lifecycle;
 pub mod log;
 pub mod metrics;
+pub mod pipeline;
 pub mod subscription;
 
 pub use domain::Domain;
@@ -42,12 +58,13 @@ pub use events::{
 pub use blob_store::{BlobBackend, BlobStore, BlobStoreError, PayloadRef};
 pub use log::{AppendAck, AppendError, AppendOpts, Log, Seq, SpanContext};
 
-// Routing layer — Phase 3. Topic/Dispatcher/ControlGate are the common
-// surface; registry/tail internals stay under `dispatcher::`.
+// Routing layer. Topic/Dispatcher/ControlGate are the common surface;
+// registry/tail internals stay under `dispatcher::` (which re-exports from
+// `pipeline::step{5,6,7}_*`).
 pub use dispatcher::{ControlGate, Dispatcher, DispatcherBuilder, NeverPaused, Topic};
 
-// Egress layer — Phase 4. The subscription module exposes `subscribe`
-// plus the `Ack<T>` handshake + combinators.
+// Egress layer. The subscription module exposes `subscribe` plus the
+// `Ack<T>` handshake + combinators.
 pub use subscription::{
     subscribe, Ack, BackoffKind, BatchSize, BatchedSubscription, CoalescingSubscription,
     Cursor, CursorFlush, CursorStore, DebouncedSubscription, FailurePolicy, FilteredSubscription,
@@ -55,10 +72,17 @@ pub use subscription::{
     StartFrom, SubscribeError, Subscription, SubscriptionOpts,
 };
 
-// Cross-cutting layer — Phase 5. Causation guard, metrics, and InMemoryBus.
-pub use guards::{check_causation, MAX_CAUSATION_DEPTH};
+// Cross-cutting layer. Causation guard is re-exported from
+// `pipeline::step1_guard` for legacy callers; `metrics` + `in_memory` unchanged.
+pub use pipeline::step1_guard::{check_causation, MAX_CAUSATION_DEPTH};
 pub use in_memory::{InMemoryBlobStore, InMemoryBus, InMemoryBusHandle, InMemoryControlGate, InMemoryLog};
 pub use metrics::{
     spawn_bus_metrics_emitter, AtomicBusMetrics, BusMetrics, BusMetricsEmitterHandle,
     MetricsSnapshot, NoopMetrics,
 };
+
+// Back-compat: `event::guards::{check_causation, MAX_CAUSATION_DEPTH}` still
+// resolves. Canonical home is `pipeline::step1_guard`.
+pub mod guards {
+    pub use crate::event::pipeline::step1_guard::*;
+}

@@ -42,10 +42,10 @@ use uuid::Uuid;
 use super::super::blob_store::{BlobStore, CLAIM_CHECK_THRESHOLD};
 use super::super::domain::Domain;
 use super::super::event_trait::DomainEvent;
-use super::super::guards::check_causation;
 use super::super::log::reader::LoggedEvent;
 use super::super::log::{AppendAck, AppendError, AppendOpts, Log, LogError, Seq};
 use super::super::metrics::{BusMetrics, NoopMetrics};
+use super::super::pipeline::step1_guard::check_causation;
 
 /// Bound on the in-memory append channel. Matches the PG default
 /// (frozen lisp §4.2.b) so behavioral parity holds.

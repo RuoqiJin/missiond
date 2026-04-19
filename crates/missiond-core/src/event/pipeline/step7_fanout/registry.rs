@@ -17,11 +17,11 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::super::domain::Domain;
-use super::super::event_trait::DomainEvent;
-use super::TOPIC_BUFFER_SIZE;
-use super::tail::DispatchError;
+use crate::event::domain::Domain;
+use crate::event::event_trait::DomainEvent;
+use crate::event::pipeline::step5_tail::DispatchError;
 use super::topic::Topic;
+use super::TOPIC_BUFFER_SIZE;
 
 /// Type-erased view of a [`Topic<T>`]. The dispatcher tail loop hands in a
 /// JSON payload (from `event_log.payload_inline` or from the claim-check

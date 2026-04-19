@@ -1,25 +1,39 @@
 //! Event log — append-only persistence layer for the event bus.
 //!
-//! Frozen lisp `.missiond/v2/intent-event-bus.lisp` §4.2.b event-log.
+//! Frozen lisp `.missiond/v2/intent-event-bus.lisp` §4.2 pre-req
+//! event-log-schema + §4.3 phase-1-bootstrap.
 //!
-//! This module provides:
+//! This thin module provides:
 //!
-//! * [`Log`] — the trait every producer uses to append events.
-//! * [`LogWriter`] — the single task that drains the append channel, batches
-//!   INSERTs into PG, and delegates Claim-Check to a [`BlobStore`].
-//! * [`reader`] — pull-based catch-up reader for subscribers.
-//! * [`retention`] — daily cleanup job that enforces TTLs.
+//! * [`Log`] / [`LogReadable`] — the traits every producer & subscriber uses.
+//! * [`AppendOpts`] / [`AppendAck`] / [`AppendError`] / [`Seq`] — the public
+//!   surface for the producer append path (frozen lisp §4.1 append-api).
+//! * [`reader`] — pull-based catch-up reader for subscribers
+//!   (frozen lisp §4.3 phase-1-bootstrap).
 //!
-//! The LogWriter is the only path into `event_log`; producers MUST NOT
-//! INSERT directly. See frozen lisp §4.1 invariant-1.
+//! The actual single-writer task (`LogWriter`) now lives under
+//! [`crate::event::pipeline::step3_commit::log_writer`]; retention lives
+//! under [`crate::event::lifecycle::retention`]. Both are re-exported here
+//! for backwards-compat with callers that still import the `log::` path.
 
 pub mod reader;
-pub mod retention;
-pub mod writer;
 
 pub use reader::{LogReader, LoggedEvent};
-pub use retention::{CleanupReport, cleanup_once};
-pub use writer::{LogWriter, LogWriterHandle, PendingAppend, new_log_writer, spawn_log_writer};
+
+// Re-exports pointing at the pipeline / lifecycle modules so existing
+// call sites (`event::log::spawn_log_writer` / `event::log::cleanup_once`)
+// keep compiling. The canonical homes are documented in each target module.
+pub use crate::event::lifecycle::retention::{cleanup_once, CleanupReport};
+pub use crate::event::pipeline::step3_commit::log_writer::{
+    new_log_writer, spawn_log_writer, LogWriter, LogWriterHandle, PendingAppend,
+};
+
+/// Back-compat module alias so `event::log::writer::…` paths still resolve.
+///
+/// Prefer [`crate::event::pipeline::step3_commit::log_writer`] in new code.
+pub mod writer {
+    pub use crate::event::pipeline::step3_commit::log_writer::*;
+}
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

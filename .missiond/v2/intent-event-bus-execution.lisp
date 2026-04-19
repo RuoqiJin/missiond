@@ -17,7 +17,7 @@
     :branch       "refactor/event-bus-v2"
     :started      "2026-04-19"
     :status       "completed"
-    :phase-cursor 9)
+    :phase-cursor 10)
 
   ;; ─ 阶段追踪 ─
   (phases
@@ -40,7 +40,9 @@
     (phase-8 :status "completed" :owner "phase8-cleanup" :started "2026-04-19" :completed "2026-04-19"
              :summary "V1 bus 完全删除 — event_bus.rs / event_router.rs / bus/compat.rs 三个文件删除;run_timeline_writer 从 main.rs 删除;4 条 MPSC bypass 缩减为 1 条(embedding/ast_sync 改标 worker-internal queue deviation D007/D008,incident 完全迁入 IncidentEvent v2 subscriber,cursor_ack 内化为 AppState.conversation_cursor_map + drain task 取代 cursor_ack_tx)。6 个 v1 timeline_rx workers 全部升级为 bus.subscribe::<T>() active handlers(gemini_logger / translation / arch_maintenance / lisp_survey / conversation_organizer / tagger_chunker)。4 个 LLM 客户端(gemini_client / codex_cli / sonnet_gateway / minimax_gateway)移除 TimelineEntry MPSC,改为 Option<Arc<BusServices>> + publish_llm/publish_worker。所有 handler / engine 文件(board / cascade / kb / misc / task / question / decision_engine / autopilot / flow_engine / memory_scheduler / historical_scanner / intent_analyst / timeline_analyst / idle_explorer / extraction / aiops / message_handler / pty_event_worker / briefing_worker / strategy_worker / step_narrator)85 个 v1 publish 点全部直接改成 state.bus.publish_xxx(V2Event::X) — 移除 v1 publish + v1_shim。新增 bus/ws_bridge.rs(PgTailSource 尾读 event_log → v2→v1 wire-format 转换 → frontend_events_tx,保全浏览器 WS 契约,12 个 variant 的字节相等单元测试)+ bus/retention_cron.rs(每日凌晨跑 event::log::retention::cleanup_once + 孤儿 cursor 清理 + ObservabilityEvent::RetentionReport 发射 + 每个归档 cursor 发 IncidentEvent::StaleSubscription)。新 v2 subscriber:spawn_incident_reactor(IncidentEvent::Reported → aiops::process_incident,替代 incident_rx 主动消费)。I004 resolved(ws_bridge JSON wire-format 字节兼容,12 测试已过);I005 resolved(cursor_ack_tx 内化成 Arc<Mutex<HashMap>> + 250ms drain tick);I007 resolved(ephemeral 改为 per-call — publish_worker/publish_memory/publish_message/publish_session 根据 variant 自动打 ephemeral 标);I010 resolved(retention cron + orphan cleanup wired)。新增 ObservabilityEvent::RetentionReport + IncidentEvent::StaleSubscription 两个 variant(不破坏 12 域契约,只在现有 enum 加 variant)。workspace build clean + missiond-core 250 lib tests + 12 chaos tests + missiond-daemon 96 tests(+5 from new ws_bridge/retention_cron)全部 PASS。剩余 D007/D008 deviation:EmbeddingEvent/AstSyncEvent 仍非 12 域内,继续作为 worker-internal queue;其语义从 bus event 剥离明确定义,不再视为 bypass。")
     (phase-9 :status "completed" :owner "phase9-final-validation" :started "2026-04-19" :completed "2026-04-19"
-             :summary "最终用户无感验证 — 5 交付:1) E2E golden path test 落地在 crates/missiond-daemon/tests/e2e_bus_golden_path.rs(#[ignore],需 Docker)全流程 PG → LogWriter → BoardEvent::TaskCreated append → event_log row 校验 → PgTailSource 回读 LoggedEvent → v1 wire-format envelope 比较(type/seq/payload 三维度断言);2) 全量测试扫描:cargo build --all-targets clean(52-54 warnings 无 error);cargo test --workspace → 391 passed,0 failed(missiond-core lib 250 / event_chaos 12 / event_dispatcher_integration 1+2 ignored / missiond-daemon 96 / +72 其他 crate);cargo clippy --workspace --all-targets 0 errors(292 warnings 皆非 bus 引入);3) Smoke test:release binary 用 MISSIOND_HOME=/tmp + 独立 PG DB + WS port 19120 启动,4 秒内全部上线(bus bootstrap + dispatcher + 8 router consumers + incident reactor + ws bridge + retention cron + 8 subscription live),SIGTERM 清理干净无 panic;4) frozen lisp §4.2 对照:生成 .missiond/v2/_phase9-layout-check.md,每个 component → 实际文件路径 1:1 映射,无 ghost(所有 core lib 文件 + daemon bus/ 5 文件都有 lisp 或 execution-log 锚点);5) 整份重构总结报告 .missiond/v2/_refactor-summary.md:9 commits (phase 0-8)、+29909/-3398 行、109 新文件/2 删除、52→64 variants、v1/v2 ASCII 架构对比图、D001-D007 全量 deviation 列表(永久保留 D001/D002/D007)、I001-I010 全量 issue 状态(I006/I009 保留,其余 resolved)、DC001-DC049 按 phase 分组决策、已知限制 + 短/中/长期 follow-up 建议。新增 DC048(E2E test placement 决策)+ DC049(smoke test 证据)。Meta 状态从 in-progress → completed,phase-cursor 8 → 9。"))
+             :summary "最终用户无感验证 — 5 交付:1) E2E golden path test 落地在 crates/missiond-daemon/tests/e2e_bus_golden_path.rs(#[ignore],需 Docker)全流程 PG → LogWriter → BoardEvent::TaskCreated append → event_log row 校验 → PgTailSource 回读 LoggedEvent → v1 wire-format envelope 比较(type/seq/payload 三维度断言);2) 全量测试扫描:cargo build --all-targets clean(52-54 warnings 无 error);cargo test --workspace → 391 passed,0 failed(missiond-core lib 250 / event_chaos 12 / event_dispatcher_integration 1+2 ignored / missiond-daemon 96 / +72 其他 crate);cargo clippy --workspace --all-targets 0 errors(292 warnings 皆非 bus 引入);3) Smoke test:release binary 用 MISSIOND_HOME=/tmp + 独立 PG DB + WS port 19120 启动,4 秒内全部上线(bus bootstrap + dispatcher + 8 router consumers + incident reactor + ws bridge + retention cron + 8 subscription live),SIGTERM 清理干净无 panic;4) frozen lisp §4.2 对照:生成 .missiond/v2/_phase9-layout-check.md,每个 component → 实际文件路径 1:1 映射,无 ghost(所有 core lib 文件 + daemon bus/ 5 文件都有 lisp 或 execution-log 锚点);5) 整份重构总结报告 .missiond/v2/_refactor-summary.md:9 commits (phase 0-8)、+29909/-3398 行、109 新文件/2 删除、52→64 variants、v1/v2 ASCII 架构对比图、D001-D007 全量 deviation 列表(永久保留 D001/D002/D007)、I001-I010 全量 issue 状态(I006/I009 保留,其余 resolved)、DC001-DC049 按 phase 分组决策、已知限制 + 短/中/长期 follow-up 建议。新增 DC048(E2E test placement 决策)+ DC049(smoke test 证据)。Meta 状态从 in-progress → completed,phase-cursor 8 → 9。")
+    (phase-10 :status "completed" :owner "phase10-reorg" :started "2026-04-19" :completed "2026-04-19"
+             :summary "pipeline/ 七步模块化重组,lisp target 路径对齐。零功能改动,仅物理重排:`event/` 下新建 `pipeline/step{1..7}_*/` 目录 + `lifecycle/` 目录;`guards/` 删除(内容迁入 step1_guard/);`log/writer.rs` → `pipeline/step3_commit/log_writer.rs`;`log/retention.rs` → `lifecycle/retention.rs`;`dispatcher/{tail,control_gate,topic,registry}.rs` → `pipeline/step{5,6,7}_*/`;`blob_store/claim_check.rs` → `pipeline/step2_decide/claim_check.rs`。所有 legacy `event::{log,guards,dispatcher,blob_store}::…` 导入路径保留可用(通过 back-compat re-export)。frozen lisp §4.2 共 7 条 :target 路径更新对齐新结构。测试状态:missiond-core --lib 255 pass(原 250 + 5 个 Phase 10 新增 doc-anchor 测试:step1_guard/type_resolve×1 + step2_decide/persistence_policy×2 + step4_ack/ack_transport×2);event_chaos 12 pass 无 regression;missiond-daemon 96 pass 无 regression。"))
 
   ;; ─ 并行锁表(防 agent 冲突) ─
   ;; 格式: (claim :phase N :scope "path/description" :agent "name" :claimed-at "..." :released-at "..."|nil)
@@ -56,6 +58,8 @@
     (claim :phase 8 :scope "delete event_bus.rs / event_router.rs / compat.rs / run_timeline_writer; rewire all publish sites + workers to v2; add ws_bridge + retention_cron; internalize cursor_ack" :agent "phase8-cleanup"
            :claimed-at "2026-04-19T00:00:00Z" :released-at "2026-04-19T00:00:00Z")
     (claim :phase 9 :scope "E2E golden path test + 全量测试扫描 + daemon smoke test + frozen-lisp layout check + refactor summary" :agent "phase9-final-validation"
+           :claimed-at "2026-04-19T00:00:00Z" :released-at "2026-04-19T00:00:00Z")
+    (claim :phase 10 :scope "crates/missiond-core/src/event/{pipeline,lifecycle}/** + reshape dispatcher/log/guards/blob_store + frozen lisp §4.2 :target 路径对齐" :agent "phase10-reorg"
            :claimed-at "2026-04-19T00:00:00Z" :released-at "2026-04-19T00:00:00Z")
     )
 
@@ -412,7 +416,33 @@
     (decision :id DC049 :phase 9 :date "2026-04-19"
               :topic "daemon smoke test 的执行方式:真启动二进制 vs integration test 模拟"
               :chose "真启动 release binary,MISSIOND_HOME=/tmp/missiond-smoke-home + 独立 PG DB missiond_smoke_v2 + WS port 19120 + IPC socket /tmp/missiond-smoke-ipc.sock,gtimeout 10s 后 SIGTERM"
-              :rationale "任务书指出'如果没法真启动,退而用 integration test 模拟启动序列'。本机有 Docker + local PG(postgres://jinchen@localhost/),真启动只需要 4 个 env vars 隔离:MISSIOND_HOME / MISSION_PG_URL / MISSION_WS_PORT / MISSION_IPC_ENDPOINT。production daemon(PID 864,com.missiond.daemon launchctl)在 9120 端口 + ~/.xjp-mission,smoke test 用 19120 + /tmp/missiond-smoke-home 完全不冲突。10 秒 gtimeout 足够观察:bus bootstrap(170ms)+ dispatcher + 8 subscribers live(<1s)+ ws bridge + retention cron + 所有 worker 启动完成。观察到 0 panic,唯一 WARN 是 autopilot Failed to complete stale conversations(sqlx 类型错误,非 bus 引入,长期存在于 main 分支)。SIGTERM 后所有子系统按序 shutdown。比 integration test 模拟更 high-fidelity — integration test 只能测 BusServices 启动序列,而真启动验证了完整 main.rs 链路(MissionControl + PgMissionStore + CCTasksWatcher + GeminiCliWatcher + WS + IPC + 所有 workers + bus)。证据:/tmp/missiond-smoke-output.log 含 24 行 bus 相关 log。"))
+              :rationale "任务书指出'如果没法真启动,退而用 integration test 模拟启动序列'。本机有 Docker + local PG(postgres://jinchen@localhost/),真启动只需要 4 个 env vars 隔离:MISSIOND_HOME / MISSION_PG_URL / MISSION_WS_PORT / MISSION_IPC_ENDPOINT。production daemon(PID 864,com.missiond.daemon launchctl)在 9120 端口 + ~/.xjp-mission,smoke test 用 19120 + /tmp/missiond-smoke-home 完全不冲突。10 秒 gtimeout 足够观察:bus bootstrap(170ms)+ dispatcher + 8 subscribers live(<1s)+ ws bridge + retention cron + 所有 worker 启动完成。观察到 0 panic,唯一 WARN 是 autopilot Failed to complete stale conversations(sqlx 类型错误,非 bus 引入,长期存在于 main 分支)。SIGTERM 后所有子系统按序 shutdown。比 integration test 模拟更 high-fidelity — integration test 只能测 BusServices 启动序列,而真启动验证了完整 main.rs 链路(MissionControl + PgMissionStore + CCTasksWatcher + GeminiCliWatcher + WS + IPC + 所有 workers + bus)。证据:/tmp/missiond-smoke-output.log 含 24 行 bus 相关 log。")
+
+    (decision :id DC050 :phase 10 :date "2026-04-19"
+              :topic "pipeline/ 七步结构的物理布局:新建 `pipeline/step{1..7}_*/` vs 就地改 `dispatcher/log/guards/blob_store` 命名"
+              :chose "新建 `crates/missiond-core/src/event/pipeline/` 顶层目录,下辖 7 个 `step{N}_<name>/` 子目录,与 frozen lisp §4.2 `execution-flow` 的 7 步一一对应"
+              :rationale "frozen lisp §4.2 把 ingress → guard → decide → commit → ack → tail → gate → fanout 列为 7 步顺序流水,但 Phase 1-8 的代码把它们散到 `guards/`, `blob_store/`, `log/writer.rs`, `dispatcher/{tail,control_gate,topic,registry}.rs` 四个互不相干的目录 — 读代码无法反向找到 lisp。两种对齐方案:(a) 把 dispatcher/log 拆成分散的 step 目录,既保留旧名又加新名;(b) 全量搬到新的 pipeline/ 树,`dispatcher/` `log/` 变成薄 re-export 壳子。选 (b) 因为它把'流水线'这个概念从松散的'producer/dispatcher 二元对立'升级为单一树,新读者看一眼目录就能对上 lisp 的 7 步;(a) 会保留历史路径裂缝。back-compat re-export 让所有下游 `event::{log,dispatcher,guards,blob_store}::…` 导入继续工作,零 breaking change。")
+
+    (decision :id DC051 :phase 10 :date "2026-04-19"
+              :topic "step3_commit 内部 5 个概念(log_writer / seq_authority / dedup / backpressure / failure_mode)的文件粒度"
+              :chose "保留 5 个独立文件,其中 log_writer.rs 是实现主体(~1000 行);其余 4 个是 doc-only anchor modules(seq_authority / dedup / backpressure / failure_mode)"
+              :rationale "任务书说'如果这 5 个子模块拆太细,也可合并为 log_writer.rs + dedup.rs + failure_mode.rs 三个'。但考虑到 frozen lisp §4.2 step-3 明确列出 5 个 (component log-writer/seq-authority/dedup-semantics/backpressure/failure-mode),一一对应才能做到'lisp 和目录结构同构'这一 Phase 10 的核心目的。4 个 doc-only 模块每个 20-50 行,纯文档 + 1-2 个常量/类型别名,读者扫一眼就知道每个概念的实现位置(全部在 log_writer.rs 内联)。没有代码重复,也不强制未来实现者把逻辑拆到多个文件。如果未来某个子概念需要独立实现(如 backpressure 上 priority queue),直接在其文件里落地即可,不用搬名字。")
+
+    (decision :id DC052 :phase 10 :date "2026-04-19"
+              :topic "step4_ack 的深度:完全 doc-only vs 提供 AckSender 类型别名"
+              :chose "step4_ack/ 里 mod.rs 是文档模块 + 类型 re-export;ack_transport.rs 定义 `pub type AckSender = oneshot::Sender<Result<AppendAck, AppendError>>` + `pub fn new_ack_channel()` 辅助函数"
+              :rationale "frozen lisp §4.2 step-4 ack 明确说'no-extra-hop — step 4 没有新组件,只是 step 3 的 out-bound 封装'。完全 doc-only 会让这个 step 目录只有 mod.rs 一个文件,不如其他 6 steps 平衡;但又不能硬塞新逻辑进去。折中方案:提供一个 `AckSender` 类型别名 + `new_ack_channel()` 便利函数,作为'step-3 填什么、step-4 接什么'的契约符号。log_writer.rs 目前仍内联 `oneshot::channel()`,改用 `new_ack_channel` 是可选优化(后续可做)。2 个单元测试:AckSender 正常派发 Committed + sender drop 时 receiver 能感知错误。保证这个 step 也有独立测试覆盖,不被 step-3 夹带。")
+
+    (decision :id DC053 :phase 10 :date "2026-04-19"
+              :topic "retention.rs 的归宿:保留 `log/retention.rs` 还是移到独立 `lifecycle/` 目录"
+              :chose "新建 `crates/missiond-core/src/event/lifecycle/retention.rs`,`log/` 完全无 retention 模块"
+              :rationale "frozen lisp §4.2 lifecycle-maintenance 是独立 section,明确与 `core 7-step pipeline` 并列:'不在 append/dispatch 主路径上的后台任务'。放在 `log/` 下会暗示 retention 属于 log 写入机制,但它是独立的 cron 任务(由 `missiond-daemon/src/bus/retention_cron.rs` 驱动),与 log append 无关,与 orphan cursor cleanup + ObservabilityEvent::RetentionReport 发射相关。单独建 `lifecycle/` 目录让这个语义可见;未来 orphan cleanup 的谓词查询若从 daemon 迁回 core,也有明确归宿。")
+
+    (decision :id DC054 :phase 10 :date "2026-04-19"
+              :topic "legacy import path 的 back-compat 策略:立即下架 vs 保留 re-export shim"
+              :chose "保留 `event::{log,dispatcher,guards,blob_store}::…` 作为 re-export shim,每个 old-path module 在 mod.rs 顶部加'canonical home pointer'注释"
+              :rationale "Phase 10 的契约是零功能改动 + 测试零回归。一次性重命名导入路径会在 daemon / tests / missiond-mcp 造成 ~50+ 行 churn,与'物理重排只影响目录结构'的 Phase 10 范围冲突。保留 shim 让重构对下游透明,旧路径清零可在将来独立的 Phase 11(imports-cleanup)做。shim 模块(`dispatcher/mod.rs` 的 `pub mod control_gate { pub use crate::event::pipeline::step6_gate::*; }` 等)只是 `pub use` 转发,无任何运行时成本。")
+)
 
   ;; ─ 阶段完成记录 ─
   ;; 格式: (completion :phase N :date "..." :agent "name"
@@ -636,7 +666,59 @@
                      ".missiond/v2/intent-event-bus-execution.lisp (updated: meta.status=completed, phase-cursor=9, phase-9 completion entry, DC048/DC049, phase-9 claim)")
       :tests-added 1
       :verified-by "cargo build --all-targets clean;cargo test --workspace → 391 passed,0 failed across 23 result groups(missiond-core lib 250 + event_chaos 12 + event_dispatcher_integration 1 passed+2 ignored + event_log_integration 6 ignored + event_subscription_integration 3 ignored + pg_integration 6 ignored + missiond-daemon 96 + e2e_bus_golden_path 0+1 ignored + 其余);cargo clippy --workspace --all-targets 0 errors(292 warnings 皆非 bus 引入);daemon release binary smoke start 成功(MISSIOND_HOME=/tmp + 独立 PG + WS 19120,4 秒内 bus bootstrap + dispatcher + 8 subscribers + incident reactor + ws bridge + retention cron 全部 live,0 panic,SIGTERM 清理干净)"
-      :notes "5 项交付全部完成:1) E2E test 真实 PG + LogWriter append + tail 回读 + v1 wire-format 字节断言(type/seq/payload 三维度);2) 全量测试 391 passed 无 regression;3) daemon 真启动 smoke test 成功(release binary + gtimeout 10s);4) _phase9-layout-check.md 每个 frozen lisp §4.2 component 映射到文件路径,0 ghost 组件;5) _refactor-summary.md 含完整数字统计(9 commits / +29909-3398 / 109 new+2 deleted / 52→64 variants / 391 tests)+ v1/v2 架构 ASCII 对照 + D001-D007 状态表(D001/D002/D007 永久保留)+ I001-I010 状态表(I006/I009 保留,其余 resolved)+ DC001-DC049 全量决策按 phase 分组 + 已知限制 + 短/中/长期 follow-up。DC048 记录 E2E test 放置决策(binary crate 限制导致内联镜像 wire-format);DC049 记录 smoke test 用真启动 release binary 而非 integration 模拟。未解决 issues 仅 I006(ContextualCommitDetected→AstSyncEvent wiring,bus 范围外)和 I009(FreezeAndCatchUp runtime,可选优化)。Meta 状态 in-progress → completed,phase-cursor 8 → 9。Refactor 准备 merge 到 main。"))
+      :notes "5 项交付全部完成:1) E2E test 真实 PG + LogWriter append + tail 回读 + v1 wire-format 字节断言(type/seq/payload 三维度);2) 全量测试 391 passed 无 regression;3) daemon 真启动 smoke test 成功(release binary + gtimeout 10s);4) _phase9-layout-check.md 每个 frozen lisp §4.2 component 映射到文件路径,0 ghost 组件;5) _refactor-summary.md 含完整数字统计(9 commits / +29909-3398 / 109 new+2 deleted / 52→64 variants / 391 tests)+ v1/v2 架构 ASCII 对照 + D001-D007 状态表(D001/D002/D007 永久保留)+ I001-I010 状态表(I006/I009 保留,其余 resolved)+ DC001-DC049 全量决策按 phase 分组 + 已知限制 + 短/中/长期 follow-up。DC048 记录 E2E test 放置决策(binary crate 限制导致内联镜像 wire-format);DC049 记录 smoke test 用真启动 release binary 而非 integration 模拟。未解决 issues 仅 I006(ContextualCommitDetected→AstSyncEvent wiring,bus 范围外)和 I009(FreezeAndCatchUp runtime,可选优化)。Meta 状态 in-progress → completed,phase-cursor 8 → 9。Refactor 准备 merge 到 main。")
+
+    (completion
+      :phase 10 :date "2026-04-19" :agent "phase10-reorg"
+      :deliverables (
+        ;; New pipeline/ tree (7 steps, all new dirs + mod.rs + sub-modules):
+        "crates/missiond-core/src/event/pipeline/mod.rs (NEW — 7-step overview + pub mod step{1..7})"
+        "crates/missiond-core/src/event/pipeline/step1_guard/mod.rs (NEW)"
+        "crates/missiond-core/src/event/pipeline/step1_guard/causation.rs (MOVED from event/guards/causation.rs)"
+        "crates/missiond-core/src/event/pipeline/step1_guard/type_resolve.rs (NEW — ResolvedEventMeta doc anchor + 1 test)"
+        "crates/missiond-core/src/event/pipeline/step2_decide/mod.rs (NEW)"
+        "crates/missiond-core/src/event/pipeline/step2_decide/claim_check.rs (MOVED from event/blob_store/claim_check.rs)"
+        "crates/missiond-core/src/event/pipeline/step2_decide/persistence_policy.rs (NEW — PersistencePolicy enum + 2 tests)"
+        "crates/missiond-core/src/event/pipeline/step3_commit/mod.rs (NEW — 5-component doc table)"
+        "crates/missiond-core/src/event/pipeline/step3_commit/log_writer.rs (MOVED from event/log/writer.rs)"
+        "crates/missiond-core/src/event/pipeline/step3_commit/seq_authority.rs (NEW — doc anchor + EventSeq alias)"
+        "crates/missiond-core/src/event/pipeline/step3_commit/dedup.rs (NEW — doc anchor + DEDUP_UNIQUE_COLUMNS)"
+        "crates/missiond-core/src/event/pipeline/step3_commit/backpressure.rs (NEW — doc anchor + APPEND_CHANNEL_CAPACITY re-export)"
+        "crates/missiond-core/src/event/pipeline/step3_commit/failure_mode.rs (NEW — doc anchor + FAILED_STATE_RETRY_CAP const)"
+        "crates/missiond-core/src/event/pipeline/step4_ack/mod.rs (NEW)"
+        "crates/missiond-core/src/event/pipeline/step4_ack/ack_transport.rs (NEW — AckSender type + new_ack_channel + 2 tests)"
+        "crates/missiond-core/src/event/pipeline/step5_tail/mod.rs (MOVED from event/dispatcher/tail.rs)"
+        "crates/missiond-core/src/event/pipeline/step6_gate/mod.rs (MOVED from event/dispatcher/control_gate.rs)"
+        "crates/missiond-core/src/event/pipeline/step7_fanout/mod.rs (NEW — TOPIC_BUFFER_SIZE moved here)"
+        "crates/missiond-core/src/event/pipeline/step7_fanout/topic.rs (MOVED from event/dispatcher/topic.rs)"
+        "crates/missiond-core/src/event/pipeline/step7_fanout/registry.rs (MOVED from event/dispatcher/registry.rs)"
+        ;; New lifecycle/ dir for retention:
+        "crates/missiond-core/src/event/lifecycle/mod.rs (NEW)"
+        "crates/missiond-core/src/event/lifecycle/retention.rs (MOVED from event/log/retention.rs)"
+        ;; Reshaped orchestrator/shim modules (kept thin, back-compat re-exports):
+        "crates/missiond-core/src/event/mod.rs (updated — layout table + pipeline + lifecycle modules + guards shim)"
+        "crates/missiond-core/src/event/log/mod.rs (updated — thin: Log/LogReadable traits, AppendOpts/Ack/Error/Seq + re-export writer/cleanup_once)"
+        "crates/missiond-core/src/event/dispatcher/mod.rs (updated — orchestrator only; step5/6/7 via pub use)"
+        "crates/missiond-core/src/event/blob_store/mod.rs (updated — claim_check helpers re-exported from pipeline::step2_decide)"
+        "crates/missiond-core/src/event/blob_store/{pg_backend,local_file_backend}.rs (updated — use super:: instead of super::claim_check)"
+        "crates/missiond-core/src/event/in_memory/log.rs (updated — check_causation import via pipeline::step1_guard)"
+        ;; Deleted (contents migrated):
+        "crates/missiond-core/src/event/guards/ (DELETED — contents migrated to pipeline/step1_guard/)"
+        "crates/missiond-core/src/event/log/writer.rs (DELETED — migrated to pipeline/step3_commit/log_writer.rs)"
+        "crates/missiond-core/src/event/log/retention.rs (DELETED — migrated to lifecycle/retention.rs)"
+        "crates/missiond-core/src/event/dispatcher/tail.rs (DELETED — migrated to pipeline/step5_tail/mod.rs)"
+        "crates/missiond-core/src/event/dispatcher/control_gate.rs (DELETED — migrated to pipeline/step6_gate/mod.rs)"
+        "crates/missiond-core/src/event/dispatcher/topic.rs (DELETED — migrated to pipeline/step7_fanout/topic.rs)"
+        "crates/missiond-core/src/event/dispatcher/registry.rs (DELETED — migrated to pipeline/step7_fanout/registry.rs)"
+        "crates/missiond-core/src/event/blob_store/claim_check.rs (DELETED — migrated to pipeline/step2_decide/claim_check.rs)"
+        ;; Daemon path fixes:
+        "crates/missiond-daemon/src/bus/retention_cron.rs (updated — import from event::lifecycle::retention)"
+        ;; Frozen lisp :target path alignment:
+        ".missiond/v2/intent-event-bus.lisp (updated — 7 :target paths: step1/step2/step3/step5/step6/step7 + retention)"
+        ".missiond/v2/intent-event-bus-execution.lisp (updated — meta.phase-cursor 9→10, phase-10 entry, DC050-DC054, phase-10 claim + completion)")
+      :tests-added 5
+      :verified-by "cargo build -p missiond-core clean;cargo build --workspace clean;cargo test -p missiond-core --lib → 255 passed,0 failed(原 250 + 5 Phase 10 新增 doc-anchor 测试);cargo test -p missiond-core --test event_chaos → 12 passed,0 failed(chaos 无 regression);cargo test -p missiond-daemon → 96 passed,0 failed(daemon 无 regression)"
+      :notes "零功能改动的物理重排。核心观察:frozen lisp §4.2 core 把事件处理描述为 7 步流水线,但 Phase 1-8 代码散布在 `guards/`/`blob_store/`/`log/writer.rs`/`dispatcher/{tail,control_gate,topic,registry}.rs` 四个历史沿革目录。Phase 10 把物理结构与 frozen lisp 对齐为 1:1。保留完整 back-compat re-export 避免 Phase 10 引起下游 import churn:`event::{log,dispatcher,guards,blob_store}::…` 所有旧路径继续解析。新增 5 个单元测试覆盖 Phase 10 引入的 doc anchor:type_resolve::ResolvedEventMeta(1)/persistence_policy::PersistencePolicy(2)/ack_transport::new_ack_channel(2)。frozen lisp §4.2 共 7 个 :target 路径更新(step1 guards/→pipeline/step1_guard/、step2 claim-check blob_store/→pipeline/step2_decide/、step3 log/writer.rs→pipeline/step3_commit/、step5 dispatcher/tail.rs→pipeline/step5_tail/、step6 dispatcher/control_gate.rs→pipeline/step6_gate/、step7 dispatcher/{topic,registry}.rs→pipeline/step7_fanout/、retention log/retention.rs→lifecycle/retention.rs)。blob-store 内部结构 `:target \"blob_store/\"` 保持(它是 step 2 使用的服务,不是 step 2 自身)。DC050-DC054 记录 5 个关键决策:pipeline/ 顶层树 vs 就地改(DC050)、step3 保留 5 子模块不合并(DC051)、step4 提供 AckSender 类型别名不做 doc-only(DC052)、retention 搬到独立 lifecycle/ 而非留在 log/(DC053)、back-compat shim 保留不立即下架(DC054)。"))
 
   ;; ─ 全局备忘(跨阶段需要记住的事) ─
   (global-notes

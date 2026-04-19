@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use tokio::fs;
 use uuid::Uuid;
 
-use super::claim_check::{hex_encode_checksum, sha256};
+use super::{hex_encode_checksum, sha256};
 use super::{BlobBackend, BlobResult, BlobStore, BlobStoreError, PayloadRef};
 
 const URI_PREFIX: &str = "file:";

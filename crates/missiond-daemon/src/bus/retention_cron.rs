@@ -7,7 +7,7 @@
 //! Behaviour:
 //!   * Sleep until the next midnight (UTC), then repeat every 24h.
 //!   * Each tick:
-//!     1. `event::log::retention::cleanup_once` — TTL eviction for
+//!     1. `event::lifecycle::retention::cleanup_once` — TTL eviction for
 //!        `event_log` (3d ephemeral / 30d persistent) + `blob_storage`.
 //!     2. Orphan-subscription sweep — DELETE cursors whose
 //!        `last_seen_at` is > 30 days stale, and emit one
@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Timelike, Utc};
 use missiond_core::event::events::{IncidentEvent, ObservabilityEvent};
-use missiond_core::event::log::retention::{cleanup_once, CleanupReport};
+use missiond_core::event::lifecycle::retention::{cleanup_once, CleanupReport};
 use missiond_core::types::{IncidentSeverity, IncidentSource, MissionIncident};
 use sqlx::PgPool;
 use tokio::sync::watch;

@@ -38,7 +38,7 @@
 //! The daemon side adapts `watch::Receiver<ControlTree>` into a
 //! [`ControlGate`] implementation. See Phase 8 wiring.
 
-use super::super::domain::Domain;
+use crate::event::domain::Domain;
 
 /// Functional pause bucket mirrored from
 /// `missiond_daemon::control_tree::CtlDomain`.

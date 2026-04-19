@@ -41,12 +41,12 @@ use async_trait::async_trait;
 use tokio::sync::watch;
 use tokio::time::timeout;
 
-use super::super::blob_store::{BlobStore, PayloadRef};
-use super::super::domain::Domain;
-use super::super::log::reader::LoggedEvent;
-use super::super::log::{LogError, Seq};
-use super::ControlGate;
-use super::registry::TopicRegistry;
+use crate::event::blob_store::{BlobStore, PayloadRef};
+use crate::event::domain::Domain;
+use crate::event::log::reader::LoggedEvent;
+use crate::event::log::{LogError, Seq};
+use crate::event::pipeline::step6_gate::ControlGate;
+use crate::event::pipeline::step7_fanout::registry::TopicRegistry;
 
 /// Per-poll row cap. Frozen lisp §4.2.c: `LIMIT 256`.
 pub const TAIL_BATCH_LIMIT: usize = 256;

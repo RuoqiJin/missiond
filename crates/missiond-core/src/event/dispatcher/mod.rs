@@ -1,8 +1,24 @@
-//! Topic dispatcher — live fan-out of appended events to in-process subscribers.
+//! Dispatcher — orchestrator that composes pipeline steps 5-7 into a
+//! runnable tail loop.
 //!
-//! Frozen lisp `.missiond/v2/intent-event-bus.lisp` §4.2.c topic-dispatcher.
+//! Frozen lisp `.missiond/v2/intent-event-bus.lisp` §4.2 step-5..7 live fan-out.
 //!
-//! Scope (frozen):
+//! This module owns only the orchestration surface (`Dispatcher`,
+//! `DispatcherBuilder`, `register_all_domains`). The underlying implementations
+//! were moved to their 7-step homes:
+//!
+//! | Concern                              | Canonical home                                    |
+//! |--------------------------------------|---------------------------------------------------|
+//! | tail loop + `TailSource`             | [`crate::event::pipeline::step5_tail`]            |
+//! | control gate / `CtlDomain` mapping   | [`crate::event::pipeline::step6_gate`]            |
+//! | per-topic broadcast + registry       | [`crate::event::pipeline::step7_fanout`]          |
+//!
+//! The re-exports below keep legacy `event::dispatcher::…` paths resolving
+//! so callers (tests + daemon) don't churn; new code is encouraged to
+//! import directly from the step module.
+//!
+//! Scope (unchanged from Phase 3 but re-stated):
+//!
 //!   * **live fan-out only** — the dispatcher tails `event_log`, routes rows
 //!     to the matching [`Topic<T>`] and broadcasts `Arc<T>` to every live
 //!     subscriber.
@@ -15,37 +31,32 @@
 //!   * **fault isolation** — each [`Topic<T>`] owns its own
 //!     `tokio::sync::broadcast` channel, so a slow subscriber on one topic
 //!     can never stall another.
-//!
-//! Phase 3 non-goals:
-//!   * No subscription API (Phase 4). Today's tests call
-//!     [`Topic::subscribe`] directly to exercise fan-out.
-//!   * No `InMemoryBus` (Phase 5).
-//!   * No retry / Lagged handling beyond the broadcast channel default; the
-//!     subscription layer wraps those semantics in Phase 4.
-//!   * No PG `LISTEN/NOTIFY` — the tail loop runs a long-polling SELECT
-//!     every 100ms. See DC011 for rationale.
-//!
-//! # Wiring (Phase 8)
-//!
-//! The daemon will construct the dispatcher like:
-//!
-//! ```ignore
-//! let dispatcher = register_all_domains(DispatcherBuilder::new()).build();
-//! let ws_sub = dispatcher.topic::<BoardEvent>().subscribe();
-//! tokio::spawn(dispatcher.run(tail_source, blob_store, gate, shutdown_rx));
-//! ```
 
-pub mod control_gate;
-pub mod registry;
-pub mod tail;
-pub mod topic;
-
-pub use control_gate::{ControlGate, NeverPaused, domain_to_ctl_domain};
-pub use registry::{AnyTopic, TopicRegistry, TopicRegistryBuilder};
-pub use tail::{DispatchError, DispatchMetrics, TailError, TailSource, TAIL_BATCH_LIMIT, TAIL_POLL_INTERVAL};
+// Re-export step-5/6/7 symbols under the legacy `dispatcher::` namespace.
+pub use crate::event::pipeline::step5_tail::{
+    DispatchError, DispatchMetrics, TailError, TailSource, TAIL_BATCH_LIMIT, TAIL_POLL_INTERVAL,
+};
 #[cfg(feature = "postgres")]
-pub use tail::PgTailSource;
-pub use topic::Topic;
+pub use crate::event::pipeline::step5_tail::PgTailSource;
+pub use crate::event::pipeline::step6_gate::{domain_to_ctl_domain, ControlGate, CtlDomain, NeverPaused};
+pub use crate::event::pipeline::step7_fanout::{
+    AnyTopic, Topic, TopicRegistry, TopicRegistryBuilder, TypedTopic, TOPIC_BUFFER_SIZE,
+};
+
+// Back-compat sub-module aliases so `event::dispatcher::control_gate::CtlDomain`
+// and friends continue to resolve. Each alias points at its step-module home.
+pub mod control_gate {
+    pub use crate::event::pipeline::step6_gate::*;
+}
+pub mod registry {
+    pub use crate::event::pipeline::step7_fanout::registry::*;
+}
+pub mod tail {
+    pub use crate::event::pipeline::step5_tail::*;
+}
+pub mod topic {
+    pub use crate::event::pipeline::step7_fanout::topic::*;
+}
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -55,10 +66,6 @@ use tokio::sync::watch;
 use super::blob_store::BlobStore;
 use super::event_trait::DomainEvent;
 use super::log::Seq;
-
-/// Default broadcast buffer per topic — matches frozen lisp
-/// §4.2.c `topic-registry.buffer-size`.
-pub const TOPIC_BUFFER_SIZE: usize = 1024;
 
 /// The runtime dispatcher handle.
 ///
@@ -91,7 +98,8 @@ impl Dispatcher {
     }
 
     /// Run the tail-and-fan-out loop until `shutdown` fires or the log
-    /// fails permanently. See [`tail`] for the full contract.
+    /// fails permanently. See [`crate::event::pipeline::step5_tail`] for the
+    /// full contract.
     pub async fn run<G>(
         self,
         tail_source: Arc<dyn TailSource>,
@@ -102,7 +110,7 @@ impl Dispatcher {
     where
         G: ControlGate + Clone + 'static,
     {
-        tail::run_tail(
+        crate::event::pipeline::step5_tail::run_tail(
             tail_source,
             blob_store,
             self.registry,

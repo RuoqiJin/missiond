@@ -36,12 +36,12 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use uuid::Uuid;
 
-use super::super::blob_store::{BlobStore, CLAIM_CHECK_THRESHOLD};
-use super::super::domain::Domain;
-use super::super::event_trait::DomainEvent;
-use super::super::guards::check_causation;
-use super::reader::{LogReader, LoggedEvent};
-use super::{AppendAck, AppendError, AppendOpts, Log, LogError, Seq};
+use crate::event::blob_store::{BlobStore, CLAIM_CHECK_THRESHOLD};
+use crate::event::domain::Domain;
+use crate::event::event_trait::DomainEvent;
+use crate::event::log::reader::{LogReader, LoggedEvent};
+use crate::event::log::{AppendAck, AppendError, AppendOpts, Log, LogError, Seq};
+use crate::event::pipeline::step1_guard::check_causation;
 
 /// Bound on the append channel. Frozen lisp §4.2.b backpressure.
 pub const APPEND_CHANNEL_CAPACITY: usize = 4096;

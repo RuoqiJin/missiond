@@ -1,6 +1,12 @@
-//! BlobStore — Claim-Check for large event payloads.
+//! BlobStore — durable byte storage backends consumed by step-2 claim-check.
 //!
-//! Frozen lisp `.missiond/v2/intent-event-bus.lisp` §4.2.b claim-check.
+//! Frozen lisp `.missiond/v2/intent-event-bus.lisp` §4.2 step-2 decide:
+//!
+//! > claim-check: 大 payload 不进 Log 主表,只留 durable pointer
+//!
+//! The threshold logic + SHA-256 helpers live in
+//! [`crate::event::pipeline::step2_decide::claim_check`]; this module only
+//! provides the physical backends the pipeline step **uses**.
 //!
 //! Two backends:
 //!   * [`pg_backend::PgBlobStore`]   — default, stores into the `blob_storage`
@@ -11,11 +17,15 @@
 //! Both implementations share a single [`BlobStore`] trait so the LogWriter
 //! stays backend-agnostic.
 
-pub mod claim_check;
 pub mod local_file_backend;
 pub mod pg_backend;
 
-pub use claim_check::{CLAIM_CHECK_THRESHOLD, hex_decode_checksum, hex_encode_checksum, sha256};
+// Re-export the claim-check helpers (threshold / sha256 / hex codec) under
+// the old `blob_store::` path so existing call sites continue to compile.
+// Their canonical home is `pipeline::step2_decide::claim_check`.
+pub use crate::event::pipeline::step2_decide::claim_check::{
+    hex_decode_checksum, hex_encode_checksum, sha256, CLAIM_CHECK_THRESHOLD,
+};
 pub use local_file_backend::LocalFileBlobStore;
 pub use pg_backend::PgBlobStore;
 

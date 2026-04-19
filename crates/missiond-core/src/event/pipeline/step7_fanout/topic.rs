@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 use tokio::sync::broadcast;
 
-use super::super::domain::Domain;
-use super::super::event_trait::DomainEvent;
+use crate::event::domain::Domain;
+use crate::event::event_trait::DomainEvent;
 
 /// Typed handle to a domain topic. Clone-cheap (wraps an `Arc` internally).
 ///

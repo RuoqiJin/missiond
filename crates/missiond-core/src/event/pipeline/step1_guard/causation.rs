@@ -15,7 +15,7 @@
 //! beyond 5 levels. Ten gives ops margin while still catching bugs that
 //! would otherwise self-replicate events forever.
 
-use super::super::log::{AppendError, AppendOpts};
+use crate::event::log::{AppendError, AppendOpts};
 
 /// Max allowed depth of a causation chain. Frozen lisp §4.4.
 ///

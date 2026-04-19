@@ -163,7 +163,7 @@
       ;; ─── STEP 1 · guard ───────────────────────────
       (step-1 guard
         (purpose "入口校验 — 排除循环事件 / 确认类型有效")
-        :target "crates/missiond-core/src/event/guards/"
+        :target "crates/missiond-core/src/event/pipeline/step1_guard/"
 
         (component causation-guard
           (desc "防 consumer 处理事件 → 触发新事件 → 再次消费 → 无限递归")
@@ -185,7 +185,7 @@
 
         (component claim-check
           (desc "大 payload 不进 Log 主表,只留 durable pointer")
-          :target "crates/missiond-core/src/event/blob_store/"
+          :target "crates/missiond-core/src/event/pipeline/step2_decide/"
           :threshold-inline "payload_size_hint() <= 8KB → 直接 JSONB 存 payload_inline"
           :threshold-ref    "payload_size_hint() >  8KB → blob_store.put(bytes) → 存 payload_ref"
 
@@ -216,7 +216,7 @@
       ;; ─── STEP 3 · commit ──────────────────────────
       (step-3 commit
         (purpose "单写入点批处理 + DB INSERT + 分配 seq + dedup 冲突解析")
-        :target "crates/missiond-core/src/event/log/writer.rs"
+        :target "crates/missiond-core/src/event/pipeline/step3_commit/"
 
         (component log-writer
           :pattern   "唯一 LogWriter task 消费 append channel"
@@ -267,7 +267,7 @@
       ;; ─── STEP 5 · tail ────────────────────────────
       (step-5 tail
         (purpose "Dispatcher 独立 task 从 event_log 拉新 seq,不阻塞同步链")
-        :target "crates/missiond-core/src/event/dispatcher/tail.rs"
+        :target "crates/missiond-core/src/event/pipeline/step5_tail/"
 
         (component dispatcher-state
           :state    "O(1) — AtomicI64 last_dispatched_seq"
@@ -287,7 +287,7 @@
       ;; ─── STEP 6 · gate ────────────────────────────
       (step-6 gate
         (purpose "paused domain 的事件不投递(事件仍在 log 中保留)")
-        :target "crates/missiond-core/src/event/dispatcher/control_gate.rs"
+        :target "crates/missiond-core/src/event/pipeline/step6_gate/"
 
         (component control-gate
           :input-source "ControlManager.is_domain_paused(domain) — watch::Receiver<ControlTree>"
@@ -306,7 +306,7 @@
       ;; ─── STEP 7 · fanout ──────────────────────────
       (step-7 fanout
         (purpose "按 domain 送到对应 Topic<T> broadcast channel,出口到 4.3")
-        :target "crates/missiond-core/src/event/dispatcher/{topic,registry}.rs"
+        :target "crates/missiond-core/src/event/pipeline/step7_fanout/"
 
         (component topic-registry
           :type             "static HashMap<Domain, Box<dyn AnyTopic>>"
@@ -329,7 +329,7 @@
         (desc "不在 append/dispatch 主路径上的后台任务")
 
         (retention
-          :target              "crates/missiond-core/src/event/log/retention.rs"
+          :target              "crates/missiond-core/src/event/lifecycle/retention.rs"
           :default-ttl         "30 天 — event_log 是恢复基座"
           :per-domain-override "ObservabilityEvent = 3 天 可配"
           :ephemeral-ttl       "3 天"
