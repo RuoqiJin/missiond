@@ -189,16 +189,8 @@ pub trait ConversationStore: Send + Sync {
     async fn list_retrospective_results(&self, limit: i64) -> DbResult<Vec<(String, String, String, Option<String>, String)>>;
     async fn get_retrospective_result(&self, session_id: &str) -> DbResult<Option<(String, String, Option<String>, String)>>;
 
-    // -- narration (from RetrospectiveStore v0.4.x) --
-    async fn insert_narrations(&self, narrations: &[(i64, &str, &str, &str, &str)]) -> DbResult<usize>;
-    async fn get_narrations_for_session(&self, session_id: &str) -> DbResult<Vec<(i64, String, String, String)>>;
-    async fn get_sessions_needing_narration(&self, min_unnarrated: i64) -> DbResult<Vec<(String, i64)>>;
-    async fn get_or_create_narration_cursor(&self, session_id: &str) -> DbResult<(i64, i64, String, i64, i64)>;
-    async fn fetch_narration_batch(&self, session_id: &str, after_id: i64, batch_size: i64) -> DbResult<Vec<ConversationMessage>>;
-    async fn get_last_narration(&self, session_id: &str) -> DbResult<Option<(i64, String, String, String)>>;
-    async fn commit_narration_batch(&self, session_id: &str, last_msg_id: i64, narrations: &[(i64, &str, &str, &str, &str)]) -> DbResult<usize>;
-    async fn mark_narration_cursor_processing(&self, session_id: &str) -> DbResult<()>;
-    async fn mark_narration_cursor_failed(&self, session_id: &str, max_retries: i64) -> DbResult<bool>;
+    // -- narration (removed v0.4.23 Phase 6): tables message_narrations +
+    //    narration_cursors dropped; step_narrator worker deleted together.
 }
 
 // ============================================================================
@@ -482,9 +474,8 @@ pub trait SlotStore: Send + Sync {
     async fn get_inbox_messages(&self, unread_only: bool, limit: i64) -> DbResult<Vec<InboxMessage>>;
     async fn mark_inbox_read(&self, id: &str) -> DbResult<()>;
 
-    // -- task.rs: events (legacy) --
-    async fn insert_event(&self, task_id: &str, event_type: EventType, data: Option<&serde_json::Value>, timestamp: i64) -> DbResult<i64>;
-    async fn get_events_by_task(&self, task_id: &str) -> DbResult<Vec<TaskEvent>>;
+    // -- task.rs: events (legacy) — removed v0.4.23 Phase 6:
+    //    table `events` dropped; pillar 四 event_log is the SSOT.
 
     // -- dynamic_slot.rs --
     async fn create_dynamic_slot(&self, slot: &DynamicSlot) -> DbResult<()>;

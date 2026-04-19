@@ -262,7 +262,7 @@ pub(crate) async fn submit_task(
     role: &str,
     prompt: &str,
 ) -> anyhow::Result<String> {
-    use missiond_core::types::{EventType, Task, TaskStatus};
+    use missiond_core::types::{Task, TaskStatus};
 
     let now = chrono::Utc::now().timestamp_millis();
     let task = Task {
@@ -284,13 +284,9 @@ pub(crate) async fn submit_task(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create task: {}", e))?;
 
-    let data = serde_json::json!({ "role": role });
-    if let Err(e) = store
-        .insert_event(&task.id, EventType::TaskCreated, Some(&data), now)
-        .await
-    {
-        tracing::error!(task_id = %task.id, error = %e, "Failed to persist task event");
-    }
+    // v0.4.23 Phase 6: legacy `events` table dropped — task-event audit
+    // moved to pillar 四 event_log (SSOT). Task state transitions emit via
+    // the event bus; per-task audit here is removed.
 
     tracing::info!(task_id = %task.id, role = %role, "Task created (via store)");
     Ok(task.id)

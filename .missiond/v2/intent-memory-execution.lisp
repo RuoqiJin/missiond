@@ -79,7 +79,9 @@
         :result "mcp-surface 100% / trait-surface 9/9 / cross-ref 51/51 pointer 通过 / frontend-surface 5 streams 大致 OK / external-filesystem 约定 paths 引用存在")
       (phase-5 :name "lisp ↔ code 双向同构校验" :status "completed" :at "2026-04-20"
         :result "lisp→code 0 orphan (60 表 + 9 trait 全部在代码存在); code→lisp 发现 5 documentation drift (D-004 ~ D-008)")
-      (phase-6 :name "drop migration + zombie cleanup" :status "in-progress"))
+      (phase-6 :name "drop migration + zombie cleanup" :status "completed" :at "2026-04-20"
+        :scope "按 frozen lisp 实际声明保守执行 — 只 drop 4 张 (narrations 2 + events + credentials), 不 drop lisp 仍 KEEP 的 tasks + DEPRECATE 的 inbox"
+        :deliverable "migration 20260421000000_drop_deprecated_tables.sql + traits 删 11 方法 + pg/ 删 ~290L zombie code + step_narrator.rs 整文件删 + 5 caller 清理"))
 
   ;; ─────────────────────────────────────────────────────────
   ;; claims — 谁锁定了什么, 防并发写冲突
@@ -173,6 +175,20 @@
       :finding "types/async_job.rs / types/dynamic_slot.rs / types/gen_types.rs 不在 lisp file-to-module-mapping"
       :status "tracked-minor")
 
+    (D009
+      :source "Phase 6 agent (a1101c5e5020c65fa) 遵循 lisp 而非任务 prompt"
+      :lisp-says "module system-support :: legacy-zone:"
+      :tasks "✓ KEEP — legacy slot API 仍在使用 (memory_scheduler/autopilot/pty_event_worker 30+ 调用)"
+      :inbox "⚠ DEPRECATE — 轻度使用 (autopilot/strategy_worker 仍写)"
+      :events "❌ DROP-CANDIDATE (event_log 取代)"
+      :credentials "❌ DROP-CANDIDATE (dead schema)"
+      :task-prompt-said "Phase 6 drop 全 6 张 (含 tasks + inbox)"
+      :agent-decision "保守只 drop 4 张 (narrations 2 + events + credentials), tasks + inbox 延后"
+      :rationale "lisp 是真相, tasks/inbox 仍在活跃调用链, 贸然 drop 会编译失败"
+      :next-step "指挥官接手后决定: (a) 迁移 tasks/inbox 活跃 caller 到新接口 → 后续 drop; (b) 保留 tasks/inbox 作 legacy 永久保存; (c) 其他策略"
+      :status "approved-decided by agent, 留给指挥官 review"
+      :at "2026-04-20 phase-6")
+
     (D003
       :lisp-said "Stage 2A.3 原计划 delete TimelineStore (基于 '它已 deprecated' 的假设)"
       :actually-found "TimelineStore 不是 deprecated; 它是 pillar 四 event-bus 的 projection 读接口 (event-bus-execution.lisp L170 明确声明 'db/pg/timeline.rs 重写: 每个 TimelineStore 方法 2-3 行 delegate 到 projection::*'); 被 ws/server.rs catch-up 和 handlers/comm/timeline.rs 的 5 MCP 工具 active 调用"
@@ -258,12 +274,18 @@
     (comp-010 :phase "2C.2+2C.3+2C.4" :agent "aaeb025f65c3e3bb0" :summary "ToolCallStore(19)+EventStore(7)+RetrospectiveStore(15) 合并进 ConversationStore; 删 pg/{tool_call,event,retrospective}.rs + sqlite/同名 6 文件" :cargo-workspace "通过" :at "2026-04-20")
     (comp-011 :phase "2C.5" :agent "a2f09b18427fb6ad3" :summary "VisionStore 10 方法合并进 ObservabilityStore; 补建 db/observability.rs" :cargo "通过" :at "2026-04-20")
     (comp-012 :phase "2D" :agent "af46ad1392fe21100" :summary "InfraStore 填 24 方法" :cargo "通过" :at "2026-04-20")
-    (comp-013 :phase "2E" :agent "af7519bb19abb5f42"
-      :summary "SQLite 生态一次性大扫除 — 删 31 文件 ~14018 LOC ~360KB"
-      :details "sqlite/ 整目录 + db/ 下 21 sqlite-gated 文件 + 5 个 src/ 文件重写去 sqlite 分支 + Cargo.toml 清理"
-      :migrate-tool-preserved "pg/migrate_from_sqlite.rs 保留 feature-gated 'all(sqlite, postgres)' 当前永不编译 (DEPRECATED note)"
-      :db-mod-rs "422→58 行"
-      :cargo "--workspace + --tests --no-run 0 error"
+    (comp-013 :phase "2E" :agent "af7519bb19abb5f42" :summary "SQLite 生态大扫除 ~14018 LOC" :cargo "通过" :at "2026-04-20")
+    (comp-014 :phase "phase-4+5 audit" :agent "ab3a924be68435f5a"
+      :summary "lisp ↔ code 双向校验: 9/9 trait + 60/60 表 + 51/51 cross-ref 全通过; 5 D-series non-critical doc drift"
+      :at "2026-04-20")
+    (comp-015 :phase "phase-6" :agent "a1101c5e5020c65fa"
+      :summary "Drop migration + zombie cleanup (保守 4 张)"
+      :migration "20260421000000_drop_deprecated_tables.sql (narrations + narration_cursors + events + credentials)"
+      :traits-deleted "ConversationStore narration 9 方法 + SlotStore events 2 方法 = 11"
+      :code-deleted "pg/conversation.rs ~250L narration block + pg/slot.rs ~40L events = ~290L + step_narrator.rs 整文件 ~400L + 5 caller 清理"
+      :mcp-impact "mission_session_narrations 整删 (内部无注册); mission_inbox 保留 (inbox 表未 drop)"
+      :agent-decision "任务要求 drop 6 张, 但 frozen lisp 明标 tasks=KEEP/inbox=DEPRECATE 仍在用; 保守执行 drop 4 张, 记 D009 报指挥官"
+      :cargo "--workspace 0 error"
       :at "2026-04-20"))
 
   ;; ─────────────────────────────────────────────────────────

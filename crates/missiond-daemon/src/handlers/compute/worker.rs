@@ -298,11 +298,8 @@ fn codex_gate_control(state: &AppState, action: &str) -> Result<ToolResult> {
             if let Some(h) = state.worker_registry.get("vision_worker") {
                 h.set_state(WorkerState::Paused);
             }
-            if let Some(h) = state.worker_registry.get("step_narrator") {
-                h.set_state(WorkerState::Paused);
-            }
             Ok(ToolResult::text(
-                "⏸ Codex/GPT-5.4 已关闸（持久化）。vision_worker 和 step_narrator 已暂停。\n\
+                "⏸ Codex/GPT-5.4 已关闸（持久化）。vision_worker 已暂停。\n\
                  恢复：mission_worker(action=\"control\", target=\"codex\", control_action=\"resume\")"
             ))
         }
@@ -311,11 +308,8 @@ fn codex_gate_control(state: &AppState, action: &str) -> Result<ToolResult> {
             if let Some(h) = state.worker_registry.get("vision_worker") {
                 h.set_state(WorkerState::Running);
             }
-            if let Some(h) = state.worker_registry.get("step_narrator") {
-                h.set_state(WorkerState::Running);
-            }
             Ok(ToolResult::text(
-                "▶️ Codex/GPT-5.4 闸口已开启。vision_worker 和 step_narrator 已恢复运行。",
+                "▶️ Codex/GPT-5.4 闸口已开启。vision_worker 已恢复运行。",
             ))
         }
         "status" => {
@@ -324,16 +318,11 @@ fn codex_gate_control(state: &AppState, action: &str) -> Result<ToolResult> {
                 .worker_registry
                 .get("vision_worker")
                 .map(|h| format!("{:?}", h.current_state()));
-            let narrator_state = state
-                .worker_registry
-                .get("step_narrator")
-                .map(|h| format!("{:?}", h.current_state()));
             Ok(ToolResult::json_pretty(&serde_json::json!({
                 "model": "codex",
                 "disabled": disabled,
                 "status": if disabled { "closed" } else { "open" },
                 "vision_worker": vision_state,
-                "step_narrator": narrator_state,
             })))
         }
         _ => Ok(ToolResult::error(

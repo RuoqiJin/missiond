@@ -589,48 +589,7 @@ impl SlotStore for PgMissionStore {
         Ok(())
     }
 
-    // -- task.rs: events (legacy) --
-
-    async fn insert_event(&self, task_id: &str, event_type: EventType, data: Option<&serde_json::Value>, timestamp: i64) -> DbResult<i64> {
-        let data_str = data.map(|d| serde_json::to_string(d).unwrap_or_default());
-        let (id,): (i64,) = sqlx::query_as(
-            "INSERT INTO events (task_id, type, data, timestamp)
-             VALUES ($1, $2, $3, $4)
-             RETURNING id"
-        )
-        .bind(task_id)
-        .bind(event_type.as_str())
-        .bind(data_str)
-        .bind(timestamp)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(id)
-    }
-
-    async fn get_events_by_task(&self, task_id: &str) -> DbResult<Vec<TaskEvent>> {
-        let rows = sqlx::query(
-            "SELECT id, task_id, type, data, timestamp FROM events WHERE task_id = $1 ORDER BY id ASC"
-        )
-        .bind(task_id)
-        .fetch_all(&self.pool)
-        .await?;
-
-        let results = rows.iter().map(|row| {
-            let type_str: String = row.get("type");
-            let event_type = EventType::from_str(&type_str).unwrap_or(EventType::TaskCreated);
-            let data_str: Option<String> = row.get("data");
-            let data = data_str.and_then(|s| serde_json::from_str(&s).ok());
-
-            TaskEvent {
-                id: row.get("id"),
-                task_id: row.get("task_id"),
-                event_type,
-                data,
-                timestamp: row.get("timestamp"),
-            }
-        }).collect();
-        Ok(results)
-    }
+    // -- task.rs: events (legacy) removed v0.4.23 Phase 6 (table `events` dropped) --
 
     // -- dynamic_slot.rs --
 

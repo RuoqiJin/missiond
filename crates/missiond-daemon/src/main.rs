@@ -36,7 +36,7 @@ use llm::{
     codex_cli, gemini_cli, gemini_client, llm_gate, llm_gateway, minimax_client, minimax_gateway,
     prompts, sonnet_gateway,
 };
-use workers::codex::{step_narrator, vision_worker};
+use workers::codex::vision_worker;
 use workers::local::{ast_sync_worker, code_prefetch, experience_harvester};
 use workers::sonnet::{embedding_worker, translation_worker};
 
@@ -1022,14 +1022,11 @@ async fn main() -> Result<()> {
         Arc::new(state.clone()),
         shutdown_rx.clone(),
     );
-    workers::spawn_worker(
-        step_narrator::StepNarratorWorker,
-        Arc::new(state.clone()),
-        shutdown_rx.clone(),
-    );
     // v1.3.0 SSOT cutover: briefing_worker deleted — its `update_timeline_summary`
     // UPDATE pattern is incompatible with the append-only event_log. Message
     // previews come from payload_inline directly; semantic briefing is deferred.
+    // v0.4.23 Phase 6: step_narrator worker deleted together with
+    // message_narrations + narration_cursors tables.
     if state.sonnet.is_some() {
         workers::spawn_worker(
             translation_worker::TranslationWorker,

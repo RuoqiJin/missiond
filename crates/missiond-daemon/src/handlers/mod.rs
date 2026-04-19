@@ -129,7 +129,6 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
             || n == "mission_embedding_ops"
             || n == "mission_habit_scan"
             || n == "mission_token_stats"
-            || n == "mission_session_narrations"
             || n == "mission_activity_report"
             || n == "mission_message_search"
             || n == "mission_context_around"
