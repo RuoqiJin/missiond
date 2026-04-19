@@ -29,8 +29,9 @@
 
 (file-governance
   :lock                "frozen"
-  :version             "v1.0.0"
+  :version             "v1.1.0"
   :sealed-at           "2026-04-19"
+  :last-revision       "2026-04-19: v1.0.0 → v1.1.0 — god-file split design (approved by user),见 execution lisp deviations D008-D012"
   :approved-by         "指挥官 (user)"
   :change-policy       "ask-before-edit"
   :companion-log       ".missiond/v2/intent-event-bus-execution.lisp"
@@ -103,8 +104,11 @@
 
       (component append-api
         :target "crates/missiond-core/src/event/log/mod.rs"
+        :impl-target "crates/missiond-core/src/event/pipeline/step3_commit/handle.rs"
         (desc "生产者调用的唯一门面;append 成功即事件已定序并持久化")
         :api "log.append(event: impl DomainEvent, opts: AppendOpts) -> Result<AppendAck, AppendError>"
+        :trait-decl-in   "log/mod.rs — Log trait 定义"
+        :trait-impl-in   "step3_commit/handle.rs — LogWriterHandle 实现 Log trait,转发到 step 3 writer task"
 
         (struct AppendOpts
           :target "crates/missiond-core/src/event/log/mod.rs"
@@ -308,18 +312,36 @@
 
         (component log-writer
           :target "crates/missiond-core/src/event/pipeline/step3_commit/log_writer.rs"
+          :scope   "LogWriter struct + run loop + spawn 构造器 — 只负责 batch 调度,不含 backend 细节"
           :pattern   "唯一 LogWriter task 消费 append channel"
           :batching  "首条到达后 drain ≤100 条 / 10ms deadline,取先到"
           :invariant "append() Ok(Committed) ⟺ DB committed,不存在 in-flight 语义")
 
+        (component handle
+          :target "crates/missiond-core/src/event/pipeline/step3_commit/handle.rs"
+          :scope "LogWriterHandle — 客户端 facade,impl Log trait;把 log.append() 调用封装成 PendingAppend 送入 channel,等待 oneshot ack"
+          :implements "Log trait (定义在 log/mod.rs)")
+
+        (component backend-abstraction
+          :target "crates/missiond-core/src/event/pipeline/step3_commit/backend.rs"
+          :scope "WriterBackend trait + InsertRow + BackendError — Writer 和底层 DB 实现之间的抽象接口"
+          :rationale "隔离 PG 专用 SQL,方便 InMemoryLog / 未来 NATS 等替代实现")
+
+        (component pg-backend
+          :target "crates/missiond-core/src/event/pipeline/step3_commit/pg_backend.rs"
+          :scope "PgWriterBackend impl WriterBackend + map_sqlx + is_unique_violation 等 PG SQL 辅助"
+          :feature-gate "#[cfg(feature = \"postgres\")]")
+
         (component seq-authority
           :target "crates/missiond-core/src/event/pipeline/step3_commit/seq_authority.rs"
+          :scope "Seq type 定义 + 权威性不变量 doc"
           :source         "DB BIGSERIAL — 全局严格单调,单点分配"
           :crash-recovery "DB 自己保存 max(seq),无应用层对账"
           :invariant      "seq 只增不减;已分配 seq 终生不变")
 
         (component dedup-semantics
           :target "crates/missiond-core/src/event/pipeline/step3_commit/dedup.rs"
+          :scope "UNIQUE 违反检测 + collision → AlreadyExists 映射 + find_existing_seq 调用封装"
           :purpose            "Producer 重试保护,非业务去重"
           :key                "(producer_id, dedupe_key) UNIQUE INDEX WHERE dedupe_key IS NOT NULL"
           :collision-behavior "二次 append 相同 key → SELECT existing → 返回 Ok(AlreadyExists(seq)),无副作用"
@@ -327,12 +349,14 @@
 
         (component backpressure
           :target "crates/missiond-core/src/event/pipeline/step3_commit/backpressure.rs"
+          :scope "PendingAppend struct + APPEND_CHANNEL_CAPACITY 常量 + bounded mpsc try_send 包装"
           :channel   "append channel 有界 (默认 4096)"
           :overflow  "满则 append() 返回 Err(Backpressure),生产者决定重试/丢弃/panic"
           :rationale "可见失败 > 静默吞 > 无界内存膨胀")
 
         (component failure-mode
           :target "crates/missiond-core/src/event/pipeline/step3_commit/failure_mode.rs"
+          :scope "FailureState atomic flag + exp_backoff + retry 状态机 + IncidentEvent emit"
           :retry  "batch INSERT 临时错误 → exp backoff 6 次"
           :fatal  "超限 → LogWriter 进 failed state,拒新 append → AppendError::LogUnavailable"
           :self-report "进 failed 时发 IncidentEvent::Reported(severity=critical)")
@@ -361,18 +385,30 @@
 
       ;; ─── STEP 5 · tail ────────────────────────────
       (step-5 tail
-        :target "crates/missiond-core/src/event/pipeline/step5_tail/mod.rs"
+        :target "crates/missiond-core/src/event/pipeline/step5_tail/"
         (purpose "Dispatcher 独立 task 从 event_log 拉新 seq,不阻塞同步链")
 
         (component dispatcher-state
           :target "crates/missiond-core/src/event/pipeline/step5_tail/mod.rs"
+          :scope "Dispatcher struct + DispatchMetrics + re-exports"
           :state    "O(1) — AtomicI64 last_dispatched_seq"
           :does     "live fan-out 最新提交的事件给在线订阅者"
           :does-not "不替离线 consumer 扫库 / 不 global-min replay / 不维护 per-subscription 状态"
           :rationale "离线 consumer 一周不上线 → Dispatcher 零负担;Consumer 上线后自己 pull 补追")
 
+        (component tail-source
+          :target "crates/missiond-core/src/event/pipeline/step5_tail/tail_source.rs"
+          :scope "TailSource trait(抽象)+ DispatchError + TailError"
+          :rationale "抽象出 tail 数据来源,方便 InMemory / 未来 NATS 替代 PG")
+
+        (component pg-tail
+          :target "crates/missiond-core/src/event/pipeline/step5_tail/pg_tail.rs"
+          :scope "PgTailSource impl TailSource — PG 长轮询 SELECT 实现"
+          :feature-gate "#[cfg(feature = \"postgres\")]")
+
         (component tail-mechanism
-          :target "crates/missiond-core/src/event/pipeline/step5_tail/mod.rs"
+          :target "crates/missiond-core/src/event/pipeline/step5_tail/dispatcher.rs"
+          :scope "run_tail 主循环 + dispatch_one + control-gate 调用,编排各 TailSource impl"
           :source        "PostgreSQL 长轮询 SELECT WHERE seq > last_dispatched LIMIT 256 每 100ms"
           :future-optim  "可升级 LISTEN/NOTIFY,API 不变(记 revisit-trigger)"
           :ordering      "严格按 seq 升序,同 batch 保持 INSERT 顺序"
@@ -487,6 +523,7 @@
 
       (component subscription-lifecycle
         :target "crates/missiond-core/src/event/subscription/lifecycle.rs"
+        :scope "Lifecycle<T> struct + Phase enum + LifecycleError + Fetched<T> + phase-1/phase-2 切换编排"
         (desc "订阅者上线的两阶段模型 — tail-and-pull")
 
         (phase-1-bootstrap
@@ -498,6 +535,13 @@
           :action        "切 Dispatcher 的 Topic broadcast Receiver,进入 live 模式"
           :invariant     "live 模式下事件按 seq 严格单调到达(同 Dispatcher 派发顺序)"
           :on-disconnect "broadcast Lagged → 记 SlowConsumer incident → 切回 phase-1 重 pull"))
+
+      (component live-source
+        :target "crates/missiond-core/src/event/subscription/live_source.rs"
+        :scope "LiveSource trait(订阅者接收 live 事件的抽象)+ BroadcastLiveSource + MpscLiveSource 两个实现"
+        :rationale "Lifecycle 依赖 LiveSource trait,生产用 Broadcast(Topic),测试用 Mpsc,抽象/实现分离"
+        :abstraction "LiveSource<T>: recv() + try_recv() 最小接口"
+        :impls 2)
 
       (component cursor-store
         :target "crates/missiond-core/src/event/subscription/cursor_store.rs"
@@ -527,16 +571,24 @@
         :design-contract     "每个 consumer 设计评审必须回答:同一事件重跑是否安全?如何保证?答案写进文档")
 
       (subscription-combinators
-        :target "crates/missiond-core/src/event/subscription/combinators.rs"
-        (desc "声明式订阅组合子,替代每个 consumer 手写样板")
-        (debounce   :api "sub.debounce(Duration::from_millis(500))"
+        :target "crates/missiond-core/src/event/subscription/combinators/"
+        :trait-entries-target "crates/missiond-core/src/event/subscription/combinators/mod.rs"
+        (desc "声明式订阅组合子,替代每个 consumer 手写样板;每个 combinator 独立文件")
+        (debounce   :target "crates/missiond-core/src/event/subscription/combinators/debounce.rs"
+                    :api "sub.debounce(Duration::from_millis(500))"
                     :semantics "固定 deadline 窗口,到期只触发一次,不滑动")
-        (rate-limit :api "sub.rate_limit(max_per_sec)")
-        (coalesce   :api "sub.coalesce(|prev, new| ...)"
+        (rate-limit :target "crates/missiond-core/src/event/subscription/combinators/rate_limit.rs"
+                    :api "sub.rate_limit(max_per_sec)")
+        (coalesce   :target "crates/missiond-core/src/event/subscription/combinators/coalesce.rs"
+                    :api "sub.coalesce(|prev, new| ...)"
                     :semantics "合并语义相同的连续事件(如多条 StateChanged 只保留最终态)")
-        (filter     :api "sub.filter(|e| e.is_some_kind())")
-        (map        :api "sub.map(|e| transform(e))")
-        (batch      :api "sub.batch(max: 50, window: 500ms) — 聚合成 Vec<E> 再投递")
+        (filter     :target "crates/missiond-core/src/event/subscription/combinators/filter.rs"
+                    :api "sub.filter(|e| e.is_some_kind())")
+        (map        :target "crates/missiond-core/src/event/subscription/combinators/map.rs"
+                    :api "sub.map(|e| transform(e))")
+        (batch      :target "crates/missiond-core/src/event/subscription/combinators/batch.rs"
+                    :api "sub.batch(max: 50, window: 500ms) — 聚合成 Vec<E> 再投递"
+                    :extra-type "EventBatch<T> 也在此文件")
 
         :rationale "旧 event_router 8 consumers 各自手写去抖;combinators 让模式声明化,实现一处"))
 
@@ -573,6 +625,12 @@
 
       (testing-story
         :in-memory-bus-target "crates/missiond-core/src/event/in_memory/"
+        :in-memory-breakdown
+          ("log.rs           — InMemoryLog struct + Log trait impl(公共 API)"
+           "writer_task.rs   — WriterTask + Pending + payload_bytes(内部 writer 任务)"
+           "storage.rs       — StoredRow + stored_to_logged 辅助 + IN_MEMORY_APPEND_CAPACITY"
+           "observability.rs — ObservabilityAppender impl(metrics 桥接)"
+           "cursor_store.rs / blob_store.rs / control_gate.rs — 各自同语义内存实现,各一文件")
         :chaos-tests-target   "crates/missiond-core/tests/event_chaos.rs"
         :integration-tests-target "crates/missiond-core/tests/event_log_integration.rs + event_dispatcher_integration.rs + event_subscription_integration.rs"
         :e2e-test-target "crates/missiond-daemon/tests/e2e_bus_golden_path.rs"
