@@ -16,9 +16,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "action": {"type": "string", "enum": ["search", "get", "list"], "default": "search"},
                     "query": {"type": "string", "description": "[search] 搜索关键词"},
                     "category": {"type": "string", "description": "[search/list] 分类过滤"},
-                    "limit": {"type": "integer", "description": "[search/list] 返回条数上限(最大 50)", "default": 10},
-                    "offset": {"type": "integer", "description": "[search/list] 分页偏移", "default": 0},
-                    "compact": {"type": "boolean", "description": "[list] 紧凑模式: 只返回 key/category/summary 骨架", "default": false},
+                    "limit": {"type": "integer", "description": "[search] 返回条数上限(最大 50)", "default": 10},
+                    "offset": {"type": "integer", "description": "[search] 分页偏移", "default": 0},
                     "search_mode": {"type": "string", "description": "[search] exact=纯相关性; explore=含 MMR 多样性", "enum": ["exact", "explore"], "default": "explore"},
                     "key": {"type": "string", "description": "[get] 精确 key"}
                 }

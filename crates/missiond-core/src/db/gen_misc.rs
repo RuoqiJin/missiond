@@ -122,43 +122,6 @@ impl MissionDB {
         }
 
 
-        conn.execute_batch("CREATE TABLE IF NOT EXISTS system_timeline (\n    seq INTEGER PRIMARY KEY,\n    trace_id TEXT,\n    span_id TEXT,\n    parent_span_id TEXT,\n    event_type TEXT NOT NULL,\n    summary TEXT,\n    payload TEXT NOT NULL,\n    created_at TEXT NOT NULL DEFAULT (datetime('now'))\n)")?;
-
-        let existing_cols: Vec<String> = conn.prepare("PRAGMA table_info(system_timeline)")?
-            .query_map([], |row| row.get::<_, String>(1))?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        if !existing_cols.iter().any(|c| c == "seq") {
-            conn.execute_batch("ALTER TABLE system_timeline ADD COLUMN seq INTEGER")?;
-        }
-        if !existing_cols.iter().any(|c| c == "trace_id") {
-            conn.execute_batch("ALTER TABLE system_timeline ADD COLUMN trace_id TEXT")?;
-        }
-        if !existing_cols.iter().any(|c| c == "span_id") {
-            conn.execute_batch("ALTER TABLE system_timeline ADD COLUMN span_id TEXT")?;
-        }
-        if !existing_cols.iter().any(|c| c == "parent_span_id") {
-            conn.execute_batch("ALTER TABLE system_timeline ADD COLUMN parent_span_id TEXT")?;
-        }
-        if !existing_cols.iter().any(|c| c == "event_type") {
-            conn.execute_batch("ALTER TABLE system_timeline ADD COLUMN event_type TEXT")?;
-        }
-        if !existing_cols.iter().any(|c| c == "summary") {
-            conn.execute_batch("ALTER TABLE system_timeline ADD COLUMN summary TEXT")?;
-        }
-        if !existing_cols.iter().any(|c| c == "payload") {
-            conn.execute_batch("ALTER TABLE system_timeline ADD COLUMN payload TEXT")?;
-        }
-        if !existing_cols.iter().any(|c| c == "created_at") {
-            conn.execute_batch("ALTER TABLE system_timeline ADD COLUMN created_at TEXT DEFAULT (datetime('now'))")?;
-        }
-
-        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_tl_created ON system_timeline(created_at)")?;
-        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_tl_type ON system_timeline(event_type)")?;
-        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_tl_trace ON system_timeline(trace_id)")?;
-        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_tl_parent ON system_timeline(parent_span_id)")?;
-
         conn.execute_batch("CREATE TABLE IF NOT EXISTS agent_questions (\n    id TEXT PRIMARY KEY,\n    task_id TEXT,\n    slot_id TEXT,\n    session_id TEXT,\n    question TEXT NOT NULL,\n    context TEXT NOT NULL DEFAULT '',\n    status TEXT NOT NULL DEFAULT 'pending',\n    answer TEXT,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL,\n    target TEXT NOT NULL DEFAULT 'user',\n    options TEXT,\n    decision_type TEXT NOT NULL DEFAULT 'implementation',\n    retry_count INTEGER NOT NULL DEFAULT 0,\n    routing_trace TEXT\n)")?;
 
         let existing_cols: Vec<String> = conn.prepare("PRAGMA table_info(agent_questions)")?
@@ -557,17 +520,6 @@ impl MissionDB {
         Ok(())
     }
 
-    // ========== system_timeline ==========
-
-    pub fn update_timeline_summary(&self, seq: i64) -> DbResult<bool> {
-        let conn = self.conn();
-        conn.execute(
-            "UPDATE system_timeline SET summary = ?1 WHERE seq = ?2",
-            params![summary, seq],
-        )?;
-        Ok(())
-    }
-
     // ========== agent_questions ==========
 
     pub fn get_agent_question(&self, id: &str) -> DbResult<Option<AgentQuestion>> {
@@ -779,50 +731,6 @@ pub trait MissionDBCustomLogic {
     /// Logic: GROUP BY file_path: name list, function/struct counts
     /// Table: ast_nodes
     fn ast_module_summaries(&self, repo: &str) -> DbResult<Vec<ModuleAstSummary>>;
-
-    /// Logic: transaction batch INSERT
-    /// Table: system_timeline
-    fn insert_timeline_batch(&self, events: &[(Option<String>, Option<String>, Option<String>, String, Option<String>, String)]) -> DbResult<()>;
-
-    /// Logic: WHERE seq > since ORDER BY seq ASC LIMIT
-    /// Table: system_timeline
-    fn query_timeline_since(&self, since_seq: i64, limit: usize) -> DbResult<Vec<TimelineRow>>;
-
-    /// Logic: SELECT MAX(seq)
-    /// Table: system_timeline
-    fn timeline_latest_seq(&self) -> DbResult<i64>;
-
-    /// Logic: DELETE WHERE created_at < N days ago
-    /// Table: system_timeline
-    fn cleanup_timeline_ttl(&self, days: i64) -> DbResult<usize>;
-
-    /// Logic: WHERE summary IS NULL AND payload length >= min
-    /// Table: system_timeline
-    fn find_timeline_needing_briefing(&self, min_content_chars: usize, limit: usize) -> DbResult<Vec<(i64, String, String, Option<String>)>>;
-
-    /// Logic: dynamic WHERE with 5 optional filters
-    /// Table: system_timeline
-    fn query_timeline_filtered(&self, event_type: Option<&str>, trace_id: Option<&str>, since: Option<&str>, until: Option<&str>, query: Option<&str>, limit: usize) -> DbResult<Vec<TimelineRow>>;
-
-    /// Logic: proportional sampling across event types
-    /// Table: system_timeline
-    fn query_timeline_stratified(&self, since: Option<&str>, until: Option<&str>, limit: usize) -> DbResult<Vec<TimelineRow>>;
-
-    /// Logic: WHERE trace_id ORDER BY seq ASC
-    /// Table: system_timeline
-    fn query_timeline_by_trace(&self, trace_id: &str) -> DbResult<Vec<TimelineRow>>;
-
-    /// Logic: multi-dimension aggregation: by_type, total, time range
-    /// Table: system_timeline
-    fn query_timeline_stats(&self, since: Option<&str>, until: Option<&str>) -> DbResult<TimelineStats>;
-
-    /// Logic: FTS5 + LIKE fallback with optional type/time filters
-    /// Table: system_timeline
-    fn query_timeline_search(&self, query: &str, event_type: Option<&str>, since: Option<&str>, until: Option<&str>, limit: usize) -> DbResult<Vec<TimelineRow>>;
-
-    /// Logic: SELECT seq, summary WHERE trace_id matches session pattern
-    /// Table: system_timeline
-    fn get_briefing_summaries_for_session(&self, session_id: &str) -> DbResult<HashMap<i64, String>>;
 
     /// Logic: INSERT with auto-id + timestamps
     /// Table: agent_questions

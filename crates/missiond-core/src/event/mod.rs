@@ -43,6 +43,7 @@ pub mod metrics;
 pub mod pipeline;
 pub mod projection;
 pub mod subscription;
+pub mod wire_format;
 
 pub use domain::Domain;
 pub use event_trait::DomainEvent;

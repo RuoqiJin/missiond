@@ -9,13 +9,19 @@
 //!
 //! Design:
 //!
-//! * `event_type` column = `"<domain>::<kind>"` (legible for AI consumers).
-//!   The WS live stream still emits the 52-arm v1 wire_type via
-//!   `daemon/src/bus/ws_bridge.rs::v2_logged_to_v1_wire_format`; catch-up
-//!   here prefers the projection format. Mixing is OK because catch-up is
-//!   always client-requested and the browser code handles both shapes.
-//! * `summary` comes from `payload_inline.preview` / `.summary` if present,
-//!   else empty.
+//! * `event_type` column = v1 wire_type (e.g. `"board_task_created"`), produced
+//!   by [`crate::event::wire_format::v2_payload_to_v1_shape`]. This is the
+//!   **SSOT** shared with the live `ws_bridge` path — catch-up replay and
+//!   live push emit byte-identical envelopes. Previously catch-up returned
+//!   `"domain::kind"` and live returned the v1 wire_type, which broke the
+//!   frontend on reconnect; now both converge on v1 wire_type.
+//! * `payload` column = v1-shape JSON string (also from the SSOT mapper).
+//!   This differs from the raw `payload_inline` (which is externally-tagged
+//!   `{"VariantName": {...}}`). Callers that need the raw shape should
+//!   query `event_log` directly.
+//! * `summary` is extracted from the raw `payload_inline` (the
+//!   externally-tagged shape) **before** wire-mapping, so the
+//!   `summary / preview / title` heuristic still works.
 //! * Search uses Postgres FTS on `payload_inline::text` (index added by
 //!   migration `20260420100000_event_log_fts.sql`).
 
@@ -27,6 +33,7 @@ use sqlx::PgPool;
 
 use crate::db::error::{DbError, DbResult};
 use crate::db::shared::{LatencyStats, TimelineRow, TimelineStats};
+use crate::event::wire_format::v2_payload_to_v1_shape;
 
 /// Parse relative time strings like "10min", "1h", "24h", "7d" into timestamp strings.
 /// Mirrors the old `pg/timeline.rs` helper so the mission_timeline MCP + catch-up
@@ -90,16 +97,26 @@ struct RawEventLogRow {
 
 impl RawEventLogRow {
     fn into_timeline_row(self) -> TimelineRow {
-        let event_type = format!("{}::{}", self.domain, self.kind);
-        let (summary, payload_str) = project_payload(&self.payload_inline);
+        // Extract summary from the raw externally-tagged payload BEFORE wire
+        // mapping — the v1-shape payload is flat and won't retain the
+        // heuristic keys reliably.
+        let summary = extract_summary(&self.payload_inline);
+
+        // Map `(domain, kind, raw_payload)` through the SSOT v1-wire mapper.
+        // This is the same transform that the live `ws_bridge` path applies,
+        // so catch-up + live emit byte-identical envelopes.
+        let raw_payload = self.payload_inline.unwrap_or(serde_json::Value::Null);
+        let (wire_type, v1_payload) =
+            v2_payload_to_v1_shape(&self.domain, &self.kind, &raw_payload);
+
         TimelineRow {
             seq: self.seq,
             trace_id: self.trace_id.map(|u| u.to_string()),
             span_id: self.span_id.map(|u| u.to_string()),
             parent_span_id: self.parent_span_id.map(|u| u.to_string()),
-            event_type,
+            event_type: wire_type.to_string(),
             summary,
-            payload: payload_str,
+            payload: v1_payload.to_string(),
             created_at: self.ts.format("%Y-%m-%d %H:%M:%S").to_string(),
         }
     }
@@ -108,33 +125,41 @@ impl RawEventLogRow {
 /// Extract a legible `summary` from the variant-wrapped payload.
 /// v2 payload shape is `{"VariantName": {...fields...}}` (externally tagged).
 /// We peek into the single variant and prefer `summary` > `preview` > `title`.
-fn project_payload(payload: &Option<serde_json::Value>) -> (Option<String>, String) {
-    let Some(payload) = payload else {
-        return (None, "null".to_string());
-    };
-    // Unwrap the externally-tagged variant if present.
+fn extract_summary(payload: &Option<serde_json::Value>) -> Option<String> {
+    let payload = payload.as_ref()?;
     let inner = payload
         .as_object()
         .and_then(|obj| obj.values().next())
         .unwrap_or(payload);
-    let summary = inner
+    inner
         .get("summary")
         .or_else(|| inner.get("preview"))
         .or_else(|| inner.get("title"))
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    (summary, payload.to_string())
+        .map(|s| s.to_string())
 }
 
-/// Parse `event_type` (projection form `"domain::kind"`) back into
-/// `(domain, kind)` parts for SQL filtering. Returns `None` for either side
-/// if the legacy wire_type (no `::` separator) is passed — caller should
-/// fall back to ILIKE match on domain or payload.
+/// Parse `event_type` input for SQL filtering on `event_log.domain` and
+/// `event_log.kind`. Accepts three forms (in order of preference):
+///
+/// 1. `"domain::kind"` (internal code, e.g. `"message::logged"`) — splits
+///    on `::` and returns both parts.
+/// 2. v1 wire_type (e.g. `"board_task_created"`) — looked up via
+///    [`crate::event::wire_format::v1_wire_type_to_v2_parts`]. Returns
+///    `(domain, kind?)`; the `kind?` may be `None` for many-to-one wire
+///    types that need domain-only match.
+/// 3. Anything else — returns `(None, None)` and the caller treats the
+///    input as a literal kind match (legacy best-effort).
 fn parse_event_type_filter(event_type: &str) -> (Option<String>, Option<String>) {
-    match event_type.split_once("::") {
-        Some((d, k)) => (Some(d.to_string()), Some(k.to_string())),
-        None => (None, None),
+    if let Some((d, k)) = event_type.split_once("::") {
+        return (Some(d.to_string()), Some(k.to_string()));
     }
+    if let Some((d, k)) =
+        crate::event::wire_format::v1_wire_type_to_v2_parts(event_type)
+    {
+        return (Some(d.to_string()), k.map(|s| s.to_string()));
+    }
+    (None, None)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -486,4 +511,146 @@ pub async fn query_timeline_search(
     q = q.bind(limit);
     let rows = q.fetch_all(pool).await.map_err(DbError::from)?;
     Ok(rows.into_iter().map(RawEventLogRow::into_timeline_row).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use serde_json::json;
+
+    /// Construct a synthetic event_log row bypassing the DB — sufficient to
+    /// exercise the pure projection mapping.
+    fn make_raw(domain: &str, kind: &str, payload: serde_json::Value) -> RawEventLogRow {
+        RawEventLogRow {
+            seq: 100,
+            domain: domain.to_string(),
+            kind: kind.to_string(),
+            payload_inline: Some(payload),
+            trace_id: None,
+            span_id: Some(uuid::Uuid::nil()),
+            parent_span_id: None,
+            ts: Utc.with_ymd_and_hms(2026, 4, 19, 0, 0, 0).unwrap(),
+        }
+    }
+
+    /// The **SSOT test** — proves catch-up emits v1 wire_type, not
+    /// `"domain::kind"`. If this ever regresses to `"board::task_created"`
+    /// the frontend live/catch-up drift is back.
+    #[test]
+    fn catch_up_emits_v1_wire_type_not_domain_kind() {
+        let raw = make_raw(
+            "board",
+            "task_created",
+            json!({
+                "TaskCreated": {
+                    "task_id": "t-1",
+                    "title": "hello",
+                    "category": "code"
+                }
+            }),
+        );
+        let row = raw.into_timeline_row();
+        assert_eq!(
+            row.event_type, "board_task_created",
+            "catch-up should emit v1 wire_type, matching live stream"
+        );
+        assert!(
+            !row.event_type.contains("::"),
+            "event_type must NOT contain `::` — drift detected"
+        );
+
+        // Payload should also be v1 shape (flat keys + `action`), not
+        // externally-tagged.
+        let payload_val: serde_json::Value = serde_json::from_str(&row.payload).unwrap();
+        assert_eq!(payload_val.get("task_id").unwrap(), "t-1");
+        assert_eq!(payload_val.get("title").unwrap(), "hello");
+        assert_eq!(payload_val.get("action").unwrap(), "created");
+        assert!(
+            payload_val.get("TaskCreated").is_none(),
+            "payload must NOT contain externally-tagged variant name"
+        );
+    }
+
+    #[test]
+    fn catch_up_slot_state_changed_wire_type() {
+        let raw = make_raw(
+            "slot",
+            "became_idle",
+            json!({ "BecameIdle": { "slot_id": "slot-a" } }),
+        );
+        let row = raw.into_timeline_row();
+        assert_eq!(row.event_type, "slot_state_changed");
+    }
+
+    #[test]
+    fn catch_up_message_logged_routes_by_role() {
+        let raw = make_raw(
+            "message",
+            "logged",
+            json!({
+                "Logged": {
+                    "message_id": 1,
+                    "session_id": "s-1",
+                    "role": "user",
+                    "content_chars": 5,
+                    "preview": "hello"
+                }
+            }),
+        );
+        let row = raw.into_timeline_row();
+        // Role-based wire_type routing preserved.
+        assert_eq!(row.event_type, "user_message");
+    }
+
+    #[test]
+    fn summary_still_extracted_from_raw_payload() {
+        let raw = make_raw(
+            "slot",
+            "task_dispatched",
+            json!({
+                "TaskDispatched": {
+                    "slot_id": "slot-a",
+                    "task_id": "t-1",
+                    "purpose": "code-review",
+                    "prompt_chars": 100,
+                    "preview": "Please review the diff",
+                    "cited_kb_ids": []
+                }
+            }),
+        );
+        let row = raw.into_timeline_row();
+        assert_eq!(row.summary.as_deref(), Some("Please review the diff"));
+    }
+
+    #[test]
+    fn parse_event_type_filter_handles_all_input_forms() {
+        // Form 1: "domain::kind" — internal code style.
+        assert_eq!(
+            parse_event_type_filter("message::logged"),
+            (Some("message".into()), Some("logged".into()))
+        );
+
+        // Form 2: v1 wire_type — frontend style.
+        assert_eq!(
+            parse_event_type_filter("board_task_created"),
+            (Some("board".into()), Some("task_created".into()))
+        );
+
+        // Form 2 many-to-one: domain-only match.
+        assert_eq!(
+            parse_event_type_filter("slot_state_changed"),
+            (Some("slot".into()), None)
+        );
+        assert_eq!(
+            parse_event_type_filter("user_message"),
+            (Some("message".into()), Some("logged".into()))
+        );
+
+        // Form 3: unknown — caller falls back to best-effort kind match.
+        assert_eq!(
+            parse_event_type_filter("totally_unknown_type"),
+            (None, None)
+        );
+    }
 }

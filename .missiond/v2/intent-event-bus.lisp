@@ -738,12 +738,13 @@
                              :target "crates/missiond-core/src/event/pipeline/step5_tail/pg_tail.rs")
           (read-catchup      "subscription 订阅启动时 phase-1 pull — lifecycle 调用 LogReader 执行 SELECT"
                              :target "crates/missiond-core/src/event/log/reader.rs")
-          (read-ui-projection "v1.3.0+ — UI readers 经 projection 把 event_log 转成 timeline 形 (映射 domain::kind→event_type, 抽 summary from payload_inline)"
+          (read-ui-projection "v1.3.0+ — UI readers 经 projection 把 event_log 转成 timeline 形; event_type + payload 走 SSOT v1-wire mapper (原 'domain::kind' 仅保留于 AI-facing stats/stratified 分析接口, UI catch-up 路径已对齐 live ws_bridge)"
                               :consumers "mission_timeline MCP tool + WS timeline-event-stream"
-                              :projection-options
-                                ("(a) SQL VIEW timeline_view AS SELECT ... FROM event_log"
-                                 "(b) 查询层代码转换 (handlers/comm/timeline.rs 改读 event_log)")
-                              :pending-migration "v1.3.0 lisp 声明目标态; 代码迁移待实施"
+                              :ssot-wire-mapper "crates/missiond-core/src/event/wire_format.rs"
+                              :target ("crates/missiond-core/src/event/projection.rs"
+                                       "crates/missiond-core/src/event/wire_format.rs"
+                                       "crates/missiond-daemon/src/bus/ws_bridge.rs")
+                              :drift-elimination "live (ws_bridge) + catch-up (projection) 共用 wire_format::v2_payload_to_v1_shape → event_type=v1 wire_type (如 'board_task_created'), payload=flat v1 shape; 12 个 byte-equiv 测试 (daemon) + 5 个 catch-up SSOT 测试 (core::event::projection) 锁定一致性"
                               :fts-requirement "event_log.payload_inline 需补 GIN FTS 索引 (mission_timeline FTS 搜索功能)")
           (retention         "lifecycle-maintenance 每日清理 ephemeral / 30 天过期"
                              :target "crates/missiond-core/src/event/lifecycle/retention.rs"))

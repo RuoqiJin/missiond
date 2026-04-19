@@ -982,23 +982,7 @@ impl MissionDB {
             );"
         )?;
 
-        // Phase 6: System Timeline — persistent event log with global monotonic seq
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS system_timeline (
-                seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                trace_id TEXT,
-                span_id TEXT,
-                parent_span_id TEXT,
-                event_type TEXT NOT NULL,
-                summary TEXT,
-                payload TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
-            );
-            CREATE INDEX IF NOT EXISTS idx_tl_created ON system_timeline(created_at);
-            CREATE INDEX IF NOT EXISTS idx_tl_type ON system_timeline(event_type);
-            CREATE INDEX IF NOT EXISTS idx_tl_trace ON system_timeline(trace_id);
-            CREATE INDEX IF NOT EXISTS idx_tl_parent ON system_timeline(parent_span_id);"
-        )?;
+        // system_timeline dropped per PG SSOT cutover (commit 6789509) — replaced by event_log.
 
         // Message translations — side table for async translated content (e.g. thinking → Chinese)
         conn.execute_batch(
@@ -1228,48 +1212,7 @@ impl MissionDB {
             tracing::info!("Migration: added tool_name column to conversation_messages");
         }
 
-        // ── Timeline FTS5 — full-text search for system_timeline ──
-        let has_timeline_fts: bool = conn.query_row(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='system_timeline_fts'",
-            [],
-            |row| row.get(0),
-        )?;
-        if !has_timeline_fts {
-            conn.execute_batch(
-                "CREATE VIRTUAL TABLE system_timeline_fts USING fts5(
-                    summary, payload,
-                    event_type UNINDEXED,
-                    content='system_timeline', content_rowid='seq',
-                    tokenize='unicode61'
-                );
-
-                -- Populate from existing data
-                INSERT INTO system_timeline_fts(rowid, summary, payload, event_type)
-                    SELECT seq, COALESCE(summary, ''), payload, event_type FROM system_timeline;
-
-                -- Auto-sync triggers
-                CREATE TRIGGER IF NOT EXISTS trg_timeline_fts_insert
-                AFTER INSERT ON system_timeline BEGIN
-                    INSERT INTO system_timeline_fts(rowid, summary, payload, event_type)
-                    VALUES (NEW.seq, COALESCE(NEW.summary, ''), NEW.payload, NEW.event_type);
-                END;
-
-                CREATE TRIGGER IF NOT EXISTS trg_timeline_fts_delete
-                AFTER DELETE ON system_timeline BEGIN
-                    INSERT INTO system_timeline_fts(system_timeline_fts, rowid, summary, payload, event_type)
-                    VALUES ('delete', OLD.seq, OLD.summary, OLD.payload, OLD.event_type);
-                END;
-
-                CREATE TRIGGER IF NOT EXISTS trg_timeline_fts_update
-                AFTER UPDATE ON system_timeline BEGIN
-                    INSERT INTO system_timeline_fts(system_timeline_fts, rowid, summary, payload, event_type)
-                    VALUES ('delete', OLD.seq, OLD.summary, OLD.payload, OLD.event_type);
-                    INSERT INTO system_timeline_fts(rowid, summary, payload, event_type)
-                    VALUES (NEW.seq, COALESCE(NEW.summary, ''), NEW.payload, NEW.event_type);
-                END;"
-            )?;
-            tracing::info!("Migration: created system_timeline_fts with auto-sync triggers");
-        }
+        // system_timeline_fts dropped with system_timeline (commit 6789509) — event_log FTS lives in migrations/20260420100000_event_log_fts.sql (PG tsvector).
 
         // Phase E: beacon harvest_count (self-evolution: skill synthesis frequency tracking)
         {

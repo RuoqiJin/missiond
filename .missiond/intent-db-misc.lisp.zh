@@ -31,20 +31,7 @@
     (table ast_file_meta
       :zh "表: ast_file_meta")
 
-    (table system_timeline
-      :zh "表: system_timeline"
-      (op insert_timeline_batch :zh "操作 insert_timeline_batch: 事务批量 INSERT")
-      (op query_timeline_since :zh "操作 query_timeline_since: seq 大于阈值，按 seq 升序 LIMIT")
-      (op timeline_latest_seq :zh "操作 timeline_latest_seq: SELECT MAX(seq)")
-      (op cleanup_timeline_ttl :zh "操作 cleanup_timeline_ttl: 删除 N 天前数据")
-      (op find_timeline_needing_briefing :zh "操作 find_timeline_needing_briefing: summary 为空且 payload 长度 >= 阈值")
-      (op update_timeline_summary :zh "操作 update_timeline_summary: 按 seq 更新 summary")
-      (op query_timeline_filtered :zh "操作 query_timeline_filtered: 5 个可选过滤器的动态 WHERE")
-      (op query_timeline_stratified :zh "操作 query_timeline_stratified: 按事件类型比例采样")
-      (op query_timeline_by_trace :zh "操作 query_timeline_by_trace: 按 trace_id 查询，按 seq 升序")
-      (op query_timeline_stats :zh "操作 query_timeline_stats: 多维聚合 by_type、总数、时间范围")
-      (op query_timeline_search :zh "操作 query_timeline_search: FTS5 + LIKE 兜底，含可选类型/时间过滤")
-      (op get_briefing_summaries_for_session :zh "操作 get_briefing_summaries_for_session: 按 session 匹配 trace_id 获取 seq 与 summary"))
+    ;; system_timeline 于 commit 6789509 废弃 — 由 event_log 取代
 
     (table agent_questions
       :zh "表: agent_questions"
@@ -156,7 +143,6 @@
 
     :notes ("" "" "表: ast_nodes" "" "" ""
             "表: ast_file_meta" "" "" ""
-            "表: system_timeline" "" "" ""
             "表: agent_questions" "" "" ""
             "表: gemini_requests" "" "" ""
             "表: gemini_file_uploads" "" "" ""

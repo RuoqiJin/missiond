@@ -1,7 +1,8 @@
 ;; ══════════════════════════════════════════════════════════════
 ;; MissionD DB Layer — Remaining Modules (SQLite)
-;; ast, timeline, router_chat, question, gemini_log,
+;; ast, router_chat, question, gemini_log,
 ;; narration, dynamic_slot, incident, vision
+;; (system_timeline dropped per commit 6789509 — replaced by event_log)
 ;; ══════════════════════════════════════════════════════════════
 
 (pattern crud-gateway
@@ -55,36 +56,7 @@
     (col updated_at  :type timestamptz :default-now)
     (pk (repo file_path)))
 
-  ;; ┌──────────────────────────────────────────────────────────┐
-  ;; │ Table: system_timeline                                   │
-  ;; └──────────────────────────────────────────────────────────┘
-  (table system_timeline
-    (col seq            :type bigint  :pk)
-    (col trace_id       :type text    :nullable)
-    (col span_id        :type text    :nullable)
-    (col parent_span_id :type text    :nullable)
-    (col event_type     :type text)
-    (col summary        :type text    :nullable)
-    (col payload        :type text)
-    (col created_at     :type timestamptz :default-now)
-
-    (idx idx_tl_created :cols (created_at))
-    (idx idx_tl_type    :cols (event_type))
-    (idx idx_tl_trace   :cols (trace_id))
-    (idx idx_tl_parent  :cols (parent_span_id))
-
-    (op insert_timeline_batch :kind custom :params ((events "&[(Option<String>, Option<String>, Option<String>, String, Option<String>, String)]")) :returns "()" :logic "transaction batch INSERT")
-    (op query_timeline_since  :kind custom :params ((since_seq "i64") (limit "usize")) :returns "Vec<TimelineRow>" :logic "WHERE seq > since ORDER BY seq ASC LIMIT")
-    (op timeline_latest_seq   :kind custom :returns "i64" :logic "SELECT MAX(seq)")
-    (op cleanup_timeline_ttl  :kind custom :params ((days "i64")) :returns "usize" :logic "DELETE WHERE created_at < N days ago")
-    (op find_timeline_needing_briefing :kind custom :params ((min_content_chars "usize") (limit "usize")) :returns "Vec<(i64, String, String, Option<String>)>" :logic "WHERE summary IS NULL AND payload length >= min")
-    (op update_timeline_summary :kind update :where ((seq "i64")) :set ((summary "&str")) :returns "bool")
-    (op query_timeline_filtered :kind custom :params ((event_type "Option<&str>") (trace_id "Option<&str>") (since "Option<&str>") (until "Option<&str>") (query "Option<&str>") (limit "usize")) :returns "Vec<TimelineRow>" :logic "dynamic WHERE with 5 optional filters")
-    (op query_timeline_stratified :kind custom :params ((since "Option<&str>") (until "Option<&str>") (limit "usize")) :returns "Vec<TimelineRow>" :logic "proportional sampling across event types")
-    (op query_timeline_by_trace :kind custom :where ((trace_id "&str")) :returns "Vec<TimelineRow>" :logic "WHERE trace_id ORDER BY seq ASC")
-    (op query_timeline_stats :kind custom :params ((since "Option<&str>") (until "Option<&str>")) :returns "TimelineStats" :logic "multi-dimension aggregation: by_type, total, time range")
-    (op query_timeline_search :kind custom :params ((query "&str") (event_type "Option<&str>") (since "Option<&str>") (until "Option<&str>") (limit "usize")) :returns "Vec<TimelineRow>" :logic "FTS5 + LIKE fallback with optional type/time filters")
-    (op get_briefing_summaries_for_session :kind custom :where ((session_id "&str")) :returns "HashMap<i64, String>" :logic "SELECT seq, summary WHERE trace_id matches session pattern"))
+  ;; system_timeline dropped per commit 6789509 — replaced by migrations/20260419000000_event_log.sql
 
   ;; ┌──────────────────────────────────────────────────────────┐
   ;; │ Table: agent_questions                                   │
