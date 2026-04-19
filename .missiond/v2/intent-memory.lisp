@@ -23,7 +23,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.17")
+  (version "draft-v0.4.18")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -116,6 +116,133 @@
         (image_descriptions    :benefit "项目级图片注释"    :owner-note "category system-support; 独立按 hash 去重")
         (router_chat_archive   :benefit "项目级 router 归档" :owner-note "category system-support")
         (flows-yaml-files      :benefit "项目私有 flow 模板" :kind "文件, 非 DB"))))
+
+
+  ;; ═════════════════════════════════════════════════════════════
+  ;;  Pillar Interfaces — memory pillar 对外 4 个接口维度
+  ;;  v0.4.18 引入: 按消费者类别切 surface, 和 8 module 的业务切分正交
+  ;;  module 是 SSOT (具体 writer/reader 定义); 本 section 是契约层 (语义/稳定性/协议)
+  ;;  每个 writer/reader 通过 :binds-to [:surface-name] 绑定, 形成 module × surface 反向索引
+  ;; ═════════════════════════════════════════════════════════════
+  (pillar-interfaces
+    (desc "memory pillar 对外暴露的 4 个接口维度 — 按消费者类别切, 和 8 module 的业务切分正交")
+    (design-principle "module 是 SSOT (具体 writer/reader 定义), pillar-interfaces 是契约层 (语义 + 稳定性 + 协议)")
+    (binding-protocol "每个 module 的 writer/reader 通过 :binds-to [:surface-name] 指向本层, 形成 module × surface 反向索引")
+    (created "v0.4.18 (2026-04-20)")
+
+    ;; ─────────────────────────────────────────────
+    ;; Surface 1: MCP Surface — 对 MCP client 暴露
+    ;; ─────────────────────────────────────────────
+    (interface mcp-surface
+      (purpose "对 MCP client(Claude Code / 其他 Agent)暴露的 CRUD + query API")
+      (protocol "JSON-RPC over stdio (rmcp)")
+      (code-location "crates/missiond-mcp/src/tools/*.rs + crates/missiond-daemon/src/handlers/*.rs")
+      (stability-contract
+        (breaking "参数 schema / response schema 破坏性变更 → 走 forge 冲压 major version")
+        (additive "加新 tool / 加可选参数 → 走 forge minor version")
+        (lifecycle "tool 弃用需 deprecated 标记 + 至少 1 版本过渡期"))
+      (current-tool-families
+        (family-project "mission_project / mission_intent / mission_skill_*")
+        (family-board "mission_board_create / _query / _update / _claim / _retry / _delete / _decompose / _note_add")
+        (family-kb "mission_kb_query / _mutate / _remember / _ops / mission_insight / mission_code_search / mission_universe_graph")
+        (family-conversation "mission_conversation_query / _analyze / _reconcile / mission_retrospective_manage / mission_audit")
+        (family-observability "mission_llm_trace / mission_cost_report (🚧) / mission_incident / mission_infra_query")
+        (family-slot "mission_slots / mission_slot_history / mission_compute_slot")
+        (family-intent-layer "mission_intent / mission_plan / mission_workflow (TBD, v0.4.17 声明)")
+        (family-system "mission_sys_config / mission_sys_logs / mission_inbox / mission_router_chat")))
+
+    ;; ─────────────────────────────────────────────
+    ;; Surface 2: Worker-Trait Surface — 对 daemon 内部 Rust 代码暴露
+    ;; ─────────────────────────────────────────────
+    (interface worker-trait-surface
+      (purpose "对 pillar 二 workers / engines / daemon 内部所有 Rust 代码暴露的 trait 接口")
+      (protocol "async trait in missiond-core::db::traits + PG impl in db/pg/*.rs")
+      (code-location "crates/missiond-core/src/db/traits.rs + db/pg/*.rs")
+      (stability-contract
+        (breaking "trait 方法签名变更 → 触发 cascade lint + 所有 impl 同步改")
+        (additive "加新方法 → default impl 或 require all impls")
+        (vs-mcp "trait 可先于 MCP 工具实现 (库早于 API), 这是 v0.4.10+ cross-ref 分工的基础"))
+      (cross-trait-sharing-policy "trait 按 .rs 文件切, module 按业务切, 允许 trait 跨 module (impedance mismatch 显式披露)")
+      (current-traits
+        (ProjectStore      :module "project-management" :scope "projects + skill_* 4 张")
+        (BoardStore        :module "board"              :scope "board_tasks + notes + questions + prompt_snapshots")
+        (KbStore           :module "kb-manager"         :scope "knowledge + edges + access_log + operation_queue + ast + beacon")
+        (ConversationStore :module "conversation-logs"  :scope "conversations + messages + turns + events + user_intents + labels, 36+ 方法, traits.rs:36-151" :cross-module "user_intents 的 6 方法")
+        (MessageStore      :module "conversation-logs"  :scope "messages 细粒度 + 搜索 + 分页, traits.rs:158+")
+        (ObservabilityStore :spans ["llm-support" "system-support" "conversation-logs"]
+                            :scope "gemini_requests + file_uploads + token_ledger + incidents + labels, 36 方法, traits.rs:614"
+                            :note "典型 cross-module trait, 按 .rs 文件切粒度")
+        (IntentLayerStore  :module "intent-layer"       :scope "intent + plan + workflow, 约 15 方法, TBD v0.4.17")
+        (SlotStore         :spans ["slot-support" "conversation-logs"]
+                           :scope "slot_sessions + slot_tasks + dynamic_slots, traits.rs:478")
+        (InfraStore        :module "system-support"     :scope "infrastructure_state + backfill_* + daemon_state")))
+
+    ;; ─────────────────────────────────────────────
+    ;; Surface 3: Frontend Surface — 对前端 WS 暴露
+    ;; ─────────────────────────────────────────────
+    (interface frontend-surface
+      (purpose "对前端 WS 暴露的实时数据订阅流")
+      (protocol "WS frames on event_log subscribers via daemon bus bridge")
+      (code-location "crates/missiond-daemon/src/bus/ws_bridge.rs")
+      (stability-contract
+        (breaking "WS event kind 删除 / payload schema 变更 → 前端同步更新")
+        (additive "加新 event kind → event_log 加 kind + frontend 订阅扩展")
+        (note "WS bridge 本质也是 worker-trait-surface 的一种 (Rust 读 trait 发 WS), 但契约形态是 WS event 不是 trait 方法, 单独列"))
+      (current-streams
+        (stream-conversation "新 messages / turns / events — from conversation-logs")
+        (stream-board        "board_tasks 状态变更 / notes / questions — from board")
+        (stream-project      "projects CRUD / slot 状态 — from project-management + slot-support")
+        (stream-timeline     "event_log 订阅 → 前端 timeline view (来自 pillar 四 event-bus)")
+        (stream-llm-trace    "gemini_requests 实时 (🚧 潜在, 未实现)")))
+
+    ;; ─────────────────────────────────────────────
+    ;; Surface 4: Cross-Pillar Surface — 对其他 pillar 暴露
+    ;; ─────────────────────────────────────────────
+    (interface cross-pillar-surface
+      (purpose "对其他 pillar 暴露的事件 + schema 宿主关系 — lisp 层契约, 非单一代码点")
+      (protocol "多种: event_log kind 约定 / schema 承载 / config 读取 / trait 调用")
+      (stability-contract "跨 pillar 契约改动需对应 pillar 同步修改 + 事件总线 SSOT 遵守 v1.3.0 frozen")
+
+      (to-pillar-二-workers
+        (mechanism "workers 通过 worker-trait-surface 的 trait 方法 CRUD 本 pillar 的表")
+        (cross-ref "见 worker-trait-surface :: current-traits")
+        (note "每个 module 的 ingress/egress 的 worker cross-ref 全部归此维度"))
+
+      (to-pillar-四-event-bus
+        (mechanism "本 pillar 的 modules 作为 event producer, 写 event_log 表")
+        (cross-ref "pillar 四 event-bus (v1.3.0 frozen) 的 event_log 接收来自 memory 8 module 的业务事件")
+        (producer-modules-list "conversation-logs (message-ingested) / board (task-state-changed) / kb-manager (knowledge-added) / 等"))
+
+      (to-pillar-五-intent-layer
+        (mechanism "pillar 五 actor (TBD) 将是 memory intent-layer module 的 writer")
+        (schema-hosting "intent / plan / workflow 3 张表 schema 在 memory (v0.4.17), actor 在 pillar 五")
+        (cross-ref "见 module intent-layer :: pending-implementation-checklist"))
+
+      (to-pillar-六-system
+        (mechanism "memory modules 读 pillar 六 system_config 获取 DB 连接串 / retention 策略")
+        (note "每个 module 启动时读 config, module 内不重复声明 — pillar 六 是全局配置源"))
+
+      (to-pillar-七-flow
+        (mechanism "flow-engine-v2 通过 worker-trait-surface 读写 board_tasks + prompt_snapshots")
+        (note "flow-engine 本质是 pillar 二 worker 的一种, 统一走 worker-trait-surface")))
+
+    ;; ─────────────────────────────────────────────
+    ;; Surface 5: External-Filesystem Surface — 非 DB 文件系统直写/直读
+    ;; ─────────────────────────────────────────────
+    (interface external-filesystem
+      (purpose "memory pillar 管辖的 non-db-forms — 文件系统级读写, 不经 DB interface")
+      (protocol "OS-level file IO (Claude Code Edit tool / 用户手编 / worker 文件写)")
+      (code-location "无集中入口 — 各 non-db-form 各自通过文件系统操作")
+      (stability-contract
+        (breaking "文件路径约定 / 文件格式 (lisp / md / yaml / jsonl) 变更 → 所有直接 IO 方都要同步")
+        (additive "加新文件变体 → 在 non-db-forms section 声明")
+        (note "因为不经 trait, 契约靠文件约定 + 目录结构传达; 易出锅需小心管理"))
+      (current-endpoints
+        (per-project-intent-file ".missiond/intent.lisp — 代码快照, worker 写 / mcp_intent 读 / Claude Code 直读")
+        (project-claudemd         "<project>/CLAUDE.md — 项目级 Claude 指令")
+        (auto-memory-vault        "~/.claude/projects/{encoded}/memory/*.md — 跨会话记忆, 用户/Claude Code 编")
+        (pty-jsonl-source         "~/.claude/projects/{encoded}/*.jsonl — 外部产, conversation-logger 消费"))
+      (contrast-with-mcp "MCP 工具里的 mission_intent(action=read) 是 MCP surface 暴露, 但底层读的是本 surface 的文件 — 表层 surface 上是 MCP, 数据源走文件; :binds-to 标最贴近的那层")))
 
 
   ;; ═════════════════════════════════════════════════════════════
@@ -307,24 +434,30 @@
 
       ;; ── MCP 库写入 API ──
       (writer mcp-project-mutation
+        :binds-to [:mcp-surface]
         :tools  "mission_project init / sync / set_active / vault_sync / import_universe / survey"
         :writes "projects"
         :code   "daemon/src/handlers/knowledge/project.rs")
 
       (writer mcp-skill-mutation
+        :binds-to [:mcp-surface]
         :tools  "mission_skill_mutate"
         :writes "skill_topics / skill_blocks / skill_versions / skill_executions"
         :code   "daemon/src/handlers/knowledge/skill.rs")
 
       ;; ── 外部 worker 驱动 (cross-ref) ──
       (writer lisp-survey-worker-snapshot
+        :binds-to [:worker-trait-surface]
+        :binds-to-note "写文件不走 trait, 但 projects.intent_path 的 UPDATE 走 trait; 归 worker-trait-surface"
         :cross-ref "pillar 二 2.3 :: workers/sonnet/lisp_survey_worker.rs"
         :writes    "<project>/.missiond/intent.lisp (per-project 代码快照 FILE, 非 DB)"
         :library-pov "库不管 FILE 的存在, 只在 projects.intent_path 存路径指针; 扫描 + 写文件策略在 worker"
-        :not-writes "DB intent/plan/workflow 表 — 这些在 pillar 五 intent-layer 不在本模块")
+        :not-writes "DB intent/plan/workflow 表 — 这些在 memory intent-layer module (v0.4.17)")
 
       ;; ── 外部 actor (用户 / Claude Code 直接编辑文件) ──
       (writer vault-md-edit
+        :binds-to [:external-filesystem]
+        :binds-to-note "不经 memory pillar 的 DB interface, 也不经 MCP; 纯文件系统级"
         :source "用户手动 / Claude Code Edit tool"
         :writes "~/.claude/projects/{encoded}/memory/*.md"
         :kind   "文件系统操作, 不走 DB"
@@ -435,19 +568,23 @@
       (desc "项目级别的读取")
 
       (reader mcp-project-views
+        :binds-to [:mcp-surface]
         :tools "mission_project get / list / context / memories / sync / vault_sync"
         :reads "projects + 多表聚合 + vault")
 
       (reader mcp-intent-view
+        :binds-to [:mcp-surface]
         :tool "mission_intent read/section/summary/list"
         :reads "<project>/.missiond/intent.lisp 文件 (only — 描述项目代码真实状态)"
-        :not-reads "intent DB 表 (那是 action/instruction specs, 归 pillar 五)")
+        :not-reads "intent DB 表 (那是 memory intent-layer module 管, v0.4.17)")
 
       (reader mcp-skill-view
+        :binds-to [:mcp-surface]
         :tools "mission_skill_query / mission_skill_context"
         :reads "skill_topics / blocks / versions / executions")
 
       (reader frontend-project-stream
+        :binds-to [:frontend-surface]
         :emits "项目列表 / 活跃切换 / 项目元数据变更"
         :via "pillar 六 6.2 ws-server"))
 
@@ -493,23 +630,27 @@
 
       ;; ── MCP 写入 API (库的直接写入面) ──
       (writer mcp-board-lifecycle
+        :binds-to [:mcp-surface]
         :tools "mission_board_create / update / claim / decompose / retry / note_add / delete"
         :count 7
         :writes "board_tasks / board_task_notes"
         :code "daemon/src/handlers/knowledge/board.rs")
 
       (writer mcp-question-lifecycle
+        :binds-to [:mcp-surface]
         :tool "mission_question (独立 MCP 工具, 非 board 工具面)"
         :writes "agent_questions (+ 自动 UPDATE 关联 board_tasks.status='blocked')"
         :code "daemon/src/handlers/.../question.rs")
 
       ;; ── 外部 engine 驱动的写入 (计算逻辑不在库内) ──
       (writer autopilot
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.4 orchestration :: component autopilot"
         :writes "board_tasks (CAS claim / status 推进 / lease 回收) + prompt_snapshots (task 执行存档)"
         :library-pov "库只暴露 BoardStore 原子操作 + prompt_snapshots schema; tick / 决策 / recovery 时机 由 engine 管")
 
       (writer flow-engine-v2
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.4 orchestration :: component flow-engine-v2"
         :writes "board_tasks.flow_context (每节点 persist)"
         :library-pov "库只暴露 update_board_task 接口 + flow_context JSONB 列; 节点执行顺序 / 变量插值 由 engine 管"))
@@ -672,10 +813,12 @@
       :principle "autopilot 的 tick-scan 是 engine 内部自读自写闭环 (见 pillar 二 2.4 :: autopilot), 非库的独立 reader"
 
       (reader mcp-board-query
+        :binds-to [:mcp-surface]
         :tool "mission_board_query"
         :actions "list / get / search / summary / clear_done")
 
       (reader frontend-board-stream
+        :binds-to [:frontend-surface]
         :source "pillar 四 event_log subscribe BoardEvent"
         :emits "BoardTask* 事件 → 前端实时更新"
         :via "daemon/src/bus/ws_bridge.rs"))
@@ -717,33 +860,39 @@
 
       ;; ── MCP 库写入 API ──
       (writer mcp-kb-mutation
+        :binds-to [:mcp-surface]
         :tools  "mission_kb_mutate / mission_kb_remember / mission_kb_batch_set_project"
         :writes "knowledge (+ kb_operation_queue async)"
         :code   "daemon/src/handlers/knowledge/kb.rs")
 
       ;; ── 外部 worker 驱动的写入 (cross-ref pillar 二 2.3) ──
       (writer worker-arch-maintenance
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/sonnet/arch_maintenance_worker.rs"
         :writes    "knowledge (category=architecture)"
         :library-pov "库暴露 KnowledgeStore write 接口 + category 约束; 扫描触发算法在 worker")
 
       (writer worker-experience-harvester
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/local/experience_harvester.rs"
         :writes    "knowledge (category=bugfix/policy/memory)"
         :source    "module conversation-logs 的 conversations (跨模块 reader)"
         :library-pov "库暴露 write 接口; 挖掘策略 / 分类算法在 worker")
 
       (writer worker-tagger-chunker
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/local/tagger_chunker.rs"
         :writes    "knowledge (分块 + 标签) + kb_ast_links"
         :library-pov "库暴露 knowledge + kb_ast_links 接口; 分块 + 打标算法在 worker")
 
       (writer worker-ast-sync
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/local/ast_sync_worker.rs"
         :writes    "ast_nodes / ast_file_meta / beacons / beacon_nodes"
         :library-pov "库暴露 4 张代码索引表 + 增量 upsert 接口; 文件变更监听 + 解析在 worker")
 
       (writer worker-embedding-cross
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/sonnet/embedding_worker.rs"
         :writes    "knowledge.embedding_vec + ast_nodes.embedding_vec"
         :cross-module "同 worker 也写 conv-logs (message_embeddings + topic_vectors) + project-mgmt (skill_topics)"
@@ -752,6 +901,7 @@
 
       ;; ── daemon 内部 context-pipeline 审计写入 ──
       (writer context-pipeline-kb-audit
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 context-pipeline (daemon 内部, 非 worker)"
         :code "crates/missiond-daemon/src/context/context_pipeline.rs :: kb_log_co_access"
         :writes "kb_access_log"
@@ -843,28 +993,33 @@
 
       ;; ── MCP 库读取 API ──
       (reader mcp-kb-query
+        :binds-to [:mcp-surface]
         :tools "mission_kb_query / mission_kb_search / mission_kb_ops"
         :reads "knowledge + knowledge_edges"
         :invokes "pillar 二 2.6 search-engines")
 
       (reader mcp-insight-recall
+        :binds-to [:mcp-surface]
         :tools "mission_insight / mission_memory"
         :focus "综合洞察 / 记忆召回"
         :reads "knowledge")
 
       (reader mcp-code-search
+        :binds-to [:mcp-surface]
         :tool "mission_code_search"
         :reads "knowledge + ast_nodes + beacons + kb_ast_links"
         :focus "代码语义 + 结构并查"
         :invokes "pillar 二 2.6 search-engines")
 
       (reader mcp-universe-graph
+        :binds-to [:mcp-surface]
         :tool "mission_universe_graph"
         :reads "knowledge + knowledge_edges (跨项目)"
         :focus "实体 / 关系图生成")
 
       ;; ── 外部 compute 消费者 (cross-ref, 非库独立 reader) ──
       (reader context-pipeline-retrieval
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 context-pipeline (daemon 内部)"
         :reads "knowledge (向量 + 最近)"
         :purpose "为 LLM 调用拼 prompt"
@@ -872,6 +1027,7 @@
         :note "记忆最密集的消费者 — 每次 LLM 调用都触发")
 
       (reader worker-code-prefetch
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/local/code_prefetch.rs"
         :reads "ast_nodes / beacons"
         :purpose "AST 混合搜索引擎 (FTS5 + embedding RRF)"
@@ -915,34 +1071,41 @@
 
       ;; ── MCP 库写入 API (库直接暴露的写入面) ──
       (writer mcp-conversation-reconcile
+        :binds-to [:mcp-surface]
         :tools  "mission_conversation_reconcile / mission_conversation_analyze"
         :writes "conversations / conversation_messages"
         :code   "daemon/src/handlers/comm/conversation.rs")
 
       ;; ── 三引擎原始摄入 worker (cross-ref pillar 二 2.3 local) ──
       (writer worker-conversation-logger
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/local/conversation_logger.rs"
         :writes    "conversations + conversation_messages + conversation_turns + conversation_events"
         :library-pov "库暴露 ConversationStore append 接口 + (session_id, turn_id) 幂等; tail JSONL 算法在 worker")
 
       (writer worker-codex-ingestion
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/local/codex_ingestion_worker.rs"
         :writes    "conversations / conversation_messages (engine_type=codex)")
 
       (writer worker-gemini-logger
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/local/gemini_logger.rs"
         :writes    "conversations / conversation_messages (engine_type=gemini)")
 
       (writer worker-gemini-reconcile
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/local/gemini_reconcile_worker.rs"
         :writes    "conversations (对账校正)")
 
       (writer worker-conversation-organizer
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/local/conversation_organizer.rs"
         :writes    "conversation_turns / conversation_tool_calls")
 
       ;; ── 派生分析 worker (cross-ref pillar 二 2.3 sonnet/codex) ──
       (writer worker-embedding
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/sonnet/embedding_worker.rs"
         :writes    "message_embeddings (halfvec) / conversation_topic_vectors"
         :cross-module "同一 worker 也写 kb-manager (knowledge.embedding_vec / ast_nodes) + project-management (skill_topics)"
@@ -952,16 +1115,19 @@
       ;; worker-step-narrator 已随 narration 移除 (v0.4.12), 见下方 writer-removed
 
       (writer worker-translation
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/sonnet/translation_worker.rs"
         :writes    "message_translations")
 
       (writer worker-retro
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/sonnet/retro_worker.rs"
         :writes    "retrospective_results"
         :trigger   "会话结束信号 / 手动触发 (具体时机由 worker 定)")
 
       ;; ── user_intents 写入 (v0.4.16 新增: 之前错列在 pillar 五) ──
       (writer worker-intent-analyst
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 :: engine/learning_engine/intent_analyst.rs"
         :writes    "user_intents + conversation_turns.intent_group_id (back-reference)"
         :mechanism "按 session 扫 conversation_turns, LLM 分析 turn 范围的意图, 增量游标式处理"
@@ -1088,6 +1254,7 @@
 
       ;; ── MCP 库读取 API ──
       (reader mcp-conversation-query
+        :binds-to [:mcp-surface]
         :tools "mission_conversation_query / mission_conversation_analyze"
         :actions "get / list / search"
         :reads "conversations + messages + turns + events"
@@ -1095,32 +1262,38 @@
         :note "v0.4.12: 不再读 narrations (表下线)")
 
       (reader mcp-retrospective-view
+        :binds-to [:mcp-surface]
         :tool "mission_retrospective_manage"
         :actions "get / list"
         :reads "retrospective_results")
 
       (reader mcp-audit
+        :binds-to [:mcp-surface]
         :tool "mission_audit"
         :reads "conversation_tool_calls + conversation_events")
 
       (reader mcp-llm-trace
+        :binds-to [:mcp-surface]
         :tool "mission_llm_trace"
         :reads "conversation_tool_calls (+ category system-support :: gemini_requests)")
 
       ;; ── 前端 WS 流 ──
       (reader frontend-conversation-stream
+        :binds-to [:frontend-surface]
         :source "pillar 四 event_log / DB watch"
         :emits "新 messages (v0.4.12: 不再推 narrations)"
         :via "daemon/src/bus/ws_bridge.rs")
 
       ;; ── 外部 compute 消费者 (cross-ref, 非库独立 reader) ──
       (reader context-pipeline-history
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 context-pipeline (daemon 内部)"
         :reads "最近 messages (v0.4.12: 不再读 narrations)"
         :purpose "每次 LLM 调用拼 prompt 时触发"
         :library-pov "库暴露 ConversationStore 查询接口; pipeline 策略 / token 预算在 daemon")
 
       (reader harvester-for-kb
+        :binds-to [:worker-trait-surface]
         :cross-ref "module kb-manager :: worker-experience-harvester"
         :reads "conversations"
         :writes-to "knowledge (经 kb-manager ingress)"
@@ -1128,12 +1301,14 @@
 
       ;; ── user_intents 读取 (v0.4.16 新增) ──
       (reader intent-analyst-self
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 :: engine/learning_engine/intent_analyst.rs"
         :reads "user_intents (游标计算: get_intent_coverage / sessions_pending_intent_analysis)"
         :purpose "增量处理 — 跳过已分析的 turn 范围, 只处理新 turn"
         :library-pov "库暴露 get_intent_coverage / sessions_pending_intent_analysis; 回填 / 增量策略在 learning engine")
 
       (reader autopilot-recent-intents
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 :: engine/intent_engine/autopilot.rs:1496"
         :reads "user_intents (get_recent_intents 1800s 时窗)"
         :purpose "autopilot tick 判断时读近 30min 的用户意图, 辅助决策"
@@ -1189,6 +1364,8 @@
 
       ;; ── 未来 writer 占位 (待 pillar 整理时替换为真实 cross-ref) ──
       (writer TBD-intent-compiler
+        :binds-to [:worker-trait-surface]
+        :binds-to-note "如最终选 option C (MCP 工具直写), 追加 :mcp-surface"
         :status "未实现"
         :expected-writes "intent (create / update status / set approved_at / set compiler_model)"
         :expected-trigger "user utterance 到达 (可能经 MCP 或 autopilot tick)"
@@ -1196,6 +1373,7 @@
         :library-pov "库暴露原子写入接口 + 版本语义; utterance 解析 / LLM 调编译 / approval 策略在 actor/worker 侧")
 
       (writer TBD-plan-compiler
+        :binds-to [:worker-trait-surface]
         :status "未实现"
         :expected-writes "plan (create from intent / update status / set executing/succeeded/failed / superseded-chain)"
         :expected-trigger "intent status → compiled 时触发 plan 生成; 或 board_task 创建时编译"
@@ -1203,6 +1381,7 @@
         :library-pov "库暴露 plan 版本 + FSM 迁移接口 + sexp_hash 幂等; 编译逻辑 / FK 完整性校验在 actor")
 
       (writer TBD-workflow-distiller
+        :binds-to [:worker-trait-surface]
         :status "未实现"
         :expected-writes "workflow (create from successful plan / 累加 executions+success_count / update last_used_at / upsert match_rules)"
         :expected-trigger "plan status → succeeded 时触发蒸馏; 或定期后台扫 top-N plan 抽取模板"
@@ -1259,24 +1438,28 @@
       :principle "memory = 库. egress 暴露查询原语, 消费策略在外"
 
       (reader TBD-mcp-intent
+        :binds-to [:mcp-surface]
         :status "未实现"
         :expected-tool "mission_intent (action=list / get / get-version-chain / by-status)"
         :expected-reads "intent (按 status / version / utterance 模糊查)"
         :expected-api "IntentLayerStore::intent_list_by_status / intent_get_version_chain")
 
       (reader TBD-mcp-plan
+        :binds-to [:mcp-surface]
         :status "未实现"
         :expected-tool "mission_plan (action=list / get / by-task / provenance)"
         :expected-reads "plan (按 board_task_id 查版本链 / 按 status 查 awaiting_approval / 按 sexp_hash 查 provenance)"
         :expected-api "IntentLayerStore::plan_list_by_task / plan_get_latest")
 
       (reader TBD-mcp-workflow
+        :binds-to [:mcp-surface]
         :status "未实现"
         :expected-tool "mission_workflow (action=list / match / top-n / apply)"
         :expected-reads "workflow (按 match_rules 查匹配 / 按 executions 排 top-n / 按 name get)"
         :expected-api "IntentLayerStore::workflow_find_by_match / workflow_list_top_n")
 
       (reader TBD-autopilot-workflow-match
+        :binds-to [:worker-trait-surface]
         :status "未实现 (潜在 consumer)"
         :expected-cross-ref "pillar 二 :: engine/intent_engine/autopilot — tick 时拿 utterance 查 workflow 匹配"
         :expected-reads "workflow (match_rules JSONB 查询)"
@@ -1336,6 +1519,7 @@
       :principle "memory = 库. 本模块只列'谁来写我的表'; gateway / worker 算法见 pillar 二 2.2 + 2.3"
 
       (writer worker-gemini-logger
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/local/gemini_logger.rs"
         :mechanism "event-bus subscriber on LlmEvent; two-step persist:"
         :step-1    "gemini_log_insert_started (id + caller + model + prompt_chars + prompt_text)"
@@ -1345,12 +1529,14 @@
         :library-pov "库暴露 gemini_log_insert_started + _update_completed; event-bus 订阅 + 采样 / 清理 策略在 worker")
 
       (writer llm-gateways-file-cache
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.2 :: daemon/src/llm/gemini_file_api.rs"
         :writes    "gemini_file_uploads (file_hash 去重 upsert)"
         :api       "ObservabilityStore::gemini_file_cache_get / _put / _gc"
         :library-pov "库暴露 cache get/put/gc 三接口; 上传前查 cache miss 再调 Gemini API, TTL 决策在 gateway")
 
       (writer token-usage-accounting
+        :binds-to [:worker-trait-surface]
         :cross-ref "daemon/src/infra/message_handler.rs:674 (PTY JSONL 摄入下游)"
         :trigger "conversation-logger 摄入时, 对含 usage 字段的消息调 insert_token_usage"
         :writes  "token_usage_ledger (每消息一条: conversation_id + slot_id + model + 4 个 tokens + message_id)"
@@ -1393,6 +1579,7 @@
       (desc "MCP 查询 LLM 观测数据")
 
       (reader mcp-llm-trace
+        :binds-to [:mcp-surface]
         :tool    "mission_llm_trace"
         :reads   "gemini_requests"
         :api     "ObservabilityStore::gemini_log_query / _stats / _get_content"
@@ -1400,6 +1587,7 @@
         :actions "list / by-session / by-model / by-time")
 
       (reader mcp-cost-report
+        :binds-to [:mcp-surface]
         :status  "🚧 MCP 未实现, 但底层查询原语已有"
         :tool    "mission_cost_report"
         :reads   "token_usage_ledger"
@@ -1408,12 +1596,14 @@
         :implementation-effort "低 — 只需写 MCP handler 包装 token_stats 查询, 核心 SQL 已在 trait 里")
 
       (reader timeline-enrichment
+        :binds-to [:worker-trait-surface]
         :cross-ref "daemon/src/handlers/comm/timeline.rs:125"
         :reads "gemini_requests (用于 enrich gemini_request_completed 事件的 timeline 展示)"
         :api "ObservabilityStore::gemini_log_get_content(request_id)"
         :purpose "Timeline UI/CLI 显示 LLM 调用事件时, 从 gemini_requests 拉完整 prompt/response 细节")
 
       (reader daemon-stats-counter
+        :binds-to [:worker-trait-surface]
         :cross-ref "daemon/src/infra/daemon_stats.rs"
         :reads "gemini_requests 计数 (AtomicU64 in-memory counter, 不查 DB)"
         :purpose "daemon 运行时 observability 计数"
@@ -1467,41 +1657,49 @@
 
       ;; ── slot_sessions writers (4 处) ──
       (writer slot-orchestrator-bind
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.1 :: daemon/src/slot_orchestrator/mod.rs:42"
         :writes    "slot_sessions (slot 启动时绑定 session)"
         :library-pov "库暴露 set_slot_session (upsert on conflict); orchestrator 决定何时绑定")
 
       (writer slot-env-bind
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.1 :: daemon/src/context/slot_env.rs:197"
         :writes    "slot_sessions (slot 环境构建时同步)")
 
       (writer ingestion-router-bind
+        :binds-to [:worker-trait-surface]
         :cross-ref "daemon/src/infra/ingestion_router.rs:79,104"
         :writes    "slot_sessions (JSONL 摄入发现新 session 时更新)")
 
       ;; ── slot_tasks writers (learning engine 专属) ──
       (writer learning-engine-extraction
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 :: daemon/src/engine/learning_engine/extraction.rs (3 call sites)"
         :writes    "slot_tasks (task_type=extraction 类, 3 种场景)"
         :library-pov "库暴露 insert_slot_task + status 转换接口 (set_running / set_completed / set_failed); 触发 + 派发在 extraction engine")
 
       (writer learning-engine-decision
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 :: daemon/src/engine/learning_engine/decision_engine.rs:805"
         :writes    "slot_tasks (task_type=decision)")
 
       ;; ── dynamic_slots writers (MCP + 清理) ──
       (writer mcp-compute-slot
+        :binds-to [:mcp-surface]
         :tools     "mission_compute_slot (actions: create / terminate / extend / list)"
         :code      "daemon/src/handlers/compute/compute_slot.rs"
         :writes    "dynamic_slots (create:216 / terminate:293,339 / extend:385)"
         :library-pov "库暴露 create/terminate/extend/list 接口 + (status, expires_at) 索引; MCP handler 做业务编排")
 
       (writer daemon-restart-cleanup
+        :binds-to [:worker-trait-surface]
         :cross-ref "daemon/src/main.rs:297"
         :writes    "dynamic_slots (terminate on 'daemon_restart')"
         :library-pov "库暴露 terminate_dynamic_slot; 重启策略 (全部强制终止 active slot) 在 daemon bootstrap")
 
       (writer autopilot-ttl-gc
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.4 :: autopilot (daemon/src/engine/intent_engine/autopilot.rs:1357)"
         :writes    "dynamic_slots (terminate on 'ttl_expired')"
         :library-pov "库暴露 find_expired_dynamic_slots 扫描接口 + terminate; tick 频率 + 决策在 autopilot"))
@@ -1544,23 +1742,27 @@
 
       ;; ── MCP readers ──
       (reader mcp-slots
+        :binds-to [:mcp-surface]
         :tool "mission_slots"
         :reads "slot_sessions + dynamic_slots"
         :code "daemon/src/handlers/sysinfra/misc.rs (与 mission_slot_history / mission_inbox 共用 handler)"
         :purpose "列当前 slot + session 绑定 + active dynamic slots")
 
       (reader mcp-slot-history
+        :binds-to [:mcp-surface]
         :tool "mission_slot_history"
         :reads "slot_tasks"
         :code "daemon/src/handlers/sysinfra/misc.rs:349 (调 list_slot_tasks)"
         :purpose "slot 内 AI 任务历史 (含 pending / running / completed / failed)")
 
       (reader mcp-compute-slot-query
+        :binds-to [:mcp-surface]
         :tool "mission_compute_slot (action=list)"
         :reads "dynamic_slots"
         :code "daemon/src/handlers/compute/compute_slot.rs:413 (调 list_dynamic_slots)")
 
       (reader mission-memory-task-trail
+        :binds-to [:mcp-surface]
         :tool "mission_memory (附加 slot task 快照)"
         :code "daemon/src/handlers/knowledge/memory.rs:269"
         :reads "slot_tasks (按 slot_id 拉最近 10 条)"
@@ -1568,26 +1770,31 @@
 
       ;; ── daemon 内部 readers ──
       (reader daemon-startup-recovery
+        :binds-to [:worker-trait-surface]
         :cross-ref "daemon/src/main.rs:294,423"
         :reads "list_dynamic_slots('active') + get_all_slot_sessions"
         :purpose "daemon 启动时: (1) 扫 active 动态 slot 做 terminate 清理 (2) 恢复现有 slot↔session 映射")
 
       (reader reconcile-workers
+        :binds-to [:worker-trait-surface]
         :cross-ref "daemon/src/workers/local/reconcile_worker.rs + gemini_reconcile_worker.rs"
         :reads "get_slot_for_session (session → slot 反查)"
         :purpose "对账 workers 发现 session 时反查 slot 做归属判断")
 
       (reader events-sync-lookup
+        :binds-to [:worker-trait-surface]
         :cross-ref "daemon/src/events_sync.rs:948"
         :reads "get_slot_for_session"
         :purpose "PTY 事件同步时 session → slot 反查")
 
       (reader ingestion-router-lookup
+        :binds-to [:worker-trait-surface]
         :cross-ref "daemon/src/infra/ingestion_router.rs:123"
         :reads "get_slot_for_session"
         :purpose "JSONL 摄入路由时反查")
 
       (reader session-util
+        :binds-to [:worker-trait-surface]
         :cross-ref "daemon/src/infra/session_util.rs:25"
         :reads "get_all_slot_sessions"
         :purpose "infra 工具读全部绑定"))
@@ -1639,6 +1846,7 @@
 
       ;; ── 观测 writers (3) ──
       (writer aiops-incident-reactor
+        :binds-to [:worker-trait-surface]
         :cross-ref "daemon/src/infra/aiops.rs:145 process_incident (写入点 192 / 338)"
         :trigger "event-bus IncidentEvent::Reported subscriber (bus/v2_subscribers.rs:98 v2_incident_reactor)"
         :writes "incidents (含 dedupe_key 去重)"
@@ -1646,6 +1854,7 @@
         :library-pov "库暴露 insert + dedup check; triage 逻辑在 aiops")
 
       (writer router-chat-archiver
+        :binds-to [:worker-trait-surface]
         :cross-ref "daemon/src/handlers/comm/router_chat.rs + pg/observability.rs router_chat_clear 族"
         :trigger "router_chat_clear / _clear_by_task 等时机 — 归档被删除 / 压缩的旧消息"
         :writes "router_chat_archive (original_id / session_id / role / content / archive_reason)"
@@ -1653,33 +1862,39 @@
         :library-pov "库暴露 router_chat_* 方法族; archive 策略在 handler")
 
       (writer vision-worker
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/codex/vision_worker.rs :: save_image_description"
         :writes "image_descriptions (upsert by image_hash)"
         :library-pov "库暴露按 hash upsert; vision LLM 调用 + 去重决策在 worker")
 
       ;; ── infra 游标 + backfill writers (7) ──
       (writer watcher-cursor-writers
+        :binds-to [:worker-trait-surface]
         :cross-ref "多个 file-watcher 类 worker (具体 worker 待补 — 方法签名是 batch upsert)"
         :writes "watcher_cursors (file_path PK / byte_offset / session_id)"
         :trait-methods "ObservabilityStore::load_watcher_cursors / upsert_watcher_cursors_batch / delete_watcher_cursor"
         :library-pov "库暴露 load/batch-upsert/delete; watcher 算法在 worker")
 
       (writer reconcile-worker-watermarks
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/local/reconcile_worker.rs"
         :writes "reconcile_watermarks (jsonl_path PK / last_reconciled_size / last_reconciled_at)"
         :trait-methods "ObservabilityStore::get_reconcile_watermark / upsert_reconcile_watermark / get_all_reconcile_watermarks")
 
       (writer gemini-reconcile-watermarks
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/local/gemini_reconcile_worker.rs"
         :writes "gemini_cli_watermarks (session_file PK / session_id / last_msg_count)"
         :trait-methods "ObservabilityStore::load_gemini_cursors / save_gemini_cursor")
 
       (writer consumer-watermarks-writers
+        :binds-to [:worker-trait-surface]
         :cross-ref "多 consumer 通过 watermark_* API 更新 (具体 consumers 散在多 worker)"
         :writes "consumer_watermarks (consumer_name + session_id 复合 PK / last_processed_msg_id / extra)"
         :trait-methods "ObservabilityStore::watermark_get / _advance_time / _advance_msg_id / _advance_full / _list")
 
       (writer embedding-worker-backfill
+        :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.3 :: workers/sonnet/embedding_worker.rs (写入点 1236 / 1322 / 1327 / 1343 / 1544 / 1597 / 1663 / 1912 / 1936 / 1953)"
         :writes "backfill_progress (phase 进度) + backfill_failures (重试记录)"
         :known-phases "conv_topic_vectors / conv_summary (session-level embedding backfill)"
@@ -1687,6 +1902,7 @@
         :correction-v0.4.15 "原以为是一次性迁移表 — 实际是 embedding-worker 持续的 phased 作业状态管理, active")
 
       (writer daemon-state-writer
+        :binds-to [:worker-trait-surface]
         :cross-ref "daemon bootstrap + 各 state 更新处 (多处)"
         :writes "daemon_state (key PK / value / updated_at)"
         :trait-methods "SlotStore::daemon_state_get / _set"
@@ -1694,6 +1910,7 @@
 
       ;; ── Legacy zone writers (2 active + 2 dead) ──
       (writer legacy-task-api-writers
+        :binds-to [:worker-trait-surface]
         :cross-ref "crates/missiond-core/src/db/task.rs + db/pg/slot.rs (legacy v1 slot API 路径)"
         :writes "tasks (active) / inbox (轻度) / events (疑似 dead, 仅 legacy 写入)"
         :status "⚠ tasks/inbox 尚在 — events 仅 legacy 写"
@@ -1824,47 +2041,56 @@
 
       ;; ── MCP readers (5) ──
       (reader mcp-incident
+        :binds-to [:mcp-surface]
         :tool "mission_incident"
         :reads "incidents"
         :code "daemon/src/handlers/comm/question.rs (共用 handler, 与 mission_question / llm_trace 等)")
 
       (reader mcp-router-chat
+        :binds-to [:mcp-surface]
         :tools "mission_router_chat / mission_router_chat_manage"
         :reads "router_chat_archive + conversations (chat_type='router_chat')"
         :code "daemon/src/handlers/comm/router_chat.rs")
 
       (reader mcp-sys-config-logs
+        :binds-to [:mcp-surface]
         :tools "mission_sys_config / mission_sys_logs / mission_daemon_update"
         :reads "daemon_state + 各种 watermark 表 + backfill_progress"
         :code "daemon/src/handlers/system.rs")
 
       (reader mcp-infra-query
+        :binds-to [:mcp-surface]
         :tools "mission_infra_query / mission_infra_ops"
         :reads "reconcile_watermarks / gemini_cli_watermarks / consumer_watermarks / watcher_cursors"
         :code "daemon/src/handlers/sysinfra/infra.rs")
 
       (reader mcp-inbox-legacy
+        :binds-to [:mcp-surface]
         :tool "mission_inbox"
         :reads "inbox (legacy v1 API)"
         :code "daemon/src/handlers/sysinfra/misc.rs (共用 misc handler)")
 
       ;; ── daemon 内部 readers (4) ──
       (reader vision-enrichment
+        :binds-to [:worker-trait-surface]
         :cross-ref "daemon 内消息 enrichment 流程"
         :reads "image_descriptions (按 image_hash 查)"
         :purpose "消息含图片时查找缓存的 LLM 描述")
 
       (reader backfill-resume
+        :binds-to [:worker-trait-surface]
         :cross-ref "embedding_worker.rs 启动时恢复"
         :reads "backfill_progress (get_phase) + backfill_failures (retryable_failures)"
         :purpose "daemon 重启后从上次 phase 继续")
 
       (reader watermark-consumers-readers
+        :binds-to [:worker-trait-surface]
         :cross-ref "多 consumer workers"
         :reads "consumer_watermarks / watcher_cursors / reconcile_watermarks / gemini_cli_watermarks"
         :purpose "每 worker 启动时读自己的游标做增量处理")
 
       (reader incident-enrichment
+        :binds-to [:worker-trait-surface]
         :cross-ref "handlers/comm/timeline.rs (类似 gemini_requests enrichment 模式, 待确认)"
         :reads "incidents (可能 enrich 部分 Timeline 事件)"
         :status "🚧 待确认 — 类比 llm-support timeline-enrichment 模式"))
@@ -2165,7 +2391,23 @@
       "(SS) table-catalog by-owner pillar-five-intent-layer (count 3→0); 新增 by-owner module-intent-layer (count 3)"
       "     ownership-summary: pillar-five 4→0, memory 新增 intent-layer 3; memory 总量 53→56"
       "(TT) intent.lisp 同步: pillar 五 action-instruction-specs 改 cross-ref 到 memory intent-layer"
-      "     drop-candidate 标记全撤, 改为 schema-ready-pending-implementation")
+      "     drop-candidate 标记全撤, 改为 schema-ready-pending-implementation"
+      "v0.4.18 (2026-04-20 — pillar-interfaces 正交维度引入, 方案 B):"
+      "(UU) 用户洞察: memory pillar 单 module 有 in/core/out 三层, 但 pillar 自己对外没有 interface 聚合"
+      "     各 module 的 writer/reader 通过隐式消费者分类散落 (MCP/worker/frontend/daemon), 缺正式契约"
+      "(VV) 新增顶层 (pillar-interfaces ...) section, 5 个 surface:"
+      "     - mcp-surface (JSON-RPC over stdio, 8 tool families)"
+      "     - worker-trait-surface (Rust async trait, 9 trait 跨 module 共享)"
+      "     - frontend-surface (WS via ws_bridge.rs, 5 streams)"
+      "     - cross-pillar-surface (伞 — 对 pillar 二/四/五/六/七 的契约)"
+      "     - external-filesystem (lisp/md/jsonl 文件 IO, 不经 trait, pillar 五补充发现)"
+      "     每 surface 都声明 purpose / protocol / code-location / stability-contract / current-endpoints"
+      "(WW) 所有 96 个 active writer/reader 加 :binds-to [:surface-name] 标签, 覆盖率 100%"
+      "     8 module × 5 surface 正交矩阵建立, SSOT 仍在 module"
+      "     :binds-to-note 标注歧义场景 (e.g. intent-layer TBD-intent-compiler 未来若选 option C 追加 :mcp-surface)"
+      "(XX) 设计原则: module 是 SSOT (具体 writer/reader), pillar-interfaces 是契约层"
+      "     反对 splitter (代码层虚幻), 支持 catalog (纯文档索引)"
+      "     未来整理 pillar 二/四/五/六/七 时, 翻 pillar-interfaces 即可知'和 memory 对接什么'")
 
     (ownership-summary
       (module-project-management   5 "projects + 4 skills (specs 4 张迁走)")
