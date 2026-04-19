@@ -50,21 +50,52 @@
   (deviations
     (D001
       :lisp-said "骨架 file-to-module-mapping 列 'db/project.rs → ProjectStore' 和 'db/observability.rs → ObservabilityStore'"
-      :actually-found "这 2 个 db-level 文件不存在. 实际: ProjectStore trait 定义在 db/traits.rs, impl 在 db/pg/project.rs (ObservabilityStore 同). 无 SQLite-level 中间层文件."
-      :reason "lisp 骨架假设 db/<name>.rs + db/pg/<name>.rs 两层结构, 但 2 处 domain 只有 pg/ 层"
-      :blocker-level "medium — 不阻断施工, 但骨架语义错"
-      :approval-needed "指挥官需决定: (a) 改 frozen lisp 骨架 修正描述 [不推荐: lisp 已 frozen]; (b) 理解 'db/project.rs' 为广义域概念, 含 traits.rs 声明 + pg/ impl; (c) 施工时补 db/project.rs / db/observability.rs 中间层文件"
-      :submitted-at "2026-04-20 phase-1 scan"
-      :status "pending-approval")
+      :ground-truth-verified "主 Claude 用 ls 验证: db/project.rs 不存在, db/observability.rs 不存在. 仅 pg/project.rs + pg/observability.rs 存在."
+      :actually-found "ProjectStore trait 定义在 db/traits.rs:724, impl 在 db/pg/project.rs (550+ 行); ObservabilityStore trait 定义在 traits.rs:614, impl 在 db/pg/observability.rs (1200+ 行). **无 db-level 中间层文件**"
+      :reason "lisp 骨架假设两层 db/<name>.rs + db/pg/<name>.rs, 但这 2 处 domain 实际只有单层 (trait 在 traits.rs, impl 在 pg/)"
+      :decided "指挥官指示: 代码向 lisp 对齐. 应建 db/project.rs 和 db/observability.rs 中间层文件, 承载本 domain 的 Row struct + enum + 任何非 PG-specific 的逻辑 (follow db/board.rs / db/conversation.rs 等现有 pattern)"
+      :决策-方向 "(c) 施工时补建 — 先看其他 db/<name>.rs 内容模式, 按样补 db/project.rs 和 db/observability.rs"
+      :施工-action "phase-2 按 module 重构时顺便建这 2 文件"
+      :status "approved-decided"
+      :at "2026-04-20 phase-1.5")
 
     (D002
       :lisp-said "pillar-interfaces :: worker-trait-surface :: current-traits 列 9 traits + cross-cutting db-trait-abstraction :stores 9"
-      :actually-found "crates/missiond-core/src/db/traits.rs 实际定义 14 traits (pg/ 13 impl). Extras 可能 (需细察): KnowledgeStore 独立? SkillStore 独立? ToolCallStore / RetrospectiveStore / VisionStore / EventStore?"
-      :reason "v0.4.20 修正 13→9 是对齐 pillar-interfaces 列表, 但 pillar-interfaces 列表本身可能不全; 或代码有 9 外的次级 trait"
-      :blocker-level "high — 影响 施工 phase-2 的 impl-checklist 生成"
-      :approval-needed "指挥官需决定: (a) 重扫代码确认准确 trait count; (b) 补齐 pillar-interfaces current-traits 到 14; (c) 还是确认 lisp 的 9 大 trait 是 'primary/public', 其余 5 是 'internal/helper' 不列"
-      :submitted-at "2026-04-20 phase-1 scan"
-      :status "pending-approval"))
+      :ground-truth-verified "主 Claude + phase-1.5 agent 核实: traits.rs 实际 13 active trait (非 14)"
+      :code-13-traits
+        (ConversationStore    :行 27   :方法 56 :lisp-有 "ConversationStore")
+        (MessageStore         :行 159  :方法 15 :lisp-有 "MessageStore")
+        (ToolCallStore        :行 215  :方法  8 :lisp-无 "lisp 未列为 primary, 是 ConversationStore 的 sub-trait")
+        (EventStore           :行 245  :方法  6 :lisp-无 "同上, conversation-logs sub-trait")
+        (RetrospectiveStore   :行 261  :方法 13 :lisp-无 "同上, conversation-logs sub-trait")
+        (VisionStore          :行 288  :方法  8 :lisp-无 "system-support sub-trait (image_descriptions), 应合并 ObservabilityStore")
+        (KnowledgeStore       :行 308  :方法 56 :lisp-有-rename "lisp 叫 KbStore, 代码叫 KnowledgeStore — 命名不符!")
+        (BoardStore           :行 396  :方法 41 :lisp-有 "BoardStore")
+        (TimelineStore        :行 462  :方法  6 :lisp-无 "⚠ DEPRECATED — v1.3.0 后 timeline 归 event_log; 应删")
+        (SlotStore            :行 478  :方法 41 :lisp-有 "SlotStore")
+        (SkillStore           :行 540  :方法 25 :lisp-无 "lisp 把 skill 归 ProjectStore; 代码是独立 trait")
+        (ObservabilityStore   :行 614  :方法 75 :lisp-有 "ObservabilityStore")
+        (ProjectStore         :行 724  :方法  7 :lisp-有 "ProjectStore (只 7 方法; skill_* 4 表方法在 SkillStore 里)")
+      :lisp-3-traits-code-没
+        (KbStore              :status "rename needed — 代码叫 KnowledgeStore")
+        (DirectiveLayerStore  :status "TBD — v0.4.17 声明, 未实现, phase-3 建")
+        (InfraStore           :status "⚠ 代码没有! watermarks/backfill/daemon_state 方法散在 ObservabilityStore + SlotStore 里")
+      :reason "lisp '9 primary traits' 是简化公开视图; 代码按 .rs 文件切粒度更细, 产生 13 active trait (含 5 个 lisp 视为 sub-trait 的 + 命名差异 1 + deprecated 1)"
+      :decided "指挥官指示: 代码向 lisp 对齐. 代码重构向 9 primary traits 合并"
+      :决策-方向
+        (rename-KnowledgeStore→KbStore   :priority P1 :effort small)
+        (delete-TimelineStore              :priority P1 :effort small :已 deprecated)
+        (merge-SkillStore-into-ProjectStore :priority P2 :effort medium :lisp-说 "skill_* 4 表归 ProjectStore")
+        (merge-ToolCallStore-into-ConversationStore :priority P2 :effort medium)
+        (merge-EventStore-into-ConversationStore    :priority P2 :effort medium)
+        (merge-RetrospectiveStore-into-ConversationStore :priority P2 :effort small)
+        (merge-VisionStore-into-ObservabilityStore  :priority P2 :effort small)
+        (建-InfraStore                    :priority P1 :effort medium
+                                          :from "从 ObservabilityStore 拆 watermarks+backfill; 从 SlotStore 拆 daemon_state"
+                                          :lisp-说 "InfraStore 归 system-support: infrastructure_state + backfill_* + daemon_state")
+        (建-DirectiveLayerStore           :priority P1 :effort large "phase-3 专项, 新建 15 方法")
+      :status "approved-decided"
+      :at "2026-04-20 phase-1.5"))
 
   ;; ─────────────────────────────────────────────────────────
   ;; decisions — 决策日志 (非 frozen lisp 改动, 施工过程的小决策)
@@ -111,7 +142,28 @@
     (I003
       :severity "info"
       :desc "migrations/ 实际 22 个 .sql 文件, lisp 称 60 表. agent 口径 '61 张实际' 可能把 drop_system_timeline 也算了. 需 phase-4 精确核对"
-      :at "2026-04-20 phase-1 scan"))
+      :resolved "phase-1.5 agent 确认 60 表现存 + 1 已 drop (system_timeline) = 61 migrations 定义; 对齐 lisp ✓"
+      :at "2026-04-20 phase-1 scan")
+
+    (I004
+      :severity "high"
+      :desc "db/sqlite/ 子目录存在 15 个文件 (deprecated per lisp). 需清理"
+      :lisp-standing "pillar-interfaces worker-trait-surface :: impl (impl sqlite-store :status deprecated). 清理未跟上"
+      :resolution-path "phase-2 每 module 施工时顺便删对应 db/sqlite/*.rs"
+      :at "2026-04-20 phase-1.5 ls 发现")
+
+    (I005
+      :severity "high"
+      :desc "gen_*.rs 在两处: db/ 根下 8 个 + db/gen/ 子目录 10 个, 两套 forge 冲压产物?"
+      :details "db/ 根下: gen_audit.rs / gen_board.rs / gen_compute.rs / gen_conversation.rs / gen_knowledge.rs / gen_misc.rs / gen_pipeline.rs / gen_skill.rs; db/gen/ 里未查清"
+      :resolution-path "phase-1.6 需派 agent 看 db/gen/ 内容 + 搞清两套的关系 (可能一套旧一套新, 或命名空间不同)"
+      :at "2026-04-20 phase-1.5 ls 发现")
+
+    (I006
+      :severity "medium"
+      :desc "migration.rs (73KB) 在 db/ 根下, 非 pg/ 非 sqlite/ 非 gen_*. 性质未知"
+      :resolution-path "phase-1.6 查该文件内容"
+      :at "2026-04-20 phase-1.5 ls 发现"))
 
   ;; ─────────────────────────────────────────────────────────
   ;; phase-1 产出: file-to-module-mapping 扫描结果
