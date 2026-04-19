@@ -27,7 +27,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.21")
+  (version "draft-v0.4.22")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -247,6 +247,102 @@
         (auto-memory-vault        "~/.claude/projects/{encoded}/memory/*.md — 跨会话记忆, 用户/Claude Code 编")
         (pty-jsonl-source         "~/.claude/projects/{encoded}/*.jsonl — 外部产, conversation-logger 消费"))
       (contrast-with-mcp "MCP 工具里的 mission_intent(action=read) 是 MCP surface 暴露, 但底层读的是本 surface 的文件 — 表层 surface 上是 MCP, 数据源走文件; :binds-to 标最贴近的那层")))
+
+
+  ;; ═════════════════════════════════════════════════════════════
+  ;;  Target Code Layout — memory pillar 代码同构目标布局
+  ;;  v0.4.22 补充 — 施工前必读, 明确同构范围 + 边界 + 目录决定
+  ;; ═════════════════════════════════════════════════════════════
+  (target-code-layout
+    (desc "memory pillar 代码同构目标布局 — 施工第一步参照")
+    :principle "按 9 module + 5 surface 正交组织; SSOT 按业务 module 切; trait 按 .rs 文件切 (接受阻抗不匹配, 显式披露)"
+    :created "v0.4.22 (2026-04-20)"
+    :purpose "对施工 agent 明确: 什么算本 pillar 的代码 / 什么是 out-of-scope / 代码目录组织原则"
+
+    (in-scope
+      (desc "本 lisp 管辖代码 — 同构重构范围")
+      (core-crate       "crates/missiond-core/src/db/"
+        :purpose "schema + trait + PG impl (worker-trait-surface 实现)"
+        :files "按 .rs 文件切 trait (project.rs / board.rs / knowledge.rs / conversation.rs / slot.rs / observability.rs / gemini_log.rs / incident.rs / ast.rs / question.rs / task.rs / backfill.rs)")
+      (core-types       "crates/missiond-core/src/types/"
+        :purpose "Rust struct + enum (FSM / EmbedDecision / 各表 row 类型)")
+      (migrations       "crates/missiond-core/migrations/"
+        :purpose "PG schema 演进 SSOT"
+        :authority "migrations 里的 CREATE TABLE 是 schema 唯一真相")
+      (mcp-tools        "crates/missiond-mcp/src/tools/"
+        :purpose "MCP tool 定义 (mcp-surface 的 client-facing 形态)")
+      (daemon-handlers  "crates/missiond-daemon/src/handlers/"
+        :purpose "MCP tool handler 实现 — 调 trait, 做业务编排"
+        :note "handler 物理上在 daemon crate, 逻辑上实现 memory 的 MCP 契约, 属 memory 管辖")
+      (daemon-ws-bridge "crates/missiond-daemon/src/bus/ws_bridge.rs"
+        :purpose "memory → 前端 WS (frontend-surface)"
+        :note "ws_bridge 整个文件横切 (也有 event-bus frames), memory 只管和本 pillar stream 相关部分"))
+
+    (out-of-scope
+      (desc "本 lisp :cross-ref 指向但不施工的代码 — 由对应 pillar 负责")
+      (pillar-二-workers  "crates/missiond-daemon/src/workers/"
+        :reason "writer/reader 的 :cross-ref 指向这里, 但 worker 的 tick / 算法 / recovery 由 pillar 二 管")
+      (pillar-二-engines  "crates/missiond-daemon/src/engine/"
+        :reason "autopilot / flow-engine / learning engine 归 pillar 二")
+      (pillar-四-event-bus "crates/missiond-daemon/src/event/ + bus/ (非 ws_bridge 部分)"
+        :reason "event_log 等 4 表 + 事件总线 v1.3.0 frozen")
+      (pillar-五-actor    "TBD"
+        :reason "directive-layer 未来 writer 在 pillar 五, 本 pillar 只声明 schema+trait 契约")
+      (施工规则 "同构只动 in-scope; 对 out-of-scope 的 :cross-ref 只做 '指向的文件/函数存在性' 验证, 不改内容, 不做重构"))
+
+    (layout-decision-directory-structure
+      :question "要不要把代码按 module 重组成 crates/missiond-core/src/memory/<module>/ 这种目录?"
+      :decision "❌ NO — 保持 flat trait-file 切分"
+      :reason-1 "trait 跨 module 现实普遍: ObservabilityStore 跨 3 module (llm-support / system-support / conversation-logs), SlotStore 跨 2 module (slot-support / system-support + conversation-logs); 目录化制造假整洁"
+      :reason-2 "按 trait 文件切 + 现有代码阻抗最小; 重组成本 >> 收益"
+      :reason-3 "lisp 的 module 概念已足够 cohesive; 代码层通过 pillar-interfaces :: worker-trait-surface :: current-traits 做 module ↔ trait ↔ files 三方映射即可"
+      :concrete-result "每个 memory module 对应若干 trait (:primary-traits) + 可能共享的 trait (:consumes-shared-trait); 每个 trait 对应一个 .rs 文件 (db/*.rs + db/pg/*.rs)")
+
+    (file-to-module-mapping
+      (desc "代码文件 → memory module 的映射 — 施工第一步扫描补齐")
+      :status "🚧 v0.4.22 初始骨架, phase-1 扫描时 施工 agent 补齐 + 校验"
+      :mapping-style "一个文件可能归一个 module, 也可能跨 module (trait 阻抗)"
+
+      (db/project.rs            :serves "module project-management"  :trait "ProjectStore")
+      (db/skill.rs              :serves "module project-management"  :trait "ProjectStore (skill_* 4 张)")
+      (db/board.rs              :serves "module board"               :trait "BoardStore (board_tasks 主)")
+      (db/question.rs           :serves "module board"               :trait "BoardStore (agent_questions)")
+      (db/knowledge.rs          :serves "module kb-manager"          :trait "KbStore (knowledge + edges + access_log + op_queue + ast_links)")
+      (db/ast.rs                :serves "module kb-manager"          :trait "KbStore (ast_nodes + ast_file_meta + beacons + beacon_nodes)")
+      (db/conversation.rs       :serves "module conversation-logs"   :trait "ConversationStore + MessageStore")
+      (db/slot.rs               :serves ["slot-support" "system-support (daemon_state)" "conversation-logs (sessions)"]
+                                :trait "SlotStore (cross-module, 25 方法)")
+      (db/observability.rs      :serves ["llm-support" "system-support" "conversation-logs"]
+                                :trait "ObservabilityStore (cross-module, 36 方法)")
+      (db/gemini_log.rs         :serves "module llm-support"         :trait "ObservabilityStore (gemini_log_* + gemini_file_cache_*)")
+      (db/incident.rs           :serves ["system-support (incidents)" "llm-support (token_usage)"]
+                                :trait "ObservabilityStore (insert_incident + insert_token_usage + token_stats)")
+      (db/task.rs               :serves "module system-support"      :trait "SlotStore (legacy tasks/inbox/events)")
+      (db/backfill.rs           :serves "module system-support"      :inherent "MissionDB inherent 方法 (非 trait)")
+      (db/traits.rs             :serves "all modules"                :purpose "9 trait 定义 + MissionStore 聚合 super-trait")
+      (db/pg/*.rs               :serves "各 trait PG impl"           :purpose "对应 store trait 的 PG 实现")
+      (types/*                  :serves "all modules"                :purpose "Row struct + FSM enum")
+
+      (directive-layer-TBD
+        :status "🚧 未实现"
+        :expected-files "db/directive.rs (新) + db/pg/directive.rs (新) + types 加 Directive/Plan/Workflow struct + status enums"
+        :trait "DirectiveLayerStore"))
+
+    (施工-roadmap
+      (phase-1 "file-to-module-mapping 扫描补齐 + 校验"
+        :action "施工 agent 扫 in-scope 目录, 对每个 .rs 文件生成 '属于哪个 module / 实现哪个 trait / 方法列表' 清单, 补完本 section")
+      (phase-2 "按 module 生成 impl-checklist"
+        :action "每个 module 生成一张 MD checklist: trait 声明 vs 实际 impl + cross-ref 文件指向 vs 实际文件存在"
+        :output-location "施工 execution lisp 的 shared-memory 槽位")
+      (phase-3 "填 DirectiveLayerStore (全新 trait)"
+        :action "按 module directive-layer pending-implementation-checklist 6 步执行"
+        :dependency "phase-1+2 完成")
+      (phase-4 "binds-to 验证"
+        :action "每个 writer/reader :cross-ref 指向的代码函数在 in-scope 范围内的确存在; out-of-scope 的只做文件存在性 ping")
+      (phase-5 "agent-team 验证 lisp ↔ code 同构"
+        :action "派独立 agent 双向校验: (a) lisp 每个 module 的 trait/writer/reader 在代码里找得到 (b) 代码的 struct/trait/impl 在 lisp 里也被声明")
+      (phase-6 "(可选) 野生清理 v2 + pending-drop 表实际 drop migration"
+        :action "v0.4.22 标的 2 张 narrations + 4 legacy (tasks/inbox/events/credentials drop-candidate) 执行 migration")))
 
 
   ;; ═════════════════════════════════════════════════════════════
@@ -1331,19 +1427,35 @@
         :library-pov "库暴露 get_recent_intents(since_secs); 时窗 / 调用频率在 autopilot"))
 
     (module-tables-owned
-      (desc "本模块独占 13 张表")
+      (desc "本模块独占 15 张表 (13 active + 2 pending-drop)")
       (tables conversations conversation_messages conversation_turns conversation_events
               conversation_tool_calls conversation_topic_vectors conversation_labels
               message_embeddings message_embedding_skips
+              message_narrations narration_cursors
               message_translations message_labels
               retrospective_results
               user_intents)
-      (count 13)
-      (removed-in-v0.4-revision "image_descriptions 挪到 category system-support (独立图片缓存, 无外键, 非 conversation-scoped)")
-      (removed-in-v0.4.12 "message_narrations + narration_cursors 下线 (连同 briefing-worker [v1.3.0 删] + step-narrator [v0.4.12 删]); 摘要功能完全移除, 需 drop migration")
+      (count 15)
+      (active-count 13)
+      (pending-drop
+        (message_narrations :status "pending-drop-v0.4.12" :reason "briefing-worker (v1.3.0 删) + step-narrator (v0.4.12 删) 已无 writer, migration 待写"  :施工-action "确认无 writer/reader 后写 drop migration")
+        (narration_cursors  :status "pending-drop-v0.4.12" :reason "同上, 仅 narration 防重游标"  :施工-action "同上, 一起 drop"))
+      (removed-in-v0.4-revision "image_descriptions 挪到 module system-support (独立图片缓存, 无外键, 非 conversation-scoped)")
       (added-in-v0.4.16 "user_intents (之前错列在 pillar 五 action-instruction-specs; 实际 writer=intent_analyst, reader=autopilot+self, trait 挂 ConversationStore)")
+      (v0.4.22-count-correction "原 count 13 是 '预期清理后' 数量, 但 narrations 2 张 migration 未写实际仍在; 改为 count 15 实况 + active-count 13 + pending-drop 2")
       (non-db-forms-owned
-        (jsonl-source "~/.claude/projects/{encoded}/*.jsonl (see non-db-forms :: external-source-streams)"))))
+        (jsonl-source "~/.claude/projects/{encoded}/*.jsonl (see non-db-forms :: external-source-streams)")))
+
+    (cross-module-trait-sharing
+      (desc "本 module 的 trait 跨模块共享关系 — 主 trait 独占, 消费部分共享 trait")
+      :primary-traits
+        ("ConversationStore (db/traits.rs:36-151) — 本 module 主 trait, 36+ 方法覆盖 conversations/messages/turns/events/user_intents/labels"
+         "MessageStore (db/traits.rs:158+) — 消息级细粒度 CRUD + 搜索 + 分页")
+      :consumes-shared-trait
+        ("ObservabilityStore (db/traits.rs:614) 的 label_* + conversations_missing_summary_* 方法 — trait 挂 observability.rs 文件但语义归本模块消费"
+         "SlotStore 的极少方法 (slot_id 反查场景, 主归 slot-support)")
+      :design-note "ConversationStore/MessageStore 和本 module 1:1 无阻抗; ObservabilityStore/SlotStore 跨 module 是 trait 按 .rs 文件切分产生的阻抗不匹配, 接受 + 显式披露"
+      :施工-note "本模块代码同构时, ConversationStore/MessageStore 全部 impl 在本 module 范围; ObservabilityStore 的 label_* 方法 impl 在 db/pg/observability.rs 但逻辑按本 module 约束"))
 
 
   ;; ═════════════════════════════════════════════════════════════
@@ -2564,7 +2676,28 @@
       "(KKK) cross-cutting capability embedding-storage-governance 收缩为 cross-ref 一句话指向新 module"
       "     non-db-forms form embedding-vectors :managed-by 'module embedding-support' (v0.4.20 未决的 #12 解决)"
       "(LLL) memory pillar 定稿 9 module: 5 business + 4 support; ownership-summary 更新"
-      "     野生清扫完结: 从 v0.4.20 识别的 15 项问题现已 15/15 治理")
+      "     野生清扫完结: 从 v0.4.20 识别的 15 项问题现已 15/15 治理"
+      "v0.4.22 (2026-04-20 — 施工开工前最后审计 + 上锁候选):"
+      "(MMM) 审计发现 + 修正 3 项:"
+      "     🔴 conversation-logs count 不一致: by-owner 15 vs tables-owned 13"
+      "       → 统一为 15 (实际数据库现状) + active-count 13 + pending-drop 2 (narrations 系列)"
+      "       → narrations 2 张带 :status 'pending-drop-v0.4.12' + :施工-action"
+      "     🟡 conversation-logs 缺 cross-module-trait-sharing 区块"
+      "       → 补上: ConversationStore/MessageStore 主 trait + 消费 ObservabilityStore 部分方法"
+      "     💡 顶部新增 (target-code-layout ...) 块 — 施工前必读"
+      "       声明 in-scope (memory pillar 管辖的 5 类路径)"
+      "       声明 out-of-scope (pillar 二/四/五 的代码, 同构只验不改)"
+      "       决定不做目录重组 (保持 flat trait-file 切分, 理由 3 条)"
+      "       给出 file-to-module-mapping 骨架 (施工 phase-1 扫描补齐)"
+      "       6 phase 施工 roadmap"
+      "(NNN) lisp 进入上锁候选状态:"
+      "     - 9 module × 6 核心区块 100% (直到 conversation-logs 也补上)"
+      "     - 96 writer/reader × :binds-to 100% 覆盖"
+      "     - 98 处 cross-ref/code 施工锚点"
+      "     - trait 数字处处 9 一致; 表总数 60 (56 memory + 4 pillar 四) 一致"
+      "     - target-code-layout 明确同构范围边界"
+      "     - 进入施工阶段后, 本 lisp 不允许修改; 并行 agent 共享内存层另开 intent-memory-execution.lisp"
+      "(OOO) 开工准备就绪; 下一步 commit 此版本作为 frozen 基线")
 
     (ownership-summary
       ;; 5 business modules
