@@ -310,7 +310,8 @@
           :desc "embedding 列写入 → HNSW 索引增量更新 (pgvector 原生)"
           :writer   "2.3 workers :: embedding-worker (sonnet 组)"
           :provider "2.2 llm-gateways :: sonnet-gateway (qwen3 路由)"
-          :writes   "knowledge.embedding_vec / conversations.summary_embedding / conversation_topic_vectors"
+          :writes   "5 张表 embedding_vec 列 (knowledge / conversation_topic_vectors / message_embeddings / skill_topics / ast_nodes)"
+          :governance "契约见 pillar 一 memory :: cross-cutting :: capability embedding-storage-governance (v0.4.6+)"
           :invariant "禁止降级兜底, 失败直接报错")
 
         (source db-write-auto-index

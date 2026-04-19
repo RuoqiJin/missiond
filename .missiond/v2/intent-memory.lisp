@@ -23,7 +23,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.5")
+  (version "draft-v0.4.6")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -36,7 +36,8 @@
     (v0.4.2 "4 模块 in/core/out harmonization: board/kb/conv core 统一用 (path/plumbing/helper) 三分法语义")
     (v0.4.3 "CLAUDE.md 分层: 全局 ~/.claude/CLAUDE.md + manager → pillar 五 intent-layer; 项目级 <project>/CLAUDE.md + manager → memory :: project-management")
     (v0.4.4 "action/instruction specs 迁 pillar 五: intent/plan/workflow/user_intents DB 表 + system-level intent*.lisp + workflows*.lisp + flows/*.yaml; memory 只留'项目代码真实状态'的 per-project intent.lisp")
-    (v0.4.5 "workflow-lisp-templates + flow-yaml-templates 合并到单一 component workflows (:kind methodology | executable), 符合 Option B 设计"))
+    (v0.4.5 "workflow-lisp-templates + flow-yaml-templates 合并到单一 component workflows (:kind methodology | executable), 符合 Option B 设计")
+    (v0.4.6 "embedding 契约 SSOT: cross-cutting 新增 capability embedding-storage-governance, 5 处散落描述改用 cross-ref; 确认 5 张承载表 (含 skill_topics / ast_nodes) 及 message_embeddings 的 halfvec 特殊性"))
   (status "草稿 — 大多数 module 已稳定, 可演进")
 
   (purpose "系统长期记忆 — 4 个业务模块自治 + 底层系统支持层 + 横切")
@@ -247,13 +248,9 @@
         :debounce "60s per project_id"))
 
     (form embedding-vectors
-      (desc "pgvector 512-dim 二进制 — 存 DB 列")
-      :columns "knowledge.embedding_vec / conversations.summary_embedding / conversation_topic_vectors.vec / message_embeddings.vec"
-      :dim 512
-      :provider "pillar 二 2.2 sonnet-gateway (qwen3)"
-      :generator "pillar 二 2.3 embedding-worker"
-      :consumer "pillar 二 2.6 search-engines :: vector-hnsw"
-      :invariant "禁止降级兜底")
+      (desc "pgvector 二进制 embedding 列 — 详见 cross-cutting :: embedding-storage-governance")
+      :governance-ssot "cross-cutting :: capability embedding-storage-governance (v0.4.6+)"
+      :quick-facts "512 dim / 5 承载表 / qwen3 via sonnet-gateway / HNSW cosine / 禁止降级兜底")
 
     (form side-channel-blobs
       (desc "claim-check 大对象")
@@ -621,10 +618,10 @@
       (writer worker-embedding-cross
         :kind   "sonnet (cross-module writer)"
         :code   "crates/missiond-daemon/src/workers/sonnet/embedding_worker.rs"
-        :writes "knowledge.embedding_vec"
-        :also-writes-in-other-module "conversation-logs: message_embeddings + conversation_topic_vectors"
-        :purpose "生成 KB 条目向量供向量检索"
-        :provider "qwen3 via sonnet-gateway (pillar 二 2.2)")
+        :writes "knowledge.embedding_vec (+ ast_nodes.embedding_vec)"
+        :also-writes-in-other-module "conversation-logs: message_embeddings + conversation_topic_vectors; project-management: skill_topics"
+        :purpose "生成本模块 embedding 供向量检索"
+        :governance "契约 + schema + provider 见 cross-cutting :: capability embedding-storage-governance")
 
       (writer context-pipeline-kb-audit
         :code   "crates/missiond-daemon/src/context/context_pipeline.rs :: kb_log_co_access"
@@ -654,9 +651,10 @@
       (plumbing knowledge-store
         (desc "语义级记忆主表 — 40+ category, 每条独立知识片段")
         :table "knowledge"
-        :schema-cols "id / key / category / content / embedding_vec(512) / project_id / tags / access_count / created_at / updated_at"
+        :schema-cols "id / key / category / content / embedding_vec / project_id / tags / access_count / created_at / updated_at"
         :code "crates/missiond-core/src/db/knowledge.rs"
-        :scoping "has project_id column (primary scoped)")
+        :scoping "has project_id column (primary scoped)"
+        :embedding "见 cross-cutting :: embedding-storage-governance")
 
       (plumbing knowledge-graph
         (desc "KB 条目之间的关系图 — 支撑 universe_graph")
@@ -821,10 +819,10 @@
       (writer worker-embedding
         :kind   "sonnet (cross-module writer)"
         :code   "crates/missiond-daemon/src/workers/sonnet/embedding_worker.rs"
-        :writes "message_embeddings / conversation_topic_vectors"
-        :also-writes-in-other-module "kb-manager: knowledge.embedding_vec"
-        :provider "qwen3 via sonnet-gateway (pillar 二 2.2)"
-        :note "不写 conversations.summary_embedding, 也不写 message_embedding_skips (skip 逻辑是 worker 内部控制, 不落此表)")
+        :writes "message_embeddings (halfvec) / conversation_topic_vectors"
+        :also-writes-in-other-module "kb-manager: knowledge.embedding_vec + ast_nodes.embedding_vec; project-management: skill_topics"
+        :governance "契约 + schema + provider 见 cross-cutting :: capability embedding-storage-governance"
+        :note "不写 conversations.summary_embedding (该列不存在); message_embedding_skips 是 worker 内部去重策略")
 
       (writer worker-translation
         :kind   "sonnet"
@@ -899,8 +897,9 @@
 
       ;; ── helper: 派生层 (path derived-analysis-layer 的产物) ──
       (helper semantic-vectors
-        (desc "消息 + 话题向量")
+        (desc "消息 + 话题向量 — embedding 治理见 cross-cutting :: embedding-storage-governance")
         :tables (conversation_topic_vectors message_embeddings message_embedding_skips)
+        :note "conversation_topic_vectors 是 vector, message_embeddings 是 halfvec (1KB 压缩); 不同 HNSW 参数见 governance"
         :generator "worker-embedding (sonnet)"
         :consumer "pillar 二 2.6 search-engines :: vector-hnsw")
 
@@ -1085,7 +1084,75 @@
       (desc "schema 演进 — daemon 启动 phase 1 自动跑")
       :code "crates/missiond-core/migrations/"
       :count 20
-      :automation "sqlx::migrate! 编译期检查 + 运行期执行"))
+      :automation "sqlx::migrate! 编译期检查 + 运行期执行")
+
+    (capability embedding-storage-governance
+      (desc "embedding 列的 schema + policy SSOT — 存储端契约, 给 worker (生成) + search-engines (消费) 共同遵守")
+      :role "schema + policy authority for embedding columns (NOT generator, NOT search)"
+      :dimension 512
+      :provider-binding "qwen3 via pillar 二 2.2 sonnet-gateway (唯一 provider, 禁止降级兜底)"
+      :index-type "HNSW (pgvector extension, cosine similarity)"
+
+      (storage-tables
+        (desc "5 张表有 embedding_vec 列 — 按模块归属")
+        (knowledge
+          :column "embedding_vec"
+          :type "vector (standard)"
+          :hnsw-params "m=16, ef_construction=64"
+          :owned-by "module kb-manager")
+        (conversation_topic_vectors
+          :column "embedding_vec"
+          :type "vector"
+          :hnsw-params "m=16, ef_construction=64"
+          :owned-by "module conversation-logs")
+        (message_embeddings
+          :column "embedding_vec"
+          :type "halfvec (1KB 压缩)"
+          :hnsw-params "m=24, ef_construction=128"
+          :rationale "消息量大, halfvec 节省空间 + 更深索引"
+          :owned-by "module conversation-logs")
+        (skill_topics
+          :column "embedding_vec"
+          :type "vector"
+          :hnsw-params "m=16, ef_construction=64"
+          :owned-by "module project-management")
+        (ast_nodes
+          :column "embedding_vec"
+          :type "vector"
+          :hnsw-params "m=16, ef_construction=64"
+          :owned-by "module kb-manager"))
+
+      (dedup-policy
+        :table "message_embedding_skips"
+        :rule "消息不该 embed 的记录此 ID, 避免 embedding-worker 重复尝试"
+        :owner-module "conversation-logs"
+        :writer "embedding-worker 内部逻辑 (不公开为 ingress)")
+
+      (retention
+        :strategy "follow-parent"
+        :reason "embedding 是 parent row 的派生物, 无独立 TTL"
+        :note "parent row 删除 → embedding 随之失效 (CASCADE 或应用层清理)")
+
+      (contract-with-generator
+        :generator "pillar 二 2.3 workers/sonnet/embedding_worker.rs"
+        :invariant-1 "失败 fail-fast 不兜底 (见 embedding-worker :provider)"
+        :invariant-2 "批量写入, 单次事务 (insert_message_embeddings_batch / set_conversation_topic_vectors / kb_remember)"
+        :invariant-3 "provider 固定 qwen3, 换需重算全表")
+
+      (contract-with-consumer
+        :consumer "pillar 二 2.6 search-engines :: engine vector-hnsw"
+        :invariant-1 "consumer 必须容忍 NULL embedding (async 生成未就绪或跳过)"
+        :invariant-2 "查询时用同 provider 生成 query 向量, 否则相似度不可比"
+        :fusion-with "FTS + trigram + tag (见 pillar 二 2.6 fusion-ranker)")
+
+      (change-protocol
+        :dim-change "改 512 → 1024: 需同时迁移 5 承载表 + 5 HNSW 索引 + provider 切换"
+        :provider-change "换 qwen3 → 别的: 需重算所有 5 表 embedding; 中间态不可搜, 建议离线 backfill"
+        :new-table-adding-embedding "(1) 迁移加 embedding_vec 列 + HNSW 索引 (2) 本 capability 的 storage-tables 补记 (3) embedding-worker 加写入路径")
+
+      (known-issue-v0.4.6-moved
+        "skill_topics embedding 归 project-management 而非 kb-manager: 因 skills 是 project-management 管; 但 search-engines 查 skill 时仍通过 vector-hnsw 统一路径"
+        "ast_nodes embedding 归 kb-manager (kb-ast-linkage + code-search 消费)")))
 
 
   ;; ═════════════════════════════════════════════════════════════
@@ -1152,7 +1219,14 @@
       "    → 单一 component workflows 带 (kind methodology) + (kind executable)"
       "    methodology = .missiond/workflows/*.lisp (human, 抽象叙事, 非执行)"
       "    executable  = $MISSIOND_HOME/flows/*.yaml (machine, 具体节点, flow-engine-v2 执行)"
-      "    受众/粒度/执行性分轴, 但概念统一为'多步工作流规约'")
+      "    受众/粒度/执行性分轴, 但概念统一为'多步工作流规约'"
+      "v0.4.6 (2026-04-19 — embedding 治理):"
+      "(U) cross-cutting 新增 capability embedding-storage-governance (schema + policy SSOT)"
+      "    确定 5 承载表: knowledge / conversation_topic_vectors / message_embeddings / skill_topics / ast_nodes"
+      "    发现 message_embeddings 用 halfvec (1KB 压缩), HNSW 参数 m=24 ef=128 (vs 其他 4 表 m=16 ef=64)"
+      "    澄清 conversations.summary_embedding 列不存在 (之前 lisp 错列, 已修)"
+      "(V) 5 处散落描述改用 cross-ref 指向 governance SSOT (kb/conv writer / non-db-forms / pillar 二 2.6)"
+      "    减少维护负担 + 单点真理")
 
     (ownership-summary
       (module-project-management   5 "projects + 4 skills (specs 4 张迁走)")
