@@ -5,6 +5,7 @@ pub mod traits;
 pub mod shared;
 pub(crate) mod directive;
 pub(crate) mod project;
+pub(crate) mod observability;
 
 #[cfg(feature = "postgres")]
 pub mod pg;

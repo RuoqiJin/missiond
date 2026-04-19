@@ -94,8 +94,7 @@ pub mod migrate_from_sqlite;
 
 // Domain trait implementations — one file per trait:
 // Note: tool_call/event/retrospective merged into conversation (v0.4.23).
-#[cfg(feature = "postgres")]
-mod vision;
+// Note: vision merged into observability (v0.4.23 — Stage 2C.5).
 #[cfg(feature = "postgres")]
 mod skill;
 #[cfg(feature = "postgres")]

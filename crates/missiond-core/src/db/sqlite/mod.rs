@@ -4,9 +4,9 @@
 //! to provide async trait implementations that preserve slow-query monitoring.
 
 // Note: tool_call/event/retrospective merged into conversation (v0.4.23).
+// Note: vision merged into observability (v0.4.23 — Stage 2C.5).
 mod conversation;
 mod message;
-mod vision;
 mod knowledge;
 mod board;
 mod timeline;

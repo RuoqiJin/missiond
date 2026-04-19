@@ -264,24 +264,10 @@ pub trait MessageStore: Send + Sync {
 // ============================================================================
 
 // ============================================================================
-// 6. VisionStore — Image description cache, translation cache
-// Source: vision.rs + translation.rs
+// 6. [MERGED] VisionStore → ObservabilityStore (v0.4.23)
+// Per memory pillar v0.4.23: image_descriptions belongs to module system-support
+// which is covered by ObservabilityStore. VisionStore merged as a section below.
 // ============================================================================
-
-#[async_trait]
-pub trait VisionStore: Send + Sync {
-    async fn get_image_description(&self, image_hash: &str) -> DbResult<Option<String>>;
-    async fn save_image_description(&self, image_hash: &str, media_type: &str, description: &str) -> DbResult<()>;
-    async fn update_message_content(&self, message_id: i64, new_content: &str) -> DbResult<()>;
-    async fn get_message_raw_content(&self, message_id: i64) -> DbResult<Option<String>>;
-    async fn find_unprocessed_image_messages(&self, limit: usize) -> DbResult<Vec<(i64, String)>>;
-    async fn mark_vision_permanently_failed(&self, message_id: i64) -> DbResult<bool>;
-    async fn image_description_count(&self) -> DbResult<i64>;
-
-    async fn insert_translation(&self, message_id: i64, translation: &str, model: &str, duration_ms: u64) -> DbResult<()>;
-    async fn get_translation(&self, message_id: i64) -> DbResult<Option<(String, String)>>;
-    async fn has_translation(&self, message_id: i64) -> DbResult<bool>;
-}
 
 // ============================================================================
 // 7. KbStore — KB CRUD, FTS, embedding, graph, ops, AST links
@@ -624,6 +610,19 @@ pub trait ObservabilityStore: Send + Sync {
     async fn router_chat_delete(&self, conversation_id: &str) -> DbResult<(i64, i64)>;
     async fn router_chat_delete_by_task(&self, task_id: &str) -> DbResult<(i64, i64)>;
     async fn router_chat_restore(&self, conversation_id: &str) -> DbResult<i64>;
+
+    // -- from VisionStore v0.4.23 --
+    // Source: vision.rs (image_descriptions, system-support module) + translation.rs (message_translations, conversation-logs)
+    async fn get_image_description(&self, image_hash: &str) -> DbResult<Option<String>>;
+    async fn save_image_description(&self, image_hash: &str, media_type: &str, description: &str) -> DbResult<()>;
+    async fn update_message_content(&self, message_id: i64, new_content: &str) -> DbResult<()>;
+    async fn get_message_raw_content(&self, message_id: i64) -> DbResult<Option<String>>;
+    async fn find_unprocessed_image_messages(&self, limit: usize) -> DbResult<Vec<(i64, String)>>;
+    async fn mark_vision_permanently_failed(&self, message_id: i64) -> DbResult<bool>;
+    async fn image_description_count(&self) -> DbResult<i64>;
+    async fn insert_translation(&self, message_id: i64, translation: &str, model: &str, duration_ms: u64) -> DbResult<()>;
+    async fn get_translation(&self, message_id: i64) -> DbResult<Option<(String, String)>>;
+    async fn has_translation(&self, message_id: i64) -> DbResult<bool>;
 }
 
 // ============================================================================
@@ -798,7 +797,7 @@ pub trait ProjectStore: Send + Sync {
 #[async_trait]
 pub trait MissionStore:
     ConversationStore + MessageStore
-    + VisionStore + KbStore + BoardStore
+    + KbStore + BoardStore
     + TimelineStore + SlotStore + ObservabilityStore
     + ProjectStore + InfraStore + DirectiveLayerStore
     + Send + Sync
