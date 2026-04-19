@@ -75,9 +75,11 @@
         (stage-2F "I001 wild files 补分类 → file-to-module-mapping-complete" :status "completed" :at "2026-04-20"
           :note "Stage 2A-2E 执行后, 大部分 wild files 自然消除 (删除 / 合并). 剩余文件每个都已归属明确, 记录在 file-to-module-mapping-complete 槽位下"))
       (phase-3 :name "(deprecated — 合并进 phase-2 stage-2B + 独立)"         :status "merged-into-phase-2")
-      (phase-4 :name "binds-to cross-ref 验证"                                :status "pending")
-      (phase-5 :name "lisp ↔ code 双向同构校验"                               :status "pending")
-      (phase-6 :name "(可选) drop migration (narrations 2 + legacy 4)"       :status "pending"))
+      (phase-4 :name "binds-to cross-ref 验证" :status "completed" :at "2026-04-20"
+        :result "mcp-surface 100% / trait-surface 9/9 / cross-ref 51/51 pointer 通过 / frontend-surface 5 streams 大致 OK / external-filesystem 约定 paths 引用存在")
+      (phase-5 :name "lisp ↔ code 双向同构校验" :status "completed" :at "2026-04-20"
+        :result "lisp→code 0 orphan (60 表 + 9 trait 全部在代码存在); code→lisp 发现 5 documentation drift (D-004 ~ D-008)")
+      (phase-6 :name "drop migration + zombie cleanup" :status "in-progress"))
 
   ;; ─────────────────────────────────────────────────────────
   ;; claims — 谁锁定了什么, 防并发写冲突
@@ -139,6 +141,37 @@
         (建-DirectiveLayerStore           :priority P1 :effort large "phase-3 专项, 新建 15 方法")
       :status "approved-decided"
       :at "2026-04-20 phase-1.5")
+
+    (D004
+      :source "Phase 4+5 audit (agent ab3a924be68435f5a)"
+      :finding "lisp target-code-layout :: file-to-module-mapping (v0.4.22 骨架) 引用 db/board.rs / db/question.rs / db/ast.rs / db/gemini_log.rs / db/task.rs / db/backfill.rs / db/incident.rs / db/knowledge.rs / db/conversation.rs / db/slot.rs / db/observability.rs — 但 Phase 2 后这些文件全部转移到 db/pg/*.rs 或 types/*.rs, db/ 根只剩 8 文件"
+      :note "lisp 已标 :status 🚧 初始骨架 pending phase-1 scan 补齐, 所以这是 known-incomplete 非真错"
+      :resolved-by "execution lisp 的 file-to-module-mapping-complete 槽位 (Stage 2F 产出) 已给终极映射"
+      :status "tracked-resolved" :at "2026-04-20")
+
+    (D005
+      :source "Phase 4+5 audit"
+      :finding "db/conversation_query.rs 文件存在但未在 lisp file-to-module-mapping 骨架里列"
+      :note "execution lisp file-to-module-mapping-complete 已补"
+      :status "tracked-resolved")
+
+    (D006
+      :source "Phase 4+5 audit"
+      :finding "workers/codex/step_narrator.rs + workers/local/xjpcode_briefing_worker.rs 文件还在, lisp 多处说 worker-removed. 属 pillar 二 (out-of-scope for memory pillar), 但 memory lisp v0.4.12 history 的声明与实际有 drift"
+      :action "记为 I-series 给 pillar 二 施工时清理; memory pillar 同构不动这些文件"
+      :status "tracked-out-of-scope")
+
+    (D007
+      :source "Phase 4+5 audit"
+      :finding "ConversationStore::insert_narrations + message_narrations / narration_cursors 表仍活着. lisp v0.4.12 说'narrations 下线'但 migration + trait 未执行"
+      :action "Phase 6 drop migration 处理 — 选择: (a) 真 drop (按 lisp) 或 (b) lisp 后续版本 rephrase '写 paused, schema 保留'"
+      :decision "按指挥官 '代码向 lisp 对齐' 原则, Phase 6 真 drop"
+      :status "phase-6-target")
+
+    (D008
+      :source "Phase 4+5 audit"
+      :finding "types/async_job.rs / types/dynamic_slot.rs / types/gen_types.rs 不在 lisp file-to-module-mapping"
+      :status "tracked-minor")
 
     (D003
       :lisp-said "Stage 2A.3 原计划 delete TimelineStore (基于 '它已 deprecated' 的假设)"
