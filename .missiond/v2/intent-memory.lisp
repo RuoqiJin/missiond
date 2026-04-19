@@ -23,7 +23,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.12")
+  (version "draft-v0.4.13")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -43,7 +43,8 @@
     (v0.4.9 "conversation-logs 按 'memory=库' 精简: 10 worker 全改 cross-ref + 新增 writer-removed 墓志铭 (worker-briefing 已在 v1.3.0 删) + 2 egress 消费者改 cross-ref + pillar 二 2.3 同步修正 briefing 删除 + 增 writes-to-memory 注记")
     (v0.4.10 "kb-manager 按 'memory=库' 精简: 5 worker + 1 context-pipeline writer → cross-ref; 2 egress compute 消费者 → cross-ref; core plumbing 的 :maintained-by 改 cross-ref; helper access-audit + operation-queue 加 :library-pov 分清接口 vs 时机")
     (v0.4.11 "project-management 按 'memory=库' 精简: lisp-survey-worker → cross-ref pillar 二 2.3; scope-propagation 从 ingress 'writer' 重构为 plumbing scope-mechanism 下的 write-propagation-convention (不是 writer 而是跨模块约定); vault-md-edit 加 :library-pov")
-    (v0.4.12 "野生逻辑清理 Phase 1: L1 修正 (agent-questions auto-unblock 实际已实现) + L1 移除摘要 (message_narrations/cursors 下线 + step-narrator 删) + L2 TBD 修正 (kb_operation_queue 有 consumer / message_embedding_skips 是 audit trail) + L2 设计 (project-claudemd / agent-execution-coordination / prompt-snapshot 三个 MCP tool interface)"))
+    (v0.4.12 "野生逻辑清理 Phase 1: L1 修正 (agent-questions auto-unblock 实际已实现) + L1 移除摘要 (message_narrations/cursors 下线 + step-narrator 删) + L2 TBD 修正 (kb_operation_queue 有 consumer / message_embedding_skips 是 audit trail) + L2 设计 (project-claudemd / agent-execution-coordination / prompt-snapshot 三个 MCP tool interface)")
+    (v0.4.13 "Phase 2 第一步: 新增 module llm-support (3 表: gemini_requests / gemini_file_uploads / token_usage_ledger, 从 category system-support 分离); 调查确认 3 writer 实际路径 (token 纠正为 message_handler.rs, 不是 gateway); 确认 observability-consumer 存在 (timeline.rs enrichment); cross-module-trait-sharing 诚实披露 ObservabilityStore 跨模块使用"))
   (status "草稿 — 大多数 module 已稳定, 可演进")
 
   (purpose "系统长期记忆 — 4 个业务模块自治 + 底层系统支持层 + 横切")
@@ -1126,32 +1127,151 @@
 
 
   ;; ═════════════════════════════════════════════════════════════
+  ;;  Support 模块 5: LLM Support Manager
+  ;;  对 LLM worker 的数据支持 — 请求日志 / 文件引用 / 成本追踪
+  ;; ═════════════════════════════════════════════════════════════
+  (module llm-support
+    (desc "LLM 调用的观测数据层 — 每次请求 + 远程文件引用 + token 成本")
+    (maturity "成熟 (3 张表均有 active 读写)")
+    :migrated-from "v0.4.13: 从 category system-support :: component global-observability 分离 (用户决策: 独立 manager)"
+
+    (primary-goals
+      (goal-1 llm-call-observability
+        :problem  "LLM 调用分散在多个 gateway (sonnet / gemini / codex / minimax) + 多处 worker, 成本 / 延迟 / 错误没有统一留痕"
+        :solution "gemini_requests 表按每次调用存 caller / model / prompt_chars / duration_ms / status / error_msg"
+        :benefit  "mission_llm_trace 支持按模型 / 时段 / 错误做聚合分析")
+      (goal-2 cost-tracking
+        :problem  "多模型混用下 token 花销需按 session × 模型 维度统计"
+        :solution "token_usage_ledger: conversation_id × model × (input / cache_creation / cache_read / output) tokens"
+        :benefit  "成本归因到会话 / 模型 / 时段; 未来按项目聚合 (scoping candidate)")
+      (goal-3 remote-file-cache
+        :problem  "Gemini File API 上传有 URI + TTL, 同文件重传浪费带宽"
+        :solution "gemini_file_uploads 按 file_hash 去重, 存 file_uri + expires_at"
+        :benefit  "同文件复用 URI; TTL 过期后自然失效"))
+
+    (module-ingress
+      (desc "LLM gateway + logger worker 写入 3 张表")
+      :principle "memory = 库. 本模块只列'谁来写我的表'; gateway / worker 算法见 pillar 二 2.2 + 2.3"
+
+      (writer worker-gemini-logger
+        :cross-ref "pillar 二 2.3 :: workers/local/gemini_logger.rs"
+        :mechanism "event-bus subscriber on LlmEvent; two-step persist:"
+        :step-1    "gemini_log_insert_started (id + caller + model + prompt_chars + prompt_text)"
+        :step-2    "gemini_log_update_completed (id + api_mode + response + duration_ms + status)"
+        :writes    "gemini_requests"
+        :startup   "开机清 7 天前旧日志 (gemini_log_cleanup)"
+        :library-pov "库暴露 gemini_log_insert_started + _update_completed; event-bus 订阅 + 采样 / 清理 策略在 worker")
+
+      (writer llm-gateways-file-cache
+        :cross-ref "pillar 二 2.2 :: daemon/src/llm/gemini_file_api.rs"
+        :writes    "gemini_file_uploads (file_hash 去重 upsert)"
+        :api       "ObservabilityStore::gemini_file_cache_get / _put / _gc"
+        :library-pov "库暴露 cache get/put/gc 三接口; 上传前查 cache miss 再调 Gemini API, TTL 决策在 gateway")
+
+      (writer token-usage-accounting
+        :cross-ref "daemon/src/infra/message_handler.rs:674 (PTY JSONL 摄入下游)"
+        :trigger "conversation-logger 摄入时, 对含 usage 字段的消息调 insert_token_usage"
+        :writes  "token_usage_ledger (每消息一条: conversation_id + slot_id + model + 4 个 tokens + message_id)"
+        :api     "ObservabilityStore::insert_token_usage"
+        :library-pov "库暴露 insert_token_usage + token_stats; 摄入侧决定 '何时写 / 挑哪些消息'"
+        :correction-v0.4.13 "之前假设在 gateway wrapper / fanout subscriber 是错的; 实际是摄入层"))
+
+    (module-core
+      (desc "3 张 LLM 观测表 — schema + 语义; 统一通过 ObservabilityStore super-trait 访问")
+      :trait "ObservabilityStore (crates/missiond-core/src/db/traits.rs:614) — 注: 此 trait 还管 incidents / watermark / labels, 跨 llm-support / system-support / conversation-logs 多模块"
+
+      (plumbing llm-request-log
+        (desc "每次 LLM 请求的日志项")
+        :table "gemini_requests"
+        :schema-cols "id / caller / session_id / api_mode / model / prompt_chars / response_chars / queue_wait_ms / duration_ms / retry_count / status / error_msg / prompt_text / response_text / created_at"
+        :write-pattern "two-step (started + update_completed) — 见 ingress worker-gemini-logger"
+        :trait-methods "gemini_log_insert_started / _update_completed / _get_content / _query / _stats / _cleanup"
+        :retention "7 天 (gemini-logger 启动时 cleanup)"
+        :scoping-candidate "加 project_id 可按项目统计 LLM 使用"
+        :code "crates/missiond-core/src/db/gemini_log.rs + pg/observability.rs (PG impl)")
+
+      (plumbing remote-file-cache
+        (desc "Gemini File API 文件引用 + TTL")
+        :table "gemini_file_uploads"
+        :schema-cols "file_hash (PK) / file_uri / mime_type / expires_at"
+        :trait-methods "gemini_file_cache_get / _put / _gc"
+        :note "PG 只存引用, 实际文件在 Gemini 服务端; upsert on conflict (hash)"
+        :code "crates/missiond-core/src/db/gemini_log.rs + pg/observability.rs")
+
+      (plumbing token-ledger
+        (desc "LLM token 成本按 会话 × 模型 聚合")
+        :table "token_usage_ledger"
+        :schema-cols "conversation_id / slot_id / slot_task_id / model / input_tokens / cache_creation_tokens / cache_read_tokens / output_tokens / message_id / created_at"
+        :trait-methods "insert_token_usage / token_stats (group_by: conversation / slot / model)"
+        :aggregations "by model / by session / by slot / time-series"
+        :scoping-candidate "加 project_id 后可按项目做成本报表"
+        :code "crates/missiond-core/src/db/incident.rs (声明) + pg/observability.rs (impl)"))
+
+    (module-egress
+      (desc "MCP 查询 LLM 观测数据")
+
+      (reader mcp-llm-trace
+        :tool    "mission_llm_trace"
+        :reads   "gemini_requests"
+        :api     "ObservabilityStore::gemini_log_query / _stats / _get_content"
+        :code    "daemon/src/handlers/comm/question.rs :: handle (注: 与 mission_question / decision_stats / incident / gemini_auth 共用 question.rs handler)"
+        :actions "list / by-session / by-model / by-time")
+
+      (reader mcp-cost-report
+        :status  "🚧 MCP 未实现, 但底层查询原语已有"
+        :tool    "mission_cost_report"
+        :reads   "token_usage_ledger"
+        :api     "ObservabilityStore::token_stats(conversation_id, slot_id, since, group_by) 已实现"
+        :purpose "token 花销报表 — by model / by conversation / time-series / 未来按项目"
+        :implementation-effort "低 — 只需写 MCP handler 包装 token_stats 查询, 核心 SQL 已在 trait 里")
+
+      (reader timeline-enrichment
+        :cross-ref "daemon/src/handlers/comm/timeline.rs:125"
+        :reads "gemini_requests (用于 enrich gemini_request_completed 事件的 timeline 展示)"
+        :api "ObservabilityStore::gemini_log_get_content(request_id)"
+        :purpose "Timeline UI/CLI 显示 LLM 调用事件时, 从 gemini_requests 拉完整 prompt/response 细节")
+
+      (reader daemon-stats-counter
+        :cross-ref "daemon/src/infra/daemon_stats.rs"
+        :reads "gemini_requests 计数 (AtomicU64 in-memory counter, 不查 DB)"
+        :purpose "daemon 运行时 observability 计数"
+        :note "内存计数, 不是 DB reader, 列此仅说明 observability 面板数据源之一"))
+
+    (module-tables-owned
+      (desc "本模块独占 3 张表")
+      (tables gemini_requests gemini_file_uploads token_usage_ledger)
+      (count 3)
+      (migrated-from "v0.4.11 category system-support :: component global-observability"))
+
+    (cross-module-trait-sharing
+      (desc "ObservabilityStore super-trait 横跨多模块, 本模块只用其中一部分")
+      :shared-trait "ObservabilityStore (db/traits.rs:614)"
+      :this-module-uses "gemini_log_* (6 方法) + gemini_file_cache_* (3 方法) + insert_token_usage / token_stats"
+      :other-modules-use
+        ("incident 方法 (insert_incident / has_recent_incident / list_incidents) → module system-support"
+         "watermark 方法 (watermark_get / _advance_* / _list) → module system-support"
+         "label 方法 (label_set / _get / _find_messages) → module conversation-logs"
+         "router chat 方法 → module system-support")
+      :design-note "trait 按实现文件切分, 不按模块语义切分. 这是 lisp ↔ code 的一处阻抗不匹配, 可接受."))
+
+
+  ;; ═════════════════════════════════════════════════════════════
   ;;  分类: System Support (系统支持层)
   ;;  非业务语义的基础表 — 被所有模块使用或支撑
   ;; ═════════════════════════════════════════════════════════════
   (category system-support
-    (desc "系统级基础表 — 20 张, 无独立业务语义, 支撑全局运行")
+    (desc "系统级基础表 — 17 张 (v0.4.13: LLM 3 表迁出到 llm-support)")
     (maturity "基础层 — 结构稳定, 部分 legacy 待清理")
 
     (component global-observability
-      (desc "跨项目的观测 / 审计 / 成本追踪 — 不按项目分")
+      (desc "跨项目的观测 / 审计 — 不按项目分")
       :note "v0.4.1: system_timeline 已移除 — event_log (pillar 四) 作为 timeline SSOT, 直接服务 mission_timeline / WS timeline-stream (经 projection)"
+      :migrated-out-v0.4.13 "gemini_requests / gemini_file_uploads / token_usage_ledger 3 表迁到 module llm-support (独立 manager)"
       (table incidents
         :purpose "告警/异常聚合"
         :writer "pillar 四 :: incident-writer"
         :dedup "dedupe_key + 时间窗口"
         :scoping-candidate true)
-      (table token_usage_ledger
-        :purpose "LLM 调用成本追踪"
-        :writer "pillar 四 :: token-usage-writer"
-        :aggregations "by model / slot / conversation / time"
-        :scoping-candidate true)
-      (table gemini_requests
-        :purpose "Gemini API 调用性能日志"
-        :writer "pillar 二 2.3 :: gemini-logger")
-      (table gemini_file_uploads
-        :purpose "Gemini 文件上传缓存 (只存引用)"
-        :actual-storage "Gemini 服务端")
       (table router_chat_archive
         :purpose "Router 聊天历史归档"))
 
@@ -1182,10 +1302,11 @@
         :note "非 conversation-scoped (无 session_id FK); 是全局图片 → 文本 cache"))
 
     (module-tables-owned
-      (desc "此分类持有 20 张表 — 待各模块/pillar 进一步认领以减少 system-support 规模")
-      (count 20)
+      (desc "此分类持有 17 张表 — 待后续模块分离后进一步瘦身")
+      (count 17)
       (added-in-v0.4-revision "image_descriptions 从 conversation-logs 迁入 (该表无 FK, 非会话附属)")
-      (removed-in-v0.4.1-revision "system_timeline 合并进 pillar 四 event_log (SSOT); timeline-writer 订阅者 + mission_timeline 改读 event_log")))
+      (removed-in-v0.4.1-revision "system_timeline 合并进 pillar 四 event_log (SSOT); timeline-writer 订阅者 + mission_timeline 改读 event_log")
+      (removed-in-v0.4.13 "gemini_requests / gemini_file_uploads / token_usage_ledger 3 表 → module llm-support (独立 LLM manager)")))
 
 
   ;; ═════════════════════════════════════════════════════════════
