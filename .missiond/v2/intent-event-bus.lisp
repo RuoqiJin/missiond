@@ -29,10 +29,12 @@
 
 (file-governance
   :lock                "frozen"
-  :version             "v1.2.0"
+  :version             "v1.3.0"
   :sealed-at           "2026-04-19"
-  :last-revision       "2026-04-19: v1.1.0 → v1.2.0 — §4.6 persistence-layer 新增 (从 memory pillar 划回 event_log / event_subscriptions / blob_storage / dead_letter_queue 4 表的所有权声明), approved by user"
-  :prior-revisions     "v1.0.0 → v1.1.0 — god-file split design (approved by user),见 execution lisp deviations D008-D012"
+  :last-revision       "2026-04-19: v1.2.0 → v1.3.0 — event_log 正式锁定为 timeline SSOT (原 system_timeline 表废弃); event_log 新增 read-ui-projection 访问模式 + §4.2 retention 更新 cutover 状态; approved by user"
+  :prior-revisions
+    ("v1.1.0 → v1.2.0: §4.6 persistence-layer 新增 (4 表所有权从 memory pillar 划回), D013 deviation"
+     "v1.0.0 → v1.1.0: god-file split design (approved), D008-D012 deviations")
   :approved-by         "指挥官 (user)"
   :change-policy       "ask-before-edit"
   :companion-log       ".missiond/v2/intent-event-bus-execution.lisp"
@@ -470,11 +472,12 @@
 
         (retention
           :target              "crates/missiond-core/src/event/lifecycle/retention.rs"
-          :default-ttl         "30 天 — event_log 是恢复基座"
+          :default-ttl         "30 天 — event_log 是恢复基座 + timeline SSOT"
           :per-domain-override "ObservabilityEvent = 3 天 可配"
           :ephemeral-ttl       "3 天"
           :cleanup-strategy    "每日清理 job,DELETE WHERE age > domain_ttl"
-          :old-system_timeline "已删(Phase 8)")
+          :system_timeline-cutover
+            "v1.3.0 正式声明 event_log = timeline SSOT; 实施进度: schema drop migration 待写, timeline-writer 订阅者待移除, mission_timeline / WS stream 待迁读 event_log; lisp 先行记录目标态")
 
         (orphan-cleanup
           :target   "crates/missiond-daemon/src/bus/retention_cron.rs"
@@ -729,15 +732,23 @@
                             :partial "WHERE ephemeral = true"
                             :purpose "TTL 清理 ephemeral 行"))
         (access-patterns
-          (write        "step-3 commit 单写点 — LogWriter 批量 INSERT RETURNING seq (SQL 在 pg_backend.rs)"
-                        :target "crates/missiond-core/src/event/pipeline/step3_commit/pg_backend.rs")
-          (read-live    "step-5 tail Dispatcher 长轮询 seq > cursor"
-                        :target "crates/missiond-core/src/event/pipeline/step5_tail/pg_tail.rs")
-          (read-catchup "subscription 订阅启动时 phase-1 pull — lifecycle 调用 LogReader 执行 SELECT"
-                        :target "crates/missiond-core/src/event/log/reader.rs")
-          (retention    "lifecycle-maintenance 每日清理 ephemeral / 30 天过期"
-                        :target "crates/missiond-core/src/event/lifecycle/retention.rs"))
-        (retention "常规 30 天 / ephemeral 3 天 — 待 retention_cron 落地"))
+          (write             "step-3 commit 单写点 — LogWriter 批量 INSERT RETURNING seq (SQL 在 pg_backend.rs)"
+                             :target "crates/missiond-core/src/event/pipeline/step3_commit/pg_backend.rs")
+          (read-live         "step-5 tail Dispatcher 长轮询 seq > cursor"
+                             :target "crates/missiond-core/src/event/pipeline/step5_tail/pg_tail.rs")
+          (read-catchup      "subscription 订阅启动时 phase-1 pull — lifecycle 调用 LogReader 执行 SELECT"
+                             :target "crates/missiond-core/src/event/log/reader.rs")
+          (read-ui-projection "v1.3.0+ — UI readers 经 projection 把 event_log 转成 timeline 形 (映射 domain::kind→event_type, 抽 summary from payload_inline)"
+                              :consumers "mission_timeline MCP tool + WS timeline-event-stream"
+                              :projection-options
+                                ("(a) SQL VIEW timeline_view AS SELECT ... FROM event_log"
+                                 "(b) 查询层代码转换 (handlers/comm/timeline.rs 改读 event_log)")
+                              :pending-migration "v1.3.0 lisp 声明目标态; 代码迁移待实施"
+                              :fts-requirement "event_log.payload_inline 需补 GIN FTS 索引 (mission_timeline FTS 搜索功能)")
+          (retention         "lifecycle-maintenance 每日清理 ephemeral / 30 天过期"
+                             :target "crates/missiond-core/src/event/lifecycle/retention.rs"))
+        :ssot-declaration
+          "v1.3.0+ event_log 正式作为 timeline 的唯一真理源 (SSOT); 原 system_timeline 表废弃, 待代码迁移完成后 DROP")
 
       (table event_subscriptions
         (purpose "订阅者 cursor 存储 — at-least-once 交付的状态载体")

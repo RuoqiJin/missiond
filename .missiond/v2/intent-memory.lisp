@@ -1,190 +1,181 @@
 ;; ══════════════════════════════════════════════════════
 ;; MissionD — Memory Pillar (Full Spec)
 ;; Parent:  v2/intent.lisp :: pillar memory
-;; Status:  草稿 v0.3 — 3 成熟模块(自治 in/core/out) + 平铺未成熟区 + 横切
+;; Status:  草稿 v0.4 — 4 成熟模块各管自己的表 + 精简 system-support
 ;; Created: 2026-04-19
 ;; ══════════════════════════════════════════════════════
 ;;
-;; 结构一眼图:
+;; v0.4 重大重构 — 按用户指令把表归到 4 个业务模块:
 ;;
-;;   ┌── 成熟模块 (各自内部 入/核心/出) ──────────────────┐
-;;   │  module project-management  作用域 + 聚合              │
-;;   │  module board                任务队列 + FSM + 派发     │
-;;   └──────────────────────────────────────────────────────┘
-;;   ┌── 未模块化 (平铺, 待晋升) ─────────────────────────┐
-;;   │  category project-specs     Lisp 规约 + 加载器      │
-;;   │  category system-support    底层表层 (含 writer 注记) │
-;;   └──────────────────────────────────────────────────────┘
-;;   ┌── 横切 ────────────────────────────────────────────┐
-;;   │  db-trait / retention / migrations                     │
-;;   │  (embedding + gen-crud 已迁出到 pillar 二 worker)      │
-;;   └──────────────────────────────────────────────────────┘
+;;   ┌── 4 成熟模块 (各自 in/core/out + 显式 owned-tables) ────────┐
+;;   │  module project-management     9 张 (projects + specs + skills)│
+;;   │  module board                  3 张 (board_tasks 系列)         │
+;;   │  module kb-manager   NEW      10 张 (knowledge + ast 索引)     │
+;;   │  module conversation-logs NEW 15 张 (claude/gemini/codex 会话) │
+;;   └──────────────────────────────────────────────────────────────┘
+;;   ┌── 分类 ────────────────────────────────────────────────────┐
+;;   │  category system-support    ~20 张 (观测 / 基建 / 运行时游标)  │
+;;   └──────────────────────────────────────────────────────────────┘
+;;   ┌── 横切 ────────────────────────────────────────────────────┐
+;;   │  db-trait / retention / migrations                             │
+;;   └──────────────────────────────────────────────────────────────┘
 ;;
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.3")
+  (version "draft-v0.4.1")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
-    (v0.1 "2026-04-19 — 4 分类扁平结构")
-    (v0.2 "2026-04-19 — 仿 event-bus 三段式 (ingress/core/egress)")
-    (v0.3   "2026-04-19 — 3 成熟模块自治 + 平铺未成熟区 + 横切; embedding/gen-crud 迁出")
-    (v0.3.1 "2026-04-19 — search-engines 模块迁出到 pillar 二 worker (搜索是计算不是数据)"))
-  (status "草稿 — 可演进; maturity-ladder 体现演进路径")
+    (v0.1   "4 分类扁平")
+    (v0.2   "仿 event-bus 三段式 (ingress/core/egress)")
+    (v0.3   "3 成熟模块 + 平铺 + 横切 (embedding/gen-crud 迁出)")
+    (v0.3.1 "搜索引擎迁出到 pillar 二 2.6 (搜索是计算不是数据)")
+    (v0.4   "4 成熟模块各管自己的表: kb-manager + conversation-logs 两个新模块; skill/specs 归 project-management; event-bus 4 表归 pillar 四")
+    (v0.4.1 "SSOT 合并: system_timeline 移除, pillar 四 event_log 成 timeline SSOT (v1.3.0); 总表 61→60"))
+  (status "草稿 — 大多数 module 已稳定, 可演进")
 
-  (purpose "系统长期记忆: 2 成熟模块自治 + 底层数据层共享 + 横切基础设施")
+  (purpose "系统长期记忆 — 4 个业务模块自治 + 底层系统支持层 + 横切")
   (storage "PostgreSQL via sqlx::PgPool")
   (gateway "crates/missiond-core/src/db/ — 唯一 DB 入口")
 
-  (migrated-out-to-worker-pillar
-    "embedding-provider (qwen3 via SonnetGateway) → pillar 二 2.2 sonnet-gateway + 2.3 embedding-worker"
-    "gen-crud (Forge 冲压 CRUD) → pillar 二 2.5 code-generation"
-    "search-engines (HNSW/FTS/trigram/tag + 融合打分) → pillar 二 2.6 search-engines (搜索是计算, 不是数据)")
-
+  (migrated-out
+    "embedding-provider → pillar 二 2.2 sonnet-gateway (qwen3 双角色)"
+    "gen-crud (Forge 冲压) → pillar 二 2.5 code-generation"
+    "search-engines → pillar 二 2.6 search-engines (搜索是计算不是数据)"
+    "event-bus 4 表 (event_log / event_subscriptions / blob_storage / dead_letter_queue) → pillar 四 §4.6 persistence-layer")
 
   ;; ═════════════════════════════════════════════════════════════
-  ;;  Scoping Index — 全系统表的项目化归类 (诚实摆盘)
+  ;;  Scoping Index — 按 project_id 列实际存在归类
   ;; ═════════════════════════════════════════════════════════════
   (scoping-index
-    (desc "按 project_id 列实际存在与否归类")
-    (authoritative-source "migrations/20260410100000_project_id_columns.sql")
+    (desc "按 project_id 列实况归类 — 源: migrations/20260410100000_project_id_columns.sql")
+    (authoritative-source "crates/missiond-core/migrations/20260410100000_project_id_columns.sql")
 
     (group scoped-primary
-      (rationale "服务 module project-management 两大目标")
+      (rationale "核心业务, 项目隔离是本质需求")
       (tables
-        (projects  :role "registry — project_id 就是主键")
-        (knowledge :role "goal-2: KB 省 token" :has-column true)))
+        (projects  :role "registry — project_id 是主键"        :owned-by "module project-management")
+        (knowledge :role "goal: KB 省 token"                   :owned-by "module kb-manager" :has-column true)))
 
     (group scoped-secondary
-      (rationale "有 project_id 列, 但不是 core 诉求 — 顺带覆盖")
+      (rationale "有 project_id 列, 顺带覆盖")
       (tables
-        (conversations :has-column true)
-        (board_tasks   :has-column true)))
+        (conversations :has-column true :owned-by "module conversation-logs")
+        (board_tasks   :has-column true :owned-by "module board")))
 
     (group inherited-scope
-      (rationale "自身无 project_id, 通过 parent 表的外键推断")
+      (rationale "自身无 project_id, 通过 parent FK 推断")
       (from-conversations-session-id
         :count 11
-        :tables "conversation_messages / turns / events / tool_calls / topic_vectors / labels; message_narrations / narration_cursors / embeddings / translations / labels")
+        :tables "conversation_messages / turns / events / tool_calls / topic_vectors / labels; message_narrations / narration_cursors / embeddings / translations / labels"
+        :owned-by "module conversation-logs")
       (from-knowledge-id
         :count 3
-        :tables "knowledge_edges / kb_ast_links / kb_operation_queue")
+        :tables "knowledge_edges / kb_ast_links / kb_operation_queue"
+        :owned-by "module kb-manager")
       (from-board-tasks-id
         :count 1
-        :tables "board_task_notes"))
+        :tables "board_task_notes"
+        :owned-by "module board"))
 
     (group global-infrastructure
-      (rationale "系统级或基础设施, 本就不应按项目分")
-      :examples "system_timeline / daemon_state / credentials / event_log / blob_storage / inbox / events / tasks / dynamic_slots / slot_sessions / gemini_file_uploads / watcher_cursors / consumer_watermarks / reconcile_watermarks / gemini_cli_watermarks / backfill_*"
-      :see "下方 table-catalog :: domain infrastructure / event-bus / slots-tasks")
+      (rationale "系统级, 本就不应按项目分")
+      :owned-by "category system-support"
+      :examples "daemon_state / credentials / inbox / events / tasks / slot_sessions / watcher_cursors / consumer_watermarks / reconcile_watermarks / backfill_*"
+      :note "v0.4.1: system_timeline 已移除 — 合并进 pillar 四 event_log (见 migration-log)")
 
     (group candidates-for-promotion
-      (rationale "⚠ 当前全局无 project_id, 按项目分可能有价值 — 待决策")
+      (rationale "⚠ 目前全局无 project_id, 按项目分可能有价值")
       (candidates
-        (retrospective_results :benefit "项目级复盘归档")
-        (token_usage_ledger    :benefit "项目级成本追踪 — 最想看的指标")
-        (prompt_snapshots      :benefit "项目级 prompt 调优对比")
-        (incidents             :benefit "项目级告警分级")
-        (gemini_requests       :benefit "项目级 LLM 使用模式")
-        (agent_questions       :benefit "项目级 agent 问题集")
-        (slot_tasks            :benefit "项目级 slot 任务记录")
-        (user_intents          :benefit "项目级意图识别")
-        (intent plan workflow  :benefit "新 specs 三表, 应加 project_id (20260420 migration 未加)")
-        (ast_nodes ast_file_meta beacons beacon_nodes :benefit "项目级代码索引")
-        (skill_topics skill_blocks skill_versions skill_executions :benefit "项目私有技能库")
-        (image_descriptions    :benefit "项目级图片注释")
-        (router_chat_archive   :benefit "项目级 router 聊天归档")
+        (retrospective_results :benefit "项目级复盘归档"     :owner-note "module conversation-logs; 可经 session_id → conversations.project_id 推断")
+        (token_usage_ledger    :benefit "项目级成本追踪 — 最想看的指标" :owner-note "category system-support")
+        (prompt_snapshots      :benefit "项目级 prompt 调优"  :owner-note "module board; PK=task_id 可经 board_tasks.project_id 推断")
+        (incidents             :benefit "项目级告警分级"     :owner-note "category system-support")
+        (gemini_requests       :benefit "项目级 LLM 使用模式" :owner-note "category system-support")
+        (agent_questions       :benefit "项目级 agent 问题集" :owner-note "module board; 可经 task_id → board_tasks.project_id 推断")
+        (slot_tasks            :benefit "项目级 slot 任务"   :owner-note "category system-support compute-runtime; 可能应归 pillar 二")
+        (user_intents          :benefit "项目级意图识别"     :owner-note "module project-management; 缺 project_id 列")
+        (intent plan workflow  :benefit "specs 三表应加 project_id" :owner-note "module project-management; dead schema, 需实现")
+        (ast_nodes ast_file_meta beacons beacon_nodes :benefit "项目级代码索引" :owner-note "module kb-manager; 缺列")
+        (skill_topics skill_blocks skill_versions skill_executions :benefit "项目私有技能库" :owner-note "module project-management; 缺列")
+        (image_descriptions    :benefit "项目级图片注释"    :owner-note "category system-support; 独立按 hash 去重")
+        (router_chat_archive   :benefit "项目级 router 归档" :owner-note "category system-support")
         (flows-yaml-files      :benefit "项目私有 flow 模板" :kind "文件, 非 DB"))))
 
 
   ;; ═════════════════════════════════════════════════════════════
-  ;;  Table Catalog — 61 张 PG 表实况
+  ;;  Table Catalog — 61 张 PG 表按模块 ownership 归类
   ;; ═════════════════════════════════════════════════════════════
   (table-catalog
-    (desc "migrations/*.sql 的 CREATE TABLE 实际统计 — 按业务域分 12 组")
-    (total 61)
+    (desc "migrations/*.sql 的 CREATE TABLE 实际统计 — 按 module / category ownership 分组")
+    (total 60)
+    (total-note "61 migrations 定义, -1 = system_timeline 合并进 event_log (v0.4.1 SSOT 整合)")
     (source "crates/missiond-core/migrations/")
 
-    (domain project (count 1)
-      (projects :purpose "项目注册 — id/path/intent_path/active/slots/github_url/vault"))
-
-    (domain knowledge-kb (count 7)
-      (knowledge           :purpose "语义级记忆 40+ category (architecture/bugfix/policy/...)" :scoping primary)
-      (knowledge_edges     :purpose "KB 条目间关系图" :scoping inherited)
-      (kb_access_log       :purpose "KB 访问审计 — 谁读了什么")
-      (kb_operation_queue  :purpose "KB 变更异步队列")
-      (kb_ast_links        :purpose "KB 条目 ↔ AST 节点关联")
-      (prompt_snapshots    :purpose "模型输入输出存档 — prompt 迭代用")
-      (image_descriptions  :purpose "图片的文本描述 (vision)"))
-
-    (domain conversations (count 13)
-      (conversations              :purpose "会话主表 — session_id / summary / project_id" :scoping secondary)
-      (conversation_messages      :purpose "消息原始记录 (PTY JSONL 来源)")
-      (conversation_turns         :purpose "turn 级切分 (user ↔ assistant)")
-      (conversation_events        :purpose "会话事件流 (tool use / status change)")
-      (conversation_tool_calls    :purpose "工具调用详情")
-      (conversation_topic_vectors :purpose "话题向量 — 语义聚类")
-      (conversation_labels        :purpose "会话级打标 (主题/质量)")
-      (message_embeddings         :purpose "消息级向量 (去重)")
-      (message_embedding_skips    :purpose "跳过 embedding 的记录")
-      (message_narrations         :purpose "消息 LLM 摘要 (briefing-worker 产)")
-      (narration_cursors          :purpose "narration 游标 (防重)")
-      (message_translations       :purpose "消息翻译 (多语种)")
-      (message_labels             :purpose "消息级打标"))
-
-    (domain board (count 3)
-      (board_tasks      :purpose "任务队列 — 27 列, 7 态 FSM" :scoping secondary)
-      (board_task_notes :purpose "任务附注" :scoping inherited)
-      (agent_questions  :purpose "Agent 卡住时提的问题"))
-
-    (domain slots-tasks (count 4)
-      (tasks          :purpose "任务表 (老版, 疑似 deprecated)")
-      (slot_sessions  :purpose "槽位会话 (CLI 进程生命周期)")
-      (slot_tasks     :purpose "槽位任务队列 (slot 专属 lifecycle)")
-      (dynamic_slots  :purpose "按需创建的动态槽位"))
-
-    (domain skills (count 4)
+    (by-owner module-project-management (count 9)
+      (projects         :purpose "项目注册 — id/path/intent_path/active/slots/github_url/vault")
+      (intent           :purpose "项目 intent.lisp 的 DB 镜像 (20260420)")
+      (plan             :purpose "执行计划 (20260420)")
+      (workflow         :purpose "工作流模板 (20260420)")
+      (user_intents     :purpose "用户意图识别记录")
       (skill_topics     :purpose "技能主题 (顶层分类)")
       (skill_blocks     :purpose "技能内容块")
       (skill_versions   :purpose "技能版本")
       (skill_executions :purpose "技能执行记录"))
 
-    (domain specs (count 4)
-      (intent       :purpose "项目 intent.lisp 的 DB 镜像 (新表 20260420)")
-      (plan         :purpose "执行计划 (新表 20260420)")
-      (workflow     :purpose "工作流模板 (新表 20260420)")
-      (user_intents :purpose "用户意图识别记录"))
+    (by-owner module-board (count 4)
+      (board_tasks      :purpose "任务队列 — 27 列, 7 态 FSM"                    :scoping secondary)
+      (board_task_notes :purpose "任务附注"                                      :scoping inherited)
+      (agent_questions  :purpose "Agent 卡住时提的问题 (FK→board_tasks nullable)")
+      (prompt_snapshots :purpose "task 执行 prompt 快照 + KB citation 审计"      :note "PK=task_id"))
 
-    (domain ast-indexing (count 4)
-      (ast_nodes     :purpose "AST 节点 — 文件/函数/类结构化")
-      (ast_file_meta :purpose "文件级元数据 (hash/size/modified)")
-      (beacons       :purpose "代码 beacon — 关注点标记")
-      (beacon_nodes  :purpose "beacon 关联的 AST 节点"))
+    (by-owner module-kb-manager (count 9)
+      (knowledge           :purpose "语义级记忆 40+ category"    :scoping primary)
+      (knowledge_edges     :purpose "KB 条目间关系图"            :scoping inherited)
+      (kb_access_log       :purpose "KB 共访问记录 (prefetch 触发)" :scoping inherited)
+      (kb_operation_queue  :purpose "KB 变更异步队列"            :scoping inherited)
+      (kb_ast_links        :purpose "KB ↔ AST 节点关联")
+      (ast_nodes           :purpose "AST 节点 — 文件/函数/类结构化")
+      (ast_file_meta       :purpose "文件级元数据 (hash/size/modified)")
+      (beacons             :purpose "代码 beacon — 关注点标记")
+      (beacon_nodes        :purpose "beacon 关联的 AST 节点"))
 
-    (domain observability (count 5)
-      (system_timeline     :purpose "统一时间线 — 7 天 TTL" :scoping global)
-      (incidents           :purpose "告警/异常聚合" :scoping candidate)
-      (token_usage_ledger  :purpose "LLM 调用成本追踪" :scoping candidate)
-      (gemini_requests     :purpose "Gemini API 调用日志" :scoping candidate)
-      (gemini_file_uploads :purpose "Gemini 文件上传缓存"))
+    (by-owner module-conversation-logs (count 14)
+      (conversations              :purpose "会话主表 — session_id/summary/project_id/engine_type" :scoping secondary)
+      (conversation_messages      :purpose "消息原始记录 (PTY JSONL 来源)")
+      (conversation_turns         :purpose "turn 级切分 (user ↔ assistant)")
+      (conversation_events        :purpose "会话事件流 (tool use / status change)")
+      (conversation_tool_calls    :purpose "工具调用详情")
+      (conversation_topic_vectors :purpose "话题向量 — 语义聚类")
+      (conversation_labels        :purpose "会话级打标")
+      (message_embeddings         :purpose "消息级向量 (halfvec 512)")
+      (message_embedding_skips    :purpose "跳过 embedding 的记录 (独立写入路径)")
+      (message_narrations         :purpose "消息 LLM 摘要 (briefing 产)")
+      (narration_cursors          :purpose "narration 游标 (防重)")
+      (message_translations       :purpose "消息多语种翻译")
+      (message_labels             :purpose "消息级打标")
+      (retrospective_results      :purpose "会话复盘 JSON (PK=session_id)"))
 
-    (domain audit-products (count 2)
-      (retrospective_results :purpose "会话复盘 JSON" :scoping candidate)
-      (router_chat_archive   :purpose "Router 聊天归档" :scoping candidate))
+    (by-owner pillar-four-event-bus (count 4)
+      :owned-section "pillar 四 §4.6 persistence-layer"
+      :note "这 4 表不在 memory pillar 管辖, 只在此列名方便索引")
 
-    (domain event-bus
-      :count-in-memory 0
-      :owned-by "pillar 四 event-bus :: §4.6 persistence-layer"
-      :tables-elsewhere "event_log / event_subscriptions / blob_storage / dead_letter_queue (4 张, 归 pillar 四 管)"
-      :migrated-out "2026-04-19 v1.2.0 — 所有权从此转给 pillar 四 (它们是 event-bus 的实现细节)"
-      :note "其他 pillar 不直接读写这 4 张表, 必须通过 pillar 四 的 (append) / (subscribe) API")
-
-    (domain infrastructure (count 10)
+    (by-owner category-system-support (count 20)
+      (incidents             :purpose "告警/异常聚合"         :scoping candidate)
+      (token_usage_ledger    :purpose "LLM 调用成本追踪"      :scoping candidate)
+      (gemini_requests       :purpose "Gemini API 调用日志"   :scoping candidate)
+      (gemini_file_uploads   :purpose "Gemini 文件上传缓存")
+      (router_chat_archive   :purpose "Router 聊天归档"       :scoping candidate)
+      (image_descriptions    :purpose "图片描述缓存 (vision_worker 写, 按 hash 去重, 无 FK)")
       (daemon_state          :purpose "daemon 级全局状态")
       (credentials           :purpose "凭据存储 (加密)")
-      (inbox                 :purpose "收件箱 (老表)")
+      (inbox                 :purpose "收件箱 (老表, 疑似 deprecated)")
       (events                :purpose "事件表 (老版, 疑似 deprecated)")
+      (tasks                 :purpose "任务表 (老版, 疑似 deprecated)")
+      (slot_sessions         :purpose "槽位会话生命周期"     :owner-alt "可归 pillar 二")
+      (slot_tasks            :purpose "槽位任务队列"         :owner-alt "可归 pillar 二")
+      (dynamic_slots         :purpose "按需创建的动态槽位"   :owner-alt "可归 pillar 二")
       (reconcile_watermarks  :purpose "对账游标")
       (gemini_cli_watermarks :purpose "Gemini CLI 水位游标")
       (watcher_cursors       :purpose "观察者游标")
@@ -192,478 +183,857 @@
       (backfill_progress     :purpose "回填进度追踪")
       (backfill_failures     :purpose "回填失败记录"))
 
-    (legacy-note "⚠ tasks / inbox / events 疑似老版 schema 不再活跃, 待实地确认是否可删"))
+    (legacy-note "⚠ tasks / inbox / events 疑似老版 schema 不再活跃; slot_* 可能属 pillar 二 worker"))
 
 
   ;; ═════════════════════════════════════════════════════════════
-  ;;  Non-DB Forms — 数据库之外的记忆载体 (6 种形式)
+  ;;  Non-DB Forms — 数据库之外的记忆载体
   ;; ═════════════════════════════════════════════════════════════
   (non-db-forms
-    (desc "记忆不止 DB — 还有 Lisp 规约 / YAML 模板 / Markdown 手写 / 外部流 / 向量 / 大对象 6 种载体")
+    (desc "Lisp / YAML / Markdown / 外部流 / 向量 / 大对象 6 种载体")
 
-    ;; ── 形式 1: Lisp 声明文件 (self-describing specs) ──
     (form lisp-spec-files
-      (desc "Lisp 自我描述文件 — 设计时产物, 可被 Agent 读取以省导航")
-
+      (desc "Lisp 自我描述文件")
       (variant project-intent
         :path "<project>/.missiond/intent.lisp"
         :scope per-project
-        :writer "pillar 二 2.3 lisp-survey-worker (sonnet)"
-        :reader "mission_intent tool (MCP)"
-        :purpose "每项目的架构画像, goal-1 的直接服务对象")
-
+        :writer "pillar 二 2.3 lisp-survey-worker"
+        :reader "mission_intent tool"
+        :db-mirror "intent 表 (module project-management :: component spec-db-mirror)"
+        :purpose "每项目的架构画像, goal-1 直接服务对象")
       (variant system-main
         :path ".missiond/v2/intent.lisp"
         :scope global
-        :purpose "系统主架构 — 6 大 pillar 总览")
-
+        :purpose "系统主架构 — 6 pillar 总览")
       (variant system-detail
         :path ".missiond/v2/intent-{event-bus,memory}.lisp"
         :scope global
         :purpose "pillar 级细节规格"
-        :note "event-bus.lisp 是 frozen v1.1.0; memory.lisp (本文件) 是 v0.3.1 草稿")
-
+        :note "event-bus.lisp frozen v1.2.0; memory.lisp (本文件) v0.4 草稿")
       (variant workflow-templates
         :path ".missiond/workflows/*.lisp"
         :scope global
-        :purpose "可复用方法论模板 (如 bus-refactor.lisp)"
-        :reader "人工参考 + Agent 检索"))
+        :purpose "可复用方法论模板"))
 
-    ;; ── 形式 2: YAML 流程模板 ──
     (form yaml-flow-templates
       (desc "flow-engine-v2 的声明式节点编排")
       :path "$MISSIOND_HOME/flows/*.yaml"
-      :scope "全局共享 (候选: scoping-index :: candidates-for-promotion)"
+      :scope "全局共享 (候选 per-project)"
       :loader "daemon/src/engine/flow/loader.rs"
-      :executor "pillar 二 2.4 orchestration :: flow-engine-v2"
-      :parser "serde_yaml::from_str::<FlowDefinition>")
+      :executor "pillar 二 2.4 orchestration :: flow-engine-v2")
 
-    ;; ── 形式 3: Markdown + YAML 手写记忆 ──
     (form markdown-handwritten-memories
-      (desc "人工手写的持久记忆 — Markdown + YAML frontmatter")
-
+      (desc "Markdown + YAML frontmatter 人工手写")
       (variant user-global-claudemd
         :path "~/.claude/CLAUDE.md"
         :scope global-user
-        :purpose "全局用户指令 (跨项目永久适用, 每次会话都加载)"
-        :loaded-by "Claude Code system prompt")
-
+        :purpose "全局用户指令 (跨项目永久)")
       (variant project-claudemd
         :path "<project>/CLAUDE.md"
         :scope per-project
-        :purpose "项目级 Claude 指令 (随项目 git 版本化, 每次会话都加载)"
-        :loaded-by "Claude Code system prompt")
-
+        :purpose "项目级 Claude 指令 (随项目 git)")
       (variant auto-memory-vault
-        :path "~/.claude/projects/{encoded-path}/memory/*.md"
-        :index "~/.claude/projects/{encoded-path}/memory/MEMORY.md"
-        :scope per-project-per-user
+        :path "~/.claude/projects/{encoded}/memory/*.md"
+        :index "~/.claude/projects/{encoded}/memory/MEMORY.md"
         :types "user / feedback / project / reference"
-        :format "YAML frontmatter (name / type / description) + Markdown 正文"
-        :purpose "Agent 跨会话持久记忆 — 反馈 / 习惯 / 项目背景"
+        :purpose "Agent 跨会话持久记忆"
         :see "module project-management :: helper project-memories-vault"))
 
-    ;; ── 形式 4: 外部原始流 (记忆的原料, worker 消费入 DB) ──
     (form external-source-streams
-      (desc "外部系统产生的原始流, MissionD 的 worker 消费并解包入 DB")
-
+      (desc "外部原始流, worker 消费入 DB")
       (source pty-session-jsonl
-        :path "~/.claude/projects/{encoded-path}/*.jsonl"
-        :producer "Claude Code CLI (外部工具)"
-        :consumer "pillar 二 2.3 conversation-logger (local)"
-        :writes-to "conversations / conversation_messages / conversation_turns / conversation_events"
-        :idempotency "(session_id, turn_id) 去重")
-
+        :path "~/.claude/projects/{encoded}/*.jsonl"
+        :producer "Claude Code CLI (外部)"
+        :consumer "pillar 二 2.3 :: conversation-logger worker"
+        :writes-to "module conversation-logs :: 4 张 conversation_* 表"
+        :idempotency "(session_id, turn_id) 去重"
+        :claimed-by "module conversation-logs :: non-db-source")
       (source git-commit-history
         :path "<project>/.git/"
-        :producer "git (外部)"
-        :consumer "lisp-survey-worker (通过 ContextualCommitDetected 事件)"
-        :triggers "lisp-surveyor slot dispatch → 更新项目 intent.lisp"
+        :producer "git"
+        :consumer "pillar 二 2.3 :: lisp-survey-worker (via ContextualCommitDetected)"
+        :triggers "更新项目 intent.lisp"
         :debounce "60s per project_id"))
 
-    ;; ── 形式 5: 二进制向量 (embedding) ──
     (form embedding-vectors
-      (desc "pgvector 512-dim 二进制 — 存 DB 列但是特殊形式")
+      (desc "pgvector 512-dim 二进制 — 存 DB 列")
       :columns "knowledge.embedding_vec / conversations.summary_embedding / conversation_topic_vectors.vec / message_embeddings.vec"
       :dim 512
       :provider "pillar 二 2.2 sonnet-gateway (qwen3)"
-      :generator "pillar 二 2.3 embedding-worker (sonnet)"
-      :consumer "pillar 二 2.6 search-engines :: engine vector-hnsw"
-      :invariant "禁止降级兜底, 失败直接报错")
+      :generator "pillar 二 2.3 embedding-worker"
+      :consumer "pillar 二 2.6 search-engines :: vector-hnsw"
+      :invariant "禁止降级兜底")
 
-    ;; ── 形式 6: Side-channel 大对象 ──
     (form side-channel-blobs
-      (desc ">8KB 大对象 — claim-check 模式 side-channel 存储")
-
+      (desc "claim-check 大对象")
       (location blob-storage-pg
         :table "blob_storage"
-        :purpose "event-bus 中 >8KB payload 的 side-channel 主存储"
-        :threshold "8KB"
-        :see "pillar 四 event-bus :: claim-check (section 4.2 decide)")
-
+        :owned-by "pillar 四 §4.6"
+        :purpose "event-bus >8KB payload side-channel")
       (location gemini-file-remote
-        :table "gemini_file_uploads (PG 只存引用)"
+        :table "gemini_file_uploads (引用)"
         :actual-storage "Gemini 服务端"
-        :purpose "Gemini File API 的文件引用缓存")))
-  ;;  项目是记忆的作用域单位 — 注册 / 路径解析 / 数据隔离 / 聚合
+        :owned-by "category system-support")))
+
+
+  ;; ═════════════════════════════════════════════════════════════
+  ;;  模块 1: Project Management
+  ;;  项目作为记忆的作用域单位; 管 projects + specs + skills
   ;; ═════════════════════════════════════════════════════════════
   (module project-management
-    (desc "两大目标: ①MCP 精准召回项目 intent.lisp(省导航) ②项目级 KB 过滤(省 token)")
+    (desc "项目管理: 注册 + 作用域 + 规约(intent/plan/workflow) + 技能(skills)")
     (maturity "成熟")
+    :migrated-in-v0.4 "skills (4 表) + specs (4 表) 从 system-support/project-specs 并入本模块"
 
-    ;; ── 为什么存在 ──
     (primary-goals
-      (goal-1 mcp-intent-precision
-        :problem  "agent 调 MCP 不知道当前项目, 需多步 cwd→path→intent 搜索"
-        :solution "ProjectRegistry::resolve(cwd) → project_id → projects.intent_path → 读文件"
-        :benefit  "每次 MCP 调用省 3-5 步导航")
+      (goal-1 mcp-specs-precision
+        :problem  "agent 调 MCP 不知当前项目, 需多步搜索 intent/plan/workflow"
+        :solution "ProjectRegistry::resolve(cwd) → project_id → 直接定位 specs"
+        :benefit  "每次 MCP 调用省 3-5 步导航"
+        :applies-to "intent / plan / workflow / user_intents + <project>/.missiond/intent.lisp 文件")
       (goal-2 kb-token-economy
-        :problem  "KB 全局查召回无关项目条目, 干扰 LLM 判断 + 浪费 token"
-        :solution "WHERE knowledge.project_id = $X OR IS NULL"
-        :benefit  "LLM context 更聚焦, token 使用下降"))
+        :problem  "KB 全局查召回无关项目条目, 浪费 token"
+        :solution "WHERE knowledge.project_id = $X OR IS NULL (委托 module kb-manager)"
+        :benefit  "LLM context 更聚焦, token 使用下降"
+        :delegates-to "module kb-manager")
+      (goal-3 project-skill-scope
+        :problem  "全局 skill 对具体项目可能不适用"
+        :solution "skill_* 表加 project_id (待实现, 见 scoping-index :: candidates)"
+        :benefit  "项目私有 skill, 避免跨项目污染"))
 
-    ;; ── 入点 ──
     (module-ingress
-      (desc "项目注册 + 项目作用域传播的写入路径")
+      (desc "项目注册 + spec 变更 + skill 变更 + 作用域传播")
 
       (writer mcp-project-mutation
         :tools  "mission_project init / sync / set_active / vault_sync / import_universe / survey"
         :writes "projects"
-        :code   "daemon/src/handlers/knowledge/project.rs"
-        :kind   "MCP 同步")
+        :code   "daemon/src/handlers/knowledge/project.rs")
+
+      (writer mcp-specs-mutation
+        :tools  "mission_intent write (if/when exists) / lisp-survey-worker auto-update"
+        :writes "intent / plan / workflow / user_intents (DB) + <project>/.missiond/intent.lisp (文件)"
+        :note   "DB 与文件双向同步由 spec-db-sync 组件负责 (待实现)")
+
+      (writer mcp-skill-mutation
+        :tools  "mission_skill_mutate"
+        :writes "skill_topics / skill_blocks / skill_versions / skill_executions"
+        :code   "daemon/src/handlers/knowledge/skill.rs")
 
       (writer project-memory-vault-edit
-        :source "用户手动编辑 + Claude Code 文件操作"
-        :writes "~/.claude/projects/{encoded}/memory/*.md (文件, YAML 前置元数据)"
+        :source "用户手动 + Claude Code 文件操作"
+        :writes "~/.claude/projects/{encoded}/memory/*.md"
         :kind   "文件系统, 不走 DB")
 
       (writer project-scope-propagation
-        :desc   "其他模块的 writer 插入时自动打 project_id (作用域传播机制)"
-        :writers-list ("conversation-logger → conversations.project_id"
-                       "kb-mutation → knowledge.project_id"
-                       "board-lifecycle → board_tasks.project_id"
-                       "retro-worker → retrospective_results.project_id")
-        :resolve-via "ProjectRegistry::resolve(cwd) 或 handler 显式参数"))
+        :desc   "其他模块 writer 插入时自动打 project_id"
+        :writers-list
+          ("conversation-logger → conversations.project_id"
+           "mcp-kb-mutation → knowledge.project_id"
+           "mcp-board-lifecycle → board_tasks.project_id"
+           "retro-worker → retrospective_results (inherited 继承)")
+        :resolve-via "ProjectRegistry::resolve(cwd)"))
 
-    ;; ── 逻辑核心: 主路径 + plumbing + 辅助 ──
     (module-core
-      (desc "围绕两大 primary-goal 组织: path 直接服务 goal, plumbing 共用基础, helper 面板类")
+      (desc "主路径 (path) + 共用基础 (plumbing) + 辅助 (helper)")
 
-      ;; ── 主路径 (每条直接对应一个 goal) ──
-      (path project-intent-access
+      ;; ── 主路径 ──
+      (path project-specs-access
         :serves goal-1
-        :flow  "cwd → ProjectRegistry::resolve → project_id → projects.intent_path → 读文件"
-        :entry "mission_intent read (cwd 自动解析, 无需手动传 project)")
+        :flow  "cwd → ProjectRegistry::resolve → project_id → projects.intent_path / DB 镜像 → 读 spec"
+        :entry "mission_intent read / mission_plan / mission_workflow (若有)"
+        :tables "intent / plan / workflow / user_intents"
+        :file-form "<project>/.missiond/intent.lisp")
 
       (path project-kb-access
         :serves goal-2
+        :delegates-to "module kb-manager :: mcp-kb-query (带 project_scoped=true)"
         :rule  "WHERE knowledge.project_id = $X OR IS NULL"
-        :entry "mission_kb_query / mission_kb_search (默认 project_scoped=true)"
-        :batch "mission_kb_batch_set_project — 把现有条目归到项目")
+        :note  "本 path 不自己实现 KB, 通过 scope-mechanism 让 kb-manager 过滤")
 
-      ;; ── plumbing (共用基础, 让主路径跑得起来) ──
+      (path project-skill-access
+        :serves goal-3
+        :entry "mission_skill_query / mission_skill_context (按项目过滤)"
+        :tables "skill_topics / skill_blocks / skill_versions / skill_executions"
+        :todo  "skill_* 加 project_id 列 + 扩 scope-mechanism applies-to")
+
+      ;; ── plumbing ──
       (plumbing project-registry
-        (desc "两条 path 的共用基础 — projects 表 + 内存索引 + cwd 解析器")
+        (desc "核心基础 — projects 表 + 内存索引 + cwd 解析")
         :tables "projects"
         :schema-cols "id(PK) / path(unique) / intent_path / active / slots[] / github_url / timestamps"
-        :in-memory "启动时从 PG 加载到内存; longest-prefix 路径匹配; 运行期只读"
+        :in-memory "启动从 PG 加载; longest-prefix 路径匹配; 运行期只读"
         :migration "20260410000000_projects.sql + 20260410200000 seed"
-        :backfill "conversations.project_id 按 path 匹配回填"
         :resolver "ProjectRegistry::resolve(cwd) / exclusive_slots / list_active"
-        :code "crates/missiond-core/src/{types,db/pg}/project.rs + daemon/src/state.rs (SharedProjectRegistry)")
+        :code "crates/missiond-core/src/{types,db/pg}/project.rs + daemon/src/state.rs")
 
       (plumbing scope-mechanism
-        (desc "project_id 列 + 查询规则 — 所有带 project_id 的表共用的隔离工具")
-        :rule "WHERE project_id = $X OR project_id IS NULL"
-        :semantics "NULL = 全局/跨项目共享; 非 NULL = 项目私有"
-        :applies-to "4 张表 (实况): projects / knowledge / conversations / board_tasks"
-        :primary-beneficiaries "knowledge (goal-2) / projects (goal-1 基础)"
-        :secondary-beneficiaries "conversations / board_tasks (有列但非核心诉求)"
-        :honesty "仅此 4 张有 project_id 列; 其他 ~15 张通过 parent FK 继承, ~40 张全局无 scope"
-        :see-also "顶层 scoping-index (按 scoping 归类) + table-catalog (按业务域归类)")
+        (desc "project_id 列 + 查询规则")
+        :rule "WHERE project_id = $X OR IS NULL"
+        :semantics "NULL = 全局共享; 非 NULL = 项目私有"
+        :applies-to "4 张实际有列: projects / knowledge / conversations / board_tasks"
+        :candidates "~15 张可升级 (见 scoping-index :: candidates-for-promotion)"
+        :see-also "顶层 scoping-index / table-catalog")
 
-      ;; ── 辅助 (用户常用面板, 不是主路径) ──
+      (plumbing spec-db-sync
+        (desc "intent.lisp 文件 ↔ intent DB 表 双向同步机制")
+        :status "❌ UNIMPLEMENTED — migration 20260420 创建了表, 但 Rust 端零实现"
+        :evidence "grep 结果: 无 insert_intent / save_intent / create_plan 等调用; board_tasks.context_intent 列存在但未使用"
+        :consequence "intent / plan / workflow / user_intents 4 表目前是 dead schema"
+        :action-needed "要么实现 lisp→DB sync worker, 要么下一步迁移中 DROP 这些表"
+        :pattern-when-impl "候选: write-through 或 write-behind")
+
+      ;; ── helper ──
       (helper project-context-aggregator
-        (desc "mission_project context 视图 — 多源聚合 观察项目当前状态")
+        (desc "mission_project context 视图 — 多源聚合观察项目当前状态")
         :code "daemon/src/handlers/knowledge/project.rs :: build_*"
-        :aggregates ("build_intent_summary: 读 intent.lisp → survey-date / pillar 列表"
-                     "conversation_stats_by_project: COUNT / status 分布"
-                     "kb_stats_by_project: BY category"
-                     "slot-status: 项目关联的 compute_slots 状态")
-        :priority "辅助 — 不是主路径, 但 mission_project context 常用")
+        :aggregates
+          ("build_intent_summary: 读 intent.lisp → survey-date / pillar 列表"
+           "conversation_stats_by_project: COUNT / status (借 module conversation-logs)"
+           "kb_stats_by_project: BY category (借 module kb-manager)"
+           "skill-status: 项目 skill 执行情况"
+           "slot-status: 项目关联的 compute_slots"))
 
       (helper project-memories-vault
-        (desc "项目专属的人工手写记忆库 — 独立于 DB")
+        (desc "项目专属的人工手写记忆库")
         :storage "~/.claude/projects/{encoded}/memory/*.md"
-        :format "Markdown + YAML 前置元数据(name/type/description)"
+        :format "Markdown + YAML frontmatter(name/type/description)"
         :code "daemon/src/handlers/knowledge/project_memory.rs"
-        :invariant "path-traversal 防护; 独立于 DB scoping"
-        :priority "辅助 — 文件系统级 per-project, 不走 DB"))
+        :invariant "path-traversal 防护; 独立于 DB"))
 
-    ;; ── 出点 ──
     (module-egress
-      (desc "项目级别的读取出口")
+      (desc "项目级别的读取")
 
       (reader mcp-project-views
-        :tools "mission_project get / list / context / memories"
-        :reads "projects + ProjectRegistry 聚合 + project-memories-vault"
-        :code  "daemon/src/handlers/knowledge/project.rs")
+        :tools "mission_project get / list / context / memories / sync / vault_sync"
+        :reads "projects + 多表聚合 + vault")
+
+      (reader mcp-intent-view
+        :tool "mission_intent read/section/summary/list"
+        :reads "intent 表 + <project>/.missiond/intent.lisp 文件")
+
+      (reader mcp-skill-view
+        :tools "mission_skill_query / mission_skill_context"
+        :reads "skill_topics / blocks / versions / executions")
 
       (reader frontend-project-stream
         :emits "项目列表 / 活跃切换 / 项目元数据变更"
-        :via   "pillar 六 6.2 process-transport :: ws-server")))
+        :via "pillar 六 6.2 ws-server"))
+
+    (module-tables-owned
+      (desc "本模块独占 9 张表 — 但 4 张 (specs) 是 dead schema")
+      (tables
+        (projects         :status "✓ active")
+        (intent           :status "❌ schema-only (no Rust reader/writer)")
+        (plan             :status "❌ schema-only (no Rust reader/writer)")
+        (workflow         :status "❌ schema-only (no Rust reader/writer)")
+        (user_intents     :status "⚠ 存在 schema + 疑似代码引用, 待确认")
+        (skill_topics     :status "✓ active — mission_skill_* MCP")
+        (skill_blocks     :status "✓ active")
+        (skill_versions   :status "✓ active")
+        (skill_executions :status "✓ active"))
+      (count 9)
+      (active-count 5)
+      (dead-schema-count 4)
+      (non-db-forms-owned
+        (lisp-file "<project>/.missiond/intent.lisp (see non-db-forms :: lisp-spec-files)")
+        (md-vault "~/.claude/projects/{encoded}/memory/*.md (see non-db-forms :: markdown-handwritten-memories)"))))
 
 
   ;; ═════════════════════════════════════════════════════════════
-  ;;  成熟模块 2: 看板 (Board)
-  ;;  任务队列 — worker 的唯一输入面 + DAG 调度中心
+  ;;  模块 2: Board (看板)
+  ;;  任务队列 — worker 的唯一输入面
   ;; ═════════════════════════════════════════════════════════════
   (module board
     (desc "任务队列 — 所有可分发工作的权威存储, worker 的唯一输入面")
-    (maturity "成熟 — 7 态 FSM + 8 MCP 工具 + autopilot 消费者齐备")
-    :migrated-from "v1: pillar worker :: section board; v0.3 晋升为独立模块"
+    (maturity "成熟")
+    :migrated-from "v0.3.1 module board (内容不变, v0.4 仅补 owned-tables)"
 
-    ;; ── 入点 ──
+    (primary-goals
+      (goal-1 task-queue-authority
+        :problem  "分布式 worker 要原子地领取/推进任务, 避免重复执行"
+        :solution "CAS 原子 claim + lease_expires 回收 + 7 态 FSM"
+        :benefit  "唯一事实来源, 并发安全")
+      (goal-2 dag-orchestration
+        :problem  "复杂流程需要 DAG 依赖 + 级联重试"
+        :solution "depends_on(JSONB) + retry_cascade BFS"
+        :benefit  "支撑 autopilot 自主编排"))
+
     (module-ingress
-      (desc "看板任务的写入路径 — MCP lifecycle + engine 内部推进")
-
       (writer mcp-board-lifecycle
-        :tools  "mission_board_create / update / claim / decompose / retry / note_add / delete"
-        :count  7
+        :tools "mission_board_create / update / claim / decompose / retry / note_add / delete"
+        :count 7
         :writes "board_tasks / board_task_notes"
-        :code   "daemon/src/handlers/knowledge/board.rs")
+        :code "daemon/src/handlers/knowledge/board.rs")
 
       (writer autopilot-engine
-        :code   "daemon/src/engine/intent_engine/autopilot.rs"
-        :tick   "5-10s"
-        :writes "board_tasks (CAS claim / status 推进 / lease 回收)"
-        :tick-pipeline "memory-scheduler → extraction-check → board-task-dispatch → flow-progression → supervision-check"
-        :invariant "open→running 是原子 CAS, 多 executor 并发安全")
+        :code "daemon/src/engine/intent_engine/autopilot.rs"
+        :tick "5-10s"
+        :writes "board_tasks (CAS claim / status 推进 / lease 回收)")
 
       (writer flow-engine-v2
-        :code   "daemon/src/engine/flow/{mod,runner,handlers,loader}.rs"
-        :writes "board_tasks.flow_context (每节点执行后 persist_context)"
-        :node-types 5 "LlmCall / SlotTask / McpTool / DaemonAction / ParallelSlotTasks"))
+        :code "daemon/src/engine/flow/*.rs"
+        :writes "board_tasks.flow_context (每节点 persist)")
 
-    ;; ── 逻辑核心 ──
+      (writer mcp-question-lifecycle
+        :tool "mission_question (独立 MCP 工具, 非 board 工具面)"
+        :writes "agent_questions (+ 自动 UPDATE 关联 board_tasks.status='blocked')"
+        :code "daemon/src/handlers/.../question.rs (创建问题时 CAS 关联 task)")
+
+      (writer autopilot-prompt-snapshot
+        :code "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs :: save_prompt_snapshot"
+        :writes "prompt_snapshots"
+        :purpose "task 执行时的 prompt + KB 引用存档 — KB citation 审计 + prompt 调优"
+        :note "PK 是 task_id, 故归本模块"))
+
     (module-core
-      (desc "board_tasks 数据模型 + 7 态 FSM + 核心操作 + DomainEvent")
-
       (component data-model
         :table "board_tasks"
         :columns 27
         :grouping "身份 / 内容 / 生命周期 / 占用 / 层级 / 执行 / 流程 / 作用域 / 去重 / UI"
-        :schema-cols "id / title / description / status(enum:7) / priority / category / engineering_phase / executor / assigned_slot / depends_on(JSONB) / dedupe_key / lease_until / retry_count / autopilot / flow_template / flow_phase / flow_context(JSON) / project_id / claim_executor_id / claim_executor_type / claimed_at / parent_id"
         :indexes 5
         :code "crates/missiond-core/src/db/board.rs")
 
       (component state-machine
-        (desc "7 态有限状态机 + 原子性保障 + lease 恢复")
         :states (open running verifying done failed blocked skipped)
-        :transitions
-          ("open→running       : CAS claim_executor_id (原子)"
-           "open→blocked       : check_dependencies 失败"
-           "running→verifying  : engineering flow 执行完待审"
-           "running→done/failed: executor 报完成 / lease 超时"
-           "blocked→open       : 上游依赖解除"
-           "terminal→open      : mission_board_retry (reset + retry_count++)")
-        :atomicity "open→running 是 SQL CAS 原子操作"
-        :recovery "lease_expires_at 超期 → recover_stale_running_tasks 强制 reset"
-        :terminal-irreversibility "done/failed/skipped 不能前转, 只能 retry")
+        :transitions "open→running(CAS) / open→blocked / running→verifying/done/failed / blocked→open / terminal→open(retry)"
+        :atomicity "open→running 是 SQL CAS"
+        :recovery "lease_expires_at 超期 → recover_stale_running_tasks")
 
       (component core-operations
-        (desc "8 个 lifecycle 操作, 都走 BoardStore trait")
-        :operations (create claim update decompose retry note-add delete query)
-        :code "crates/missiond-core/src/db/board.rs + daemon/src/handlers/knowledge/board.rs"
-        :notes ("decompose: 派 slot 执行 AI 分析 → 生成子任务 DAG"
-                "retry: 可选级联重置下游的 BFS 算法"
-                "delete: CASCADE 删子任务 + notes"))
+        :operations 8 "create / claim / update / decompose / retry / note-add / delete / query"
+        :code "crates/missiond-core/src/db/board.rs + handlers/knowledge/board.rs")
 
       (component events-emitted
-        (desc "BoardEvent domain event — 骨干在 pillar 四 event-bus")
         :variants "BoardTaskCreated / StatusChanged / NoteAdded / Claimed / Deleted / Updated"
-        :emitted-by "MCP handler + autopilot engine"
-        :persisted-via "pillar 四 event_log → timeline-writer fanout → system_timeline"))
+        :persisted-via "pillar 四 event_log (SSOT; v0.4.1 合并后不再走 system_timeline)")
 
-    ;; ── 出点 ──
+      (component task-notes
+        :table "board_task_notes"
+        :scoping "inherited via board_tasks.id"
+        :purpose "附注不改 status")
+
+      (component agent-questions
+        :table "agent_questions"
+        :schema "task_id TEXT REFERENCES board_tasks(id) NULLABLE + status (pending/answered/dismissed) + target (user/master)"
+        :purpose "Agent 卡住时提问, 等待用户或其他 agent 回答"
+        :relationship "物理上有 FK 到 board_tasks, 逻辑上独立生命周期 (status 独立)"
+        :creation-side-effect "创建问题时 CAS UPDATE board_tasks SET status='blocked' WHERE id=task_id"
+        :mcp "mission_question (独立 MCP 工具, 非 board 工具面)")
+
+      (component prompt-snapshot
+        :table "prompt_snapshots"
+        :schema "task_id PRIMARY KEY / prompt / cited_kb_ids / category / task_outcome / created_at"
+        :purpose "task 执行时的 prompt 快照 + KB 引用审计"
+        :writer "autopilot.rs :: save_prompt_snapshot"
+        :readers "MCP prompt 调优工具 (待实现) / 复盘分析"
+        :cross-module-note "cited_kb_ids 关联 kb-manager :: knowledge; 但 PK 是 task_id 故归 board"))
+
     (module-egress
-      (desc "看板的查询 + 前端实时推送 + autopilot 内部扫描")
-
       (reader mcp-board-query
-        :tool    "mission_board_query"
-        :actions "list / get / search / summary / clear_done"
-        :reads   "board_tasks / board_task_notes")
+        :tool "mission_board_query"
+        :actions "list / get / search / summary / clear_done")
 
       (reader frontend-board-stream
-        :source "pillar 四 event_log subscribe BoardEvent topic"
-        :emits  "BoardTask* events → 前端看板实时更新"
-        :via    "daemon/src/bus/ws_bridge.rs")
+        :source "pillar 四 event_log subscribe BoardEvent"
+        :emits "BoardTask* 事件 → 前端实时更新"
+        :via "daemon/src/bus/ws_bridge.rs")
 
       (reader autopilot-tick-scan
-        :desc  "autopilot 做决策前的扫描(内部消费者)"
-        :query "WHERE auto_execute=1 AND status='open' ORDER BY (assignee 存在) → order_idx"
-        :note  "这是同一个 autopilot 既读又写, 读在前(决策), 写在后(占用)")))
+        :query "WHERE auto_execute=1 AND status='open'"
+        :note "autopilot 自读自写"))
 
+    (module-tables-owned
+      (desc "本模块独占 4 张表")
+      (tables board_tasks board_task_notes agent_questions prompt_snapshots)
+      (count 4)
+      (added-in-v0.4-revision "prompt_snapshots 从 kb-manager 挪入 (PK 是 task_id, 归属任务执行)")))
 
 
   ;; ═════════════════════════════════════════════════════════════
-  ;;  未模块化的平铺分类 — 待成熟后晋升为模块
+  ;;  模块 3: KB Manager (知识库管理)  NEW
+  ;;  语义级记忆 + 代码索引 + 访问审计
   ;; ═════════════════════════════════════════════════════════════
+  (module kb-manager
+    (desc "知识库管理 — 语义记忆 + 代码索引 + 变更审计 + prompt 存档")
+    (maturity "成熟")
+    :migrated-from "v0.3.1 category system-support :: knowledge-db-layer + table-catalog :: domain knowledge-kb"
 
-  (category project-specs
-    (desc "设计时 Lisp 规约文件 + 加载 / 感知 / 查询")
-    (maturity "未成熟 — lisp-surveyor 仍在完善; 待稳定可晋升模块")
+    (primary-goals
+      (goal-1 semantic-recall
+        :problem  "跨会话记忆散落在 jsonl 流里, 无法语义检索"
+        :solution "40+ category 结构化存储 + 向量索引(delegated to pillar 二 2.6)"
+        :benefit  "Agent / 用户可按语义 / 关键词 / 标签三路找回记忆"
+        :serves-also "project-management goal-2 (project-scoped KB)")
+      (goal-2 code-awareness
+        :problem  "LLM 对代码库的理解每次都要从头扫"
+        :solution "AST 结构化存储 + KB ↔ AST 链接"
+        :benefit  "mission_code_search 可语义 + 结构并查")
+      (goal-3 audit-mutation-trail
+        :problem  "KB 条目 append-only 不够, 还需知道谁改了谁读了"
+        :solution "kb_access_log (读审计) + kb_operation_queue (写队列)"
+        :benefit  "KB 演化可追溯"))
 
-    (component intent-lisp-registry
-      :storage "projects.intent_path 字段指向项目 .missiond/intent.lisp 文件")
+    (module-ingress
+      (desc "KB 变更写入 + 代码索引维护 + 访问审计")
 
-    (component intent-lisp-loader
-      :code "daemon/src/handlers/knowledge/intent.rs"
-      :actions "read / section / summary / list"
-      :caching "无缓存, 每次读文件(支持热 reload)"
-      :reader "mission_intent MCP tool")
+      (writer mcp-kb-mutation
+        :tools  "mission_kb_mutate / mission_kb_remember / mission_kb_batch_set_project"
+        :writes "knowledge (+ kb_operation_queue async)"
+        :code   "daemon/src/handlers/knowledge/kb.rs")
 
-    (component intent-lisp-auto-survey
-      :worker  "pillar 二 2.3 :: lisp-survey-worker (sonnet)"
-      :trigger "ContextualCommitDetected 事件 → slot dispatch"
-      :debounce "60s per project_id"
-      :writes  "项目 intent.lisp 文件 (唯一走文件系统的 writer)"
-      :self-loop-guard "slot_id == lisp-surveyor 的 commit 自动跳过")
+      (writer worker-arch-maintenance
+        :kind   "sonnet"
+        :code   "crates/missiond-daemon/src/workers/sonnet/arch_maintenance_worker.rs"
+        :writes "knowledge (category=architecture)"
+        :trigger "定期扫描项目 intent.lisp + 代码变更")
 
-    (component flow-definitions
-      :storage "$MISSIOND_HOME/flows/*.yaml"
-      :loader  "daemon/src/engine/flow/loader.rs"
-      :executor "pillar 二 2.4 orchestration :: flow-engine-v2")
+      (writer worker-experience-harvester
+        :kind   "local"
+        :code   "crates/missiond-daemon/src/workers/local/experience_harvester.rs"
+        :source "module conversation-logs 的 conversations"
+        :writes "knowledge (category=bugfix/policy/memory)"
+        :purpose "从会话挖掘经验 → KB")
 
-    (component prompt-snapshot-archive
-      :table   "prompt_snapshots"
-      :purpose "存档模型输入输出, 用于迭代学习 / prompt 工程"))
+      (writer worker-tagger-chunker
+        :kind   "local"
+        :code   "crates/missiond-daemon/src/workers/local/tagger_chunker.rs"
+        :writes "knowledge (chunks + tags)"
+        :purpose "分块 + 打标签 + 生成 kb_ast_links")
+
+      (writer worker-ast-sync
+        :kind   "local"
+        :code   "crates/missiond-daemon/src/workers/local/ast_sync_worker.rs"
+        :writes "ast_nodes / ast_file_meta / beacons / beacon_nodes"
+        :purpose "代码结构索引维护 — 文件变更时增量更新")
+
+      (writer worker-embedding-cross
+        :kind   "sonnet (cross-module writer)"
+        :code   "crates/missiond-daemon/src/workers/sonnet/embedding_worker.rs"
+        :writes "knowledge.embedding_vec"
+        :also-writes-in-other-module "conversation-logs: message_embeddings + conversation_topic_vectors"
+        :purpose "生成 KB 条目向量供向量检索"
+        :provider "qwen3 via sonnet-gateway (pillar 二 2.2)")
+
+      (writer context-pipeline-kb-audit
+        :code   "crates/missiond-daemon/src/context/context_pipeline.rs :: kb_log_co_access"
+        :writes "kb_access_log"
+        :purpose "KB prefetch 时记录共访问关系 — 用于 KB 相关性挖掘"
+        :note "不是通用 middleware, 只在 context-pipeline prefetch 路径触发"))
+
+    (module-core
+      (desc "KB 主表 + 图 + 代码索引 + 审计 + 队列 + prompt 存档")
+
+      (component knowledge-store
+        (desc "语义级记忆主表 — 40+ category, 每条独立知识片段")
+        :table "knowledge"
+        :schema-cols "id / key / category / content / embedding_vec(512) / project_id / tags / access_count / created_at / updated_at"
+        :code "crates/missiond-core/src/db/knowledge.rs"
+        :scoping "has project_id column (primary scoped)")
+
+      (component knowledge-graph
+        (desc "KB 条目之间的关系图 — 支撑 universe_graph")
+        :table "knowledge_edges"
+        :schema-cols "id / from_id / to_id / relation_type / weight / created_at"
+        :scoping "inherited via knowledge.id")
+
+      (component access-audit
+        (desc "KB 访问审计 — 谁读了什么, 用于使用模式分析")
+        :table "kb_access_log"
+        :scoping "inherited"
+        :retention "append-only; 按时间 DELETE (待策略)")
+
+      (component operation-queue
+        (desc "KB 变更异步队列 — 大规模 mutate 走队列避开阻塞")
+        :table "kb_operation_queue"
+        :scoping "inherited"
+        :consumer "后台批处理 worker (待确认)")
+
+      (component kb-ast-linkage
+        (desc "KB 条目 ↔ AST 节点的双向关联")
+        :table "kb_ast_links"
+        :purpose "支撑 mission_code_search 从 KB 跳到代码, 或从代码跳到相关 KB")
+
+      (component code-indexing
+        (desc "代码结构化索引 — 支撑 KB ↔ 代码关联 + code_search")
+        :tables (ast_nodes ast_file_meta beacons beacon_nodes)
+        :code "crates/missiond-core/src/db/ast.rs"
+        :maintained-by "worker-ast-sync"
+        :consumed-by "mission_code_search / universe_graph / kb-ast-linkage"
+        :scoping "global (候选 per-project)")
+
+      (plumbing search-delegation
+        (desc "搜索走 pillar 二 2.6 search-engines 四路融合")
+        :engines "HNSW vector + GIN FTS + trigram + tag"
+        :delegates-to "pillar 二 2.6 search-engines :: fusion-ranker"
+        :see-also "pillar 二 2.6")
+
+      (plumbing project-scope-consumption
+        (desc "使用 module project-management :: scope-mechanism 过滤 KB 查询")
+        :rule "WHERE knowledge.project_id = $X OR IS NULL"
+        :owner "scope-mechanism 所有权在 project-management, 本模块只消费"))
+
+    (module-egress
+      (desc "KB 查询 + 搜索 + 代码搜索 + Context 拼接")
+
+      (reader mcp-kb-query
+        :tools "mission_kb_query / mission_kb_search / mission_kb_ops"
+        :reads "knowledge + knowledge_edges"
+        :invokes "pillar 二 2.6 search-engines")
+
+      (reader mcp-insight-recall
+        :tools "mission_insight / mission_memory"
+        :focus "综合洞察 / 记忆召回"
+        :reads "knowledge")
+
+      (reader mcp-code-search
+        :tool "mission_code_search"
+        :reads "knowledge + ast_nodes + beacons + kb_ast_links"
+        :focus "代码语义 + 结构并查")
+
+      (reader mcp-universe-graph
+        :tool "mission_universe_graph"
+        :reads "knowledge + knowledge_edges (跨项目)"
+        :focus "实体 / 关系图生成")
+
+      (reader context-pipeline-retrieval
+        :code "crates/missiond-daemon/src/context/{pipeline,retrieval}.rs"
+        :purpose "为 LLM 调用拼 prompt"
+        :reads "knowledge (向量 + 最近)"
+        :note "记忆最密集的消费者")
+
+      (reader worker-code-prefetch
+        :kind "local"
+        :code "crates/missiond-daemon/src/workers/local/code_prefetch.rs"
+        :reads "ast_nodes / beacons"
+        :purpose "AST 混合搜索引擎 (FTS5 + embedding RRF) — 只读, 不写"))
+
+    (module-tables-owned
+      (desc "本模块独占 9 张表")
+      (tables knowledge knowledge_edges kb_access_log kb_operation_queue kb_ast_links
+              ast_nodes ast_file_meta beacons beacon_nodes)
+      (count 9)
+      (removed-in-v0.4-revision "prompt_snapshots 挪到 module board (主键 task_id 属任务执行归属)")))
 
 
+  ;; ═════════════════════════════════════════════════════════════
+  ;;  模块 4: Conversation Logs (会话日志)  NEW
+  ;;  Claude Code / Gemini / Codex 三类 CLI 引擎的完整会话
+  ;; ═════════════════════════════════════════════════════════════
+  (module conversation-logs
+    (desc "三类 CLI 引擎(Claude Code / Gemini / Codex)的会话完整记录 + 二次分析")
+    (maturity "成熟")
+    :migrated-from "v0.3.1 category system-support :: conversation-db-layer + table-catalog :: domain conversations"
+
+    (primary-goals
+      (goal-1 complete-session-recording
+        :problem  "Claude Code 等 CLI 会话散在 jsonl 流里, 不可检索/回放"
+        :solution "PTY JSONL → 结构化 DB (conversations + messages + turns + events)"
+        :benefit  "所有会话可查询、按项目隔离、支持二次分析")
+      (goal-2 multi-engine-unified
+        :problem  "Claude Code / Gemini / Codex 三种 CLI 格式各异"
+        :solution "统一的 conversations 表 + engine-specific ingestion worker"
+        :benefit  "跨引擎查询一套工具")
+      (goal-3 analysis-layer
+        :problem  "原始消息 JSONL 难以直接用于 context 拼接 / 复盘"
+        :solution "briefing (摘要) + embedding (向量) + translation (多语种) + labels (打标) + retrospective (复盘)"
+        :benefit  "多层次派生视图, 服务不同消费场景"))
+
+    (module-ingress
+      (desc "3 引擎专项摄入 + 多种二次分析 worker")
+
+      ;; ── 三引擎原始摄入 ──
+      (writer worker-conversation-logger
+        :kind     "local"
+        :code     "crates/missiond-daemon/src/workers/local/conversation_logger.rs"
+        :source   "~/.claude/projects/{encoded}/*.jsonl (PTY JSONL, see non-db-forms)"
+        :writes   "conversations / conversation_messages / conversation_turns / conversation_events"
+        :idempotency "(session_id, turn_id) 去重"
+        :engine-primary "Claude Code")
+
+      (writer worker-codex-ingestion
+        :kind   "local"
+        :code   "crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs"
+        :writes "conversations / conversation_messages (codex engine_type)"
+        :engine-primary "Codex")
+
+      (writer worker-gemini-logger
+        :kind   "local"
+        :code   "crates/missiond-daemon/src/workers/local/gemini_logger.rs"
+        :writes "conversations / conversation_messages (gemini engine_type)"
+        :engine-primary "Gemini")
+
+      (writer worker-gemini-reconcile
+        :kind   "local"
+        :code   "crates/missiond-daemon/src/workers/local/gemini_reconcile_worker.rs"
+        :writes "conversations (对账校正)"
+        :purpose "Gemini 流特殊对账")
+
+      (writer worker-conversation-organizer
+        :kind   "local"
+        :code   "crates/missiond-daemon/src/workers/local/conversation_organizer.rs"
+        :writes "conversation_turns / conversation_tool_calls"
+        :purpose "消息流 → turn 结构化 + tool call 抽取")
+
+      ;; ── 二次分析 ──
+      (writer worker-briefing
+        :kind   "sonnet"
+        :code   "crates/missiond-daemon/src/workers/sonnet/briefing_worker.rs"
+        :writes "message_narrations + narration_cursors"
+        :purpose "LLM 摘要 — 每轮或每会话生成 briefing")
+
+      (writer worker-step-narrator
+        :kind   "codex"
+        :code   "crates/missiond-daemon/src/workers/codex/step_narrator.rs"
+        :writes "message_narrations (codex-specific narrations)")
+
+      (writer worker-embedding
+        :kind   "sonnet (cross-module writer)"
+        :code   "crates/missiond-daemon/src/workers/sonnet/embedding_worker.rs"
+        :writes "message_embeddings / conversation_topic_vectors"
+        :also-writes-in-other-module "kb-manager: knowledge.embedding_vec"
+        :provider "qwen3 via sonnet-gateway (pillar 二 2.2)"
+        :note "不写 conversations.summary_embedding, 也不写 message_embedding_skips (skip 逻辑是 worker 内部控制, 不落此表)")
+
+      (writer worker-translation
+        :kind   "sonnet"
+        :code   "crates/missiond-daemon/src/workers/sonnet/translation_worker.rs"
+        :writes "message_translations"
+        :purpose "多语种翻译")
+
+      (writer worker-retro
+        :kind   "sonnet"
+        :code   "crates/missiond-daemon/src/workers/sonnet/retro_worker.rs"
+        :writes "retrospective_results"
+        :trigger "会话结束信号 / 手动触发")
+
+      ;; 注: vision_worker 写 image_descriptions 但该表已迁到 category system-support
+      ;; (独立无外键的图片缓存, 非 conversation-scoped), 见该 section
+
+      ;; ── MCP 写入 ──
+      (writer mcp-conversation-reconcile
+        :tools  "mission_conversation_reconcile / mission_conversation_analyze"
+        :writes "conversations / conversation_messages"
+        :code   "daemon/src/handlers/comm/conversation.rs"))
+
+    (module-core
+      (desc "15 张表 — 会话全生命周期的结构化表示")
+
+      ;; ── 原始层 ──
+      (component session-master
+        (desc "会话主表 — session_id / summary / project_id / engine_type / timestamps")
+        :table "conversations"
+        :scoping "has project_id column (secondary scoped)"
+        :engines "claude-code / gemini / codex")
+
+      (component raw-messages
+        (desc "消息原始记录 — 从 PTY JSONL 解包")
+        :table "conversation_messages"
+        :scoping "inherited via conversations.session_id")
+
+      (component turn-structure
+        (desc "turn 级切分 — user ↔ assistant 交替")
+        :table "conversation_turns"
+        :scoping "inherited")
+
+      (component session-events
+        (desc "会话内结构化事件 — tool use / status change")
+        :table "conversation_events"
+        :scoping "inherited")
+
+      (component tool-call-log
+        (desc "工具调用详情 — 每次 tool call 的 input/output/status")
+        :table "conversation_tool_calls"
+        :scoping "inherited")
+
+      ;; ── 派生层 ──
+      (component semantic-vectors
+        (desc "消息 + 话题向量")
+        :tables (conversation_topic_vectors message_embeddings message_embedding_skips)
+        :generator "worker-embedding (sonnet)"
+        :consumer "pillar 二 2.6 search-engines :: vector-hnsw")
+
+      (component narration-briefing
+        (desc "LLM 生成的摘要 + 游标 (防重处理)")
+        :tables (message_narrations narration_cursors)
+        :generator "worker-briefing (sonnet) + worker-step-narrator (codex)"
+        :scoping "inherited")
+
+      (component translation-multilingual
+        (desc "消息翻译 (多语种)")
+        :table "message_translations"
+        :generator "worker-translation (sonnet)")
+
+      (component labels-tags
+        (desc "会话级 + 消息级打标 (主题 / 质量 / 分类)")
+        :tables (conversation_labels message_labels))
+
+      (component retrospective
+        (desc "会话复盘 — JSON 结构化总结")
+        :table "retrospective_results"
+        :schema "session_id PRIMARY KEY → conversation-scoped (天然关联会话)"
+        :generator "worker-retro (sonnet)"
+        :consumer "mission_retrospective_manage"
+        :scoping-candidate "缺 project_id 列, 可通过 session_id → conversations.project_id 推断")
+
+      ;; ── 源与作用域 ──
+      (non-db-source pty-jsonl
+        (desc "PTY JSONL 是 conversations 的唯一 ingestion 源")
+        :path "~/.claude/projects/{encoded-path}/*.jsonl"
+        :claimed-from "non-db-forms :: external-source-streams :: pty-session-jsonl")
+
+      (plumbing engine-discrimination
+        (desc "conversations.engine_type 区分三类 CLI")
+        :values "claude-code / gemini / codex"
+        :applied-by "conversation-logger / codex-ingestion / gemini-logger")
+
+      (plumbing project-scope-propagation
+        (desc "conversation-logger 摄入时从 PTY path 推断 project_id")
+        :resolver "ProjectRegistry::resolve(cwd)"
+        :owner "scope-mechanism 在 project-management"))
+
+    (module-egress
+      (desc "会话查询 + 复盘 + 审计 + WS 流 + 内部消费")
+
+      (reader mcp-conversation-query
+        :tools "mission_conversation_query / mission_conversation_analyze"
+        :actions "get / list / search"
+        :reads "conversations + messages + turns + events + narrations"
+        :code "daemon/src/handlers/comm/conversation.rs")
+
+      (reader mcp-retrospective-view
+        :tool "mission_retrospective_manage"
+        :actions "get / list"
+        :reads "retrospective_results")
+
+      (reader mcp-audit
+        :tool "mission_audit"
+        :reads "conversation_tool_calls + conversation_events")
+
+      (reader mcp-llm-trace
+        :tool "mission_llm_trace"
+        :reads "conversation_tool_calls (+ category system-support :: gemini_requests)")
+
+      (reader frontend-conversation-stream
+        :source "pillar 四 event_log / DB watch"
+        :emits "新 messages / 新 narrations"
+        :via "daemon/src/bus/ws_bridge.rs")
+
+      (reader context-pipeline-history
+        :code "crates/missiond-daemon/src/context/"
+        :reads "最近 messages + narrations (拼 LLM prompt)"
+        :purpose "daemon 内部, 每次 LLM 调用都触发")
+
+      (reader harvester-for-kb
+        :consumer "module kb-manager :: worker-experience-harvester"
+        :reads "conversations"
+        :writes-to "knowledge (via kb-manager ingress)"
+        :note "跨模块链路: conversations 是 KB 的语料库源头"))
+
+    (module-tables-owned
+      (desc "本模块独占 14 张表")
+      (tables conversations conversation_messages conversation_turns conversation_events
+              conversation_tool_calls conversation_topic_vectors conversation_labels
+              message_embeddings message_embedding_skips message_narrations narration_cursors
+              message_translations message_labels
+              retrospective_results)
+      (count 14)
+      (removed-in-v0.4-revision "image_descriptions 挪到 category system-support (独立图片缓存, 无外键, 非 conversation-scoped)")
+      (non-db-forms-owned
+        (jsonl-source "~/.claude/projects/{encoded}/*.jsonl (see non-db-forms :: external-source-streams)"))))
+
+
+  ;; ═════════════════════════════════════════════════════════════
+  ;;  分类: System Support (系统支持层)
+  ;;  非业务语义的基础表 — 被所有模块使用或支撑
+  ;; ═════════════════════════════════════════════════════════════
   (category system-support
-    (desc "底层数据层 — 被所有模块使用, 无独立业务语义; 每张表标注 :writers / :readers")
-    (maturity "基础层 — 结构稳定, 但包含未来可能晋升的内容(如 conversations)")
+    (desc "系统级基础表 — 20 张, 无独立业务语义, 支撑全局运行")
+    (maturity "基础层 — 结构稳定, 部分 legacy 待清理")
 
-    (component conversation-tables
-      :tables "conversations / conversation_messages / conversation_turns / message_narrations"
-      :code "crates/missiond-core/src/db/conversation.rs"
-      :writers ("pillar 二 2.3 :: conversation-logger(local): PTY JSONL 实时解包"
-                "pillar 二 2.3 :: message-narrator(sonnet): LLM 摘要"
-                "MCP: mission_conversation_reconcile / analyze")
-      :readers ("MCP: mission_conversation_query / analyze(action=get)"
-                "module project-management :: context-aggregator"
-                "前端 WS: conversation-event-stream")
-      :scoping "project_id — 见 module project-management :: scope-mechanism")
+    (component global-observability
+      (desc "跨项目的观测 / 审计 / 成本追踪 — 不按项目分")
+      :note "v0.4.1: system_timeline 已移除 — event_log (pillar 四) 作为 timeline SSOT, 直接服务 mission_timeline / WS timeline-stream (经 projection)"
+      (table incidents
+        :purpose "告警/异常聚合"
+        :writer "pillar 四 :: incident-writer"
+        :dedup "dedupe_key + 时间窗口"
+        :scoping-candidate true)
+      (table token_usage_ledger
+        :purpose "LLM 调用成本追踪"
+        :writer "pillar 四 :: token-usage-writer"
+        :aggregations "by model / slot / conversation / time"
+        :scoping-candidate true)
+      (table gemini_requests
+        :purpose "Gemini API 调用性能日志"
+        :writer "pillar 二 2.3 :: gemini-logger")
+      (table gemini_file_uploads
+        :purpose "Gemini 文件上传缓存 (只存引用)"
+        :actual-storage "Gemini 服务端")
+      (table router_chat_archive
+        :purpose "Router 聊天历史归档"))
 
-    (component knowledge-tables
-      :tables "knowledge / knowledge_edges / prompt_snapshots"
-      :code "crates/missiond-core/src/db/knowledge.rs"
-      :writers ("MCP: mission_kb_mutate / mission_kb_remember"
-                "pillar 二 2.3 sonnet 组: arch-maintenance / experience-harvester"
-                "pillar 二 2.3 local 组: tagger-chunker"
-                "module search-engines :: embedding-column-writes (embedding 列)")
-      :readers "见 pillar 二 2.6 search-engines :: consumers (全部搜索消费者)"
-      :scoping "project_id — 见 module project-management")
+    (component infrastructure
+      (desc "daemon 级基础状态 + 凭据 + 游标")
+      (tables daemon_state credentials
+              reconcile_watermarks gemini_cli_watermarks watcher_cursors consumer_watermarks
+              backfill_progress backfill_failures)
+      :note "游标类表是各种增量处理的进度记录")
 
-    (component audit-trail-tables
-      :tables "tool_calls / conversation_events / retrospective_results"
-      :code "crates/missiond-core/src/db/audit.rs"
-      :writers ("MCP dispatch 中间件 → tool_calls (自动审计所有工具调用)"
-                "pillar 二 2.3 :: retro-worker(sonnet) → retrospective_results"
-                "pillar 二 2.3 :: conversation-logger → conversation_events")
-      :readers ("MCP: mission_audit / mission_retrospective_manage / mission_llm_trace")
-      :invariant "append-only; UPDATE 只改状态列不改身份列")
+    (component compute-runtime
+      (desc "slot / 任务的运行时状态 — 本应归 pillar 二 worker")
+      (tables slot_sessions slot_tasks dynamic_slots)
+      :owner-alt "pillar 二 worker"
+      :note "v0.4 暂留, 待与 pillar 二 协调后决定归属")
 
-    (component timeline-table
-      :table "system_timeline"
-      :code "crates/missiond-core/src/db/timeline.rs"
-      :columns "seq(autoincrement) / trace_id / span_id / parent_span_id / event_type / summary / payload / created_at"
-      :writers "pillar 四 event-bus :: timeline-writer (订阅 event_log 所有 topic)"
-      :readers ("MCP: mission_timeline"
-                "前端 WS: timeline-event-stream")
-      :queries "by trace_id / by event_type / 分层抽样 / FTS 搜索"
-      :ttl "7 天自动清理 (retention_cron)")
+    (component legacy-tables
+      (desc "老版 schema 疑似不再活跃")
+      (tables tasks inbox events)
+      :action-needed "实地确认使用情况; 若确认 deprecated 则 drop")
 
-    (component observability-tables
-      (sub-table gemini-trace
-        :tables "gemini_requests / gemini_file_cache"
-        :writers "pillar 二 2.3 :: gemini-logger(local)"
-        :readers "MCP: mission_llm_trace")
+    (component vision-assets
+      (desc "图片描述缓存 — 独立无外键, 按 image_hash 去重")
+      (table image_descriptions
+        :schema "image_hash / media_type / description / char_count / created_at"
+        :writer "pillar 二 workers/codex/vision_worker.rs :: save_image_description"
+        :reader "message enrichment 时按 hash 查询"
+        :note "非 conversation-scoped (无 session_id FK); 是全局图片 → 文本 cache"))
 
-      (sub-table incidents
-        :table "incidents"
-        :writers "pillar 四 event-bus :: incident-writer (订阅 IncidentEvent)"
-        :dedup "dedupe_key + 时间窗口")
-
-      (sub-table token-usage
-        :table "token_usage"
-        :writers "pillar 四 event-bus :: token-usage-writer (订阅 LlmEvent.usage)"
-        :aggregations "by model / slot / conversation / time-series")
-
-      (sub-table narration-cursor
-        :table "narration_cursors"
-        :writers "pillar 二 2.3 :: message-narrator(sonnet)"
-        :purpose "避免重复 narrate 同一批 message"))
-
-    (component embedding-storage
-      (desc "向量物理存储位置 — 生成路径和 provider 见 pillar 二 worker")
-      :columns "knowledge.embedding_vec(512) / conversations.summary_embedding / conversation_topic_vectors"
-      :see-generator "pillar 二 2.3 :: embedding-worker (sonnet) + 2.2 :: sonnet-gateway (qwen3 路由)")
-
-    (component misc-tables
-      (desc "其他 MCP 工具对应的小表 — 暂未抽模块")
-      (sub-table skills
-        :table   "skills"
-        :writers "MCP: mission_skill_mutate"
-        :readers "MCP: mission_skill_query / mission_skill_context")
-
-      (sub-table permission
-        :tables  "permission_policies / learned_permissions"
-        :writers "MCP: mission_permission_mutate"
-        :readers "MCP: mission_permission_query")
-
-      (sub-table inbox
-        :table   "inbox_messages"
-        :writers "MCP: mission_inbox create"
-        :readers "MCP: mission_inbox list/get")))
+    (module-tables-owned
+      (desc "此分类持有 20 张表 — 待各模块/pillar 进一步认领以减少 system-support 规模")
+      (count 20)
+      (added-in-v0.4-revision "image_descriptions 从 conversation-logs 迁入 (该表无 FK, 非会话附属)")
+      (removed-in-v0.4.1-revision "system_timeline 合并进 pillar 四 event_log (SSOT); timeline-writer 订阅者 + mission_timeline 改读 event_log")))
 
 
   ;; ═════════════════════════════════════════════════════════════
-  ;;  横切能力 — 贯穿所有模块 + 分类
-  ;;  (embedding-provider + gen-crud 已迁出到 pillar 二 worker)
+  ;;  横切能力 (Cross-Cutting)
   ;; ═════════════════════════════════════════════════════════════
   (cross-cutting
-    (desc "不归属任何模块或分类, 贯穿全记忆 pillar 的基础能力")
+    (desc "贯穿 4 个模块 + system-support 的基础能力")
 
     (capability db-trait-abstraction
-      (desc "MissionStore 超 trait 聚合 13 个领域 store, 隔离 PG/SQLite 实现")
+      (desc "MissionStore 超 trait 聚合 13 领域 store")
       :trait "MissionStore"
       :code "crates/missiond-core/src/db/traits.rs (~750 行)"
       :stores 13
-      :store-list "Conversation / Message / ToolCall / Event / Retrospective / Vision / Knowledge / Board / Timeline / Slot / Skill / Observability / Project"
-      :invariant "其他 crate 只依赖 trait 不依赖实现 — 可切换后端"
-      (impl pg-store
-        :desc "生产实现: 原生 async sqlx"
-        :target "crates/missiond-core/src/db/pg_*/ (15 文件)")
-      (impl sqlite-store
-        :desc "遗留实现, spawn_blocking 包装"
-        :status "⚠ deprecated — 仅保留 pg::migrate_from_sqlite 辅助"))
+      :invariant "其他 crate 只依赖 trait 不依赖实现"
+      (impl pg-store :target "crates/missiond-core/src/db/pg_*/" :status production)
+      (impl sqlite-store :status deprecated))
 
     (capability retention-policy
       (desc "按表粒度的保留/清理规则")
-      :rules ("system_timeline:     7 天 TTL (retention_cron)"
-              "conversation_*:       append-only, 无自动清理"
-              "knowledge:            append-only, 按 access_count 手动归档"
-              "incidents:            粗粒度按时间 DELETE"
-              "tool_calls:           append-only")
-      :code "daemon/src/bus/retention_cron.rs")
+      :rules ("event_log: 30 天常规 / 3 天 ephemeral (pillar 四 SSOT) — 取代原 system_timeline 7 天"
+              "conversation_messages/events: append-only 无清理"
+              "knowledge: append-only, access_count 手动归档"
+              "incidents: 粗粒度按时间 DELETE"
+              "tool_calls: append-only")
+      :code "daemon/src/bus/retention_cron.rs + event/lifecycle/retention.rs (pillar 四)")
 
     (capability migrations-runner
-      (desc "schema 演进管理 — daemon 启动 phase 1 自动跑")
+      (desc "schema 演进 — daemon 启动 phase 1 自动跑")
       :code "crates/missiond-core/migrations/"
-      :count "16 migrations (含 seed + backfill)"
-      :automation "sqlx::migrate! 编译期检查 + 运行期执行"
-      :entry "启动 phase 1"))
+      :count 20
+      :automation "sqlx::migrate! 编译期检查 + 运行期执行"))
 
 
   ;; ═════════════════════════════════════════════════════════════
@@ -671,31 +1041,51 @@
   ;; ═════════════════════════════════════════════════════════════
   (cross-cutting-notes
 
-    (maturity-ladder
-      (mature-modules   2 "project-management / board")
-      (flat-categories  2 "project-specs / system-support")
-      (cross-cutting    3 "db-trait / retention / migrations")
-      (external-modules 1 "search-engines 已迁至 pillar 二 2.6 (搜索是计算)")
-      (strategy "某个区块稳定后, 相关 writer/reader/core 抽成 module; 若本质是计算而非数据, 则归 worker pillar"))
-
     (migration-log
-      "2026-04-19 v0.3:"
-      "(1) embedding-provider 迁出到 pillar 二 2.2 sonnet-gateway (双角色: API + embedding)"
-      "(2) gen-crud 迁出到 pillar 二 2.5 code-generation (新增 section)"
-      "(3) 3 个成熟能力(project-management / board / search-engines) 升级为模块, 各自内部 in/core/out"
-      "(4) scoping-model 从 cross-cutting 下沉到 module project-management :: scope-mechanism (因项目是 scoping 的所有者)"
-      "2026-04-19 v0.3.1:"
-      "(5) search-engines 模块整体迁出到 pillar 二 2.6 (搜索是 computation, 记忆是 data; 概念归属纠正)")
+      "v0.4 (2026-04-19 session):"
+      "(1) 抽 kb-manager 模块: 从 system-support 划 9 张表 (knowledge + 4 kb_* + 4 ast/beacon)"
+      "(2) 抽 conversation-logs 模块: 从 system-support 划 14 张表 (conversations + 10 派生 + retrospective_results)"
+      "(3) project-management 吸收 skills (4 表) + specs (4 表: intent/plan/workflow/user_intents)"
+      "(4) project-specs category 并入 project-management (移除)"
+      "(5) board 补 owned-tables 4 张 (含新增 prompt_snapshots)"
+      "(6) system-support 从 ~45 张表瘦身到 21 张"
+      "(7) 每个模块加 :module-tables-owned 显式声明 ownership"
+      "v0.4 第二轮修正 (基于代码调查):"
+      "(A) kb-manager: 移除 code-prefetch + xjpcode-briefing (一个是 reader 一个写文件系统)"
+      "(B) kb-manager: 修正 kb-access-audit writer 实际在 context_pipeline.rs"
+      "(C) prompt_snapshots: kb-manager → board (PK=task_id, autopilot 写)"
+      "(D) image_descriptions: conversation-logs → system-support (独立无 FK)"
+      "(E) embedding-worker: 标记为 cross-module writer (写两个模块的表)"
+      "(F) spec-db-sync: 明确标注为 UNIMPLEMENTED (intent/plan/workflow 是 dead schema)"
+      "(G) retrospective_results: 标注 PK=session_id 可经 FK 推断 project_id"
+      "v0.4.1 (2026-04-19 后续):"
+      "(H) SSOT 合并: system_timeline 从 category system-support 移除"
+      "    pillar 四 升级到 v1.3.0, 正式锁定 event_log = timeline SSOT"
+      "    UI readers (mission_timeline + WS timeline-stream) 目标改读 event_log (via projection)"
+      "    代码 cutover (drop 表 + 移除 timeline-writer + 迁 reader + FTS 索引) 待后续执行"
+      "    总表数 61 → 60")
+
+    (ownership-summary
+      (module-project-management   9 "projects + 4 specs (dead schema) + 4 skills")
+      (module-board                4 "board_tasks + board_task_notes + agent_questions + prompt_snapshots")
+      (module-kb-manager           9 "knowledge + 4 kb_* + 4 ast/beacon")
+      (module-conversation-logs   14 "conversations + 10 conv/message 派生 + retrospective_results")
+      (pillar-four-event-bus       4 "event_log (also SSOT for timeline v1.3.0+) + event_subscriptions + blob_storage + dlq")
+      (category-system-support    20 "observability + image_descriptions + infrastructure + compute-runtime + legacy")
+      (total 60)
+      (total-delta-from-v0.4 "-1 (system_timeline 并入 event_log 作为 SSOT v1.3.0)"))
+
+    (pending-actions
+      "A. 给 candidates-for-promotion 中的高价值表加 project_id (token_usage / prompt_snapshots / specs / skills)"
+      "B. 确认 legacy tables (tasks / inbox / events) 是否可 drop"
+      "C. 与 pillar 二 协调 compute-runtime (slot_sessions/tasks/dynamic_slots) 归属"
+      "D. 实现 spec-db-sync (intent.lisp 文件 ↔ intent DB 表)"
+      "E. 派 agent 验证每个模块 owned-tables 在实际代码中是否被正确隔离 (不被其他 pillar 越界读写)")
 
     (design-rationale
-      "module = 已稳定, 有清晰的入口/核心/出口闭环, 值得单独导航;"
-      "category = 底层数据层或未成熟规约, 结构稳定但使用模式还在扩展, 按表标注 writer/reader;"
-      "cross-cutting = 贯穿全局的基础机制, 无独立身份")
-
-    (pending-questions
-      "Q1: scoping-model 下沉到 project-management 模块后, 是否仍需要在 cross-cutting 留一个指针?"
-      "Q2: conversations 已经很稳定, 什么时候晋升成独立模块? (依赖: message-narrator 路径是否会变)"
-      "Q3: audit-trail / timeline / observability 未来合并成一个"observability 模块"?"
-      "Q4: project-specs 晋升需要什么条件? (lisp-surveyor 稳定 + plan.lisp/workflow.lisp 加载器收口)"))
+      "v0.4 核心变化: 让每个业务模块承担自己表的所有权声明;"
+      "不再把表都堆到 system-support; "
+      "ownership 从隐含 (通过 :code 字段推断) 变成显式 ((module-tables-owned ...) 块)."
+      "这使得其他 pillar / module 一眼能看出'这张表归谁管', 减少越界读写可能."))
 
 ) ;; end intent memory

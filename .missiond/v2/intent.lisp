@@ -24,41 +24,54 @@
   ;; 详细规格在 intent-memory.lisp (草稿),本处只作导航摘要
   (pillar memory
     :file ".missiond/v2/intent-memory.lisp"
-    :status "草稿 v0.3.1 — 2 成熟模块(自治 in/core/out) + 平铺未成熟区 + 横切; 搜索引擎已迁出"
-    :paradigm "2 mature modules (project-management / board) + 底层数据层 + 横切"
+    :status "草稿 v0.4.1 — 4 成熟模块 + 精简 system-support + event_log 成 timeline SSOT (pillar 四 v1.3.0)"
+    :paradigm "4 mature modules (project-management / board / kb-manager / conversation-logs) 自治 + 系统支持 + 横切"
 
-    (purpose "一切需要跨会话保留的数据: 项目私有数据 / 任务队列 / 规约文件 / 底层表层")
+    (purpose "系统长期记忆: 4 个业务模块自治管理自己的表 + 底层系统支持层 + 横切")
     (storage "PostgreSQL via sqlx::PgPool")
     (gateway "crates/missiond-core/src/db/ — 唯一 DB 入口")
 
     (migrated-out
       "embedding-provider → pillar 二 2.2 sonnet-gateway (qwen3 双角色)"
       "gen-crud (Forge 冲压) → pillar 二 2.5 code-generation"
-      "search-engines (HNSW/FTS/trigram/tag + 融合打分) → pillar 二 2.6 search-engines (搜索是计算, 不是数据)")
+      "search-engines → pillar 二 2.6 search-engines (搜索是计算不是数据)"
+      "event-bus 4 表 → pillar 四 §4.6 persistence-layer (event_log / subscriptions / blob_storage / dlq)")
 
-    ;; ── 结构 (模块 + 分类 + 横切) ──
+    ;; ── 结构 (4 模块 + 1 分类 + 横切) ──
     (structure
-      ;; 成熟模块 (自治 in/core/out)
+      ;; 成熟模块 — 各自 in/core/out + 显式 module-tables-owned
       (module project-management
-        :desc   "项目作用域单位: 注册 + 路径解析 + scoping 机制 + 全景聚合"
+        :desc   "项目作用域: 注册 + specs(intent/plan/workflow/user_intents) + skills"
         :target "intent-memory.lisp :: module project-management"
-        :mcp    "mission_project init/list/get/set_active/context/memories/sync")
+        :owned-tables 9
+        :mcp    "mission_project / mission_intent / mission_skill_*")
 
       (module board
-        :desc   "任务队列 + 7 态 FSM + autopilot 派发 + DAG 调度"
+        :desc   "任务队列: 27 列 7 态 FSM + autopilot + flow + agent_questions + prompt_snapshots"
         :target "intent-memory.lisp :: module board"
-        :mcp    "mission_board_query/create/update/claim/decompose/retry/note_add/delete")
+        :owned-tables 4
+        :mcp    "mission_board_* (8 个) + mission_question")
 
-      ;; 未模块化平铺分类
-      (category project-specs
-        :desc   "Lisp 规约文件(intent/plan/workflow)+ 加载器 + 自感知"
-        :target "intent-memory.lisp :: category project-specs"
-        :maturity "未成熟 — 待 lisp-surveyor 稳定后晋升")
+      (module kb-manager
+        :desc   "知识库: 语义记忆 + 代码索引 (ast/beacons) + 访问审计 + KB↔AST 链接"
+        :target "intent-memory.lisp :: module kb-manager"
+        :owned-tables 9
+        :mcp    "mission_kb_* / mission_insight / mission_memory / mission_code_search / mission_universe_graph")
 
+      (module conversation-logs
+        :desc   "三引擎(Claude Code/Gemini/Codex)会话记录 + 摘要/翻译/打标/复盘"
+        :target "intent-memory.lisp :: module conversation-logs"
+        :owned-tables 14
+        :non-db-source "PTY JSONL (~/.claude/projects/{encoded}/*.jsonl)"
+        :mcp    "mission_conversation_* / mission_retrospective_manage / mission_audit / mission_llm_trace")
+
+      ;; 分类 — 系统支持层
       (category system-support
-        :desc   "底层表层(conversations/audit/timeline/observability 等)+ 每表内联 :writers/:readers"
+        :desc   "系统级基础表 — 观测 + 图片缓存 + 基建 + 运行时游标 + legacy"
         :target "intent-memory.lisp :: category system-support"
-        :maturity "基础层 — 结构稳定, 部分(如 conversations)未来可能晋升模块")
+        :owned-tables 20
+        :content "global-observability / vision-assets / infrastructure / compute-runtime / legacy"
+        :v0.4.1-change "-1 (system_timeline 合并进 pillar 四 event_log 作 SSOT)")
 
       ;; 横切能力
       (cross-cutting
@@ -73,7 +86,7 @@
       (knowledge-table        :at "crates/missiond-core/src/db/knowledge.rs")
       (conversation-table     :at "crates/missiond-core/src/db/conversation.rs")
       (audit-table            :at "crates/missiond-core/src/db/audit.rs")
-      (timeline-table         :at "crates/missiond-core/src/db/timeline.rs")
+      (timeline-ssot          :at "pillar 四 event_log (SSOT, v1.3.0+) — 原 timeline.rs 代码待 cutover 后删")
       (intent-loader          :at "crates/missiond-daemon/src/handlers/knowledge/intent.rs")
       (lisp-survey-worker     :at "crates/missiond-daemon/src/workers/sonnet/lisp_survey_worker.rs")
       (conversation-logger    :at "crates/missiond-daemon/src/workers/local/conversation_logger.rs")
