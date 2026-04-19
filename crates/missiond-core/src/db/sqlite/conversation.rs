@@ -1,3 +1,9 @@
+//! ConversationStore — SQLite implementation (unified per memory pillar v0.4.23).
+//!
+//! Covers session + message lifecycle, tool calls, events, retrospective,
+//! narration — merged from former ToolCallStore / EventStore / RetrospectiveStore.
+
+use std::collections::HashSet;
 use async_trait::async_trait;
 use super::SqliteMissionStore;
 use crate::db::error::DbResult;
@@ -317,4 +323,248 @@ impl ConversationStore for SqliteMissionStore {
     async fn update_turns_intent_group(&self, _session_id: &str, _turn_range_start: i32, _turn_range_end: i32, _intent_id: i64) -> DbResult<()> { Ok(()) }
     async fn get_recent_intents(&self, _since_secs: i64) -> DbResult<Vec<UserIntent>> { Ok(vec![]) }
     async fn sessions_pending_intent_analysis(&self, _limit: i64) -> DbResult<Vec<String>> { Ok(vec![]) }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // -- from ToolCallStore v0.4.x --
+    // ══════════════════════════════════════════════════════════════════════
+
+    async fn insert_tool_call(&self, tc: &ToolCallRecord) -> DbResult<()> {
+        let tc = tc.clone();
+        self.executor.run(move |db| db.insert_tool_call(&tc)).await
+    }
+
+    async fn insert_tool_calls_batch(&self, calls: &[ToolCallRecord]) -> DbResult<usize> {
+        let calls = calls.to_vec();
+        self.executor.run(move |db| db.insert_tool_calls_batch(&calls)).await
+    }
+
+    async fn update_tool_call_output(&self, tool_use_id: &str, output_summary: &str, raw_output: &str, status: &str) -> DbResult<bool> {
+        let tool_use_id = tool_use_id.to_owned();
+        let output_summary = output_summary.to_owned();
+        let raw_output = raw_output.to_owned();
+        let status = status.to_owned();
+        self.executor.run(move |db| db.update_tool_call_output(&tool_use_id, &output_summary, &raw_output, &status)).await
+    }
+
+    async fn get_tool_calls_by_session(&self, session_id: &str, tool_filter: Option<&[String]>, limit: i64) -> DbResult<Vec<ToolCallRecord>> {
+        let session_id = session_id.to_owned();
+        let tool_filter = tool_filter.map(|s| s.to_vec());
+        self.executor.run(move |db| db.get_tool_calls_by_session(&session_id, tool_filter.as_deref(), limit)).await
+    }
+
+    async fn get_tool_call_by_id(&self, tool_use_id: &str) -> DbResult<Option<ToolCallRecord>> {
+        let tool_use_id = tool_use_id.to_owned();
+        self.executor.run(move |db| db.get_tool_call_by_id(&tool_use_id)).await
+    }
+
+    async fn get_tool_call_stats(&self, session_id: &str) -> DbResult<Vec<(String, i64, i64, i64)>> {
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.get_tool_call_stats(&session_id)).await
+    }
+
+    async fn count_pending_tool_calls(&self) -> DbResult<i64> {
+        self.executor.run(move |db| db.count_pending_tool_calls()).await
+    }
+
+    async fn get_sessions_with_pending_tool_calls(&self) -> DbResult<Vec<String>> {
+        self.executor.run(move |db| db.get_sessions_with_pending_tool_calls()).await
+    }
+
+    async fn get_sessions_with_tool_calls(&self) -> DbResult<HashSet<String>> {
+        self.executor.run(move |db| db.get_sessions_with_tool_calls()).await
+    }
+
+    async fn get_messages_for_tool_call_backfill(&self, session_id: &str) -> DbResult<Vec<(String, String, String)>> {
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.get_messages_for_tool_call_backfill(&session_id)).await
+    }
+
+    async fn get_conversations_with_jsonl(&self) -> DbResult<Vec<(String, String)>> {
+        self.executor.run(move |db| db.get_conversations_with_jsonl()).await
+    }
+
+    // -- Retrospective tool analysis --
+
+    async fn get_retrospective_tool_stats(&self, session_id: &str, limit: i64) -> DbResult<Vec<(String, i64, i64, i64, f64)>> {
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.get_retrospective_tool_stats(&session_id, limit)).await
+    }
+
+    async fn get_retrospective_meta(&self, session_id: &str) -> DbResult<(i64, i64, i64, i64)> {
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.get_retrospective_meta(&session_id)).await
+    }
+
+    async fn get_retrospective_repeat_patterns(&self, session_id: &str, min_streak: i64) -> DbResult<Vec<(String, i64, String, String)>> {
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.get_retrospective_repeat_patterns(&session_id, min_streak)).await
+    }
+
+    async fn get_tool_name_sequence(&self, session_id: &str) -> DbResult<Vec<String>> {
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.get_tool_name_sequence(&session_id)).await
+    }
+
+    async fn get_retrospective_high_error_tools(&self, session_id: &str, min_error_rate: f64) -> DbResult<Vec<(String, f64, i64)>> {
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.get_retrospective_high_error_tools(&session_id, min_error_rate)).await
+    }
+
+    async fn get_tool_error_samples(&self, session_id: &str, tool_name: &str) -> DbResult<Vec<(String, String, String)>> {
+        let session_id = session_id.to_owned();
+        let tool_name = tool_name.to_owned();
+        self.executor.run(move |db| db.get_tool_error_samples(&session_id, &tool_name)).await
+    }
+
+    async fn get_tool_calls_for_detailed_analysis(&self, session_id: &str) -> DbResult<Vec<(String, String, String, String)>> {
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.get_tool_calls_for_detailed_analysis(&session_id)).await
+    }
+
+    async fn get_tool_calls_with_status_timeline(&self, session_id: &str) -> DbResult<Vec<(String, String, String, String)>> {
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.get_tool_calls_with_status_timeline(&session_id)).await
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // -- from EventStore v0.4.x --
+    // ══════════════════════════════════════════════════════════════════════
+
+    async fn insert_conversation_events_batch(&self, events: &[ConversationEvent]) -> DbResult<usize> {
+        let events = events.to_vec();
+        self.executor.run(move |db| db.insert_conversation_events_batch(&events)).await
+    }
+
+    async fn get_conversation_events(&self, session_id: &str, event_type: Option<&str>, limit: i64) -> DbResult<Vec<ConversationEvent>> {
+        let session_id = session_id.to_owned();
+        let event_type = event_type.map(|s| s.to_owned());
+        self.executor.run(move |db| db.get_conversation_events(&session_id, event_type.as_deref(), limit)).await
+    }
+
+    async fn is_compact_boundary_event(&self, session_id: &str, event_uuid: &str) -> DbResult<bool> {
+        let session_id = session_id.to_owned();
+        let event_uuid = event_uuid.to_owned();
+        self.executor.run(move |db| db.is_compact_boundary_event(&session_id, &event_uuid)).await
+    }
+
+    async fn get_agent_trajectory(&self, tool_use_id: &str, limit: i64) -> DbResult<Vec<ConversationMessage>> {
+        let tool_use_id = tool_use_id.to_owned();
+        self.executor.run(move |db| db.get_agent_trajectory(&tool_use_id, limit)).await
+    }
+
+    async fn get_event_type_summary(&self, session_id: Option<&str>) -> DbResult<Vec<(String, i64)>> {
+        let session_id = session_id.map(|s| s.to_owned());
+        self.executor.run(move |db| db.get_event_type_summary(session_id.as_deref())).await
+    }
+
+    async fn cleanup_old_events(&self, cutoff: &str) -> DbResult<usize> {
+        let cutoff = cutoff.to_owned();
+        self.executor.run(move |db| db.cleanup_old_events(&cutoff)).await
+    }
+
+    async fn get_sessions_with_events(&self) -> DbResult<HashSet<String>> {
+        self.executor.run(|db| db.get_sessions_with_events()).await
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // -- from RetrospectiveStore v0.4.x --
+    // ══════════════════════════════════════════════════════════════════════
+
+    // -- audit.rs: retrospective --
+
+    async fn save_retrospective_result(&self, session_id: &str, trigger_reason: &str, quick_stats: &str, full_analysis: Option<&str>) -> DbResult<()> {
+        let session_id = session_id.to_owned();
+        let trigger_reason = trigger_reason.to_owned();
+        let quick_stats = quick_stats.to_owned();
+        let full_analysis = full_analysis.map(|s| s.to_owned());
+        self.executor.run(move |db| db.save_retrospective_result(&session_id, &trigger_reason, &quick_stats, full_analysis.as_deref())).await
+    }
+
+    async fn has_retrospective_result(&self, session_id: &str) -> DbResult<bool> {
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.has_retrospective_result(&session_id)).await
+    }
+
+    async fn get_sessions_needing_retrospective(&self) -> DbResult<Vec<(String, i64, i64, f64)>> {
+        self.executor.run(|db| db.get_sessions_needing_retrospective()).await
+    }
+
+    async fn get_sessions_for_retro_backfill(&self, since: &str, force: bool) -> DbResult<Vec<(String, i64, i64, f64)>> {
+        let since = since.to_owned();
+        self.executor.run(move |db| db.get_sessions_for_retro_backfill(&since, force)).await
+    }
+
+    async fn list_retrospective_results(&self, limit: i64) -> DbResult<Vec<(String, String, String, Option<String>, String)>> {
+        self.executor.run(move |db| db.list_retrospective_results(limit)).await
+    }
+
+    async fn get_retrospective_result(&self, session_id: &str) -> DbResult<Option<(String, String, Option<String>, String)>> {
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.get_retrospective_result(&session_id)).await
+    }
+
+    // -- narration.rs --
+
+    async fn insert_narrations(&self, narrations: &[(i64, &str, &str, &str, &str)]) -> DbResult<usize> {
+        let narrations: Vec<(i64, String, String, String, String)> = narrations
+            .iter()
+            .map(|(id, a, b, c, d)| (*id, a.to_string(), b.to_string(), c.to_string(), d.to_string()))
+            .collect();
+        self.executor.run(move |db| {
+            let refs: Vec<(i64, &str, &str, &str, &str)> = narrations
+                .iter()
+                .map(|(id, a, b, c, d)| (*id, a.as_str(), b.as_str(), c.as_str(), d.as_str()))
+                .collect();
+            db.insert_narrations(&refs)
+        }).await
+    }
+
+    async fn get_narrations_for_session(&self, session_id: &str) -> DbResult<Vec<(i64, String, String, String)>> {
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.get_narrations_for_session(&session_id)).await
+    }
+
+    async fn get_sessions_needing_narration(&self, min_unnarrated: i64) -> DbResult<Vec<(String, i64)>> {
+        self.executor.run(move |db| db.get_sessions_needing_narration(min_unnarrated)).await
+    }
+
+    async fn get_or_create_narration_cursor(&self, session_id: &str) -> DbResult<(i64, i64, String, i64, i64)> {
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.get_or_create_narration_cursor(&session_id)).await
+    }
+
+    async fn fetch_narration_batch(&self, session_id: &str, after_id: i64, batch_size: i64) -> DbResult<Vec<ConversationMessage>> {
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.fetch_narration_batch(&session_id, after_id, batch_size)).await
+    }
+
+    async fn get_last_narration(&self, session_id: &str) -> DbResult<Option<(i64, String, String, String)>> {
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.get_last_narration(&session_id)).await
+    }
+
+    async fn commit_narration_batch(&self, session_id: &str, last_msg_id: i64, narrations: &[(i64, &str, &str, &str, &str)]) -> DbResult<usize> {
+        let session_id = session_id.to_owned();
+        let narrations: Vec<(i64, String, String, String, String)> = narrations
+            .iter()
+            .map(|(id, a, b, c, d)| (*id, a.to_string(), b.to_string(), c.to_string(), d.to_string()))
+            .collect();
+        self.executor.run(move |db| {
+            let refs: Vec<(i64, &str, &str, &str, &str)> = narrations
+                .iter()
+                .map(|(id, a, b, c, d)| (*id, a.as_str(), b.as_str(), c.as_str(), d.as_str()))
+                .collect();
+            db.commit_narration_batch(&session_id, last_msg_id, &refs)
+        }).await
+    }
+
+    async fn mark_narration_cursor_processing(&self, session_id: &str) -> DbResult<()> {
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.mark_narration_cursor_processing(&session_id)).await
+    }
+
+    async fn mark_narration_cursor_failed(&self, session_id: &str, max_retries: i64) -> DbResult<bool> {
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.mark_narration_cursor_failed(&session_id, max_retries)).await
+    }
 }

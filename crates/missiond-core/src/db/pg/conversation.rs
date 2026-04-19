@@ -1,6 +1,17 @@
-//! ConversationStore — PostgreSQL implementation.
+//! ConversationStore — PostgreSQL implementation (unified per memory pillar v0.4.23).
+//!
+//! Covers the full ConversationStore surface for PG backend:
+//!   - session + message lifecycle, embeddings, extraction
+//!   - tool calls (merged from former ToolCallStore)
+//!   - conversation events (merged from former EventStore)
+//!   - retrospective results + narration (merged from former RetrospectiveStore)
+//!
+//! Note: Rust coherence requires a single `impl ConversationStore for PgMissionStore`
+//! block per crate. All methods live here.
 
+use std::collections::HashSet;
 use async_trait::async_trait;
+use sqlx::Row;
 use crate::db::error::DbResult;
 use crate::db::traits::ConversationStore;
 use crate::types::*;
@@ -1489,5 +1500,926 @@ impl ConversationStore for PgMissionStore {
             .fetch_all(&self.pool)
             .await?;
         Ok(rows)
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // -- from ToolCallStore v0.4.x: tool call CRUD, stats, retrospective --
+    // ══════════════════════════════════════════════════════════════════════
+
+    async fn insert_tool_call(&self, tc: &ToolCallRecord) -> DbResult<()> {
+        sqlx::query(
+            "INSERT INTO conversation_tool_calls (id, session_id, message_id, tool_name, input_summary, raw_input, output_summary, raw_output, status, duration_ms, timestamp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             ON CONFLICT (id) DO NOTHING"
+        )
+        .bind(&tc.id)
+        .bind(&tc.session_id)
+        .bind(tc.message_id)
+        .bind(&tc.tool_name)
+        .bind(&tc.input_summary)
+        .bind(&tc.raw_input)
+        .bind(&tc.output_summary)
+        .bind(&tc.raw_output)
+        .bind(&tc.status)
+        .bind(tc.duration_ms)
+        .bind(&tc.timestamp)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn insert_tool_calls_batch(&self, calls: &[ToolCallRecord]) -> DbResult<usize> {
+        if calls.is_empty() {
+            return Ok(0);
+        }
+        // Insert new calls; for already-existing calls, allow ONLY a
+        // pending → terminal transition. This handles ingestion sources (e.g.
+        // Codex JSONL) that write the function_call line first and the matching
+        // function_call_output later: the first ingest creates a pending row,
+        // the next ingest (after the output is appended) flips it to success/error
+        // with the actual output. Existing terminal rows are never overwritten.
+        let mut count = 0usize;
+        for tc in calls {
+            let result = sqlx::query(
+                "INSERT INTO conversation_tool_calls (id, session_id, message_id, tool_name, input_summary, raw_input, output_summary, raw_output, status, duration_ms, timestamp)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                 ON CONFLICT (id) DO UPDATE SET
+                    output_summary = EXCLUDED.output_summary,
+                    raw_output     = EXCLUDED.raw_output,
+                    status         = EXCLUDED.status,
+                    duration_ms    = EXCLUDED.duration_ms
+                 WHERE conversation_tool_calls.status = 'pending'
+                   AND EXCLUDED.status <> 'pending'"
+            )
+            .bind(&tc.id)
+            .bind(&tc.session_id)
+            .bind(tc.message_id)
+            .bind(&tc.tool_name)
+            .bind(&tc.input_summary)
+            .bind(&tc.raw_input)
+            .bind(&tc.output_summary)
+            .bind(&tc.raw_output)
+            .bind(&tc.status)
+            .bind(tc.duration_ms)
+            .bind(&tc.timestamp)
+            .execute(&self.pool)
+            .await?;
+            if result.rows_affected() > 0 {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    async fn update_tool_call_output(&self, tool_use_id: &str, output_summary: &str, raw_output: &str, status: &str) -> DbResult<bool> {
+        let result = sqlx::query(
+            "UPDATE conversation_tool_calls SET output_summary = $1, raw_output = $2, status = $3 WHERE id = $4"
+        )
+        .bind(output_summary)
+        .bind(raw_output)
+        .bind(status)
+        .bind(tool_use_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn get_tool_calls_by_session(&self, session_id: &str, tool_filter: Option<&[String]>, limit: i64) -> DbResult<Vec<ToolCallRecord>> {
+        if let Some(filter) = tool_filter {
+            if filter.is_empty() {
+                return Ok(Vec::new());
+            }
+            // Build dynamic IN clause
+            let placeholders: Vec<String> = (0..filter.len()).map(|i| format!("${}", i + 2)).collect();
+            let sql = format!(
+                "SELECT id, session_id, message_id, tool_name, input_summary, raw_input, output_summary, raw_output, status, duration_ms, timestamp
+                 FROM conversation_tool_calls WHERE session_id = $1 AND tool_name IN ({}) ORDER BY id ASC LIMIT ${}",
+                placeholders.join(","),
+                filter.len() + 2
+            );
+            // sqlx doesn't support dynamic bind count easily, so use query_as with raw
+            let mut query = sqlx::query_as::<_, (String, String, Option<i64>, String, Option<String>, Option<String>, Option<String>, Option<String>, String, Option<i64>, String)>(&sql);
+            query = query.bind(session_id);
+            for f in filter {
+                query = query.bind(f);
+            }
+            query = query.bind(limit);
+            let rows = query.fetch_all(&self.pool).await?;
+            Ok(rows.into_iter().map(|r| ToolCallRecord {
+                id: r.0, session_id: r.1, message_id: r.2, tool_name: r.3,
+                input_summary: r.4, raw_input: r.5, output_summary: r.6, raw_output: r.7,
+                status: r.8, duration_ms: r.9, timestamp: r.10,
+            }).collect())
+        } else {
+            let rows: Vec<(String, String, Option<i64>, String, Option<String>, Option<String>, Option<String>, Option<String>, String, Option<i64>, String)> = sqlx::query_as(
+                "SELECT id, session_id, message_id, tool_name, input_summary, raw_input, output_summary, raw_output, status, duration_ms, timestamp
+                 FROM conversation_tool_calls WHERE session_id = $1 ORDER BY id ASC LIMIT $2"
+            )
+            .bind(session_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+            Ok(rows.into_iter().map(|r| ToolCallRecord {
+                id: r.0, session_id: r.1, message_id: r.2, tool_name: r.3,
+                input_summary: r.4, raw_input: r.5, output_summary: r.6, raw_output: r.7,
+                status: r.8, duration_ms: r.9, timestamp: r.10,
+            }).collect())
+        }
+    }
+
+    async fn get_tool_call_by_id(&self, tool_use_id: &str) -> DbResult<Option<ToolCallRecord>> {
+        let row: Option<(String, String, Option<i64>, String, Option<String>, Option<String>, Option<String>, Option<String>, String, Option<i64>, String)> = sqlx::query_as(
+            "SELECT id, session_id, message_id, tool_name, input_summary, raw_input, output_summary, raw_output, status, duration_ms, timestamp
+             FROM conversation_tool_calls WHERE id = $1"
+        )
+        .bind(tool_use_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| ToolCallRecord {
+            id: r.0, session_id: r.1, message_id: r.2, tool_name: r.3,
+            input_summary: r.4, raw_input: r.5, output_summary: r.6, raw_output: r.7,
+            status: r.8, duration_ms: r.9, timestamp: r.10,
+        }))
+    }
+
+    async fn get_tool_call_stats(&self, session_id: &str) -> DbResult<Vec<(String, i64, i64, i64)>> {
+        let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+            "SELECT tool_name,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
+                    SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_count
+             FROM conversation_tool_calls WHERE session_id = $1
+             GROUP BY tool_name ORDER BY total DESC"
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn count_pending_tool_calls(&self) -> DbResult<i64> {
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM conversation_tool_calls WHERE status = 'pending'"
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
+
+    async fn get_sessions_with_pending_tool_calls(&self) -> DbResult<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT session_id FROM conversation_tool_calls WHERE status = 'pending'"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
+    async fn get_sessions_with_tool_calls(&self) -> DbResult<HashSet<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT session_id FROM conversation_tool_calls"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
+    async fn get_messages_for_tool_call_backfill(&self, session_id: &str) -> DbResult<Vec<(String, String, String)>> {
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT role, raw_content, timestamp FROM conversation_messages
+             WHERE session_id = $1 AND raw_content IS NOT NULL AND raw_content != ''
+             AND role IN ('assistant', 'user', 'thinking', 'system', 'tool_result')
+             ORDER BY id ASC"
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn get_conversations_with_jsonl(&self) -> DbResult<Vec<(String, String)>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, jsonl_path FROM conversations WHERE jsonl_path IS NOT NULL AND jsonl_path != ''"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    // -- Retrospective tool analysis --
+
+    async fn get_retrospective_tool_stats(&self, session_id: &str, limit: i64) -> DbResult<Vec<(String, i64, i64, i64, f64)>> {
+        let rows: Vec<(String, i64, i64, i64, f64)> = sqlx::query_as(
+            "SELECT tool_name,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
+                    SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_count,
+                    COALESCE(AVG(duration_ms), 0) as avg_duration
+             FROM conversation_tool_calls WHERE session_id = $1
+             GROUP BY tool_name ORDER BY total DESC LIMIT $2"
+        )
+        .bind(session_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn get_retrospective_meta(&self, session_id: &str) -> DbResult<(i64, i64, i64, i64)> {
+        let (total_calls, total_duration, unique_tools): (i64, i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COALESCE(SUM(duration_ms), 0), COUNT(DISTINCT tool_name)
+             FROM conversation_tool_calls WHERE session_id = $1"
+        )
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let (compact_count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM conversation_events
+             WHERE session_id = $1 AND event_type = 'compact_boundary'"
+        )
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok((total_calls, total_duration, unique_tools, compact_count))
+    }
+
+    async fn get_retrospective_repeat_patterns(&self, session_id: &str, min_streak: i64) -> DbResult<Vec<(String, i64, String, String)>> {
+        let rows: Vec<(String, i64, String, String)> = sqlx::query_as(
+            "WITH numbered AS (
+                SELECT tool_name, timestamp,
+                       ROW_NUMBER() OVER (ORDER BY id) as rn,
+                       ROW_NUMBER() OVER (PARTITION BY tool_name ORDER BY id) as grn
+                FROM conversation_tool_calls WHERE session_id = $1
+            )
+            SELECT tool_name, COUNT(*) as streak, MIN(timestamp) as start_t, MAX(timestamp) as end_t
+            FROM numbered GROUP BY tool_name, (rn - grn)
+            HAVING COUNT(*) >= $2 ORDER BY streak DESC"
+        )
+        .bind(session_id)
+        .bind(min_streak)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn get_tool_name_sequence(&self, session_id: &str) -> DbResult<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT tool_name FROM conversation_tool_calls WHERE session_id = $1 ORDER BY id ASC"
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
+    async fn get_retrospective_high_error_tools(&self, session_id: &str, min_error_rate: f64) -> DbResult<Vec<(String, f64, i64)>> {
+        let rows: Vec<(String, f64, i64)> = sqlx::query_as(
+            "SELECT tool_name,
+                    ROUND(100.0 * SUM(CASE WHEN status='error' THEN 1 ELSE 0 END)::numeric / COUNT(*), 1)::float8 as error_rate,
+                    COUNT(*) as total
+             FROM conversation_tool_calls WHERE session_id = $1
+             GROUP BY tool_name HAVING (100.0 * SUM(CASE WHEN status='error' THEN 1 ELSE 0 END)::numeric / COUNT(*)) > $2
+             ORDER BY error_rate DESC"
+        )
+        .bind(session_id)
+        .bind(min_error_rate)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn get_tool_error_samples(&self, session_id: &str, tool_name: &str) -> DbResult<Vec<(String, String, String)>> {
+        let mut samples = Vec::new();
+        // First error
+        let first: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT COALESCE(input_summary, ''), COALESCE(output_summary, ''), timestamp
+             FROM conversation_tool_calls
+             WHERE session_id = $1 AND tool_name = $2 AND status = 'error'
+             ORDER BY id ASC LIMIT 1"
+        )
+        .bind(session_id)
+        .bind(tool_name)
+        .fetch_all(&self.pool)
+        .await?;
+        samples.extend(first);
+        // Last error (if different from first)
+        let last: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT COALESCE(input_summary, ''), COALESCE(output_summary, ''), timestamp
+             FROM conversation_tool_calls
+             WHERE session_id = $1 AND tool_name = $2 AND status = 'error'
+             ORDER BY id DESC LIMIT 1"
+        )
+        .bind(session_id)
+        .bind(tool_name)
+        .fetch_all(&self.pool)
+        .await?;
+        for sample in last {
+            if samples.is_empty() || samples[0].2 != sample.2 {
+                samples.push(sample);
+            }
+        }
+        Ok(samples)
+    }
+
+    async fn get_tool_calls_for_detailed_analysis(&self, session_id: &str) -> DbResult<Vec<(String, String, String, String)>> {
+        let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT tool_name, COALESCE(input_summary, ''), COALESCE(output_summary, ''), status
+             FROM conversation_tool_calls WHERE session_id = $1 ORDER BY id ASC"
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn get_tool_calls_with_status_timeline(&self, session_id: &str) -> DbResult<Vec<(String, String, String, String)>> {
+        let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT tool_name, status, COALESCE(input_summary, ''), timestamp
+             FROM conversation_tool_calls WHERE session_id = $1 ORDER BY id ASC"
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // -- from EventStore v0.4.x: conversation events (JSONL audit) --
+    // ══════════════════════════════════════════════════════════════════════
+
+    async fn insert_conversation_events_batch(&self, events: &[ConversationEvent]) -> DbResult<usize> {
+        if events.is_empty() {
+            return Ok(0);
+        }
+        let mut count = 0usize;
+        for event in events {
+            let result = sqlx::query(
+                "INSERT INTO conversation_events (session_id, event_uuid, event_type, content, raw_data, timestamp)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (session_id, event_uuid) DO NOTHING"
+            )
+            .bind(&event.session_id)
+            .bind(&event.event_uuid)
+            .bind(&event.event_type)
+            .bind(&event.content)
+            .bind(&event.raw_data)
+            .bind(&event.timestamp)
+            .execute(&self.pool)
+            .await?;
+            if result.rows_affected() > 0 {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    async fn get_conversation_events(&self, session_id: &str, event_type: Option<&str>, limit: i64) -> DbResult<Vec<ConversationEvent>> {
+        let rows = if let Some(et) = event_type {
+            sqlx::query(
+                "SELECT id, session_id, event_uuid, event_type, content, raw_data, timestamp
+                 FROM conversation_events WHERE session_id = $1 AND event_type = $2
+                 ORDER BY id ASC LIMIT $3"
+            )
+            .bind(session_id)
+            .bind(et)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT id, session_id, event_uuid, event_type, content, raw_data, timestamp
+                 FROM conversation_events WHERE session_id = $1
+                 ORDER BY id ASC LIMIT $2"
+            )
+            .bind(session_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        let results: Vec<ConversationEvent> = rows.iter().map(|row| {
+            ConversationEvent {
+                id: row.get("id"),
+                session_id: row.get("session_id"),
+                event_uuid: row.get("event_uuid"),
+                event_type: row.get("event_type"),
+                content: row.get("content"),
+                raw_data: row.get("raw_data"),
+                timestamp: row.get("timestamp"),
+            }
+        }).collect();
+        Ok(results)
+    }
+
+    async fn is_compact_boundary_event(&self, session_id: &str, event_uuid: &str) -> DbResult<bool> {
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM conversation_events
+             WHERE session_id = $1 AND event_uuid = $2 AND event_type = 'compact_boundary'"
+        )
+        .bind(session_id)
+        .bind(event_uuid)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count > 0)
+    }
+
+    async fn get_agent_trajectory(&self, tool_use_id: &str, limit: i64) -> DbResult<Vec<ConversationMessage>> {
+        let rows = sqlx::query(
+            "SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
+                    tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count
+             FROM conversation_messages WHERE parent_uuid = $1 AND role LIKE 'agent_%'
+             ORDER BY id ASC LIMIT $2"
+        )
+        .bind(tool_use_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let results: Vec<ConversationMessage> = rows.iter().map(|row| {
+            ConversationMessage {
+                id: row.get("id"),
+                session_id: row.get("session_id"),
+                role: row.get("role"),
+                content: row.get("content"),
+                raw_content: row.get("raw_content"),
+                message_uuid: row.get("message_uuid"),
+                parent_uuid: row.get("parent_uuid"),
+                model: row.get("model"),
+                timestamp: row.get("timestamp"),
+                metadata: row.get("metadata"),
+                tool_name: row.get("tool_name"),
+                raw_role: row.get("raw_role"),
+                content_types: row.get("content_types"),
+                has_image: row.get::<bool, _>("has_image"),
+                has_tool_use: row.get::<bool, _>("has_tool_use"),
+                has_tool_result: row.get::<bool, _>("has_tool_result"),
+                token_count: row.get("token_count"),
+                seq: None,
+                role_display: None,
+            }
+        }).collect();
+        Ok(results)
+    }
+
+    async fn get_event_type_summary(&self, session_id: Option<&str>) -> DbResult<Vec<(String, i64)>> {
+        let rows = if let Some(sid) = session_id {
+            sqlx::query(
+                "SELECT event_type, COUNT(*) as cnt FROM conversation_events
+                 WHERE session_id = $1 GROUP BY event_type ORDER BY cnt DESC"
+            )
+            .bind(sid)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT event_type, COUNT(*) as cnt FROM conversation_events
+                 GROUP BY event_type ORDER BY cnt DESC"
+            )
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        let results: Vec<(String, i64)> = rows.iter().map(|row| {
+            (row.get::<String, _>("event_type"), row.get::<i64, _>("cnt"))
+        }).collect();
+        Ok(results)
+    }
+
+    async fn cleanup_old_events(&self, cutoff: &str) -> DbResult<usize> {
+        let result = sqlx::query(
+            "DELETE FROM conversation_events
+             WHERE event_type IN ('progress:bash_progress', 'progress:mcp_progress', 'hook_progress', 'progress:waiting_for_task')
+             AND timestamp < $1"
+        )
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() as usize)
+    }
+
+    async fn get_sessions_with_events(&self) -> DbResult<HashSet<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT session_id FROM conversation_events"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // -- from RetrospectiveStore v0.4.x: retrospective results + narration --
+    // ══════════════════════════════════════════════════════════════════════
+
+    // -- audit.rs: retrospective --
+
+    async fn save_retrospective_result(&self, session_id: &str, trigger_reason: &str, quick_stats: &str, full_analysis: Option<&str>) -> DbResult<()> {
+        sqlx::query(
+            "INSERT INTO retrospective_results (session_id, trigger_reason, quick_stats, full_analysis, created_at)
+             VALUES ($1, $2, $3, $4, NOW())
+             ON CONFLICT (session_id) DO UPDATE SET
+                trigger_reason = EXCLUDED.trigger_reason,
+                quick_stats = EXCLUDED.quick_stats,
+                full_analysis = EXCLUDED.full_analysis,
+                created_at = NOW()"
+        )
+        .bind(session_id)
+        .bind(trigger_reason)
+        .bind(quick_stats)
+        .bind(full_analysis)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn has_retrospective_result(&self, session_id: &str) -> DbResult<bool> {
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM retrospective_results WHERE session_id = $1"
+        )
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count > 0)
+    }
+
+    async fn get_sessions_needing_retrospective(&self) -> DbResult<Vec<(String, i64, i64, f64)>> {
+        let rows = sqlx::query(
+            "SELECT c.id, c.message_count,
+                    COALESCE((SELECT COUNT(*) FROM conversation_tool_calls tc WHERE tc.session_id = c.id), 0) as tool_count,
+                    COALESCE(
+                        (SELECT (100.0 * SUM(CASE WHEN tc2.status='error' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0))::float8
+                         FROM conversation_tool_calls tc2 WHERE tc2.session_id = c.id), 0
+                    )::float8 as error_rate
+             FROM conversations c
+             WHERE c.status = 'completed'
+               AND c.conversation_type = 'user'
+               AND (c.slot_id IS NULL OR (
+                   c.slot_id NOT LIKE 'slot-memory%'
+                   AND c.slot_id NOT LIKE 'slot-diagnosis%'
+                   AND c.slot_id NOT LIKE 'agent-%'
+               ))
+               AND c.id NOT IN (SELECT session_id FROM retrospective_results)
+               AND (
+                   c.message_count > 100
+                   OR (SELECT COUNT(*) FROM conversation_tool_calls tc3 WHERE tc3.session_id = c.id) > 50
+                   OR EXTRACT(EPOCH FROM (c.ended_at::timestamp - c.started_at::timestamp)) / 60 > 60
+               )
+             ORDER BY c.ended_at DESC
+             LIMIT 5"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let results = rows.iter().map(|row| {
+            (
+                row.get::<String, _>("id"),
+                row.get::<i64, _>("message_count"),
+                row.get::<i64, _>("tool_count"),
+                row.get::<f64, _>("error_rate"),
+            )
+        }).collect();
+        Ok(results)
+    }
+
+    async fn get_sessions_for_retro_backfill(&self, since: &str, force: bool) -> DbResult<Vec<(String, i64, i64, f64)>> {
+        let sql = if force {
+            "SELECT c.id, c.message_count,
+                    COALESCE((SELECT COUNT(*) FROM conversation_tool_calls tc WHERE tc.session_id = c.id), 0) as tool_count,
+                    COALESCE(
+                        (SELECT (100.0 * SUM(CASE WHEN tc2.status='error' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0))::float8
+                         FROM conversation_tool_calls tc2 WHERE tc2.session_id = c.id), 0
+                    )::float8 as error_rate
+             FROM conversations c
+             WHERE c.conversation_type = 'user'
+               AND (c.slot_id IS NULL OR (
+                   c.slot_id NOT LIKE 'slot-memory%'
+                   AND c.slot_id NOT LIKE 'slot-diagnosis%'
+                   AND c.slot_id NOT LIKE 'agent-%'
+               ))
+               AND c.message_count >= 6
+               AND c.started_at >= $1
+             ORDER BY c.started_at ASC"
+        } else {
+            "SELECT c.id, c.message_count,
+                    COALESCE((SELECT COUNT(*) FROM conversation_tool_calls tc WHERE tc.session_id = c.id), 0) as tool_count,
+                    COALESCE(
+                        (SELECT (100.0 * SUM(CASE WHEN tc2.status='error' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0))::float8
+                         FROM conversation_tool_calls tc2 WHERE tc2.session_id = c.id), 0
+                    )::float8 as error_rate
+             FROM conversations c
+             WHERE c.conversation_type = 'user'
+               AND (c.slot_id IS NULL OR (
+                   c.slot_id NOT LIKE 'slot-memory%'
+                   AND c.slot_id NOT LIKE 'slot-diagnosis%'
+                   AND c.slot_id NOT LIKE 'agent-%'
+               ))
+               AND c.message_count >= 6
+               AND c.started_at >= $1
+               AND c.id NOT IN (SELECT session_id FROM retrospective_results)
+             ORDER BY c.started_at ASC"
+        };
+
+        let rows = sqlx::query(sql)
+            .bind(since)
+            .fetch_all(&self.pool)
+            .await?;
+
+        let results = rows.iter().map(|row| {
+            (
+                row.get::<String, _>("id"),
+                row.get::<i64, _>("message_count"),
+                row.get::<i64, _>("tool_count"),
+                row.get::<f64, _>("error_rate"),
+            )
+        }).collect();
+        Ok(results)
+    }
+
+    async fn list_retrospective_results(&self, limit: i64) -> DbResult<Vec<(String, String, String, Option<String>, String)>> {
+        let rows = sqlx::query(
+            "SELECT session_id, trigger_reason, quick_stats, full_analysis, created_at
+             FROM retrospective_results ORDER BY created_at DESC LIMIT $1"
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let results = rows.iter().map(|row| {
+            (
+                row.get::<String, _>("session_id"),
+                row.get::<String, _>("trigger_reason"),
+                row.get::<String, _>("quick_stats"),
+                row.get::<Option<String>, _>("full_analysis"),
+                row.get::<String, _>("created_at"),
+            )
+        }).collect();
+        Ok(results)
+    }
+
+    async fn get_retrospective_result(&self, session_id: &str) -> DbResult<Option<(String, String, Option<String>, String)>> {
+        let row = sqlx::query(
+            "SELECT trigger_reason, quick_stats, full_analysis, created_at
+             FROM retrospective_results WHERE session_id = $1"
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| {
+            (
+                r.get::<String, _>("trigger_reason"),
+                r.get::<String, _>("quick_stats"),
+                r.get::<Option<String>, _>("full_analysis"),
+                r.get::<String, _>("created_at"),
+            )
+        }))
+    }
+
+    // -- narration.rs --
+
+    async fn insert_narrations(&self, narrations: &[(i64, &str, &str, &str, &str)]) -> DbResult<usize> {
+        let mut count = 0usize;
+        for (message_id, session_id, step_title, step_intent, step_result) in narrations {
+            sqlx::query(
+                "INSERT INTO message_narrations (message_id, session_id, step_title, step_intent, step_result)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (message_id) DO UPDATE SET
+                    session_id = EXCLUDED.session_id,
+                    step_title = EXCLUDED.step_title,
+                    step_intent = EXCLUDED.step_intent,
+                    step_result = EXCLUDED.step_result"
+            )
+            .bind(message_id)
+            .bind(session_id)
+            .bind(step_title)
+            .bind(step_intent)
+            .bind(step_result)
+            .execute(&self.pool)
+            .await?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    async fn get_narrations_for_session(&self, session_id: &str) -> DbResult<Vec<(i64, String, String, String)>> {
+        let rows = sqlx::query(
+            "SELECT message_id, step_title, step_intent, step_result FROM message_narrations WHERE session_id = $1"
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let results = rows.iter().map(|row| {
+            (
+                row.get::<i64, _>("message_id"),
+                row.get::<String, _>("step_title"),
+                row.get::<String, _>("step_intent"),
+                row.get::<String, _>("step_result"),
+            )
+        }).collect();
+        Ok(results)
+    }
+
+    async fn get_sessions_needing_narration(&self, min_unnarrated: i64) -> DbResult<Vec<(String, i64)>> {
+        let rows = sqlx::query(
+            "SELECT cm.session_id, COUNT(*) as unnarrated
+             FROM conversation_messages cm
+             JOIN conversations c ON c.id = cm.session_id
+             LEFT JOIN message_narrations mn ON mn.message_id = cm.id
+             WHERE mn.message_id IS NULL
+               AND c.conversation_type = 'user'
+               AND cm.role IN ('user', 'assistant')
+             GROUP BY cm.session_id
+             HAVING COUNT(*) >= $1
+             ORDER BY MAX(cm.timestamp) DESC
+             LIMIT 5"
+        )
+        .bind(min_unnarrated)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let results = rows.iter().map(|row| {
+            (
+                row.get::<String, _>("session_id"),
+                row.get::<i64, _>("unnarrated"),
+            )
+        }).collect();
+        Ok(results)
+    }
+
+    async fn get_or_create_narration_cursor(&self, session_id: &str) -> DbResult<(i64, i64, String, i64, i64)> {
+        // Count total user/assistant messages for this session
+        let (total,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM conversation_messages WHERE session_id = $1 AND role IN ('user', 'assistant')"
+        )
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        // Upsert cursor
+        sqlx::query(
+            "INSERT INTO narration_cursors (session_id, total_messages) VALUES ($1, $2)
+             ON CONFLICT (session_id) DO UPDATE SET total_messages = $2"
+        )
+        .bind(session_id)
+        .bind(total)
+        .execute(&self.pool)
+        .await?;
+
+        // Fetch cursor state
+        let row = sqlx::query(
+            "SELECT last_processed_id, batch_index, status, retry_count, total_messages FROM narration_cursors WHERE session_id = $1"
+        )
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok((
+            row.get::<i64, _>("last_processed_id"),
+            row.get::<i64, _>("batch_index"),
+            row.get::<String, _>("status"),
+            row.get::<i64, _>("retry_count"),
+            row.get::<i32, _>("total_messages") as i64,
+        ))
+    }
+
+    async fn fetch_narration_batch(&self, session_id: &str, after_id: i64, batch_size: i64) -> DbResult<Vec<ConversationMessage>> {
+        let rows = sqlx::query(
+            "SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
+                    tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count
+             FROM conversation_messages
+             WHERE session_id = $1 AND id > $2 AND role IN ('user', 'assistant')
+             ORDER BY id ASC LIMIT $3"
+        )
+        .bind(session_id)
+        .bind(after_id)
+        .bind(batch_size)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let results = rows.iter().map(|row| {
+            ConversationMessage {
+                id: row.get("id"),
+                session_id: row.get("session_id"),
+                role: row.get("role"),
+                content: row.get("content"),
+                raw_content: row.get("raw_content"),
+                message_uuid: row.get("message_uuid"),
+                parent_uuid: row.get("parent_uuid"),
+                model: row.get("model"),
+                timestamp: row.get::<chrono::DateTime<chrono::Utc>, _>("timestamp")
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                metadata: row.get("metadata"),
+                tool_name: row.get("tool_name"),
+                raw_role: row.get("raw_role"),
+                content_types: row.get("content_types"),
+                has_image: row.get::<bool, _>("has_image"),
+                has_tool_use: row.get::<bool, _>("has_tool_use"),
+                has_tool_result: row.get::<bool, _>("has_tool_result"),
+                token_count: row.get("token_count"),
+                seq: None,
+                role_display: None,
+            }
+        }).collect();
+        Ok(results)
+    }
+
+    async fn get_last_narration(&self, session_id: &str) -> DbResult<Option<(i64, String, String, String)>> {
+        let row = sqlx::query(
+            "SELECT message_id, step_title, step_intent, step_result FROM message_narrations
+             WHERE session_id = $1 ORDER BY message_id DESC LIMIT 1"
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| {
+            (
+                r.get::<i64, _>("message_id"),
+                r.get::<String, _>("step_title"),
+                r.get::<String, _>("step_intent"),
+                r.get::<String, _>("step_result"),
+            )
+        }))
+    }
+
+    async fn commit_narration_batch(&self, session_id: &str, last_msg_id: i64, narrations: &[(i64, &str, &str, &str, &str)]) -> DbResult<usize> {
+        // Insert narrations
+        let mut count = 0usize;
+        for (message_id, sid, step_title, step_intent, step_result) in narrations {
+            sqlx::query(
+                "INSERT INTO message_narrations (message_id, session_id, step_title, step_intent, step_result)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (message_id) DO UPDATE SET
+                    session_id = EXCLUDED.session_id,
+                    step_title = EXCLUDED.step_title,
+                    step_intent = EXCLUDED.step_intent,
+                    step_result = EXCLUDED.step_result"
+            )
+            .bind(message_id)
+            .bind(sid)
+            .bind(step_title)
+            .bind(step_intent)
+            .bind(step_result)
+            .execute(&self.pool)
+            .await?;
+            count += 1;
+        }
+        // Advance cursor
+        sqlx::query(
+            "UPDATE narration_cursors SET last_processed_id = $2, batch_index = batch_index + 1,
+             status = 'idle', retry_count = 0, updated_at = NOW()
+             WHERE session_id = $1"
+        )
+        .bind(session_id)
+        .bind(last_msg_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(count)
+    }
+
+    async fn mark_narration_cursor_processing(&self, session_id: &str) -> DbResult<()> {
+        sqlx::query(
+            "UPDATE narration_cursors SET status = 'processing', updated_at = NOW() WHERE session_id = $1"
+        )
+        .bind(session_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn mark_narration_cursor_failed(&self, session_id: &str, max_retries: i64) -> DbResult<bool> {
+        // Increment retry count
+        sqlx::query(
+            "UPDATE narration_cursors SET retry_count = retry_count + 1, updated_at = NOW() WHERE session_id = $1"
+        )
+        .bind(session_id)
+        .execute(&self.pool)
+        .await?;
+
+        // Check if max retries exceeded
+        let (retry_count,): (i64,) = sqlx::query_as(
+            "SELECT retry_count FROM narration_cursors WHERE session_id = $1"
+        )
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        if retry_count >= max_retries {
+            sqlx::query(
+                "UPDATE narration_cursors SET status = 'error' WHERE session_id = $1"
+            )
+            .bind(session_id)
+            .execute(&self.pool)
+            .await?;
+            Ok(true) // permanently failed
+        } else {
+            sqlx::query(
+                "UPDATE narration_cursors SET status = 'idle' WHERE session_id = $1"
+            )
+            .bind(session_id)
+            .execute(&self.pool)
+            .await?;
+            Ok(false) // will retry
+        }
     }
 }

@@ -3,11 +3,9 @@
 //! Wraps the existing synchronous `MissionDB` via `DbExecutor::run()` (spawn_blocking)
 //! to provide async trait implementations that preserve slow-query monitoring.
 
+// Note: tool_call/event/retrospective merged into conversation (v0.4.23).
 mod conversation;
 mod message;
-mod tool_call;
-mod event;
-mod retrospective;
 mod vision;
 mod knowledge;
 mod board;

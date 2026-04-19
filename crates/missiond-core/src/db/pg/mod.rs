@@ -93,18 +93,15 @@ impl crate::db::traits::MissionStore for PgMissionStore {
 pub mod migrate_from_sqlite;
 
 // Domain trait implementations — one file per trait:
+// Note: tool_call/event/retrospective merged into conversation (v0.4.23).
 #[cfg(feature = "postgres")]
 mod vision;
-#[cfg(feature = "postgres")]
-mod event;
 #[cfg(feature = "postgres")]
 mod skill;
 #[cfg(feature = "postgres")]
 mod observability;
 #[cfg(feature = "postgres")]
 mod timeline;
-#[cfg(feature = "postgres")]
-mod retrospective;
 #[cfg(feature = "postgres")]
 mod slot;
 #[cfg(feature = "postgres")]
@@ -113,8 +110,6 @@ mod board;
 mod conversation;
 #[cfg(feature = "postgres")]
 mod message;
-#[cfg(feature = "postgres")]
-mod tool_call;
 #[cfg(feature = "postgres")]
 mod knowledge;
 #[cfg(feature = "postgres")]

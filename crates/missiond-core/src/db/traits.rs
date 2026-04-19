@@ -148,6 +148,57 @@ pub trait ConversationStore: Send + Sync {
     async fn get_recent_intents(&self, since_secs: i64) -> DbResult<Vec<UserIntent>>;
     /// Find sessions with turns but no intent analysis (backfill).
     async fn sessions_pending_intent_analysis(&self, limit: i64) -> DbResult<Vec<String>>;
+
+    // -- tool call CRUD, stats (from ToolCallStore v0.4.x) --
+    async fn insert_tool_call(&self, tc: &ToolCallRecord) -> DbResult<()>;
+    async fn insert_tool_calls_batch(&self, calls: &[ToolCallRecord]) -> DbResult<usize>;
+    async fn update_tool_call_output(&self, tool_use_id: &str, output_summary: &str, raw_output: &str, status: &str) -> DbResult<bool>;
+    async fn get_tool_calls_by_session(&self, session_id: &str, tool_filter: Option<&[String]>, limit: i64) -> DbResult<Vec<ToolCallRecord>>;
+    async fn get_tool_call_by_id(&self, tool_use_id: &str) -> DbResult<Option<ToolCallRecord>>;
+    async fn get_tool_call_stats(&self, session_id: &str) -> DbResult<Vec<(String, i64, i64, i64)>>;
+    async fn count_pending_tool_calls(&self) -> DbResult<i64>;
+    async fn get_sessions_with_pending_tool_calls(&self) -> DbResult<Vec<String>>;
+    async fn get_sessions_with_tool_calls(&self) -> DbResult<std::collections::HashSet<String>>;
+    async fn get_messages_for_tool_call_backfill(&self, session_id: &str) -> DbResult<Vec<(String, String, String)>>;
+    async fn get_conversations_with_jsonl(&self) -> DbResult<Vec<(String, String)>>;
+
+    // -- retrospective tool analysis (from ToolCallStore v0.4.x) --
+    async fn get_retrospective_tool_stats(&self, session_id: &str, limit: i64) -> DbResult<Vec<(String, i64, i64, i64, f64)>>;
+    async fn get_retrospective_meta(&self, session_id: &str) -> DbResult<(i64, i64, i64, i64)>;
+    async fn get_retrospective_repeat_patterns(&self, session_id: &str, min_streak: i64) -> DbResult<Vec<(String, i64, String, String)>>;
+    async fn get_tool_name_sequence(&self, session_id: &str) -> DbResult<Vec<String>>;
+    async fn get_retrospective_high_error_tools(&self, session_id: &str, min_error_rate: f64) -> DbResult<Vec<(String, f64, i64)>>;
+    async fn get_tool_error_samples(&self, session_id: &str, tool_name: &str) -> DbResult<Vec<(String, String, String)>>;
+    async fn get_tool_calls_for_detailed_analysis(&self, session_id: &str) -> DbResult<Vec<(String, String, String, String)>>;
+    async fn get_tool_calls_with_status_timeline(&self, session_id: &str) -> DbResult<Vec<(String, String, String, String)>>;
+
+    // -- conversation events / JSONL audit (from EventStore v0.4.x) --
+    async fn insert_conversation_events_batch(&self, events: &[ConversationEvent]) -> DbResult<usize>;
+    async fn get_conversation_events(&self, session_id: &str, event_type: Option<&str>, limit: i64) -> DbResult<Vec<ConversationEvent>>;
+    async fn is_compact_boundary_event(&self, session_id: &str, event_uuid: &str) -> DbResult<bool>;
+    async fn get_agent_trajectory(&self, tool_use_id: &str, limit: i64) -> DbResult<Vec<ConversationMessage>>;
+    async fn get_event_type_summary(&self, session_id: Option<&str>) -> DbResult<Vec<(String, i64)>>;
+    async fn cleanup_old_events(&self, cutoff: &str) -> DbResult<usize>;
+    async fn get_sessions_with_events(&self) -> DbResult<std::collections::HashSet<String>>;
+
+    // -- retrospective results (from RetrospectiveStore v0.4.x) --
+    async fn save_retrospective_result(&self, session_id: &str, trigger_reason: &str, quick_stats: &str, full_analysis: Option<&str>) -> DbResult<()>;
+    async fn has_retrospective_result(&self, session_id: &str) -> DbResult<bool>;
+    async fn get_sessions_needing_retrospective(&self) -> DbResult<Vec<(String, i64, i64, f64)>>;
+    async fn get_sessions_for_retro_backfill(&self, since: &str, force: bool) -> DbResult<Vec<(String, i64, i64, f64)>>;
+    async fn list_retrospective_results(&self, limit: i64) -> DbResult<Vec<(String, String, String, Option<String>, String)>>;
+    async fn get_retrospective_result(&self, session_id: &str) -> DbResult<Option<(String, String, Option<String>, String)>>;
+
+    // -- narration (from RetrospectiveStore v0.4.x) --
+    async fn insert_narrations(&self, narrations: &[(i64, &str, &str, &str, &str)]) -> DbResult<usize>;
+    async fn get_narrations_for_session(&self, session_id: &str) -> DbResult<Vec<(i64, String, String, String)>>;
+    async fn get_sessions_needing_narration(&self, min_unnarrated: i64) -> DbResult<Vec<(String, i64)>>;
+    async fn get_or_create_narration_cursor(&self, session_id: &str) -> DbResult<(i64, i64, String, i64, i64)>;
+    async fn fetch_narration_batch(&self, session_id: &str, after_id: i64, batch_size: i64) -> DbResult<Vec<ConversationMessage>>;
+    async fn get_last_narration(&self, session_id: &str) -> DbResult<Option<(i64, String, String, String)>>;
+    async fn commit_narration_batch(&self, session_id: &str, last_msg_id: i64, narrations: &[(i64, &str, &str, &str, &str)]) -> DbResult<usize>;
+    async fn mark_narration_cursor_processing(&self, session_id: &str) -> DbResult<()>;
+    async fn mark_narration_cursor_failed(&self, session_id: &str, max_retries: i64) -> DbResult<bool>;
 }
 
 // ============================================================================
@@ -207,77 +258,10 @@ pub trait MessageStore: Send + Sync {
 }
 
 // ============================================================================
-// 3. ToolCallStore — Tool call CRUD, stats, retrospective analysis
-// Source: audit.rs (tool_call + retrospective methods)
+// 3-5. [MERGED] ToolCallStore, EventStore, RetrospectiveStore → ConversationStore
+// Per memory pillar v0.4.23: module conversation-logs unifies all session-scoped
+// stores into a single trait. See ConversationStore above for the merged methods.
 // ============================================================================
-
-#[async_trait]
-pub trait ToolCallStore: Send + Sync {
-    async fn insert_tool_call(&self, tc: &ToolCallRecord) -> DbResult<()>;
-    async fn insert_tool_calls_batch(&self, calls: &[ToolCallRecord]) -> DbResult<usize>;
-    async fn update_tool_call_output(&self, tool_use_id: &str, output_summary: &str, raw_output: &str, status: &str) -> DbResult<bool>;
-    async fn get_tool_calls_by_session(&self, session_id: &str, tool_filter: Option<&[String]>, limit: i64) -> DbResult<Vec<ToolCallRecord>>;
-    async fn get_tool_call_by_id(&self, tool_use_id: &str) -> DbResult<Option<ToolCallRecord>>;
-    async fn get_tool_call_stats(&self, session_id: &str) -> DbResult<Vec<(String, i64, i64, i64)>>;
-    async fn count_pending_tool_calls(&self) -> DbResult<i64>;
-    async fn get_sessions_with_pending_tool_calls(&self) -> DbResult<Vec<String>>;
-    async fn get_sessions_with_tool_calls(&self) -> DbResult<std::collections::HashSet<String>>;
-    async fn get_messages_for_tool_call_backfill(&self, session_id: &str) -> DbResult<Vec<(String, String, String)>>;
-    async fn get_conversations_with_jsonl(&self) -> DbResult<Vec<(String, String)>>;
-
-    // -- Retrospective tool analysis --
-    async fn get_retrospective_tool_stats(&self, session_id: &str, limit: i64) -> DbResult<Vec<(String, i64, i64, i64, f64)>>;
-    async fn get_retrospective_meta(&self, session_id: &str) -> DbResult<(i64, i64, i64, i64)>;
-    async fn get_retrospective_repeat_patterns(&self, session_id: &str, min_streak: i64) -> DbResult<Vec<(String, i64, String, String)>>;
-    async fn get_tool_name_sequence(&self, session_id: &str) -> DbResult<Vec<String>>;
-    async fn get_retrospective_high_error_tools(&self, session_id: &str, min_error_rate: f64) -> DbResult<Vec<(String, f64, i64)>>;
-    async fn get_tool_error_samples(&self, session_id: &str, tool_name: &str) -> DbResult<Vec<(String, String, String)>>;
-    async fn get_tool_calls_for_detailed_analysis(&self, session_id: &str) -> DbResult<Vec<(String, String, String, String)>>;
-    async fn get_tool_calls_with_status_timeline(&self, session_id: &str) -> DbResult<Vec<(String, String, String, String)>>;
-}
-
-// ============================================================================
-// 4. EventStore — Conversation events (JSONL audit)
-// Source: audit.rs (event methods)
-// ============================================================================
-
-#[async_trait]
-pub trait EventStore: Send + Sync {
-    async fn insert_conversation_events_batch(&self, events: &[ConversationEvent]) -> DbResult<usize>;
-    async fn get_conversation_events(&self, session_id: &str, event_type: Option<&str>, limit: i64) -> DbResult<Vec<ConversationEvent>>;
-    async fn is_compact_boundary_event(&self, session_id: &str, event_uuid: &str) -> DbResult<bool>;
-    async fn get_agent_trajectory(&self, tool_use_id: &str, limit: i64) -> DbResult<Vec<ConversationMessage>>;
-    async fn get_event_type_summary(&self, session_id: Option<&str>) -> DbResult<Vec<(String, i64)>>;
-    async fn cleanup_old_events(&self, cutoff: &str) -> DbResult<usize>;
-    async fn get_sessions_with_events(&self) -> DbResult<std::collections::HashSet<String>>;
-}
-
-// ============================================================================
-// 5. RetrospectiveStore — Retrospective analysis, narration
-// Source: audit.rs (retrospective) + narration.rs
-// ============================================================================
-
-#[async_trait]
-pub trait RetrospectiveStore: Send + Sync {
-    // -- audit.rs: retrospective --
-    async fn save_retrospective_result(&self, session_id: &str, trigger_reason: &str, quick_stats: &str, full_analysis: Option<&str>) -> DbResult<()>;
-    async fn has_retrospective_result(&self, session_id: &str) -> DbResult<bool>;
-    async fn get_sessions_needing_retrospective(&self) -> DbResult<Vec<(String, i64, i64, f64)>>;
-    async fn get_sessions_for_retro_backfill(&self, since: &str, force: bool) -> DbResult<Vec<(String, i64, i64, f64)>>;
-    async fn list_retrospective_results(&self, limit: i64) -> DbResult<Vec<(String, String, String, Option<String>, String)>>;
-    async fn get_retrospective_result(&self, session_id: &str) -> DbResult<Option<(String, String, Option<String>, String)>>;
-
-    // -- narration.rs --
-    async fn insert_narrations(&self, narrations: &[(i64, &str, &str, &str, &str)]) -> DbResult<usize>;
-    async fn get_narrations_for_session(&self, session_id: &str) -> DbResult<Vec<(i64, String, String, String)>>;
-    async fn get_sessions_needing_narration(&self, min_unnarrated: i64) -> DbResult<Vec<(String, i64)>>;
-    async fn get_or_create_narration_cursor(&self, session_id: &str) -> DbResult<(i64, i64, String, i64, i64)>;
-    async fn fetch_narration_batch(&self, session_id: &str, after_id: i64, batch_size: i64) -> DbResult<Vec<ConversationMessage>>;
-    async fn get_last_narration(&self, session_id: &str) -> DbResult<Option<(i64, String, String, String)>>;
-    async fn commit_narration_batch(&self, session_id: &str, last_msg_id: i64, narrations: &[(i64, &str, &str, &str, &str)]) -> DbResult<usize>;
-    async fn mark_narration_cursor_processing(&self, session_id: &str) -> DbResult<()>;
-    async fn mark_narration_cursor_failed(&self, session_id: &str, max_retries: i64) -> DbResult<bool>;
-}
 
 // ============================================================================
 // 6. VisionStore — Image description cache, translation cache
@@ -813,8 +797,8 @@ pub trait ProjectStore: Send + Sync {
 /// Backends must explicitly implement this trait (no blanket impl).
 #[async_trait]
 pub trait MissionStore:
-    ConversationStore + MessageStore + ToolCallStore + EventStore
-    + RetrospectiveStore + VisionStore + KbStore + BoardStore
+    ConversationStore + MessageStore
+    + VisionStore + KbStore + BoardStore
     + TimelineStore + SlotStore + ObservabilityStore
     + ProjectStore + InfraStore + DirectiveLayerStore
     + Send + Sync
