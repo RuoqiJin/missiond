@@ -24,7 +24,7 @@
   ;; 详细规格在 intent-memory.lisp (草稿),本处只作导航摘要
   (pillar memory
     :file ".missiond/v2/intent-memory.lisp"
-    :status "草稿 v0.4.1 — 4 成熟模块 + 精简 system-support + event_log 成 timeline SSOT (pillar 四 v1.3.0)"
+    :status "草稿 v0.4.4 — 4 成熟模块 + 精简 system-support; action/instruction specs 已迁 pillar 五"
     :paradigm "4 mature modules (project-management / board / kb-manager / conversation-logs) 自治 + 系统支持 + 横切"
 
     (purpose "系统长期记忆: 4 个业务模块自治管理自己的表 + 底层系统支持层 + 横切")
@@ -41,10 +41,11 @@
     (structure
       ;; 成熟模块 — 各自 in/core/out + 显式 module-tables-owned
       (module project-management
-        :desc   "项目作用域: 注册 + specs(intent/plan/workflow/user_intents) + skills"
+        :desc   "项目作用域: 注册 + per-project 代码快照 intent.lisp 文件 + skills"
         :target "intent-memory.lisp :: module project-management"
-        :owned-tables 9
-        :mcp    "mission_project / mission_intent / mission_skill_*")
+        :owned-tables 5
+        :v0.4.4-change "specs 4 表 (intent/plan/workflow/user_intents) 迁到 pillar 五 action-instruction-specs"
+        :mcp    "mission_project / mission_intent (只读 FILE) / mission_skill_*")
 
       (module board
         :desc   "任务队列: 27 列 7 态 FSM + autopilot + flow + agent_questions + prompt_snapshots"
@@ -523,7 +524,78 @@
       :readers "Claude Code 每次会话启动"
       :writers "用户手动 / Claude Code Edit tool (文件层)"
       :status "文件层存在, daemon/MCP 层无 manager — 待实现"
-      :cross-ref "项目级 <project>/CLAUDE.md 的 manager 在 memory pillar :: project-management :: helper project-claudemd-manager"))
+      :cross-ref "项目级 <project>/CLAUDE.md 的 manager 在 memory pillar :: project-management :: helper project-claudemd-manager")
+
+    ;; ═══════════════════════════════════════════════════
+    ;; Action-Instruction Specs — 动作与指令规约
+    ;;   (v0.4.4 从 memory pillar 迁入)
+    ;;   区别:memory 只存'项目代码真实状态的 intent.lisp';
+    ;;         本 section 管所有'描述动作和指令'的 DB 表 + 文件
+    ;; ═══════════════════════════════════════════════════
+    (section action-instruction-specs
+      (desc "所有描述'应该做什么 / 如何做'的规约 — DB 表 + Lisp/YAML 文件")
+      :migrated-from "memory pillar :: project-management (4 tables) + non-db-forms (3 variants + 1 form) in v0.4.4"
+      :rationale "memory 记'是什么'(facts); 本层记'应该做什么'(prescriptions) — 分层原则"
+
+      ;; ── DB 表 (4 张) ──
+      (component intent-spec-db
+        (desc "项目 intent 规约 DB 镜像 — 描述项目应该做什么")
+        :table "intent"
+        :migration "20260420000000_intent_plan_workflow.sql"
+        :status "❌ schema-only — 无 Rust reader/writer"
+        :moved-from "memory :: project-management :: module-tables-owned (v0.4.4)"
+        :vs-per-project-intent "memory 里的 <project>/.missiond/intent.lisp 是 factual 代码快照; 本表是 instruction 规约")
+
+      (component plan-spec-db
+        (desc "执行计划 DB 表 — 描述 action 步骤")
+        :table "plan"
+        :status "❌ schema-only"
+        :moved-from "memory (v0.4.4)")
+
+      (component workflow-spec-db
+        (desc "工作流模板 DB 表 — 可复用的 action 组合")
+        :table "workflow"
+        :status "❌ schema-only"
+        :moved-from "memory (v0.4.4)")
+
+      (component user-intents-db
+        (desc "用户意图识别记录 — 解析用户指令后的结构化意图")
+        :table "user_intents"
+        :moved-from "memory (v0.4.4)")
+
+      ;; ── Lisp / YAML 文件 (3 类) ──
+      (component system-level-intent-files
+        (desc "系统主架构 + pillar 级细节规约 Lisp 文件")
+        :paths (".missiond/v2/intent.lisp 系统主架构"
+                ".missiond/v2/intent-event-bus.lisp frozen v1.3.0"
+                ".missiond/v2/intent-memory.lisp 草稿 v0.4.4"
+                ".missiond/intent-db-*.lisp Forge 源 lisp"
+                ".missiond/intent-pillar-*.lisp v1 分 pillar lisp")
+        :purpose "系统自我描述 + Forge 冲压源"
+        :moved-from "memory :: non-db-forms :: lisp-spec-files variant system-main/detail (v0.4.4)"
+        :note "本层所有 intent*.lisp 都描述'系统应该如何'; 项目 intent.lisp (code snapshot) 不在这里")
+
+      (component workflow-lisp-templates
+        (desc "可复用方法论模板 — e.g. bus-refactor")
+        :path ".missiond/workflows/*.lisp"
+        :purpose "记录成熟的重构/工作流 pattern, 供未来参考"
+        :moved-from "memory :: non-db-forms (v0.4.4)")
+
+      (component flow-yaml-templates
+        (desc "flow-engine-v2 的声明式节点编排模板")
+        :path "$MISSIOND_HOME/flows/*.yaml"
+        :loader "daemon/src/engine/flow/loader.rs"
+        :executor "pillar 二 2.4 orchestration :: flow-engine-v2"
+        :moved-from "memory :: non-db-forms :: yaml-flow-templates (v0.4.4)")
+
+      ;; ── Manager ──
+      (component specs-manager
+        (desc "action/instruction specs 的读/写/reload — 大部分 TBD")
+        :actions "read / write / reload / sync-with-file"
+        :status "mostly TBD — DB 4 表是 schema-only, 无 Rust 实现"
+        :files-status "intent/workflow/flow 文件层已有 readers (mission_intent / flow-engine-v2); writers 多为手动编辑"
+        :cross-ref "memory :: project-management :: path project-code-snapshot (读 per-project 代码快照 FILE, 职责不同)"
+        :future-work "要么实现 4 DB 表的 sync worker, 要么下次 migration DROP 以消除 dead schema")))
 
 
   ;; ═══════════════════════════════════════════════════

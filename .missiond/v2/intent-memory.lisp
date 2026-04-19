@@ -23,7 +23,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.3")
+  (version "draft-v0.4.4")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -34,7 +34,8 @@
     (v0.4   "4 成熟模块各管自己的表: kb-manager + conversation-logs 两个新模块; skill/specs 归 project-management; event-bus 4 表归 pillar 四")
     (v0.4.1 "SSOT 合并: system_timeline 移除, pillar 四 event_log 成 timeline SSOT (v1.3.0); 总表 61→60")
     (v0.4.2 "4 模块 in/core/out harmonization: board/kb/conv core 统一用 (path/plumbing/helper) 三分法语义")
-    (v0.4.3 "CLAUDE.md 分层: 全局 ~/.claude/CLAUDE.md + manager → pillar 五 intent-layer; 项目级 <project>/CLAUDE.md + manager → memory :: project-management"))
+    (v0.4.3 "CLAUDE.md 分层: 全局 ~/.claude/CLAUDE.md + manager → pillar 五 intent-layer; 项目级 <project>/CLAUDE.md + manager → memory :: project-management")
+    (v0.4.4 "action/instruction specs 迁 pillar 五: intent/plan/workflow/user_intents DB 表 + system-level intent*.lisp + workflows*.lisp + flows/*.yaml; memory 只留'项目代码真实状态'的 per-project intent.lisp"))
   (status "草稿 — 大多数 module 已稳定, 可演进")
 
   (purpose "系统长期记忆 — 4 个业务模块自治 + 底层系统支持层 + 横切")
@@ -97,8 +98,8 @@
         (gemini_requests       :benefit "项目级 LLM 使用模式" :owner-note "category system-support")
         (agent_questions       :benefit "项目级 agent 问题集" :owner-note "module board; 可经 task_id → board_tasks.project_id 推断")
         (slot_tasks            :benefit "项目级 slot 任务"   :owner-note "category system-support compute-runtime; 可能应归 pillar 二")
-        (user_intents          :benefit "项目级意图识别"     :owner-note "module project-management; 缺 project_id 列")
-        (intent plan workflow  :benefit "specs 三表应加 project_id" :owner-note "module project-management; dead schema, 需实现")
+        (user_intents          :benefit "项目级意图识别"     :owner-note "pillar 五 intent-layer (v0.4.4 迁出); 缺 project_id 列")
+        (intent plan workflow  :benefit "specs 三表应加 project_id" :owner-note "pillar 五 intent-layer (v0.4.4 迁出); dead schema, 需实现")
         (ast_nodes ast_file_meta beacons beacon_nodes :benefit "项目级代码索引" :owner-note "module kb-manager; 缺列")
         (skill_topics skill_blocks skill_versions skill_executions :benefit "项目私有技能库" :owner-note "module project-management; 缺列")
         (image_descriptions    :benefit "项目级图片注释"    :owner-note "category system-support; 独立按 hash 去重")
@@ -115,16 +116,21 @@
     (total-note "61 migrations 定义, -1 = system_timeline 合并进 event_log (v0.4.1 SSOT 整合)")
     (source "crates/missiond-core/migrations/")
 
-    (by-owner module-project-management (count 9)
+    (by-owner module-project-management (count 5)
       (projects         :purpose "项目注册 — id/path/intent_path/active/slots/github_url/vault")
-      (intent           :purpose "项目 intent.lisp 的 DB 镜像 (20260420)")
-      (plan             :purpose "执行计划 (20260420)")
-      (workflow         :purpose "工作流模板 (20260420)")
-      (user_intents     :purpose "用户意图识别记录")
       (skill_topics     :purpose "技能主题 (顶层分类)")
       (skill_blocks     :purpose "技能内容块")
       (skill_versions   :purpose "技能版本")
-      (skill_executions :purpose "技能执行记录"))
+      (skill_executions :purpose "技能执行记录")
+      (moved-out-v0.4.4 "intent / plan / workflow / user_intents 4 张迁到 pillar 五 intent-layer"))
+
+    (by-owner pillar-five-intent-layer (count 4)
+      :owned-section ".missiond/v2/intent.lisp :: pillar intent-layer :: section action-instruction-specs"
+      :note "v0.4.4 从 memory project-management 迁入 — action/instruction 层, 非项目数据"
+      (intent       :purpose "项目 intent 规约 DB 表 (20260420, schema-only)")
+      (plan         :purpose "执行计划 DB 表 (20260420, schema-only)")
+      (workflow     :purpose "工作流模板 DB 表 (20260420, schema-only)")
+      (user_intents :purpose "用户意图识别记录 DB 表"))
 
     (by-owner module-board (count 4)
       (board_tasks      :purpose "任务队列 — 27 列, 7 态 FSM"                    :scoping secondary)
@@ -195,34 +201,18 @@
     (desc "Lisp / YAML / Markdown / 外部流 / 向量 / 大对象 6 种载体")
 
     (form lisp-spec-files
-      (desc "Lisp 自我描述文件")
+      (desc "Lisp 自我描述文件 — memory 层只剩 per-project 代码快照 (v0.4.4)")
+      :moved-out "system-main / system-detail / workflow-templates → pillar 五 intent-layer :: section action-instruction-specs (那些是 action/instruction, 本层只留 factual code state)"
       (variant project-intent
         :path "<project>/.missiond/intent.lisp"
         :scope per-project
         :writer "pillar 二 2.3 lisp-survey-worker"
-        :reader "mission_intent tool"
-        :db-mirror "intent 表 (module project-management :: component spec-db-mirror)"
-        :purpose "每项目的架构画像, goal-1 直接服务对象")
-      (variant system-main
-        :path ".missiond/v2/intent.lisp"
-        :scope global
-        :purpose "系统主架构 — 6 pillar 总览")
-      (variant system-detail
-        :path ".missiond/v2/intent-{event-bus,memory}.lisp"
-        :scope global
-        :purpose "pillar 级细节规格"
-        :note "event-bus.lisp frozen v1.2.0; memory.lisp (本文件) v0.4 草稿")
-      (variant workflow-templates
-        :path ".missiond/workflows/*.lisp"
-        :scope global
-        :purpose "可复用方法论模板"))
+        :reader "mission_intent tool (from memory :: project-management :: mcp-intent-view)"
+        :nature "factual code state snapshot — 描述项目代码真实状态"
+        :purpose "每项目的架构画像, goal-1 直接服务对象"
+        :managed-by "module project-management :: path project-code-snapshot"))
 
-    (form yaml-flow-templates
-      (desc "flow-engine-v2 的声明式节点编排")
-      :path "$MISSIOND_HOME/flows/*.yaml"
-      :scope "全局共享 (候选 per-project)"
-      :loader "daemon/src/engine/flow/loader.rs"
-      :executor "pillar 二 2.4 orchestration :: flow-engine-v2")
+    ;; yaml-flow-templates 迁出到 pillar 五 intent-layer :: section action-instruction-specs
 
     (form markdown-handwritten-memories
       (desc "Markdown + YAML frontmatter 人工手写 — 项目级 + auto-memory vault")
@@ -286,11 +276,12 @@
     :migrated-in-v0.4 "skills (4 表) + specs (4 表) 从 system-support/project-specs 并入本模块"
 
     (primary-goals
-      (goal-1 mcp-specs-precision
-        :problem  "agent 调 MCP 不知当前项目, 需多步搜索 intent/plan/workflow"
-        :solution "ProjectRegistry::resolve(cwd) → project_id → 直接定位 specs"
-        :benefit  "每次 MCP 调用省 3-5 步导航"
-        :applies-to "intent / plan / workflow / user_intents + <project>/.missiond/intent.lisp 文件")
+      (goal-1 per-project-code-snapshot-access
+        :problem  "agent 调 MCP 不知当前项目代码状态, 需多步 grep/tree 扫"
+        :solution "ProjectRegistry::resolve(cwd) → project_id → projects.intent_path → 读 <project>/.missiond/intent.lisp (代码真实状态快照)"
+        :benefit  "每次 MCP 调用省 3-5 步代码导航"
+        :scope    "per-project intent.lisp 文件 (factual code state snapshot) — 非 instruction/action"
+        :moved-out "intent/plan/workflow DB 表 + system-level lisp + workflow 方法论 → pillar 五 intent-layer (v0.4.4)")
       (goal-2 kb-token-economy
         :problem  "KB 全局查召回无关项目条目, 浪费 token"
         :solution "WHERE knowledge.project_id = $X OR IS NULL (委托 module kb-manager)"
@@ -309,10 +300,13 @@
         :writes "projects"
         :code   "daemon/src/handlers/knowledge/project.rs")
 
-      (writer mcp-specs-mutation
-        :tools  "mission_intent write (if/when exists) / lisp-survey-worker auto-update"
-        :writes "intent / plan / workflow / user_intents (DB) + <project>/.missiond/intent.lisp (文件)"
-        :note   "DB 与文件双向同步由 spec-db-sync 组件负责 (待实现)")
+      (writer lisp-survey-worker-snapshot
+        :kind   "sonnet"
+        :code   "crates/missiond-daemon/src/workers/sonnet/lisp_survey_worker.rs"
+        :writes "<project>/.missiond/intent.lisp (per-project 代码状态快照 FILE, 非 DB)"
+        :trigger "ContextualCommitDetected → slot dispatch"
+        :debounce "60s per project_id"
+        :note   "DB specs (intent/plan/workflow/user_intents) 归 pillar 五, 不在本模块")
 
       (writer mcp-skill-mutation
         :tools  "mission_skill_mutate"
@@ -337,12 +331,13 @@
       (desc "主路径 (path) + 共用基础 (plumbing) + 辅助 (helper)")
 
       ;; ── 主路径 ──
-      (path project-specs-access
+      (path project-code-snapshot
         :serves goal-1
-        :flow  "cwd → ProjectRegistry::resolve → project_id → projects.intent_path / DB 镜像 → 读 spec"
-        :entry "mission_intent read / mission_plan / mission_workflow (若有)"
-        :tables "intent / plan / workflow / user_intents"
-        :file-form "<project>/.missiond/intent.lisp")
+        :flow  "cwd → ProjectRegistry::resolve → project_id → projects.intent_path → 读 <project>/.missiond/intent.lisp 文件"
+        :entry "mission_intent read / section / summary / list"
+        :nature "factual code state snapshot — 描述项目代码真实状态 (由 lisp-survey-worker 基于 commit 差量更新)"
+        :file-form "<project>/.missiond/intent.lisp"
+        :out-of-scope "DB specs (intent/plan/workflow/user_intents) 与 system-level lisp 在 pillar 五")
 
       (path project-kb-access
         :serves goal-2
@@ -373,14 +368,6 @@
         :applies-to "4 张实际有列: projects / knowledge / conversations / board_tasks"
         :candidates "~15 张可升级 (见 scoping-index :: candidates-for-promotion)"
         :see-also "顶层 scoping-index / table-catalog")
-
-      (plumbing spec-db-sync
-        (desc "intent.lisp 文件 ↔ intent DB 表 双向同步机制")
-        :status "❌ UNIMPLEMENTED — migration 20260420 创建了表, 但 Rust 端零实现"
-        :evidence "grep 结果: 无 insert_intent / save_intent / create_plan 等调用; board_tasks.context_intent 列存在但未使用"
-        :consequence "intent / plan / workflow / user_intents 4 表目前是 dead schema"
-        :action-needed "要么实现 lisp→DB sync worker, 要么下一步迁移中 DROP 这些表"
-        :pattern-when-impl "候选: write-through 或 write-behind")
 
       ;; ── helper ──
       (helper project-context-aggregator
@@ -420,7 +407,8 @@
 
       (reader mcp-intent-view
         :tool "mission_intent read/section/summary/list"
-        :reads "intent 表 + <project>/.missiond/intent.lisp 文件")
+        :reads "<project>/.missiond/intent.lisp 文件 (only — 描述项目代码真实状态)"
+        :not-reads "intent DB 表 (那是 action/instruction specs, 归 pillar 五)")
 
       (reader mcp-skill-view
         :tools "mission_skill_query / mission_skill_context"
@@ -431,23 +419,19 @@
         :via "pillar 六 6.2 ws-server"))
 
     (module-tables-owned
-      (desc "本模块独占 9 张表 — 但 4 张 (specs) 是 dead schema")
+      (desc "本模块独占 5 张表 (v0.4.4: specs 4 张已移到 pillar 五)")
       (tables
         (projects         :status "✓ active")
-        (intent           :status "❌ schema-only (no Rust reader/writer)")
-        (plan             :status "❌ schema-only (no Rust reader/writer)")
-        (workflow         :status "❌ schema-only (no Rust reader/writer)")
-        (user_intents     :status "⚠ 存在 schema + 疑似代码引用, 待确认")
         (skill_topics     :status "✓ active — mission_skill_* MCP")
         (skill_blocks     :status "✓ active")
         (skill_versions   :status "✓ active")
         (skill_executions :status "✓ active"))
-      (count 9)
-      (active-count 5)
-      (dead-schema-count 4)
+      (count 5)
+      (removed-in-v0.4.4 "intent / plan / workflow / user_intents 迁到 pillar 五 intent-layer (都是 action/instruction 层, 非项目数据)")
       (non-db-forms-owned
-        (lisp-file "<project>/.missiond/intent.lisp (see non-db-forms :: lisp-spec-files)")
-        (md-vault "~/.claude/projects/{encoded}/memory/*.md (see non-db-forms :: markdown-handwritten-memories)"))))
+        (lisp-file "<project>/.missiond/intent.lisp (per-project 代码快照, see non-db-forms :: lisp-spec-files)")
+        (md-vault "~/.claude/projects/{encoded}/memory/*.md (see non-db-forms :: markdown-handwritten-memories)")
+        (project-claudemd "<project>/CLAUDE.md (项目指令, via helper project-claudemd-manager)"))))
 
 
   ;; ═════════════════════════════════════════════════════════════
@@ -1149,17 +1133,31 @@
       "(M) 全局 ~/.claude/CLAUDE.md + manager 从 memory pillar non-db-forms 移到 pillar 五 intent-layer"
       "    rationale: 全局 CLAUDE.md 是'系统如何被指挥'的元层声明, 非业务记忆"
       "(N) 项目级 <project>/CLAUDE.md 留在 memory pillar, 新增 project-management :: helper project-claudemd-manager"
-      "    明确 per-project CLAUDE.md 的读/写/reload 归属")
+      "    明确 per-project CLAUDE.md 的读/写/reload 归属"
+      "v0.4.4 (2026-04-19 — 动作/指令 specs 迁出):"
+      "(O) intent / plan / workflow / user_intents 4 DB 表从 project-management 迁到 pillar 五 intent-layer"
+      "    rationale: 这些是 action/instruction 规约 (元层), 非项目 factual data"
+      "(P) .missiond/v2/intent.lisp + intent-*.lisp + workflows/*.lisp 从 non-db-forms :: lisp-spec-files 迁出"
+      "    rationale: system-level lisp + 方法论模板都是 action/instruction 层"
+      "(Q) .missiond/flows/*.yaml 从 non-db-forms :: yaml-flow-templates 迁到 pillar 五"
+      "    rationale: flow 模板是 action/instruction"
+      "(R) project-management goal-1 改: 从'mcp-specs-precision'变'per-project-code-snapshot-access'"
+      "    path project-specs-access → path project-code-snapshot (只访问 per-project intent.lisp FILE, 非 DB specs)"
+      "    lisp-survey-worker writer 明确只写 FILE"
+      "(S) memory pillar 保留'描述各个项目代码真实状态'的 per-project .missiond/intent.lisp (唯一 lisp-spec 形式)"
+      "    memory pillar ownership: 5+4+9+14+20 = 52 张 (从 v0.4.3 的 56 下降 4)")
 
     (ownership-summary
-      (module-project-management   9 "projects + 4 specs (dead schema) + 4 skills")
+      (module-project-management   5 "projects + 4 skills (specs 4 张迁走)")
       (module-board                4 "board_tasks + board_task_notes + agent_questions + prompt_snapshots")
       (module-kb-manager           9 "knowledge + 4 kb_* + 4 ast/beacon")
       (module-conversation-logs   14 "conversations + 10 conv/message 派生 + retrospective_results")
       (pillar-four-event-bus       4 "event_log (also SSOT for timeline v1.3.0+) + event_subscriptions + blob_storage + dlq")
+      (pillar-five-intent-layer    4 "intent + plan + workflow + user_intents (v0.4.4 迁入, action/instruction 层)")
       (category-system-support    20 "observability + image_descriptions + infrastructure + compute-runtime + legacy")
       (total 60)
-      (total-delta-from-v0.4 "-1 (system_timeline 并入 event_log 作为 SSOT v1.3.0)"))
+      (memory-pillar-subtotal 52 "memory 管 5+4+9+14+20 = 52 张 (v0.4.4 从 56 下降 4)")
+      (total-delta-from-v0.4.3 "-4 in memory (specs 迁 pillar 五, 不减总量)"))
 
     (pending-actions
       "A. 给 candidates-for-promotion 中的高价值表加 project_id (token_usage / prompt_snapshots / specs / skills)"
