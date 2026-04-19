@@ -46,6 +46,7 @@
         :target "intent-memory.lisp :: module project-management"
         :owned-tables 5
         :v0.4.4-change "specs 4 表 (intent/plan/workflow/user_intents) 迁到 pillar 五 action-instruction-specs"
+        :v0.4.16-correction "user_intents 实际从未迁出, 仍在 conversation-logs (trait=ConversationStore); 其余 3 张为 drop-candidate"
         :mcp    "mission_project / mission_intent (只读 FILE) / mission_skill_*")
 
       (module board
@@ -595,12 +596,14 @@
       :migrated-from "memory pillar :: project-management (4 tables) + non-db-forms (3 variants + 1 form) in v0.4.4"
       :rationale "memory 记'是什么'(facts); 本层记'应该做什么'(prescriptions) — 分层原则"
 
-      ;; ── DB 表 (4 张) ──
+      ;; ── DB 表 (v0.4.4: 4 张; v0.4.16 校正: 3 张 + 都是 drop-candidate) ──
+      ;; v0.4.16: user_intents 移回 memory :: conversation-logs (writer=intent_analyst, trait=ConversationStore)
       (component intent-spec-db
         (desc "项目 intent 规约 DB 镜像 — 描述项目应该做什么")
         :table "intent"
         :migration "20260420000000_intent_plan_workflow.sql"
         :status "❌ schema-only — 无 Rust reader/writer"
+        :drop-candidate "v0.4.16: grep 确认 zero writer/reader/trait; 若 v0.5 前未实现 pillar 五 actor 则 drop migration"
         :moved-from "memory :: project-management :: module-tables-owned (v0.4.4)"
         :vs-per-project-intent "memory 里的 <project>/.missiond/intent.lisp 是 factual 代码快照; 本表是 instruction 规约")
 
@@ -608,18 +611,20 @@
         (desc "执行计划 DB 表 — 描述 action 步骤")
         :table "plan"
         :status "❌ schema-only"
+        :drop-candidate "v0.4.16: 同 intent-spec-db"
         :moved-from "memory (v0.4.4)")
 
       (component workflow-spec-db
         (desc "工作流模板 DB 表 — 可复用的 action 组合")
         :table "workflow"
         :status "❌ schema-only"
+        :drop-candidate "v0.4.16: 同 intent-spec-db"
         :moved-from "memory (v0.4.4)")
 
-      (component user-intents-db
-        (desc "用户意图识别记录 — 解析用户指令后的结构化意图")
-        :table "user_intents"
-        :moved-from "memory (v0.4.4)")
+      ;; v0.4.16: user-intents-db component 已删除 — 该表归属 memory :: conversation-logs
+      ;; writer: engine/learning_engine/intent_analyst.rs
+      ;; readers: intent_analyst self + autopilot.rs:1496 (get_recent_intents)
+      ;; trait: ConversationStore::insert_user_intent + 5 查询方法 (traits.rs:136-150)
 
       ;; ── Lisp / YAML 文件 (3 类) ──
       (component system-level-intent-files

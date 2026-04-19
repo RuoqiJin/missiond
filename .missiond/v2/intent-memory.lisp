@@ -23,7 +23,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.15")
+  (version "draft-v0.4.16")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -109,8 +109,8 @@
         (gemini_requests       :benefit "项目级 LLM 使用模式" :owner-note "category system-support")
         (agent_questions       :benefit "项目级 agent 问题集" :owner-note "module board; 可经 task_id → board_tasks.project_id 推断")
         (slot_tasks            :benefit "项目级 slot 任务"   :owner-note "category system-support compute-runtime; 可能应归 pillar 二")
-        (user_intents          :benefit "项目级意图识别"     :owner-note "pillar 五 intent-layer (v0.4.4 迁出); 缺 project_id 列")
-        (intent plan workflow  :benefit "specs 三表应加 project_id" :owner-note "pillar 五 intent-layer (v0.4.4 迁出); dead schema, 需实现")
+        (user_intents          :benefit "项目级意图识别"     :owner-note "module conversation-logs (v0.4.16 校正: 实际从未真正迁出, ConversationStore trait 仍拥有 6 个方法); 缺 project_id 列")
+        (intent plan workflow  :benefit "specs 三表应加 project_id" :owner-note "pillar 五 intent-layer (v0.4.4 迁出); v0.4.16 确认 dead-schema — zero writer/reader/trait, drop-candidate")
         (ast_nodes ast_file_meta beacons beacon_nodes :benefit "项目级代码索引" :owner-note "module kb-manager; 缺列")
         (skill_topics skill_blocks skill_versions skill_executions :benefit "项目私有技能库" :owner-note "module project-management; 缺列")
         (image_descriptions    :benefit "项目级图片注释"    :owner-note "category system-support; 独立按 hash 去重")
@@ -133,15 +133,15 @@
       (skill_blocks     :purpose "技能内容块")
       (skill_versions   :purpose "技能版本")
       (skill_executions :purpose "技能执行记录")
-      (moved-out-v0.4.4 "intent / plan / workflow / user_intents 4 张迁到 pillar 五 intent-layer"))
+      (moved-out-v0.4.4 "intent / plan / workflow 3 张迁到 pillar 五 intent-layer (user_intents v0.4.16 校正: 从未真正迁出, ConversationStore 仍拥有)"))
 
-    (by-owner pillar-five-intent-layer (count 4)
+    (by-owner pillar-five-intent-layer (count 3)
       :owned-section ".missiond/v2/intent.lisp :: pillar intent-layer :: section action-instruction-specs"
       :note "v0.4.4 从 memory project-management 迁入 — action/instruction 层, 非项目数据"
-      (intent       :purpose "项目 intent 规约 DB 表 (20260420, schema-only)")
-      (plan         :purpose "执行计划 DB 表 (20260420, schema-only)")
-      (workflow     :purpose "工作流模板 DB 表 (20260420, schema-only)")
-      (user_intents :purpose "用户意图识别记录 DB 表"))
+      :v0.4.16-verdict "3 张均 zero writer/reader/trait, 为 drop-candidate — 若 v0.5 前未实现 pillar 五 actor 则 drop migration"
+      (intent       :purpose "项目 intent 规约 DB 表 (20260420, schema-only)"       :status "drop-candidate" :evidence "grep: 0 writer, 0 reader, 0 Store trait")
+      (plan         :purpose "执行计划 DB 表 (20260420, schema-only)"                :status "drop-candidate" :evidence "grep: 0 writer, 0 reader, 0 Store trait")
+      (workflow     :purpose "工作流模板 DB 表 (20260420, schema-only)"              :status "drop-candidate" :evidence "grep: 0 writer, 0 reader, 0 Store trait"))
 
     (by-owner module-board (count 4)
       (board_tasks      :purpose "任务队列 — 27 列, 7 态 FSM"                    :scoping secondary)
@@ -160,10 +160,10 @@
       (beacons             :purpose "代码 beacon — 关注点标记")
       (beacon_nodes        :purpose "beacon 关联的 AST 节点"))
 
-    (by-owner module-conversation-logs (count 14)
+    (by-owner module-conversation-logs (count 15)
       (conversations              :purpose "会话主表 — session_id/summary/project_id/engine_type" :scoping secondary)
       (conversation_messages      :purpose "消息原始记录 (PTY JSONL 来源)")
-      (conversation_turns         :purpose "turn 级切分 (user ↔ assistant)")
+      (conversation_turns         :purpose "turn 级切分 (user ↔ assistant)" :note "v0.4.16: turns.intent_group_id 回指 user_intents")
       (conversation_events        :purpose "会话事件流 (tool use / status change)")
       (conversation_tool_calls    :purpose "工具调用详情")
       (conversation_topic_vectors :purpose "话题向量 — 语义聚类")
@@ -174,7 +174,8 @@
       (narration_cursors          :purpose "narration 游标 (防重)")
       (message_translations       :purpose "消息多语种翻译")
       (message_labels             :purpose "消息级打标")
-      (retrospective_results      :purpose "会话复盘 JSON (PK=session_id)"))
+      (retrospective_results      :purpose "会话复盘 JSON (PK=session_id)")
+      (user_intents               :purpose "会话 turn 级意图识别记录 (v0.4.16 校正: 归 conversation-logs, 非 pillar 五)" :scoping "secondary via session_id → conversations.project_id"))
 
     (by-owner pillar-four-event-bus (count 4)
       :owned-section "pillar 四 §4.6 persistence-layer"
@@ -458,7 +459,8 @@
         (skill_versions   :status "✓ active")
         (skill_executions :status "✓ active"))
       (count 5)
-      (removed-in-v0.4.4 "intent / plan / workflow / user_intents 迁到 pillar 五 intent-layer (都是 action/instruction 层, 非项目数据)")
+      (removed-in-v0.4.4 "intent / plan / workflow 迁到 pillar 五 intent-layer (action/instruction 层)")
+      (v0.4.16-correction "user_intents 之前声称迁 pillar 五 是错的; 实际 writer=intent_analyst/reader=autopilot, trait=ConversationStore, 归 conversation-logs")
       (non-db-forms-owned
         (lisp-file "<project>/.missiond/intent.lisp (per-project 代码快照, see non-db-forms :: lisp-spec-files)")
         (md-vault "~/.claude/projects/{encoded}/memory/*.md (see non-db-forms :: markdown-handwritten-memories)")
@@ -957,6 +959,15 @@
         :writes    "retrospective_results"
         :trigger   "会话结束信号 / 手动触发 (具体时机由 worker 定)")
 
+      ;; ── user_intents 写入 (v0.4.16 新增: 之前错列在 pillar 五) ──
+      (writer worker-intent-analyst
+        :cross-ref "pillar 二 :: engine/learning_engine/intent_analyst.rs"
+        :writes    "user_intents + conversation_turns.intent_group_id (back-reference)"
+        :mechanism "按 session 扫 conversation_turns, LLM 分析 turn 范围的意图, 增量游标式处理"
+        :trait     "ConversationStore (insert_user_intent / update_turns_intent_group — trait 挂此, 因 trait 按 .rs 文件切不按业务切)"
+        :library-pov "库暴露 insert + update_turns_intent_group; LLM 分析 / 游标策略 / 批次大小 / 置信度阈值 在 learning engine"
+        :v0.4.16-note "之前 lisp 错列为 pillar 五 action-instruction-specs; 本条修正")
+
       ;; ── 已删除的 writer (code 已去, lisp 保留墓志铭) ──
       (writer-removed worker-briefing
         :removed-in "SSOT cutover v1.3.0 (commit 6789509)"
@@ -1112,18 +1123,33 @@
         :cross-ref "module kb-manager :: worker-experience-harvester"
         :reads "conversations"
         :writes-to "knowledge (经 kb-manager ingress)"
-        :note "跨模块链路: conversations 是 KB 语料库源头; 本条仅表明 '此 worker 读我的表'"))
+        :note "跨模块链路: conversations 是 KB 语料库源头; 本条仅表明 '此 worker 读我的表'")
+
+      ;; ── user_intents 读取 (v0.4.16 新增) ──
+      (reader intent-analyst-self
+        :cross-ref "pillar 二 :: engine/learning_engine/intent_analyst.rs"
+        :reads "user_intents (游标计算: get_intent_coverage / sessions_pending_intent_analysis)"
+        :purpose "增量处理 — 跳过已分析的 turn 范围, 只处理新 turn"
+        :library-pov "库暴露 get_intent_coverage / sessions_pending_intent_analysis; 回填 / 增量策略在 learning engine")
+
+      (reader autopilot-recent-intents
+        :cross-ref "pillar 二 :: engine/intent_engine/autopilot.rs:1496"
+        :reads "user_intents (get_recent_intents 1800s 时窗)"
+        :purpose "autopilot tick 判断时读近 30min 的用户意图, 辅助决策"
+        :library-pov "库暴露 get_recent_intents(since_secs); 时窗 / 调用频率在 autopilot"))
 
     (module-tables-owned
-      (desc "本模块独占 12 张表")
+      (desc "本模块独占 13 张表")
       (tables conversations conversation_messages conversation_turns conversation_events
               conversation_tool_calls conversation_topic_vectors conversation_labels
               message_embeddings message_embedding_skips
               message_translations message_labels
-              retrospective_results)
-      (count 12)
+              retrospective_results
+              user_intents)
+      (count 13)
       (removed-in-v0.4-revision "image_descriptions 挪到 category system-support (独立图片缓存, 无外键, 非 conversation-scoped)")
       (removed-in-v0.4.12 "message_narrations + narration_cursors 下线 (连同 briefing-worker [v1.3.0 删] + step-narrator [v0.4.12 删]); 摘要功能完全移除, 需 drop migration")
+      (added-in-v0.4.16 "user_intents (之前错列在 pillar 五 action-instruction-specs; 实际 writer=intent_analyst, reader=autopilot+self, trait 挂 ConversationStore)")
       (non-db-forms-owned
         (jsonl-source "~/.claude/projects/{encoded}/*.jsonl (see non-db-forms :: external-source-streams)"))))
 
@@ -1955,19 +1981,33 @@
       "(LL) plumbing scope-mechanism 整合 (write-propagation-convention) 子块"
       "     列 4 个 propagators 说明 conversations/knowledge/board_tasks/retrospective 的 project_id 如何填"
       "     标明是 'library-side invariant', 每个 worker 实现在各自模块"
-      "(MM) 4 模块 'memory=库' 精简全部完成: board / conversation-logs / kb-manager / project-management")
+      "(MM) 4 模块 'memory=库' 精简全部完成: board / conversation-logs / kb-manager / project-management"
+      "v0.4.16 (2026-04-19 — pillar 五 intent-layer 清算 + user_intents 归属校正):"
+      "(NN) 原计划新增 intent-layer-bridge module, 调查后取消 — memory pillar 保持 8 module 不变"
+      "     原因: bridge module 前提不成立"
+      "     - user_intents: writer=engine/learning_engine/intent_analyst.rs, reader=autopilot+self"
+      "       trait=ConversationStore::insert_user_intent + 5 查询方法 (traits.rs:136-150)"
+      "       从未真正迁到 pillar 五; v0.4.4 lisp 声明与代码事实不符, 现归 conversation-logs"
+      "     - intent / plan / workflow 3 张: grep 确认 zero writer/reader/trait"
+      "       migration 20260420000000 存在但 Rust 代码无任何 CRUD, 纯 schema-only"
+      "       标记 drop-candidate, 待 pillar 五 actor 实现或 v0.5 前直接 drop"
+      "(OO) table-catalog by-owner 更新: module-conversation-logs 14→15, pillar-five-intent-layer 4→3"
+      "     module-tables-owned conversation-logs 12→13 (tables 列表 + user_intents)"
+      "     ingress 新增 worker-intent-analyst writer, egress 新增 2 reader (self + autopilot)"
+      "(PP) intent.lisp 同步修正: pillar 五 action-instruction-specs user-intents-db component 移除"
+      "     intent/plan/workflow 3 component 加 :drop-candidate 状态标记")
 
     (ownership-summary
       (module-project-management   5 "projects + 4 skills (specs 4 张迁走)")
       (module-board                4 "board_tasks + board_task_notes + agent_questions + prompt_snapshots")
       (module-kb-manager           9 "knowledge + 4 kb_* + 4 ast/beacon")
-      (module-conversation-logs   14 "conversations + 10 conv/message 派生 + retrospective_results")
+      (module-conversation-logs   15 "conversations + 10 conv/message 派生 + retrospective_results + user_intents (v0.4.16 校正)")
       (pillar-four-event-bus       4 "event_log (also SSOT for timeline v1.3.0+) + event_subscriptions + blob_storage + dlq")
-      (pillar-five-intent-layer    4 "intent + plan + workflow + user_intents (v0.4.4 迁入, action/instruction 层)")
+      (pillar-five-intent-layer    3 "intent + plan + workflow (v0.4.4 迁入, action/instruction 层; v0.4.16 user_intents 移回 conversation-logs, 3 张均 drop-candidate)")
       (category-system-support    20 "observability + image_descriptions + infrastructure + compute-runtime + legacy")
       (total 60)
-      (memory-pillar-subtotal 52 "memory 管 5+4+9+14+20 = 52 张 (v0.4.4 从 56 下降 4)")
-      (total-delta-from-v0.4.3 "-4 in memory (specs 迁 pillar 五, 不减总量)"))
+      (memory-pillar-subtotal 53 "memory 管 5+4+9+15+20 = 53 张 (v0.4.16: +1 user_intents 校正回归)")
+      (total-delta-from-v0.4.3 "-4 in memory (specs 迁 pillar 五), +1 v0.4.16 (user_intents 移回), 净 -3"))
 
     (pending-actions
       "A. 给 candidates-for-promotion 中的高价值表加 project_id (token_usage / prompt_snapshots / specs / skills)"
