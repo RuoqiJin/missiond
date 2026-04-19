@@ -29,9 +29,10 @@
 
 (file-governance
   :lock                "frozen"
-  :version             "v1.1.0"
+  :version             "v1.2.0"
   :sealed-at           "2026-04-19"
-  :last-revision       "2026-04-19: v1.0.0 → v1.1.0 — god-file split design (approved by user),见 execution lisp deviations D008-D012"
+  :last-revision       "2026-04-19: v1.1.0 → v1.2.0 — §4.6 persistence-layer 新增 (从 memory pillar 划回 event_log / event_subscriptions / blob_storage / dead_letter_queue 4 表的所有权声明), approved by user"
+  :prior-revisions     "v1.0.0 → v1.1.0 — god-file split design (approved by user),见 execution lisp deviations D008-D012"
   :approved-by         "指挥官 (user)"
   :change-policy       "ask-before-edit"
   :companion-log       ".missiond/v2/intent-event-bus-execution.lisp"
@@ -687,4 +688,137 @@
         "若 exactly-once 成合规要求 → 考虑 outbox pattern"
         "若 Memory 域丢事件造成业务损失 → 实现 FreezeAndCatchUp"
         "若需外部监控告警 → 实现 Prometheus backend"
-        "若 LISTEN/NOTIFY 替换长轮询有明显收益 → upgrade step 5 tail-mechanism")))
+        "若 LISTEN/NOTIFY 替换长轮询有明显收益 → upgrade step 5 tail-mechanism"))
+
+    ;; ═════════════════════════════════════════════════
+    ;; 4.6 · 持久化层 (Persistence Layer) — 本 pillar 独占的 4 张 PG 表
+    ;;   - v1.2.0 从 memory pillar :: table-catalog :: domain event-bus 划回
+    ;;   - 其他 pillar 不直接读写这 4 张表
+    ;;   - 本 section 是这 4 张表 schema 的真理源
+    ;; ═════════════════════════════════════════════════
+    (section persistence-layer
+      (desc "event-bus 专属的 4 张 PG 表 schema + 访问模式 — pillar 物理底座")
+      :migrated-from "memory pillar :: table-catalog :: domain event-bus (2026-04-19 v1.2.0)"
+      :ownership-rule "本 pillar 独占; 其他 pillar 不直接读写, 只能通过 (append) / (subscribe) API 访问"
+
+      (table event_log
+        (purpose "Log-as-Bus 核心 — 追加式事件日志, BIGSERIAL seq 即全局单调权威")
+        :migration "crates/missiond-core/migrations/20260419000000_event_log.sql"
+        (columns
+          (seq             :type "BIGSERIAL PRIMARY KEY"        :role "seq 权威, 全局单调")
+          (domain          :type "TEXT NOT NULL"                :role "12 域之一, topic 路由键")
+          (kind            :type "TEXT NOT NULL"                :role "domain variant name")
+          (payload_inline  :type "JSONB"                        :role "≤8KB payload 直存")
+          (payload_ref     :type "TEXT"                         :role ">8KB payload → blob_storage.id")
+          (producer_id     :type "TEXT NOT NULL"                :role "去重组合键")
+          (dedupe_key      :type "UUID"                         :role "producer 侧幂等")
+          (causation_depth :type "SMALLINT NOT NULL DEFAULT 0"  :role "step-1 guard ≤ 10")
+          (trace_id        :type "UUID"                         :role "端到端追踪")
+          (span_id         :type "UUID"                         :role "当前事件 span")
+          (parent_span_id  :type "UUID"                         :role "父 span")
+          (ts              :type "TIMESTAMPTZ DEFAULT now()"    :role "创建时间")
+          (ephemeral       :type "BOOLEAN NOT NULL DEFAULT false" :role "3 天清理标记 vs 30 天常规"))
+        (indexes
+          (idx-domain-seq   :cols "(domain, seq)"
+                            :purpose "step-5 tail 按域 catch-up 扫描")
+          (uq-dedupe        :cols "(producer_id, dedupe_key)"
+                            :unique true
+                            :partial "WHERE dedupe_key IS NOT NULL"
+                            :purpose "producer 重试幂等保护")
+          (idx-ephemeral-ts :cols "(ts)"
+                            :partial "WHERE ephemeral = true"
+                            :purpose "TTL 清理 ephemeral 行"))
+        (access-patterns
+          (write        "step-3 commit 单写点 — LogWriter 批量 INSERT RETURNING seq (SQL 在 pg_backend.rs)"
+                        :target "crates/missiond-core/src/event/pipeline/step3_commit/pg_backend.rs")
+          (read-live    "step-5 tail Dispatcher 长轮询 seq > cursor"
+                        :target "crates/missiond-core/src/event/pipeline/step5_tail/pg_tail.rs")
+          (read-catchup "subscription 订阅启动时 phase-1 pull — lifecycle 调用 LogReader 执行 SELECT"
+                        :target "crates/missiond-core/src/event/log/reader.rs")
+          (retention    "lifecycle-maintenance 每日清理 ephemeral / 30 天过期"
+                        :target "crates/missiond-core/src/event/lifecycle/retention.rs"))
+        (retention "常规 30 天 / ephemeral 3 天 — 待 retention_cron 落地"))
+
+      (table event_subscriptions
+        (purpose "订阅者 cursor 存储 — at-least-once 交付的状态载体")
+        :migration "crates/missiond-core/migrations/20260419000001_event_subscriptions.sql"
+        (columns
+          (subscription_name :type "TEXT PRIMARY KEY"            :role "订阅唯一标识")
+          (consumer_name     :type "TEXT NOT NULL"               :role "消费者名, 信息性")
+          (domain            :type "TEXT NOT NULL"               :role "订阅的 domain")
+          (last_acked_seq    :type "BIGINT NOT NULL DEFAULT 0"   :role "已 ack 的最高 seq")
+          (last_seen_at      :type "TIMESTAMPTZ"                 :role "最近活跃时间")
+          (failure_policy    :type "JSONB"                       :role "FailurePolicy 序列化")
+          (created_at        :type "TIMESTAMPTZ DEFAULT now()"   :role "首次创建"))
+        (indexes
+          (idx-domain :cols "(domain)" :purpose "按域批量找订阅者"))
+        (access-patterns
+          (write-cursor-flush "subscription API lifecycle — batch ack 或 1s tick flush"
+                              :target "crates/missiond-core/src/event/subscription/cursor_store.rs")
+          (read-on-bootstrap  "订阅者启动时读 cursor 决定从哪开始 pull (SQL 在 cursor_store.rs, lifecycle 调用之)"
+                              :target "crates/missiond-core/src/event/subscription/cursor_store.rs")
+          (orphan-sweep       "retention_cron 每日扫 30 天未 seen 的 cursor → DELETE + incident"
+                              :target "crates/missiond-daemon/src/bus/retention_cron.rs"))
+        (invariant "subscription_name 全局唯一 (PK); last_acked_seq 只能单调递增"))
+
+      (table blob_storage
+        (purpose "claim-check side-channel — >8KB payload 的独立大对象存储")
+        :migration "crates/missiond-core/migrations/20260419000002_blob_storage.sql"
+        (columns
+          (id          :type "UUID PRIMARY KEY DEFAULT gen_random_uuid()" :role "blob 标识, event_log.payload_ref 指向此")
+          (data        :type "BYTEA NOT NULL"                   :role "原始 payload 字节")
+          (size        :type "INTEGER NOT NULL"                 :role "字节数")
+          (checksum    :type "TEXT NOT NULL"                    :role "sha256 hex, 完整性校验")
+          (created_at  :type "TIMESTAMPTZ DEFAULT now()"        :role "创建时间")
+          (ttl_expires :type "TIMESTAMPTZ"                      :role "可选 TTL 过期点"))
+        (indexes
+          (idx-ttl :cols "(ttl_expires)"
+                   :partial "WHERE ttl_expires IS NOT NULL"
+                   :purpose "TTL 清理扫描"))
+        (access-patterns
+          (write   "step-2 decide 判阈值 > 8KB → BlobStore.put() INSERT (SQL 在 blob_store/pg_backend.rs)"
+                   :target "crates/missiond-core/src/event/blob_store/pg_backend.rs")
+          (read    "log/reader.rs 解析 event_log 行, payload_ref 非空 → BlobStore.get() SELECT"
+                   :target "crates/missiond-core/src/event/blob_store/pg_backend.rs")
+          (cleanup "TTL 过期 blob 回收 — lifecycle/retention.rs DELETE WHERE ttl_expires < now()"
+                   :target "crates/missiond-core/src/event/lifecycle/retention.rs"))
+        (threshold "8KB — 在 §4.2 step-2 decide claim-check 判断"))
+
+      (table dead_letter_queue
+        (purpose "订阅者处理失败的事件归档 — 供人工排查 / 重放")
+        :migration "crates/missiond-core/migrations/20260419000002_blob_storage.sql (同 migration 文件)"
+        (columns
+          (id                :type "BIGSERIAL PRIMARY KEY" :role "DLQ 自增 ID")
+          (subscription_name :type "TEXT NOT NULL"        :role "来自哪个 subscription")
+          (event_seq         :type "BIGINT NOT NULL"      :role "原 event_log.seq (快照, 非 FK)")
+          (failure_reason    :type "TEXT NOT NULL"        :role "失败描述")
+          (payload_snapshot  :type "JSONB"                :role "失败时 payload 快照")
+          (created_at        :type "TIMESTAMPTZ DEFAULT now()" :role "DLQ 写入时间"))
+        (indexes
+          (idx-subscription :cols "(subscription_name, created_at DESC)"
+                            :purpose "按订阅翻最近失败事件"))
+        (access-patterns
+          (write           "subscription runtime 触发 FailurePolicy::SkipToDLQ → PgDlqSink.record() INSERT"
+                           :target "crates/missiond-core/src/event/subscription/failure.rs")
+          (read            "人工 MCP 查询 / 重放工具 (待实现)")
+          (no-auto-cleanup "DLQ 是故障留痕, 不自动清理 — 需人工处理"))
+        (see "§4.3 FailurePolicy :: SkipToDLQ"))
+
+      ;; ── 表之间的关系 ──
+      (relationships
+        (event_log-blob_storage
+          :via "event_log.payload_ref → blob_storage.id"
+          :kind "loose reference (TEXT, 非 FK)"
+          :rationale "FK 会拖慢写入; loose reference + 回收策略更灵活")
+        (event_subscriptions-event_log
+          :via "event_subscriptions.last_acked_seq ≤ event_log.seq"
+          :kind "logical cursor, 无 FK")
+        (dead_letter_queue-event_log
+          :via "dead_letter_queue.event_seq → event_log.seq"
+          :kind "snapshot reference (非 FK) — 即使 event_log 清理也保留 DLQ"))
+
+      ;; ── 跨 pillar 所有权声明 ──
+      (ownership
+        :owned-by      "pillar 四 event-bus"
+        :not-shared    "其他 pillar 不直接 SQL 读写, 必须通过 (append) / (subscribe) API"
+        :memory-pillar-pointer "memory :: table-catalog :: domain event-bus (v0.3.1+ 只含指针)")))
