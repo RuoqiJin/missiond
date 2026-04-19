@@ -26,15 +26,27 @@
   ;; phase-tracker — 当前施工全局状态
   ;; ─────────────────────────────────────────────────────────
   (phase-tracker
-    :current-phase "phase-1-scan"
+    :current-phase "phase-2-stage-2A.1"
     :started-at "2026-04-20"
+    :strategy "指挥官选 A: 稳扎稳打分批. 老代码耦合严重, lisp 新架构优雅. 稳不出错就是快. 派 agent-team 保护主会话 context"
     :roadmap
-      (phase-1 :name "file-to-module-mapping 扫描补齐"     :status "in-progress" :deliverable "file-scan-results 槽位")
-      (phase-2 :name "按 module 生成 impl-checklist"        :status "pending"     :parallelism-hint "9 module 可并行 9 agents")
-      (phase-3 :name "填 DirectiveLayerStore (全新 trait)"  :status "pending"     :depends-on ["phase-1" "phase-2"])
-      (phase-4 :name "binds-to cross-ref 验证"              :status "pending")
-      (phase-5 :name "agent-team lisp ↔ code 同构双向校验"  :status "pending")
-      (phase-6 :name "(可选) drop migration for pending-drop 表" :status "pending"))
+      (phase-1 :name "file-to-module-mapping 扫描补齐"     :status "completed"   :delivered "comp-001 + comp-002 + comp-003; D001/D002/I001-I007 全部闭环")
+      (phase-2 :name "代码向 lisp 对齐 (6 stage 分批)"      :status "in-progress"
+        :stages-order "2A 热身 → 2B 新建 trait 壳 → 2C 合并子 trait → 2D 跨 trait 拆分 → 2E sqlite 生态清理 → 2F wild files 补分类"
+        (stage-2A "轻量独立动作 (热身)"
+          (2A.1 "删除两套 gen_*.rs (16 文件 8302 LOC ~285KB, 未被 mod.rs 导入)" :status "completed" :at "2026-04-20" :cargo-build "通过")
+          (2A.2 "kb-manager: KnowledgeStore → KbStore rename"                    :status "pending")
+          (2A.3 "board: 补 I001 wild files 归属 (question/audit/beacon)"        :status "pending")
+          (2A.4 "delete TimelineStore (traits.rs + db/timeline.rs + pg/timeline.rs)" :status "pending"))
+        (stage-2B "新建 trait 壳 — InfraStore + DirectiveLayerStore 空壳先建"  :status "pending")
+        (stage-2C "合并子 trait (SkillStore / ToolCall / Event / Retrospective / Vision)" :status "pending")
+        (stage-2D "跨 trait 拆分 (watermarks/backfill/daemon_state → InfraStore)" :status "pending")
+        (stage-2E "清理 sqlite 生态 (验证迁移 → 删 cfg → 删目录)"             :status "pending")
+        (stage-2F "I001 wild files 补分类"                                       :status "pending"))
+      (phase-3 :name "(deprecated — 合并进 phase-2 stage-2B + 独立)"         :status "merged-into-phase-2")
+      (phase-4 :name "binds-to cross-ref 验证"                                :status "pending")
+      (phase-5 :name "lisp ↔ code 双向同构校验"                               :status "pending")
+      (phase-6 :name "(可选) drop migration (narrations 2 + legacy 4)"       :status "pending"))
 
   ;; ─────────────────────────────────────────────────────────
   ;; claims — 谁锁定了什么, 防并发写冲突
@@ -134,7 +146,17 @@
       :resolved ["I005" "I006" "I007 info"]
       :refined ["I004"]
       :at "2026-04-20"
-      :phase-2-ready true))
+      :phase-2-ready true)
+
+    (comp-004
+      :phase "phase-2-stage-2A.1"
+      :agent "general-purpose agent (adf12f667fb1b1875)"
+      :summary "删除两套 gen_*.rs: db/gen_*.rs 根下 8 个 + db/gen/ 子目录 8 个 = 16 文件"
+      :deleted "16 文件 / 8302 LOC / ~285KB"
+      :verified-mod-rs "无 mod gen_* / 无 pub mod gen; 确认未导入"
+      :cargo-build "通过 (Finished dev profile in 12.93s, 仅 pg/board.rs:852 unused_mut pre-existing warning)"
+      :resolved ["I005"]
+      :at "2026-04-20"))
 
   ;; ─────────────────────────────────────────────────────────
   ;; issues — 阻塞 / 未决问题
