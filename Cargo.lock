@@ -2679,7 +2679,6 @@ dependencies = [
  "notify",
  "once_cell",
  "regex",
- "rusqlite",
  "semantic-terminal",
  "serde",
  "serde_json",

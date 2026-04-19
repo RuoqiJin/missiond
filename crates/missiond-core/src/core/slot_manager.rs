@@ -1,9 +1,9 @@
 //! Slot Manager - Workstation configuration management
 //!
 //! Manages slot configurations. Process lifecycle is handled by PTYManager.
+//! Post-v0.4.23 Stage 2E: session persistence is owned entirely by the async
+//! `SlotStore` trait (PG backend); this manager is DB-free.
 
-#[cfg(feature = "sqlite")]
-use crate::db::MissionDB;
 use crate::types::{Slot, SlotConfig};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -14,23 +14,10 @@ use tracing::{debug, info};
 /// Manages workstation configurations (process lifecycle handled by PTYManager)
 pub struct SlotManager {
     slots: Arc<RwLock<HashMap<String, Slot>>>,
-    #[cfg(feature = "sqlite")]
-    db: Option<Arc<MissionDB>>,
 }
 
 impl SlotManager {
-    /// Create a new SlotManager (SQLite mode). `db` is optional — when None,
-    /// session persistence is skipped (handled by async store instead).
-    #[cfg(feature = "sqlite")]
-    pub fn new(db: Option<Arc<MissionDB>>) -> Self {
-        Self {
-            slots: Arc::new(RwLock::new(HashMap::new())),
-            db,
-        }
-    }
-
     /// Create a new SlotManager (PG mode — no SQLite DB).
-    #[cfg(not(feature = "sqlite"))]
     pub fn new() -> Self {
         Self {
             slots: Arc::new(RwLock::new(HashMap::new())),
@@ -45,11 +32,7 @@ impl SlotManager {
             // Apply default traits based on role if none explicitly configured
             config.apply_default_traits();
 
-            // Restore session_id from database (if SQLite available)
-            #[cfg(feature = "sqlite")]
-            let saved_session_id = self.db.as_ref()
-                .and_then(|db| db.get_slot_session(&config.id).ok().flatten());
-            #[cfg(not(feature = "sqlite"))]
+            // Session restoration is handled by async SlotStore in PG mode.
             let saved_session_id: Option<String> = None;
 
             let traits_desc = if config.traits.is_empty() {
@@ -122,11 +105,6 @@ impl SlotManager {
 
         if let Some(slot) = slots.get_mut(slot_id) {
             slot.session_id = Some(session_id.to_string());
-            #[cfg(feature = "sqlite")]
-            if let Some(ref db) = self.db {
-                let _ = db.set_slot_session(slot_id, session_id);
-                let _ = db.cleanup_pty_placeholder(slot_id);
-            }
             debug!(slot_id = %slot_id, session_id = %session_id, "Session updated");
         }
     }
@@ -137,10 +115,6 @@ impl SlotManager {
 
         if let Some(slot) = slots.get_mut(slot_id) {
             slot.session_id = None;
-            #[cfg(feature = "sqlite")]
-            if let Some(ref db) = self.db {
-                db.clear_slot_session(slot_id);
-            }
             info!(slot_id = %slot_id, "Session reset");
         }
     }
@@ -177,10 +151,6 @@ impl SlotManager {
                 }
             } else {
                 // New slot
-                #[cfg(feature = "sqlite")]
-                let saved_session_id = self.db.as_ref()
-                    .and_then(|db| db.get_slot_session(&config.id).ok().flatten());
-                #[cfg(not(feature = "sqlite"))]
                 let saved_session_id: Option<String> = None;
                 let slot = Slot {
                     config: config.clone(),
@@ -210,10 +180,6 @@ impl SlotManager {
     pub fn unregister_dynamic_slot(&self, slot_id: &str) {
         let mut slots = self.slots.write().unwrap();
         if slots.remove(slot_id).is_some() {
-            #[cfg(feature = "sqlite")]
-            if let Some(ref db) = self.db {
-                db.clear_slot_session(slot_id);
-            }
             info!(slot_id = %slot_id, "Dynamic slot unregistered");
         }
     }
@@ -252,282 +218,5 @@ pub struct SlotReloadResult {
 impl SlotReloadResult {
     pub fn has_changes(&self) -> bool {
         !self.added.is_empty() || !self.removed.is_empty() || !self.updated.is_empty()
-    }
-}
-
-#[cfg(all(test, feature = "sqlite"))]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    fn create_test_db() -> Arc<MissionDB> {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-        Arc::new(MissionDB::open(db_path).unwrap())
-    }
-
-    #[test]
-    fn test_load_and_get_slots() {
-        let db = create_test_db();
-        let manager = SlotManager::new(Some(db));
-
-        let configs = vec![
-            SlotConfig {
-                id: "slot-1".to_string(),
-                role: "worker".to_string(),
-                description: "Worker slot".to_string(),
-                engine: Default::default(),
-                cwd: None,
-                mcp_config: None,
-                lifecycle: None,
-                auto_start: None,
-                dangerously_skip_permissions: None,
-                model: None,
-                traits: vec![],
-                env: None,
-                initial_prompt: None,
-            },
-            SlotConfig {
-                id: "slot-2".to_string(),
-                role: "worker".to_string(),
-                description: "Another worker".to_string(),
-                engine: Default::default(),
-                cwd: None,
-                mcp_config: None,
-                lifecycle: None,
-                auto_start: None,
-                dangerously_skip_permissions: None,
-                model: None,
-                traits: vec![],
-                env: None,
-                initial_prompt: None,
-            },
-            SlotConfig {
-                id: "slot-3".to_string(),
-                role: "specialist".to_string(),
-                description: "Specialist slot".to_string(),
-                engine: Default::default(),
-                cwd: None,
-                mcp_config: None,
-                lifecycle: None,
-                auto_start: None,
-                dangerously_skip_permissions: None,
-                model: None,
-                traits: vec![],
-                env: None,
-                initial_prompt: None,
-            },
-        ];
-
-        manager.load_slots(configs);
-
-        // Test get_all_slots
-        let all = manager.get_all_slots();
-        assert_eq!(all.len(), 3);
-
-        // Test get_slot
-        let slot = manager.get_slot("slot-1").unwrap();
-        assert_eq!(slot.config.role, "worker");
-
-        // Test get_slots_by_role
-        let workers = manager.get_slots_by_role("worker");
-        assert_eq!(workers.len(), 2);
-
-        // Test find_slot_by_role
-        let specialist = manager.find_slot_by_role("specialist").unwrap();
-        assert_eq!(specialist.config.id, "slot-3");
-    }
-
-    #[test]
-    fn test_session_management() {
-        let db = create_test_db();
-        let manager = SlotManager::new(Some(db));
-
-        let configs = vec![SlotConfig {
-            id: "slot-1".to_string(),
-            role: "worker".to_string(),
-            description: "Worker slot".to_string(),
-            engine: Default::default(),
-            cwd: None,
-            mcp_config: None,
-            lifecycle: None,
-            auto_start: None,
-            dangerously_skip_permissions: None,
-            model: None,
-            traits: vec![],
-            env: None,
-            initial_prompt: None,
-        }];
-
-        manager.load_slots(configs);
-
-        // Initially no session
-        let slot = manager.get_slot("slot-1").unwrap();
-        assert!(slot.session_id.is_none());
-
-        // Update session
-        manager.update_session("slot-1", "session-abc");
-        let slot = manager.get_slot("slot-1").unwrap();
-        assert_eq!(slot.session_id, Some("session-abc".to_string()));
-
-        // Reset session
-        manager.reset_session("slot-1");
-        let slot = manager.get_slot("slot-1").unwrap();
-        assert!(slot.session_id.is_none());
-    }
-
-    #[test]
-    fn test_reload_slots() {
-        let db = create_test_db();
-        let manager = SlotManager::new(Some(db));
-
-        // Initial load
-        manager.load_slots(vec![
-            SlotConfig {
-                id: "slot-1".to_string(),
-                role: "worker".to_string(),
-                description: "Worker 1".to_string(),
-                engine: Default::default(),
-                cwd: None,
-                mcp_config: None,
-                lifecycle: None,
-                auto_start: None,
-                dangerously_skip_permissions: None,
-                model: None,
-                traits: vec![],
-                env: None,
-                initial_prompt: None,
-            },
-            SlotConfig {
-                id: "slot-2".to_string(),
-                role: "worker".to_string(),
-                description: "Worker 2".to_string(),
-                engine: Default::default(),
-                cwd: None,
-                mcp_config: None,
-                lifecycle: None,
-                auto_start: None,
-                dangerously_skip_permissions: None,
-                model: None,
-                traits: vec![],
-                env: None,
-                initial_prompt: None,
-            },
-        ]);
-
-        // Set a session on slot-1 to verify it's preserved
-        manager.update_session("slot-1", "session-xyz");
-
-        // Reload: remove slot-2, add slot-3, update slot-1's role
-        let result = manager.reload_slots(vec![
-            SlotConfig {
-                id: "slot-1".to_string(),
-                role: "specialist".to_string(), // changed
-                description: "Worker 1".to_string(),
-                engine: Default::default(),
-                cwd: None,
-                mcp_config: None,
-                lifecycle: None,
-                auto_start: None,
-                dangerously_skip_permissions: None,
-                model: None,
-                traits: vec![],
-                env: None,
-                initial_prompt: None,
-            },
-            SlotConfig {
-                id: "slot-3".to_string(),
-                role: "coder".to_string(),
-                description: "New coder".to_string(),
-                engine: Default::default(),
-                cwd: None,
-                mcp_config: None,
-                lifecycle: None,
-                auto_start: None,
-                dangerously_skip_permissions: None,
-                model: None,
-                traits: vec![],
-                env: None,
-                initial_prompt: None,
-            },
-        ]);
-
-        assert_eq!(result.added, vec!["slot-3"]);
-        assert_eq!(result.removed, vec!["slot-2"]);
-        assert_eq!(result.updated, vec!["slot-1"]);
-        assert!(result.has_changes());
-
-        // Verify slot-1 session preserved
-        let slot1 = manager.get_slot("slot-1").unwrap();
-        assert_eq!(slot1.session_id, Some("session-xyz".to_string()));
-        assert_eq!(slot1.config.role, "specialist");
-
-        // Verify slot-2 removed
-        assert!(manager.get_slot("slot-2").is_none());
-
-        // Verify slot-3 added
-        let slot3 = manager.get_slot("slot-3").unwrap();
-        assert_eq!(slot3.config.role, "coder");
-    }
-
-    #[test]
-    fn test_stats() {
-        let db = create_test_db();
-        let manager = SlotManager::new(Some(db));
-
-        let configs = vec![
-            SlotConfig {
-                id: "slot-1".to_string(),
-                role: "worker".to_string(),
-                description: "Worker 1".to_string(),
-                engine: Default::default(),
-                cwd: None,
-                mcp_config: None,
-                lifecycle: None,
-                auto_start: None,
-                dangerously_skip_permissions: None,
-                model: None,
-                traits: vec![],
-                env: None,
-                initial_prompt: None,
-            },
-            SlotConfig {
-                id: "slot-2".to_string(),
-                role: "worker".to_string(),
-                description: "Worker 2".to_string(),
-                engine: Default::default(),
-                cwd: None,
-                mcp_config: None,
-                lifecycle: None,
-                auto_start: None,
-                dangerously_skip_permissions: None,
-                model: None,
-                traits: vec![],
-                env: None,
-                initial_prompt: None,
-            },
-            SlotConfig {
-                id: "slot-3".to_string(),
-                role: "specialist".to_string(),
-                description: "Specialist".to_string(),
-                engine: Default::default(),
-                cwd: None,
-                mcp_config: None,
-                lifecycle: None,
-                auto_start: None,
-                dangerously_skip_permissions: None,
-                model: None,
-                traits: vec![],
-                env: None,
-                initial_prompt: None,
-            },
-        ];
-
-        manager.load_slots(configs);
-
-        let stats = manager.get_stats();
-        assert_eq!(stats.total, 3);
-        assert_eq!(stats.by_role.get("worker"), Some(&2));
-        assert_eq!(stats.by_role.get("specialist"), Some(&1));
     }
 }

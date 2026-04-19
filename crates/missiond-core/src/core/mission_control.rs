@@ -5,20 +5,11 @@
 use super::{
     PermissionConfig, PermissionPolicy, PermissionRule, SlotManager,
 };
-#[cfg(feature = "sqlite")]
-use crate::db::MissionDB;
 use crate::types::{Slot, SlotConfig, SlotsConfig};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
-#[cfg(feature = "sqlite")]
-use std::sync::Arc;
 use tokio::sync::RwLock;
-#[cfg(feature = "sqlite")]
-use tracing::{error, info};
-#[cfg(not(feature = "sqlite"))]
 use tracing::info;
-#[cfg(feature = "sqlite")]
-use uuid::Uuid;
 
 /// Execution mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,8 +48,6 @@ pub struct MissionControlOptions {
 /// Coordinator for slot configuration and permissions.
 /// Task/inbox operations have been migrated to async MissionStore trait.
 pub struct MissionControl {
-    #[cfg(feature = "sqlite")]
-    db: Option<Arc<MissionDB>>,
     slot_manager: SlotManager,
     permission_policy: PermissionPolicy,
     started: RwLock<bool>,
@@ -69,59 +58,7 @@ pub struct MissionControl {
 }
 
 impl MissionControl {
-    /// Create a new MissionControl (SQLite mode).
-    /// When `db_path` is None, SQLite is not opened at all.
-    #[cfg(feature = "sqlite")]
-    pub fn new(options: MissionControlOptions) -> Result<Self> {
-        // Initialize database (optional — None in PG mode)
-        let db = match &options.db_path {
-            Some(path) => Some(Arc::new(MissionDB::open(path)?)),
-            None => None,
-        };
-
-        // Logs directory
-        let logs_dir = options.logs_dir.unwrap_or_else(|| {
-            options.db_path.as_ref()
-                .and_then(|p| p.parent())
-                .unwrap_or_else(|| Path::new("."))
-                .join("logs")
-        });
-
-        let default_mode = options.default_mode.unwrap_or(ExecutionMode::Batch);
-
-        // Initialize components (DB-optional)
-        let slot_manager = SlotManager::new(db.clone());
-
-        // Load permission config
-        let permission_config_path = options.permission_config_path.unwrap_or_else(|| {
-            options.db_path.as_ref()
-                .and_then(|p| p.parent())
-                .unwrap_or_else(|| Path::new("."))
-                .join("config")
-                .join("permissions.yaml")
-        });
-        let permission_policy = PermissionPolicy::new(&permission_config_path);
-
-        // Load slots config
-        let slots_config_path = options.slots_config_path.clone();
-        let mc = Self {
-            db,
-            slot_manager,
-            permission_policy,
-            started: RwLock::new(false),
-            logs_dir,
-            default_mode: RwLock::new(default_mode),
-            slots_config_path: slots_config_path.clone(),
-        };
-
-        mc.load_slots_config(&slots_config_path)?;
-
-        info!("MissionControl initialized");
-        Ok(mc)
-    }
-
     /// Create a new MissionControl (PG mode — no SQLite DB).
-    #[cfg(not(feature = "sqlite"))]
     pub fn new(options: MissionControlOptions) -> Result<Self> {
         // Logs directory
         let logs_dir = options.logs_dir.unwrap_or_else(|| {
@@ -223,20 +160,6 @@ impl MissionControl {
         Ok(())
     }
 
-    /// Get a reference to the database.
-    /// Panics in PG mode — all callers should use `store` instead.
-    #[cfg(feature = "sqlite")]
-    pub fn db(&self) -> &MissionDB {
-        self.db.as_ref().expect("db() called in PG mode — use store instead")
-    }
-
-    /// Get a shared Arc to the database.
-    /// Panics in PG mode — all callers should use `store` instead.
-    #[cfg(feature = "sqlite")]
-    pub fn db_arc(&self) -> Arc<MissionDB> {
-        Arc::clone(self.db.as_ref().expect("db_arc() called in PG mode — use store instead"))
-    }
-
     // ============ Slot Operations ============
 
     /// List all slots
@@ -321,87 +244,5 @@ impl MissionControl {
     ) -> super::PermissionDecision {
         self.permission_policy
             .check_permission(slot_id, role, tool_name)
-    }
-}
-
-
-#[cfg(all(test, feature = "sqlite"))]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    fn create_test_config(dir: &Path) -> (PathBuf, PathBuf) {
-        let db_path = dir.join("mission.db");
-        let slots_config_path = dir.join("slots.yaml");
-
-        // Create slots config
-        let slots_config = r#"
-slots:
-  - id: slot-1
-    role: worker
-    description: Test worker slot
-  - id: slot-2
-    role: specialist
-    description: Test specialist slot
-"#;
-        std::fs::write(&slots_config_path, slots_config).unwrap();
-
-        (db_path, slots_config_path)
-    }
-
-    #[tokio::test]
-    async fn test_create_mission_control() {
-        let dir = tempdir().unwrap();
-        let (db_path, slots_config_path) = create_test_config(dir.path());
-
-        let mc = MissionControl::new(MissionControlOptions {
-            db_path: Some(db_path),
-            slots_config_path,
-            permission_config_path: None,
-            logs_dir: None,
-            default_mode: None,
-        })
-        .unwrap();
-
-        let slots = mc.list_slots();
-        assert_eq!(slots.len(), 2);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_stats() {
-        let dir = tempdir().unwrap();
-        let (db_path, slots_config_path) = create_test_config(dir.path());
-
-        let mc = MissionControl::new(MissionControlOptions {
-            db_path: Some(db_path),
-            slots_config_path,
-            permission_config_path: None,
-            logs_dir: None,
-            default_mode: None,
-        })
-        .unwrap();
-
-        let stats = mc.get_stats();
-        assert_eq!(stats.slots.total, 2);
-    }
-
-    #[tokio::test]
-    async fn test_default_mode() {
-        let dir = tempdir().unwrap();
-        let (db_path, slots_config_path) = create_test_config(dir.path());
-
-        let mc = MissionControl::new(MissionControlOptions {
-            db_path: Some(db_path),
-            slots_config_path,
-            permission_config_path: None,
-            logs_dir: None,
-            default_mode: Some(ExecutionMode::Pty),
-        })
-        .unwrap();
-
-        assert_eq!(mc.get_default_mode().await, ExecutionMode::Pty);
-
-        mc.set_default_mode(ExecutionMode::Batch).await;
-        assert_eq!(mc.get_default_mode().await, ExecutionMode::Batch);
     }
 }

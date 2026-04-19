@@ -131,40 +131,13 @@ async fn main() -> Result<()> {
     #[cfg(unix)]
     ensure_config_permissions(&home);
 
-    // M3: SQLite → PostgreSQL one-time migration CLI
-    // Usage: MISSION_PG_URL=postgres://... missiond --migrate-sqlite-to-pg
-    #[cfg(all(feature = "sqlite", feature = "postgres"))]
+    // M3: SQLite → PostgreSQL migration CLI removed in v0.4.23 Stage 2E.
+    // The old CLI flag is now a hard error so stale scripts fail loudly.
     if std::env::args().any(|a| a == "--migrate-sqlite-to-pg") {
-        let sqlite_path = db_path().to_string_lossy().to_string();
-        let pg_url =
-            pg_url().ok_or_else(|| anyhow!("MISSION_PG_URL env var required for migration"))?;
-        info!(sqlite = %sqlite_path, pg = %pg_url, "Starting SQLite → PostgreSQL migration");
-
-        match missiond_core::db::pg::migrate_from_sqlite::migrate_sqlite_to_pg(
-            &sqlite_path,
-            &pg_url,
-        )
-        .await
-        {
-            Ok((tables, rows)) => {
-                info!(tables, rows, "Migration complete");
-                // Post-migration: backfill pgvector embedding columns from BYTEA
-                match missiond_core::db::pg::migrate_from_sqlite::backfill_pg_embeddings(&pg_url)
-                    .await
-                {
-                    Ok(total) => info!(backfilled = total, "Embedding backfill complete"),
-                    Err(e) => {
-                        warn!(error = %e, "Embedding backfill failed (non-fatal, can re-run)")
-                    }
-                }
-                println!("Migration OK: {} tables, {} rows", tables, rows);
-                return Ok(());
-            }
-            Err(e) => {
-                eprintln!("Migration FAILED: {}", e);
-                return Err(anyhow!("Migration failed: {}", e));
-            }
-        }
+        return Err(anyhow!(
+            "--migrate-sqlite-to-pg is no longer supported (SQLite backend removed in v0.4.23 Stage 2E). \
+             See crates/missiond-core/src/db/pg/migrate_from_sqlite.rs for the legacy tool."
+        ));
     }
 
     let db_path = db_path();
@@ -248,29 +221,18 @@ async fn main() -> Result<()> {
     let mut pg_pool_for_bus: Option<sqlx::PgPool> = None;
 
     let store: Arc<dyn missiond_core::db::traits::MissionStore> = {
-        #[cfg(feature = "postgres")]
-        {
-            let url = pg_url().ok_or_else(|| {
-                anyhow!("MISSION_PG_URL required. PostgreSQL is the default backend.")
-            })?;
-            info!(url = %url, "Connecting to PostgreSQL...");
-            let pg_store = missiond_core::db::pg::PgMissionStore::connect(&url)
-                .await
-                .map_err(|e| anyhow!("PostgreSQL connection failed: {}", e))?;
-            pg_store.fix_identity_sequences().await;
-            info!("PostgreSQL store ready");
-            let _ = db_stats_callback; // PG mode: latency tracked by sqlx instrumentation
-            pg_pool_for_bus = Some(pg_store.pool().clone());
-            Arc::new(pg_store)
-        }
-
-        #[cfg(not(feature = "postgres"))]
-        Arc::new(
-            missiond_core::db::sqlite::SqliteMissionStore::with_callback(
-                mission.db_arc(),
-                db_stats_callback,
-            ),
-        )
+        let url = pg_url().ok_or_else(|| {
+            anyhow!("MISSION_PG_URL required. PostgreSQL is the only supported backend.")
+        })?;
+        info!(url = %url, "Connecting to PostgreSQL...");
+        let pg_store = missiond_core::db::pg::PgMissionStore::connect(&url)
+            .await
+            .map_err(|e| anyhow!("PostgreSQL connection failed: {}", e))?;
+        pg_store.fix_identity_sequences().await;
+        info!("PostgreSQL store ready");
+        let _ = db_stats_callback; // PG mode: latency tracked by sqlx instrumentation
+        pg_pool_for_bus = Some(pg_store.pool().clone());
+        Arc::new(pg_store)
     };
 
     // Startup: clean orphan slot_tasks from previous daemon instance

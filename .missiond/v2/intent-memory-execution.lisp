@@ -65,7 +65,13 @@
         (stage-2D "跨 trait 拆分 (watermarks/backfill/daemon_state → InfraStore)" :status "completed" :at "2026-04-20"
           :migration-stats "InfraStore 0→24 方法, ObservabilityStore 80→58 (-22), SlotStore 40→38 (-2)"
           :files "pg/infra.rs 14→386L, pg/observability.rs -335L, pg/slot.rs -26L")
-        (stage-2E "清理 sqlite 生态 (验证迁移 → 删 cfg → 删目录)"             :status "pending")
+        (stage-2E "清理 sqlite 生态 (一次性大扫除)" :status "completed" :at "2026-04-20"
+          :deleted "sqlite/ 整目录 10 文件 + db/ 下 21 个 sqlite-gated 文件 (含 migration.rs 1675L) = 31 文件 ~14018 LOC ~360KB"
+          :migrate-tool-kept "pg/migrate_from_sqlite.rs 保留, feature-gated 'all(sqlite, postgres)' 当前永不编译, 加 DEPRECATED doc"
+          :src-rewrites "inbox.rs/slot_manager.rs/mission_control.rs/learned_permissions.rs/main.rs 去 sqlite 分支; types/board.rs 去 rusqlite impl; db/error.rs 去 DbError::Sqlite 变体"
+          :cargo-toml "core 删 sqlite feature + rusqlite; daemon 删 sqlite feature (codex 仍 rusqlite)"
+          :db-mod-rs "422→58 行 (压缩 86%)"
+          :cargo-build "--workspace 0 error; --tests --no-run 0 error")
         (stage-2F "I001 wild files 补分类"                                       :status "pending"))
       (phase-3 :name "(deprecated — 合并进 phase-2 stage-2B + 独立)"         :status "merged-into-phase-2")
       (phase-4 :name "binds-to cross-ref 验证"                                :status "pending")
@@ -217,11 +223,14 @@
     (comp-009 :phase "2C.1" :agent "a1ceaa5a700e618e1" :summary "SkillStore 25 方法合并进 ProjectStore (+8=33 total); pg/project.rs 的 8 方法搬进 pg/skill.rs 单一 impl; 补建 db/project.rs (18L re-export + D001 达成)" :cargo-workspace "通过" :rust-analyzer-note "E0119/E0046 IDE 误报, cargo feature 组合不同导致" :at "2026-04-20")
     (comp-010 :phase "2C.2+2C.3+2C.4" :agent "aaeb025f65c3e3bb0" :summary "ToolCallStore(19)+EventStore(7)+RetrospectiveStore(15) 合并进 ConversationStore; 删 pg/{tool_call,event,retrospective}.rs + sqlite/同名 6 文件" :cargo-workspace "通过" :at "2026-04-20")
     (comp-011 :phase "2C.5" :agent "a2f09b18427fb6ad3" :summary "VisionStore 10 方法合并进 ObservabilityStore; 补建 db/observability.rs" :cargo "通过" :at "2026-04-20")
-    (comp-012 :phase "2D" :agent "af46ad1392fe21100"
-      :summary "InfraStore 空壳填满 24 方法: watermarks(13)+backfill(9)+daemon_state(2)"
-      :migration "从 ObservabilityStore 拆 22 + 从 SlotStore 拆 2"
-      :note "conversations_missing_summary_cursor 4 方法保留在 ObservabilityStore (偏 conversation 分析, 不是 infra)"
-      :cargo-workspace "通过" :at "2026-04-20"))
+    (comp-012 :phase "2D" :agent "af46ad1392fe21100" :summary "InfraStore 填 24 方法" :cargo "通过" :at "2026-04-20")
+    (comp-013 :phase "2E" :agent "af7519bb19abb5f42"
+      :summary "SQLite 生态一次性大扫除 — 删 31 文件 ~14018 LOC ~360KB"
+      :details "sqlite/ 整目录 + db/ 下 21 sqlite-gated 文件 + 5 个 src/ 文件重写去 sqlite 分支 + Cargo.toml 清理"
+      :migrate-tool-preserved "pg/migrate_from_sqlite.rs 保留 feature-gated 'all(sqlite, postgres)' 当前永不编译 (DEPRECATED note)"
+      :db-mod-rs "422→58 行"
+      :cargo "--workspace + --tests --no-run 0 error"
+      :at "2026-04-20"))
 
   ;; ─────────────────────────────────────────────────────────
   ;; issues — 阻塞 / 未决问题

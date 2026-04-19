@@ -3,7 +3,13 @@
 //! One-time ETL: reads all rows from SQLite MissionDB, writes to PgMissionStore.
 //! Supports cursor-based resume for crash recovery.
 //!
-//! Usage: called from daemon with `--migrate-sqlite-to-pg` flag.
+//! DEPRECATED (v0.4.23 Stage 2E): The SQLite backend has been removed. This
+//! module is retained as a legacy one-shot migration tool and is fully gated
+//! behind `#[cfg(all(feature = "sqlite", feature = "postgres"))]`, so it
+//! compiles only if the `sqlite` feature is reintroduced (e.g. temporarily
+//! restored against an external SQLite snapshot). Do not add new callers.
+//!
+//! Previously usage: daemon `--migrate-sqlite-to-pg` flag (also removed).
 
 #[cfg(all(feature = "sqlite", feature = "postgres"))]
 use tracing::{info, warn};

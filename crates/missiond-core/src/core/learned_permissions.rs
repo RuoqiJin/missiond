@@ -113,33 +113,9 @@ impl LearnedPermissions {
         Ok(store)
     }
 
-    /// Migrate entries from legacy SQLite database.
-    #[cfg(feature = "sqlite")]
-    fn migrate_from_sqlite(db_path: &Path) -> Result<Vec<LearnedPermission>> {
-        use rusqlite::Connection;
-        let conn = Connection::open(db_path)?;
-        let mut stmt = conn.prepare(
-            "SELECT id, scope_type, scope_id, tool_pattern, decision, param_pattern,
-                    learned_at, last_used_at, use_count
-             FROM learned_permissions ORDER BY id"
-        )?;
-        let perms = stmt.query_map([], |row| {
-            Ok(LearnedPermission {
-                id: row.get(0)?,
-                scope_type: row.get(1)?,
-                scope_id: row.get(2)?,
-                tool_pattern: row.get(3)?,
-                decision: row.get(4)?,
-                param_pattern: row.get(5)?,
-                learned_at: row.get(6)?,
-                last_used_at: row.get(7)?,
-                use_count: row.get(8)?,
-            })
-        })?.collect::<Result<Vec<_>, _>>()?;
-        Ok(perms)
-    }
-
-    #[cfg(not(feature = "sqlite"))]
+    /// Legacy SQLite migration hook — kept for YAML bootstrap compatibility,
+    /// but the SQLite backend was removed in v0.4.23 Stage 2E. Always returns
+    /// an empty vector; existing YAML on disk is still loaded by `new()`.
     fn migrate_from_sqlite(_db_path: &Path) -> Result<Vec<LearnedPermission>> {
         Ok(Vec::new())
     }

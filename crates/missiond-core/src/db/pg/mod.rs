@@ -88,7 +88,9 @@ impl crate::db::traits::MissionStore for PgMissionStore {
     }
 }
 
-// M2-6: SQLite → PostgreSQL data migration
+// M2-6: SQLite → PostgreSQL data migration — DEPRECATED in v0.4.23 Stage 2E.
+// Retained as reference only; never compiled under current feature set because
+// the `sqlite` feature was removed. See the module's doc comment for details.
 #[cfg(all(feature = "sqlite", feature = "postgres"))]
 pub mod migrate_from_sqlite;
 
