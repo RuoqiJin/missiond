@@ -5,16 +5,19 @@
 ;; Created: 2026-04-19
 ;; ══════════════════════════════════════════════════════
 ;;
-;; v0.4 重大重构 — 按用户指令把表归到 4 个业务模块:
+;; v0.4.x 重构演进 — 8 个 module 自治 + 5 surface 正交维度 (v0.4.18 pillar-interfaces):
 ;;
-;;   ┌── 4 成熟模块 (各自 in/core/out + 显式 owned-tables) ────────┐
-;;   │  module project-management     9 张 (projects + specs + skills)│
-;;   │  module board                  3 张 (board_tasks 系列)         │
-;;   │  module kb-manager   NEW      10 张 (knowledge + ast 索引)     │
-;;   │  module conversation-logs NEW 15 张 (claude/gemini/codex 会话) │
+;;   ┌── 5 business module (各自 in/core/out + 显式 owned-tables) ──┐
+;;   │  module project-management     5 张 (projects + 4 skills)      │
+;;   │  module board                  4 张 (board_tasks 系列)         │
+;;   │  module kb-manager             9 张 (knowledge + ast 索引)     │
+;;   │  module conversation-logs     15 张 (claude/gemini/codex 会话) │
+;;   │  module directive-layer        3 张 (directive/plan/workflow)  │
 ;;   └──────────────────────────────────────────────────────────────┘
-;;   ┌── 分类 ────────────────────────────────────────────────────┐
-;;   │  category system-support    ~20 张 (观测 / 基建 / 运行时游标)  │
+;;   ┌── 3 support module (v0.4.13/14/15 从 category 分化) ─────────┐
+;;   │  module llm-support            3 张 (gemini/token 观测)        │
+;;   │  module slot-support           3 张 (slot 运行时)              │
+;;   │  module system-support        14 张 (infra 游标 / legacy)      │
 ;;   └──────────────────────────────────────────────────────────────┘
 ;;   ┌── 横切 ────────────────────────────────────────────────────┐
 ;;   │  db-trait / retention / migrations                             │
@@ -23,7 +26,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.19")
+  (version "draft-v0.4.20")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -47,9 +50,9 @@
     (v0.4.13 "Phase 2 第一步: 新增 module llm-support (3 表: gemini_requests / gemini_file_uploads / token_usage_ledger, 从 category system-support 分离); 调查确认 3 writer 实际路径 (token 纠正为 message_handler.rs, 不是 gateway); 确认 observability-consumer 存在 (timeline.rs enrichment); cross-module-trait-sharing 诚实披露 ObservabilityStore 跨模块使用")
     (v0.4.14 "Phase 2 第二步: 新增 module slot-support (3 表: slot_sessions / slot_tasks / dynamic_slots, 从 category system-support :: compute-runtime 分离); 校正 slot_tasks 实际语义为 learning engine 的 AI 任务 (extraction + decision), 不是通用 slot 任务; cross-module-trait-sharing 披露 SlotStore 跨模块 (daemon_state + legacy tasks/inbox/events)")
     (v0.4.15 "Phase 2 第三步: category system-support upgrade 为 module (14 张表 = 10 active + 4 legacy). 10 active 分: 观测 3 + infra 游标 4 + backfill 2 + daemon_state 1. legacy-zone 4 张 drop 决策: tasks keep / inbox deprecate / events drop / credentials drop (v0.4.15 新发现 dead schema). 关键校正: backfill_* 不是一次性迁移, 是 embedding-worker 持续 phased 作业; router_chat_archive 是 side-table, 主数据在 conversations (chat_type='router_chat'); 每 writer 定位到具体代码行"))
-  (status "草稿 — 大多数 module 已稳定, 可演进")
+  (status "8 module + 5 surface 定稿 (v0.4.18 pillar-interfaces + v0.4.19 rename + v0.4.20 cleanup); 可演进")
 
-  (purpose "系统长期记忆 — 4 个业务模块自治 + 底层系统支持层 + 横切")
+  (purpose "系统长期记忆 — 5 business module + 3 support module (共 8 个) + 5 surface (pillar-interfaces v0.4.18) + 横切")
   (storage "PostgreSQL via sqlx::PgPool")
   (gateway "crates/missiond-core/src/db/ — 唯一 DB 入口")
 
@@ -95,26 +98,26 @@
 
     (group global-infrastructure
       (rationale "系统级, 本就不应按项目分")
-      :owned-by "category system-support"
-      :examples "daemon_state / credentials / inbox / events / tasks / slot_sessions / watcher_cursors / consumer_watermarks / reconcile_watermarks / backfill_*"
+      :owned-by "module system-support (+ module slot-support for slot_*)"
+      :examples "daemon_state / credentials / inbox / events / tasks (system-support); slot_sessions/tasks/dynamic_slots (slot-support); watcher_cursors / consumer_watermarks / reconcile_watermarks / backfill_* (system-support)"
       :note "v0.4.1: system_timeline 已移除 — 合并进 pillar 四 event_log (见 migration-log)")
 
     (group candidates-for-promotion
       (rationale "⚠ 目前全局无 project_id, 按项目分可能有价值")
       (candidates
         (retrospective_results :benefit "项目级复盘归档"     :owner-note "module conversation-logs; 可经 session_id → conversations.project_id 推断")
-        (token_usage_ledger    :benefit "项目级成本追踪 — 最想看的指标" :owner-note "category system-support")
+        (token_usage_ledger    :benefit "项目级成本追踪 — 最想看的指标" :owner-note "module llm-support")
         (prompt_snapshots      :benefit "项目级 prompt 调优"  :owner-note "module board; PK=task_id 可经 board_tasks.project_id 推断")
-        (incidents             :benefit "项目级告警分级"     :owner-note "category system-support")
-        (gemini_requests       :benefit "项目级 LLM 使用模式" :owner-note "category system-support")
+        (incidents             :benefit "项目级告警分级"     :owner-note "module system-support")
+        (gemini_requests       :benefit "项目级 LLM 使用模式" :owner-note "module llm-support")
         (agent_questions       :benefit "项目级 agent 问题集" :owner-note "module board; 可经 task_id → board_tasks.project_id 推断")
-        (slot_tasks            :benefit "项目级 slot 任务"   :owner-note "category system-support compute-runtime; 可能应归 pillar 二")
+        (slot_tasks            :benefit "项目级 slot 任务"   :owner-note "module slot-support (v0.4.14 已归)")
         (user_intents          :benefit "项目级意图识别"     :owner-note "module conversation-logs (v0.4.16 校正: 实际从未真正迁出, ConversationStore trait 仍拥有 6 个方法); 缺 project_id 列")
         (intent plan workflow  :benefit "specs 三表应加 project_id" :owner-note "module directive-layer (v0.4.17): schema-ready-pending-implementation, writer/reader 待 pillar 五 actor 启用")
         (ast_nodes ast_file_meta beacons beacon_nodes :benefit "项目级代码索引" :owner-note "module kb-manager; 缺列")
         (skill_topics skill_blocks skill_versions skill_executions :benefit "项目私有技能库" :owner-note "module project-management; 缺列")
-        (image_descriptions    :benefit "项目级图片注释"    :owner-note "category system-support; 独立按 hash 去重")
-        (router_chat_archive   :benefit "项目级 router 归档" :owner-note "category system-support")
+        (image_descriptions    :benefit "项目级图片注释"    :owner-note "module system-support; 独立按 hash 去重")
+        (router_chat_archive   :benefit "项目级 router 归档" :owner-note "module system-support")
         (flows-yaml-files      :benefit "项目私有 flow 模板" :kind "文件, 非 DB"))))
 
 
@@ -309,29 +312,39 @@
       :owned-section "pillar 四 §4.6 persistence-layer"
       :note "这 4 表不在 memory pillar 管辖, 只在此列名方便索引")
 
-    (by-owner category-system-support (count 20)
-      (incidents             :purpose "告警/异常聚合"         :scoping candidate)
-      (token_usage_ledger    :purpose "LLM 调用成本追踪"      :scoping candidate)
+    (by-owner module-llm-support (count 3)
+      :migrated-from "v0.4.13 从 category system-support 分化"
       (gemini_requests       :purpose "Gemini API 调用日志"   :scoping candidate)
       (gemini_file_uploads   :purpose "Gemini 文件上传缓存")
+      (token_usage_ledger    :purpose "LLM 调用成本追踪"      :scoping candidate))
+
+    (by-owner module-slot-support (count 3)
+      :migrated-from "v0.4.14 从 category system-support 分化"
+      (slot_sessions         :purpose "槽位会话生命周期")
+      (slot_tasks            :purpose "槽位任务队列 (learning engine 用)"  :scoping candidate)
+      (dynamic_slots         :purpose "按需创建的动态槽位"))
+
+    (by-owner module-system-support (count 14)
+      :migrated-from "v0.4.15 category 升级为 module, 10 active + 4 legacy"
+      ;; active 观测 (3)
+      (incidents             :purpose "告警/异常聚合"         :scoping candidate)
       (router_chat_archive   :purpose "Router 聊天归档"       :scoping candidate)
       (image_descriptions    :purpose "图片描述缓存 (vision_worker 写, 按 hash 去重, 无 FK)")
-      (daemon_state          :purpose "daemon 级全局状态")
-      (credentials           :purpose "凭据存储 (加密)")
-      (inbox                 :purpose "收件箱 (老表, 疑似 deprecated)")
-      (events                :purpose "事件表 (老版, 疑似 deprecated)")
-      (tasks                 :purpose "任务表 (老版, 疑似 deprecated)")
-      (slot_sessions         :purpose "槽位会话生命周期"     :owner-alt "可归 pillar 二")
-      (slot_tasks            :purpose "槽位任务队列"         :owner-alt "可归 pillar 二")
-      (dynamic_slots         :purpose "按需创建的动态槽位"   :owner-alt "可归 pillar 二")
+      ;; active infra (7)
+      (watcher_cursors       :purpose "观察者游标")
       (reconcile_watermarks  :purpose "对账游标")
       (gemini_cli_watermarks :purpose "Gemini CLI 水位游标")
-      (watcher_cursors       :purpose "观察者游标")
       (consumer_watermarks   :purpose "消费者水位")
       (backfill_progress     :purpose "回填进度追踪")
-      (backfill_failures     :purpose "回填失败记录"))
+      (backfill_failures     :purpose "回填失败记录")
+      (daemon_state          :purpose "daemon 级全局状态")
+      ;; legacy (4)
+      (credentials           :status "❌ drop-candidate — dead schema (v0.4.15 新发现)")
+      (inbox                 :status "⚠ deprecate")
+      (events                :status "❌ drop-candidate (event_log 取代)")
+      (tasks                 :status "⚠ keep — legacy slot API"))
 
-    (legacy-note "⚠ tasks / inbox / events 疑似老版 schema 不再活跃; slot_* 可能属 pillar 二 worker"))
+    (legacy-note "⚠ tasks / inbox / events / credentials 4 张 legacy; 详见 module system-support :: legacy-zone"))
 
 
   ;; ═════════════════════════════════════════════════════════════
@@ -383,7 +396,8 @@
         :producer "git"
         :consumer "pillar 二 2.3 :: lisp-survey-worker (via ContextualCommitDetected)"
         :triggers "更新项目 intent.lisp"
-        :debounce "60s per project_id"))
+        :debounce "60s per project_id"
+        :managed-by "module project-management (v0.4.20: 作为 lisp-survey trigger 源, 归项目管理)"))
 
     (form embedding-vectors
       (desc "pgvector 二进制 embedding 列 — 详见 cross-cutting :: embedding-storage-governance")
@@ -399,7 +413,7 @@
       (location gemini-file-remote
         :table "gemini_file_uploads (引用)"
         :actual-storage "Gemini 服务端"
-        :owned-by "category system-support")))
+        :owned-by "module llm-support")))
 
 
   ;; ═════════════════════════════════════════════════════════════
@@ -1400,7 +1414,7 @@
         :fsm "draft → refining → approved → compiled → archived"
         :invariant "UNIQUE(id, version) — 同一 directive 多版本演进保留历史"
         :expected-trait-methods "directive_insert / directive_get / directive_update_status / directive_approve / directive_list_by_status / directive_get_version_chain"
-        :scoping-candidate "加 project_id 列 — 项目级意图隔离")
+        :scoping-candidate "加 project_id 列 — 项目级指令隔离")
 
       (plumbing plan-execution
         (desc "directive 编译出的执行 DAG — 绑 board_task + 版本 + FSM")
@@ -2146,10 +2160,12 @@
     (desc "贯穿 4 个模块 + system-support 的基础能力")
 
     (capability db-trait-abstraction
-      (desc "MissionStore 超 trait 聚合 13 领域 store")
+      (desc "MissionStore 超 trait 聚合 9 个领域 store (见 pillar-interfaces worker-trait-surface)")
       :trait "MissionStore"
       :code "crates/missiond-core/src/db/traits.rs (~750 行)"
-      :stores 13
+      :stores 9
+      :stores-list "ProjectStore / BoardStore / KbStore / ConversationStore / MessageStore / ObservabilityStore / DirectiveLayerStore (TBD) / SlotStore / InfraStore"
+      :v0.4.20-correction "原 lisp 标 13, 和 pillar-interfaces current-traits 9 不一致; 以 pillar-interfaces 为准"
       :invariant "其他 crate 只依赖 trait 不依赖实现"
       (impl pg-store :target "crates/missiond-core/src/db/pg_*/" :status production)
       (impl sqlite-store :status deprecated))
@@ -2157,10 +2173,14 @@
     (capability retention-policy
       (desc "按表粒度的保留/清理规则")
       :rules ("event_log: 30 天常规 / 3 天 ephemeral (pillar 四 SSOT) — 取代原 system_timeline 7 天"
+              "gemini_requests: 7 天 (gemini-logger 启动 cleanup, 见 module llm-support)"
               "conversation_messages/events: append-only 无清理"
               "knowledge: append-only, access_count 手动归档"
               "incidents: 粗粒度按时间 DELETE"
-              "tool_calls: append-only")
+              "tool_calls: append-only"
+              "embedding 列: follow-parent (parent row 删则 embedding 随之, 见 embedding-storage-governance)")
+      :default "其他未列表默认 append-only"
+      :uncovered-candidates "token_usage_ledger / board_tasks (done 状态清理) / slot_tasks (completed 状态清理) / backfill_failures (成功后清) — 策略待定"
       :code "daemon/src/bus/retention_cron.rs + event/lifecycle/retention.rs (pillar 四)")
 
     (capability migrations-runner
@@ -2425,27 +2445,55 @@
       "(AAA) pillar 五 intent-layer 名保留 (元层: 系统如何描述自己); 反倒分层更清:"
       "     pillar 五 intent-layer = 元意图 (系统自我描述)"
       "     memory directive-layer = 用户指令 (说话 → lisp 指令编译)"
-      "(BBB) 代码改动 = 0 (trait 和 writer/reader 都还没实现); 只改 lisp 声明 + migration SQL")
+      "(BBB) 代码改动 = 0 (trait 和 writer/reader 都还没实现); 只改 lisp 声明 + migration SQL"
+      "v0.4.20 (2026-04-20 — 野生逻辑清扫 Phase 1: 声明自洽 + 命名归一):"
+      "(CCC) 声明自相矛盾修正:"
+      "     - db-trait-abstraction :stores 13 → 9 (对齐 pillar-interfaces current-traits)"
+      "     - header purpose + 顶部注释: '4 业务模块' → '5 business + 3 support = 8 module'"
+      "     - pending-actions C (compute-runtime 归属) → 标 [已解决 v0.4.14]"
+      "     - pending-actions D (spec-db-sync 双向同步) → 标 [已撤回 v0.4.19] (forge 是单向服务方, 方向错)"
+      "     - 新增 pending-action F (实现 directive-layer trait+writer/reader) + G (drop narration migration)"
+      "(DDD) category system-support 命名陈旧清扫 (v0.4.13-15 已分化成 3 module, 但多处 cross-ref 遗留):"
+      "     - table-catalog: by-owner category-system-support (20) → 拆成 module-llm-support (3) + module-slot-support (3) + module-system-support (14)"
+      "     - scoping-index group global-infrastructure :owned-by → 'module system-support (+ slot-support for slot_*)'"
+      "     - candidates-for-promotion 6 处 :owner-note → 具体 module"
+      "     - non-db-forms side-channel-blobs gemini-file-remote :owned-by → module llm-support"
+      "     - ownership-summary 拆 3 行 + memory-pillar-subtotal 公式细化 (5+4+9+15+3+3+3+14)"
+      "(EEE) 未归 module 的载体:"
+      "     - git-commit-history source 加 :managed-by 'module project-management' (作为 lisp-survey trigger 源)"
+      "     - embedding-vectors form 归属待 v0.4.21 处理 (新建 embedding-support module)"
+      "(FFF) 锦上添花:"
+      "     - status 从 '草稿' → '8 module + 5 surface 定稿'"
+      "     - retention-policy 补 gemini_requests/embedding 列规则 + default append-only + 未覆盖候选"
+      "     - directive-layer :scoping-candidate '项目级意图隔离' → '项目级指令隔离' (v0.4.19 rename 遗漏修正)"
+      "(GGG) 下一步 v0.4.21: 新建 module embedding-support (承接 cross-cutting :: capability embedding-storage-governance)")
 
     (ownership-summary
-      (module-project-management   5 "projects + 4 skills (specs 4 张迁走)")
+      ;; 5 business modules
+      (module-project-management   5 "projects + 4 skills")
       (module-board                4 "board_tasks + board_task_notes + agent_questions + prompt_snapshots")
       (module-kb-manager           9 "knowledge + 4 kb_* + 4 ast/beacon")
-      (module-conversation-logs   15 "conversations + 10 conv/message 派生 + retrospective_results + user_intents (v0.4.16 校正)")
-      (module-directive-layer         3 "directive + plan + workflow (v0.4.17 新建: schema-ready-pending-implementation; 三段式编译 pipeline)")
-      (pillar-four-event-bus       4 "event_log (also SSOT for timeline v1.3.0+) + event_subscriptions + blob_storage + dlq")
-      (pillar-five-intent-layer    0 "v0.4.17: 3 张表从 pillar 五 action-instruction-specs 剥离到 memory directive-layer module; pillar 五 仅保留非 DB 的 intent-files/graph/forge/governance/workflows 组件")
-      (category-system-support    20 "observability + image_descriptions + infrastructure + compute-runtime + legacy")
+      (module-conversation-logs   15 "conversations + 10 conv/message 派生 + retrospective_results + user_intents")
+      (module-directive-layer      3 "directive + plan + workflow (schema-ready-pending-implementation)")
+      ;; 3 support modules (v0.4.13/14/15 从 category system-support 分化)
+      (module-llm-support          3 "gemini_requests + gemini_file_uploads + token_usage_ledger")
+      (module-slot-support         3 "slot_sessions + slot_tasks + dynamic_slots")
+      (module-system-support      14 "10 active (3 观测 + 7 infra) + 4 legacy (tasks/inbox/events/credentials)")
+      ;; 外部
+      (pillar-four-event-bus       4 "event_log (SSOT for timeline v1.3.0+) + event_subscriptions + blob_storage + dlq (not memory)")
+      (pillar-five-intent-layer    0 "v0.4.17: 3 张表剥离到 memory directive-layer; pillar 五 仅保留非 DB 组件")
       (total 60)
-      (memory-pillar-subtotal 56 "memory 管 5+4+9+15+3+20 = 56 张 (v0.4.17: +3 directive-layer 新建)")
-      (total-delta-from-v0.4.3 "-4 in memory (v0.4.4 specs 迁 pillar 五), +1 v0.4.16 (user_intents 校正回归), +3 v0.4.17 (directive-layer 从 pillar 五 拿回), 净 0"))
+      (memory-pillar-subtotal 56 "memory 管 5+4+9+15+3+3+3+14 = 56 张 (v0.4.20 拆算清晰)")
+      (delta-history "v0.4.4: -4 specs 迁 pillar 五; v0.4.16: +1 user_intents 校正回归; v0.4.17: +3 directive-layer 从 pillar 五 拿回; 净 0"))
 
     (pending-actions
-      "A. 给 candidates-for-promotion 中的高价值表加 project_id (token_usage / prompt_snapshots / specs / skills)"
-      "B. 确认 legacy tables (tasks / inbox / events) 是否可 drop"
-      "C. 与 pillar 二 协调 compute-runtime (slot_sessions/tasks/dynamic_slots) 归属"
-      "D. 实现 spec-db-sync (intent.lisp 文件 ↔ intent DB 表)"
-      "E. 派 agent 验证每个模块 owned-tables 在实际代码中是否被正确隔离 (不被其他 pillar 越界读写)")
+      "A. 给 candidates-for-promotion 中的高价值表加 project_id (token_usage_ledger / prompt_snapshots / directive+plan+workflow / skills 4 表)"
+      "B. 确认 legacy tables (tasks / inbox / events / credentials) 是否可 drop + 写 migration"
+      "[已解决 v0.4.14] ~~C. compute-runtime 归属~~ — slot-support module 建立后归属明确"
+      "[已撤回 v0.4.19] ~~D. spec-db-sync~~ — 方向错 (forge 是单向服务方, 不是协作者); 且命名歧义已在 v0.4.19 rename 解决"
+      "E. 派 agent 验证每个模块 owned-tables 在实际代码中是否被正确隔离 (不被其他 pillar 越界读写)"
+      "F. 实现 directive-layer module 的 trait + writer/reader (pending-implementation-checklist 见该 module)"
+      "G. drop 老的 narration 系列表 migration (message_narrations / narration_cursors, v0.4.12 声明但 migration 未写)")
 
     (design-rationale
       "v0.4 核心变化: 让每个业务模块承担自己表的所有权声明;"
