@@ -1,3 +1,21 @@
+;; ╔════════════════════════════════════════════════════════════════════╗
+;; ║  🔒 LOCKED — DO NOT MODIFY WITHOUT EXPLICIT USER APPROVAL          ║
+;; ║  🔒 已锁定 — 未经指挥官明确同意,agent / LLM 禁止修改本文件        ║
+;; ║                                                                    ║
+;; ║  If you are an LLM or agent and you want to change this file:      ║
+;; ║    1. STOP.                                                        ║
+;; ║    2. Ask the user: "我想修改 intent-event-bus.lisp 的 X,可以吗?" ║
+;; ║    3. Wait for explicit "yes / 同意 / 可以" (not inferred).        ║
+;; ║    4. Only after approval: apply change + bump :version in         ║
+;; ║       (file-governance) below + log rationale to                   ║
+;; ║       intent-event-bus-execution.lisp.                             ║
+;; ║                                                                    ║
+;; ║  Typo / path drift correction 属于 :allowed-without-ask 清单,     ║
+;; ║  但仍需在 execution lisp 的 (deviations) 留痕。                    ║
+;; ║                                                                    ║
+;; ║  违反此锁 = 协议违规:回退变更,停止当前操作,向用户报告。          ║
+;; ╚════════════════════════════════════════════════════════════════════╝
+;;
 ;; MissionD v2 — Pillar: event-bus (FROZEN DESIGN)
 ;; Split from v2/intent.lisp for parallel loading
 ;; Parent: v2/intent.lisp
@@ -8,6 +26,39 @@
 ;;
 ;; ⚠ 阅读提示:每个 component / trait / struct / enum 都带 :target,
 ;;             读 lisp 后可直接定位代码文件,减少 survey 步数
+
+(file-governance
+  :lock                "frozen"
+  :version             "v1.0.0"
+  :sealed-at           "2026-04-19"
+  :approved-by         "指挥官 (user)"
+  :change-policy       "ask-before-edit"
+  :companion-log       ".missiond/v2/intent-event-bus-execution.lisp"
+  :who-can-approve     "human user only — agents/LLMs cannot self-approve"
+  :who-must-ask        "any agent / LLM / automated tool before any edit"
+
+  (allowed-without-ask
+    (typo-fix             "错别字 / 标点修正,execution lisp 留痕即可")
+    (path-drift-correct   ":target 路径因代码移动而过时,更新 :target 并在 execution lisp 记 drift")
+    (new-target-addition  "代码新增子模块可补 :target,不可改已存在的"))
+
+  (requires-approval
+    (design-decision-change  "任何 decided-options / design-philosophy 字段变动")
+    (invariant-change        "invariants / 契约 / :stateless / :guarantee 字段")
+    (structural-change       "新增/删除 step / section / component 层级")
+    (enum-variant-change     "AppendAck / AppendError / FailurePolicy 等枚举的增删改")
+    (schema-change           "event_log / event_subscriptions / blob_storage schema")
+    (lock-release            "把 :lock 改为其他值"))
+
+  (enforcement-layers
+    (layer-1-banner      "文件顶部大横幅警告,任何 LLM reader 第一眼可见")
+    (layer-2-governance  "此 (file-governance) 块,机器可解析的锁声明")
+    (layer-3-fs-permission "chmod 444 OS 级只读(可选,用户可 chmod 644 临时打开)")
+    (layer-4-claude-md   "~/.claude/CLAUDE.md 或项目 CLAUDE.md 全局提醒")
+    (layer-5-auto-memory "Claude Code 长期记忆,跨 session 生效"))
+
+  :violation-protocol
+    "若发现已被未授权修改:1) git diff 查差异 2) git checkout -- 此文件还原 3) 向用户报告违规 4) 询问是否确实需要此改动")
 
   (pillar event-bus
     (purpose "进程内神经网络 — 追加式事件日志 + 类型化 topic 路由 + 游标式订阅")
