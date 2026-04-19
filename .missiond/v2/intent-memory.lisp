@@ -23,7 +23,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.11")
+  (version "draft-v0.4.12")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -42,7 +42,8 @@
     (v0.4.8 "board 新增 helper agent-execution-coordination: 从 intent-event-bus-execution.lisp 提取'并行 agent 共享内存层'模式, 6 slots + storage/manager interface 声明")
     (v0.4.9 "conversation-logs 按 'memory=库' 精简: 10 worker 全改 cross-ref + 新增 writer-removed 墓志铭 (worker-briefing 已在 v1.3.0 删) + 2 egress 消费者改 cross-ref + pillar 二 2.3 同步修正 briefing 删除 + 增 writes-to-memory 注记")
     (v0.4.10 "kb-manager 按 'memory=库' 精简: 5 worker + 1 context-pipeline writer → cross-ref; 2 egress compute 消费者 → cross-ref; core plumbing 的 :maintained-by 改 cross-ref; helper access-audit + operation-queue 加 :library-pov 分清接口 vs 时机")
-    (v0.4.11 "project-management 按 'memory=库' 精简: lisp-survey-worker → cross-ref pillar 二 2.3; scope-propagation 从 ingress 'writer' 重构为 plumbing scope-mechanism 下的 write-propagation-convention (不是 writer 而是跨模块约定); vault-md-edit 加 :library-pov"))
+    (v0.4.11 "project-management 按 'memory=库' 精简: lisp-survey-worker → cross-ref pillar 二 2.3; scope-propagation 从 ingress 'writer' 重构为 plumbing scope-mechanism 下的 write-propagation-convention (不是 writer 而是跨模块约定); vault-md-edit 加 :library-pov")
+    (v0.4.12 "野生逻辑清理 Phase 1: L1 修正 (agent-questions auto-unblock 实际已实现) + L1 移除摘要 (message_narrations/cursors 下线 + step-narrator 删) + L2 TBD 修正 (kb_operation_queue 有 consumer / message_embedding_skips 是 audit trail) + L2 设计 (project-claudemd / agent-execution-coordination / prompt-snapshot 三个 MCP tool interface)"))
   (status "草稿 — 大多数 module 已稳定, 可演进")
 
   (purpose "系统长期记忆 — 4 个业务模块自治 + 底层系统支持层 + 横切")
@@ -404,9 +405,26 @@
         :nature "Markdown 明文, 随项目 git 版本化"
         :readers "Claude Code 系统启动时读, 拼 system prompt"
         :writers "用户手动 / Claude Code 文件编辑 (Edit tool)"
-        :code "TBD — 目前 Claude Code 直接读文件, 无 daemon 侧 manager; 未来可补 MCP tool (mission_project_claudemd read/edit/reload)"
-        :status "文件层存在, DB 层无 manager"
-        :cross-ref "全局 ~/.claude/CLAUDE.md 在 pillar 五 intent-layer :: global-claudemd (非本模块)"))
+        :cross-ref "全局 ~/.claude/CLAUDE.md 在 pillar 五 intent-layer :: global-claudemd (非本模块)"
+
+        (mcp-tool-design mission_project_claudemd
+          :status "🚧 设计完成, 待实现"
+          (actions
+            (read
+              :args "project_id? (default: resolve from cwd)"
+              :returns "markdown content + last_modified + size"
+              :purpose "Agent 能按需读取项目 CLAUDE.md 而不是等下次会话启动")
+            (edit
+              :args "project_id? + new_content (整体替换) 或 patch (diff 格式)"
+              :writes "<project>/CLAUDE.md"
+              :side-effect "发 ProjectEvent::ClaudemdUpdated 到 event-bus → Claude Code 下次加载时读新版"
+              :invariant "保留 git history — 不覆盖历史 commit, 新内容走正常文件 write")
+            (reload
+              :args "project_id?"
+              :purpose "显式触发 Claude Code 重读 CLAUDE.md (如果在同一会话内想应用新内容)"
+              :note "实际 reload 语义依赖 Claude Code 客户端支持; 当前仅发事件"))
+          :implementation-plan "crates/missiond-daemon/src/handlers/knowledge/project_claudemd.rs (新文件)"
+          :invariant "path-traversal 防护 (同 project_memory_vault.rs)"))
 
     (module-egress
       (desc "项目级别的读取")
@@ -538,6 +556,9 @@
         :purpose "Agent 卡住时提问, 等待用户或其他 agent 回答"
         :relationship "物理上有 FK 到 board_tasks, 逻辑上独立生命周期 (status 独立)"
         :creation-side-effect "创建问题时 CAS UPDATE board_tasks SET status='blocked' WHERE id=task_id"
+        :answer-side-effect "answer_agent_question() 在全部 pending 问题解决时, CAS UPDATE board_tasks SET status='open' WHERE status='blocked'"
+        :event-signal "发 QuestionEvent::Resolved 到 event-bus"
+        :code "crates/missiond-core/src/db/question.rs :: create_question / answer_agent_question"
         :mcp "mission_question (独立 MCP 工具, 非 board 工具面)")
 
       (helper prompt-snapshot
@@ -545,8 +566,29 @@
         :schema "task_id PRIMARY KEY / prompt / cited_kb_ids / category / task_outcome / created_at"
         :purpose "task 执行时的 prompt 快照 + KB 引用审计"
         :writer "autopilot.rs :: save_prompt_snapshot"
-        :readers "MCP prompt 调优工具 (待实现) / 复盘分析"
-        :cross-module-note "cited_kb_ids 关联 kb-manager :: knowledge; 但 PK 是 task_id 故归 board")
+        :cross-module-note "cited_kb_ids 关联 kb-manager :: knowledge; 但 PK 是 task_id 故归 board"
+
+        (mcp-tool-design mission_prompt_snapshot
+          :status "🚧 设计完成, 待实现"
+          (actions
+            (get
+              :args "task_id"
+              :returns "prompt + cited_kb_ids + category + task_outcome"
+              :purpose "单 task 的 prompt 回放")
+            (list
+              :args "category? / time-range? / task_outcome? (filter) + limit"
+              :returns "Vec<PromptSnapshotSummary>"
+              :purpose "批量浏览 prompt 调优候选")
+            (analyze
+              :args "category OR time-range"
+              :returns "cited-kb 频次统计 + task_outcome 分布 + prompt 长度分布"
+              :purpose "prompt 工程洞察: 哪些 KB 被高频引用 / 哪种 prompt 模式更成功")
+            (diff
+              :args "task_id_a + task_id_b"
+              :returns "两次 prompt 的文本 diff + KB 引用差"
+              :purpose "对比两次相似 task 的 prompt 差异, 找调优方向"))
+          :implementation-plan "crates/missiond-daemon/src/handlers/knowledge/prompt_snapshot.rs (新文件)"
+          :invariant "只读工具 — 不改已存的 snapshot"))
 
       ;; ── 并行 agent 协作的共享内存层 (从 intent-event-bus-execution.lisp 提取的模式) ──
       (helper agent-execution-coordination
@@ -570,10 +612,44 @@
           :db-option "未来可选 execution_contexts + execution_entries 2 表 (JSONB entries), 暂不做 — file 够用")
 
         (manager-interface
-          :current-impl "⚠ 手动 — agent 按约定读写 Lisp 文件, 人类审校"
-          :future-mcp "TBD MCP tools (mission_execution_claim / decide / deviate / complete / tracker-update)"
-          :current-workaround "agent 直接 Edit lisp 文件, 但易冲突 + 无原子保证"
-          :status "板 owns the pattern; 实现 TBD")
+          :status "🚧 设计完成, 待实现 — 脱离 'agent 直接 Edit lisp' 的易冲突模式"
+          :implementation-plan "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs (新文件)"
+
+          (mcp-tool-design mission_execution
+            (action claim
+              :args "execution_id (e.g. 'intent-event-bus') + phase + claimer_name + scope (files / modules)"
+              :writes "execution lisp 的 (claims) section 加一条"
+              :atomicity "写入前检查 scope 是否已被别人 claim → 冲突返 ConflictError"
+              :purpose "防并发修改同一文件")
+            (action release
+              :args "execution_id + claimer_name + claim_id"
+              :writes "execution lisp 的 (claims) 移除 entry"
+              :purpose "工作完成释放 claim")
+            (action decide
+              :args "execution_id + context + rationale + decided-by"
+              :writes "execution lisp 的 (decisions) 新增 DC<NNN>"
+              :id-allocation "自动分配下一个 DC id"
+              :purpose "记录决策日志")
+            (action deviate
+              :args "execution_id + lisp-said + actually-did + reason + approved-by"
+              :writes "execution lisp 的 (deviations) 新增 D<NNN>"
+              :purpose "frozen lisp 与实际实现的偏差留痕")
+            (action complete
+              :args "execution_id + phase + agent_name + summary?"
+              :writes "execution lisp 的 (completions) 加条 + phase-tracker 标完成"
+              :purpose "标 phase 完成, 支持断点续跑")
+            (action issue
+              :args "execution_id + severity + desc + resolution?"
+              :writes "execution lisp 的 (issues) 新增 I<NNN>"
+              :purpose "记录阻塞/未决问题")
+            (action status
+              :args "execution_id"
+              :returns "phase-tracker + active-claims + recent-decisions + open-issues"
+              :purpose "Agent 启动时先查状态, 避免重复劳动"))
+
+          :invariant-1 "所有写操作对 lisp 文件原子化 (整体 read → modify → write, 或 write-lock)"
+          :invariant-2 "paren balance 写前写后校验"
+          :invariant-3 "ID 分配避免冲突 (D<NNN> / DC<NNN> / I<NNN>)")
 
         (linked-concepts
           :methodology "pillar 五 :: workflows :kind methodology (e.g. bus-refactor.lisp) — 可复用方法论模板"
@@ -744,11 +820,16 @@
 
       (helper operation-queue
         :serves goal-3
-        (desc "KB 变更异步队列 — 大规模 mutate 走队列避开阻塞")
+        (desc "KB 变更操作队列 — 记录计划 + 同步消费")
         :table "kb_operation_queue"
+        :schema "id / plan_id / task_id / operation / target_keys / status / result / error / executed_at"
         :scoping "inherited"
-        :library-pov "库暴露 enqueue / dequeue 接口"
-        :consumer-cross-ref "⚠ TBD — 后台批处理 worker 未确认实现; 已知缺口"))
+        :library-pov "库暴露 enqueue/update/complete/summary 接口"
+        :writers "kb_ops_save_plan (daemon/src/db/pg/knowledge.rs)"
+        :consumer-inline "mission_kb_ops 'list' 动作直接读 pending 并同步执行 (crates/missiond-daemon/src/handlers/knowledge/kb.rs)"
+        :consumer-completion "pty_event_worker + memory_scheduler 调 kb_ops_complete_by_task_id()"
+        :stats "kb_ops_plan_summary() GROUP BY status"
+        :note "⚠ 不是 async background consumer — 是 MCP handler inline 消费 (同步式)"))
 
     (module-egress
       (desc "MCP 库查询 API + 外部 compute 消费者 cross-ref")
@@ -818,9 +899,9 @@
         :benefit  "跨引擎查询一套工具")
       (goal-3 analysis-layer
         :problem  "原始消息 JSONL 难以直接用于 context 拼接 / 复盘"
-        :solution "embedding (向量) + translation (多语种) + labels (打标) + retrospective (复盘) + step-narrator (codex)"
+        :solution "embedding (向量) + translation (多语种) + labels (打标) + retrospective (复盘)"
         :benefit  "多层次派生视图, 服务不同消费场景"
-        :note     "briefing-worker 在 SSOT cutover (v1.3.0) 删除, 语义级消息摘要能力已移除"))
+        :history  "briefing-worker (v1.3.0 删) + step-narrator + message_narrations/cursors (v0.4.12 删); 摘要能力完全移除 — 用户决策不再需要"))
 
     (module-ingress
       (desc "MCP 库写入 API + 外部 worker 驱动的写入")
@@ -862,9 +943,7 @@
         :governance "cross-cutting :: capability embedding-storage-governance"
         :library-pov "库暴露 embedding_vec 列 + halfvec/vector 类型约束; 生成算法在 worker")
 
-      (writer worker-step-narrator
-        :cross-ref "pillar 二 2.3 :: workers/codex/step_narrator.rs"
-        :writes    "message_narrations (codex-specific)")
+      ;; worker-step-narrator 已随 narration 移除 (v0.4.12), 见下方 writer-removed
 
       (writer worker-translation
         :cross-ref "pillar 二 2.3 :: workers/sonnet/translation_worker.rs"
@@ -880,8 +959,14 @@
         :removed-in "SSOT cutover v1.3.0 (commit 6789509)"
         :was "crates/missiond-daemon/src/workers/sonnet/briefing_worker.rs"
         :wrote "message_narrations + narration_cursors (LLM 生成每轮会话摘要)"
-        :reason "update_timeline_summary 路径与 append-only event_log 不兼容 + 语义摘要功能按决策不再需要"
-        :impact "message_narrations 现在主要由 worker-step-narrator (codex) 填充")
+        :reason "update_timeline_summary 路径与 append-only event_log 不兼容 + 语义摘要功能按决策不再需要")
+
+      (writer-removed worker-step-narrator
+        :removed-in "v0.4.12 (2026-04-19, 连同 narration 表一起下线)"
+        :was "crates/missiond-daemon/src/workers/codex/step_narrator.rs"
+        :wrote "message_narrations (codex 专项步骤叙述)"
+        :reason "随 message_narrations + narration_cursors 表一起下线 (用户决策: 摘要功能完全不再需要)"
+        :code-action-needed "代码层需移除文件 + 取消 codex mod 引用 + 删 migration for message_narrations / narration_cursors tables"))
 
       ;; 注: vision_worker 写 image_descriptions, 但该表在 v0.4.4 迁到 category system-support
       ;; (独立图片缓存, 无 conversation FK). vision_worker 不是本模块 ingress.
@@ -945,12 +1030,9 @@
         :generator "worker-embedding (sonnet)"
         :consumer "pillar 二 2.6 search-engines :: vector-hnsw")
 
-      (helper narration
-        (desc "消息摘要 + narration 游标 (防重处理)")
-        :tables (message_narrations narration_cursors)
-        :generator "worker-step-narrator (codex) — briefing-worker 已在 SSOT cutover v1.3.0 删除"
-        :scoping "inherited"
-        :history "原由 worker-briefing (sonnet) 生成语义摘要, v1.3.0 删除; message_narrations 现仅由 step-narrator 填充 codex 专项")
+      ;; helper narration 已在 v0.4.12 移除 (message_narrations + narration_cursors 连同 step-narrator 下线)
+      ;; 墓志铭: 历史上由 briefing-worker (v1.3.0 删) + step-narrator (v0.4.12 删) 生成
+      ;; 用户决策: 语义/步骤摘要功能不再需要
 
       (helper translation-multilingual
         (desc "消息翻译 (多语种)")
@@ -993,8 +1075,9 @@
       (reader mcp-conversation-query
         :tools "mission_conversation_query / mission_conversation_analyze"
         :actions "get / list / search"
-        :reads "conversations + messages + turns + events + narrations"
-        :code "daemon/src/handlers/comm/conversation.rs")
+        :reads "conversations + messages + turns + events"
+        :code "daemon/src/handlers/comm/conversation.rs"
+        :note "v0.4.12: 不再读 narrations (表下线)")
 
       (reader mcp-retrospective-view
         :tool "mission_retrospective_manage"
@@ -1012,13 +1095,13 @@
       ;; ── 前端 WS 流 ──
       (reader frontend-conversation-stream
         :source "pillar 四 event_log / DB watch"
-        :emits "新 messages / 新 narrations"
+        :emits "新 messages (v0.4.12: 不再推 narrations)"
         :via "daemon/src/bus/ws_bridge.rs")
 
       ;; ── 外部 compute 消费者 (cross-ref, 非库独立 reader) ──
       (reader context-pipeline-history
         :cross-ref "pillar 二 context-pipeline (daemon 内部)"
-        :reads "最近 messages + narrations"
+        :reads "最近 messages (v0.4.12: 不再读 narrations)"
         :purpose "每次 LLM 调用拼 prompt 时触发"
         :library-pov "库暴露 ConversationStore 查询接口; pipeline 策略 / token 预算在 daemon")
 
@@ -1029,14 +1112,15 @@
         :note "跨模块链路: conversations 是 KB 语料库源头; 本条仅表明 '此 worker 读我的表'"))
 
     (module-tables-owned
-      (desc "本模块独占 14 张表")
+      (desc "本模块独占 12 张表")
       (tables conversations conversation_messages conversation_turns conversation_events
               conversation_tool_calls conversation_topic_vectors conversation_labels
-              message_embeddings message_embedding_skips message_narrations narration_cursors
+              message_embeddings message_embedding_skips
               message_translations message_labels
               retrospective_results)
-      (count 14)
+      (count 12)
       (removed-in-v0.4-revision "image_descriptions 挪到 category system-support (独立图片缓存, 无外键, 非 conversation-scoped)")
+      (removed-in-v0.4.12 "message_narrations + narration_cursors 下线 (连同 briefing-worker [v1.3.0 删] + step-narrator [v0.4.12 删]); 摘要功能完全移除, 需 drop migration")
       (non-db-forms-owned
         (jsonl-source "~/.claude/projects/{encoded}/*.jsonl (see non-db-forms :: external-source-streams)"))))
 
@@ -1170,11 +1254,16 @@
           :hnsw-params "m=16, ef_construction=64"
           :owned-by "module kb-manager"))
 
-      (dedup-policy
+      (skip-audit-policy
         :table "message_embedding_skips"
-        :rule "消息不该 embed 的记录此 ID, 避免 embedding-worker 重复尝试"
+        :role "audit trail — 记录跳过 embed 的消息 ID + skip_reason"
+        :schema "message_id (PK, FK→conversation_messages.id) + skip_reason TEXT"
         :owner-module "conversation-logs"
-        :writer "embedding-worker 内部逻辑 (不公开为 ingress)")
+        :writer "embedding_worker.rs :: insert_message_embedding_skips_batch (backfill 分桶时批量写)"
+        :decision-source "embedding_worker.rs :: should_embed() 返 EmbedDecision enum"
+        :readers "db/pg/conversation.rs 的统计查询 (COUNT + GROUP BY skip_reason)"
+        :note "⚠ 重要: 这是 audit log 不是 dedup 表. 实际去重在 EmbedDecision enum pattern 做, skip 表只是留痕"
+        :reasons-examples "tool_result / system message / empty / role-based skip")
 
       (retention
         :strategy "follow-parent"

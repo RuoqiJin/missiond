@@ -195,11 +195,12 @@
         (desc "跨 gateway 共享 system / task prompt 模板")
         :target "llm/prompts.rs"))
 
-    ;; ── 2.3 后台 worker 集群: 20 个计算租户 ──
-    (section workers 20
+    ;; ── 2.3 后台 worker 集群: 19 个计算租户 ──
+    (section workers 19
       (desc "反应式 + 定时 + 外部触发的后台计算单元,按执行介质分组")
       :target "crates/missiond-daemon/src/workers/"
-      :v1.3.0-change "sonnet 组 briefing_worker 删除 (SSOT cutover, commit 6789509); 6 → 5"
+      :v1.3.0-change  "sonnet 组 briefing_worker 删除 (SSOT cutover, commit 6789509); 6 → 5"
+      :v0.4.12-change "codex 组 step_narrator 删除 (narration 表下线); 2 → 1; 总 20 → 19"
 
       (group sonnet 5
         :examples "embedding / translation / arch-maintenance / retro / lisp-survey"
@@ -211,13 +212,12 @@
            "arch-maintenance → kb-manager(knowledge category=architecture)"
            "retro → conv-logs(retrospective_results)"
            "lisp-survey → 项目 .missiond/intent.lisp 文件 (project-management)"))
-      (group codex 2
-        :examples "step-narrator / vision"
+      (group codex 1
+        :examples "vision"
         :routes-via "Claude Code PTY via slot_orchestrator/cc_controller"
         :target "workers/codex/"
-        :writes-to-memory
-          ("step-narrator → conv-logs(message_narrations)"
-           "vision → system-support(image_descriptions)"))
+        :writes-to-memory "vision → system-support(image_descriptions)"
+        :v0.4.12-removed "step_narrator.rs 随 message_narrations 表下线")
       (group gemini 1
         :examples "strategy"
         :routes-via "Gemini CLI PTY via slot_orchestrator/gemini_controller"
@@ -851,9 +851,9 @@
             :emits  "BoardTaskCreated (每个子任务一次)"))
         (result "Parent task + DAG of children with dependency links"))
 
-      ;; ── Flow 3: Agent 提问阻塞 ──
+      ;; ── Flow 3: Agent 提问阻塞 (已实现 auto-unblock) ──
       (flow agent-question-block-resume
-        (desc "Agent 卡住 → 提问 → task 被 block → 回答后 unblock")
+        (desc "Agent 卡住 → 提问 → task 被 block → 回答后 auto-unblock")
         (trigger "mission_question create with task_id")
         (stages
           (s1 question-create
@@ -864,13 +864,16 @@
 
           (s2 human-answer
             :at     "用户手动 / 其他 agent / Claude Code 交互"
-            :writes "agent_questions status=answered + answer text")
+            :writes "agent_questions status=answered + answer text"
+            :code   "db/question.rs :: answer_agent_question()")
 
-          (s3 unblock
-            :at     "⚠ TBD — 当前需手动 mission_board_update"
-            :desc   "检测 question answered → board_task status=blocked→open 重新 claim"
-            :gap    "已知缺口 — 自动 unblock 路径未实现"))
-        (known-gap "s3 未自动化 — agent 回答后, 需手动把 task 从 blocked 改回 open"))
+          (s3 auto-unblock
+            :at     "pillar 一 memory :: board :: answer_agent_question (同事务)"
+            :trigger "answer_agent_question() 检查 task 所有 pending 问题是否全部 answered/dismissed"
+            :writes "board_tasks status=blocked→open (仅当最后一个问题解决时)"
+            :emits  "QuestionEvent::Resolved 到 event-bus"
+            :code   "db/question.rs:156-170"))
+        (status "✓ auto-unblock 已实现 — 之前标的 gap 是错的, v0.4.12 修正"))
 
       ;; ── Flow 4: Autopilot tick 流水线 ──
       (flow autopilot-tick-pipeline
