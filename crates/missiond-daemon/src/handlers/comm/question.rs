@@ -4,9 +4,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracing::info;
 
-use crate::event_bus::{DaemonEvent, TraceContext};
-use crate::gemini_client::REQUEST_SESSION_ID;
 use crate::state::AppState;
+use missiond_core::event::events::{QuestionEvent, TaskEvent};
 
 #[derive(Deserialize)]
 struct QuestionCreateArgs {
@@ -161,19 +160,12 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             // Signal Decision Engine if target=master
             if q.target == "master" {
-                state.event_bus.publish_traced(
-                    DaemonEvent::QuestionCreated {
+                let _ = state
+                    .bus
+                    .publish_question(QuestionEvent::Created {
                         question_id: q.id.clone(),
-                    },
-                    TraceContext {
-                        trace_id: q.task_id.clone(),
-                        summary: Some(format!(
-                            "Question: {}",
-                            q.question.chars().take(80).collect::<String>()
-                        )),
-                        ..Default::default()
-                    },
-                );
+                    })
+                    .await;
                 info!(question_id = %q.id, "Decision Engine notified: new master question");
             }
             Ok(ToolResult::json_pretty(&q))
@@ -217,20 +209,19 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             {
                 Some(q) => {
                     // Signal scheduler for instant slot recovery after question answered
-                    state.event_bus.publish(DaemonEvent::TaskCompleted {
-                        task_id: String::new(),
-                    });
-                    state.event_bus.publish_traced(
-                        DaemonEvent::QuestionResolved {
+                    let _ = state
+                        .bus
+                        .publish_task(TaskEvent::Completed {
+                            task_id: String::new(),
+                        })
+                        .await;
+                    let _ = state
+                        .bus
+                        .publish_question(QuestionEvent::Resolved {
                             question_id: id.clone(),
                             resolution: "answered".to_string(),
-                        },
-                        TraceContext {
-                            trace_id: REQUEST_SESSION_ID.try_with(|s| s.clone()).ok(),
-                            summary: Some("Question answered by human".to_string()),
-                            ..Default::default()
-                        },
-                    );
+                        })
+                        .await;
                     Ok(ToolResult::json_pretty(&q))
                 }
                 None => Ok(ToolResult::error("Question not found")),
@@ -245,17 +236,13 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 .map_err(|e| anyhow!("DB error: {}", e))?
             {
                 Some(q) => {
-                    state.event_bus.publish_traced(
-                        DaemonEvent::QuestionResolved {
+                    let _ = state
+                        .bus
+                        .publish_question(QuestionEvent::Resolved {
                             question_id: id.clone(),
                             resolution: "dismissed".to_string(),
-                        },
-                        TraceContext {
-                            trace_id: REQUEST_SESSION_ID.try_with(|s| s.clone()).ok(),
-                            summary: Some("Question dismissed by human".to_string()),
-                            ..Default::default()
-                        },
-                    );
+                        })
+                        .await;
                     Ok(ToolResult::json_pretty(&q))
                 }
                 None => Ok(ToolResult::error("Question not found")),

@@ -10,19 +10,17 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 use super::{BackgroundWorker, WorkerContext, WorkerKind};
-use crate::event_bus::{DaemonEvent, TimelineEvent};
 use crate::state::AppState;
+use missiond_core::event::events::{MessageEvent, SessionEvent};
+use missiond_core::event::subscription::SubscriptionOpts;
 
 /// Debounce interval: wait for 5s of silence before processing batch.
 const DEBOUNCE_SECS: u64 = 5;
 
-pub struct ConversationOrganizerWorker {
-    pub timeline_rx: broadcast::Receiver<TimelineEvent>,
-}
+pub struct ConversationOrganizerWorker;
 
 impl BackgroundWorker for ConversationOrganizerWorker {
     const KIND: WorkerKind = WorkerKind::Local;
@@ -36,36 +34,40 @@ impl BackgroundWorker for ConversationOrganizerWorker {
         state: Arc<AppState>,
         ctx: WorkerContext,
     ) -> impl std::future::Future<Output = ()> + Send {
-        run_organizer(state, ctx, self.timeline_rx)
+        run_organizer(state, ctx)
     }
 }
 
-async fn run_organizer(
-    state: Arc<AppState>,
-    mut ctx: WorkerContext,
-    mut rx: broadcast::Receiver<TimelineEvent>,
-) {
+async fn run_organizer(state: Arc<AppState>, mut ctx: WorkerContext) {
+    let mut sub = match state
+        .bus
+        .subscribe::<MessageEvent>(
+            "conversation_organizer",
+            SubscriptionOpts::named("conversation_organizer"),
+        )
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "conversation_organizer: bus subscribe failed, worker exiting");
+            return;
+        }
+    };
+
     let mut dirty: HashSet<String> = HashSet::new();
     let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(DEBOUNCE_SECS));
 
     loop {
         ctx.wait_if_paused().await;
         tokio::select! {
-            event = rx.recv() => match event {
-                Ok(te) => {
-                    if let DaemonEvent::ConversationMessageLogged { ref session_id, .. } = te.event {
-                        debug!(session_id = %session_id, "Organizer: received ConversationMessageLogged");
-                        dirty.insert(session_id.clone());
-                    }
+            ack_opt = sub.next() => {
+                let Some(ack) = ack_opt else { break; };
+                if let MessageEvent::Logged { session_id, .. } = ack.event() {
+                    debug!(session_id = %session_id, "Organizer: received MessageEvent::Logged");
+                    dirty.insert(session_id.clone());
                 }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    // DATA LOSS: {n} ConversationMessageLogged events were permanently lost.
-                    // Affected sessions will not be organized until next activity triggers a new event.
-                    warn!(skipped = n, "Organizer: broadcast lagged — events permanently lost");
-                    continue;
-                }
-                Err(_) => break,
-            },
+                ack.ack().await;
+            }
             _ = tick.tick(), if !dirty.is_empty() => {
                 let batch: Vec<String> = dirty.drain().collect();
                 organize(&state, &batch).await;
@@ -114,9 +116,12 @@ async fn organize(state: &AppState, session_ids: &[String]) {
     // Emit SessionOrganized for all processed sessions
     for sid in session_ids {
         info!(session_id = %sid, "Organizer: emitting SessionOrganized");
-        state.event_bus.publish(DaemonEvent::SessionOrganized {
-            session_id: sid.clone(),
-        });
+        let _ = state
+            .bus
+            .publish_session(SessionEvent::Organized {
+                session_id: sid.clone(),
+            })
+            .await;
     }
 
     info!(

@@ -341,14 +341,15 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 }
             }
 
-            // Phase 3: Emit KBBatchMutated for event-driven FTS rebuild / consolidation triggers
-            state
-                .event_bus
-                .publish(crate::event_bus::DaemonEvent::KBBatchMutated {
+            // Emit KBBatchMutated for event-driven FTS rebuild / consolidation triggers
+            let _ = state
+                .bus
+                .publish_memory(missiond_core::event::events::MemoryEvent::KBBatchMutated {
                     count: 1,
                     categories: vec![input.category.clone()],
                     action: result.action.clone(),
-                });
+                })
+                .await;
 
             // Conflict detection: for new entries, check semantic similarity against existing KB
             let conflicts = if result.action == "created" {
@@ -416,15 +417,16 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                     let _ = state.store.kb_delete_ast_links_for(id).await;
                 }
             }
-            // Phase 3: Emit KBBatchMutated for event-driven FTS rebuild
+            // Emit KBBatchMutated for event-driven FTS rebuild
             if deleted {
-                state
-                    .event_bus
-                    .publish(crate::event_bus::DaemonEvent::KBBatchMutated {
+                let _ = state
+                    .bus
+                    .publish_memory(missiond_core::event::events::MemoryEvent::KBBatchMutated {
                         count: 1,
                         categories: vec![],
                         action: "deleted".to_string(),
-                    });
+                    })
+                    .await;
             }
             Ok(ToolResult::json(&serde_json::json!({
                 "deleted": deleted,
@@ -457,15 +459,16 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .kb_batch_forget(&keys)
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
-            // Phase 3: Emit KBBatchMutated for event-driven consumers
+            // Emit KBBatchMutated for event-driven consumers
             if count > 0 {
-                state
-                    .event_bus
-                    .publish(crate::event_bus::DaemonEvent::KBBatchMutated {
+                let _ = state
+                    .bus
+                    .publish_memory(missiond_core::event::events::MemoryEvent::KBBatchMutated {
                         count: count as u32,
                         categories: vec![],
                         action: "deleted".to_string(),
-                    });
+                    })
+                    .await;
             }
             Ok(ToolResult::json(&serde_json::json!({
                 "deleted_count": count,
@@ -530,14 +533,15 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                             .embedding_tx
                             .try_send(EmbeddingTask::ProcessKBEntry(entry.id.clone()));
                     }
-                    // Phase 3: Emit KBBatchMutated for event-driven consumers
-                    state
-                        .event_bus
-                        .publish(crate::event_bus::DaemonEvent::KBBatchMutated {
+                    // Emit KBBatchMutated for event-driven consumers
+                    let _ = state
+                        .bus
+                        .publish_memory(missiond_core::event::events::MemoryEvent::KBBatchMutated {
                             count: 1,
                             categories: vec![entry.category.clone()],
                             action: "updated".to_string(),
-                        });
+                        })
+                        .await;
                     Ok(ToolResult::json_pretty(&serde_json::json!({
                         "updated": true,
                         "content_changed": content_changed,
@@ -1781,11 +1785,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 .iter()
                 .any(|r| r.get("status").and_then(|s| s.as_str()) == Some("dispatched"))
             {
-                state
-                    .event_bus
-                    .publish(crate::event_bus::DaemonEvent::TaskCreated {
+                let _ = state
+                    .bus
+                    .publish_task(missiond_core::event::events::TaskEvent::Created {
                         task_id: String::new(),
-                    });
+                    })
+                    .await;
             }
 
             // Get remaining count

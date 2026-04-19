@@ -1,0 +1,153 @@
+(zh
+  :header ("MissionD — 支柱: mcp-dispatch"
+           "从 intent.lisp 拆分以支持并行加载"
+           "父文件: intent.lisp")
+
+  (pillar mcp-dispatch
+    :zh "支柱: mcp-dispatch"
+    (purpose :zh "JSON-RPC stdio 服务器 → 跨 4 个域的处理器分发")
+
+    (component mcp-server
+      :zh "组件: mcp-server"
+      (gateway-impl :zh "网关实现")
+      (gen-gateway :zh "生成的网关代码"))
+
+    (component compute-tools
+      :zh "组件: compute-tools (计算类工具)"
+      (tool mission_pty_spawn :zh "工具: mission_pty_spawn — 派生 PTY")
+      (tool mission_pty_send :zh "工具: mission_pty_send — 向 PTY 发送输入")
+      (tool mission_pty_read :zh "工具: mission_pty_read — 读取 PTY 输出")
+      (tool mission_pty_screenshot :zh "工具: mission_pty_screenshot — PTY 屏幕快照")
+      (tool mission_pty_status :zh "工具: mission_pty_status — PTY 状态查询")
+      (tool mission_pty_signal :zh "工具: mission_pty_signal — 向 PTY 发送信号")
+      (tool mission_pty_confirm :zh "工具: mission_pty_confirm — PTY 确认操作")
+      (tool mission_task_submit :zh "工具: mission_task_submit — 提交任务")
+      (tool mission_task_query :zh "工具: mission_task_query — 查询任务")
+      (tool mission_task_cancel :zh "工具: mission_task_cancel — 取消任务")
+      (tool mission_task_delegate :zh "工具: mission_task_delegate — 委派任务")
+      (tool mission_compute_slot :zh "工具: mission_compute_slot — 计算槽位管理")
+      (tool mission_slots :zh "工具: mission_slots — 槽位查询")
+      (tool mission_worker
+        :zh "工具: mission_worker — 工作器管理"
+        :notes ("commit e18d0bf: handle_control 新增 target_type=\"project\" → ControlManager.set_project(id, paused)"
+                "MCP schema enum: [\"global\",\"provider\",\"domain\",\"worker\",\"slot_role\",\"project\"]"))
+      (tool mission_job_poll :zh "工具: mission_job_poll — 作业轮询")
+      (tool mission_flow_run
+        :zh "工具: mission_flow_run — Flow 运行"
+        :notes ("Flow Engine v2 入口 — 动作: run | list | status"
+                "完整细节见 (component flow-engine-v2)"))
+      :notes ("commit 34167db: 通过 forge CLI 的 Forge Lisp→Rust 冲压工具")
+      (tool mission_forge_build
+        :zh "工具: mission_forge_build — Forge 构建"
+        :doc-zh "文档: 外壳执行 `forge build <root>` — ProjectRegistry 查找项目根路径，FORGE_BIN 环境变量可覆盖")
+      (tool mission_forge_lint
+        :zh "工具: mission_forge_lint — Forge 治理性 lint"
+        :doc-zh "文档: 外壳执行 `forge lint <root>` — 对 intent.lisp 做治理性 lint；补齐 xjpcode↔missiond↔forge 神经三角")
+      (tool mission_sonnet_process :zh "工具: mission_sonnet_process — Sonnet 处理")
+      (tool mission_minimax_process :zh "工具: mission_minimax_process — MiniMax 处理")
+      (tool mission_agent :zh "工具: mission_agent — Claude Code Agent 任务"))
+
+    (component knowledge-tools
+      :zh "组件: knowledge-tools (知识类工具)"
+      (tool mission_kb_query :zh "工具: mission_kb_query — 知识库查询")
+      (tool mission_kb_mutate :zh "工具: mission_kb_mutate — 知识库变更")
+      (tool mission_kb_ops :zh "工具: mission_kb_ops — 知识库操作")
+      (tool mission_kb_remember
+        :zh "工具: mission_kb_remember — 知识库记忆"
+        :params-added-zh "新增参数: project: Option<String> — 所属项目 ID (commit 3c10d21)")
+      :notes ("commit 3c10d21: 批量设置 KB 条目项目归属")
+      (tool mission_kb_batch_set_project
+        :zh "工具: mission_kb_batch_set_project — 批量设置 KB 条目项目归属"
+        :doc-zh "文档: 一次性分配多条 KB 条目到指定项目; project_id 为空/null 表示清除归属(设为全局)")
+      (tool mission_memory :zh "工具: mission_memory — 记忆管理")
+      (tool mission_board_query :zh "工具: mission_board_query — 看板查询")
+      (tool mission_board_create :zh "工具: mission_board_create — 看板创建")
+      (tool mission_board_update :zh "工具: mission_board_update — 看板更新")
+      (tool mission_board_delete :zh "工具: mission_board_delete — 看板删除")
+      (tool mission_board_claim :zh "工具: mission_board_claim — 看板领取")
+      (tool mission_board_retry :zh "工具: mission_board_retry — 看板重试")
+      (tool mission_board_note_add :zh "工具: mission_board_note_add — 看板添加备注")
+      (tool mission_board_decompose :zh "工具: mission_board_decompose — 看板任务分解")
+      (tool mission_cc_query :zh "工具: mission_cc_query — 级联查询")
+      (tool mission_cc_swarm :zh "工具: mission_cc_swarm — 级联蜂群")
+      (tool mission_skill_query :zh "工具: mission_skill_query — 技能查询")
+      (tool mission_skill_exec :zh "工具: mission_skill_exec — 技能执行")
+      (tool mission_skill_mutate :zh "工具: mission_skill_mutate — 技能变更")
+      (tool mission_skill_context :zh "工具: mission_skill_context — 技能上下文")
+      (tool mission_insight :zh "工具: mission_insight — 洞察")
+      (tool mission_embedding_ops :zh "工具: mission_embedding_ops — Embedding 操作")
+      (tool mission_code_search :zh "工具: mission_code_search — 代码搜索")
+      (tool mission_universe_graph :zh "工具: mission_universe_graph — 宇宙图")
+      (tool mission_cascade_plan :zh "工具: mission_cascade_plan — 级联计划")
+      (tool mission_cascade_trigger :zh "工具: mission_cascade_trigger — 级联触发")
+      (tool mission_cascade_lint :zh "工具: mission_cascade_lint — 级联 lint")
+      :notes ("commit ec269d7: 从 MCP 读取项目 intent.lisp")
+      (tool mission_intent
+        :zh "工具: mission_intent — 读取项目 intent.lisp"
+        :doc-zh "文档: 读取/查询已注册项目的 .missiond/intent.lisp; 模糊项目查找(子串匹配，唯一命中自动解析，多命中返回 'ambiguous' 错误并列出候选)"
+        (action read :zh "动作 read: 读取原始 lisp 内容")
+        (action section :zh "动作 section: 返回匹配的 s-expression 块")
+        (action summary :zh "动作 summary: 返回 intent 的高层摘要")
+        (action list :zh "动作 list: 返回 Vec<{project_id, intent_path, exists}>"))
+
+      :notes ("P4+P5 (commit 76900d1): mission_project — 项目管理 MCP 工具"
+              "commit 84ac1a6: 新增 init action; list 响应增加 lispFiles/lispCount")
+      (tool mission_project
+        :zh "工具: mission_project — 项目管理"
+        :doc-zh "文档: init: 一步注册新项目(path→git-remote→intent-scan→upsert+backfill+reload); list: 列出所有项目(附带lispFiles/lispCount); get: 按id获取; set_active: 设置活跃状态; sync: 扫描 ~/.claude/projects/ 自动发现注册; context: 项目全景聚合; memories: 读取 Claude Code 项目记忆"
+        (action init
+          :zh "动作 init: 一步注册新项目"
+          :steps-zh ("规范化路径" "从目录名(或参数)推导 id" "git remote get-url origin → github_url" "扫描 .missiond/.jarvis/ 下的 intent.lisp" "upsert 项目" "backfill_project_id(path%) + backfill_project_id(claude-encoded-pattern%)" "重载 SharedProjectRegistry"))
+        :notes ("commit 8438a7d: 项目上下文聚合器")
+        (action context
+          :zh "动作 context: 项目上下文聚合"
+          :sources-zh ("build_intent_summary: 读取 intent.lisp → 提取 survey-date/last-updated/pillar 名称，不做全量加载"
+                       "build_github_info: git@ → https:// 归一化"
+                       "conversation_stats_by_project: PG 聚合查询"
+                       "recent_conversations_by_project: PG 最近 N 条"
+                       "project_memory::list_memories: 文件系统扫描 + YAML frontmatter 解析"
+                       "project_memory::read_memory_index: MEMORY.md 内容"
+                       "kb_stats_by_project: PG 按分类分组"
+                       "build_slots_info: 已配置槽位 × pty 运行时状态"))
+        (action memories
+          :zh "动作 memories: 读取项目记忆"
+          :returns-zh "返回: 指定 file → 原始内容; 未指定 file → {dir, count, index, entries:[{file,name,mem_type,description}]}"
+          :doc-zh "文档: 扫描 ~/.claude/projects/{encoded-path}/memory/*.md，解析 YAML frontmatter (name/type/description)，路径穿越防护(拒绝 / \\ ..)")))
+
+    (component comm-tools
+      :zh "组件: comm-tools (通信类工具)"
+      (tool mission_conversation_query :zh "工具: mission_conversation_query — 会话查询")
+      (tool mission_conversation_analyze :zh "工具: mission_conversation_analyze — 会话分析")
+      (tool mission_conversation_reconcile :zh "工具: mission_conversation_reconcile — 会话对账")
+      (tool mission_question :zh "工具: mission_question — 提问")
+      (tool mission_router_chat :zh "工具: mission_router_chat — Router 对话")
+      (tool mission_router_chat_manage :zh "工具: mission_router_chat_manage — Router 对话管理")
+      (tool mission_timeline :zh "工具: mission_timeline — 时间线")
+      (tool mission_audit :zh "工具: mission_audit — 审计")
+      (tool mission_retrospective_manage :zh "工具: mission_retrospective_manage — 复盘管理")
+      (tool mission_llm_trace :zh "工具: mission_llm_trace — LLM 追踪")
+      (tool mission_decision_stats :zh "工具: mission_decision_stats — 决策统计")
+      (tool mission_slot_history :zh "工具: mission_slot_history — 槽位历史")
+      (tool mission_beacon :zh "工具: mission_beacon — 信标")
+      :notes ("commit ec269d7: 新增 Codex CLI 集成工具")
+      (tool mission_codex_ops
+        :zh "工具: mission_codex_ops — Codex CLI 操作"
+        :source-zh "来源: ~/.codex/state_5.sqlite (经由 CodexIngestionWorker)"
+        :doc-zh "文档: 查询已注入 MissionD 会话时间线的 Codex CLI 操作历史"))
+
+    (component sysinfra-tools
+      :zh "组件: sysinfra-tools (系统基础设施类工具)"
+      (tool mission_control :zh "工具: mission_control — 系统控制")
+      (tool mission_daemon_update :zh "工具: mission_daemon_update — 守护进程更新")
+      (tool mission_sys_config :zh "工具: mission_sys_config — 系统配置")
+      (tool mission_sys_logs :zh "工具: mission_sys_logs — 系统日志")
+      (tool mission_infra_ops :zh "工具: mission_infra_ops — 基础设施操作")
+      (tool mission_infra_query :zh "工具: mission_infra_query — 基础设施查询")
+      (tool mission_permission_query :zh "工具: mission_permission_query — 权限查询")
+      (tool mission_permission_mutate :zh "工具: mission_permission_mutate — 权限变更")
+      (tool mission_power_control :zh "工具: mission_power_control — 电源控制")
+      (tool mission_pause :zh "工具: mission_pause — 暂停")
+      (tool mission_inbox :zh "工具: mission_inbox — 收件箱")
+      (tool mission_incident :zh "工具: mission_incident — 事件")
+      (tool mission_submit_phase_result :zh "工具: mission_submit_phase_result — 提交阶段结果")
+      (tool mission_gemini_auth :zh "工具: mission_gemini_auth — Gemini 认证"))))

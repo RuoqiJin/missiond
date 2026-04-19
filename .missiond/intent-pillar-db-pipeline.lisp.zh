@@ -1,0 +1,217 @@
+(zh
+  :header ("MissionD — 支柱: db-pipeline"
+           "从 intent.lisp 拆分以支持并行加载"
+           "父文件: intent.lisp")
+
+  (pillar db-pipeline
+    :zh "支柱: db-pipeline"
+    (purpose :zh "用途: 会话轮次、AST 同步、信标、回填阶段、水位线、翻译")
+
+    :notes ("── 会话轮次（S3 Tagger & Chunker 管线阶段） ──────────────")
+
+    (component turn-tables
+      :zh "组件: turn-tables"
+
+      (table conversation_turns
+        :zh "表: conversation_turns"
+        (col id :zh "列 id：bigserial 主键")
+        (col session_id :zh "列 session_id：外键指向 conversations.id，级联删除")
+        (col turn_idx :zh "列 turn_idx：轮次序号")
+        (col start_message_id :zh "列 start_message_id：外键指向 conversation_messages.id")
+        (col end_message_id :zh "列 end_message_id：外键指向 conversation_messages.id")
+
+        :notes ("预抽取的摘要字段（纯规则，不走 LLM）")
+
+        (col user_content :zh "列 user_content：用户消息文本，截断至 2000 字符")
+        (col tool_names :zh "列 tool_names：CSV 格式，如 Bash,Read,Edit")
+        (col tool_call_count :zh "列 tool_call_count：工具调用次数，默认 0")
+        (col message_count :zh "列 message_count：消息数，默认 0")
+        (col has_code_change :zh "列 has_code_change：是否含代码变更，默认 false")
+        (col has_mcp_call :zh "列 has_mcp_call：是否含 MCP 调用，默认 false")
+        (col started_at :zh "列 started_at：起始时间")
+        (col ended_at :zh "列 ended_at：结束时间")
+
+        :notes ("下游字段（S4 Embedder / Intent Analyst）")
+
+        (col topic :zh "列 topic：话题")
+        (col intent_group_id :zh "列 intent_group_id：意图分组 ID")
+
+        :notes ("Embedding 摘要字段（commit 21a3b63 — 20260409000000）")
+
+        (col files_read
+          :zh "列 files_read：可空"
+          :comment-zh "通过正则从 Read 工具调用中抽取的短文件名")
+        (col files_changed
+          :zh "列 files_changed：可空"
+          :comment-zh "通过正则从 Write/Edit 工具调用中抽取的短文件名")
+        (col outcome
+          :zh "列 outcome：可空"
+          :comment-zh "最后一段 assistant 非工具文本——表示完成什么的 embedding 信号")
+
+        :notes ("轮次骨架（commit dc45dcb — 20260409100000）")
+
+        (col skeleton
+          :zh "列 skeleton：可空"
+          :comment-zh "JSON 索引: {user_msg_id, tool_calls:[{tool,file,req_msg_id,res_msg_id}], outcome_msg_id}；支持按需选择性取消息，避免一次加载全部 68+ 条")
+
+        (unique :zh "唯一约束 (session_id, turn_idx)")
+        (index idx_ct_session :zh "索引 idx_ct_session：列 (session_id)")
+        (index idx_ct_session_idx :zh "索引 idx_ct_session_idx：列 (session_id, turn_idx)")
+        (index idx_ct_start_msg :zh "索引 idx_ct_start_msg：列 (start_message_id)")
+        (index idx_ct_end_msg :zh "索引 idx_ct_end_msg：列 (end_message_id)")
+
+        (op get-last-turn-end-msg :zh "操作 get-last-turn-end-msg：入参 session_id，返回 Option<i64>")
+        (op get-max-turn-idx :zh "操作 get-max-turn-idx：入参 session_id，返回 Option<i32>")
+        (op insert-batch
+          :zh "操作 insert-batch：入参 session_id、base_idx、Vec<RawTurn>"
+          :note-zh "注: INSERT ON CONFLICT (session_id, turn_idx) DO UPDATE —— 幂等 upsert")
+        (op missing-embeddings
+          :zh "操作 missing-embeddings：返回 Vec<session_id>"
+          :where-zh "NOT EXISTS (SELECT 1 FROM conversation_turns ct WHERE ct.session_id = c.id)"))
+
+      :notes ("TurnBuilder —— 逻辑位于 tagger_chunker.rs 内（commit 21a3b63 重构）")
+
+      (struct RawTurn
+        :zh "结构: RawTurn"
+        (field turn_idx :zh "字段 turn_idx：i32")
+        (field start_message_id :zh "字段 start_message_id：i64")
+        (field end_message_id :zh "字段 end_message_id：i64")
+        (field user_content :zh "字段 user_content：Option<String>")
+        (field tool_names :zh "字段 tool_names：Vec<String>")
+        (field tool_call_count :zh "字段 tool_call_count：i32")
+        (field message_count :zh "字段 message_count：i32")
+        (field has_code_change :zh "字段 has_code_change：bool")
+        (field has_mcp_call :zh "字段 has_mcp_call：bool")
+        (field started_at :zh "字段 started_at：Option<String>")
+        (field ended_at :zh "字段 ended_at：Option<String>")
+        (field files_read :zh "字段 files_read：Option<String>，新增于 21a3b63")
+        (field files_changed :zh "字段 files_changed：Option<String>，新增于 21a3b63")
+        (field outcome :zh "字段 outcome：Option<String>，新增于 21a3b63")
+        (field skeleton :zh "字段 skeleton：Option<String>，新增于 dc45dcb"))
+
+      (note :zh "注: build_turn_embedding_text（commit 21a3b63）从自然语言改写为结构化关键词密集格式：'project:X files:Y intent:Z outcome:W' —— 针对 Claude Code agent 的 MCP 向量搜索优化。过滤 <task-notification> 噪音轮次。"))
+
+    (component ast-tables
+      :zh "组件: ast-tables"
+
+      (table ast_nodes
+        :zh "表: ast_nodes"
+        (col id :zh "列 id：uuid 主键")
+        (col file_path :zh "列 file_path：文件路径，非空")
+        (col symbol_name :zh "列 symbol_name：符号名，非空")
+        (col kind
+          :zh "列 kind：类型，非空"
+          :enum-zh "枚举: function / struct / enum / trait / impl / mod / const / type")
+        (col start_line :zh "列 start_line：起始行，非空")
+        (col end_line :zh "列 end_line：结束行，非空")
+        (col signature :zh "列 signature：签名")
+        (col is_exported :zh "列 is_exported：是否导出，默认 false")
+        (col parent_symbol :zh "列 parent_symbol：父符号")
+        (col embedding :zh "列 embedding：bytea 向量")
+        (col beacon_tags :zh "列 beacon_tags：jsonb 信标标签")
+        (col commit_hash :zh "列 commit_hash：commit 哈希")
+        (col created_at :zh "列 created_at：创建时间，非空")
+
+        (op sync-file :zh "操作 sync-file：入参 file_path、Vec<CodeNode>、commit_hash")
+        (op delete-file :zh "操作 delete-file：入参 file_path")
+        (op search :zh "操作 search：入参 query、kind、is_exported、limit；全文检索")
+        (op search-ranked :zh "操作 search-ranked：入参 query、embedding、limit；混合检索")
+        (op get-file-nodes :zh "操作 get-file-nodes：入参 file_path")
+        (op find-related :zh "操作 find-related：入参 symbol_name、kind")
+        (op get-file-commit :zh "操作 get-file-commit：入参 file_path")
+        (op stats :zh "操作 stats：聚合统计")
+        (op set-embedding :zh "操作 set-embedding：入参 id、embedding")
+        (op find-unembedded :zh "操作 find-unembedded：入参 batch_size")
+        (op load-all-embeddings :zh "操作 load-all-embeddings：返回 Vec<(id, embedding)>")
+        (op get-search-hit :zh "操作 get-search-hit：入参 id")
+        (op get-node :zh "操作 get-node：入参 id")
+        (op module-summaries :zh "操作 module-summaries：返回 Vec<(module, count)>")))
+
+    (component beacon-tables
+      :zh "组件: beacon-tables"
+
+      (table beacons
+        :zh "表: beacons"
+        (col id :zh "列 id：uuid 主键")
+        (col tag :zh "列 tag：唯一且非空的标签")
+        (col description :zh "列 description：描述")
+        (col harvest_count :zh "列 harvest_count：采集次数，默认 0")
+        (col created_at :zh "列 created_at：创建时间，非空")
+        (op list :zh "操作 list：列出信标")
+        (op ensure :zh "操作 ensure：入参 tag，按 tag 做 upsert")
+        (op increment-harvest :zh "操作 increment-harvest：入参 tag")
+        (op set-description :zh "操作 set-description：入参 tag、description")
+        (op search :zh "操作 search：入参 query；全文检索")
+        (op cleanup-empty :zh "操作 cleanup-empty：清理 harvest_count=0"))
+
+      (table beacon_nodes
+        :zh "表: beacon_nodes"
+        (col id :zh "列 id：uuid 主键")
+        (col beacon_id :zh "列 beacon_id：外键指向 beacons.id")
+        (col file_path :zh "列 file_path：文件路径，非空")
+        (col symbol_name :zh "列 symbol_name：符号名")
+        (col line :zh "列 line：行号")
+        (col annotation :zh "列 annotation：注解")
+        (op upsert :zh "操作 upsert：入参 beacon_id、file_path、symbol_name、line")
+        (op map :zh "操作 map：入参 beacon_id")
+        (op delete-file :zh "操作 delete-file：入参 file_path")
+        (op annotate :zh "操作 annotate：入参 id、annotation")))
+
+    (component pipeline-tables
+      :zh "组件: pipeline-tables"
+
+      (table backfill_phases
+        :zh "表: backfill_phases"
+        (col phase_name :zh "列 phase_name：阶段名，主键")
+        (col status
+          :zh "列 status：状态，默认 pending"
+          :enum-zh "枚举: pending / running / completed / failed")
+        (col progress :zh "列 progress：进度，默认 0")
+        (col total :zh "列 total：总数")
+        (col started_at :zh "列 started_at：起始时间")
+        (col completed_at :zh "列 completed_at：完成时间")
+        (col error :zh "列 error：错误信息")
+        (op get :zh "操作 get：入参 phase_name")
+        (op list :zh "操作 list：列出所有阶段")
+        (op start :zh "操作 start：入参 phase_name、total")
+        (op update-progress :zh "操作 update-progress：入参 phase_name、progress")
+        (op complete :zh "操作 complete：入参 phase_name")
+        (op record-failure :zh "操作 record-failure：入参 phase_name、error")
+        (op retryable-failures :zh "操作 retryable-failures：可重试的失败项")
+        (op clear-failure :zh "操作 clear-failure：入参 phase_name"))
+
+      (table watermarks
+        :zh "表: watermarks"
+        (col key :zh "列 key：主键")
+        (col time_value :zh "列 time_value：时间水位")
+        (col msg_id_value :zh "列 msg_id_value：消息 ID 水位")
+        (op advance-time :zh "操作 advance-time：入参 key、time_value")
+        (op advance-msg-id :zh "操作 advance-msg-id：入参 key、msg_id_value"))
+
+      (table labels
+        :zh "表: labels"
+        (col key :zh "列 key：主键")
+        (col value :zh "列 value：值，非空")
+        (op set :zh "操作 set：入参 key、value"))
+
+      (table translations
+        :zh "表: translations"
+        (col id :zh "列 id：uuid 主键")
+        (col message_id :zh "列 message_id：消息 ID")
+        (col language :zh "列 language：语言，非空")
+        (col content :zh "列 content：内容，非空")
+        (col created_at :zh "列 created_at：创建时间，非空")
+        (op insert :zh "操作 insert：入参 message_id、language、content")
+        (op has :zh "操作 has：入参 message_id、language，返回 bool")))
+
+    (component vision-tables
+      :zh "组件: vision-tables"
+
+      (table image_descriptions
+        :zh "表: image_descriptions"
+        (col id :zh "列 id：uuid 主键")
+        (col image_hash :zh "列 image_hash：图像哈希，唯一且非空")
+        (col description :zh "列 description：描述，非空")
+        (col created_at :zh "列 created_at：创建时间，非空")
+        (op save :zh "操作 save：入参 image_hash、description，按 image_hash 做 upsert")
+        (op count :zh "操作 count：聚合计数")))))

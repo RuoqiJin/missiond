@@ -1,0 +1,256 @@
+(zh
+  :header (""
+           "MissionD DB 层 — 审计与复盘 (SQLite)"
+           "conversation_tool_calls、conversation_events、retrospective_results"
+           "")
+
+  (pattern crud-gateway
+    :zh "模式: crud-gateway"
+    :pool-zh "连接池: Mutex<Connection>"
+    :backend-zh "后端: sqlite"
+
+    :notes ("" "表: conversation_tool_calls" "")
+
+    (table conversation_tool_calls
+      :zh "表: conversation_tool_calls"
+      (col id :zh "列 id: 主键,文本")
+      (col session_id :zh "列 session_id: 外键 → conversations,级联删除")
+      (col message_id :zh "列 message_id: bigint,可空")
+      (col tool_name :zh "列 tool_name: 工具名")
+      (col input_summary :zh "列 input_summary: 输入摘要,可空")
+      (col raw_input :zh "列 raw_input: 原始输入,可空")
+      (col output_summary :zh "列 output_summary: 输出摘要,可空")
+      (col raw_output :zh "列 raw_output: 原始输出,可空")
+      (col status :zh "列 status: 状态,默认 pending")
+      (col duration_ms :zh "列 duration_ms: 耗时毫秒,可空")
+      (col timestamp :zh "列 timestamp: 时间戳")
+
+      (idx idx_tc_session :zh "索引 idx_tc_session: 按 session_id")
+      (idx idx_tc_name :zh "索引 idx_tc_name: 按 tool_name")
+      (idx idx_tc_status :zh "索引 idx_tc_status: 按 status")
+
+      (row-type ToolCallRow
+        :zh "行类型 ToolCallRow: 转换器 row_to_tool_call → ToolCallRecord")
+
+      (op insert_tool_call
+        :zh "操作 insert_tool_call: 插入结构体 &ToolCallRecord")
+
+      (op insert_tool_calls_batch
+        :zh "操作 insert_tool_calls_batch: 批量插入 &[ToolCallRecord]"
+        :logic-zh "事务循环 INSERT OR IGNORE")
+
+      (op update_tool_call_output
+        :zh "操作 update_tool_call_output: 按 id 更新 output_summary/raw_output/status")
+
+      (op get_tool_call_by_id
+        :zh "操作 get_tool_call_by_id: 按 id 单条查询 → Option<ToolCallRecord>")
+
+      (op get_tool_calls_by_session
+        :zh "操作 get_tool_calls_by_session: 按 session_id 自定义查询"
+        :logic-zh "可选 tool_name IN 过滤,按 timestamp 升序")
+
+      (op get_tool_call_stats
+        :zh "操作 get_tool_call_stats: 按 session_id 统计"
+        :logic-zh "按 tool_name 分组: 总数、完成数、平均耗时")
+
+      (op count_pending_tool_calls
+        :zh "操作 count_pending_tool_calls: 计数 status = 'pending'")
+
+      (op get_sessions_with_pending_tool_calls
+        :zh "操作 get_sessions_with_pending_tool_calls: 返回 Vec<String>"
+        :logic-zh "SELECT DISTINCT session_id WHERE status=pending")
+
+      (op get_sessions_with_tool_calls
+        :zh "操作 get_sessions_with_tool_calls: 返回 HashSet<String>"
+        :logic-zh "SELECT DISTINCT session_id")
+
+      (op get_messages_for_tool_call_backfill
+        :zh "操作 get_messages_for_tool_call_backfill: 按 session_id 返回消息"
+        :logic-zh "查 tool_use/tool_result 消息的 message_uuid、role、content")
+
+      (op get_tool_calls_for_detailed_analysis
+        :zh "操作 get_tool_calls_for_detailed_analysis: 按 session_id 详细分析"
+        :logic-zh "字段: tool_name、status、input_summary、output_summary")
+
+      (op get_tool_calls_with_status_timeline
+        :zh "操作 get_tool_calls_with_status_timeline: 按 session_id 时间轴"
+        :logic-zh "字段: tool_name、status、timestamp、duration_ms 时间轴")
+
+      (op get_tool_name_sequence
+        :zh "操作 get_tool_name_sequence: 按 session_id 返回工具序列"
+        :logic-zh "SELECT tool_name ORDER BY timestamp ASC")
+
+      (op get_tool_error_samples
+        :zh "操作 get_tool_error_samples: session_id + tool_name 取失败样本"
+        :logic-zh "失败工具调用的 input、output、raw_output 样本"))
+
+    :notes ("" "表: conversation_events" "")
+
+    (table conversation_events
+      :zh "表: conversation_events"
+      (col id :zh "列 id: 主键,bigint")
+      (col session_id :zh "列 session_id: 外键 → conversations,级联删除")
+      (col event_type :zh "列 event_type: 事件类型")
+      (col content :zh "列 content: 内容,可空")
+      (col raw_data :zh "列 raw_data: 原始数据,可空")
+      (col timestamp :zh "列 timestamp: 时间戳")
+      (col event_uuid :zh "列 event_uuid: 事件 UUID,可空")
+
+      (idx idx_conv_event_session :zh "索引 idx_conv_event_session: 按 session_id")
+      (idx idx_conv_event_type :zh "索引 idx_conv_event_type: 按 event_type")
+
+      (op insert_conversation_events_batch
+        :zh "操作 insert_conversation_events_batch: 批量插入 &[ConversationEvent]"
+        :logic-zh "事务循环 INSERT OR IGNORE,按 (session_id, event_uuid) 去重")
+
+      (op get_conversation_events
+        :zh "操作 get_conversation_events: 多条件查询事件"
+        :logic-zh "动态 WHERE,可选类型/时间过滤")
+
+      (op is_compact_boundary_event
+        :zh "操作 is_compact_boundary_event: 判断是否压缩边界事件"
+        :logic-zh "EXISTS 检查 compact_boundary 事件")
+
+      (op get_agent_trajectory
+        :zh "操作 get_agent_trajectory: 按 session_id 返回 Agent 轨迹"
+        :logic-zh "事件 + 工具调用交织,按 timestamp 排序")
+
+      (op get_event_type_summary
+        :zh "操作 get_event_type_summary: 按 session_id 汇总事件类型"
+        :logic-zh "按 event_type 分组: 计数、首次、末次")
+
+      (op cleanup_old_events
+        :zh "操作 cleanup_old_events: 清理旧事件"
+        :logic-zh "DELETE 已完成会话中 created_at < cutoff 的事件")
+
+      (op get_sessions_with_events
+        :zh "操作 get_sessions_with_events: 返回 HashSet<String>"
+        :logic-zh "SELECT DISTINCT session_id"))
+
+    :notes ("" "会话生命周期操作 (跨 conversations 表)" "")
+
+    (table conversations
+      :zh "表: conversations"
+      (col id :zh "列 id: 主键,文本")
+
+      (op get_conversations_with_jsonl
+        :zh "操作 get_conversations_with_jsonl: 返回有 jsonl 的会话"
+        :logic-zh "SELECT id, jsonl_path WHERE jsonl_path IS NOT NULL")
+
+      (op mark_conversation_analyzed
+        :zh "操作 mark_conversation_analyzed: 标记已分析"
+        :set-zh "设置 analyzed_at = datetime('now')")
+
+      (op get_unanalyzed_conversations
+        :zh "操作 get_unanalyzed_conversations: 返回未分析会话"
+        :logic-zh "WHERE analyzed_at IS NULL AND status=completed")
+
+      (op complete_conversation
+        :zh "操作 complete_conversation: 按 id 完成会话"
+        :set-zh "设置 status='completed', ended_at/updated_at = datetime('now')")
+
+      (op save_conversation_exit_code
+        :zh "操作 save_conversation_exit_code: 按 id 保存退出码"
+        :set-zh "设置 exit_code, updated_at = datetime('now')")
+
+      (op complete_stale_conversations
+        :zh "操作 complete_stale_conversations: 批量完成陈旧会话"
+        :logic-zh "UPDATE active → completed WHERE updated_at < cutoff 且槽位活跃")
+
+      (op mark_conversation_compacted
+        :zh "操作 mark_conversation_compacted: 按 id 标记已压缩"
+        :set-zh "设置 status='compacted', updated_at = datetime('now')")
+
+      (op set_conversation_task_id
+        :zh "操作 set_conversation_task_id: 按 id 设置 task_id")
+
+      (op get_conversations_by_task_id
+        :zh "操作 get_conversations_by_task_id: 按 task_id 批量查 → Vec<Conversation>")
+
+      (op reactivate_conversation
+        :zh "操作 reactivate_conversation: 按 id 重新激活会话"
+        :logic-zh "UPDATE status=active,清空 ended_at,仅对 completed/compacted 生效")
+
+      :notes ("── 记忆/用户心声/实时转发 ──")
+
+      (op get_pending_memory_messages
+        :zh "操作 get_pending_memory_messages: 取今日待转发记忆消息"
+        :logic-zh "仅今日、未转发的会话消息,按 session 分组")
+
+      (op update_memory_forwarded_at
+        :zh "操作 update_memory_forwarded_at: 按 session_id 更新记忆转发时间")
+
+      (op get_pending_user_voice_messages
+        :zh "操作 get_pending_user_voice_messages: 取待转发的用户心声消息"
+        :logic-zh "user_voice_forwarded_at IS NULL 的会话,按 session 分组")
+
+      (op update_user_voice_forwarded_at
+        :zh "操作 update_user_voice_forwarded_at: 按 session_id 更新用户心声转发时间")
+
+      (op get_pending_realtime_messages
+        :zh "操作 get_pending_realtime_messages: 取待转发的实时消息"
+        :logic-zh "未转发的实时消息会话")
+
+      (op get_pending_realtime_messages_with_limit
+        :zh "操作 get_pending_realtime_messages_with_limit: 带 LIMIT 版本"
+        :logic-zh "同上,对会话数 LIMIT")
+
+      (op update_realtime_forwarded_at
+        :zh "操作 update_realtime_forwarded_at: 按 session_id 更新实时转发时间"))
+
+    :notes ("" "表: retrospective_results" "")
+
+    (table retrospective_results
+      :zh "表: retrospective_results"
+      (col session_id :zh "列 session_id: 主键,文本")
+      (col trigger_reason :zh "列 trigger_reason: 触发原因")
+      (col quick_stats :zh "列 quick_stats: 快速统计")
+      (col full_analysis :zh "列 full_analysis: 完整分析,可空")
+      (col created_at :zh "列 created_at: timestamptz,默认当前")
+
+      (idx idx_retro_created :zh "索引 idx_retro_created: 按 created_at")
+
+      (op save_retrospective_result
+        :zh "操作 save_retrospective_result: upsert 复盘结果"
+        :on-conflict-zh "冲突时更新 trigger_reason/quick_stats/full_analysis")
+
+      (op has_retrospective_result
+        :zh "操作 has_retrospective_result: 按 session_id 计数 → bool")
+
+      (op get_retrospective_result
+        :zh "操作 get_retrospective_result: 按 session_id 读取"
+        :logic-zh "SELECT trigger_reason、quick_stats、full_analysis、created_at")
+
+      (op list_retrospective_results
+        :zh "操作 list_retrospective_results: 按 limit 列出"
+        :logic-zh "SELECT session_id、trigger_reason、quick_stats、full_analysis、created_at")
+
+      (op get_sessions_needing_retrospective
+        :zh "操作 get_sessions_needing_retrospective: 返回待复盘会话"
+        :logic-zh "已完成但无复盘,带工具调用统计")
+
+      (op get_sessions_for_retro_backfill
+        :zh "操作 get_sessions_for_retro_backfill: 带 since/force 的回填查询"
+        :logic-zh "同上,额外 since 过滤及可选 force")
+
+      :notes ("复盘分析辅助 (跨表查询)")
+
+      (op get_retrospective_tool_stats
+        :zh "操作 get_retrospective_tool_stats: session_id + limit 取工具统计"
+        :logic-zh "从 tool_calls 取 tool_name、总数、完成、失败、平均耗时")
+
+      (op get_retrospective_meta
+        :zh "操作 get_retrospective_meta: 按 session_id 取元数据"
+        :logic-zh "消息数、工具数、用户消息、助手消息")
+
+      (op get_retrospective_repeat_patterns
+        :zh "操作 get_retrospective_repeat_patterns: session_id + min_streak 取重复模式"
+        :logic-zh "检测 tool_calls 中连续同工具的 streak")
+
+      (op get_retrospective_high_error_tools
+        :zh "操作 get_retrospective_high_error_tools: session_id + 错误率阈值"
+        :logic-zh "tool_name、error_rate、总调用数,超过阈值")
+
+      (op get_first_user_message
+        :zh "操作 get_first_user_message: 按 session_id 取首条用户消息"
+        :logic-zh "SELECT content FROM messages WHERE role=user ORDER BY id ASC LIMIT 1"))))

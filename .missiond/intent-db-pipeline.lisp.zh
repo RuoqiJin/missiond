@@ -1,0 +1,195 @@
+(zh
+  :header (""
+           "MissionD 数据库层 — 数据管线基础设施 (SQLite)"
+           "backfill、beacons、watermarks、labels、translations"
+           "")
+
+  (pattern crud-gateway
+    :zh "模式: crud-gateway"
+    :gateway-zh "网关: MissionDB"
+    :pool-zh "连接池: Mutex<Connection>"
+    :backend-zh "后端: sqlite"
+
+    :notes (""
+            "表: backfill_progress"
+            ""
+            ""
+            "表: backfill_failures"
+            ""
+            ""
+            "表: beacons"
+            ""
+            ""
+            "表: beacon_nodes"
+            ""
+            ""
+            "表: consumer_watermarks"
+            ""
+            ""
+            "表: message_labels"
+            ""
+            ""
+            "表: message_translations"
+            "")
+
+    (table backfill_progress
+      :zh "表: backfill_progress — 回填进度"
+
+      (op backfill_get_phase
+        :zh "操作: backfill_get_phase — 获取某阶段进度"
+        :logic-zh "逻辑: SELECT * WHERE phase, 映射到结构体")
+
+      (op backfill_list_phases
+        :zh "操作: backfill_list_phases — 列出所有阶段"
+        :logic-zh "逻辑: SELECT * ORDER BY started_at")
+
+      (op backfill_start_phase
+        :zh "操作: backfill_start_phase — 启动某阶段(upsert)"
+        :on-conflict-zh "冲突: (phase) DO UPDATE SET status/total/started_at(COALESCE)/updated_at")
+
+      (op backfill_update_progress
+        :zh "操作: backfill_update_progress — 更新进度(游标/已处理/失败/时间戳)")
+
+      (op backfill_complete_phase
+        :zh "操作: backfill_complete_phase — 标记阶段完成(status='completed' + completed_at)"))
+
+    (table backfill_failures
+      :zh "表: backfill_failures — 回填失败记录"
+
+      (op backfill_record_failure
+        :zh "操作: backfill_record_failure — 记录失败(upsert, retry_count+1)"
+        :on-conflict-zh "冲突: (session_id, phase) DO UPDATE SET retry_count+1, last_error, updated_at")
+
+      (op backfill_clear_failure
+        :zh "操作: backfill_clear_failure — 清除失败记录")
+
+      (op backfill_retryable_failures
+        :zh "操作: backfill_retryable_failures — 可重试失败列表"
+        :logic-zh "逻辑: WHERE retry_count < max AND 冷却时间已过, 返回 session_ids")
+
+      (op backfill_retryable_failures_no_cooldown
+        :zh "操作: backfill_retryable_failures_no_cooldown — 可重试数(无冷却)"
+        :logic-zh "逻辑: COUNT WHERE retry_count < max (不检查冷却)")
+
+      :notes ("游标式回填查询(跨表)")
+
+      (op conversations_missing_summary_cursor
+        :zh "操作: conversations_missing_summary_cursor — 缺少摘要的会话(游标)"
+        :logic-zh "逻辑: SELECT rowid, id FROM conversations WHERE 无摘要, rowid > 游标")
+
+      (op conversations_needing_topic_vectors_cursor
+        :zh "操作: conversations_needing_topic_vectors_cursor — 需要主题向量的会话(游标)"
+        :logic-zh "逻辑: SELECT rowid, id WHERE 有 embedding 但无主题向量, rowid > 游标")
+
+      (op conversations_missing_summary_count
+        :zh "操作: conversations_missing_summary_count — 缺摘要会话数"
+        :logic-zh "逻辑: COUNT 无摘要的会话(user/worker 类型)")
+
+      (op conversations_needing_topic_vectors_count
+        :zh "操作: conversations_needing_topic_vectors_count — 需主题向量会话数"
+        :logic-zh "逻辑: COUNT 有 embedding 但无主题向量的会话"))
+
+    (table beacons
+      :zh "表: beacons — 信标(代码符号聚合点)"
+
+      (op beacon_list
+        :zh "操作: beacon_list — 列出所有信标"
+        :logic-zh "逻辑: SELECT + LEFT JOIN beacon_nodes 统计 node_count")
+
+      (op beacon_ensure
+        :zh "操作: beacon_ensure — 确保信标存在"
+        :logic-zh "逻辑: INSERT OR IGNORE + 返回 id (已有或新建)")
+
+      (op beacon_increment_harvest
+        :zh "操作: beacon_increment_harvest — 采集计数 +1"
+        :logic-zh "逻辑: UPDATE harvest_count + 1, 返回新计数")
+
+      (op beacon_set_description
+        :zh "操作: beacon_set_description — 设置描述")
+
+      (op beacon_search
+        :zh "操作: beacon_search — 搜索信标"
+        :logic-zh "逻辑: 在 name + description + symbol_name 上 LIKE 搜索")
+
+      (op beacon_cleanup_empty
+        :zh "操作: beacon_cleanup_empty — 清理空信标"
+        :logic-zh "逻辑: DELETE 无 beacon_nodes 的信标"))
+
+    (table beacon_nodes
+      :zh "表: beacon_nodes — 信标节点(代码符号)"
+
+      (op beacon_node_upsert
+        :zh "操作: beacon_node_upsert — 信标节点 upsert"
+        :on-conflict-zh "冲突: (beacon_id, repo, file_path, symbol_name) DO UPDATE SET annotation(COALESCE)")
+
+      (op beacon_nodes_delete_file
+        :zh "操作: beacon_nodes_delete_file — 删除文件对应节点"
+        :logic-zh "逻辑: DELETE WHERE repo AND file_path")
+
+      (op beacon_map
+        :zh "操作: beacon_map — 查看信标映射"
+        :logic-zh "逻辑: JOIN beacons ON name → SELECT 节点 + 可选的 ast_nodes 注释")
+
+      (op beacon_node_annotate
+        :zh "操作: beacon_node_annotate — 注解节点"
+        :logic-zh "逻辑: 通过信标名 + 符号 JOIN 更新 annotation"))
+
+    (table consumer_watermarks
+      :zh "表: consumer_watermarks — 消费者水位(幂等进度)"
+
+      (op watermark_get
+        :zh "操作: watermark_get — 获取水位"
+        :logic-zh "逻辑: SELECT msg_id, time WHERE consumer AND session")
+
+      (op watermark_advance_time
+        :zh "操作: watermark_advance_time — 按时间推进水位(upsert)"
+        :on-conflict-zh "冲突: (consumer_name, session_id) DO UPDATE SET last_processed_time")
+
+      (op watermark_advance_msg_id
+        :zh "操作: watermark_advance_msg_id — 按消息 ID 推进水位(upsert)"
+        :on-conflict-zh "冲突: (consumer_name, session_id) DO UPDATE SET last_processed_msg_id")
+
+      (op watermark_advance_full
+        :zh "操作: watermark_advance_full — 全字段推进(可选字段 COALESCE)"
+        :logic-zh "逻辑: UPSERT + 通过 COALESCE 更新可选字段")
+
+      (op watermark_list
+        :zh "操作: watermark_list — 列出消费者的所有水位"
+        :logic-zh "逻辑: SELECT session_id, msg_id, time WHERE consumer"))
+
+    (table message_labels
+      :zh "表: message_labels — 消息标签"
+
+      (op label_set
+        :zh "操作: label_set — 设置单个标签(upsert)"
+        :on-conflict-zh "冲突: (message_id, label) DO UPDATE SET value, source")
+
+      (op label_set_batch
+        :zh "操作: label_set_batch — 批量设置标签"
+        :logic-zh "逻辑: 事务循环, 每个标签 INSERT OR REPLACE")
+
+      (op label_get
+        :zh "操作: label_get — 取单条消息的标签"
+        :logic-zh "逻辑: SELECT label, value, source WHERE message_id")
+
+      (op label_get_batch
+        :zh "操作: label_get_batch — 批量取多条消息的标签"
+        :logic-zh "逻辑: IN 子句批量 SELECT, 按 message_id 分组")
+
+      (op label_find_messages
+        :zh "操作: label_find_messages — 按标签查消息"
+        :logic-zh "逻辑: SELECT message_id WHERE label AND 可选 value"))
+
+    (table message_translations
+      :zh "表: message_translations — 消息译文"
+
+      (op insert_translation
+        :zh "操作: insert_translation — 写入译文(upsert)"
+        :on-conflict-zh "冲突: (message_id) DO UPDATE SET translation, model, duration_ms")
+
+      (op get_translation
+        :zh "操作: get_translation — 取译文"
+        :logic-zh "逻辑: SELECT translation, target_lang WHERE message_id")
+
+      (op has_translation
+        :zh "操作: has_translation — 判断是否已译"))))

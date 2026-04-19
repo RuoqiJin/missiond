@@ -1,0 +1,122 @@
+(zh
+  :header ("MissionD — 支柱: 独立部署服务"
+           "从 intent.lisp 拆分以支持并行加载"
+           "父文件: intent.lisp")
+
+  (pillar standalone
+    :zh "支柱: 独立部署服务"
+    (purpose :zh "可独立部署的服务与客户端包")
+
+    (component skill-store
+      :zh "组件: 技能商店"
+      (routes
+        :zh "路由"
+        (auth :zh "路由: 认证")
+        (skills :zh "路由: 技能")
+        (invoke :zh "路由: 调用")
+        (creator :zh "路由: 创作者")
+        (subscriptions :zh "路由: 订阅"))
+      (services
+        :zh "服务"
+        (billing :zh "服务: 计费")
+        (defense :zh "服务: 防护")
+        (executor :zh "服务: 执行器")
+        (llm-proxy :zh "服务: LLM 代理")))
+
+    (component missiond-attach
+      :zh "组件: missiond-attach 附加工具")
+
+    (component missiond-runner
+      :zh "组件: missiond-runner 运行器")
+
+    (component semantic-terminal-napi
+      :zh "组件: semantic-terminal-napi 语义终端 N-API 绑定")
+
+    (component board-frontend
+      :zh "组件: 看板前端"
+      (api-routes
+        :zh "API 路由"
+        (route "/api/slots"
+          :zh "路由: /api/slots")
+        (route "/api/tasks"
+          :zh "路由: /api/tasks")
+        (route "/api/conversations"
+          :zh "路由: /api/conversations"
+          :note-zh "注: project 参数透传至 mission_conversation_list; commit 5671c95")
+        (route "/api/kb"
+          :zh "路由: /api/kb"
+          :note-zh "注: project 参数透传至 mission_kb_query/mission_kb_list; commit 5671c95"
+          (method PATCH
+            :zh "方法: PATCH"
+            :action-zh "动作: kb_update(key, project_id) — 空串清除归属"
+            :returns-zh "返回: 来自 mission_kb_update 的 ToolResult"))
+        (route "/api/projects"
+          :zh "路由: /api/projects"
+          :returns-zh "返回: Vec<ProjectInfo>(含 lispFiles/lispCount/githubUrl)")
+        (route "/api/questions"
+          :zh "路由: /api/questions")
+        (route "/api/timeline/events"
+          :zh "路由: /api/timeline/events")
+        (route "/api/architecture"
+          :zh "路由: /api/architecture")
+        (route "/api/pty/spawn"
+          :zh "路由: /api/pty/spawn")
+        (route "/api/pty/screen"
+          :zh "路由: /api/pty/screen")
+        (route "/api/pty/confirm"
+          :zh "路由: /api/pty/confirm")
+        (route "/api/system/health"
+          :zh "路由: /api/system/health")
+        (route "/api/system/llm-traces"
+          :zh "路由: /api/system/llm-traces")
+        (route "/api/deploy/status"
+          :zh "路由: /api/deploy/status"))
+
+      (ui-components
+        :zh "UI 组件"
+        (component Conversations
+          :zh "组件: Conversations 会话面板"
+          (state projectFilter
+            :zh "状态: projectFilter")
+          (state projects
+            :zh "状态: projects")
+          (widget project-filter-select
+            :zh "控件: 项目筛选下拉"
+            :shows-zh "展示: 按 conversation_count 排序的活跃项目")
+          (note :zh "注: viewMode 联合类型新增 jarvis — 修复既有构建错误 (commit ac96b3c)"))
+
+        (component KnowledgeBase
+          :zh "组件: KnowledgeBase 知识库面板"
+          (state activeProject
+            :zh "状态: activeProject")
+          (state projects
+            :zh "状态: projects")
+          (widget project-filter-pills
+            :zh "控件: 项目筛选药丸按钮"
+            :note-zh "注: commit 3c10d21: '__unclassified__' 药丸为客户端过滤(不传后端), filter: !e.projectId")
+          (widget per-entry-project-selector
+            :zh "控件: 单条目项目选择器"
+            :location-zh "位置: KBEntryCard — 每张卡片底部 meta 行"
+            :type-zh "类型: <select> 下拉"
+            :options-zh "选项: 未分类(value='')、各 ProjectConfig.id"
+            :style-zh "样式: 无项目 border-neutral-700/text-neutral-500; 有项目 border-cyan-500/30 text-cyan-400"
+            :interaction-zh "交互: onChange → handleSetProject(key, projectId|null) → PATCH /api/kb → 乐观更新 state; 失败时 fetchEntries 回滚"))
+
+        (component SystemDashboard
+          :zh "组件: SystemDashboard 系统仪表盘"
+          (sub-component ProjectsPanel
+            :zh "子组件: ProjectsPanel 项目面板"
+            :layout-zh "布局: grid 1/2/3 列响应式"
+            :sort-zh "排序: 活跃优先 → lispCount 降序 → 字母序"
+            :note-zh "注: githubUrl 从 git@github.com:X/Y.git 转换为 https://github.com/X/Y")
+          :note-zh "注: ProjectsPanel 置于 MemoryDashboard 之前(最顶部折叠区); collapsed 默认展开")))
+
+    (component node-client
+      :zh "组件: Node 客户端"
+      (modules
+        :zh "模块"
+        (client :zh "模块: client 客户端")
+        (daemon :zh "模块: daemon 守护进程")
+        (binary :zh "模块: binary 二进制管理")
+        (pty :zh "模块: pty 伪终端")
+        (types :zh "模块: types 类型定义")))))

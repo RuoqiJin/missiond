@@ -1,0 +1,252 @@
+(zh
+  :header (""
+           "MissionD 数据库层 — 计算基础设施 (SQLite)"
+           "slot_sessions、slot_tasks、daemon_state、tasks、inbox、events"
+           "")
+
+  (pattern crud-gateway
+    :zh "模式: crud-gateway"
+
+    (table slot_sessions
+      :zh "表: slot_sessions"
+      :notes ("" "表: slot_sessions" "")
+
+      (col slot_id :zh "列: slot_id  主键")
+      (col session_id :zh "列: session_id")
+      (col updated_at :zh "列: updated_at")
+
+      (op get_slot_session
+        :zh "操作: get_slot_session (custom)"
+        :logic-zh "逻辑: 根据 slot_id 查询 session_id")
+
+      (op set_slot_session
+        :zh "操作: set_slot_session (upsert)"
+        :on-conflict-zh "冲突策略: (slot_id) DO UPDATE SET session_id = ?2, updated_at = ?3")
+
+      (op delete_slot_session
+        :zh "操作: delete_slot_session (delete)")
+
+      (op get_all_slot_sessions
+        :zh "操作: get_all_slot_sessions (custom)"
+        :logic-zh "逻辑: SELECT slot_id, session_id FROM slot_sessions")
+
+      (op get_slot_for_session
+        :zh "操作: get_slot_for_session (custom)"
+        :logic-zh "逻辑: 根据 session_id 查询 slot_id")
+
+      (op cleanup_pty_placeholder
+        :zh "操作: cleanup_pty_placeholder (custom)"
+        :logic-zh "逻辑: 清理以 pty-placeholder 开头的 session_id"))
+
+    (table slot_tasks
+      :zh "表: slot_tasks"
+      :notes ("" "表: slot_tasks" "")
+
+      (col id :zh "列: id  主键")
+      (col slot_id :zh "列: slot_id")
+      (col task_type :zh "列: task_type")
+      (col status :zh "列: status  默认 'pending'")
+      (col prompt_summary :zh "列: prompt_summary  可空")
+      (col source_sessions :zh "列: source_sessions  可空")
+      (col output_count :zh "列: output_count  默认 0")
+      (col created_at :zh "列: created_at")
+      (col started_at :zh "列: started_at  可空")
+      (col completed_at :zh "列: completed_at  可空")
+      (col duration_ms :zh "列: duration_ms  可空")
+      (col error :zh "列: error  可空")
+      (col conversation_id :zh "列: conversation_id  可空")
+
+      (idx idx_slot_tasks_slot :zh "索引: idx_slot_tasks_slot (slot_id)")
+      (idx idx_slot_tasks_type :zh "索引: idx_slot_tasks_type (task_type)")
+      (idx idx_slot_tasks_created :zh "索引: idx_slot_tasks_created (created_at)")
+
+      (row-type SlotTaskRow
+        :zh "行类型: SlotTaskRow → SlotTask")
+
+      (op insert_slot_task
+        :zh "操作: insert_slot_task (insert-struct)")
+
+      (op slot_task_set_running
+        :zh "操作: slot_task_set_running (update)"
+        :set-zh "设置: status='running', started_at=datetime('now')")
+
+      (op slot_task_set_completed
+        :zh "操作: slot_task_set_completed (update)"
+        :set-zh "设置: status='completed', completed_at=datetime('now'), output_count")
+
+      (op slot_task_set_failed
+        :zh "操作: slot_task_set_failed (update)"
+        :set-zh "设置: status='failed', completed_at=datetime('now'), error")
+
+      (op get_running_slot_task
+        :zh "操作: get_running_slot_task (custom)"
+        :logic-zh "逻辑: WHERE slot_id AND status=running 查询 id")
+
+      (op last_completed_slot_task_at
+        :zh "操作: last_completed_slot_task_at (custom)"
+        :logic-zh "逻辑: 按 task_type 取 completed_at 最大 epoch")
+
+      (op list_slot_tasks
+        :zh "操作: list_slot_tasks (custom)"
+        :logic-zh "逻辑: 动态 WHERE 可选过滤 + ORDER BY created_at DESC")
+
+      (op slot_task_stats
+        :zh "操作: slot_task_stats (custom)"
+        :logic-zh "逻辑: 多维聚合 by_status / by_type / avg_duration")
+
+      (op reap_stale_slot_tasks
+        :zh "操作: reap_stale_slot_tasks (custom)"
+        :logic-zh "逻辑: UPDATE running → failed WHERE age > max_age_secs")
+
+      (op find_stale_decision_tasks
+        :zh "操作: find_stale_decision_tasks (custom)"
+        :logic-zh "逻辑: 查询超时的 pending+running 决策任务")
+
+      (op cleanup_orphan_slot_tasks
+        :zh "操作: cleanup_orphan_slot_tasks (custom)"
+        :logic-zh "逻辑: UPDATE running → failed WHERE 槽位不在活跃槽位中"))
+
+    (table daemon_state
+      :zh "表: daemon_state (键值存储)"
+      :notes ("" "表: daemon_state (键值存储)" "")
+
+      (col key :zh "列: key  主键")
+      (col value :zh "列: value")
+      (col updated_at :zh "列: updated_at")
+
+      (op daemon_state_get
+        :zh "操作: daemon_state_get (custom)"
+        :logic-zh "逻辑: 查询 value 并解析为 i64")
+
+      (op daemon_state_set
+        :zh "操作: daemon_state_set (upsert)"
+        :on-conflict-zh "冲突策略: (key) DO UPDATE SET value = ?2, updated_at = ?3"))
+
+    (table tasks
+      :zh "表: tasks (任务队列)"
+      :notes ("" "表: tasks (任务队列)" "")
+
+      (col id :zh "列: id  主键")
+      (col role :zh "列: role")
+      (col prompt :zh "列: prompt")
+      (col status :zh "列: status  默认 'queued'")
+      (col manual :zh "列: manual  默认 0")
+      (col slot_id :zh "列: slot_id  可空")
+      (col session_id :zh "列: session_id  可空")
+      (col result :zh "列: result  可空")
+      (col error :zh "列: error  可空")
+      (col created_at :zh "列: created_at")
+      (col started_at :zh "列: started_at  可空")
+      (col finished_at :zh "列: finished_at  可空")
+      (col notified_at :zh "列: notified_at  可空")
+
+      (idx idx_tasks_status :zh "索引: idx_tasks_status (status)")
+      (idx idx_tasks_role :zh "索引: idx_tasks_role (role)")
+      (idx idx_tasks_created :zh "索引: idx_tasks_created (created_at)")
+
+      (row-type TaskRow
+        :zh "行类型: TaskRow → Task  含 status 枚举映射")
+
+      (op insert_task
+        :zh "操作: insert_task (insert-struct)")
+
+      (op get_task
+        :zh "操作: get_task (select-one)")
+
+      (op get_tasks_by_status
+        :zh "操作: get_tasks_by_status (custom)"
+        :logic-zh "逻辑: WHERE status = status.as_str()")
+
+      (op get_queued_tasks_by_role
+        :zh "操作: get_queued_tasks_by_role (custom)"
+        :logic-zh "逻辑: WHERE role AND status=queued ORDER BY created_at ASC")
+
+      (op requeue_running_tasks_for_slot
+        :zh "操作: requeue_running_tasks_for_slot (custom)"
+        :logic-zh "逻辑: UPDATE running → queued WHERE slot_id 并清空 session_id")
+
+      (op get_all_tasks
+        :zh "操作: get_all_tasks (custom)"
+        :logic-zh "逻辑: SELECT * ORDER BY created_at DESC LIMIT")
+
+      (op ack_completed_tasks
+        :zh "操作: ack_completed_tasks (custom)"
+        :logic-zh "逻辑: 取出 completed/failed 未通知项并写入 notified_at")
+
+      (op update_task
+        :zh "操作: update_task (custom)"
+        :logic-zh "逻辑: 动态 SET 可选字段"))
+
+    (table inbox
+      :zh "表: inbox"
+      :notes ("" "表: inbox" "")
+
+      (col id :zh "列: id  主键")
+      (col task_id :zh "列: task_id")
+      (col from_role :zh "列: from_role")
+      (col content :zh "列: content")
+      (col read :zh "列: read  默认 0")
+      (col created_at :zh "列: created_at")
+
+      (idx idx_inbox_read :zh "索引: idx_inbox_read (read)")
+      (idx idx_inbox_created :zh "索引: idx_inbox_created (created_at)")
+
+      (row-type InboxMessageRow
+        :zh "行类型: InboxMessageRow → InboxMessage")
+
+      (op insert_inbox_message
+        :zh "操作: insert_inbox_message (insert-struct)")
+
+      (op get_inbox_messages
+        :zh "操作: get_inbox_messages (custom)"
+        :logic-zh "逻辑: 可选 WHERE read=0, ORDER BY created_at DESC")
+
+      (op mark_inbox_read
+        :zh "操作: mark_inbox_read (update)"
+        :set-zh "设置: read=1"))
+
+    (table events
+      :zh "表: events"
+      :notes ("" "表: events" "")
+
+      (col id :zh "列: id  主键")
+      (col task_id :zh "列: task_id")
+      (col type :zh "列: type")
+      (col data :zh "列: data  jsonb 可空")
+      (col timestamp :zh "列: timestamp")
+
+      (idx idx_events_task :zh "索引: idx_events_task (task_id)")
+      (idx idx_events_timestamp :zh "索引: idx_events_timestamp (timestamp)")
+
+      (row-type TaskEventRow
+        :zh "行类型: TaskEventRow → TaskEvent  含 type 枚举映射")
+
+      (op insert_event
+        :zh "操作: insert_event (custom)"
+        :logic-zh "逻辑: INSERT 自增 ID + epoch 时间戳")
+
+      (op get_events_by_task
+        :zh "操作: get_events_by_task (select-many)"
+        :order-zh "排序: timestamp ASC"))
+
+    (helpers
+      :zh "辅助函数"
+      :notes ("── 辅助函数 ──")
+
+      (fn task_status_to_str
+        :zh "函数: task_status_to_str (TaskStatus → &'static str)"
+        :map-zh "映射: Queued→queued, Running→running, Completed→completed, Failed→failed")
+
+      (fn task_status_from_str
+        :zh "函数: task_status_from_str (&str → TaskStatus)"
+        :map-zh "映射: queued→Queued, running→Running, completed→Completed, failed→Failed"
+        :default-zh "默认值: Queued")
+
+      (fn event_type_to_str
+        :zh "函数: event_type_to_str (EventType → &'static str)"
+        :map-zh "映射: TaskCreated/TaskStarted/TaskCompleted/TaskFailed/MessageSent/MessageReceived → 对应 snake_case 字符串")
+
+      (fn event_type_from_str
+        :zh "函数: event_type_from_str (&str → EventType)"
+        :map-zh "映射: task_created/task_started/task_completed/task_failed/message_sent/message_received → 对应枚举"
+        :default-zh "默认值: TaskCreated"))))

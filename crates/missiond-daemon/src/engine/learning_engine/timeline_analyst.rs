@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
 use tracing::{debug, info, warn};
 
-use crate::event_bus::{DaemonEvent, TraceContext};
 use crate::llm_gateway::call_gemini_for_flow;
 use crate::state::AppState;
+use missiond_core::event::events::SystemEvent;
 use missiond_core::db::TimelineRow;
 
 const ANALYSIS_INTERVAL_SECS: i64 = 12 * 3600; // 12 hours
@@ -309,20 +309,17 @@ async fn execute_insights(state: &AppState, insights: &[Insight]) -> usize {
         chrono::Utc::now().format("%Y%m%d-%H%M")
     );
 
+    let _ = trace_id; // v2 bus: trace_id carried via SpanContext when needed.
     for insight in insights {
-        // Publish InsightGenerated to Timeline (feedback loop: insights enter the timeline)
-        state.event_bus.publish_traced(
-            DaemonEvent::InsightGenerated {
+        // Publish InsightGenerated to bus (feedback loop: insights enter the log).
+        let _ = state
+            .bus
+            .publish_system(SystemEvent::InsightGenerated {
                 category: insight.category.clone(),
                 priority: insight.priority.clone(),
                 title: insight.title.clone(),
-            },
-            TraceContext {
-                trace_id: Some(trace_id.clone()),
-                summary: Some(format!("[L4] {}", insight.title)),
-                ..Default::default()
-            },
-        );
+            })
+            .await;
 
         match insight.action.as_str() {
             "create_task" => {

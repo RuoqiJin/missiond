@@ -13,10 +13,9 @@ mod llm;
 mod workers;
 
 // ── Root-level modules ──
+mod bus;
 #[allow(dead_code)]
 mod control_tree;
-mod event_bus;
-mod event_router;
 mod events_sync;
 mod handlers;
 mod helpers;
@@ -60,7 +59,7 @@ use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, error, info, warn};
 
 // Re-imports from extracted modules
-use aiops::{health_scan, process_incident};
+use aiops::health_scan;
 use autopilot::autopilot_tick;
 use embedding_worker::init_embedding_provider;
 use helpers::*;
@@ -84,119 +83,6 @@ impl AppState {
     async fn call_tool_inner(&self, name: &str, args: Value) -> Result<ToolResult> {
         handlers::dispatch_tool(self, name, args).await
     }
-}
-
-/// Phase 6: Timeline Writer — single consumer for MPSC, batch-writes to DB,
-/// then broadcasts TimelineEvent to all consumers + serializes to WS String channel.
-async fn run_timeline_writer(
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<event_bus::TimelineEntry>,
-    store: Arc<dyn missiond_core::db::traits::MissionStore>,
-    timeline_tx: broadcast::Sender<event_bus::TimelineEvent>,
-    ws_tx: broadcast::Sender<String>,
-) {
-    use event_bus::{TimelineEntry, TimelineEvent};
-
-    loop {
-        // Block until first event arrives
-        let first = match rx.recv().await {
-            Some(e) => e,
-            None => break, // Channel closed
-        };
-        let mut batch: Vec<TimelineEntry> = vec![first];
-
-        // Micro-batch: drain up to 100 ready events
-        while batch.len() < 100 {
-            match rx.try_recv() {
-                Ok(e) => batch.push(e),
-                Err(_) => break,
-            }
-        }
-
-        let ts = chrono::Utc::now().timestamp_millis();
-
-        // Split: ephemeral events skip DB, persistent events get written.
-        let (persistent, ephemeral): (Vec<TimelineEntry>, Vec<TimelineEntry>) =
-            batch.into_iter().partition(|e| !e.event.is_ephemeral());
-
-        // Ephemeral: broadcast to WS + internal consumers without DB persistence.
-        for entry in ephemeral {
-            let te = TimelineEvent {
-                seq: 0,
-                trace_id: entry.trace_id,
-                span_id: entry.span_id,
-                parent_span_id: entry.parent_span_id,
-                event: entry.event,
-                summary: entry.summary,
-                ts,
-            };
-            let _ = ws_tx.send(te.to_frontend_json());
-            let _ = timeline_tx.send(te);
-        }
-
-        // Persistent: batch-write to DB, then broadcast with assigned seq.
-        if persistent.is_empty() {
-            continue;
-        }
-
-        let db_entries: Vec<(
-            Option<String>,
-            String,
-            Option<String>,
-            String,
-            Option<String>,
-            String,
-        )> = persistent
-            .iter()
-            .map(|entry| {
-                let payload_json = entry.event.to_frontend_payload().to_string();
-                (
-                    entry.trace_id.clone(),
-                    entry.span_id.clone(),
-                    entry.parent_span_id.clone(),
-                    entry.event.wire_type().to_string(),
-                    entry.summary.clone(),
-                    payload_json,
-                )
-            })
-            .collect();
-
-        let params: Vec<(Option<&str>, &str, Option<&str>, &str, Option<&str>, &str)> = db_entries
-            .iter()
-            .map(|(t, s, p, e, sum, pay)| {
-                (
-                    t.as_deref(),
-                    s.as_str(),
-                    p.as_deref(),
-                    e.as_str(),
-                    sum.as_deref(),
-                    pay.as_str(),
-                )
-            })
-            .collect();
-
-        let seqs = match store.insert_timeline_batch(&params).await {
-            Ok(seqs) => seqs,
-            Err(e) => {
-                tracing::error!(error = %e, "Timeline Writer: batch insert failed");
-                continue;
-            }
-        };
-
-        for (entry, seq) in persistent.into_iter().zip(seqs) {
-            let te = TimelineEvent {
-                seq,
-                trace_id: entry.trace_id,
-                span_id: entry.span_id,
-                parent_span_id: entry.parent_span_id,
-                event: entry.event,
-                summary: entry.summary,
-                ts,
-            };
-            let _ = ws_tx.send(te.to_frontend_json());
-            let _ = timeline_tx.send(te);
-        }
-    }
-    tracing::warn!("Timeline Writer: MPSC channel closed, shutting down");
 }
 
 #[tokio::main]
@@ -356,6 +242,11 @@ async fn main() -> Result<()> {
         })
     };
 
+    // Preserve the PG pool for the v2 event bus bootstrap (Phase 6). The
+    // dynamic `MissionStore` trait object doesn't expose the pool directly.
+    #[cfg(feature = "postgres")]
+    let mut pg_pool_for_bus: Option<sqlx::PgPool> = None;
+
     let store: Arc<dyn missiond_core::db::traits::MissionStore> = {
         #[cfg(feature = "postgres")]
         {
@@ -369,6 +260,7 @@ async fn main() -> Result<()> {
             pg_store.fix_identity_sequences().await;
             info!("PostgreSQL store ready");
             let _ = db_stats_callback; // PG mode: latency tracked by sqlx instrumentation
+            pg_pool_for_bus = Some(pg_store.pool().clone());
             Arc::new(pg_store)
         }
 
@@ -463,28 +355,25 @@ async fn main() -> Result<()> {
     // PTY conversation logger: subscribe to manager events
     let pty_logger_rx = pty.subscribe();
 
-    // AIOps: incident event bus (capacity 500, try_send only — "宁丢不阻塞")
-    // Increased from 100 to handle MCP error burst scenarios without losing incidents.
-    let (incident_tx, incident_rx) =
+    // AIOps: webhook incidents arrive via WS and are forwarded to the v2 bus
+    // through this MPSC (the WS server is in missiond-core and cannot see
+    // the daemon-side `BusServices` directly).
+    let (incident_webhook_tx, mut incident_webhook_rx) =
         tokio::sync::mpsc::channel::<missiond_core::types::MissionIncident>(500);
 
-    // Embedding worker channel: event-driven, 0 CPU when idle
+    // Embedding worker channel: event-driven, 0 CPU when idle. Kept as an
+    // internal worker queue per deviation DC041 (no `EmbeddingEvent` domain
+    // in the 12 frozen domains — see `intent-event-bus.lisp` §4.2.a).
     let (embedding_tx, embedding_rx) = tokio::sync::mpsc::channel::<EmbeddingTask>(256);
 
-    // AST sync worker channel: code indexing pipeline (P2 HCE)
+    // AST sync worker channel: same story as embedding — internal queue only.
     let (ast_sync_tx, ast_sync_rx) = tokio::sync::mpsc::channel::<ast_sync_worker::AstSyncTask>(64);
 
     // Screenshot broker (coordinates browser-based PTY screenshots)
     let screenshot_broker =
         missiond_core::ws::ScreenshotBroker::new(std::time::Duration::from_secs(5));
 
-    // Phase 6: Timeline architecture
-    // MPSC for event ingestion, broadcast<TimelineEvent> for fan-out to consumers + WS
-    let (timeline_mpsc_tx, timeline_mpsc_rx) =
-        tokio::sync::mpsc::unbounded_channel::<event_bus::TimelineEntry>();
-    let (timeline_broadcast_tx, _) = broadcast::channel::<event_bus::TimelineEvent>(512);
-
-    // Frontend event stream: TimelineEvent → JSON String → WS /events
+    // Frontend event stream: bus → ws_bridge → JSON string → WS /events
     let (frontend_events_tx, _) = broadcast::channel::<String>(256);
 
     // WebSocket server (PTY attach + Tasks events + AIOps webhooks + EventBus stream)
@@ -496,7 +385,7 @@ async fn main() -> Result<()> {
         pty_manager: Some(Arc::clone(&pty)),
         cc_tasks_watcher: Some(Arc::clone(&cc_tasks)),
         screenshot_broker: Some(Arc::clone(&screenshot_broker)),
-        incident_tx: Some(incident_tx.clone()),
+        incident_tx: Some(incident_webhook_tx.clone()),
         frontend_events_tx: Some(frontend_events_tx.clone()),
         db: Some(Arc::clone(&store)),
         context_enricher: Arc::clone(&context_enricher_slot),
@@ -541,8 +430,6 @@ async fn main() -> Result<()> {
     }
     let pty_session_uuids_arc = Arc::new(tokio::sync::RwLock::new(pty_uuids));
 
-    let event_bus_instance = Arc::new(event_bus::EventBus::new(timeline_mpsc_tx));
-
     // M1 Step 6: Skill ingest via async store (moved from pre-store section)
     let ingested = missiond_core::skill::ingest_skills(store.as_ref(), &skills_dir).await;
     info!(count = ingested, "Skill engine: ingested skills into DB");
@@ -583,6 +470,27 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    // Phase 6: bootstrap the v2 event bus (Log + BlobStore + CursorStore +
+    // Dispatcher + ControlGate adapter + metrics). The dispatcher tail loop
+    // and metrics emitter are started later once the global shutdown signal
+    // is in scope.
+    #[cfg(feature = "postgres")]
+    let bus_services = {
+        let pool = pg_pool_for_bus
+            .as_ref()
+            .ok_or_else(|| anyhow!("v2 event bus requires the PG pool; postgres feature missing"))?
+            .clone();
+        bus::BusServices::bootstrap(pool, &control_manager_arc)
+            .await
+            .map_err(|e| anyhow!("BusServices::bootstrap failed: {}", e))?
+    };
+    #[cfg(not(feature = "postgres"))]
+    let bus_services: Arc<bus::BusServices> = {
+        return Err(anyhow!(
+            "Phase 6 v2 event bus requires the postgres feature"
+        ));
+    };
 
     let state_cc_tasks = Arc::clone(&cc_tasks);
 
@@ -690,7 +598,6 @@ async fn main() -> Result<()> {
         gemini: {
             // Check llm.yaml for provider config
             let llm_yaml = default_mission_home().join("llm.yaml");
-            let event_tx = event_bus_instance.sender(); // mpsc::UnboundedSender<TimelineEntry>
             if llm_yaml.exists() {
                 if let Ok(content) = std::fs::read_to_string(&llm_yaml) {
                     if let Ok(config) =
@@ -699,14 +606,12 @@ async fn main() -> Result<()> {
                         if config.provider == "gemini-cli" {
                             let cli_cfg = config.gemini_cli.unwrap_or_default();
                             info!(binary = %cli_cfg.binary, model = %cli_cfg.model, "LLM provider: gemini-cli (PTY transport)");
-                            // API key pool: hot-reloads from llm.yaml on each call, no restart needed
                             let initial_count = gemini_cli::resolve_apikey_pool().len();
                             info!(
                                 count = initial_count,
                                 "Gemini API key pool: {} keys (hot-reload enabled)", initial_count
                             );
                             let api_key_pool = std::sync::Arc::new(gemini_cli::ApiKeyPool::new());
-                            // PTY transport: uses GeminiPtyDriver → PTYManager (unified)
                             let pty_cwd = std::env::current_dir()
                                 .unwrap_or_else(|_| std::path::PathBuf::from("/"));
                             let gemini_driver_for_transport =
@@ -732,25 +637,26 @@ async fn main() -> Result<()> {
                                     Some(api_key_pool),
                                 )
                                 .with_pty(pty_transport),
-                                event_tx,
                             )
+                            .with_bus(Arc::clone(&bus_services))
                         } else {
                             info!(provider = %config.provider, "LLM provider: HTTP router");
-                            gemini_client::GeminiClient::new(event_tx)
+                            gemini_client::GeminiClient::new().with_bus(Arc::clone(&bus_services))
                         }
                     } else {
-                        gemini_client::GeminiClient::new(event_tx)
+                        gemini_client::GeminiClient::new().with_bus(Arc::clone(&bus_services))
                     }
                 } else {
-                    gemini_client::GeminiClient::new(event_tx)
+                    gemini_client::GeminiClient::new().with_bus(Arc::clone(&bus_services))
                 }
             } else {
-                gemini_client::GeminiClient::new(event_tx)
+                gemini_client::GeminiClient::new().with_bus(Arc::clone(&bus_services))
             }
         },
         minimax: {
-            let gw = minimax_gateway::create_minimax_gateway(event_bus_instance.sender());
+            let gw = minimax_gateway::create_minimax_gateway();
             if let Some((handle, gateway)) = gw {
+                let gateway = gateway.with_bus(Arc::clone(&bus_services));
                 info!("MinimaxGateway initialized");
                 tokio::spawn(gateway.run());
                 Some(handle)
@@ -760,8 +666,8 @@ async fn main() -> Result<()> {
             }
         },
         sonnet: {
-            let (handle, gateway) =
-                sonnet_gateway::create_sonnet_gateway(event_bus_instance.sender());
+            let (handle, gateway) = sonnet_gateway::create_sonnet_gateway();
+            let gateway = gateway.with_bus(Arc::clone(&bus_services));
             info!("SonnetGateway initialized");
             tokio::spawn(gateway.run());
             Some(handle)
@@ -784,8 +690,7 @@ async fn main() -> Result<()> {
         skill_embedding_cache: missiond_core::embedding::new_cache(),
         kb_search_cache: missiond_core::embedding::new_cache(),
         embedding_tx: embedding_tx,
-        incident_tx: incident_tx.clone(),
-        event_bus: Arc::clone(&event_bus_instance),
+        bus: Arc::clone(&bus_services),
         stats: Arc::clone(&daemon_stats),
         prompts: Arc::new(prompts::PromptStore::load()),
         briefing_notify: Arc::new(tokio::sync::Notify::new()),
@@ -836,27 +741,37 @@ async fn main() -> Result<()> {
         gemini_watch_handle: Arc::new(tokio::sync::Mutex::new(None)),
         gemini_watch_attempts: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         gemini_watch_started_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-        cursor_ack_tx: {
-            // Ack-based cursor: message_handler acks after PG INSERT → cursor_persist_loop persists.
-            // This eliminates the data loss window where cursor advances before messages reach PG.
-            // Ack routing: .json → GeminiCliWatcher, .jsonl → CCTasksWatcher (prevents cross-talk).
-            let (ack_tx, mut ack_rx) = tokio::sync::mpsc::unbounded_channel::<(String, u64)>();
+        conversation_cursor_map: {
+            // Internalized cursor persistence (Phase 8 I005): conversation_logger
+            // writes `path → offset` into the map; this drain task persists to
+            // the correct watcher. Replaces the old `cursor_ack_tx` MPSC.
+            let map: Arc<tokio::sync::Mutex<HashMap<String, u64>>> =
+                Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+            let map_task = Arc::clone(&map);
             let cc_tasks_ref = Arc::clone(&state_cc_tasks);
             let gemini_tasks_ref = Arc::clone(&gemini_tasks);
             tokio::spawn(async move {
-                while let Some((path, offset)) = ack_rx.recv().await {
-                    if path.ends_with(".json") {
-                        // Gemini CLI session file → route to GeminiCliWatcher
-                        let watcher = gemini_tasks_ref.lock().await;
-                        watcher.persist_cursor_ack(&path, offset);
-                    } else {
-                        // JSONL file → route to CCTasksWatcher
-                        let watcher = cc_tasks_ref.lock().await;
-                        watcher.persist_cursor_ack(&path, offset);
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_millis(250));
+                loop {
+                    interval.tick().await;
+                    // Drain: swap out the current map, persist each entry.
+                    let entries: Vec<(String, u64)> = {
+                        let mut guard = map_task.lock().await;
+                        guard.drain().collect()
+                    };
+                    for (path, offset) in entries {
+                        if path.ends_with(".json") {
+                            let watcher = gemini_tasks_ref.lock().await;
+                            watcher.persist_cursor_ack(&path, offset);
+                        } else {
+                            let watcher = cc_tasks_ref.lock().await;
+                            watcher.persist_cursor_ack(&path, offset);
+                        }
                     }
                 }
             });
-            ack_tx
+            map
         },
     };
 
@@ -1113,6 +1028,20 @@ async fn main() -> Result<()> {
     // --- Background Workers (unified lifecycle via BackgroundWorker trait) ---
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
+    // Phase 6: start the v2 event-bus dispatcher + metrics emitter now that
+    // the shutdown signal is available. Held handle keeps the tasks alive
+    // until daemon exit (Phase 7 subscribers will attach to the topics).
+    let _bus_handle = bus_services
+        .start(shutdown_rx.clone())
+        .await
+        .map_err(|e| anyhow!("BusServices::start failed: {}", e))?;
+    info!("v2 event bus: dispatcher + metrics emitter started");
+
+    // Phase 7: spawn v2 subscribers (8 router consumers + 6 worker
+    // observers). They run alongside the v1 timeline subscribers until
+    // Phase 8 removes the v1 path.
+    bus::start_v2_subscribers(&bus_services, &state, shutdown_rx.clone());
+
     // Embedding Worker: event-driven actor (KB/Skill/Conv/AST embeddings + backfill)
     workers::spawn_worker(
         workers::sonnet::embedding_worker::EmbeddingLoopWorker { rx: embedding_rx },
@@ -1120,11 +1049,9 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     );
 
-    // Gemini request log subscriber (Timeline → DB persistence)
+    // Gemini request log subscriber (v2 bus → DB persistence)
     workers::spawn_worker(
-        workers::local::gemini_logger::GeminiLoggerWorker {
-            timeline_rx: timeline_broadcast_tx.subscribe(),
-        },
+        workers::local::gemini_logger::GeminiLoggerWorker,
         Arc::new(state.clone()),
         shutdown_rx.clone(),
     );
@@ -1146,9 +1073,7 @@ async fn main() -> Result<()> {
             shutdown_rx.clone(),
         );
         workers::spawn_worker(
-            translation_worker::TranslationWorker {
-                timeline_rx: timeline_broadcast_tx.subscribe(),
-            },
+            translation_worker::TranslationWorker,
             Arc::new(state.clone()),
             shutdown_rx.clone(),
         );
@@ -1253,20 +1178,28 @@ async fn main() -> Result<()> {
     }
     info!("AST embedding health monitor started (15min interval)");
 
-    // --- P3: Event-driven handlers via EventBus (Phase 2) ---
-    // Extracted to event_router.rs to prevent main.rs from becoming a God Module (R4).
-    event_router::start_event_consumers(&state, &timeline_broadcast_tx, shutdown_rx.clone());
-
-    // --- Phase 6: Timeline Writer Task ---
-    // MPSC → SQLite batch INSERT (get seq) → broadcast<TimelineEvent> + broadcast<String> (WS)
+    // --- Phase 8: WS bridge — tail event_log and push v1-compatible JSON ---
+    // to `frontend_events_tx`, preserving the browser WS wire contract.
     {
-        let rx = timeline_mpsc_rx;
-        let timeline_tx = timeline_broadcast_tx.clone();
-        let ws_tx = frontend_events_tx.clone();
-        let store_clone = Arc::clone(&state.store);
-        tokio::spawn(async move {
-            run_timeline_writer(rx, store_clone, timeline_tx, ws_tx).await;
-        });
+        let pool = pg_pool_for_bus
+            .as_ref()
+            .ok_or_else(|| anyhow!("ws bridge requires the PG pool"))?
+            .clone();
+        let blob = bus_services.blob_store.clone();
+        let _bridge = bus::spawn_ws_bridge(pool, blob, frontend_events_tx.clone(), shutdown_rx.clone());
+    }
+
+    // --- Phase 8: Retention + orphan-subscription cleanup daily cron ---
+    {
+        let pool = pg_pool_for_bus
+            .as_ref()
+            .ok_or_else(|| anyhow!("retention cron requires the PG pool"))?
+            .clone();
+        let _cron = bus::spawn_retention_cron(
+            Arc::clone(&bus_services),
+            pool,
+            shutdown_rx.clone(),
+        );
     }
 
     // --- AST Sync Worker (P2 HCE) ---
@@ -1321,10 +1254,6 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 let snap = stats.snapshot();
-                let publish_count = s
-                    .event_bus
-                    .publish_count
-                    .load(std::sync::atomic::Ordering::Relaxed);
                 let memory_paused = s
                     .control_manager
                     .current()
@@ -1343,7 +1272,6 @@ async fn main() -> Result<()> {
                     "seq": -1,
                     "payload": {
                         "stats": snap,
-                        "event_bus": { "publish_count": publish_count },
                         "memory": {
                             "paused": memory_paused,
                             "fast_lane": fast_lane,
@@ -1356,30 +1284,36 @@ async fn main() -> Result<()> {
         });
     }
     info!(
-        "Timeline Writer + Health snapshot started (ws://*:{}/events)",
+        "WS bridge + Health snapshot started (ws://*:{}/events)",
         ws_port
     );
 
-    // Timeline TTL cleanup on startup
+    // Legacy `system_timeline` TTL cleanup still runs at startup for the
+    // 3-month read-only archive window (see execution lisp global-notes).
     {
         let store = Arc::clone(&state.store);
         tokio::spawn(async move {
             match store.cleanup_timeline_ttl(7).await {
                 Ok(deleted) if deleted > 0 => {
-                    info!(deleted, "Timeline: cleaned up old entries (>7 days)")
+                    info!(deleted, "system_timeline (legacy): cleaned up old entries (>7 days)")
                 }
                 _ => {}
             }
         });
     }
 
-    // AIOps Reactor: consume incident events, debounce, triage, create board tasks
+    // WS webhook → v2 bus bridge: the core WS server can't call into
+    // `BusServices` directly, so it forwards via `incident_webhook_tx`
+    // and this task re-publishes as `IncidentEvent::Reported`.
     {
-        let s = state.clone();
-        let mut rx = incident_rx;
+        let bus = Arc::clone(&bus_services);
         tokio::spawn(async move {
-            while let Some(incident) = rx.recv().await {
-                process_incident(&s, incident).await;
+            while let Some(incident) = incident_webhook_rx.recv().await {
+                let _ = bus
+                    .publish_incident(
+                        missiond_core::event::events::IncidentEvent::Reported { incident },
+                    )
+                    .await;
             }
         });
     }
@@ -1439,18 +1373,14 @@ async fn main() -> Result<()> {
 
     // Architecture maintenance worker — auto-updates YAML manifests on structural code changes
     workers::spawn_worker(
-        workers::sonnet::arch_maintenance_worker::ArchMaintenanceWorker {
-            timeline_rx: timeline_broadcast_tx.subscribe(),
-        },
+        workers::sonnet::arch_maintenance_worker::ArchMaintenanceWorker,
         Arc::new(state.clone()),
         shutdown_rx.clone(),
     );
 
     // Lisp survey worker — commit-triggered intent.lisp incremental maintenance
     workers::spawn_worker(
-        workers::sonnet::lisp_survey_worker::LispSurveyWorker {
-            timeline_rx: timeline_broadcast_tx.subscribe(),
-        },
+        workers::sonnet::lisp_survey_worker::LispSurveyWorker,
         Arc::new(state.clone()),
         shutdown_rx.clone(),
     );
@@ -1495,9 +1425,7 @@ async fn main() -> Result<()> {
     // Conversation Organizer — Stage 2 of Cognitive Pipeline
     // Repairs parent links, splices compaction fragments, emits SessionOrganized
     workers::spawn_worker(
-        workers::local::conversation_organizer::ConversationOrganizerWorker {
-            timeline_rx: timeline_broadcast_tx.subscribe(),
-        },
+        workers::local::conversation_organizer::ConversationOrganizerWorker,
         Arc::new(state.clone()),
         shutdown_rx.clone(),
     );
@@ -1505,9 +1433,7 @@ async fn main() -> Result<()> {
     // Tagger & Chunker — Stage 3 of Cognitive Pipeline
     // Extracts structured Turns from flat messages, applies noise labels
     workers::spawn_worker(
-        workers::local::tagger_chunker::TaggerChunkerWorker {
-            timeline_rx: timeline_broadcast_tx.subscribe(),
-        },
+        workers::local::tagger_chunker::TaggerChunkerWorker,
         Arc::new(state.clone()),
         shutdown_rx.clone(),
     );
@@ -1719,12 +1645,15 @@ async fn main() -> Result<()> {
                                 let events = std::mem::take(&mut pending_config_events);
                                 for (path, kind) in events {
                                     info!(path = %path, kind = %kind, "Config file changed");
-                                    watch_state.event_bus.publish(
-                                        event_bus::DaemonEvent::ConfigFileChanged {
-                                            path: path.clone(),
-                                            kind: kind.clone(),
-                                        },
-                                    );
+                                    let _ = watch_state
+                                        .bus
+                                        .publish_system(
+                                            missiond_core::event::events::SystemEvent::ConfigChanged {
+                                                path: path.clone(),
+                                                kind: kind.clone(),
+                                            },
+                                        )
+                                        .await;
 
                                     // Hot-reload prompts if a prompt file changed
                                     if path.contains("/prompts/") {

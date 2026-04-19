@@ -120,8 +120,14 @@ pub(crate) async fn health_scan(state: &AppState) {
                 created_at: chrono::Utc::now().to_rfc3339(),
             };
 
-            if let Err(e) = state.incident_tx.try_send(incident) {
-                warn!(server_id = %server_id, "Incident channel full, dropping health check: {}", e);
+            // v2 bus: IncidentEvent::Reported → IncidentEvent subscriber
+            // triages via `aiops::process_incident`.
+            if let Err(e) = state
+                .bus
+                .publish_incident(missiond_core::event::events::IncidentEvent::Reported { incident })
+                .await
+            {
+                warn!(server_id = %server_id, error = %e, "Failed to publish health-check incident");
             }
         }
     }
@@ -311,11 +317,12 @@ pub(crate) async fn process_incident(
                     "AIOps: incident → board task created"
                 );
                 // Notify autopilot
-                state
-                    .event_bus
-                    .publish(crate::event_bus::DaemonEvent::TaskCreated {
+                let _ = state
+                    .bus
+                    .publish_task(missiond_core::event::events::TaskEvent::Created {
                         task_id: String::new(),
-                    });
+                    })
+                    .await;
                 Some(task.id.to_string())
             }
             Err(e) => {
@@ -404,11 +411,12 @@ pub(crate) async fn create_pty_remediation_task(
                 "PTY remediation: Board task created for Opus slot"
             );
             // Notify autopilot to pick up immediately
-            state
-                .event_bus
-                .publish(crate::event_bus::DaemonEvent::TaskCreated {
+            let _ = state
+                .bus
+                .publish_task(missiond_core::event::events::TaskEvent::Created {
                     task_id: String::new(),
-                });
+                })
+                .await;
         }
         Err(e) => {
             error!(error = %e, "PTY remediation: failed to create Board task");

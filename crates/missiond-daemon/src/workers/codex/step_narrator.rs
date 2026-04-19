@@ -16,7 +16,7 @@ use serde::Deserialize;
 use tracing::{info, warn};
 
 use crate::codex_cli::CodexCli;
-use crate::event_bus::{DaemonEvent, TraceContext};
+use missiond_core::event::events::WorkerEvent;
 use crate::state::AppState;
 
 /// Messages per batch sent to GPT-5.4.
@@ -83,8 +83,8 @@ impl super::BackgroundWorker for StepNarratorWorker {
             "codex".to_string(),
             "gpt-5.4".to_string(),
             Duration::from_secs(180),
-            state.event_bus.sender(),
-        );
+        )
+        .with_bus(Arc::clone(&state.bus));
 
         info!("Step Narrator started (batch_size: {BATCH_SIZE}, poll: {POLL_INTERVAL_SECS}s)");
         tokio::time::sleep(Duration::from_secs(STARTUP_DELAY_SECS)).await;
@@ -157,19 +157,14 @@ async fn process_session(
           cursor = last_processed_id, batch = batch_index,
           "Step Narrator: starting session");
 
-    let trace_ctx = || TraceContext {
-        trace_id: Some(format!("narrator-{}", short_id)),
-        ..Default::default()
-    };
-
-    state.event_bus.publish_traced(
-        DaemonEvent::NarrationSessionStarted {
+    let _ = state
+        .bus
+        .publish_worker(WorkerEvent::NarrationSessionStarted {
             session_id: session_id.to_string(),
             total_messages: total_messages as usize,
             already_narrated,
-        },
-        trace_ctx(),
-    );
+        })
+        .await;
 
     let mut current_cursor = last_processed_id;
     let mut current_batch_index = batch_index;
@@ -247,16 +242,16 @@ async fn process_session(
                               narrated = count, duration_ms,
                               "Step Narrator: batch completed");
 
-                        state.event_bus.publish_traced(
-                            DaemonEvent::NarrationBatchCompleted {
+                        let _ = state
+                            .bus
+                            .publish_worker(WorkerEvent::NarrationBatchCompleted {
                                 session_id: session_id.to_string(),
                                 batch_index: current_batch_index as usize,
                                 processed_count: count,
                                 total_messages: total_messages as usize,
                                 duration_ms,
-                            },
-                            trace_ctx(),
-                        );
+                            })
+                            .await;
 
                         current_cursor = batch_last_id;
                         current_batch_index += 1;
@@ -269,15 +264,15 @@ async fn process_session(
                             .mark_narration_cursor_failed(session_id, MAX_RETRIES)
                             .await
                             .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
-                        state.event_bus.publish_traced(
-                            DaemonEvent::NarrationFailed {
+                        let _ = state
+                            .bus
+                            .publish_worker(WorkerEvent::NarrationFailed {
                                 session_id: session_id.to_string(),
                                 batch_index: current_batch_index as usize,
                                 error: format!("Parse error: {e}"),
                                 will_retry: !permanently_failed,
-                            },
-                            trace_ctx(),
-                        );
+                            })
+                            .await;
                         return Ok(()); // Stop this session, try next
                     }
                 }
@@ -291,15 +286,15 @@ async fn process_session(
                     .mark_narration_cursor_failed(session_id, MAX_RETRIES)
                     .await
                     .map_err(|e2| anyhow::anyhow!("DB error: {}", e2))?;
-                state.event_bus.publish_traced(
-                    DaemonEvent::NarrationFailed {
+                let _ = state
+                    .bus
+                    .publish_worker(WorkerEvent::NarrationFailed {
                         session_id: session_id.to_string(),
                         batch_index: current_batch_index as usize,
                         error: format!("{e}"),
                         will_retry: !permanently_failed,
-                    },
-                    trace_ctx(),
-                );
+                    })
+                    .await;
                 return Ok(()); // Stop this session, try next
             }
         }
@@ -312,13 +307,13 @@ async fn process_session(
     if session_narrated_count > 0 {
         info!(session = %short_id, total_narrated = session_narrated_count,
               "Step Narrator: session completed");
-        state.event_bus.publish_traced(
-            DaemonEvent::NarrationSessionCompleted {
+        let _ = state
+            .bus
+            .publish_worker(WorkerEvent::NarrationSessionCompleted {
                 session_id: session_id.to_string(),
                 total_narrated: session_narrated_count,
-            },
-            trace_ctx(),
-        );
+            })
+            .await;
     }
 
     Ok(())

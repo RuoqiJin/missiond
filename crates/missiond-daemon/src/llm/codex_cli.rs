@@ -29,11 +29,11 @@ use governor::{
 };
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
-use crate::event_bus::{DaemonEvent, TimelineEntry};
 use crate::gemini_client::current_parent_span_id;
+use missiond_core::event::events::{LlmEvent, Provider};
 
 type GovernorLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
@@ -64,9 +64,10 @@ pub(crate) struct CodexCli {
     binary: String,
     default_model: String,
     idle_timeout: Duration,
-    event_tx: mpsc::UnboundedSender<TimelineEntry>,
     rate_limiter: Arc<GovernorLimiter>,
     semaphore: Arc<Semaphore>,
+    /// v2 bus: every LlmEvent flows here.
+    bus: Option<Arc<crate::bus::BusServices>>,
 }
 
 /// Response from a Codex CLI invocation.
@@ -113,12 +114,7 @@ impl Drop for RequestGuard<'_> {
 }
 
 impl CodexCli {
-    pub fn new(
-        binary: String,
-        default_model: String,
-        idle_timeout: Duration,
-        event_tx: mpsc::UnboundedSender<TimelineEntry>,
-    ) -> Self {
+    pub fn new(binary: String, default_model: String, idle_timeout: Duration) -> Self {
         let quota = Quota::per_minute(NonZeroU32::new(CODEX_RPM).unwrap());
         info!(
             rpm = CODEX_RPM,
@@ -129,9 +125,24 @@ impl CodexCli {
             binary,
             default_model,
             idle_timeout,
-            event_tx,
             rate_limiter: Arc::new(RateLimiter::direct(quota)),
             semaphore: Arc::new(Semaphore::new(CODEX_MAX_CONCURRENT)),
+            bus: None,
+        }
+    }
+
+    /// Attach the v2 bus so every emitted event flows through it.
+    pub fn with_bus(mut self, bus: Arc<crate::bus::BusServices>) -> Self {
+        self.bus = Some(bus);
+        self
+    }
+
+    /// Spawn a detached task that publishes `ev` on the bus if one is attached.
+    fn publish(&self, ev: LlmEvent) {
+        if let Some(bus) = self.bus.clone() {
+            tokio::spawn(async move {
+                let _ = bus.publish_llm(ev).await;
+            });
         }
     }
 
@@ -349,9 +360,10 @@ impl CodexCli {
         span_id: &str,
         queue_wait_ms: u64,
     ) {
-        let parent = current_parent_span_id();
-        let event = DaemonEvent::CliRequestStarted {
-            engine: missiond_core::CliEngine::Codex,
+        let _ = current_parent_span_id();
+        let _ = span_id;
+        self.publish(LlmEvent::RequestStarted {
+            provider: Provider::Codex,
             request_id: request_id.to_string(),
             caller: caller.to_string(),
             session_id: None,
@@ -363,22 +375,7 @@ impl CodexCli {
                 "image_hash": image_hash,
                 "queue_wait_ms": queue_wait_ms,
             }),
-        };
-        let entry = TimelineEntry {
-            event,
-            trace_id: Some("codex".to_string()),
-            span_id: span_id.to_string(),
-            parent_span_id: parent,
-            summary: Some(format!(
-                "{} → {} ({}ch{}, q:{}ms)",
-                caller,
-                model,
-                prompt.len(),
-                if has_image { " +img" } else { "" },
-                queue_wait_ms
-            )),
-        };
-        let _ = self.event_tx.send(entry);
+        });
     }
 
     fn emit_completed(
@@ -419,8 +416,10 @@ impl CodexCli {
         info!(request_id, caller, model, prompt_chars, response_chars,
               duration_ms, queue_wait_ms, status = %status, "codex_request");
 
-        let event = DaemonEvent::CliRequestCompleted {
-            engine: missiond_core::CliEngine::Codex,
+        let _ = current_parent_span_id();
+        let _ = span_id;
+        self.publish(LlmEvent::RequestCompleted {
+            provider: Provider::Codex,
             request_id: request_id.to_string(),
             caller: caller.to_string(),
             session_id: None,
@@ -437,19 +436,7 @@ impl CodexCli {
                 "image_hash": image_hash,
                 "queue_wait_ms": queue_wait_ms,
             }),
-        };
-        let parent = current_parent_span_id();
-        let entry = TimelineEntry {
-            event,
-            trace_id: Some("codex".to_string()),
-            span_id: span_id.to_string(),
-            parent_span_id: parent,
-            summary: Some(format!(
-                "{} → {} ({}ms, q:{}ms)",
-                caller, model, duration_ms, queue_wait_ms
-            )),
-        };
-        let _ = self.event_tx.send(entry);
+        });
     }
 }
 

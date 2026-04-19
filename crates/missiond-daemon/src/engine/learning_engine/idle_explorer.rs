@@ -470,13 +470,14 @@ async fn create_explore_task(
 
     match state.store.create_board_task(&input).await {
         Ok(task) => {
-            state
-                .event_bus
-                .publish(crate::event_bus::DaemonEvent::BoardTaskStatusChanged {
+            let _ = state
+                .bus
+                .publish_board(missiond_core::event::events::BoardEvent::StatusChanged {
                     task_id: task.id.to_string(),
                     old_status: String::new(),
                     new_status: "open".to_string(),
-                });
+                })
+                .await;
             info!(task_id = %task.id, title = %title, "Idle explorer: created exploration task");
             true
         }

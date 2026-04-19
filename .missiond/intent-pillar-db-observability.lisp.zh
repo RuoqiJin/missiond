@@ -1,0 +1,165 @@
+(zh
+  :header ("MissionD — 支柱: db-observability（DB 可观测性）"
+           "从 intent.lisp 拆出以支持并行加载"
+           "父文件: intent.lisp")
+
+  (pillar db-observability
+    :zh "支柱: db-observability（审计与可观测性）"
+    (purpose :zh "用途: 审计轨迹、工具调用、时间线、LLM 追踪、复盘")
+
+    (component audit-tables
+      :zh "组件: audit-tables（审计表）"
+
+      (table tool_calls
+        :zh "表: tool_calls（工具调用记录）"
+        (col id :zh "列: id（uuid 主键）")
+        (col session_id :zh "列: session_id（text 非空）")
+        (col conversation_id :zh "列: conversation_id（text）")
+        (col tool_name :zh "列: tool_name（text 非空）")
+        (col input :zh "列: input（jsonb 输入）")
+        (col output :zh "列: output（jsonb 输出）")
+        (col status :zh "列: status（text 状态）")
+        (col error :zh "列: error（text 错误信息）")
+        (col created_at :zh "列: created_at（timestamptz 非空）")
+        (col completed_at :zh "列: completed_at（timestamptz）")
+
+        (op insert :zh "操作: insert（插入单条）")
+        (op insert-batch :zh "操作: insert-batch（批量插入 Vec<tool_call>）")
+        (op update-output :zh "操作: update-output（更新输出/状态/错误/完成时间）")
+        (op select-one :zh "操作: select-one（按 id 查一条）")
+        (op select-by-session :zh "操作: select-by-session（按会话查询，支持 limit/offset）")
+        (op stats :zh "操作: stats（按会话聚合统计）")
+        (op count-pending :zh "操作: count-pending（统计会话中 pending 条数）")
+        (op sessions-with-pending :zh "操作: sessions-with-pending（返回含 pending 的会话列表）")
+        (op for-detailed-analysis :zh "操作: for-detailed-analysis（取详细分析所需数据）")
+        (op with-status-timeline :zh "操作: with-status-timeline（附带状态时间线）")
+        (op name-sequence :zh "操作: name-sequence（工具名调用顺序）")
+        (op error-samples :zh "操作: error-samples（按工具名取错误样本）")
+        (op retro-tool-stats :zh "操作: retro-tool-stats（复盘: 工具级统计）")
+        (op retro-meta :zh "操作: retro-meta（复盘: 元信息）")
+        (op retro-repeat-patterns :zh "操作: retro-repeat-patterns（复盘: 重复模式识别）")
+        (op retro-high-error-tools :zh "操作: retro-high-error-tools（复盘: 高错误率工具）")
+        (op first-user-message :zh "操作: first-user-message（首条用户消息）")
+        (op for-backfill :zh "操作: for-backfill（回填用取数）"))
+
+      (table conversation_events
+        :zh "表: conversation_events（会话事件）"
+        (col id :zh "列: id（bigint 主键自增）")
+        (col conversation_id :zh "列: conversation_id（text 非空）")
+        (col event_type :zh "列: event_type（text 非空）")
+        (col data :zh "列: data（jsonb）")
+        (col created_at :zh "列: created_at（timestamptz 非空）")
+        (op insert-batch :zh "操作: insert-batch（批量插入 Vec<event>）")
+        (op select :zh "操作: select（按会话/类型/时间区间/limit 查询）")
+        (op agent-trajectory :zh "操作: agent-trajectory（Agent 行为轨迹）")
+        (op type-summary :zh "操作: type-summary（按类型聚合汇总）")
+        (op cleanup-old :zh "操作: cleanup-old（清理过期事件）")
+        (op sessions-with-events :zh "操作: sessions-with-events（含事件的会话列表）"))
+
+      (table retrospective_results
+        :zh "表: retrospective_results（复盘结果）"
+        (col session_id :zh "列: session_id（text 主键）")
+        (col result :zh "列: result（jsonb 非空）")
+        (col created_at :zh "列: created_at（timestamptz 非空）")
+        (op save :zh "操作: save（保存复盘结果）")
+        (op has :zh "操作: has（是否存在，返回 bool）")
+        (op select-one :zh "操作: select-one（按会话取一条）")
+        (op list :zh "操作: list（分页列出）")
+        (op needing-retro :zh "操作: needing-retro（筛选待复盘会话，NOT EXISTS 条件）")
+        (op for-backfill :zh "操作: for-backfill（回填用取数）")))
+
+    (component timeline-tables
+      :zh "组件: timeline-tables（时间线表）"
+
+      (table system_timeline
+        :zh "表: system_timeline（系统时间线）"
+        (col id :zh "列: id（bigint 主键自增）")
+        (col event_type :zh "列: event_type（text 非空）")
+        (col slot_name :zh "列: slot_name（text 槽位名）")
+        (col session_id :zh "列: session_id（text）")
+        (col summary :zh "列: summary（text 摘要）")
+        (col data :zh "列: data（jsonb）")
+        (col trace_id :zh "列: trace_id（text 追踪 id）")
+        (col created_at :zh "列: created_at（timestamptz 非空）")
+        (op insert :zh "操作: insert（写入事件）")
+        (op query :zh "操作: query（按类型/槽位/时间区间查询）")
+        (op update-summary :zh "操作: update-summary（更新摘要）")
+        (op stats :zh "操作: stats（按时间聚合统计）")
+        (op traces :zh "操作: traces（按 trace_id 取链路）")))
+
+    (component gemini-log-tables
+      :zh "组件: gemini-log-tables（Gemini 日志表）"
+
+      (table gemini_requests
+        :zh "表: gemini_requests（Gemini 请求记录）"
+        (col id :zh "列: id（uuid 主键）")
+        (col model :zh "列: model（text 非空）")
+        (col purpose :zh "列: purpose（text 用途）")
+        (col prompt_preview :zh "列: prompt_preview（text 提示预览）")
+        (col response_preview :zh "列: response_preview（text 响应预览）")
+        (col input_tokens :zh "列: input_tokens（integer 输入 token 数）")
+        (col output_tokens :zh "列: output_tokens（integer 输出 token 数）")
+        (col status :zh "列: status（text 状态）")
+        (col duration_ms :zh "列: duration_ms（integer 耗时毫秒）")
+        (col created_at :zh "列: created_at（timestamptz 非空）")
+        (col completed_at :zh "列: completed_at（timestamptz）")
+        (op insert-started :zh "操作: insert-started（记录请求开始）")
+        (op update-completed :zh "操作: update-completed（记录完成: 响应/tokens/状态/耗时）")
+        (op get-content :zh "操作: get-content（取完整内容）")
+        (op query :zh "操作: query（按模型/用途/时间区间查询）")
+        (op stats :zh "操作: stats（按时间聚合统计）")
+        (op cleanup :zh "操作: cleanup（清理过期记录）"))
+
+      (table gemini_file_cache
+        :zh "表: gemini_file_cache（Gemini 文件缓存）"
+        (col file_hash :zh "列: file_hash（text 主键）")
+        (col uri :zh "列: uri（text 非空）")
+        (col expires_at :zh "列: expires_at（timestamptz 非空，过期时间）")
+        (op get :zh "操作: get（按 hash 查 uri）")
+        (op put :zh "操作: put（写入 hash/uri/过期时间）")
+        (op gc :zh "操作: gc（清理已过期条目）")))
+
+    (component incident-tables
+      :zh "组件: incident-tables（事故与用量表）"
+
+      (table incidents
+        :zh "表: incidents（事故记录）"
+        (col id :zh "列: id（uuid 主键）")
+        (col incident_type :zh "列: incident_type（text 非空）")
+        (col severity :zh "列: severity（text 严重等级，非空）")
+        (col message :zh "列: message（text 非空）")
+        (col data :zh "列: data（jsonb）")
+        (col created_at :zh "列: created_at（timestamptz 非空）")
+        (op insert :zh "操作: insert（写入事故）")
+        (op has-recent :zh "操作: has-recent（判断近期是否已有同类事故，返回 bool）")
+        (op list :zh "操作: list（按严重度/时间列出）"))
+
+      (table token_usage
+        :zh "表: token_usage（Token 用量）"
+        (col id :zh "列: id（uuid 主键）")
+        (col session_id :zh "列: session_id（text）")
+        (col model :zh "列: model（text）")
+        (col input_tokens :zh "列: input_tokens（integer 输入 token 数）")
+        (col output_tokens :zh "列: output_tokens（integer 输出 token 数）")
+        (col cost_usd :zh "列: cost_usd（float8 美元成本）")
+        (col created_at :zh "列: created_at（timestamptz 非空）")
+        (op insert :zh "操作: insert（写入一次用量）")
+        (op stats :zh "操作: stats（按时间聚合统计）")))
+
+    (component narration-tables
+      :zh "组件: narration-tables（旁白/叙事表）"
+
+      (table narration_cursors
+        :zh "表: narration_cursors（旁白游标）"
+        (col conversation_id :zh "列: conversation_id（text 主键）")
+        (col last_message_id :zh "列: last_message_id（bigint 上次处理的消息 id）")
+        (col processing :zh "列: processing（boolean 是否正在处理，默认 false）")
+        (col updated_at :zh "列: updated_at（timestamptz）")
+        (op mark-processing :zh "操作: mark-processing（标记为处理中）"))
+
+      (table message_narrations
+        :zh "表: message_narrations（消息旁白）"
+        (col id :zh "列: id（bigint 主键自增）")
+        (col message_id :zh "列: message_id（bigint 外键 → conversation_messages.id）")
+        (col narration :zh "列: narration（text 非空，旁白文本）")
+        (col created_at :zh "列: created_at（timestamptz 非空）")))))

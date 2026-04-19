@@ -1,0 +1,72 @@
+(zh
+  :header ("MissionD — 数据流"
+           "从 intent.lisp 拆分以支持并行加载"
+           "父文件: intent.lisp")
+
+  (flows
+    :zh "数据流集合"
+
+    (flow user-message-to-knowledge
+      :zh "数据流: 用户消息到知识"
+      (description :zh "原始 PTY 输出 → 持久化消息 → 提取的知识")
+      (steps :zh "步骤: pty-session → semantic-parser → conversation-logger → tagger-chunker → embedding-worker → knowledge"))
+
+    (flow board-task-lifecycle
+      :zh "数据流: 看板任务生命周期"
+      (description :zh "任务创建 → autopilot 认领 → 槽位分派 → 完成")
+      (steps :zh "步骤: board-create → autopilot-tick → slot-dispatch → cc-controller → pty-session → result-harvest → board-done"))
+
+    (flow decision-cascade
+      :zh "数据流: 决策级联"
+      (description :zh "Agent 提问 → 多层级解析")
+      (steps :zh "步骤: question-raised → kb-lookup → gemini-consult → decision-slot → human-escalation → answer-routed"))
+
+    (flow mcp-request
+      :zh "数据流: MCP 请求"
+      (description :zh "外部 MCP 调用 → daemon 处理器 → 响应")
+      (steps :zh "步骤: stdio-jsonrpc → mcp-server → ipc-bridge → handler-dispatch → db-query → jsonrpc-response"))
+
+    (flow context-assembly
+      :zh "数据流: 上下文装配"
+      (description :zh "槽位激活 → 预算受限的 prompt 构建")
+      (steps :zh "步骤: slot-activated → context-pipeline → budget-allocator → source-ranker → kb-fetch → skill-fetch → history-fetch → truncation → assembled-prompt"))
+
+    (flow retrospective
+      :zh "数据流: 复盘"
+      (description :zh "会话结束 → 分析 → 知识提取")
+      (steps :zh "步骤: session-end → retro-worker → tool-stats → pattern-analysis → sonnet-summarize → retrospective-result → knowledge-upsert"))
+
+    (flow embedding-pipeline
+      :zh "数据流: 向量化管道"
+      (description :zh "新内容 → 向量生成 → 向量存储")
+      (steps :zh "步骤: content-created → embedding-worker → model-inference → vector-storage → search-index-ready"))
+
+    (flow gemini-llm-call
+      :zh "数据流: Gemini LLM 调用"
+      (description :zh "LLM 请求 → 限流 → 提供方分派 → 日志")
+      (steps :zh "步骤: handler-request → llm-gate → rate-check → gemini-client → api-call → gemini-logger → response"))
+
+    :notes ("── Project 隔离体系流 (P1-P5, 2026-04-10) ──")
+
+    (flow project-scoped-kb-search
+      :zh "数据流: 项目范围的 KB 检索"
+      (description :zh "带 project_id 的 KB 检索：项目知识 + 全局知识并集")
+      (steps :zh "步骤: mcp-kb-query-with-project → kb-handler-routes-to-scoped-variant → kb_search_fts_ranked_scoped → sql-WHERE-project_id-eq-OR-IS-NULL → ranked-results-returned")
+      :note-zh "注: project_id=NULL 条目对所有项目可见；项目专属条目仅对该项目可见")
+
+    (flow project-cwd-resolution
+      :zh "数据流: 项目 CWD 解析"
+      (description :zh "从 CWD 自动解析 project_id — 已实现 (commit e18d0bf)")
+      (steps :zh "步骤: message-arrives-with-cwd → message_handler.ingest-extracts-first-msg-cwd → state.project_registry.read() → ProjectRegistry.resolve(cwd)-longest-prefix-match → project_id-set-on-Conversation-struct → persisted-to-PG-via-upsert_conversation")
+      :note-zh "注: daemon init 时从 PG list_projects() 加载 → SharedProjectRegistry 注入 AppState; message_handler 每次 ingest 时自动解析")
+
+    (flow project-sync
+      :zh "数据流: 项目同步"
+      (description :zh "自动发现并注册 ~/.claude/projects/ 下的项目")
+      (steps :zh "步骤: mission_project-sync-action → scan-~/.claude/projects/ → for-each-dir → decode-dir-name-as-path → skip-if-exists → upsert_project-to-PG"))
+
+    (flow project-init
+      :zh "数据流: 项目初始化"
+      :added-zh "新增于: 84ac1a6"
+      (description :zh "一步注册新项目：path → 完整项目元数据 → DB + 历史回填 + 注册表热重载")
+      (steps :zh "步骤: mission_project-init-action{path,id?,slots?} → canonicalize-path → derive-id-from-dir-name → git-remote-get-url-origin → github_url → scan-intent-lisp-candidates(\".missiond/intent.lisp\" \".jarvis/intent.lisp\" \"intent.lisp\") → upsert_project-to-PG → backfill_project_id(path%) → N rows updated → backfill_project_id(claude-encoded-pattern%) → M rows updated → reload-SharedProjectRegistry → return{id path githubUrl intentPath backfilledConversations status}"))))

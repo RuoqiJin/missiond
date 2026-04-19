@@ -1,0 +1,89 @@
+(zh
+  :header ("MissionD — 支柱: transport-bootstrap"
+           "从 intent.lisp 拆分以支持并行加载"
+           "父文件: intent.lisp")
+
+  (pillar transport-bootstrap
+    :zh "支柱: transport-bootstrap 传输与启动"
+    (purpose :zh "IPC、WebSocket、PTY 传输层 + daemon 初始化")
+
+    (component ws-server
+      :zh "组件: ws-server WebSocket 服务器"
+      (sub-components
+        :zh "子组件列表"
+        (screenshot-broker :zh "子组件: screenshot-broker 截图分发器")
+        (jarvis-trace :zh "子组件: jarvis-trace 追踪通道")))
+
+    (component ipc
+      :zh "组件: ipc 进程间通信")
+
+    (component pty-manager
+      :zh "组件: pty-manager 伪终端管理器"
+      (sub-components
+        :zh "子组件列表"
+        (session :zh "子组件: session PTY 会话")
+        (screenshot :zh "子组件: screenshot PTY 截图")
+        (extractor :zh "子组件: extractor 内容提取器")
+        (anomaly :zh "子组件: anomaly 异常检测")))
+
+    (component daemon-init
+      :zh "组件: daemon-init 守护进程初始化"
+      (init-order
+        :zh "初始化顺序: 依阶段串行启动各模块"
+        :notes ("阶段 1: 基础设施"
+                ""
+                "阶段 1.5: 项目注册表 (commit e18d0bf — 在 slot_manager 之前从 PG 加载)"
+                ""
+                "阶段 2: 核心模块"
+                ""
+                "阶段 3: 网关"
+                ""
+                "阶段 4: 管道"
+                ""
+                "阶段 5: 工作器 (18 个 spawn)"
+                ""
+                "阶段 6: 引擎"))
+
+      (depends-graph
+        :zh "依赖图: 各模块构造时的依赖关系"
+        (project_registry
+          :zh "project_registry 依赖 db"
+          :note-zh "注: store.list_projects() → ProjectRegistry::new(projects) → SharedProjectRegistry")
+        (pty_manager :zh "pty_manager 依赖 event_bus")
+        (slot_manager :zh "slot_manager 依赖 db, pty_manager, event_bus")
+        (mission_control :zh "mission_control 依赖 db, slot_manager, event_bus")
+        (gemini_gateway :zh "gemini_gateway 依赖 db")
+        (sonnet_gateway :zh "sonnet_gateway 依赖 slot_manager")
+        (llm_gateway :zh "llm_gateway 依赖 gemini_gateway, sonnet_gateway")
+        (context_pipeline :zh "context_pipeline 依赖 db, slot_manager")
+        (autopilot :zh "autopilot 依赖 db, slot_manager, event_bus, llm_gateway, context_pipeline")))
+
+    (component state-management
+      :zh "组件: state-management 状态管理"
+      :notes ("commit e18d0bf: AppState 新增 project_registry: SharedProjectRegistry"
+              "Arc<RwLock<ProjectRegistry>> — path→project_id 解析 + 项目元数据缓存")
+      (field project_registry
+        :zh "字段: project_registry 类型 SharedProjectRegistry"
+        :doc-zh "doc: 在 daemon 初始化时从 PG 加载，供 message_handler 做 CWD→project_id 解析"))
+
+    (component supervisor
+      :zh "组件: supervisor 进程监督")
+
+    (component infra-modules
+      :zh "组件: infra-modules 基础设施模块群"
+      (module aiops :zh "模块: aiops AI 运维")
+      (module daemon-stats :zh "模块: daemon-stats 守护进程统计")
+      :notes (""
+              "⚠ git-watcher 已移除 (commit 65c8b59) — 被 event_analyzer_worker 取代 (本地 BackgroundWorker)"
+              "原先为: 通过 crates/missiond-daemon/src/infra/git_watcher.rs 做 30s git-log 轮询")
+      (module ingestion-router :zh "模块: ingestion-router 摄取路由")
+      (module ipc-handler
+        :zh "模块: ipc-handler IPC 处理器"
+        :notes ("commit ec269d7: 新增指令让 slot 使用 mission_conversation_query(action=get, sessionId=…, tail=N)"
+                "以读取历史 turn 内容 (auto-memory 之前默认使用自身 memory 目录)"))
+      (module mcp-client :zh "模块: mcp-client MCP 客户端")
+      (module message-handler
+        :zh "模块: message-handler 消息处理器"
+        :notes (""
+                ""))
+      (module session-util :zh "模块: session-util 会话工具"))))

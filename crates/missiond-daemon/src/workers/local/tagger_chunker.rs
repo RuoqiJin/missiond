@@ -13,12 +13,12 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, LazyLock};
 
 use regex::Regex;
-use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 use super::{BackgroundWorker, WorkerContext, WorkerKind};
-use crate::event_bus::{DaemonEvent, TimelineEvent};
 use crate::state::{AppState, EmbeddingTask};
+use missiond_core::event::events::{MemoryEvent, SessionEvent, SystemEvent};
+use missiond_core::event::subscription::SubscriptionOpts;
 use missiond_core::types::{ConversationMessage, RawTurn};
 
 /// Fixed-window batch interval (same as S2 Organizer).
@@ -70,9 +70,7 @@ struct CommitDetection {
     summary: String,
 }
 
-pub struct TaggerChunkerWorker {
-    pub timeline_rx: broadcast::Receiver<TimelineEvent>,
-}
+pub struct TaggerChunkerWorker;
 
 impl BackgroundWorker for TaggerChunkerWorker {
     const KIND: WorkerKind = WorkerKind::Local;
@@ -86,40 +84,41 @@ impl BackgroundWorker for TaggerChunkerWorker {
         state: Arc<AppState>,
         ctx: WorkerContext,
     ) -> impl std::future::Future<Output = ()> + Send {
-        run_tagger_chunker(state, ctx, self.timeline_rx)
+        run_tagger_chunker(state, ctx)
     }
 }
 
-async fn run_tagger_chunker(
-    state: Arc<AppState>,
-    mut ctx: WorkerContext,
-    mut rx: broadcast::Receiver<TimelineEvent>,
-) {
+async fn run_tagger_chunker(state: Arc<AppState>, mut ctx: WorkerContext) {
     // Startup backfill: process completed sessions that have no turns yet
     startup_backfill(&state).await;
 
+    let mut sub = match state
+        .bus
+        .subscribe::<SessionEvent>("tagger_chunker", SubscriptionOpts::named("tagger_chunker"))
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "tagger_chunker: bus subscribe failed, worker exiting");
+            return;
+        }
+    };
+
     let mut dirty: HashSet<String> = HashSet::new();
     let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(BATCH_INTERVAL_SECS));
-    let mut reconcile_tick = tokio::time::interval(tokio::time::Duration::from_secs(RECONCILE_INTERVAL_SECS));
+    let mut reconcile_tick =
+        tokio::time::interval(tokio::time::Duration::from_secs(RECONCILE_INTERVAL_SECS));
 
     loop {
         ctx.wait_if_paused().await;
         tokio::select! {
-            event = rx.recv() => match event {
-                Ok(te) => {
-                    if let DaemonEvent::SessionOrganized { ref session_id } = te.event {
-                        dirty.insert(session_id.clone());
-                    }
+            ack_opt = sub.next() => {
+                let Some(ack) = ack_opt else { break; };
+                if let SessionEvent::Organized { session_id } = ack.event() {
+                    dirty.insert(session_id.clone());
                 }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    // DATA LOSS: {n} events were permanently dropped by the broadcast channel.
-                    // These SessionOrganized events cannot be recovered via broadcast replay.
-                    // The reconcile_tick sweep below will catch missed sessions within 60s.
-                    warn!(skipped = n, "TaggerChunker: broadcast lagged — events permanently lost");
-                    continue;
-                }
-                Err(_) => break,
-            },
+                ack.ack().await;
+            }
             _ = tick.tick(), if !dirty.is_empty() => {
                 let batch: Vec<String> = dirty.drain().collect();
                 process_batch(&state, &batch).await;
@@ -190,10 +189,13 @@ async fn reconcile_missed_sessions(state: &AppState) {
         match process_session(state, sid).await {
             Ok(count) if count > 0 => {
                 recovered += 1;
-                state.event_bus.publish(DaemonEvent::TurnExtracted {
-                    session_id: sid.clone(),
-                    turn_count: count,
-                });
+                let _ = state
+                    .bus
+                    .publish_memory(MemoryEvent::TurnExtracted {
+                        session_id: sid.clone(),
+                        turn_count: count,
+                    })
+                    .await;
                 if let Err(e) = state.embedding_tx.try_send(EmbeddingTask::ProcessTurns {
                     session_id: sid.clone(),
                 }) {
@@ -214,10 +216,13 @@ async fn process_batch(state: &AppState, session_ids: &[String]) {
     for sid in session_ids {
         match process_session(state, sid).await {
             Ok(count) if count > 0 => {
-                state.event_bus.publish(DaemonEvent::TurnExtracted {
-                    session_id: sid.clone(),
-                    turn_count: count,
-                });
+                let _ = state
+                    .bus
+                    .publish_memory(MemoryEvent::TurnExtracted {
+                        session_id: sid.clone(),
+                        turn_count: count,
+                    })
+                    .await;
                 // Trigger S4 per-turn embedding
                 if let Err(e) = state.embedding_tx.try_send(EmbeddingTask::ProcessTurns {
                     session_id: sid.clone(),
@@ -315,15 +320,18 @@ async fn analyze_messages(state: &AppState, session_id: &str, messages: &[Conver
                 session_id = %commit.session_id,
                 "TaggerChunker: git commit detected"
             );
-            state.event_bus.publish(DaemonEvent::ContextualCommitDetected {
-                commit_hash: commit.commit_hash,
-                branch: commit.branch,
-                summary: commit.summary,
-                conversation_id: commit.session_id.clone(),
-                message_id: commit.message_id,
-                session_id: commit.session_id,
-                slot_id: slot_id.clone(),
-            });
+            let _ = state
+                .bus
+                .publish_system(SystemEvent::ContextualCommitDetected {
+                    commit_hash: commit.commit_hash,
+                    branch: commit.branch,
+                    summary: commit.summary,
+                    conversation_id: commit.session_id.clone(),
+                    message_id: commit.message_id,
+                    session_id: commit.session_id,
+                    slot_id: slot_id.clone(),
+                })
+                .await;
         }
     }
 }

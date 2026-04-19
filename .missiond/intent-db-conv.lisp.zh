@@ -1,0 +1,264 @@
+(zh
+  :header (""
+           "MissionD 数据库层 — 会话 + 消息 (SQLite)"
+           "")
+
+  (pattern crud-gateway
+    :zh "模式: crud-gateway"
+    :gateway-zh "网关: MissionDB"
+    :pool-zh "连接池: Mutex<Connection>"
+    :backend-zh "后端: sqlite"
+
+    :notes ("" "┌──────────────────────────────────────────────────────────┐"
+            "│ 表: conversations                                        │"
+            "└──────────────────────────────────────────────────────────┘")
+
+    (table conversations
+      :zh "表: conversations (会话表)"
+
+      (col id :zh "字段: id — 主键, text")
+      (col project :zh "字段: project — 项目, 可空")
+      (col slot_id :zh "字段: slot_id — 槽位 ID, 可空")
+      (col source :zh "字段: source — 来源, 默认 claude_cli")
+      (col model :zh "字段: model — 模型, 可空")
+      (col git_branch :zh "字段: git_branch — Git 分支, 可空")
+      (col jsonl_path :zh "字段: jsonl_path — JSONL 路径, 可空")
+      (col message_count :zh "字段: message_count — 消息数, 默认 0")
+      (col started_at :zh "字段: started_at — 开始时间")
+      (col ended_at :zh "字段: ended_at — 结束时间, 可空")
+      (col status :zh "字段: status — 状态, 默认 active")
+      (col analyzed_at :zh "字段: analyzed_at — 分析时间, 可空")
+      (col memory_forwarded_at :zh "字段: memory_forwarded_at — 记忆转发时间, 可空")
+      (col user_voice_forwarded_at :zh "字段: user_voice_forwarded_at — 用户语音转发时间, 可空")
+      (col realtime_forwarded_at :zh "字段: realtime_forwarded_at — 实时转发时间, 可空")
+      (col analysis_version :zh "字段: analysis_version — 分析版本, 默认 0")
+      (col analysis_retries :zh "字段: analysis_retries — 分析重试次数, 默认 0")
+      (col parent_session_id :zh "字段: parent_session_id — 父会话 ID, 可空")
+      (col task_id :zh "字段: task_id — 任务 ID, 可空")
+      (col deep_analyzed_message_id :zh "字段: deep_analyzed_message_id — 深度分析消息 ID, 默认 0")
+      (col chat_type :zh "字段: chat_type — 聊天类型, 可空, 默认 pty")
+      (col conversation_type :zh "字段: conversation_type — 会话类型, 默认 user")
+      (col updated_at :zh "字段: updated_at — 更新时间, 可空")
+      (col llm_summary :zh "字段: llm_summary — LLM 摘要, 可空")
+      (col embedding_provider :zh "字段: embedding_provider — 向量提供方, 可空")
+      (col embedding :zh "字段: embedding — 向量, 可空")
+      (col session_timeline :zh "字段: session_timeline — 会话时间线, 可空")
+      (col timeline_built_at :zh "字段: timeline_built_at — 时间线生成时间, 可空")
+      (col exit_code :zh "字段: exit_code — 退出码, 可空")
+      (col habit_scanned_at :zh "字段: habit_scanned_at — 习惯扫描时间, 可空")
+      (col rolling_summary :zh "字段: rolling_summary — 滚动摘要, 可空")
+      (col last_summarized_msg_id :zh "字段: last_summarized_msg_id — 最后摘要消息 ID, 默认 0")
+
+      (idx idx_conv_status :zh "索引: idx_conv_status (status)")
+      (idx idx_conv_task_id :zh "索引: idx_conv_task_id (task_id)")
+      (idx idx_conv_parent :zh "索引: idx_conv_parent (parent_session_id)")
+      (idx idx_conv_type :zh "索引: idx_conv_type (conversation_type)")
+      (idx idx_conv_slot :zh "索引: idx_conv_slot (slot_id)")
+
+      (row-type ConversationRow
+        :zh "行类型: ConversationRow — 通过 row_to_conversation 转为 Conversation")
+
+      :notes ("── 机械 CRUD ──")
+
+      (op upsert_conversation
+        :zh "操作: upsert_conversation — upsert 会话"
+        :on-conflict-zh "冲突: (id) DO UPDATE SET slot_id = COALESCE(?3, slot_id), model = COALESCE(?5, model), git_branch = COALESCE(?6, git_branch), message_count = ?10, ended_at = ?12, status = ?13, conversation_type = COALESCE(?15, conversation_type)")
+
+      (op get_conversation
+        :zh "操作: get_conversation — 按 id 取单条会话")
+
+      (op get_child_conversations
+        :zh "操作: get_child_conversations — 按 parent_session_id 取子会话列表")
+
+      (op mark_analysis_complete
+        :zh "操作: mark_analysis_complete — 标记分析完成")
+
+      (op update_deep_checkpoint
+        :zh "操作: update_deep_checkpoint — 更新深度分析断点")
+
+      (op mark_analysis_failed
+        :zh "操作: mark_analysis_failed — 标记分析失败, 重试次数加一")
+
+      (op mark_habit_scanned
+        :zh "操作: mark_habit_scanned — 标记习惯扫描完成")
+
+      (op set_conversation_summary
+        :zh "操作: set_conversation_summary — 设置会话 LLM 摘要")
+
+      (op clear_conversation_summary
+        :zh "操作: clear_conversation_summary — 清空会话摘要与向量")
+
+      (op set_conversation_embedding
+        :zh "操作: set_conversation_embedding — 写入会话向量"
+        :logic-zh "逻辑: UPDATE 写入 blob 向量与 provider, 按 id 定位")
+
+      :notes ("── 分析管道查询 ──")
+
+      (op get_pending_deep_analysis
+        :zh "操作: get_pending_deep_analysis — 取待深度分析的会话"
+        :logic-zh "逻辑: 三状态 UNION, completed + compacted + active, 附带版本/重试检查")
+
+      (op has_pending_deep_analysis
+        :zh "操作: has_pending_deep_analysis — 是否存在待深度分析的会话"
+        :logic-zh "逻辑: EXISTS 检查待深度分析项")
+
+      (op count_pending_deep_analysis
+        :zh "操作: count_pending_deep_analysis — 计数待深度分析会话"
+        :logic-zh "逻辑: COUNT 待深度分析的会话数")
+
+      (op pending_deep_detail
+        :zh "操作: pending_deep_detail — 待深度分析明细"
+        :logic-zh "逻辑: 每会话待处理摘要 (id, ended_at, retries)")
+
+      (op count_pending_realtime
+        :zh "操作: count_pending_realtime — 计数待实时转发会话"
+        :logic-zh "逻辑: COUNT DISTINCT 含待实时消息的会话")
+
+      (op pending_realtime_detail
+        :zh "操作: pending_realtime_detail — 待实时转发明细"
+        :logic-zh "逻辑: 每会话实时摘要 (session_id, msg_count, oldest_ts)")
+
+      :notes ("── 习惯扫描 ──")
+
+      (op get_unscanned_conversations
+        :zh "操作: get_unscanned_conversations — 取未扫描会话"
+        :logic-zh "逻辑: WHERE habit_scanned_at IS NULL AND type=user, 按时间升序")
+
+      (op count_unscanned_conversations
+        :zh "操作: count_unscanned_conversations — 计数未扫描用户会话"
+        :logic-zh "逻辑: COUNT 未扫描的用户会话")
+
+      (op count_scannable_conversations
+        :zh "操作: count_scannable_conversations — 计数可扫描会话"
+        :logic-zh "逻辑: COUNT 符合扫描条件的全部用户会话")
+
+      :notes ("── 复杂查询 ──")
+
+      (op list_conversations
+        :zh "操作: list_conversations — 列出会话"
+        :logic-zh "逻辑: 7 可选过滤条件的动态 SQL, 两阶段取数 (active vs non-active)")
+
+      :notes ("── 向量/摘要/主题查询 ──")
+
+      (op load_conversation_embeddings
+        :zh "操作: load_conversation_embeddings — 加载会话向量"
+        :logic-zh "逻辑: SELECT id, embedding WHERE provider 匹配, 反序列化 blob")
+
+      (op conversations_missing_summary
+        :zh "操作: conversations_missing_summary — 缺摘要会话"
+        :logic-zh "逻辑: 缺 LLM 摘要的会话 ID, 仅 user/worker 类型")
+
+      (op conversations_stale_embedding
+        :zh "操作: conversations_stale_embedding — 向量过期会话"
+        :logic-zh "逻辑: 来自不同 provider 的向量 ID")
+
+      (op set_conversation_topic_vectors
+        :zh "操作: set_conversation_topic_vectors — 写入会话主题向量"
+        :logic-zh "逻辑: DELETE 旧数据 + INSERT 新主题向量 (按 session)")
+
+      (op load_conversation_topic_vectors
+        :zh "操作: load_conversation_topic_vectors — 加载会话主题向量"
+        :logic-zh "逻辑: GROUP BY session_id, 从 blob 重建向量")
+
+      (op get_conversation_topics
+        :zh "操作: get_conversation_topics — 取会话主题"
+        :logic-zh "逻辑: SELECT 会话的主题摘要")
+
+      (op conversations_needing_topic_vectors
+        :zh "操作: conversations_needing_topic_vectors — 需要主题向量的会话"
+        :logic-zh "逻辑: 旧单向量但无主题向量的会话")
+
+      :notes ("── 会话时间线 ──")
+
+      (op conversations_needing_timeline
+        :zh "操作: conversations_needing_timeline — 需要时间线的会话"
+        :logic-zh "逻辑: 已完成的父会话, 有 compaction 子会话但无时间线")
+
+      (op get_compaction_fragments
+        :zh "操作: get_compaction_fragments — 取 compaction 片段"
+        :logic-zh "逻辑: 有序 compaction 片段 (id, started_at, msg_count)")
+
+      (op get_last_assistant_content
+        :zh "操作: get_last_assistant_content — 取最后一条助手消息"
+        :logic-zh "逻辑: compaction 摘要所需的最后一条 assistant 消息内容")
+
+      (op set_session_timeline
+        :zh "操作: set_session_timeline — 写入会话时间线"
+        :logic-zh "逻辑: CAS 写入, 仅当 timeline_built_at IS NULL"))
+
+    :notes ("┌──────────────────────────────────────────────────────────┐"
+            "│ 表: conversation_messages                                │"
+            "└──────────────────────────────────────────────────────────┘")
+
+    (table conversation_messages
+      :zh "表: conversation_messages (会话消息表)"
+
+      (col id :zh "字段: id — 主键, bigint")
+      (col session_id :zh "字段: session_id — 会话外键, 指向 conversations, 级联删除")
+      (col role :zh "字段: role — 角色")
+      (col content :zh "字段: content — 内容")
+      (col raw_content :zh "字段: raw_content — 原始内容, 可空")
+      (col message_uuid :zh "字段: message_uuid — 消息 UUID, 可空")
+      (col parent_uuid :zh "字段: parent_uuid — 父消息 UUID, 可空")
+      (col model :zh "字段: model — 模型, 可空")
+      (col timestamp :zh "字段: timestamp — 时间戳")
+      (col metadata :zh "字段: metadata — 元数据, 可空")
+      (col tool_name :zh "字段: tool_name — 工具名, 可空")
+      (col raw_role :zh "字段: raw_role — 原始角色, 可空")
+      (col content_types :zh "字段: content_types — 内容类型, 可空")
+      (col has_image :zh "字段: has_image — 是否含图片, 默认 0")
+      (col has_tool_use :zh "字段: has_tool_use — 是否含工具调用, 默认 0")
+      (col has_tool_result :zh "字段: has_tool_result — 是否含工具结果, 默认 0")
+      (col token_count :zh "字段: token_count — token 数, 可空")
+
+      (unique :zh "唯一约束: (message_uuid)")
+      (idx idx_conv_msg_session :zh "索引: idx_conv_msg_session (session_id)")
+      (idx idx_conv_msg_session_id :zh "索引: idx_conv_msg_session_id (session_id, id)")
+      (idx idx_conv_msg_timestamp :zh "索引: idx_conv_msg_timestamp (timestamp)")
+      (idx idx_conv_msg_uuid :zh "索引: idx_conv_msg_uuid (message_uuid)")
+      (idx idx_conv_msg_tool :zh "索引: idx_conv_msg_tool (tool_name)")
+
+      (row-type ConversationMessageRow
+        :zh "行类型: ConversationMessageRow — 通过 row_to_conversation_message 转为 ConversationMessage")
+
+      :notes ("── 机械 CRUD ──")
+
+      (op insert_conversation_message
+        :zh "操作: insert_conversation_message — 插入单条会话消息")
+
+      (op get_conversation_message_by_id
+        :zh "操作: get_conversation_message_by_id — 按 id 取单条消息")
+
+      (op get_conversation_messages
+        :zh "操作: get_conversation_messages — 取会话消息"
+        :logic-zh "逻辑: since ID 之后或最后 N 条, 附带 label 覆盖 LEFT JOIN")
+
+      (op insert_conversation_messages_batch
+        :zh "操作: insert_conversation_messages_batch — 批量插入消息"
+        :logic-zh "逻辑: 事务内 INSERT OR IGNORE, 自动更新 message_count")
+
+      :notes ("── 搜索 (全部为复杂/自定义查询) ──")
+
+      (op get_messages_around
+        :zh "操作: get_messages_around — 取消息前后文"
+        :logic-zh "逻辑: before/after/anchor 三段 CTE, 附带 label 覆盖")
+
+      (op search_conversation_messages
+        :zh "操作: search_conversation_messages — 搜索会话消息"
+        :logic-zh "逻辑: 三阶段 AND-first FTS5 → OR 回退 → LIKE 回退")
+
+      (op search_messages_filtered
+        :zh "操作: search_messages_filtered — 带过滤的消息搜索"
+        :logic-zh "逻辑: 动态 WHERE, SQL 侧下推过滤 + 三阶段 FTS")
+
+      (op search_conversation_sessions_fts
+        :zh "操作: search_conversation_sessions_fts — 按会话聚合的 FTS 搜索"
+        :logic-zh "逻辑: 按会话分组的 BM25 评分, AND→OR→LIKE 回退")
+
+      (op get_session_fts_snippets
+        :zh "操作: get_session_fts_snippets — 取会话 FTS 片段"
+        :logic-zh "逻辑: FTS5 snippet() 抽取, 带排序")
+
+      (op search_conversation_sessions_fts_filtered
+        :zh "操作: search_conversation_sessions_fts_filtered — 带过滤的会话 FTS 搜索"
+        :logic-zh "逻辑: FTS5 会话搜索, 附带时间/项目过滤"))))

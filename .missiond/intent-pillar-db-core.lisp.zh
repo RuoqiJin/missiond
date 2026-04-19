@@ -1,0 +1,405 @@
+(zh
+  :header ("MissionD — 支柱: db-core (核心数据库)"
+           "从 intent.lisp 拆分以支持并行加载"
+           "父文件: intent.lisp")
+
+  (pillar db-core
+    :zh "支柱: db-core (核心业务数据)"
+    (purpose :zh "主要业务实体: 项目、看板任务、会话、知识、计算")
+
+    :notes ("── 项目注册表 (P1: 2026-04-10) ──────────────────────────────────")
+
+    (component project-tables
+      :zh "组件: project-tables (项目表)"
+
+      (struct ProjectConfig
+        :zh "结构体: ProjectConfig (项目配置)"
+        (field id :zh "字段 id: 项目标识符，如项目名或 UUID")
+        (field path :zh "字段 path: 项目的根文件系统路径")
+        (field intent_path :zh "字段 intent_path: 可选的 .missiond/intent.lisp 路径")
+        (field active :zh "字段 active: 是否激活")
+        (field slots :zh "字段 slots: 与本项目关联的槽位名列表")
+        (field github_url :zh "字段 github_url: GitHub 远程仓库 URL；通过迁移 20260410300000 持久化到 DB；启动/同步时通过 git remote get-url origin 解析")
+        (field created_at :zh "字段 created_at: 创建时间")
+        (field updated_at :zh "字段 updated_at: 更新时间"))
+
+      (struct ProjectRegistry
+        :zh "结构体: ProjectRegistry (项目注册表)"
+        :note-zh "内存缓存，带最长前缀 CWD 解析；启动时从 PG 加载"
+        (field projects :zh "字段 projects: 项目列表")
+        (field path_index :zh "字段 path_index: 按路径长度降序排序以便最长前缀匹配"))
+
+      (method resolve
+        :zh "方法 resolve (解析)"
+        :doc-zh "最长前置路径匹配：若 cwd 以任一注册路径开头则返回 project_id")
+
+      (method exclusive_slots
+        :zh "方法 exclusive_slots (独占槽位)"
+        :doc-zh "本项目独占的槽位 (不与其他激活项目共享)")
+
+      (type SharedProjectRegistry
+        :zh "类型别名: SharedProjectRegistry")
+
+      (table projects
+        :zh "表: projects (项目)"
+        (col id :zh "列 id: 主键")
+        (col path :zh "列 path: 唯一路径")
+        (col intent_path :zh "列 intent_path: 可空")
+        (col active :zh "列 active: 激活状态，默认 true")
+        (col slots :zh "列 slots: 文本数组")
+        (col github_url
+          :zh "列 github_url: 可空"
+          :note-zh "ALTER TABLE projects ADD COLUMN IF NOT EXISTS github_url TEXT; 含已知 4 项目初始值回填")
+        (col created_at :zh "列 created_at: 默认 now")
+        (col updated_at :zh "列 updated_at: 默认 now")
+
+        (op list
+          :zh "操作 list (列出)"
+          :note-zh "list 响应额外附加 lispFiles/lispCount (handler 层 readdir 扫描，非 DB 字段)")
+        (op get :zh "操作 get (获取单个)")
+        (op list-active :zh "操作 list-active (列出激活)")
+        (op upsert
+          :zh "操作 upsert (插入或更新)"
+          :note-zh "github_url ON CONFLICT: COALESCE(EXCLUDED.github_url, projects.github_url) — 不覆盖已有值")
+        (op set-active :zh "操作 set-active (设置激活)")
+        (op set-slots :zh "操作 set-slots (设置槽位)")
+        (op delete :zh "操作 delete (删除)"))
+
+      (trait ProjectStore
+        :zh "Trait: ProjectStore (项目存储)"
+        (list_projects :zh "list_projects: 列出所有项目")
+        (get_project :zh "get_project: 获取单个项目")
+        (upsert_project :zh "upsert_project: 插入或更新项目")
+        (set_project_active :zh "set_project_active: 设置项目激活状态")
+        (backfill_project_id
+          :zh "backfill_project_id: 回填 project_id"
+          :sql-zh "SQL: UPDATE conversations SET project_id=$1 WHERE project_id IS NULL AND project LIKE $2")
+
+        :notes ("commit 8438a7d: 项目上下文聚合器 — 3 个新的聚合查询")
+
+        (conversation_stats_by_project
+          :zh "conversation_stats_by_project: 项目会话统计"
+          :doc-zh "某项目的会话数、状态分布、时间范围")
+        (recent_conversations_by_project
+          :zh "recent_conversations_by_project: 项目最近会话"
+          :doc-zh "某项目最近的 N 条会话")
+        (kb_stats_by_project
+          :zh "kb_stats_by_project: 项目知识库统计"
+          :doc-zh "某项目按分类分组的 KB 条目数"))
+
+      :notes ("── 回填迁移 (20260410200000, commit e18d0bf) ──")
+
+      (backfill backfill_project_id
+        :zh "回填: backfill_project_id"
+        :doc-zh "一次性回填 + 种子: (1) conversations.project_id 通过 path 前缀匹配回填 9 个已知项目; (2) 向 projects 表 INSERT ON CONFLICT DO NOTHING 种子 9 行"
+        (seed-projects
+          :zh "种子项目列表 (9 个已知项目)")))
+
+    (component board-tables
+      :zh "组件: board-tables (看板表)"
+
+      (table board_tasks
+        :zh "表: board_tasks (看板任务)"
+        (col id :zh "列 id: UUID 主键")
+        (col title :zh "列 title: 标题")
+        (col description :zh "列 description: 描述")
+        (col status :zh "列 status: 状态 (open/running/done/failed/blocked)，默认 open")
+        (col priority :zh "列 priority: 优先级 (critical/high/medium/low)，默认 medium")
+        (col engineering_phase :zh "列 engineering_phase: 工程阶段 (investigate/consult/plan/execute/finalize)")
+        (col category :zh "列 category: 分类")
+        (col executor :zh "列 executor: 执行者")
+        (col assigned_slot :zh "列 assigned_slot: 分配的槽位")
+        (col depends_on :zh "列 depends_on: 依赖关系 (jsonb)")
+        (col dedupe_key :zh "列 dedupe_key: 去重键")
+        (col lease_until :zh "列 lease_until: 租约到期时间")
+        (col retry_count :zh "列 retry_count: 重试次数，默认 0")
+        (col autopilot :zh "列 autopilot: 自动驾驶，默认 false")
+        (col context :zh "列 context: 上下文 (jsonb)")
+        (col project_id :zh "列 project_id: 项目范围；NULL=全局")
+        (col created_at :zh "列 created_at: 创建时间")
+        (col updated_at :zh "列 updated_at: 更新时间")
+
+        (op insert :zh "操作 insert (插入)")
+        (op create :zh "操作 create (创建带完整字段)")
+        (op select-one :zh "操作 select-one (按 id 查询)")
+        (op select-many :zh "操作 select-many (按状态查询，按 updated_at 降序，限 100)")
+        (op update :zh "操作 update (更新)")
+        (op delete :zh "操作 delete (删除)")
+        (op toggle :zh "操作 toggle (切换状态)")
+        (op claim :zh "操作 claim (认领 open 任务)")
+        (op retry :zh "操作 retry (重试)")
+        (op search :zh "操作 search (全文检索)")
+        (op find-by-dedupe :zh "操作 find-by-dedupe (按去重键查找 open 任务)")
+        (op close-by-dedupe :zh "操作 close-by-dedupe (按去重键关闭)")
+        (op list-running-autopilot :zh "操作 list-running-autopilot (列出运行中的自动驾驶)")
+        (op list-autopilot :zh "操作 list-autopilot (列出所有自动驾驶)")
+        (op board-summary :zh "操作 board-summary (看板汇总)")
+        (op count-by-priority :zh "操作 count-by-priority (按优先级计数)")
+        (op count-by-category :zh "操作 count-by-category (按分类计数)")
+        (op check-dependencies :zh "操作 check-dependencies (检查依赖)")
+        (op find-downstream :zh "操作 find-downstream (查找下游任务)")
+        (op set-lease :zh "操作 set-lease (设置租约)")
+        (op release-claims :zh "操作 release-claims (释放认领)")
+        (op recover-stale :zh "操作 recover-stale (回收过期任务)")
+        (op clear-done :zh "操作 clear-done (清理已完成)")
+        (op query-in-range :zh "操作 query-in-range (时间范围查询)")
+        (op query-in-range-with-status :zh "操作 query-in-range-with-status (时间范围带状态查询)"))
+
+      (table board_task_notes
+        :zh "表: board_task_notes (任务备注)"
+        (col id :zh "列 id: UUID 主键")
+        (col task_id :zh "列 task_id: 外键关联 board_tasks.id")
+        (col author :zh "列 author: 作者")
+        (col content :zh "列 content: 内容")
+        (col created_at :zh "列 created_at: 创建时间")
+
+        (op insert :zh "操作 insert (插入)")
+        (op select-by-task :zh "操作 select-by-task (按任务查询，按 created_at 升序)")))
+
+    (component conversation-tables
+      :zh "组件: conversation-tables (会话表)"
+
+      (table conversations
+        :zh "表: conversations (会话)"
+        (col id :zh "列 id: 主键，来自 Claude Code 的 session_id")
+        (col slot_name :zh "列 slot_name: 槽位名")
+        (col source :zh "列 source: 来源 (claude-code|gemini-cli|codex)")
+        (col status :zh "列 status: 状态 (active/completed)，默认 active")
+        (col project_id :zh "列 project_id: 项目范围；通过 ProjectRegistry 从 CWD 解析")
+        (col parent_id :zh "列 parent_id: 父会话外键")
+        (col task_id :zh "列 task_id: 任务 id")
+        (col summary :zh "列 summary: 摘要")
+        (col summary_embedding :zh "列 summary_embedding: 摘要向量")
+        (col topic_vectors :zh "列 topic_vectors: 话题向量")
+        (col timeline :zh "列 timeline: 时间线 (jsonb)")
+        (col jsonl_path :zh "列 jsonl_path: JSONL 路径")
+        (col exit_code :zh "列 exit_code: 退出码")
+        (col deep_checkpoint :zh "列 deep_checkpoint: 深度分析检查点")
+        (col created_at :zh "列 created_at: 创建时间")
+        (col updated_at :zh "列 updated_at: 更新时间")
+        (col completed_at :zh "列 completed_at: 完成时间")
+        (col analyzed_at :zh "列 analyzed_at: 分析时间")
+        (col compacted_at :zh "列 compacted_at: 压缩时间")
+        (col habit_scanned_at :zh "列 habit_scanned_at: 习惯扫描时间")
+
+        :notes ("started_at 修复 (commit 0adbb18): 3 个代码路径原本写 NOW() 而非真实时间戳"
+                "修复: ensure_conversation_exists 接受 started_at 参数，COALESCE(started_at::timestamptz, NOW())"
+                "upsert ON CONFLICT: 当 $11 非空且非 'unknown' 时更新 started_at"
+                "迁移 20260410400000: 通过 MIN(conversation_messages.timestamp) 修复 6623 条损坏记录")
+
+        (op upsert
+          :zh "操作 upsert (插入或更新)"
+          :on-conflict-zh "当有真实时间戳时更新 started_at (0adbb18)")
+        (op ensure-conversation-exists
+          :zh "操作 ensure-conversation-exists (确保会话存在)"
+          :note-zh "started_at: Option<&str>; 为 None 时用 NOW() 兜底 (commit 0adbb18)")
+        (op select-one :zh "操作 select-one (按 id 查询)")
+        (op select-children :zh "操作 select-children (查询子会话)")
+        (op list :zh "操作 list (列出会话)")
+        (op complete :zh "操作 complete (完成)")
+        (op save-exit-code :zh "操作 save-exit-code (保存退出码)")
+        (op mark-analyzed :zh "操作 mark-analyzed (标记已分析)")
+        (op mark-compacted :zh "操作 mark-compacted (标记已压缩)")
+        (op mark-habit-scanned :zh "操作 mark-habit-scanned (标记已习惯扫描)")
+        (op set-task-id :zh "操作 set-task-id (设置任务 id)")
+        (op get-by-task-id :zh "操作 get-by-task-id (按任务 id 查询)")
+        (op set-summary :zh "操作 set-summary (设置摘要)")
+        (op clear-summary :zh "操作 clear-summary (清除摘要)")
+        (op set-embedding :zh "操作 set-embedding (设置向量)")
+        (op set-topic-vectors :zh "操作 set-topic-vectors (设置话题向量)")
+        (op set-timeline :zh "操作 set-timeline (设置时间线)")
+        (op missing-summary :zh "操作 missing-summary (缺摘要的已完成会话，限 50)")
+        (op stale-embedding :zh "操作 stale-embedding (过期向量)")
+        (op needing-topic-vectors :zh "操作 needing-topic-vectors (需话题向量)")
+        (op needing-timeline :zh "操作 needing-timeline (需时间线)")
+        (op load-embeddings :zh "操作 load-embeddings (加载向量)")
+        (op load-topic-vectors :zh "操作 load-topic-vectors (加载话题向量)")
+        (op reactivate :zh "操作 reactivate (重新激活)")
+        (op complete-stale :zh "操作 complete-stale (完成陈旧 active 会话)")
+        (op pending-deep-analysis :zh "操作 pending-deep-analysis (待深度分析)")
+        (op unscanned :zh "操作 unscanned (未扫描，带批量限制)")
+        (op compaction-fragments :zh "操作 compaction-fragments (压缩片段)")
+
+        :notes ("commit 43c80f4: reconciliation 查询")
+
+        (op sessions-recently-active-without-turns
+          :zh "操作 sessions-recently-active-without-turns (近期活跃但无 turns 的会话)"
+          :note-zh "返回近 N 分钟内有 conversation_messages 但无 turns 记录的 session_id 列表；PG 实现；SQLite stub (返回空)"))
+
+      (table conversation_messages
+        :zh "表: conversation_messages (会话消息)"
+        (col id :zh "列 id: bigint 自增主键")
+        (col conversation_id :zh "列 conversation_id: 会话外键")
+        (col role :zh "列 role: 角色 (user/assistant/system/tool)")
+        (col content :zh "列 content: 内容")
+        (col tool_name :zh "列 tool_name: 工具名")
+        (col tool_call_id :zh "列 tool_call_id: 工具调用 id")
+        (col token_usage :zh "列 token_usage: Token 用量 (jsonb)")
+        (col created_at :zh "列 created_at: 创建时间")
+        (col memory_forwarded_at :zh "列 memory_forwarded_at: 记忆转发时间")
+        (col user_voice_forwarded_at :zh "列 user_voice_forwarded_at: 用户语音转发时间")
+        (col realtime_forwarded_at :zh "列 realtime_forwarded_at: 实时转发时间")
+
+        (op insert :zh "操作 insert (插入)")
+        (op insert-batch
+          :zh "操作 insert-batch (批量插入)"
+          :notes ("commit 43c80f4: insert_conversation_messages_batch trait 方法 — CodexIngestionWorker 用于批量写入 text messages"))
+        (op select-one :zh "操作 select-one (按 id 查询)")
+        (op select-by-conversation :zh "操作 select-by-conversation (按会话查询)")
+        (op get-around :zh "操作 get-around (获取上下文窗口)")
+        (op search :zh "操作 search (全文检索)")
+        (op search-filtered :zh "操作 search-filtered (过滤检索)")
+        (op search-sessions-fts :zh "操作 search-sessions-fts (按会话检索)")
+        (op search-sessions-fts-filtered :zh "操作 search-sessions-fts-filtered (按会话过滤检索)")
+        (op get-fts-snippets :zh "操作 get-fts-snippets (获取全文检索片段)")
+        (op pending-memory :zh "操作 pending-memory (待记忆，role=assistant)")
+        (op pending-user-voice :zh "操作 pending-user-voice (待用户语音，role=user)")
+        (op pending-realtime :zh "操作 pending-realtime (待实时转发)")
+        (op pending-realtime-with-limit :zh "操作 pending-realtime-with-limit (带限制的待实时)")
+        (op update-memory-forwarded :zh "操作 update-memory-forwarded (更新记忆转发时间)")
+        (op update-user-voice-forwarded :zh "操作 update-user-voice-forwarded (更新用户语音转发时间)")
+        (op update-realtime-forwarded :zh "操作 update-realtime-forwarded (更新实时转发时间)")
+        (op last-assistant-content :zh "操作 last-assistant-content (最后一条 assistant 消息内容)")))
+
+    (component knowledge-tables
+      :zh "组件: knowledge-tables (知识库表)"
+
+      (table knowledge
+        :zh "表: knowledge (知识库)"
+        (col id :zh "列 id: UUID 主键")
+        (col key :zh "列 key: 唯一键")
+        (col category :zh "列 category: 分类")
+        (col scope :zh "列 scope: 作用域")
+        (col content :zh "列 content: 内容")
+        (col source :zh "列 source: 来源")
+        (col embedding :zh "列 embedding: 向量")
+        (col linked_task_id :zh "列 linked_task_id: 关联任务 id")
+        (col project_id :zh "列 project_id: 项目范围；NULL=全局知识，所有项目可访问")
+        (col access_count :zh "列 access_count: 访问次数，默认 0")
+        (col last_accessed_at :zh "列 last_accessed_at: 最后访问时间")
+        (col created_at :zh "列 created_at: 创建时间")
+        (col updated_at :zh "列 updated_at: 更新时间")
+
+        :notes ("commit 3c10d21: project_id 写入路径"
+                "- remember: INSERT 增加 project_id 列; ON CONFLICT: project_id = COALESCE(EXCLUDED.project_id, knowledge.project_id)"
+                "- KBRememberInput.project_id: Option<String>, 透传自 mission_kb_remember 的 project 参数"
+                "- kb_update: 新增 new_project_id: Option<&str> 参数; 空串→清除归属 (设为 NULL)"
+                "- SQLite (MissionDB): project_id 字段返回 None (仅 PG 持久化)")
+
+        (op remember :zh "操作 remember (记住，按 key upsert)")
+        (op update :zh "操作 update (更新)")
+        (op select-one :zh "操作 select-one (按 id 查询)")
+        (op get-id-by-key :zh "操作 get-id-by-key (按 key 获取 id)")
+        (op search-fts :zh "操作 search-fts (全文检索)")
+        (op search-like :zh "操作 search-like (模式匹配)")
+        (op search-ranked :zh "操作 search-ranked (混合排名检索)")
+        (op search :zh "操作 search (检索)")
+
+        :notes ("P4+P5 (commit 76900d1): 项目范围检索变体")
+
+        (op search-fts-scoped
+          :zh "操作 search-fts-scoped (项目范围全文检索)"
+          :where-zh "AND (project_id = $X OR project_id IS NULL)"
+          :note-zh "若 project_id IS NULL 则回退到无范围检索")
+        (op search-like-scoped
+          :zh "操作 search-like-scoped (项目范围模式检索)"
+          :where-zh "AND (project_id = $X OR project_id IS NULL)"
+          :note-zh "动态 SQL，带关键字扩展")
+        (op list :zh "操作 list (列出)")
+        (op list-paginated :zh "操作 list-paginated (分页列出)")
+        (op list-by-scope :zh "操作 list-by-scope (按作用域列出)")
+        (op forget :zh "操作 forget (遗忘)")
+        (op batch-forget :zh "操作 batch-forget (批量遗忘)")
+        (op clear-scope :zh "操作 clear-scope (清理作用域)")
+        (op set-embedding :zh "操作 set-embedding (设置向量)")
+        (op set-linked-task-id :zh "操作 set-linked-task-id (设置关联任务 id)")
+        (op stale-embedding :zh "操作 stale-embedding (过期向量)")
+        (op missing-embedding :zh "操作 missing-embedding (缺失向量)")
+        (op load-embeddings :zh "操作 load-embeddings (加载向量)")
+        (op load-all-embeddings :zh "操作 load-all-embeddings (加载所有向量)")
+        (op update-access-stats :zh "操作 update-access-stats (更新访问统计)")
+        (op summary :zh "操作 summary (汇总)")
+        (op hot-keys :zh "操作 hot-keys (按访问数降序的热门键，限 20)")
+        (op find-stale :zh "操作 find-stale (查找陈旧项)")
+        (op find-duplicates :zh "操作 find-duplicates (查找重复项)")
+        (op embedding-stats :zh "操作 embedding-stats (向量统计)"))
+
+      (table knowledge_edges
+        :zh "表: knowledge_edges (知识边)"
+        (col from_id :zh "列 from_id: 源节点外键")
+        (col to_id :zh "列 to_id: 目标节点外键")
+        (col relation :zh "列 relation: 关系类型")
+        (col created_at :zh "列 created_at: 创建时间")
+        (op add-edge :zh "操作 add-edge (添加边)"))
+
+      (table prompt_snapshots
+        :zh "表: prompt_snapshots (Prompt 快照)"
+        (col id :zh "列 id: UUID 主键")
+        (col prompt_text :zh "列 prompt_text: Prompt 文本")
+        (col model :zh "列 model: 模型")
+        (col outcome :zh "列 outcome: 结果")
+        (col created_at :zh "列 created_at: 创建时间")
+        (col updated_at :zh "列 updated_at: 更新时间")
+        (op save :zh "操作 save (保存)")
+        (op update-outcome :zh "操作 update-outcome (更新结果)")
+        (op list :zh "操作 list (按 created_at 降序列出，限 50)")))
+
+    (component compute-tables
+      :zh "组件: compute-tables (计算表)"
+
+      (table slot_sessions
+        :zh "表: slot_sessions (槽位会话)"
+        (col slot_name :zh "列 slot_name: 槽位名主键")
+        (col session_id :zh "列 session_id: 会话 id")
+        (col pid :zh "列 pid: 进程 id")
+        (col status :zh "列 status: 状态")
+        (col started_at :zh "列 started_at: 启动时间")
+        (op set :zh "操作 set (设置)")
+        (op delete :zh "操作 delete (删除)"))
+
+      (table slot_tasks
+        :zh "表: slot_tasks (槽位任务)"
+        (col id :zh "列 id: UUID 主键")
+        (col slot_name :zh "列 slot_name: 槽位名")
+        (col task_type :zh "列 task_type: 任务类型")
+        (col prompt :zh "列 prompt: 提示词")
+        (col status :zh "列 status: 状态 (queued/running/completed/failed)，默认 queued")
+        (col result :zh "列 result: 结果")
+        (col created_at :zh "列 created_at: 创建时间")
+        (col started_at :zh "列 started_at: 启动时间")
+        (col completed_at :zh "列 completed_at: 完成时间")
+        (op insert :zh "操作 insert (插入)")
+        (op set-running :zh "操作 set-running (设为运行中)")
+        (op set-completed :zh "操作 set-completed (设为已完成)")
+        (op set-failed :zh "操作 set-failed (设为失败)"))
+
+      (table tasks
+        :zh "表: tasks (任务)"
+        (col id :zh "列 id: UUID 主键")
+        (col description :zh "列 description: 描述")
+        (col status :zh "列 status: 状态 (queued/running/completed/failed)，默认 queued")
+        (col result :zh "列 result: 结果")
+        (col slot_name :zh "列 slot_name: 槽位名")
+        (col created_at :zh "列 created_at: 创建时间")
+        (col started_at :zh "列 started_at: 启动时间")
+        (col completed_at :zh "列 completed_at: 完成时间")
+        (op insert :zh "操作 insert (插入)")
+        (op select-one :zh "操作 select-one (按 id 查询)"))
+
+      (table daemon_state
+        :zh "表: daemon_state (守护进程状态)"
+        (col key :zh "列 key: 键主键")
+        (col value :zh "列 value: 值")
+        (col updated_at :zh "列 updated_at: 更新时间")
+        (op set :zh "操作 set (设置)"))
+
+      (table inbox_messages
+        :zh "表: inbox_messages (收件箱)"
+        (col id :zh "列 id: UUID 主键")
+        (col slot_name :zh "列 slot_name: 槽位名")
+        (col content :zh "列 content: 内容")
+        (col read :zh "列 read: 是否已读，默认 false")
+        (col created_at :zh "列 created_at: 创建时间")
+        (col read_at :zh "列 read_at: 已读时间")
+        (op insert :zh "操作 insert (插入)")
+        (op mark-read :zh "操作 mark-read (标记已读)")))))

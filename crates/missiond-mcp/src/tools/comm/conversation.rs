@@ -24,7 +24,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "query": {"type": "string", "description": "[search/message_search] 搜索关键词"},
                     "queryMode": {"type": "string", "description": "[search] 搜索模式", "enum": ["hybrid", "fts", "semantic"], "default": "hybrid"},
                     "timeRange": {"type": "string", "description": "[search/message_search] 时间范围", "enum": ["last_24h", "last_7d", "last_30d"]},
-                    "project": {"type": "string", "description": "[list/search] 项目过滤"},
+                    "project": {"type": "string", "description": "[search] 项目过滤"},
                     "excludeSessionId": {"type": "string", "description": "[search] 排除特定会话"},
                     "offset": {"type": "integer", "description": "[search] 分页偏移"},
                     "role": {"type": "string", "description": "[message_search] 消息角色", "enum": ["user", "assistant", "tool_result", "system", "thinking"]},
@@ -35,8 +35,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "eventType": {"type": "string", "description": "[events] 事件类型过滤"},
                     "limit": {"type": "integer", "description": "[list/search/message_search/events] 最大返回数"},
                     "since": {"type": "string", "description": "[list] 起始时间(ISO/相对格式)"},
-                    "until": {"type": "string", "description": "[list] 结束时间"},
-                    "source": {"type": "string", "description": "[list] 来源过滤"}
+                    "until": {"type": "string", "description": "[list] 结束时间"}
                 }
             }),
         ),

@@ -4,8 +4,10 @@ use tracing::{debug, info, warn};
 
 use crate::claude_md_sync::sync_claude_md;
 use crate::engine::learning_engine;
-use crate::event_bus::{DaemonEvent, TraceContext};
 use crate::flow_engine::{ensure_autopilot_pty, execute_flow_task};
+use missiond_core::event::events::{
+    BoardEvent, IncidentEvent, SessionEvent, SlotEvent, SystemEvent,
+};
 use crate::llm_gateway::determine_llm_env;
 use crate::memory_scheduler::ensure_memory_slot_by_id;
 use crate::memory_scheduler::{dispatch_queued_submit_tasks, reap_stale_submit_tasks};
@@ -38,20 +40,13 @@ async fn notify_jarvis_failure(
                     .store
                     .router_chat_append_messages(conv_id, &[("assistant".to_string(), error_msg)])
                     .await;
-                state.event_bus.publish_traced(
-                    DaemonEvent::JarvisTaskCompleted {
+                let _ = state
+                    .bus
+                    .publish_session(SessionEvent::JarvisTaskCompleted {
                         conversation_id: conv_id.to_string(),
                         task_id: task.id.to_string(),
-                    },
-                    TraceContext {
-                        trace_id: Some(conv_id.to_string()),
-                        summary: Some(format!(
-                            "jarvis: task {} failed",
-                            &task.id.as_str()[..8.min(task.id.as_str().len())]
-                        )),
-                        ..Default::default()
-                    },
-                );
+                    })
+                    .await;
                 warn!(task_id = %task.id, conv_id = %conv_id, "Jarvis async: failure notification sent");
             }
         }
@@ -373,18 +368,14 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                             },
                         )
                         .await;
-                    state.event_bus.publish_traced(
-                        DaemonEvent::BoardTaskStatusChanged {
+                    let _ = state
+                        .bus
+                        .publish_board(BoardEvent::StatusChanged {
                             task_id: task.id.to_string(),
                             old_status: format!("{:?}", task.status),
                             new_status: "blocked".to_string(),
-                        },
-                        TraceContext {
-                            trace_id: Some(task.id.to_string()),
-                            summary: Some(format!("board: {} → blocked", task.title)),
-                            ..Default::default()
-                        },
-                    );
+                        })
+                        .await;
                     let _ = state
                         .store
                         .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
@@ -655,16 +646,17 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
             } else {
                 full_prompt.clone()
             };
-            state
-                .event_bus
-                .publish(crate::event_bus::DaemonEvent::SlotTaskDispatched {
+            let _ = state
+                .bus
+                .publish_slot(SlotEvent::TaskDispatched {
                     slot_id: slot_id.clone(),
                     task_id: Some(task.id.to_string()),
                     purpose: "board_auto_execute".to_string(),
                     prompt_chars: full_prompt.len(),
                     preview,
                     cited_kb_ids,
-                });
+                })
+                .await;
         }
 
         // Pre-send state verification with dispatch guard: atomically check idle + send.
@@ -727,18 +719,14 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                                 },
                             )
                             .await;
-                        state.event_bus.publish_traced(
-                            DaemonEvent::BoardTaskStatusChanged {
+                        let _ = state
+                            .bus
+                            .publish_board(BoardEvent::StatusChanged {
                                 task_id: task.id.to_string(),
                                 old_status: format!("{:?}", task.status),
                                 new_status: "failed".to_string(),
-                            },
-                            TraceContext {
-                                trace_id: Some(task.id.to_string()),
-                                summary: Some(format!("board: {} → failed", task.title)),
-                                ..Default::default()
-                            },
-                        );
+                            })
+                            .await;
                         notify_jarvis_failure(state, &task, "OAuth token 过期，工位认证失败").await;
                     } else {
                         let _ = state
@@ -807,7 +795,10 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                         }),
                         created_at: chrono::Utc::now().to_rfc3339(),
                     };
-                    let _ = state.incident_tx.try_send(incident);
+                    let _ = state
+                        .bus
+                        .publish_incident(IncidentEvent::Reported { incident })
+                        .await;
                     notify_jarvis_failure(state, &task, "API 配额耗尽，系统已全局暂停").await;
                     // Stop processing remaining tasks — quota is gone
                     break;
@@ -865,18 +856,14 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                                 },
                             )
                             .await;
-                        state.event_bus.publish_traced(
-                            DaemonEvent::BoardTaskStatusChanged {
+                        let _ = state
+                            .bus
+                            .publish_board(BoardEvent::StatusChanged {
                                 task_id: task.id.to_string(),
                                 old_status: format!("{:?}", task.status),
                                 new_status: "done".to_string(),
-                            },
-                            TraceContext {
-                                trace_id: Some(task.id.to_string()),
-                                summary: Some(format!("board: {} → done", task.title)),
-                                ..Default::default()
-                            },
-                        );
+                            })
+                            .await;
                         info!(task_id = %task.id, duration_ms = res.duration_ms, "Autopilot: task completed");
                         // Record outcome for Skill auto-verification replay
                         let _ = state
@@ -980,20 +967,13 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                                         &[("assistant".to_string(), res.response.clone())],
                                     )
                                     .await;
-                                state.event_bus.publish_traced(
-                                    DaemonEvent::JarvisTaskCompleted {
+                                let _ = state
+                                    .bus
+                                    .publish_session(SessionEvent::JarvisTaskCompleted {
                                         conversation_id: conv_id.to_string(),
                                         task_id: task.id.to_string(),
-                                    },
-                                    TraceContext {
-                                        trace_id: Some(conv_id.to_string()),
-                                        summary: Some(format!(
-                                            "jarvis: task {} completed",
-                                            &task.id.as_str()[..8.min(task.id.as_str().len())]
-                                        )),
-                                        ..Default::default()
-                                    },
-                                );
+                                    })
+                                    .await;
                                 info!(task_id = %task.id, conv_id = %conv_id, "Jarvis async: result appended to conversation");
                             }
                         }
@@ -1084,18 +1064,14 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                                 },
                             )
                             .await;
-                        state.event_bus.publish_traced(
-                            DaemonEvent::BoardTaskStatusChanged {
+                        let _ = state
+                            .bus
+                            .publish_board(BoardEvent::StatusChanged {
                                 task_id: task.id.to_string(),
                                 old_status: format!("{:?}", task.status),
                                 new_status: "failed".to_string(),
-                            },
-                            TraceContext {
-                                trace_id: Some(task.id.to_string()),
-                                summary: Some(format!("board: {} → failed", task.title)),
-                                ..Default::default()
-                            },
-                        );
+                            })
+                            .await;
                         warn!(task_id = %task.id, retries = new_retry, "Autopilot: task failed after max retries");
                         let _ = state
                             .store
@@ -1628,11 +1604,14 @@ async fn trigger_jarvis_push(state: &AppState, reason: &str, summary: &str) {
         .router_chat_append_messages(&conv_id, &[("user".to_string(), message)])
         .await;
 
-    state.event_bus.publish(DaemonEvent::JarvisProactivePush {
-        conversation_id: conv_id.clone(),
-        trigger_reason: reason.to_string(),
-        summary: summary.to_string(),
-    });
+    let _ = state
+        .bus
+        .publish_system(SystemEvent::JarvisProactivePush {
+            conversation_id: conv_id.clone(),
+            trigger_reason: reason.to_string(),
+            summary: summary.to_string(),
+        })
+        .await;
 
     info!(reason, conv_id = %conv_id, "Proactive push sent to Jarvis");
 }

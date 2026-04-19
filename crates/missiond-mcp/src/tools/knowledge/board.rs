@@ -20,7 +20,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "ids": {"type": "array", "description": "[get] 批量任务 ID"},
                     "includeChildren": {"type": "boolean", "description": "[get] 内嵌子任务详情，默认 false"},
                     "query": {"type": "string", "description": "[search] 全文搜索 title+description"},
-                    "project": {"type": "string", "description": "[list/search] 项目过滤"},
+                    "project": {"type": "string", "description": "[search] 项目过滤"},
                     "category": {"type": "string", "description": "[search] 分类: deploy/dev/infra/test/other"},
                     "parentId": {"type": "string", "description": "[search] 父任务 ID"},
                     "limit": {"type": "integer", "description": "[search] 最大返回条数", "default": 50},

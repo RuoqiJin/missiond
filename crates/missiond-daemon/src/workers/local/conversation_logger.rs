@@ -54,8 +54,12 @@ async fn run_loop(s: &AppState, rx: &mut broadcast::Receiver<WatcherEvent>) {
                     source,
                 )
                 .await;
-                // Ack: cursor is safe to persist — messages have been written to PG
-                let _ = s.cursor_ack_tx.send((jsonl_path, read_end_offset));
+                // Ack: cursor is safe to persist — messages have been written to PG.
+                // Internalized from the old `cursor_ack_tx` MPSC per Phase 8 I005.
+                s.conversation_cursor_map
+                    .lock()
+                    .await
+                    .insert(jsonl_path, read_end_offset);
             }
             Ok(WatcherEvent::NewEvents { session_id, events }) => {
                 events_sync::handle_new_events(s, session_id, events).await;

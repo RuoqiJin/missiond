@@ -1,0 +1,66 @@
+(zh
+  :header (""
+           "MissionD 纯工具函数声明"
+           "模式: pure-utility（算法隔离舱）"
+           "状态: 阶段 1 — 语义解析器提取"
+           "")
+
+  :notes (""
+          "--- 语义解析器辅助函数 ---"
+          "以下为从 missiond-core/src/semantic/ 提取的纯函数。"
+          "无 &self，无副作用，无 I/O。"
+          ""
+          "--- 字符串安全辅助函数 ---"
+          "全局安全截断原语。替换所有危险的 &s[..N] 字节切片。"
+          ""
+          "--- Token 与预算辅助函数 ---"
+          "上下文窗口管理的纯数学函数。")
+
+  (pure-utility semantic-parsing
+    :zh "纯工具: 语义解析"
+
+    (fn is_spinner_char
+      :zh "函数: is_spinner_char"
+      :doc-zh "检查某字符是否为已知 spinner 字形（盲文点、竖线等）")
+
+    (fn split_args
+      :zh "函数: split_args"
+      :doc-zh "按逗号切分参数，同时尊重带引号的字符串")
+
+    (fn extract_phase_from_parens
+      :zh "函数: extract_phase_from_parens"
+      :doc-zh "从状态栏括号内容（如 '3m 2s · thinking'）解析阶段提示（thinking/tool）")
+
+    (fn sanitize_line
+      :zh "函数: sanitize_line"
+      :doc-zh "剥离方框绘制字符并 trim 该行，用于文本分析")
+
+    (fn has_activity_timer
+      :zh "函数: has_activity_timer"
+      :doc-zh "检测 (Ns · 或 (Nm Ns · 计时模式，表示正在活跃处理")
+
+    (fn is_idle_prompt
+      :zh "函数: is_idle_prompt"
+      :doc-zh "检查终端屏幕底部是否显示空闲提示符（❯ 或 >）"))
+
+  (pure-utility string-helpers
+    :zh "纯工具: 字符串辅助"
+
+    (fn safe_byte_truncate
+      :zh "函数: safe_byte_truncate"
+      :doc-zh "将字符串截断到至多 max_bytes，绝不打破字符边界。返回合法 UTF-8 切片。")
+
+    (fn safe_char_truncate
+      :zh "函数: safe_char_truncate"
+      :doc-zh "将字符串截断到至多 max_chars 个 Unicode 字符。"))
+
+  (pure-utility token-budget
+    :zh "纯工具: token 预算"
+
+    (fn estimate_tokens
+      :zh "函数: estimate_tokens"
+      :doc-zh "粗略 token 计数估算: 英文 chars / 4，CJK / 2")
+
+    (fn allocate_budget
+      :zh "函数: allocate_budget"
+      :doc-zh "将 token 预算按 N 个来源分配，每个来源递减回报")))

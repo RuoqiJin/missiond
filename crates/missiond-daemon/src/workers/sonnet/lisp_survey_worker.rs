@@ -15,8 +15,9 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use tracing::{debug, info, warn};
 
-use crate::event_bus::{DaemonEvent, TimelineEvent};
 use crate::state::AppState;
+use missiond_core::event::events::SystemEvent;
+use missiond_core::event::subscription::SubscriptionOpts;
 
 use super::{BackgroundWorker, WorkerContext, WorkerKind};
 
@@ -27,9 +28,7 @@ const SURVEY_COMMIT_PREFIX: &str = "chore(survey):";
 /// Maximum diff size sent to the surveyor slot.
 const MAX_DIFF_SIZE: usize = 2_000_000;
 
-pub(crate) struct LispSurveyWorker {
-    pub timeline_rx: tokio::sync::broadcast::Receiver<TimelineEvent>,
-}
+pub(crate) struct LispSurveyWorker;
 
 impl BackgroundWorker for LispSurveyWorker {
     const KIND: WorkerKind = WorkerKind::Sonnet;
@@ -39,104 +38,117 @@ impl BackgroundWorker for LispSurveyWorker {
     }
 
     async fn run(self, state: Arc<AppState>, mut ctx: WorkerContext) {
-        let mut rx = self.timeline_rx;
+        let mut sub = match state
+            .bus
+            .subscribe::<SystemEvent>("lisp_survey", SubscriptionOpts::named("lisp_survey"))
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "lisp_survey: bus subscribe failed, worker exiting");
+                return;
+            }
+        };
         // project_id → last trigger time
         let mut debounce: HashMap<String, Instant> = HashMap::new();
         let mut processing: HashSet<String> = HashSet::new();
 
-        info!("Lisp survey worker started");
+        info!("Lisp survey worker started (v2 bus)");
 
         loop {
             ctx.wait_if_paused().await;
-            match rx.recv().await {
-                Ok(te) => {
-                    if let DaemonEvent::ContextualCommitDetected {
-                        ref commit_hash,
-                        ref summary,
-                        ref slot_id,
-                        ..
-                    } = te.event
-                    {
-                        // Self-trigger filter
-                        if summary.starts_with(SURVEY_COMMIT_PREFIX) {
-                            debug!("lisp_survey: skipping own commit");
-                            continue;
-                        }
+            let Some(ack) = sub.next().await else {
+                break;
+            };
 
-                        // Resolve project from slot's cwd
-                        let project_id = match resolve_project(&state, slot_id.as_deref()).await {
-                            Some(pid) => pid,
-                            None => {
-                                debug!(
-                                    slot_id = ?slot_id,
-                                    "lisp_survey: cannot resolve project for slot"
-                                );
-                                continue;
-                            }
-                        };
+            let SystemEvent::ContextualCommitDetected {
+                commit_hash,
+                summary,
+                slot_id,
+                ..
+            } = ack.event().clone()
+            else {
+                ack.ack().await;
+                continue;
+            };
 
-                        // Check if project has intent.lisp
-                        let intent_path = match find_intent_lisp(&state, &project_id).await {
-                            Some(p) => p,
-                            None => {
-                                debug!(
-                                    project = %project_id,
-                                    "lisp_survey: project has no intent.lisp, skipping"
-                                );
-                                continue;
-                            }
-                        };
-
-                        // Debounce per project
-                        let now = Instant::now();
-                        if let Some(last) = debounce.get(&project_id) {
-                            if now.duration_since(*last) < Duration::from_secs(DEBOUNCE_SECS) {
-                                debug!(project = %project_id, "lisp_survey: debounced");
-                                continue;
-                            }
-                        }
-
-                        // Concurrency guard
-                        if processing.contains(&project_id) {
-                            debug!(project = %project_id, "lisp_survey: already processing");
-                            continue;
-                        }
-
-                        debounce.insert(project_id.clone(), now);
-                        processing.insert(project_id.clone());
-
-                        let hash = commit_hash.clone();
-                        let summary_text = summary.clone();
-                        let pid = project_id.clone();
-
-                        match process_survey(&state, &pid, &hash, &summary_text, &intent_path)
-                            .await
-                        {
-                            Ok(true) => {
-                                info!(
-                                    project = %pid,
-                                    commit = %&hash[..7.min(hash.len())],
-                                    "lisp_survey: intent.lisp updated"
-                                );
-                                ctx.record_success();
-                            }
-                            Ok(false) => {
-                                debug!(project = %pid, "lisp_survey: NO_CHANGE");
-                            }
-                            Err(e) => {
-                                warn!(error = %e, project = %pid, "lisp_survey: failed");
-                                ctx.record_failure();
-                            }
-                        }
-
-                        processing.remove(&project_id);
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(skipped = n, "lisp_survey lagged");
-                }
-                Err(_) => break,
+            // Self-trigger filter
+            if summary.starts_with(SURVEY_COMMIT_PREFIX) {
+                debug!("lisp_survey: skipping own commit");
+                ack.ack().await;
+                continue;
             }
+
+            // Resolve project from slot's cwd
+            let project_id = match resolve_project(&state, slot_id.as_deref()).await {
+                Some(pid) => pid,
+                None => {
+                    debug!(
+                        slot_id = ?slot_id,
+                        "lisp_survey: cannot resolve project for slot"
+                    );
+                    ack.ack().await;
+                    continue;
+                }
+            };
+
+            // Check if project has intent.lisp
+            let intent_path = match find_intent_lisp(&state, &project_id).await {
+                Some(p) => p,
+                None => {
+                    debug!(
+                        project = %project_id,
+                        "lisp_survey: project has no intent.lisp, skipping"
+                    );
+                    ack.ack().await;
+                    continue;
+                }
+            };
+
+            // Debounce per project
+            let now = Instant::now();
+            if let Some(last) = debounce.get(&project_id) {
+                if now.duration_since(*last) < Duration::from_secs(DEBOUNCE_SECS) {
+                    debug!(project = %project_id, "lisp_survey: debounced");
+                    ack.ack().await;
+                    continue;
+                }
+            }
+
+            // Concurrency guard
+            if processing.contains(&project_id) {
+                debug!(project = %project_id, "lisp_survey: already processing");
+                ack.ack().await;
+                continue;
+            }
+
+            debounce.insert(project_id.clone(), now);
+            processing.insert(project_id.clone());
+
+            let hash = commit_hash.clone();
+            let summary_text = summary.clone();
+            let pid = project_id.clone();
+
+            match process_survey(&state, &pid, &hash, &summary_text, &intent_path).await {
+                Ok(true) => {
+                    info!(
+                        project = %pid,
+                        commit = %&hash[..7.min(hash.len())],
+                        "lisp_survey: intent.lisp updated"
+                    );
+                    ctx.record_success();
+                }
+                Ok(false) => {
+                    debug!(project = %pid, "lisp_survey: NO_CHANGE");
+                }
+                Err(e) => {
+                    warn!(error = %e, project = %pid, "lisp_survey: failed");
+                    ctx.record_failure();
+                }
+            }
+
+            processing.remove(&project_id);
+            ack.ack().await;
         }
     }
 }

@@ -1,0 +1,244 @@
+(zh
+  :header ("MissionD — 支柱: event-workers（事件工作器）"
+           "从 intent.lisp 拆分，支持并行加载"
+           "父文件: intent.lisp")
+
+  (pillar event-workers
+    :zh "支柱: 事件-工作器（pub-sub 骨干 + 21 个后台 worker）"
+    :notes ("用途: 发布-订阅事件骨干 + 21 个后台 worker，按 LLM 依赖划分: sonnet(6) codex(2) gemini(1) local(12)"
+            "local 计数变迁: +codex_ingestion_worker (ec269d7); EventAnalyzerWorker(65c8b59) 并入 tagger-chunker(1ea1838); +xjpcode_briefing_worker (8e5efaf)")
+
+    (component event-bus
+      :zh "组件: 事件总线"
+      :notes ("描述: tokio broadcast 通道 hub，承载 DaemonEvent 枚举"
+              "事件分类"
+              "pty 事件: 状态变更、输出、截屏"
+              "消息事件: JSONL 消息入库、消息持久化"
+              "任务事件: 提交、完成、失败"
+              "看板事件: 任务创建、更新、认领"
+              "槽位事件: 空闲、卡住、会话切换"
+              "知识事件: KB 条目创建、更新"
+              "系统事件: worker 状态变更、关机请求"
+              "级联事件: 触发、完成"
+              ""
+              ""
+              "commit 事件: 带上下文的 commit 检测（会话 ID / 槽位 ID / commit 哈希 / 消息）"))
+
+    (component event-router
+      :zh "组件: 事件路由器"
+      :notes ("commit c8b76b0: 降级为 Notify 信号发射器 — 不再派生孤儿协程"
+              "strategy / retro / ast-sync 迁移到 BackgroundWorker trait; event_router 只剩薄广播层"
+              "注: 仅作信号发射器 — 所有事件驱动处理改用 BackgroundWorker trait"))
+
+    (component events-sync
+      :zh "组件: 事件同步器"
+      :notes ("写入: system_timeline"))
+
+    (component worker-registry
+      :zh "组件: worker 注册表"
+      :notes ("trait: BackgroundWorker"
+              "KIND 常量: 枚举 Sonnet / Codex / Gemini / Local"
+              "方法: name / extra-deps / run"
+              "注: KIND 必须匹配 worker 所在子目录; ControlTree provider 依赖由 spawn_worker 自动注入"
+              "commit c8b76b0: strategy-worker (Gemini)、retro-worker (Sonnet)、ast-sync-worker (Local)"
+              "从零散 async fn 改造为 BackgroundWorker 实现，支持 ControlTree 暂停 / 恢复"
+              "关闭 ControlTree 执行力漏洞 — 所有事件驱动 worker 现在都遵守级联暂停 / 恢复"))
+
+    (component control-tree
+      :zh "组件: 控制树"
+      :notes ("结构体: ControlTree"
+              "全局暂停标志"
+              "按 Provider 暂停状态"
+              "按 Domain 暂停状态"
+              "按 worker 名暂停状态"
+              "注: true=强制暂停; false=强制恢复（调试覆盖）; 不存在=跟随级联"
+              "按槽位角色暂停状态"
+              "按项目 ID 暂停状态"
+              "注: project_id → 是否暂停; P2+P3 新增（commit 50a5296）。is_project_paused() 查表默认 false"
+              "域暂停时间戳; 仅信息性，不影响判断"
+              ""
+              "级联优先级"
+              "注: is_effectively_paused() 求值顺序"
+              "1. worker 显式覆盖"
+              "语义: workers[名]=true → 恒暂停; workers[名]=false → 恒恢复（调试模式）"
+              "2. 全局总闸"
+              "语义: global_paused=true → 所有 worker 暂停（除非有显式覆盖）"
+              "3. provider-domain 级联"
+              "语义: 逐个检查 Dependency::Provider / Dependency::Domain; 任一 true → 暂停"
+              "项目暂停: is_project_paused(id) 由 handler 独立检查,"
+              "不属于 is_effectively_paused() worker 级联 — 项目控制数据流，不控制 worker"
+              ""
+              "方法: is_worker_paused"
+              "语义: worker 显式覆盖优先于 global; 不存在 → 跟随 global_paused"
+              "方法: is_effectively_paused"
+              "语义: 完整级联: worker 覆盖 > global > provider / domain 依赖"
+              "方法: status_summary"
+              "字段: 全局暂停 / providers / domains / 已暂停 workers / 强制恢复 workers / 槽位角色"
+              "注: workers 拆成 paused / force_resumed 两个列表，便于调试观察"
+              ""
+              "结构体: ControlManager"
+              "模式: 基于 watch 的推送广播（非轮询）"
+              "语义: 变更 → send_modify() 原子更新 → 所有订阅者通过 changed().await 收到通知"
+              "持久化: control_tree.json — 崩溃恢复通过 spawn_blocking 写入"
+              "注: Worker 在 select! 中 await watch::Receiver::changed() — 零成本异步推送，非 HashMap 轮询"
+              "变更方法集: set_global_paused / set_provider / set_domain / set_worker / set_slot_role / set_project"
+              "set_project: paused=true → 插入 project_id; paused=false → 移除（不存 false 条目）"))
+
+    (component workers-sonnet
+      :zh "组件: Sonnet 类 worker 集合"
+      :notes ("workers/sonnet/ — 通过 SonnetGateway 访问 Sonnet API")
+
+      (worker embedding-worker
+        :zh "worker: 嵌入生成"
+        :notes ("触发: MPSC 通道 embedding_rx"
+                "写入: knowledge / conversation_topic_vectors"))
+
+      (worker translation-worker
+        :zh "worker: 翻译"
+        :notes ("触发: 5 秒轮询"
+                "写入: translations"))
+
+      (worker briefing-worker
+        :zh "worker: 简报生成"
+        :notes ("触发: 按需"))
+
+      (worker arch-maintenance-worker
+        :zh "worker: 架构维护"
+        :notes ("触发: ContextualCommitDetected 事件（commit 65c8b59 前为 3600 秒轮询）"
+                "写入: knowledge"
+                "注: commit 65c8b59 后消费 ContextualCommitDetected（带会话上下文的富事件），不再轮询 git-log"))
+
+      (worker retro-worker
+        :zh "worker: 复盘"
+        :notes ("触发: 会话结束时"
+                "写入: retrospective_results"
+                "注: commit c8b76b0 后改造为 BackgroundWorker 实现，遵守 ControlTree 暂停 / 恢复"))
+
+      (worker lisp-survey-worker
+        :zh "worker: lisp 测绘"
+        :notes ("commit 79a877f: 新增"
+                "触发: ContextualCommitDetected 事件"
+                "路由到: lisp-surveyor（常驻 Sonnet 槽位，超时 900 秒）"
+                "写入: 项目 intent.lisp（通过槽位 Edit 工具）"
+                "去抖: 每个 project_id 60 秒"
+                "过滤: 自触发屏蔽 — slot_id == lisp-surveyor 的 commit 跳过"
+                "diff 截断: 最多 8000 字符"
+                "流程:"
+                "→ 自触发过滤（slot_id == lisp-surveyor → 跳过）"
+                "→ ProjectRegistry::resolve(project_id) → 查 intent_path"
+                "→ 未配置 intent.lisp 则跳过"
+                "→ 60 秒去抖（HashMap<String, Instant>）"
+                "→ 构造增量测绘 prompt（diff + intent.lisp 路径）"
+                "→ 解析响应: NO_CHANGE → 跳过; 否则由槽位更新 intent.lisp")))
+
+    (component workers-codex
+      :zh "组件: codex 类 worker 集合"
+      :notes ("workers/codex/ — Codex CLI / Claude Code PTY，通过 SlotManager 调度")
+
+      (worker step-narrator
+        :zh "worker: 步骤叙述"
+        :notes ("监听: MessagePersisted 事件"
+                "写入: message_narrations / narration_cursors"))
+
+      (worker vision-worker
+        :zh "worker: 视觉分析"
+        :notes ("触发: 通道"
+                "写入: image_descriptions")))
+
+    (component workers-gemini
+      :zh "组件: gemini 类 worker 集合"
+      :notes ("workers/gemini/ — Gemini CLI PTY，通过 SlotManager 调度")
+
+      (worker strategy-worker
+        :zh "worker: 策略生成"
+        :notes ("触发: 300 秒轮询（flag 门控）"
+                "注: commit c8b76b0 后改造为 BackgroundWorker 实现，遵守 ControlTree 暂停 / 恢复")))
+
+    (component workers-local
+      :zh "组件: 本地 worker 集合"
+      :notes ("workers/local/ — 纯本地计算，不依赖 LLM"
+              "数量: 12 个 worker（原 11; +xjpcode_briefing_worker 8e5efaf; 此前 +codex_ingestion_worker ec269d7; EventAnalyzerWorker 并入 tagger-chunker 1ea1838）")
+
+      (worker conversation-logger
+        :zh "worker: 会话记录"
+        :notes ("监听: JsonlMessageIngested 事件"
+                "写入: conversations / conversation_messages"))
+
+      (worker conversation-organizer
+        :zh "worker: 会话整理"
+        :notes ("监听: ConversationMessageLogged 事件"
+                "发射: SessionOrganized 事件"))
+
+      (worker pty-event-worker
+        :zh "worker: PTY 事件"
+        :notes ("监听: PtyStateChanged 事件"
+                "发射: SlotBecameIdle / SlotStuck"
+                "commit ec269d7: 自动批准包含 \"don't ask again\" / \"always\" / \"trust\" / \"不再\" 的确认对话框"
+                "发送 ConfirmResponse::Option(2): 两次连续 PTY 写入（数字 + 回车，间隔 80ms）"
+                "unicode 弯引号（U+2019）归一化，便于 ' 与 ASCII ' 一致匹配"))
+
+      (worker tagger-chunker
+        :zh "worker: 打标分块"
+        :notes ("监听: SessionOrganized 事件"
+                "commit 21a3b63: TurnBuilder 从 tool 调用抽取 files_read / files_changed / outcome"
+                "build_turn_embedding_text: 关键字密集格式（project:X files:Y intent:Z outcome:W）"
+                "过滤 <task-notification> 噪音 turn; 回填后触发逐 turn 嵌入生成（dc45dcb）"
+                "commit 1ea1838: commit 检测逻辑从 EventAnalyzerWorker 迁移到这里"
+                "commit 081b4f9: 从 [Tool: Bash] 内容格式解析真实命令"
+                ""
+                ""
+                ""
+                ""
+                ""
+                ""
+                ""
+                "  - broadcast lagged → warn! \"events permanently lost\"（事件永久丢失）"))
+
+      (worker experience-harvester
+        :zh "worker: 经验采集"
+        :notes ("EventAnalyzerWorker (65c8b59) 新增后被并入 tagger-chunker (1ea1838)"
+                "commit 检测现在在 tagger_chunker 的 schema-on-write 阶段完成，可获得完整消息内容"
+                "触发: 60 秒轮询"
+                "写入: knowledge"))
+
+      (worker reconcile-worker
+        :zh "worker: 对账"
+        :notes ("触发: 10 秒轮询"
+                "写入: slot_sessions"))
+
+      (worker gemini-reconcile-worker
+        :zh "worker: gemini 对账"
+        :notes ("触发: 10 秒轮询"))
+
+      (worker ast-sync-worker
+        :zh "worker: AST 同步"
+        :notes ("触发: MPSC 通道 ast_sync_rx"
+                "写入: ast_nodes"
+                "注: commit c8b76b0 后改造为 BackgroundWorker 实现，遵守 ControlTree 暂停 / 恢复"))
+
+      (worker code-prefetch
+        :zh "worker: 代码预取"
+        :notes ("触发: 按需"))
+
+      (worker codex-ingestion-worker
+        :zh "worker: codex 历史摄入"
+        :notes ("触发: 通过 rusqlite 轮询 ~/.codex/state_5.sqlite"
+                "写入: 会话时间线（system_timeline）+ conversation_messages（文本消息）"
+                "注: 从本地 SQLite 读取 Codex CLI 操作历史，摄入 MissionD 会话时间线。rusqlite 已加入 missiond-daemon Cargo.toml，在 main.rs 随 daemon 启动。"
+                ""
+                ""
+                "  - 轮询间隔 30s → 10s（POLL_INTERVAL_SECS=10）"))
+
+      (worker gemini-logger
+        :zh "worker: gemini 日志记录"
+        :notes ("触发: 通道"
+                "写入: gemini_requests"))
+
+      (worker xjpcode-briefing-worker
+        :zh "worker: xjpcode 简报"
+        :notes ("commit 8e5efaf: 新增 — xjpcode 神经链路简报"
+                "触发: 60 秒轮询（初始延迟 15 秒，MissedTickBehavior::Skip）"
+                "写入: ~/.xjpcode/xjpcode.md（文件系统，原子 std::fs::write）"
+                "数据源: list_board_tasks (running + failed) + list_incidents(5) + list_projects()"
+                "暂停: ControlTree ctx.wait_if_paused()"
+                "文档: 为 xjpcode CLI 生成系统简报 markdown; xjpcode 启动时读取 → 注入 system prompt 上下文。xjpcode ↔ missiond 神经链路的一部分。")))))

@@ -15,8 +15,9 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use tracing::{debug, info, warn};
 
-use crate::event_bus::{DaemonEvent, TimelineEvent};
 use crate::state::AppState;
+use missiond_core::event::events::SystemEvent;
+use missiond_core::event::subscription::SubscriptionOpts;
 
 use super::{BackgroundWorker, WorkerContext, WorkerKind};
 
@@ -29,9 +30,7 @@ const MAX_DIFF_SIZE: usize = 4_000_000;
 /// Debounce window — ignore commits for the same branch within this period.
 const DEBOUNCE_SECS: u64 = 30;
 
-pub(crate) struct ArchMaintenanceWorker {
-    pub timeline_rx: tokio::sync::broadcast::Receiver<TimelineEvent>,
-}
+pub(crate) struct ArchMaintenanceWorker;
 
 impl BackgroundWorker for ArchMaintenanceWorker {
     const KIND: WorkerKind = WorkerKind::Sonnet;
@@ -41,82 +40,96 @@ impl BackgroundWorker for ArchMaintenanceWorker {
     }
 
     async fn run(self, state: Arc<AppState>, mut ctx: WorkerContext) {
-        let mut rx = self.timeline_rx;
+        let mut sub = match state
+            .bus
+            .subscribe::<SystemEvent>("arch_maintenance", SubscriptionOpts::named("arch_maintenance"))
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "arch_maintenance: bus subscribe failed, worker exiting");
+                return;
+            }
+        };
         let mut debounce: HashMap<String, Instant> = HashMap::new();
         let mut processing: HashSet<String> = HashSet::new();
 
-        info!("Architecture maintenance worker started");
+        info!("Architecture maintenance worker started (v2 bus)");
 
         loop {
             ctx.wait_if_paused().await;
-            match rx.recv().await {
-                Ok(te) => {
-                    if let DaemonEvent::ContextualCommitDetected {
-                        ref commit_hash,
-                        ref branch,
-                        ref summary,
-                        ref session_id,
-                        ref slot_id,
-                        ..
-                    } = te.event
-                    {
-                        // Self-trigger filter: skip commits made by this worker
-                        if summary.starts_with(ARCH_COMMIT_PREFIX) {
-                            debug!(branch = %branch, "arch_maintenance: skipping own commit");
-                            continue;
-                        }
+            let Some(ack) = sub.next().await else {
+                break;
+            };
 
-                        // Debounce: skip if same branch was processed recently
-                        let now = Instant::now();
-                        if let Some(last) = debounce.get(branch) {
-                            if now.duration_since(*last) < Duration::from_secs(DEBOUNCE_SECS) {
-                                debug!(branch = %branch, "arch_maintenance: debounced");
-                                continue;
-                            }
-                        }
+            let SystemEvent::ContextualCommitDetected {
+                commit_hash,
+                branch,
+                summary,
+                session_id,
+                slot_id,
+                ..
+            } = ack.event().clone()
+            else {
+                ack.ack().await;
+                continue;
+            };
 
-                        // Concurrency guard: skip if already processing this branch
-                        if processing.contains(branch) {
-                            debug!(branch = %branch, "arch_maintenance: already processing");
-                            continue;
-                        }
-
-                        // Resolve repo path from slot's configured cwd
-                        let repo_path = slot_id
-                            .as_deref()
-                            .and_then(|sid| state.mission.get_slot(sid))
-                            .and_then(|s| s.config.cwd.clone())
-                            .unwrap_or_default();
-                        if repo_path.is_empty() {
-                            debug!(session_id = %session_id, "arch_maintenance: no cwd for slot");
-                            continue;
-                        }
-
-                        debounce.insert(branch.clone(), now);
-                        processing.insert(branch.clone());
-
-                        match process_commit(&state, &repo_path, commit_hash).await {
-                            Ok(true) => {
-                                info!(branch = %branch, commit = %commit_hash, "arch_maintenance: YAML updated");
-                                ctx.record_success();
-                            }
-                            Ok(false) => {
-                                debug!(branch = %branch, "arch_maintenance: NO_CHANGE");
-                            }
-                            Err(e) => {
-                                warn!(error = %e, branch = %branch, "arch_maintenance: failed");
-                                ctx.record_failure();
-                            }
-                        }
-
-                        processing.remove(branch);
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(skipped = n, "arch_maintenance lagged");
-                }
-                Err(_) => break,
+            // Self-trigger filter: skip commits made by this worker
+            if summary.starts_with(ARCH_COMMIT_PREFIX) {
+                debug!(branch = %branch, "arch_maintenance: skipping own commit");
+                ack.ack().await;
+                continue;
             }
+
+            // Debounce: skip if same branch was processed recently
+            let now = Instant::now();
+            if let Some(last) = debounce.get(&branch) {
+                if now.duration_since(*last) < Duration::from_secs(DEBOUNCE_SECS) {
+                    debug!(branch = %branch, "arch_maintenance: debounced");
+                    ack.ack().await;
+                    continue;
+                }
+            }
+
+            // Concurrency guard: skip if already processing this branch
+            if processing.contains(&branch) {
+                debug!(branch = %branch, "arch_maintenance: already processing");
+                ack.ack().await;
+                continue;
+            }
+
+            // Resolve repo path from slot's configured cwd
+            let repo_path = slot_id
+                .as_deref()
+                .and_then(|sid| state.mission.get_slot(sid))
+                .and_then(|s| s.config.cwd.clone())
+                .unwrap_or_default();
+            if repo_path.is_empty() {
+                debug!(session_id = ?session_id, "arch_maintenance: no cwd for slot");
+                ack.ack().await;
+                continue;
+            }
+
+            debounce.insert(branch.clone(), now);
+            processing.insert(branch.clone());
+
+            match process_commit(&state, &repo_path, &commit_hash).await {
+                Ok(true) => {
+                    info!(branch = %branch, commit = %commit_hash, "arch_maintenance: YAML updated");
+                    ctx.record_success();
+                }
+                Ok(false) => {
+                    debug!(branch = %branch, "arch_maintenance: NO_CHANGE");
+                }
+                Err(e) => {
+                    warn!(error = %e, branch = %branch, "arch_maintenance: failed");
+                    ctx.record_failure();
+                }
+            }
+
+            processing.remove(&branch);
+            ack.ack().await;
         }
     }
 }
