@@ -70,6 +70,173 @@ impl super::traits::InfraStore for SqliteMissionStore {
     // Stage 2B.1 placeholder. Methods will land in Stage 2D (PG only).
 }
 
+// ============================================================================
+// DirectiveLayerStore — fail-fast stub (SQLite deprecated; pillar 五 is PG-only)
+// ============================================================================
+
+#[async_trait]
+impl super::traits::DirectiveLayerStore for SqliteMissionStore {
+    async fn directive_insert(
+        &self,
+        _utterance_text: &str,
+        _sexp_text: &str,
+        _version: i32,
+        _status: crate::types::DirectiveStatus,
+        _compiler_model: Option<&str>,
+        _references_json: Option<&serde_json::Value>,
+    ) -> DbResult<uuid::Uuid> {
+        Err(super::super::error::DbError::Other(
+            "DirectiveLayerStore not supported on SQLite (use PostgreSQL)".to_string(),
+        ))
+    }
+
+    async fn directive_get(
+        &self,
+        _id: uuid::Uuid,
+        _version: i32,
+    ) -> DbResult<Option<crate::types::Directive>> {
+        Err(super::super::error::DbError::Other(
+            "DirectiveLayerStore not supported on SQLite (use PostgreSQL)".to_string(),
+        ))
+    }
+
+    async fn directive_update_status(
+        &self,
+        _id: uuid::Uuid,
+        _version: i32,
+        _new_status: crate::types::DirectiveStatus,
+    ) -> DbResult<()> {
+        Err(super::super::error::DbError::Other(
+            "DirectiveLayerStore not supported on SQLite (use PostgreSQL)".to_string(),
+        ))
+    }
+
+    async fn directive_approve(&self, _id: uuid::Uuid, _version: i32) -> DbResult<()> {
+        Err(super::super::error::DbError::Other(
+            "DirectiveLayerStore not supported on SQLite (use PostgreSQL)".to_string(),
+        ))
+    }
+
+    async fn directive_list_by_status(
+        &self,
+        _status: crate::types::DirectiveStatus,
+        _limit: i64,
+    ) -> DbResult<Vec<crate::types::Directive>> {
+        Err(super::super::error::DbError::Other(
+            "DirectiveLayerStore not supported on SQLite (use PostgreSQL)".to_string(),
+        ))
+    }
+
+    async fn directive_get_version_chain(
+        &self,
+        _id: uuid::Uuid,
+    ) -> DbResult<Vec<crate::types::Directive>> {
+        Err(super::super::error::DbError::Other(
+            "DirectiveLayerStore not supported on SQLite (use PostgreSQL)".to_string(),
+        ))
+    }
+
+    async fn plan_insert(
+        &self,
+        _board_task_id: &str,
+        _source_directive_id: Option<uuid::Uuid>,
+        _version: i32,
+        _sexp_text: &str,
+        _sexp_hash: &str,
+        _status: crate::types::PlanStatus,
+        _compiler_model: Option<&str>,
+        _compiled_from: Option<&str>,
+    ) -> DbResult<uuid::Uuid> {
+        Err(super::super::error::DbError::Other(
+            "DirectiveLayerStore not supported on SQLite (use PostgreSQL)".to_string(),
+        ))
+    }
+
+    async fn plan_get(&self, _id: uuid::Uuid) -> DbResult<Option<crate::types::Plan>> {
+        Err(super::super::error::DbError::Other(
+            "DirectiveLayerStore not supported on SQLite (use PostgreSQL)".to_string(),
+        ))
+    }
+
+    async fn plan_update_status(
+        &self,
+        _id: uuid::Uuid,
+        _new_status: crate::types::PlanStatus,
+    ) -> DbResult<()> {
+        Err(super::super::error::DbError::Other(
+            "DirectiveLayerStore not supported on SQLite (use PostgreSQL)".to_string(),
+        ))
+    }
+
+    async fn plan_supersede(&self, _old_id: uuid::Uuid, _new_id: uuid::Uuid) -> DbResult<()> {
+        Err(super::super::error::DbError::Other(
+            "DirectiveLayerStore not supported on SQLite (use PostgreSQL)".to_string(),
+        ))
+    }
+
+    async fn plan_list_by_task(&self, _board_task_id: &str) -> DbResult<Vec<crate::types::Plan>> {
+        Err(super::super::error::DbError::Other(
+            "DirectiveLayerStore not supported on SQLite (use PostgreSQL)".to_string(),
+        ))
+    }
+
+    async fn plan_get_latest(
+        &self,
+        _board_task_id: &str,
+    ) -> DbResult<Option<crate::types::Plan>> {
+        Err(super::super::error::DbError::Other(
+            "DirectiveLayerStore not supported on SQLite (use PostgreSQL)".to_string(),
+        ))
+    }
+
+    async fn workflow_insert(
+        &self,
+        _name: &str,
+        _sexp_text: &str,
+        _match_rules: &serde_json::Value,
+        _learned_from: Option<uuid::Uuid>,
+    ) -> DbResult<uuid::Uuid> {
+        Err(super::super::error::DbError::Other(
+            "DirectiveLayerStore not supported on SQLite (use PostgreSQL)".to_string(),
+        ))
+    }
+
+    async fn workflow_get_by_name(
+        &self,
+        _name: &str,
+    ) -> DbResult<Option<crate::types::Workflow>> {
+        Err(super::super::error::DbError::Other(
+            "DirectiveLayerStore not supported on SQLite (use PostgreSQL)".to_string(),
+        ))
+    }
+
+    async fn workflow_find_by_match(
+        &self,
+        _query_utterance: &str,
+    ) -> DbResult<Vec<crate::types::Workflow>> {
+        Err(super::super::error::DbError::Other(
+            "DirectiveLayerStore not supported on SQLite (use PostgreSQL)".to_string(),
+        ))
+    }
+
+    async fn workflow_record_execution(
+        &self,
+        _id: uuid::Uuid,
+        _success: bool,
+        _cost_usd: Option<f64>,
+    ) -> DbResult<()> {
+        Err(super::super::error::DbError::Other(
+            "DirectiveLayerStore not supported on SQLite (use PostgreSQL)".to_string(),
+        ))
+    }
+
+    async fn workflow_list_top_n(&self, _n: i64) -> DbResult<Vec<crate::types::Workflow>> {
+        Err(super::super::error::DbError::Other(
+            "DirectiveLayerStore not supported on SQLite (use PostgreSQL)".to_string(),
+        ))
+    }
+}
+
 #[async_trait]
 impl super::traits::ProjectStore for SqliteMissionStore {
     async fn list_projects(&self) -> DbResult<Vec<crate::types::ProjectConfig>> {

@@ -3,6 +3,7 @@
 pub mod error;
 pub mod traits;
 pub mod shared;
+pub(crate) mod directive;
 
 #[cfg(feature = "postgres")]
 pub mod pg;

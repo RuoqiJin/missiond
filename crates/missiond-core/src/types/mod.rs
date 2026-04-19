@@ -14,6 +14,7 @@ mod infra;
 mod dynamic_slot;
 mod async_job;
 mod project;
+mod directive;
 
 pub use slot::*;
 pub use task::*;
@@ -27,6 +28,7 @@ pub use infra::*;
 pub use dynamic_slot::*;
 pub use async_job::*;
 pub use project::*;
+pub use directive::*;
 
 #[cfg(test)]
 mod tests {

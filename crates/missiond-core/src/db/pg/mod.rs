@@ -121,3 +121,5 @@ mod knowledge;
 pub mod project;
 #[cfg(feature = "postgres")]
 mod infra;
+#[cfg(feature = "postgres")]
+mod directive;

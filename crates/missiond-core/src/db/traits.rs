@@ -729,6 +729,64 @@ pub trait InfraStore: Send + Sync {
 }
 
 // ============================================================================
+// 14. DirectiveLayerStore — User directive compilation pipeline (directive → plan → workflow)
+// Source: module directive-layer, 管 3 表 directive/plan/workflow
+// Status: schema-ready-pending-implementation (writer TBD: pillar 五 actor)
+// ============================================================================
+
+#[async_trait]
+pub trait DirectiveLayerStore: Send + Sync {
+    // -- directive 表 (6 方法) --
+    async fn directive_insert(
+        &self,
+        utterance_text: &str,
+        sexp_text: &str,
+        version: i32,
+        status: DirectiveStatus,
+        compiler_model: Option<&str>,
+        references_json: Option<&serde_json::Value>,
+    ) -> DbResult<uuid::Uuid>;
+    async fn directive_get(&self, id: uuid::Uuid, version: i32) -> DbResult<Option<Directive>>;
+    async fn directive_update_status(&self, id: uuid::Uuid, version: i32, new_status: DirectiveStatus) -> DbResult<()>;
+    async fn directive_approve(&self, id: uuid::Uuid, version: i32) -> DbResult<()>;
+    async fn directive_list_by_status(&self, status: DirectiveStatus, limit: i64) -> DbResult<Vec<Directive>>;
+    async fn directive_get_version_chain(&self, id: uuid::Uuid) -> DbResult<Vec<Directive>>;
+
+    // -- plan 表 (6 方法) --
+    async fn plan_insert(
+        &self,
+        board_task_id: &str,
+        source_directive_id: Option<uuid::Uuid>,
+        version: i32,
+        sexp_text: &str,
+        sexp_hash: &str,
+        status: PlanStatus,
+        compiler_model: Option<&str>,
+        compiled_from: Option<&str>,
+    ) -> DbResult<uuid::Uuid>;
+    async fn plan_get(&self, id: uuid::Uuid) -> DbResult<Option<Plan>>;
+    async fn plan_update_status(&self, id: uuid::Uuid, new_status: PlanStatus) -> DbResult<()>;
+    async fn plan_supersede(&self, old_id: uuid::Uuid, new_id: uuid::Uuid) -> DbResult<()>;
+    async fn plan_list_by_task(&self, board_task_id: &str) -> DbResult<Vec<Plan>>;
+    async fn plan_get_latest(&self, board_task_id: &str) -> DbResult<Option<Plan>>;
+
+    // -- workflow 表 (5 方法) --
+    async fn workflow_insert(
+        &self,
+        name: &str,
+        sexp_text: &str,
+        match_rules: &serde_json::Value,
+        learned_from: Option<uuid::Uuid>,
+    ) -> DbResult<uuid::Uuid>;
+    async fn workflow_get_by_name(&self, name: &str) -> DbResult<Option<Workflow>>;
+    /// Find workflows whose `match_rules` JSONB contains any token of `query_utterance`.
+    /// Simplified: substring match via JSONB `@>`-like text search.
+    async fn workflow_find_by_match(&self, query_utterance: &str) -> DbResult<Vec<Workflow>>;
+    async fn workflow_record_execution(&self, id: uuid::Uuid, success: bool, cost_usd: Option<f64>) -> DbResult<()>;
+    async fn workflow_list_top_n(&self, n: i64) -> DbResult<Vec<Workflow>>;
+}
+
+// ============================================================================
 // ProjectStore
 // ============================================================================
 
@@ -762,7 +820,7 @@ pub trait MissionStore:
     ConversationStore + MessageStore + ToolCallStore + EventStore
     + RetrospectiveStore + VisionStore + KbStore + BoardStore
     + TimelineStore + SlotStore + SkillStore + ObservabilityStore
-    + ProjectStore + InfraStore
+    + ProjectStore + InfraStore + DirectiveLayerStore
     + Send + Sync
 {
     /// Schema initialization (called once at startup).

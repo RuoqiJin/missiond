@@ -48,7 +48,12 @@
             :location "traits.rs:719-730 + MissionStore bound :762 + pg/infra.rs 新建 + sqlite/mod.rs:68-71"
             :rust-analyzer-note "rust-analyzer 报 E0277 trait has no implementations, 但 cargo build --workspace 通过 — 是 IDE feature-detection 缓存问题, 不阻断施工"
             :at "2026-04-20")
-          (2B.2 "新建 DirectiveLayerStore (trait + db/directive.rs + pg/directive.rs + types/)"  :status "pending"))
+          (2B.2 "新建 DirectiveLayerStore (trait + 3 文件 + 17 方法 PG impl)"
+            :status "completed"
+            :files-created ["types/directive.rs(189L)" "db/directive.rs(23L)" "pg/directive.rs(372L)"]
+            :cargo-build "workspace 通过"
+            :side-effect "Cargo.toml 加 'serde' 到 uuid features (DTO 需 Serialize)"
+            :at "2026-04-20"))
         (stage-2C "合并子 trait (SkillStore / ToolCall / Event / Retrospective / Vision)" :status "pending")
         (stage-2D "跨 trait 拆分 (watermarks/backfill/daemon_state → InfraStore)" :status "pending")
         (stage-2E "清理 sqlite 生态 (验证迁移 → 删 cfg → 删目录)"             :status "pending")
@@ -198,18 +203,8 @@
       :cargo-build "通过"
       :at "2026-04-20")
 
-    (comp-007
-      :phase "phase-2-stage-2B.1"
-      :agent "general-purpose agent (a0acf1588523ff3c8)"
-      :summary "新建 InfraStore trait 空壳 + PG/SQLite empty impl 占位"
-      :changes
-        ("traits.rs:719-730 新增 InfraStore trait (body 空, 方法待 Stage 2D 从 ObservabilityStore+SlotStore 搬)"
-         "traits.rs:762 MissionStore super-trait bound 加 + InfraStore"
-         "新建 pg/infra.rs 空 impl InfraStore for PgMissionStore"
-         "pg/mod.rs:122-123 注册 #[cfg(feature='postgres')] mod infra"
-         "sqlite/mod.rs:68-71 加空 impl InfraStore for SqliteMissionStore")
-      :cargo-build "workspace 通过 (rust-analyzer 误报 E0277 是 IDE 缓存)"
-      :at "2026-04-20"))
+    (comp-007 :phase "2B.1" :summary "InfraStore trait 空壳" :cargo "通过" :at "2026-04-20")
+    (comp-008 :phase "2B.2" :agent "a29e205bbc09f4a16" :summary "DirectiveLayerStore 17 方法完整 PG impl (types+db+pg 3 新文件)" :cargo "通过" :at "2026-04-20"))
 
   ;; ─────────────────────────────────────────────────────────
   ;; issues — 阻塞 / 未决问题
