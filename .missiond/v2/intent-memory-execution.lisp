@@ -62,7 +62,9 @@
           (2C.5 "VisionStore → ObservabilityStore (10 方法实测) + 补建 db/observability.rs"
             :status "completed" :at "2026-04-20"
             :note "agent 实测 10 方法非预期 8 (7 image + 3 translation). ObservabilityStore 最终 80 方法"))
-        (stage-2D "跨 trait 拆分 (watermarks/backfill/daemon_state → InfraStore)" :status "pending")
+        (stage-2D "跨 trait 拆分 (watermarks/backfill/daemon_state → InfraStore)" :status "completed" :at "2026-04-20"
+          :migration-stats "InfraStore 0→24 方法, ObservabilityStore 80→58 (-22), SlotStore 40→38 (-2)"
+          :files "pg/infra.rs 14→386L, pg/observability.rs -335L, pg/slot.rs -26L")
         (stage-2E "清理 sqlite 生态 (验证迁移 → 删 cfg → 删目录)"             :status "pending")
         (stage-2F "I001 wild files 补分类"                                       :status "pending"))
       (phase-3 :name "(deprecated — 合并进 phase-2 stage-2B + 独立)"         :status "merged-into-phase-2")
@@ -214,7 +216,12 @@
     (comp-008 :phase "2B.2" :agent "a29e205bbc09f4a16" :summary "DirectiveLayerStore 17 方法完整 PG impl (types+db+pg 3 新文件)" :cargo "通过" :at "2026-04-20")
     (comp-009 :phase "2C.1" :agent "a1ceaa5a700e618e1" :summary "SkillStore 25 方法合并进 ProjectStore (+8=33 total); pg/project.rs 的 8 方法搬进 pg/skill.rs 单一 impl; 补建 db/project.rs (18L re-export + D001 达成)" :cargo-workspace "通过" :rust-analyzer-note "E0119/E0046 IDE 误报, cargo feature 组合不同导致" :at "2026-04-20")
     (comp-010 :phase "2C.2+2C.3+2C.4" :agent "aaeb025f65c3e3bb0" :summary "ToolCallStore(19)+EventStore(7)+RetrospectiveStore(15) 合并进 ConversationStore; 删 pg/{tool_call,event,retrospective}.rs + sqlite/同名 6 文件" :cargo-workspace "通过" :at "2026-04-20")
-    (comp-011 :phase "2C.5" :agent "a2f09b18427fb6ad3" :summary "VisionStore 10 方法合并进 ObservabilityStore (7 image + 3 translation); 删 pg/vision.rs + sqlite/vision.rs; 补建 db/observability.rs (21L, D001 最后一个缺失文件已补)" :ObservabilityStore-final-count 80 :cargo-workspace "通过" :at "2026-04-20"))
+    (comp-011 :phase "2C.5" :agent "a2f09b18427fb6ad3" :summary "VisionStore 10 方法合并进 ObservabilityStore; 补建 db/observability.rs" :cargo "通过" :at "2026-04-20")
+    (comp-012 :phase "2D" :agent "af46ad1392fe21100"
+      :summary "InfraStore 空壳填满 24 方法: watermarks(13)+backfill(9)+daemon_state(2)"
+      :migration "从 ObservabilityStore 拆 22 + 从 SlotStore 拆 2"
+      :note "conversations_missing_summary_cursor 4 方法保留在 ObservabilityStore (偏 conversation 分析, 不是 infra)"
+      :cargo-workspace "通过" :at "2026-04-20"))
 
   ;; ─────────────────────────────────────────────────────────
   ;; issues — 阻塞 / 未决问题

@@ -467,10 +467,6 @@ pub trait SlotStore: Send + Sync {
     async fn last_completed_slot_task_at(&self, task_type: &str) -> DbResult<Option<i64>>;
     async fn get_running_slot_task(&self, slot_id: &str) -> DbResult<Option<String>>;
 
-    // -- slot.rs: daemon state --
-    async fn daemon_state_get(&self, key: &str) -> DbResult<Option<i64>>;
-    async fn daemon_state_set(&self, key: &str, value: i64) -> DbResult<()>;
-
     // -- task.rs: generic tasks --
     async fn insert_task(&self, task: &Task) -> DbResult<()>;
     async fn update_task(&self, id: &str, update: &TaskUpdate) -> DbResult<()>;
@@ -528,13 +524,6 @@ pub trait ObservabilityStore: Send + Sync {
     async fn insert_token_usage(&self, conversation_id: &str, slot_id: Option<&str>, slot_task_id: Option<&str>, model: Option<&str>, input_tokens: i64, cache_creation_tokens: i64, cache_read_tokens: i64, output_tokens: i64, message_id: Option<i64>) -> DbResult<()>;
     async fn token_stats(&self, conversation_id: Option<&str>, slot_id: Option<&str>, since: Option<&str>, group_by: Option<&str>) -> DbResult<Vec<HashMap<String, serde_json::Value>>>;
 
-    // -- watermark.rs --
-    async fn watermark_get(&self, consumer: &str, session_id: &str) -> DbResult<Option<(Option<i64>, Option<String>)>>;
-    async fn watermark_advance_time(&self, consumer: &str, session_id: &str, timestamp: &str) -> DbResult<()>;
-    async fn watermark_advance_msg_id(&self, consumer: &str, session_id: &str, msg_id: i64) -> DbResult<()>;
-    async fn watermark_advance_full(&self, consumer: &str, session_id: &str, msg_id: Option<i64>, timestamp: Option<&str>, extra: Option<&str>) -> DbResult<()>;
-    async fn watermark_list(&self, consumer: &str) -> DbResult<Vec<(String, Option<i64>, Option<String>)>>;
-
     // -- watermark.rs: labels --
     async fn label_set(&self, message_id: i64, label: &str, value: &str, source: &str) -> DbResult<()>;
     async fn label_set_batch(&self, labels: &[(i64, &str, &str, &str)]) -> DbResult<usize>;
@@ -559,34 +548,11 @@ pub trait ObservabilityStore: Send + Sync {
         let _ = (label, value, limit); Ok(vec![])
     }
 
-    // -- backfill.rs --
-    async fn backfill_get_phase(&self, phase: &str) -> DbResult<Option<BackfillPhaseStatus>>;
-    async fn backfill_list_phases(&self) -> DbResult<Vec<BackfillPhaseStatus>>;
-    async fn backfill_start_phase(&self, phase: &str, total_estimated: i64) -> DbResult<()>;
-    async fn backfill_update_progress(&self, phase: &str, new_cursor: i64, batch_success: i64, batch_failed: i64) -> DbResult<()>;
-    async fn backfill_complete_phase(&self, phase: &str) -> DbResult<()>;
-    async fn backfill_record_failure(&self, session_id: &str, phase: &str, error: &str) -> DbResult<()>;
-    async fn backfill_retryable_failures(&self, phase: &str, max_retries: i64, limit: i64) -> DbResult<Vec<String>>;
-    async fn backfill_retryable_failures_no_cooldown(&self, phase: &str, max_retries: i64) -> DbResult<i64>;
-    async fn backfill_clear_failure(&self, session_id: &str, phase: &str) -> DbResult<()>;
+    // -- backfill.rs: conversation-specific cursors (stay here, tied to conversation analysis) --
     async fn conversations_missing_summary_cursor(&self, cursor: i64, limit: i64) -> DbResult<Vec<(i64, String)>>;
     async fn conversations_needing_topic_vectors_cursor(&self, provider: &str, cursor: i64, limit: i64) -> DbResult<Vec<(i64, String)>>;
     async fn conversations_missing_summary_count(&self) -> DbResult<i64>;
     async fn conversations_needing_topic_vectors_count(&self, provider: &str) -> DbResult<i64>;
-
-    // -- watcher_cursors --
-    async fn load_watcher_cursors(&self) -> DbResult<HashMap<String, u64>>;
-    async fn upsert_watcher_cursors_batch(&self, cursors: &HashMap<String, u64>) -> DbResult<()>;
-    async fn delete_watcher_cursor(&self, file_path: &str) -> DbResult<()>;
-
-    // -- reconcile_watermarks --
-    async fn get_reconcile_watermark(&self, path: &str) -> DbResult<Option<i64>>;
-    async fn upsert_reconcile_watermark(&self, path: &str, size: i64) -> DbResult<()>;
-    async fn get_all_reconcile_watermarks(&self) -> DbResult<HashMap<String, i64>>;
-
-    // -- gemini_cli_watermarks --
-    async fn load_gemini_cursors(&self) -> DbResult<HashMap<String, i64>>;
-    async fn save_gemini_cursor(&self, file_path: &str, session_id: &str, msg_count: i64) -> DbResult<()>;
 
     // -- router_chat.rs --
     async fn router_chat_get_or_create(&self, task_id: &str, model: &str) -> DbResult<String>;
@@ -633,8 +599,42 @@ pub trait ObservabilityStore: Send + Sync {
 
 #[async_trait]
 pub trait InfraStore: Send + Sync {
-    // Methods will be migrated from ObservabilityStore and SlotStore in Stage 2D.
-    // Placeholder — no methods defined yet.
+    // -- watermarks (from ObservabilityStore v0.4.x) --
+    // consumer_watermarks (generic per-consumer per-session cursor)
+    async fn watermark_get(&self, consumer: &str, session_id: &str) -> DbResult<Option<(Option<i64>, Option<String>)>>;
+    async fn watermark_advance_time(&self, consumer: &str, session_id: &str, timestamp: &str) -> DbResult<()>;
+    async fn watermark_advance_msg_id(&self, consumer: &str, session_id: &str, msg_id: i64) -> DbResult<()>;
+    async fn watermark_advance_full(&self, consumer: &str, session_id: &str, msg_id: Option<i64>, timestamp: Option<&str>, extra: Option<&str>) -> DbResult<()>;
+    async fn watermark_list(&self, consumer: &str) -> DbResult<Vec<(String, Option<i64>, Option<String>)>>;
+
+    // watcher_cursors (JSONL byte-offset tracking)
+    async fn load_watcher_cursors(&self) -> DbResult<HashMap<String, u64>>;
+    async fn upsert_watcher_cursors_batch(&self, cursors: &HashMap<String, u64>) -> DbResult<()>;
+    async fn delete_watcher_cursor(&self, file_path: &str) -> DbResult<()>;
+
+    // reconcile_watermarks (last-reconciled file size)
+    async fn get_reconcile_watermark(&self, path: &str) -> DbResult<Option<i64>>;
+    async fn upsert_reconcile_watermark(&self, path: &str, size: i64) -> DbResult<()>;
+    async fn get_all_reconcile_watermarks(&self) -> DbResult<HashMap<String, i64>>;
+
+    // gemini_cli_watermarks
+    async fn load_gemini_cursors(&self) -> DbResult<HashMap<String, i64>>;
+    async fn save_gemini_cursor(&self, file_path: &str, session_id: &str, msg_count: i64) -> DbResult<()>;
+
+    // -- backfill (from ObservabilityStore v0.4.x) --
+    async fn backfill_get_phase(&self, phase: &str) -> DbResult<Option<BackfillPhaseStatus>>;
+    async fn backfill_list_phases(&self) -> DbResult<Vec<BackfillPhaseStatus>>;
+    async fn backfill_start_phase(&self, phase: &str, total_estimated: i64) -> DbResult<()>;
+    async fn backfill_update_progress(&self, phase: &str, new_cursor: i64, batch_success: i64, batch_failed: i64) -> DbResult<()>;
+    async fn backfill_complete_phase(&self, phase: &str) -> DbResult<()>;
+    async fn backfill_record_failure(&self, session_id: &str, phase: &str, error: &str) -> DbResult<()>;
+    async fn backfill_retryable_failures(&self, phase: &str, max_retries: i64, limit: i64) -> DbResult<Vec<String>>;
+    async fn backfill_retryable_failures_no_cooldown(&self, phase: &str, max_retries: i64) -> DbResult<i64>;
+    async fn backfill_clear_failure(&self, session_id: &str, phase: &str) -> DbResult<()>;
+
+    // -- daemon_state (from SlotStore v0.4.x) --
+    async fn daemon_state_get(&self, key: &str) -> DbResult<Option<i64>>;
+    async fn daemon_state_set(&self, key: &str, value: i64) -> DbResult<()>;
 }
 
 // ============================================================================

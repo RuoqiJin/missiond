@@ -95,18 +95,6 @@ impl SlotStore for SqliteMissionStore {
         self.executor.run(move |db| db.get_running_slot_task(&slot_id)).await
     }
 
-    // -- slot.rs: daemon state --
-
-    async fn daemon_state_get(&self, key: &str) -> DbResult<Option<i64>> {
-        let key = key.to_owned();
-        self.executor.run(move |db| db.daemon_state_get(&key)).await
-    }
-
-    async fn daemon_state_set(&self, key: &str, value: i64) -> DbResult<()> {
-        let key = key.to_owned();
-        self.executor.run(move |db| db.daemon_state_set(&key, value)).await
-    }
-
     // -- task.rs: generic tasks --
 
     async fn insert_task(&self, task: &Task) -> DbResult<()> {

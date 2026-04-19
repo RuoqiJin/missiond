@@ -358,32 +358,6 @@ impl SlotStore for PgMissionStore {
         Ok(row.map(|r| r.0))
     }
 
-    // -- slot.rs: daemon state --
-
-    async fn daemon_state_get(&self, key: &str) -> DbResult<Option<i64>> {
-        let row: Option<(String,)> = sqlx::query_as(
-            "SELECT value FROM daemon_state WHERE key = $1"
-        )
-        .bind(key)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(|r| r.0.parse::<i64>().unwrap_or(0)))
-    }
-
-    async fn daemon_state_set(&self, key: &str, value: i64) -> DbResult<()> {
-        let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO daemon_state (key, value, updated_at) VALUES ($1, $2, $3)
-             ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = $3"
-        )
-        .bind(key)
-        .bind(value.to_string())
-        .bind(&now)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
     // -- task.rs: generic tasks --
 
     async fn insert_task(&self, task: &Task) -> DbResult<()> {

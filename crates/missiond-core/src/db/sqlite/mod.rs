@@ -65,7 +65,130 @@ impl MissionStore for SqliteMissionStore {
 
 #[async_trait]
 impl super::traits::InfraStore for SqliteMissionStore {
-    // Stage 2B.1 placeholder. Methods will land in Stage 2D (PG only).
+    // Stage 2D: delegate to inherent MissionDB methods via DbExecutor.
+    // watermarks + backfill + daemon_state migrated from ObservabilityStore/SlotStore.
+
+    // ── consumer_watermarks ─────────────────────────────────────
+    async fn watermark_get(&self, consumer: &str, session_id: &str) -> DbResult<Option<(Option<i64>, Option<String>)>> {
+        let consumer = consumer.to_owned();
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.watermark_get(&consumer, &session_id)).await
+    }
+
+    async fn watermark_advance_time(&self, consumer: &str, session_id: &str, timestamp: &str) -> DbResult<()> {
+        let consumer = consumer.to_owned();
+        let session_id = session_id.to_owned();
+        let timestamp = timestamp.to_owned();
+        self.executor.run(move |db| db.watermark_advance_time(&consumer, &session_id, &timestamp)).await
+    }
+
+    async fn watermark_advance_msg_id(&self, consumer: &str, session_id: &str, msg_id: i64) -> DbResult<()> {
+        let consumer = consumer.to_owned();
+        let session_id = session_id.to_owned();
+        self.executor.run(move |db| db.watermark_advance_msg_id(&consumer, &session_id, msg_id)).await
+    }
+
+    async fn watermark_advance_full(&self, consumer: &str, session_id: &str, msg_id: Option<i64>, timestamp: Option<&str>, extra: Option<&str>) -> DbResult<()> {
+        let consumer = consumer.to_owned();
+        let session_id = session_id.to_owned();
+        let timestamp = timestamp.map(|s| s.to_owned());
+        let extra = extra.map(|s| s.to_owned());
+        self.executor.run(move |db| db.watermark_advance_full(&consumer, &session_id, msg_id, timestamp.as_deref(), extra.as_deref())).await
+    }
+
+    async fn watermark_list(&self, consumer: &str) -> DbResult<Vec<(String, Option<i64>, Option<String>)>> {
+        let consumer = consumer.to_owned();
+        self.executor.run(move |db| db.watermark_list(&consumer)).await
+    }
+
+    // ── watcher_cursors (no-op in SQLite mode) ───────────────────
+    async fn load_watcher_cursors(&self) -> DbResult<std::collections::HashMap<String, u64>> {
+        Ok(std::collections::HashMap::new())
+    }
+    async fn upsert_watcher_cursors_batch(&self, _cursors: &std::collections::HashMap<String, u64>) -> DbResult<()> {
+        Ok(())
+    }
+    async fn delete_watcher_cursor(&self, _file_path: &str) -> DbResult<()> {
+        Ok(())
+    }
+
+    // ── reconcile_watermarks (no-op in SQLite mode) ──────────────
+    async fn get_reconcile_watermark(&self, _path: &str) -> DbResult<Option<i64>> {
+        Ok(None)
+    }
+    async fn upsert_reconcile_watermark(&self, _path: &str, _size: i64) -> DbResult<()> {
+        Ok(())
+    }
+    async fn get_all_reconcile_watermarks(&self) -> DbResult<std::collections::HashMap<String, i64>> {
+        Ok(std::collections::HashMap::new())
+    }
+
+    // ── gemini_cli_watermarks (no-op in SQLite mode) ─────────────
+    async fn load_gemini_cursors(&self) -> DbResult<std::collections::HashMap<String, i64>> {
+        Ok(std::collections::HashMap::new())
+    }
+    async fn save_gemini_cursor(&self, _file_path: &str, _session_id: &str, _msg_count: i64) -> DbResult<()> {
+        Ok(())
+    }
+
+    // ── backfill ────────────────────────────────────────────────
+    async fn backfill_get_phase(&self, phase: &str) -> DbResult<Option<super::traits::BackfillPhaseStatus>> {
+        let phase = phase.to_owned();
+        self.executor.run(move |db| db.backfill_get_phase(&phase)).await
+    }
+
+    async fn backfill_list_phases(&self) -> DbResult<Vec<super::traits::BackfillPhaseStatus>> {
+        self.executor.run(|db| db.backfill_list_phases()).await
+    }
+
+    async fn backfill_start_phase(&self, phase: &str, total_estimated: i64) -> DbResult<()> {
+        let phase = phase.to_owned();
+        self.executor.run(move |db| db.backfill_start_phase(&phase, total_estimated)).await
+    }
+
+    async fn backfill_update_progress(&self, phase: &str, new_cursor: i64, batch_success: i64, batch_failed: i64) -> DbResult<()> {
+        let phase = phase.to_owned();
+        self.executor.run(move |db| db.backfill_update_progress(&phase, new_cursor, batch_success, batch_failed)).await
+    }
+
+    async fn backfill_complete_phase(&self, phase: &str) -> DbResult<()> {
+        let phase = phase.to_owned();
+        self.executor.run(move |db| db.backfill_complete_phase(&phase)).await
+    }
+
+    async fn backfill_record_failure(&self, session_id: &str, phase: &str, error: &str) -> DbResult<()> {
+        let session_id = session_id.to_owned();
+        let phase = phase.to_owned();
+        let error = error.to_owned();
+        self.executor.run(move |db| db.backfill_record_failure(&session_id, &phase, &error)).await
+    }
+
+    async fn backfill_retryable_failures(&self, phase: &str, max_retries: i64, limit: i64) -> DbResult<Vec<String>> {
+        let phase = phase.to_owned();
+        self.executor.run(move |db| db.backfill_retryable_failures(&phase, max_retries, limit)).await
+    }
+
+    async fn backfill_retryable_failures_no_cooldown(&self, phase: &str, max_retries: i64) -> DbResult<i64> {
+        let phase = phase.to_owned();
+        self.executor.run(move |db| db.backfill_retryable_failures_no_cooldown(&phase, max_retries)).await
+    }
+
+    async fn backfill_clear_failure(&self, session_id: &str, phase: &str) -> DbResult<()> {
+        let session_id = session_id.to_owned();
+        let phase = phase.to_owned();
+        self.executor.run(move |db| db.backfill_clear_failure(&session_id, &phase)).await
+    }
+
+    // ── daemon_state ────────────────────────────────────────────
+    async fn daemon_state_get(&self, key: &str) -> DbResult<Option<i64>> {
+        let key = key.to_owned();
+        self.executor.run(move |db| db.daemon_state_get(&key)).await
+    }
+
+    async fn daemon_state_set(&self, key: &str, value: i64) -> DbResult<()> {
+        let key = key.to_owned();
+        self.executor.run(move |db| db.daemon_state_set(&key, value)).await
+    }
 }
 
 // ============================================================================
