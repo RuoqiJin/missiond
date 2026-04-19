@@ -23,7 +23,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.9")
+  (version "draft-v0.4.10")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -40,7 +40,8 @@
     (v0.4.6 "embedding 契约 SSOT: cross-cutting 新增 capability embedding-storage-governance, 5 处散落描述改用 cross-ref; 确认 5 张承载表 (含 skill_topics / ast_nodes) 及 message_embeddings 的 halfvec 特殊性")
     (v0.4.7 "board 模块按'memory=库'原则精简: autopilot + flow-engine-v2 计算逻辑移到 pillar 二 2.4 orchestration, board 只留 cross-ref")
     (v0.4.8 "board 新增 helper agent-execution-coordination: 从 intent-event-bus-execution.lisp 提取'并行 agent 共享内存层'模式, 6 slots + storage/manager interface 声明")
-    (v0.4.9 "conversation-logs 按 'memory=库' 精简: 10 worker 全改 cross-ref + 新增 writer-removed 墓志铭 (worker-briefing 已在 v1.3.0 删) + 2 egress 消费者改 cross-ref + pillar 二 2.3 同步修正 briefing 删除 + 增 writes-to-memory 注记"))
+    (v0.4.9 "conversation-logs 按 'memory=库' 精简: 10 worker 全改 cross-ref + 新增 writer-removed 墓志铭 (worker-briefing 已在 v1.3.0 删) + 2 egress 消费者改 cross-ref + pillar 二 2.3 同步修正 briefing 删除 + 增 writes-to-memory 注记")
+    (v0.4.10 "kb-manager 按 'memory=库' 精简: 5 worker + 1 context-pipeline writer → cross-ref; 2 egress compute 消费者 → cross-ref; core plumbing 的 :maintained-by 改 cross-ref; helper access-audit + operation-queue 加 :library-pov 分清接口 vs 时机"))
   (status "草稿 — 大多数 module 已稳定, 可演进")
 
   (purpose "系统长期记忆 — 4 个业务模块自治 + 底层系统支持层 + 横切")
@@ -621,51 +622,50 @@
         :benefit  "KB 演化可追溯"))
 
     (module-ingress
-      (desc "KB 变更写入 + 代码索引维护 + 访问审计")
+      (desc "MCP 库写入 API + 外部 worker 驱动的写入 + daemon 内部审计写入")
+      :principle "memory = 库. 本模块只列'谁来写我的表'; worker 的 tick / 算法 / 错误恢复见 pillar 二 2.3"
 
+      ;; ── MCP 库写入 API ──
       (writer mcp-kb-mutation
         :tools  "mission_kb_mutate / mission_kb_remember / mission_kb_batch_set_project"
         :writes "knowledge (+ kb_operation_queue async)"
         :code   "daemon/src/handlers/knowledge/kb.rs")
 
+      ;; ── 外部 worker 驱动的写入 (cross-ref pillar 二 2.3) ──
       (writer worker-arch-maintenance
-        :kind   "sonnet"
-        :code   "crates/missiond-daemon/src/workers/sonnet/arch_maintenance_worker.rs"
-        :writes "knowledge (category=architecture)"
-        :trigger "定期扫描项目 intent.lisp + 代码变更")
+        :cross-ref "pillar 二 2.3 :: workers/sonnet/arch_maintenance_worker.rs"
+        :writes    "knowledge (category=architecture)"
+        :library-pov "库暴露 KnowledgeStore write 接口 + category 约束; 扫描触发算法在 worker")
 
       (writer worker-experience-harvester
-        :kind   "local"
-        :code   "crates/missiond-daemon/src/workers/local/experience_harvester.rs"
-        :source "module conversation-logs 的 conversations"
-        :writes "knowledge (category=bugfix/policy/memory)"
-        :purpose "从会话挖掘经验 → KB")
+        :cross-ref "pillar 二 2.3 :: workers/local/experience_harvester.rs"
+        :writes    "knowledge (category=bugfix/policy/memory)"
+        :source    "module conversation-logs 的 conversations (跨模块 reader)"
+        :library-pov "库暴露 write 接口; 挖掘策略 / 分类算法在 worker")
 
       (writer worker-tagger-chunker
-        :kind   "local"
-        :code   "crates/missiond-daemon/src/workers/local/tagger_chunker.rs"
-        :writes "knowledge (chunks + tags)"
-        :purpose "分块 + 打标签 + 生成 kb_ast_links")
+        :cross-ref "pillar 二 2.3 :: workers/local/tagger_chunker.rs"
+        :writes    "knowledge (分块 + 标签) + kb_ast_links"
+        :library-pov "库暴露 knowledge + kb_ast_links 接口; 分块 + 打标算法在 worker")
 
       (writer worker-ast-sync
-        :kind   "local"
-        :code   "crates/missiond-daemon/src/workers/local/ast_sync_worker.rs"
-        :writes "ast_nodes / ast_file_meta / beacons / beacon_nodes"
-        :purpose "代码结构索引维护 — 文件变更时增量更新")
+        :cross-ref "pillar 二 2.3 :: workers/local/ast_sync_worker.rs"
+        :writes    "ast_nodes / ast_file_meta / beacons / beacon_nodes"
+        :library-pov "库暴露 4 张代码索引表 + 增量 upsert 接口; 文件变更监听 + 解析在 worker")
 
       (writer worker-embedding-cross
-        :kind   "sonnet (cross-module writer)"
-        :code   "crates/missiond-daemon/src/workers/sonnet/embedding_worker.rs"
-        :writes "knowledge.embedding_vec (+ ast_nodes.embedding_vec)"
-        :also-writes-in-other-module "conversation-logs: message_embeddings + conversation_topic_vectors; project-management: skill_topics"
-        :purpose "生成本模块 embedding 供向量检索"
-        :governance "契约 + schema + provider 见 cross-cutting :: capability embedding-storage-governance")
+        :cross-ref "pillar 二 2.3 :: workers/sonnet/embedding_worker.rs"
+        :writes    "knowledge.embedding_vec + ast_nodes.embedding_vec"
+        :cross-module "同 worker 也写 conv-logs (message_embeddings + topic_vectors) + project-mgmt (skill_topics)"
+        :governance "cross-cutting :: capability embedding-storage-governance"
+        :library-pov "库暴露 embedding_vec 列 + 类型约束; 生成调度 + provider 绑定在 worker")
 
+      ;; ── daemon 内部 context-pipeline 审计写入 ──
       (writer context-pipeline-kb-audit
-        :code   "crates/missiond-daemon/src/context/context_pipeline.rs :: kb_log_co_access"
+        :cross-ref "pillar 二 context-pipeline (daemon 内部, 非 worker)"
+        :code "crates/missiond-daemon/src/context/context_pipeline.rs :: kb_log_co_access"
         :writes "kb_access_log"
-        :purpose "KB prefetch 时记录共访问关系 — 用于 KB 相关性挖掘"
-        :note "不是通用 middleware, 只在 context-pipeline prefetch 路径触发"))
+        :library-pov "库暴露 kb_access_log append 接口; 何时写 (prefetch 后记录共访问) 由 context-pipeline 决定"))
 
     (module-core
       (desc "主路径 (path) + KB 表族 (plumbing) + 代码索引 (plumbing) + helper (audit/queue)")
@@ -680,10 +680,10 @@
 
       (path kb-code-awareness
         :serves goal-2
-        :flow  "代码变更 → ast-sync-worker 更新索引 → kb_ast_links 关联 → mission_code_search"
+        :flow  "代码索引 (ast + beacons) + kb_ast_links → mission_code_search 语义+结构并查"
         :entry "mission_code_search / mission_universe_graph"
         :tables "ast_nodes + ast_file_meta + beacons + beacon_nodes + kb_ast_links"
-        :maintained-by "worker-ast-sync (local)")
+        :library-pov "库暴露 4 张代码索引表 + linkage 表; 文件变更监听 + AST 解析 → pillar 二 2.3 worker-ast-sync")
 
       ;; ── plumbing: KB 表族 ──
       (plumbing knowledge-store
@@ -709,9 +709,9 @@
         (desc "代码结构化索引 — ast_nodes / ast_file_meta / beacons / beacon_nodes")
         :tables (ast_nodes ast_file_meta beacons beacon_nodes)
         :code "crates/missiond-core/src/db/ast.rs"
-        :maintained-by "worker-ast-sync"
         :consumed-by "mission_code_search / universe_graph / kb-ast-linkage"
-        :scoping "global (候选 per-project)")
+        :scoping "global (候选 per-project)"
+        :maintenance-cross-ref "pillar 二 2.3 :: worker-ast-sync (写入调度)")
 
       (plumbing search-delegation
         (desc "搜索走 pillar 二 2.6 search-engines 四路融合")
@@ -729,20 +729,24 @@
         :serves goal-3
         (desc "KB 访问审计 — 记录共访问关系, 用于相关性挖掘")
         :table "kb_access_log"
-        :writer "context_pipeline.rs :: kb_log_co_access (非通用 middleware)"
         :scoping "inherited"
-        :retention "append-only; 按时间 DELETE (待策略)")
+        :retention "append-only; 按时间 DELETE (待策略)"
+        :writer-cross-ref "pillar 二 context-pipeline :: kb_log_co_access"
+        :library-pov "库暴露 append + 按时间 DELETE 接口; 触发时机由 context-pipeline 决定")
 
       (helper operation-queue
         :serves goal-3
         (desc "KB 变更异步队列 — 大规模 mutate 走队列避开阻塞")
         :table "kb_operation_queue"
         :scoping "inherited"
-        :consumer "后台批处理 worker (待确认)"))
+        :library-pov "库暴露 enqueue / dequeue 接口"
+        :consumer-cross-ref "⚠ TBD — 后台批处理 worker 未确认实现; 已知缺口"))
 
     (module-egress
-      (desc "KB 查询 + 搜索 + 代码搜索 + Context 拼接")
+      (desc "MCP 库查询 API + 外部 compute 消费者 cross-ref")
+      :principle "memory = 库. 直接暴露 MCP 读接口; daemon 内部 compute / worker 读取只列 cross-ref"
 
+      ;; ── MCP 库读取 API ──
       (reader mcp-kb-query
         :tools "mission_kb_query / mission_kb_search / mission_kb_ops"
         :reads "knowledge + knowledge_edges"
@@ -756,24 +760,27 @@
       (reader mcp-code-search
         :tool "mission_code_search"
         :reads "knowledge + ast_nodes + beacons + kb_ast_links"
-        :focus "代码语义 + 结构并查")
+        :focus "代码语义 + 结构并查"
+        :invokes "pillar 二 2.6 search-engines")
 
       (reader mcp-universe-graph
         :tool "mission_universe_graph"
         :reads "knowledge + knowledge_edges (跨项目)"
         :focus "实体 / 关系图生成")
 
+      ;; ── 外部 compute 消费者 (cross-ref, 非库独立 reader) ──
       (reader context-pipeline-retrieval
-        :code "crates/missiond-daemon/src/context/{pipeline,retrieval}.rs"
-        :purpose "为 LLM 调用拼 prompt"
+        :cross-ref "pillar 二 context-pipeline (daemon 内部)"
         :reads "knowledge (向量 + 最近)"
-        :note "记忆最密集的消费者")
+        :purpose "为 LLM 调用拼 prompt"
+        :library-pov "库暴露 search + retrieval 接口; token 预算 / 多源打分 由 pipeline 定"
+        :note "记忆最密集的消费者 — 每次 LLM 调用都触发")
 
       (reader worker-code-prefetch
-        :kind "local"
-        :code "crates/missiond-daemon/src/workers/local/code_prefetch.rs"
+        :cross-ref "pillar 二 2.3 :: workers/local/code_prefetch.rs"
         :reads "ast_nodes / beacons"
-        :purpose "AST 混合搜索引擎 (FTS5 + embedding RRF) — 只读, 不写"))
+        :purpose "AST 混合搜索引擎 (FTS5 + embedding RRF)"
+        :library-pov "库暴露查询接口; RRF 融合算法在 worker"))
 
     (module-tables-owned
       (desc "本模块独占 9 张表")
@@ -1286,7 +1293,17 @@
       "(EE) 2 egress 消费者改 cross-ref: context-pipeline-history / harvester-for-kb"
       "     库不再假装它们是自己的 reader; 它们是 daemon compute 或跨模块 worker"
       "(FF) pillar 二 2.3 workers 同步修正: sonnet 组 6→5 (briefing 删) + 增 :writes-to-memory 注记"
-      "     每组标明各 worker 写入哪个 memory 模块, 补强 lisp↔code 同构")
+      "     每组标明各 worker 写入哪个 memory 模块, 补强 lisp↔code 同构"
+      "v0.4.10 (2026-04-19 — kb-manager 按'memory=库'原则精简):"
+      "(GG) ingress 6 writer → 1 MCP + 5 cross-ref + 1 context-pipeline cross-ref"
+      "     5 worker (arch-maintenance / experience-harvester / tagger-chunker / ast-sync / embedding) 全 cross-ref"
+      "     context-pipeline-kb-audit 明确标为 daemon 内部非 worker"
+      "(HH) core plumbing code-indexing 的 :maintained-by → :maintenance-cross-ref"
+      "     core path kb-code-awareness 的 :maintained-by → :library-pov 强调库只暴露表接口"
+      "(II) core helper access-audit + operation-queue 加 :library-pov 分清'接口在库' vs '触发在 compute'"
+      "     operation-queue 的 :consumer 改 :consumer-cross-ref 标 ⚠ TBD 已知缺口"
+      "(JJ) egress 6 reader → 4 MCP 库 + 2 compute 消费者 cross-ref"
+      "     context-pipeline-retrieval / worker-code-prefetch 改 cross-ref + :library-pov")
 
     (ownership-summary
       (module-project-management   5 "projects + 4 skills (specs 4 张迁走)")
