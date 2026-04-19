@@ -32,6 +32,7 @@ pub mod combinators;
 pub mod cursor_store;
 pub mod failure;
 pub mod lifecycle;
+pub mod live_source;
 pub mod options;
 
 pub use api::{subscribe, SubscribeError};
@@ -48,7 +49,8 @@ pub use failure::{
 };
 #[cfg(feature = "postgres")]
 pub use failure::PgDlqSink;
-pub use lifecycle::{Lifecycle, LifecycleError, LiveSource, Phase};
+pub use lifecycle::{Lifecycle, LifecycleError, Phase};
+pub use live_source::{BroadcastLiveSource, LiveSource, MpscLiveSource};
 pub use options::{
     BackoffKind, BatchSize, CursorFlush, FailurePolicy, PauseBehavior, StartFrom, SubscriptionOpts,
 };

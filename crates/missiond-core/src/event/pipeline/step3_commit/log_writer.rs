@@ -1,202 +1,42 @@
 //! LogWriter — the single task that drains the append channel, batches
 //! INSERTs into PostgreSQL, and returns seq assignments to producers.
 //!
-//! Frozen lisp `.missiond/v2/intent-event-bus.lisp` §4.2.b writer-semantics:
+//! Frozen lisp `.missiond/v2/intent-event-bus.lisp` §4.2 step-3 commit
+//! `log-writer`:
 //!
-//! * **Single writer**: exactly one task consumes a bounded MPSC channel
-//!   (capacity 4096); producers cannot insert directly.
-//! * **Micro-batch**: after the first pending entry, drain up to 100 more
-//!   entries or 10 ms — whichever comes first.
-//! * **DB-assigned seq**: `INSERT INTO event_log ... RETURNING seq` gives
-//!   each append a monotonic seq; results are mapped back to the producer
-//!   via a `oneshot::Sender`.
-//! * **Claim-check**: payloads larger than [`CLAIM_CHECK_THRESHOLD`] are
-//!   uploaded to a [`BlobStore`] and the row stores only a `PayloadRef`.
-//! * **Dedup**: `(producer_id, dedupe_key)` UNIQUE collisions SELECT the
-//!   existing seq and yield `AppendAck::AlreadyExists`.
-//! * **Backpressure**: channel saturation becomes `AppendError::Backpressure`
-//!   at the producer — no silent drop.
-//! * **Failed state**: after `FAILED_STATE_RETRY_CAP` consecutive DB errors
-//!   the writer refuses new batches with `AppendError::LogUnavailable` and
-//!   stays in that state until explicit reset.
+//! > LogWriter struct + run loop + spawn 构造器 — 只负责 batch 调度,
+//! > 不含 backend 细节
 //!
-//! Phase 2 scope:
-//! * The writer is fully functional for PG persistent writes.
-//! * `AppendOpts::ephemeral = true` fast-path returns an in-process
-//!   `AppendAck::Volatile` without DB round-trip; dispatcher-side fan-out
-//!   lands in Phase 3. Producers that need fan-out today should keep using
-//!   the legacy path.
+//! The neighbour modules own the fine-grained concerns:
+//!
+//! | Concern                        | Module                        |
+//! |--------------------------------|-------------------------------|
+//! | producer handle + `impl Log`   | [`super::handle`]             |
+//! | `PendingAppend` + capacity     | [`super::backpressure`]       |
+//! | backend trait + `InsertRow`    | [`super::backend`]            |
+//! | PG impl + `map_sqlx`           | [`super::pg_backend`]         |
+//! | UNIQUE-violation + dedup docs  | [`super::dedup`]              |
+//! | retry / failed-state knobs     | [`super::failure_mode`]       |
+//! | seq authority (DB) docs        | [`super::seq_authority`]      |
+//!
+//! This file focuses on the orchestration: loop, batch boundaries, blob
+//! claim-check, ack fan-out. The other modules let readers navigate the
+//! seven-concern lisp §4.2 step-3 layout 1:1.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::Duration;
+use std::sync::atomic::AtomicI64;
 
-use async_trait::async_trait;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::time::timeout;
-use uuid::Uuid;
 
-use crate::event::blob_store::{BlobStore, CLAIM_CHECK_THRESHOLD};
-use crate::event::domain::Domain;
-use crate::event::event_trait::DomainEvent;
-use crate::event::log::reader::{LogReader, LoggedEvent};
-use crate::event::log::{AppendAck, AppendError, AppendOpts, Log, LogError, Seq};
-use crate::event::pipeline::step1_guard::check_causation;
+use crate::event::blob_store::BlobStore;
+use crate::event::log::reader::LogReader;
+use crate::event::log::{AppendAck, AppendError, Seq};
 
-/// Bound on the append channel. Frozen lisp §4.2.b backpressure.
-pub const APPEND_CHANNEL_CAPACITY: usize = 4096;
-
-/// Maximum rows per INSERT batch. Frozen lisp §4.2.b writer-semantics.batching.
-pub const BATCH_MAX: usize = 100;
-
-/// Deadline after first pending row before the writer flushes anyway.
-/// Frozen lisp §4.2.b writer-semantics.batching.
-pub const BATCH_DEADLINE: Duration = Duration::from_millis(10);
-
-/// Retry knobs for transient DB failures.
-const RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
-const RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
-const FAILED_STATE_RETRY_CAP: u32 = 6;
-
-/// Single entry moving through the append MPSC — the producer-side future
-/// lives on the other end of `ack`.
-pub struct PendingAppend {
-    pub domain: Domain,
-    pub kind: &'static str,
-    pub payload_bytes: Vec<u8>,
-    pub payload_inline_eligible: bool,
-    pub ephemeral: bool,
-    pub producer_id: String,
-    pub dedupe_key: Option<Uuid>,
-    pub causation_depth: i16,
-    pub trace_id: Option<Uuid>,
-    pub span_id: Option<Uuid>,
-    pub parent_span_id: Option<Uuid>,
-    pub ack: oneshot::Sender<Result<AppendAck, AppendError>>,
-}
-
-/// Producer-facing handle to the LogWriter task. Cheap to clone.
-#[derive(Clone)]
-pub struct LogWriterHandle {
-    tx: mpsc::Sender<PendingAppend>,
-    #[cfg(feature = "postgres")]
-    reader: Option<LogReader>,
-    /// Fallback seq source for the ephemeral fast-path in Phase 2. Dispatcher
-    /// owns real seq assignment in Phase 3 — here we just hand out a
-    /// process-local, monotonic counter so producers don't get `Seq(0)`.
-    volatile_counter: Arc<AtomicI64>,
-}
-
-impl LogWriterHandle {
-    /// Raw append-channel access for internal tests / Phase-3 dispatcher
-    /// integration. Normal producers go through [`Log::append`].
-    pub fn sender(&self) -> mpsc::Sender<PendingAppend> {
-        self.tx.clone()
-    }
-}
-
-#[async_trait]
-impl Log for LogWriterHandle {
-    async fn append<E>(&self, event: E, opts: AppendOpts) -> Result<AppendAck, AppendError>
-    where
-        E: DomainEvent,
-    {
-        // Frozen lisp §4.4 causation-loop-guard — enforced at both the PG
-        // writer and the InMemoryLog so behavior is uniform.
-        check_causation(&opts)?;
-
-        let kind: &'static str = event.kind();
-        let domain = E::domain();
-        let payload_bytes = serde_json::to_vec(&event)?;
-        let payload_inline_eligible = payload_bytes.len() <= CLAIM_CHECK_THRESHOLD;
-
-        // Ephemeral fast-path — no DB round-trip, no channel send.
-        if opts.ephemeral {
-            let next = self.volatile_counter.fetch_sub(1, Ordering::Relaxed);
-            return Ok(AppendAck::Volatile { seq: Seq(next) });
-        }
-
-        let producer_id = if opts.producer_id.is_empty() {
-            return Err(AppendError::Other("producer_id must not be empty".into()));
-        } else {
-            opts.producer_id
-        };
-
-        let (ack_tx, ack_rx) = oneshot::channel();
-        let span = opts.span.unwrap_or_default();
-        let pending = PendingAppend {
-            domain,
-            kind,
-            payload_bytes,
-            payload_inline_eligible,
-            ephemeral: false,
-            producer_id,
-            dedupe_key: opts.dedupe_key,
-            causation_depth: opts.causation_depth as i16,
-            trace_id: span.trace_id,
-            span_id: span.span_id,
-            parent_span_id: span.parent_span_id,
-            ack: ack_tx,
-        };
-
-        match self.tx.try_send(pending) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => return Err(AppendError::Backpressure),
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                return Err(AppendError::LogUnavailable("writer task shut down".into()));
-            }
-        }
-
-        match ack_rx.await {
-            Ok(r) => r,
-            Err(_) => Err(AppendError::LogUnavailable(
-                "writer ack channel dropped".into(),
-            )),
-        }
-    }
-
-    async fn read_from(
-        &self,
-        domain: Domain,
-        after_seq: Seq,
-        limit: usize,
-    ) -> Result<Vec<LoggedEvent>, LogError> {
-        #[cfg(feature = "postgres")]
-        {
-            match &self.reader {
-                Some(r) => r.read_from(domain, after_seq, limit).await,
-                None => Err(LogError::Other(
-                    "LogWriter configured without a reader".into(),
-                )),
-            }
-        }
-        #[cfg(not(feature = "postgres"))]
-        {
-            let _ = (domain, after_seq, limit);
-            Err(LogError::Other(
-                "pg feature disabled; LogWriter.read_from unavailable".into(),
-            ))
-        }
-    }
-
-    async fn head_seq(&self) -> Result<Seq, LogError> {
-        #[cfg(feature = "postgres")]
-        {
-            match &self.reader {
-                Some(r) => r.head_seq().await,
-                None => Err(LogError::Other(
-                    "LogWriter configured without a reader".into(),
-                )),
-            }
-        }
-        #[cfg(not(feature = "postgres"))]
-        {
-            Err(LogError::Other(
-                "pg feature disabled; LogWriter.head_seq unavailable".into(),
-            ))
-        }
-    }
-}
+use super::backend::{BackendError, InsertRow, WriterBackend};
+use super::backpressure::{PendingAppend, APPEND_CHANNEL_CAPACITY, BATCH_DEADLINE, BATCH_MAX};
+use super::failure_mode::{exp_backoff, FAILED_STATE_RETRY_CAP};
+use super::handle::LogWriterHandle;
 
 /// The background task state. Owns the DB pool + blob store.
 pub struct LogWriter {
@@ -206,46 +46,6 @@ pub struct LogWriter {
     /// Once `true` the writer refuses new batches permanently.
     failed: bool,
 }
-
-/// Abstract over the concrete DB so unit tests can plug in a mock without
-/// linking sqlx.
-#[async_trait]
-pub(crate) trait WriterBackend: Send + Sync {
-    async fn insert_batch(&self, rows: &[InsertRow<'_>]) -> Result<Vec<Seq>, BackendError>;
-
-    async fn find_existing_seq(
-        &self,
-        producer_id: &str,
-        dedupe_key: Uuid,
-    ) -> Result<Option<Seq>, BackendError>;
-}
-
-/// Row to be inserted. Borrowed from the pending append so we don't re-clone
-/// the potentially large payload.
-pub(crate) struct InsertRow<'a> {
-    pub domain: Domain,
-    pub kind: &'a str,
-    pub payload_inline: Option<&'a [u8]>,
-    pub payload_ref: Option<String>,
-    pub producer_id: &'a str,
-    pub dedupe_key: Option<Uuid>,
-    pub causation_depth: i16,
-    pub trace_id: Option<Uuid>,
-    pub span_id: Option<Uuid>,
-    pub parent_span_id: Option<Uuid>,
-    pub ephemeral: bool,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum BackendError {
-    #[error("dedupe collision (producer_id + key already exists)")]
-    DedupeCollision,
-    #[error("transient: {0}")]
-    Transient(String),
-    #[error("fatal: {0}")]
-    Fatal(String),
-}
-
 
 /// Boot the writer with an explicit backend (tests supply a mock).
 pub(crate) fn new_with_backend(
@@ -274,7 +74,8 @@ pub fn new_log_writer(
     pool: sqlx::PgPool,
     blob_store: Arc<dyn BlobStore>,
 ) -> (LogWriter, LogWriterHandle) {
-    let backend: Box<dyn WriterBackend> = Box::new(PgWriterBackend { pool: pool.clone() });
+    let backend: Box<dyn WriterBackend> =
+        Box::new(super::pg_backend::PgWriterBackend { pool: pool.clone() });
     let (writer, mut handle) = new_with_backend(backend, blob_store.clone());
     handle.reader = Some(LogReader::new(pool, blob_store));
     (writer, handle)
@@ -514,116 +315,6 @@ impl LogWriter {
     }
 }
 
-fn exp_backoff(attempt: u32) -> Duration {
-    let shift = attempt.saturating_sub(1).min(10);
-    let raw = RETRY_BASE_DELAY.saturating_mul(1 << shift);
-    raw.min(RETRY_MAX_DELAY)
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// PostgreSQL concrete backend
-// ─────────────────────────────────────────────────────────────────────────
-
-#[cfg(feature = "postgres")]
-struct PgWriterBackend {
-    pool: sqlx::PgPool,
-}
-
-#[cfg(feature = "postgres")]
-#[async_trait]
-impl WriterBackend for PgWriterBackend {
-    async fn insert_batch(&self, rows: &[InsertRow<'_>]) -> Result<Vec<Seq>, BackendError> {
-        // PG doesn't give us a batched RETURNING that preserves order across
-        // multi-value INSERT with mixed nulls for UUIDs without a lot of
-        // ceremony — simplest correct approach is one INSERT per row inside
-        // a single transaction. Batch sizes are capped at 100 so this keeps
-        // amortized cost low.
-        let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
-        let mut out = Vec::with_capacity(rows.len());
-        for r in rows {
-            let inline_json: Option<serde_json::Value> = match r.payload_inline {
-                Some(bytes) => Some(serde_json::from_slice(bytes).map_err(|e| {
-                    BackendError::Fatal(format!("payload_inline not JSON: {e}"))
-                })?),
-                None => None,
-            };
-
-            let (seq,): (i64,) = sqlx::query_as(
-                r#"
-                INSERT INTO event_log
-                    (domain, kind, payload_inline, payload_ref, producer_id,
-                     dedupe_key, causation_depth, trace_id, span_id,
-                     parent_span_id, ephemeral)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                RETURNING seq
-                "#,
-            )
-            .bind(r.domain.as_str())
-            .bind(r.kind)
-            .bind(inline_json)
-            .bind(r.payload_ref.as_deref())
-            .bind(r.producer_id)
-            .bind(r.dedupe_key)
-            .bind(r.causation_depth)
-            .bind(r.trace_id)
-            .bind(r.span_id)
-            .bind(r.parent_span_id)
-            .bind(r.ephemeral)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| match &e {
-                sqlx::Error::Database(dbe) if is_unique_violation(dbe.as_ref()) => {
-                    BackendError::DedupeCollision
-                }
-                _ => map_sqlx(e),
-            })?;
-            out.push(Seq(seq));
-        }
-        tx.commit().await.map_err(map_sqlx)?;
-        Ok(out)
-    }
-
-    async fn find_existing_seq(
-        &self,
-        producer_id: &str,
-        dedupe_key: Uuid,
-    ) -> Result<Option<Seq>, BackendError> {
-        let row: Option<(i64,)> = sqlx::query_as(
-            "SELECT seq FROM event_log WHERE producer_id = $1 AND dedupe_key = $2 LIMIT 1",
-        )
-        .bind(producer_id)
-        .bind(dedupe_key)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(map_sqlx)?;
-        Ok(row.map(|(s,)| Seq(s)))
-    }
-}
-
-#[cfg(feature = "postgres")]
-fn map_sqlx(e: sqlx::Error) -> BackendError {
-    // Crude classifier — io / pool-closed / timeout / tls ⇒ transient.
-    let msg = format!("{e}");
-    let is_transient = matches!(
-        e,
-        sqlx::Error::Io(_)
-            | sqlx::Error::PoolClosed
-            | sqlx::Error::PoolTimedOut
-            | sqlx::Error::Tls(_)
-    );
-    if is_transient {
-        BackendError::Transient(msg)
-    } else {
-        BackendError::Fatal(msg)
-    }
-}
-
-#[cfg(feature = "postgres")]
-fn is_unique_violation(e: &dyn sqlx::error::DatabaseError) -> bool {
-    // PostgreSQL SQLSTATE 23505 = unique_violation
-    e.code().as_deref() == Some("23505")
-}
-
 // ─────────────────────────────────────────────────────────────────────────
 // Tests — mock backend exercises batching, dedup, backpressure, failed state
 // ─────────────────────────────────────────────────────────────────────────
@@ -633,8 +324,12 @@ mod tests {
     use super::*;
     use crate::event::blob_store::LocalFileBlobStore;
     use crate::event::events::board::BoardEvent;
+    use crate::event::log::{AppendOpts, Log};
+    use async_trait::async_trait;
     use std::sync::Mutex;
-    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+    use uuid::Uuid;
 
     /// Fully in-memory backend for writer unit tests.
     struct MockBackend {
@@ -997,12 +692,5 @@ mod tests {
             }
         }
         out
-    }
-
-    #[test]
-    fn exp_backoff_capped() {
-        // Attempt 1 is base; it doubles until RETRY_MAX_DELAY.
-        assert_eq!(exp_backoff(1), RETRY_BASE_DELAY);
-        assert!(exp_backoff(20) <= RETRY_MAX_DELAY);
     }
 }

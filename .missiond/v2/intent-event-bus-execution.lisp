@@ -63,6 +63,10 @@
            :claimed-at "2026-04-19T00:00:00Z" :released-at "2026-04-19T00:00:00Z")
     (claim :phase 10 :scope "crates/missiond-core/src/event/{pipeline,lifecycle}/** + reshape dispatcher/log/guards/blob_store + frozen lisp §4.2 :target 路径对齐" :agent "phase10-reorg"
            :claimed-at "2026-04-19T00:00:00Z" :released-at "2026-04-19T00:00:00Z")
+    (claim :phase 11 :scope "crates/missiond-core/src/event/subscription/** + crates/missiond-core/src/event/in_memory/**" :agent "phase11-beta-subscription"
+           :claimed-at "2026-04-19T00:00:00Z" :released-at "2026-04-19T00:00:00Z")
+    (claim :phase 11 :scope "crates/missiond-core/src/event/pipeline/step3_commit/** + crates/missiond-core/src/event/pipeline/step5_tail/**" :agent "phase11-alpha-pipeline"
+           :claimed-at "2026-04-19T00:00:00Z" :released-at "2026-04-19T00:00:00Z")
     )
 
   ;; ─ 偏离 frozen lisp 的记录 ─
@@ -112,6 +116,36 @@
                :lisp-said "frozen lisp §4.1 dead-bypass:embedding-tx / ast-sync-tx 应改走 log.append(EmbeddingEvent::Requested) / log.append(AstSyncEvent::Requested)。Phase 8 任务书进一步说'AppState 里的 embedding_tx/ast_sync_tx/incident_tx 字段(receiver 端也一并删,subscriber Phase 7 已建 v2 替代),改单调用 state.bus.publish_embedding(...) / state.bus.publish_ast_sync(...)'"
                :actually-did "Phase 8 保留 embedding_tx / ast_sync_tx 作为 worker-internal MPSC。incident_tx 完全删除(迁入 IncidentEvent)。embedding_tx / ast_sync_tx 不再视为 'bus bypass',而是 worker-to-worker queue"
                :reason "frozen lisp §4.2.a 明确定义 12 个 domain enum,EmbeddingEvent / AstSyncEvent 不在列。Phase 6 D003 已记录:新增 2 个 domain 会破坏 12 域 compile-time 契约。Phase 8 任务书与 frozen lisp §4.2.a 冲突 — 按 §4.2.a 契约解读,embedding/ast_sync 不应成为新 domain。改用语义澄清:这两个 MPSC 是 worker → EmbeddingLoopWorker / AstSyncWorker 的直接任务队列(类似 `Notify` / `broadcast::Sender<WatcherEvent>`),不是事件 bus 的一部分,不需要走 event_log 持久化。incident 不同:它是外部输入(WS webhook / autopilot 检测),需要 event_log 持久化 + ops 审计,故它作为 IncidentEvent。本 Phase 重新定义 dead-bypass 范围:只有 (a) 需要 event_log 持久化,(b) 多 consumer 订阅,或 (c) 需要跨进程可见 的才算 bus event。embedding/ast_sync 是 1-producer/1-consumer worker task queue,不需要这些属性。"
+               :approved-by "auto")
+
+    (deviation :id D010 :phase 11 :date "2026-04-19" :agent "phase11-beta-subscription"
+               :lisp-said "frozen lisp §4.3 subscription-combinators :target 指向 `crates/missiond-core/src/event/subscription/combinators/` 子目录,每个 combinator 独立文件(debounce.rs / rate_limit.rs / coalesce.rs / filter.rs / map.rs / batch.rs),:trait-entries-target 指向 `combinators/mod.rs`"
+               :actually-did "按 lisp 规范创建 6 个独立文件 + 1 个 mod.rs;但 `impl<T: DomainEvent> Ack<T>` 的 combinator 支持方法(`__new_for_combinator` + `silent_ack`)保留在 combinators/mod.rs(任务书提示可选移到 subscription/api.rs,未做,保持一处)"
+               :reason "这两个方法是 combinator 私有的 `Ack` 构造/消费路径,与 combinator 同生命周期;放在 combinators/mod.rs 使得 `pub(crate)` 能直接给 batch/coalesce/map 等子模块使用而无跨文件可见性问题。api.rs 是订阅入口,承担这两个方法会把 combinator 内部机制泄露到公共 API 层。零功能改动契约下,保持这份轻量耦合符合 Phase 10 back-compat shim 精神(DC054)。公共 API 100% 兼容,外部 callsite 不变。"
+               :approved-by "auto")
+
+    (deviation :id D011 :phase 11 :date "2026-04-19" :agent "phase11-beta-subscription"
+               :lisp-said "frozen lisp §4.3 subscription-lifecycle :target `crates/missiond-core/src/event/subscription/lifecycle.rs` + live-source :target `subscription/live_source.rs`"
+               :actually-did "严格按 lisp 两文件拆分:lifecycle.rs(Phase enum + LifecycleError + Fetched + Lifecycle 编排,含 tests)和 live_source.rs(LiveSource trait + BroadcastLiveSource + MpscLiveSource)。lifecycle.rs 的 tests 需要 MpscLiveSource 做 live-overlap 测试,test module 内直接 `use crate::event::subscription::live_source::MpscLiveSource`"
+               :reason "lisp 规范每一字都落地。subscription/mod.rs 的 re-export 同步更新:`pub use lifecycle::{Lifecycle, LifecycleError, Phase}; pub use live_source::{BroadcastLiveSource, LiveSource, MpscLiveSource};` — 公共 API 从顶层 `subscription::*` 角度 100% 兼容(之前 LiveSource 从 lifecycle 导出,现在从 live_source 导出,但顶层 re-export 仍然提供)。api.rs 内部 `use super::lifecycle::Lifecycle; use super::live_source::{BroadcastLiveSource, LiveSource};` 调整为两个导入路径。"
+               :approved-by "auto")
+
+    (deviation :id D012 :phase 11 :date "2026-04-19" :agent "phase11-beta-subscription"
+               :lisp-said "frozen lisp §4.4 testing-story :in-memory-breakdown 列 5 个文件:log.rs(InMemoryLog + Log impl)/ writer_task.rs(WriterTask + Pending + payload_bytes)/ storage.rs(StoredRow + IN_MEMORY_APPEND_CAPACITY)/ observability.rs(ObservabilityAppender impl)/ 保留 cursor_store.rs + blob_store.rs + control_gate.rs"
+               :actually-did "严格按 lisp 4 文件拆分:log.rs(460 行,含 tests)/ writer_task.rs(111 行)/ storage.rs(35 行)/ observability.rs(28 行)。in_memory/mod.rs 添加 `pub mod storage; pub mod writer_task; pub mod observability;` + `pub use storage::{StoredRow, IN_MEMORY_APPEND_CAPACITY};`(之前从 log 导出 IN_MEMORY_APPEND_CAPACITY 现改从 storage 导出,顶层 pub use 同名 symbol 保证外部 API 100% 兼容)。`stored_to_logged_pub` 保留在 log.rs 供 in_memory/mod.rs 的 InMemoryTailSource 使用(路径未变)"
+               :reason "lisp 规范的每一行都落地。storage.rs 只含纯数据类型,与 writer_task 共享所有权:`Pending` 里的 `row: StoredRow` 需要 `StoredRow` 对 writer_task 可见,故 writer_task.rs `use super::storage::StoredRow;`。观测 appender 拆到 observability.rs 后,在独立 `impl` block 中引用 `super::log::InMemoryLog`,因该 trait impl 需要看到 InMemoryLog public append 方法(trait 方法而非 inherent)。零功能改动契约严格保持:PG 分离的 trait impls 无改变,chaos tests / unit tests 全通。"
+               :approved-by "auto")
+
+    (deviation :id D008 :phase 11 :date "2026-04-19" :agent "phase11-alpha-pipeline"
+               :lisp-said "frozen lisp v1.1.0 §4.2 step-3 commit 列出 7 个组件,每个带独立 :target:log-writer / handle / backend-abstraction / pg-backend / seq-authority / dedup-semantics / backpressure / failure-mode,分别在 step3_commit/ 下的独立文件"
+               :actually-did "严格按 lisp 创建 8 个 .rs 文件(mod + 7 components):log_writer.rs(296 行实现 + ~380 行 tests)、handle.rs(140 行)、backend.rs(58 行 trait+types)、pg_backend.rs(118 行 cfg-gated)、seq_authority.rs(保留 Phase 10 的 34 行 doc-only + EventSeq 类型别名)、dedup.rs(53 行:DEDUP_UNIQUE_COLUMNS + is_unique_violation classifier)、backpressure.rs(61 行:PendingAppend struct + 3 个 const)、failure_mode.rs(61 行:RETRY_BASE_DELAY/RETRY_MAX_DELAY/FAILED_STATE_RETRY_CAP + exp_backoff fn + 1 test)。不是偏离,是 v1.1.0 规定的实施。step3_commit/mod.rs 承担 `pub mod` 声明 + `pub use` 公共 re-export 保证顶层 API 100% 兼容(PendingAppend / APPEND_CHANNEL_CAPACITY / BATCH_MAX / BATCH_DEADLINE / LogWriterHandle / LogWriter / new_log_writer / spawn_log_writer)。event/log/mod.rs 的 writer shim 同步更新为从各子模块 re-export。tests 保留内联在 log_writer.rs 末尾(任务书允许 inline / tests.rs 独立,选 inline 减少文件数)。is_unique_violation 从 pg_backend 迁到 dedup 以让 classifier 表达 dedup 契约而非 PG 驱动细节。exp_backoff 从 log_writer 迁到 failure_mode 与 retry 常量同居。Cargo build + cargo test -p missiond-core --lib event::pipeline::step3_commit 9 pass。"
+               :reason "lisp v1.1.0 由用户 sealed-at 2026-04-19 v1.0.0→v1.1.0 批准,这是实施非偏离。拆分后:(a) 每个文件单一关注点,navigable 1:1 与 lisp §4.2 step-3 的 7 个 bullet;(b) 零功能改动(同样的 LogWriter 逻辑,只是物理位置分散);(c) 公共 API 100% 兼容(log/mod.rs 的 re-export 全部重定向到新位置,外部 `use event::log::{spawn_log_writer, LogWriterHandle, PendingAppend, ...}` 继续工作);(d) log_writer.rs 从 1008 行降到 ~676 行(含 tests),其中实现部分 ~296 行更聚焦于 run/flush 主循环 + claim-check + dedup fan-out 编排。"
+               :approved-by "auto")
+
+    (deviation :id D009 :phase 11 :date "2026-04-19" :agent "phase11-alpha-pipeline"
+               :lisp-said "frozen lisp v1.1.0 §4.2 step-5 tail 列出 4 个组件:dispatcher-state :target step5_tail/mod.rs / tail-source :target step5_tail/tail_source.rs / pg-tail :target step5_tail/pg_tail.rs / tail-mechanism :target step5_tail/dispatcher.rs"
+               :actually-did "严格按 lisp 创建 4 个 .rs 文件:mod.rs(DispatchMetrics struct + 两个常量 TAIL_BATCH_LIMIT/TAIL_POLL_INTERVAL + pub use re-exports + ~550 行 tests 内联)、tail_source.rs(TailSource trait + DispatchError + TailError + From<LogError>,60 行)、pg_tail.rs(PgTailSource impl TailSource,~128 行 cfg-gated)、dispatcher.rs(run_tail 主循环 + dispatch_one + control-gate 调用,~155 行)。不是偏离,是 v1.1.0 规定的实施。mod.rs 的 `pub use dispatcher::run_tail; pub use metrics::DispatchMetrics; pub use tail_source::{DispatchError, TailError, TailSource}; #[cfg(feature=\"postgres\")] pub use pg_tail::PgTailSource;` 保证顶层 event::pipeline::step5_tail::* 公共 API 100% 兼容(event::dispatcher::{TailSource, PgTailSource, DispatchMetrics, ...} 的 re-export 链继续工作)。Cargo build + cargo test -p missiond-core --lib event::pipeline::step5_tail 8 pass;cargo test --test event_chaos 12 pass;cargo test -p missiond-daemon 96 pass。"
+               :reason "lisp v1.1.0 由用户 sealed-at 2026-04-19 v1.0.0→v1.1.0 批准,这是实施非偏离。拆分后:(a) 每个文件单一关注点,navigable 1:1 与 lisp §4.2 step-5 的 4 个 bullet;(b) 零功能改动(同样的 run_tail / PgTailSource 逻辑,只是物理位置分散);(c) 公共 API 100% 兼容(event::dispatcher 的旧 shim 无需改 — 它 re-export from step5_tail::*,自动跟随新结构);(d) mod.rs 从 883 行降到 636 行(含 tests);tests 保留内联在 mod.rs 末尾以避免跨文件 test utility 共享困难。"
                :approved-by "auto"))
 
   ;; ─ 执行期阻塞/未决问题 ─
@@ -720,7 +754,63 @@
         ".missiond/v2/intent-event-bus-execution.lisp (updated — meta.phase-cursor 9→10, phase-10 entry, DC050-DC054, phase-10 claim + completion)")
       :tests-added 5
       :verified-by "cargo build -p missiond-core clean;cargo build --workspace clean;cargo test -p missiond-core --lib → 255 passed,0 failed(原 250 + 5 Phase 10 新增 doc-anchor 测试);cargo test -p missiond-core --test event_chaos → 12 passed,0 failed(chaos 无 regression);cargo test -p missiond-daemon → 96 passed,0 failed(daemon 无 regression)"
-      :notes "零功能改动的物理重排。核心观察:frozen lisp §4.2 core 把事件处理描述为 7 步流水线,但 Phase 1-8 代码散布在 `guards/`/`blob_store/`/`log/writer.rs`/`dispatcher/{tail,control_gate,topic,registry}.rs` 四个历史沿革目录。Phase 10 把物理结构与 frozen lisp 对齐为 1:1。保留完整 back-compat re-export 避免 Phase 10 引起下游 import churn:`event::{log,dispatcher,guards,blob_store}::…` 所有旧路径继续解析。新增 5 个单元测试覆盖 Phase 10 引入的 doc anchor:type_resolve::ResolvedEventMeta(1)/persistence_policy::PersistencePolicy(2)/ack_transport::new_ack_channel(2)。frozen lisp §4.2 共 7 个 :target 路径更新(step1 guards/→pipeline/step1_guard/、step2 claim-check blob_store/→pipeline/step2_decide/、step3 log/writer.rs→pipeline/step3_commit/、step5 dispatcher/tail.rs→pipeline/step5_tail/、step6 dispatcher/control_gate.rs→pipeline/step6_gate/、step7 dispatcher/{topic,registry}.rs→pipeline/step7_fanout/、retention log/retention.rs→lifecycle/retention.rs)。blob-store 内部结构 `:target \"blob_store/\"` 保持(它是 step 2 使用的服务,不是 step 2 自身)。DC050-DC054 记录 5 个关键决策:pipeline/ 顶层树 vs 就地改(DC050)、step3 保留 5 子模块不合并(DC051)、step4 提供 AckSender 类型别名不做 doc-only(DC052)、retention 搬到独立 lifecycle/ 而非留在 log/(DC053)、back-compat shim 保留不立即下架(DC054)。"))
+      :notes "零功能改动的物理重排。核心观察:frozen lisp §4.2 core 把事件处理描述为 7 步流水线,但 Phase 1-8 代码散布在 `guards/`/`blob_store/`/`log/writer.rs`/`dispatcher/{tail,control_gate,topic,registry}.rs` 四个历史沿革目录。Phase 10 把物理结构与 frozen lisp 对齐为 1:1。保留完整 back-compat re-export 避免 Phase 10 引起下游 import churn:`event::{log,dispatcher,guards,blob_store}::…` 所有旧路径继续解析。新增 5 个单元测试覆盖 Phase 10 引入的 doc anchor:type_resolve::ResolvedEventMeta(1)/persistence_policy::PersistencePolicy(2)/ack_transport::new_ack_channel(2)。frozen lisp §4.2 共 7 个 :target 路径更新(step1 guards/→pipeline/step1_guard/、step2 claim-check blob_store/→pipeline/step2_decide/、step3 log/writer.rs→pipeline/step3_commit/、step5 dispatcher/tail.rs→pipeline/step5_tail/、step6 dispatcher/control_gate.rs→pipeline/step6_gate/、step7 dispatcher/{topic,registry}.rs→pipeline/step7_fanout/、retention log/retention.rs→lifecycle/retention.rs)。blob-store 内部结构 `:target \"blob_store/\"` 保持(它是 step 2 使用的服务,不是 step 2 自身)。DC050-DC054 记录 5 个关键决策:pipeline/ 顶层树 vs 就地改(DC050)、step3 保留 5 子模块不合并(DC051)、step4 提供 AckSender 类型别名不做 doc-only(DC052)、retention 搬到独立 lifecycle/ 而非留在 log/(DC053)、back-compat shim 保留不立即下架(DC054)。")
+
+    (completion
+      :phase 11 :date "2026-04-19" :agent "phase11-beta-subscription"
+      :deliverables (
+        ;; subscription/combinators/ — 拆 600 行 combinators.rs 为子目录 6 文件 + mod.rs
+        "crates/missiond-core/src/event/subscription/combinators/ (NEW directory)"
+        "crates/missiond-core/src/event/subscription/combinators/mod.rs (NEW — Subscription<T> extension methods: debounce/rate_limit/coalesce/filter/map/batch + wrap_ack helper + Ack<T>::__new_for_combinator / silent_ack + pub use of 6 combinator structs + tests 7)"
+        "crates/missiond-core/src/event/subscription/combinators/debounce.rs (NEW — DebouncedSubscription<T>)"
+        "crates/missiond-core/src/event/subscription/combinators/rate_limit.rs (NEW — RateLimitedSubscription<T>)"
+        "crates/missiond-core/src/event/subscription/combinators/coalesce.rs (NEW — CoalescingSubscription<T, F>)"
+        "crates/missiond-core/src/event/subscription/combinators/filter.rs (NEW — FilteredSubscription<T, F>)"
+        "crates/missiond-core/src/event/subscription/combinators/map.rs (NEW — MappedSubscription<T, U, F>)"
+        "crates/missiond-core/src/event/subscription/combinators/batch.rs (NEW — BatchedSubscription<T> + EventBatch<T>)"
+        "crates/missiond-core/src/event/subscription/combinators.rs (DELETED — contents migrated)"
+        ;; subscription/lifecycle.rs 拆出 live_source.rs
+        "crates/missiond-core/src/event/subscription/lifecycle.rs (REWRITTEN — Phase/LifecycleError/Fetched/Lifecycle orchestration; LiveSource moved out)"
+        "crates/missiond-core/src/event/subscription/live_source.rs (NEW — LiveSource trait + BroadcastLiveSource + MpscLiveSource)"
+        "crates/missiond-core/src/event/subscription/mod.rs (updated — add `pub mod live_source;` + `pub use lifecycle::{Lifecycle, LifecycleError, Phase};` + `pub use live_source::{BroadcastLiveSource, LiveSource, MpscLiveSource};`)"
+        "crates/missiond-core/src/event/subscription/api.rs (updated — split import: `use super::lifecycle::Lifecycle; use super::live_source::{BroadcastLiveSource, LiveSource};`)"
+        ;; in_memory/log.rs 拆为 4 文件
+        "crates/missiond-core/src/event/in_memory/log.rs (REWRITTEN — InMemoryLog struct + `impl Log for InMemoryLog` + stored_to_logged/stored_to_logged_pub; ~460 lines including tests)"
+        "crates/missiond-core/src/event/in_memory/writer_task.rs (NEW — WriterTask + Pending + payload_bytes)"
+        "crates/missiond-core/src/event/in_memory/storage.rs (NEW — StoredRow + IN_MEMORY_APPEND_CAPACITY)"
+        "crates/missiond-core/src/event/in_memory/observability.rs (NEW — ObservabilityAppender impl for InMemoryLog)"
+        "crates/missiond-core/src/event/in_memory/mod.rs (updated — add `pub mod storage; pub mod writer_task; pub mod observability;` + `pub use storage::{StoredRow, IN_MEMORY_APPEND_CAPACITY};` + keep `pub use log::InMemoryLog;`)"
+        ;; Execution log:
+        ".missiond/v2/intent-event-bus-execution.lisp (updated — phase-11 β claim + D010/D011/D012 + phase-11 β completion entry)")
+      :tests-added 0
+      :verified-by "cargo build -p missiond-core --lib clean;cargo build --workspace clean;cargo test -p missiond-core --lib → 255 passed,0 failed(无 regression vs Phase 10 基准);cargo test -p missiond-core --test event_chaos → 12 passed,0 failed(chaos 无 regression);cargo test -p missiond-daemon → 96 passed,0 failed(daemon 无 regression)"
+      :notes "零功能改动的神经网络/观测分层物理拆分,对应 frozen lisp v1.1.0 §4.3 subscription-combinators / §4.3 subscription-lifecycle + live-source / §4.4 testing-story in-memory-breakdown 三处 god-file 切分要求。3 task 全部完成 + 测试零回归:(1) combinators.rs 600 → combinators/{mod,debounce,rate_limit,coalesce,filter,map,batch}.rs 7 文件,mod.rs 托管 Subscription<T> 的 6 个扩展方法 + wrap_ack helper + Ack<T>::__new_for_combinator / silent_ack(D010 记录保留这两方法在 mod.rs 而非搬到 api.rs 的理由);(2) lifecycle.rs 498 → {lifecycle.rs(233 行含 tests),live_source.rs(83 行)}(D011 记录),公共 API 100% 兼容(顶层 subscription::LiveSource 仍可导);(3) in_memory/log.rs 575 → {log.rs(460 行含 tests),writer_task.rs(111 行),storage.rs(35 行),observability.rs(28 行)}(D012 记录)。subscription/combinators/mod.rs 继续承载全部 7 个 combinators 单元测试(filter/map/debounce/coalesce/rate_limit/batch×2)避免 tests 循环引用。公共 API 0 breaking change:`subscription::{LiveSource, BroadcastLiveSource, MpscLiveSource}` 仍可用,`in_memory::{InMemoryLog, IN_MEMORY_APPEND_CAPACITY, StoredRow}` 仍可用。未触 pipeline/ / daemon/(agent α 的分区),未改 frozen lisp。")
+
+    (completion
+      :phase 11 :date "2026-04-19" :agent "phase11-alpha-pipeline"
+      :deliverables (
+        ;; step3_commit/ — 1008 行 god file 拆成 8 文件
+        "crates/missiond-core/src/event/pipeline/step3_commit/mod.rs (REWRITTEN — 7-component doc table + pub mod + pub use re-exports)"
+        "crates/missiond-core/src/event/pipeline/step3_commit/log_writer.rs (REWRITTEN — LogWriter struct + run/flush + new_with_backend + new_log_writer + spawn_log_writer;~296 行实现 + ~380 行 tests inline)"
+        "crates/missiond-core/src/event/pipeline/step3_commit/handle.rs (NEW — LogWriterHandle + impl Log trait + causation guard wiring;~140 行)"
+        "crates/missiond-core/src/event/pipeline/step3_commit/backend.rs (NEW — WriterBackend trait + InsertRow + BackendError;~58 行)"
+        "crates/missiond-core/src/event/pipeline/step3_commit/pg_backend.rs (NEW — PgWriterBackend impl WriterBackend + map_sqlx + INSERT RETURNING + cfg=postgres;~118 行)"
+        "crates/missiond-core/src/event/pipeline/step3_commit/dedup.rs (UPDATED — DEDUP_UNIQUE_COLUMNS + is_unique_violation classifier 从 pg_backend 迁入;~53 行)"
+        "crates/missiond-core/src/event/pipeline/step3_commit/backpressure.rs (UPDATED — PendingAppend struct 移入 + APPEND_CHANNEL_CAPACITY/BATCH_MAX/BATCH_DEADLINE 常量;~61 行)"
+        "crates/missiond-core/src/event/pipeline/step3_commit/failure_mode.rs (UPDATED — RETRY_BASE_DELAY/RETRY_MAX_DELAY/FAILED_STATE_RETRY_CAP 常量 + exp_backoff fn 从 log_writer 迁入 + 1 test;~61 行)"
+        "crates/missiond-core/src/event/pipeline/step3_commit/seq_authority.rs (UNCHANGED — Phase 10 doc-only 保留,34 行)"
+        ;; step5_tail/ — 883 行 god file 拆成 4 文件
+        "crates/missiond-core/src/event/pipeline/step5_tail/mod.rs (REWRITTEN — DispatchMetrics + TAIL_BATCH_LIMIT/TAIL_POLL_INTERVAL 常量 + pub use re-exports + tests inline;636 行)"
+        "crates/missiond-core/src/event/pipeline/step5_tail/tail_source.rs (NEW — TailSource trait + DispatchError + TailError + From<LogError>;60 行)"
+        "crates/missiond-core/src/event/pipeline/step5_tail/pg_tail.rs (NEW — PgTailSource impl TailSource + domain_from_str+blob_store 解析逻辑 + cfg=postgres;128 行)"
+        "crates/missiond-core/src/event/pipeline/step5_tail/dispatcher.rs (NEW — run_tail 主循环 + dispatch_one + control-gate 调用;155 行)"
+        ;; Shim 路径更新:
+        "crates/missiond-core/src/event/log/mod.rs (updated — event::log::{spawn_log_writer,LogWriterHandle,PendingAppend,...} re-export 链 + writer shim 子模块重定向到新结构)"
+        ;; Execution log:
+        ".missiond/v2/intent-event-bus-execution.lisp (updated — phase-11 α claim + D008/D009 + phase-11 α completion entry)")
+      :tests-added 0
+      :verified-by "cargo build -p missiond-core clean;cargo build --workspace clean;cargo test -p missiond-core --lib → 255 passed,0 failed(无 regression vs Phase 10 基准);cargo test -p missiond-core --test event_chaos → 12 passed,0 failed(chaos 无 regression);cargo test -p missiond-daemon → 96 passed,0 failed(daemon 无 regression)"
+      :notes "零功能改动的 pipeline 物理拆分,对应 frozen lisp v1.1.0 §4.2 step-3 commit / §4.2 step-5 tail 两处 god-file 切分要求。2 task 全部完成 + 测试零回归:(1) step3_commit/log_writer.rs 1008 行 → 8 文件:log_writer.rs(~676 含 tests) + handle.rs(140) + backend.rs(58) + pg_backend.rs(118) + dedup.rs(53) + backpressure.rs(61) + failure_mode.rs(61) + seq_authority.rs(34,Phase 10 unchanged),mod.rs 45 行,总 ~1246 行(含扩展 doc 和 tests);(2) step5_tail/mod.rs 883 行 → 4 文件:mod.rs(636 含 tests) + tail_source.rs(60) + pg_tail.rs(128) + dispatcher.rs(155),总 ~979 行(含扩展 doc)。核心移动:is_unique_violation 从 pg_backend 抽入 dedup(表达 contract 而非驱动细节);exp_backoff + retry 常量从 log_writer 抽入 failure_mode(与 failure docs 同居);PendingAppend + 3 个 const 从 log_writer 抽入 backpressure。公共 API 100% 兼容:event::pipeline::step3_commit::* / event::pipeline::step5_tail::* / event::log::{writer mod,spawn_log_writer,LogWriterHandle,PendingAppend,...} / event::dispatcher::{TailSource,PgTailSource,DispatchMetrics,DispatchError,TailError,run_tail,...} 所有既有导入路径继续工作。未触 subscription/ / in_memory/(agent β 的分区),未改 frozen lisp。"))
 
   ;; ─ 全局备忘(跨阶段需要记住的事) ─
   (global-notes

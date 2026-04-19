@@ -22,19 +22,18 @@
 //! ```
 //!
 //! On `broadcast::error::Lagged` we flip back to phase-1 and replay the
-//! missed seq range from the log before resuming live. See
-//! [`LiveReceiverAdapter`] for the pluggable live source abstraction that
-//! lets us unit-test this without a full dispatcher.
+//! missed seq range from the log before resuming live. The pluggable live
+//! transport lives in [`super::live_source`] so lifecycle orchestration
+//! stays independent of the dispatcher — unit tests can feed events from
+//! an mpsc adapter, production uses the broadcast adapter.
 
 use std::sync::Arc;
-
-use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 
 use super::super::domain::Domain;
 use super::super::event_trait::DomainEvent;
 use super::super::log::reader::LoggedEvent;
 use super::super::log::{LogReadable, Seq};
+use super::live_source::LiveSource;
 use super::options::BatchSize;
 
 /// Lifecycle phase for a subscription.
@@ -66,71 +65,6 @@ pub enum LifecycleError {
     /// transitions back to bootstrap; exposed for diagnostics.
     #[error("broadcast lagged by {skipped} events at last_acked {cursor:?}")]
     LiveLagged { skipped: u64, cursor: Seq },
-}
-
-/// Pluggable live source. In production this wraps a
-/// `tokio::sync::broadcast::Receiver<Arc<T>>` from the dispatcher topic; in
-/// tests a `tokio::sync::mpsc::Receiver<Arc<T>>` is convenient.
-#[async_trait::async_trait]
-pub trait LiveSource<T>: Send + Sync
-where
-    T: DomainEvent,
-{
-    /// Receive one live event. Returns:
-    ///   * `Ok(Some(arc))` — a new event arrived.
-    ///   * `Ok(None)`       — the channel closed; subscription should terminate.
-    ///   * `Err(LifecycleError::LiveLagged { .. })` — overflow: caller flips
-    ///     back to bootstrap.
-    async fn recv(&mut self) -> Result<Option<Arc<T>>, LifecycleError>;
-}
-
-/// Adapter from `tokio::sync::broadcast::Receiver<Arc<T>>` to [`LiveSource`].
-pub struct BroadcastLiveSource<T>
-where
-    T: DomainEvent,
-{
-    rx: BroadcastReceiver<Arc<T>>,
-}
-
-impl<T: DomainEvent> BroadcastLiveSource<T> {
-    pub fn new(rx: BroadcastReceiver<Arc<T>>) -> Self {
-        Self { rx }
-    }
-}
-
-#[async_trait::async_trait]
-impl<T: DomainEvent> LiveSource<T> for BroadcastLiveSource<T> {
-    async fn recv(&mut self) -> Result<Option<Arc<T>>, LifecycleError> {
-        match self.rx.recv().await {
-            Ok(ev) => Ok(Some(ev)),
-            Err(RecvError::Closed) => Ok(None),
-            Err(RecvError::Lagged(n)) => Err(LifecycleError::LiveLagged {
-                skipped: n,
-                cursor: Seq(0), // filled in by caller that knows the cursor
-            }),
-        }
-    }
-}
-
-/// Live-adapter backed by an mpsc channel. Used by unit tests.
-pub struct MpscLiveSource<T>
-where
-    T: DomainEvent,
-{
-    rx: tokio::sync::mpsc::Receiver<Arc<T>>,
-}
-
-impl<T: DomainEvent> MpscLiveSource<T> {
-    pub fn new(rx: tokio::sync::mpsc::Receiver<Arc<T>>) -> Self {
-        Self { rx }
-    }
-}
-
-#[async_trait::async_trait]
-impl<T: DomainEvent> LiveSource<T> for MpscLiveSource<T> {
-    async fn recv(&mut self) -> Result<Option<Arc<T>>, LifecycleError> {
-        Ok(self.rx.recv().await)
-    }
 }
 
 /// Resolved event handed back to the subscription handler.
@@ -299,6 +233,7 @@ mod tests {
     use crate::event::log::reader::LoggedEvent;
     use crate::event::log::Log;
     use crate::event::log::LogError;
+    use crate::event::subscription::live_source::MpscLiveSource;
     use crate::event::{AppendAck, AppendError, AppendOpts};
     use async_trait::async_trait;
     use tokio::sync::Mutex;

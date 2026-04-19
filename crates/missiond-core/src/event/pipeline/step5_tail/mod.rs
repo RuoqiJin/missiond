@@ -1,12 +1,22 @@
-//! Tail loop — long-poll the event log and fan out each row to its topic.
+//! Pipeline step 5 · tail — long-poll `event_log` and feed the dispatcher.
 //!
-//! Frozen lisp §4.2.c `tail-mechanism`:
+//! Frozen lisp `.missiond/v2/intent-event-bus.lisp` §4.2 step-5 tail:
 //!
-//! > `SELECT WHERE seq > last_dispatched ORDER BY seq LIMIT 256` every 100ms
+//! > Dispatcher 独立 task 从 event_log 拉新 seq,不阻塞同步链
 //!
-//! Contract (see the module-level doc for the full list):
-//!   1. Read up to [`TAIL_BATCH_LIMIT`] events with `seq >
-//!      last_dispatched_seq` across **all** domains.
+//! Four sub-concerns from the lisp — each is a dedicated module so the
+//! 7-step layout is navigable 1:1 with the frozen design:
+//!
+//! | Lisp component      | Module             | Role                                 |
+//! |---------------------|--------------------|--------------------------------------|
+//! | `dispatcher-state`  | [`mod@self`]       | `DispatchMetrics` + re-exports       |
+//! | `tail-source`       | [`tail_source`]    | `TailSource` trait + `DispatchError` |
+//! | `pg-tail`           | [`pg_tail`]        | PG long-poll `SELECT` impl           |
+//! | `tail-mechanism`    | [`dispatcher`]     | `run_tail` loop + `dispatch_one`     |
+//!
+//! Contract (see the per-module docs for the full list):
+//!   1. Read up to [`TAIL_BATCH_LIMIT`] events with `seq > last_dispatched_seq`
+//!      across **all** domains.
 //!   2. For each event, in seq order:
 //!      - Look up the `ControlGate` → skip (drop) if the domain is paused.
 //!        The seq cursor still advances so paused events are not retried.
@@ -14,39 +24,40 @@
 //!   3. Wait [`TAIL_POLL_INTERVAL`] before the next read. Exit early on
 //!      `shutdown`.
 //!
-//! Failure modes:
-//!   * Unknown domain label (corrupt row, schema mismatch) → log + drop
-//!     the row + advance cursor. We do NOT halt the dispatcher — a single
-//!     bad row must not stall the bus.
-//!   * Payload deserialize failure → same: log + drop + advance. The
-//!     subscriber path (Phase 4) has its own retries; the dispatcher is
-//!     at-most-once for live fan-out.
-//!   * Tail source error → return [`DispatchError::Tail`] up to the
-//!     supervisor. Restart strategy is the daemon's job.
-//!
 //! I003 note (Phase 3 resolution):
 //!
 //! Frozen lisp §4.2.c mandates "paused=true 时跳过该 domain 的所有投递". The
-//! implementation below honors that contract by default — the skip is the
-//! entire action (event stays persisted, subscriber cursor jumps forward
-//! on resume). `Observability` and `Incident` always bypass this gate via
-//! `control_gate::domain_to_ctl_domain` → `None`, which is exactly what we
-//! need for bus self-telemetry.
+//! implementation in [`dispatcher`] honors that contract by default — the
+//! skip is the entire action (event stays persisted, subscriber cursor
+//! jumps forward on resume). `Observability` and `Incident` always bypass
+//! this gate via `control_gate::domain_to_ctl_domain` → `None`, which is
+//! exactly what we need for bus self-telemetry.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
-use async_trait::async_trait;
-use tokio::sync::watch;
-use tokio::time::timeout;
+pub mod dispatcher;
+pub mod pg_tail;
+pub mod tail_source;
 
-use crate::event::blob_store::{BlobStore, PayloadRef};
-use crate::event::domain::Domain;
-use crate::event::log::reader::LoggedEvent;
-use crate::event::log::{LogError, Seq};
-use crate::event::pipeline::step6_gate::ControlGate;
-use crate::event::pipeline::step7_fanout::registry::TopicRegistry;
+mod metrics {
+    //! `dispatcher-state`.rows_* counters lifted out so tail modules can
+    //! share them by path without a cycle.
+    //!
+    //! This is a small internal split inside step-5; the public surface is
+    //! re-exported at the [`super`] module level.
+
+    /// Metrics summary returned from a terminated tail loop. Lightweight,
+    /// used by tests + shutdown diagnostics.
+    #[derive(Debug, Default, Clone)]
+    pub struct DispatchMetrics {
+        pub rows_read: u64,
+        pub rows_fanned_out: u64,
+        pub rows_dropped_paused: u64,
+        pub rows_dropped_unknown_domain: u64,
+        pub rows_dropped_deserialize: u64,
+        pub last_seq: i64,
+    }
+}
 
 /// Per-poll row cap. Frozen lisp §4.2.c: `LIMIT 256`.
 pub const TAIL_BATCH_LIMIT: usize = 256;
@@ -56,282 +67,14 @@ pub const TAIL_BATCH_LIMIT: usize = 256;
 /// full, we skip the sleep and loop again to drain quickly.
 pub const TAIL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Structured errors returned by [`run_tail`].
-#[derive(Debug, thiserror::Error)]
-pub enum DispatchError {
-    #[error("tail source error: {0}")]
-    Tail(#[from] TailError),
-
-    #[error(
-        "unknown domain {domain:?} encountered in event_log tail — registry did not include it"
-    )]
-    UnknownDomain { domain: Domain },
-
-    #[error("payload deserialize failed for domain {domain:?}: {err}")]
-    PayloadDeserialize { domain: Domain, err: String },
-
-    #[error("shutdown signal received")]
-    Shutdown,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum TailError {
-    #[error("log read error: {0}")]
-    LogRead(String),
-}
-
-impl From<LogError> for TailError {
-    fn from(e: LogError) -> Self {
-        TailError::LogRead(e.to_string())
-    }
-}
-
-/// Metrics summary returned from a terminated tail loop. Lightweight, used
-/// by tests + shutdown diagnostics.
-#[derive(Debug, Default, Clone)]
-pub struct DispatchMetrics {
-    pub rows_read: u64,
-    pub rows_fanned_out: u64,
-    pub rows_dropped_paused: u64,
-    pub rows_dropped_unknown_domain: u64,
-    pub rows_dropped_deserialize: u64,
-    pub last_seq: i64,
-}
-
-/// Abstraction over the log tail source. Production wires this to the
-/// Phase 2 `LogReader`; unit tests plug a `Vec<LoggedEvent>` mock.
-///
-/// The dispatcher reads **all domains** at once — it scans the whole log
-/// forward. Per-domain filtering happens inside the consumer (Phase 4
-/// subscription). This keeps the tail cursor O(1).
-#[async_trait]
-pub trait TailSource: Send + Sync {
-    /// Return up to `limit` events with `seq > after_seq`, ordered by seq
-    /// ascending. An empty Vec is normal (no new rows).
-    async fn read_all_from(
-        &self,
-        after_seq: Seq,
-        limit: usize,
-    ) -> Result<Vec<LoggedEvent>, TailError>;
-}
-
-/// Adapter: a PG-backed tail source reusing the Phase 2 [`LogReader`]. The
-/// reader already knows how to resolve `payload_ref` via the blob store,
-/// but its native API is per-domain. Here we loop over all domains in one
-/// batch — simple and fast for the 12-domain cardinality.
-#[cfg(feature = "postgres")]
-pub struct PgTailSource {
-    pool: sqlx::PgPool,
-    blob_store: Arc<dyn BlobStore>,
-}
+// Public re-exports: keep legacy `event::pipeline::step5_tail::*` paths
+// resolving for callers that don't want to reach into sub-modules.
+pub use dispatcher::run_tail;
+pub use metrics::DispatchMetrics;
+pub use tail_source::{DispatchError, TailError, TailSource};
 
 #[cfg(feature = "postgres")]
-impl PgTailSource {
-    pub fn new(pool: sqlx::PgPool, blob_store: Arc<dyn BlobStore>) -> Self {
-        Self { pool, blob_store }
-    }
-}
-
-#[cfg(feature = "postgres")]
-#[async_trait]
-impl TailSource for PgTailSource {
-    async fn read_all_from(
-        &self,
-        after_seq: Seq,
-        limit: usize,
-    ) -> Result<Vec<LoggedEvent>, TailError> {
-        use super::super::log::reader::domain_from_str;
-
-        #[derive(sqlx::FromRow)]
-        struct Row {
-            seq: i64,
-            domain: String,
-            kind: String,
-            payload_inline: Option<serde_json::Value>,
-            payload_ref: Option<String>,
-            producer_id: String,
-            dedupe_key: Option<uuid::Uuid>,
-            causation_depth: i16,
-            trace_id: Option<uuid::Uuid>,
-            span_id: Option<uuid::Uuid>,
-            parent_span_id: Option<uuid::Uuid>,
-            ts: chrono::DateTime<chrono::Utc>,
-            ephemeral: bool,
-        }
-
-        let rows: Vec<Row> = sqlx::query_as::<_, Row>(
-            r#"
-            SELECT seq, domain, kind, payload_inline, payload_ref, producer_id,
-                   dedupe_key, causation_depth, trace_id, span_id, parent_span_id,
-                   ts, ephemeral
-            FROM event_log
-            WHERE seq > $1
-            ORDER BY seq ASC
-            LIMIT $2
-            "#,
-        )
-        .bind(after_seq.0)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| TailError::LogRead(e.to_string()))?;
-
-        let mut out = Vec::with_capacity(rows.len());
-        for row in rows {
-            let Some(domain) = domain_from_str(&row.domain) else {
-                // Log + skip this row; the tail loop decides what to do
-                // with an unresolved domain (typically: drop).
-                tracing::warn!(
-                    seq = row.seq,
-                    domain = %row.domain,
-                    "tail: unknown domain label; skipping row"
-                );
-                continue;
-            };
-            let payload = match (row.payload_inline, row.payload_ref) {
-                (Some(inline), _) => inline,
-                (None, Some(ref_json)) => {
-                    let payload_ref = PayloadRef::from_json_str(&ref_json)
-                        .map_err(|e| TailError::LogRead(format!("decode payload_ref: {e}")))?;
-                    let bytes = self
-                        .blob_store
-                        .get(&payload_ref)
-                        .await
-                        .map_err(|e| TailError::LogRead(format!("fetch blob: {e}")))?;
-                    serde_json::from_slice(&bytes)
-                        .map_err(|e| TailError::LogRead(format!("decode blob payload: {e}")))?
-                }
-                (None, None) => serde_json::Value::Null,
-            };
-
-            out.push(LoggedEvent {
-                seq: Seq(row.seq),
-                domain,
-                kind: row.kind,
-                payload,
-                producer_id: row.producer_id,
-                dedupe_key: row.dedupe_key,
-                causation_depth: row.causation_depth,
-                trace_id: row.trace_id,
-                span_id: row.span_id,
-                parent_span_id: row.parent_span_id,
-                ts: row.ts,
-                ephemeral: row.ephemeral,
-            });
-        }
-        Ok(out)
-    }
-}
-
-/// Main dispatcher loop. Invoked from [`super::Dispatcher::run`].
-///
-/// The loop is bounded by `shutdown`: when `*shutdown.borrow()` becomes
-/// `true` the loop returns `Err(DispatchError::Shutdown)` with current
-/// metrics preserved via the last_dispatched_seq counter.
-pub async fn run_tail<G>(
-    tail_source: Arc<dyn TailSource>,
-    _blob_store: Arc<dyn BlobStore>,
-    registry: Arc<TopicRegistry>,
-    last_dispatched_seq: Arc<AtomicI64>,
-    control: G,
-    mut shutdown: watch::Receiver<bool>,
-) -> Result<DispatchMetrics, DispatchError>
-where
-    G: ControlGate + Clone + 'static,
-{
-    let mut metrics = DispatchMetrics::default();
-
-    loop {
-        // Fast shutdown check before each poll.
-        if *shutdown.borrow() {
-            return Err(DispatchError::Shutdown);
-        }
-
-        let cursor = Seq(last_dispatched_seq.load(Ordering::Acquire));
-        let batch = tail_source
-            .read_all_from(cursor, TAIL_BATCH_LIMIT)
-            .await
-            .map_err(DispatchError::Tail)?;
-
-        metrics.rows_read += batch.len() as u64;
-        let was_full = batch.len() == TAIL_BATCH_LIMIT;
-
-        for logged in batch {
-            dispatch_one(&registry, &control, &logged, &mut metrics);
-            last_dispatched_seq.store(logged.seq.0, Ordering::Release);
-            metrics.last_seq = logged.seq.0;
-        }
-
-        // If we emptied the batch (or none was available), wait the
-        // poll interval; `timeout` on the shutdown receiver lets us wake
-        // promptly on shutdown.
-        if !was_full {
-            match timeout(TAIL_POLL_INTERVAL, shutdown.changed()).await {
-                Ok(Ok(())) => {
-                    // shutdown flipped
-                    if *shutdown.borrow() {
-                        return Err(DispatchError::Shutdown);
-                    }
-                }
-                Ok(Err(_)) => {
-                    // shutdown tx dropped — treat as shutdown.
-                    return Err(DispatchError::Shutdown);
-                }
-                Err(_) => {
-                    // poll interval elapsed; loop again.
-                }
-            }
-        }
-    }
-}
-
-/// Route a single LoggedEvent to its topic, respecting the control gate.
-///
-/// Metrics are updated in place. Errors are swallowed (logged at WARN) on
-/// purpose — see module docs. This keeps one bad row from stalling the
-/// whole tail loop.
-fn dispatch_one(
-    registry: &TopicRegistry,
-    control: &impl ControlGate,
-    logged: &LoggedEvent,
-    metrics: &mut DispatchMetrics,
-) {
-    // Control-gate check first. Paused ⇒ drop + advance cursor.
-    if control.is_domain_paused(logged.domain) {
-        metrics.rows_dropped_paused += 1;
-        tracing::debug!(
-            seq = logged.seq.0,
-            domain = logged.domain.as_str(),
-            "tail: domain paused; dropping"
-        );
-        return;
-    }
-
-    let Some(topic) = registry.any_topic(logged.domain) else {
-        metrics.rows_dropped_unknown_domain += 1;
-        tracing::warn!(
-            seq = logged.seq.0,
-            domain = logged.domain.as_str(),
-            "tail: unregistered domain topic; dropping"
-        );
-        return;
-    };
-
-    match topic.fanout_json(&logged.payload) {
-        Ok(()) => {
-            metrics.rows_fanned_out += 1;
-        }
-        Err(e) => {
-            metrics.rows_dropped_deserialize += 1;
-            tracing::warn!(
-                seq = logged.seq.0,
-                domain = logged.domain.as_str(),
-                error = %e,
-                "tail: payload deserialize failed; dropping"
-            );
-        }
-    }
-}
+pub use pg_tail::PgTailSource;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Tests — mock TailSource exercises the dispatch loop without a DB
@@ -340,14 +83,24 @@ fn dispatch_one(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::blob_store::{BlobBackend, BlobResult, BlobStoreError, LocalFileBlobStore};
+    use crate::event::blob_store::{
+        BlobBackend, BlobResult, BlobStore, BlobStoreError, LocalFileBlobStore, PayloadRef,
+    };
     use crate::event::dispatcher::control_gate::CtlDomain;
     use crate::event::dispatcher::registry::TopicRegistryBuilder;
     use crate::event::dispatcher::{DispatcherBuilder, NeverPaused, register_all_domains};
+    use crate::event::domain::Domain;
     use crate::event::events::{BoardEvent, MemoryEvent, ObservabilityEvent, SlotEvent};
+    use crate::event::log::reader::LoggedEvent;
+    use crate::event::log::Seq;
+    use crate::event::pipeline::step6_gate::ControlGate;
+    use async_trait::async_trait;
     use chrono::Utc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Mutex;
     use std::time::Instant;
+    use tokio::sync::watch;
     use tokio::time::Duration as TokioDuration;
 
     /// Record of what the mock tail source has served so tests can assert

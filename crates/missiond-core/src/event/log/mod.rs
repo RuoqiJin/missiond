@@ -24,15 +24,21 @@ pub use reader::{LogReader, LoggedEvent};
 // call sites (`event::log::spawn_log_writer` / `event::log::cleanup_once`)
 // keep compiling. The canonical homes are documented in each target module.
 pub use crate::event::lifecycle::retention::{cleanup_once, CleanupReport};
-pub use crate::event::pipeline::step3_commit::log_writer::{
+pub use crate::event::pipeline::step3_commit::{
     new_log_writer, spawn_log_writer, LogWriter, LogWriterHandle, PendingAppend,
 };
 
 /// Back-compat module alias so `event::log::writer::…` paths still resolve.
 ///
-/// Prefer [`crate::event::pipeline::step3_commit::log_writer`] in new code.
+/// Prefer [`crate::event::pipeline::step3_commit`] in new code.
 pub mod writer {
-    pub use crate::event::pipeline::step3_commit::log_writer::*;
+    pub use crate::event::pipeline::step3_commit::backpressure::{
+        PendingAppend, APPEND_CHANNEL_CAPACITY, BATCH_DEADLINE, BATCH_MAX,
+    };
+    pub use crate::event::pipeline::step3_commit::handle::LogWriterHandle;
+    pub use crate::event::pipeline::step3_commit::log_writer::{
+        new_log_writer, spawn_log_writer, LogWriter,
+    };
 }
 
 use async_trait::async_trait;

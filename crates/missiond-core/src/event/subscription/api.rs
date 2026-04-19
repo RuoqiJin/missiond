@@ -27,7 +27,8 @@ use super::super::event_trait::DomainEvent;
 use super::super::log::{LogReadable, Seq};
 use super::cursor_store::{Cursor, CursorStore};
 use super::failure::{build_failure_info, DlqSink, FailureRouter};
-use super::lifecycle::{BroadcastLiveSource, Lifecycle, LiveSource};
+use super::lifecycle::Lifecycle;
+use super::live_source::{BroadcastLiveSource, LiveSource};
 use super::options::{CursorFlush, FailurePolicy, StartFrom, SubscriptionOpts};
 use super::{
     FailureOutcome, FlushSignal, FlusherHandle, Subscription, SubscriptionState,

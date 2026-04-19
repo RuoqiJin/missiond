@@ -33,11 +33,15 @@ pub mod blob_store;
 pub mod control_gate;
 pub mod cursor_store;
 pub mod log;
+pub mod observability;
+pub mod storage;
+pub mod writer_task;
 
 pub use blob_store::InMemoryBlobStore;
 pub use control_gate::InMemoryControlGate;
 pub use cursor_store::InMemoryCursorStore;
-pub use log::{InMemoryLog, IN_MEMORY_APPEND_CAPACITY};
+pub use log::InMemoryLog;
+pub use storage::{StoredRow, IN_MEMORY_APPEND_CAPACITY};
 
 use std::sync::Arc;
 use std::time::Duration;

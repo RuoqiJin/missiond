@@ -2,7 +2,10 @@
 //! semantics.
 //!
 //! Frozen lisp `.missiond/v2/intent-event-bus.lisp` §4.3 subscription-
-//! combinators.
+//! combinators. Each combinator lives in its own file; this module hosts
+//! the trait-level entry methods, the shared `wrap_ack` helper, and the
+//! internal `Ack::__new_for_combinator` / `silent_ack` primitives the
+//! combinators rely on.
 //!
 //! Each combinator consumes a [`Subscription<T>`] and exposes a
 //! `next().await` that returns an `Ack<U>` (same ack plumbing, wrapped
@@ -26,11 +29,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Mutex;
-use tokio::time::{self, Instant};
+use tokio::time::Instant;
 
 use super::super::event_trait::DomainEvent;
 use super::super::log::Seq;
 use super::{Ack, FlushSignal, Subscription, SubscriptionState};
+
+pub mod batch;
+pub mod coalesce;
+pub mod debounce;
+pub mod filter;
+pub mod map;
+pub mod rate_limit;
+
+pub use batch::{BatchedSubscription, EventBatch};
+pub use coalesce::CoalescingSubscription;
+pub use debounce::DebouncedSubscription;
+pub use filter::FilteredSubscription;
+pub use map::MappedSubscription;
+pub use rate_limit::RateLimitedSubscription;
 
 /// Produce an [`Ack<U>`] that shares the underlying subscription's flush
 /// channel + shared state. Used by combinators that emit a new wrapper
@@ -146,250 +163,12 @@ impl<T: DomainEvent> Subscription<T> {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Debounce
-// ─────────────────────────────────────────────────────────────────────────
-
-pub struct DebouncedSubscription<T: DomainEvent> {
-    inner: Subscription<T>,
-    window: Duration,
-}
-
-impl<T: DomainEvent> DebouncedSubscription<T> {
-    pub async fn next(&mut self) -> Option<Ack<T>> {
-        // Wait for the first event — without an initial event there's
-        // nothing to debounce.
-        let mut last = self.inner.next().await?;
-        let deadline = Instant::now() + self.window;
-
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Some(last);
-            }
-            match time::timeout(remaining, self.inner.next()).await {
-                Ok(Some(new_ack)) => {
-                    // New event replaces previous — silently ack the old
-                    // one so the cursor advances.
-                    last.silent_ack().await;
-                    last = new_ack;
-                }
-                Ok(None) => return Some(last),
-                Err(_) => return Some(last),
-            }
-        }
-    }
-
-    pub async fn cursor(&self) -> Seq {
-        self.inner.cursor().await
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Rate limit
-// ─────────────────────────────────────────────────────────────────────────
-
-pub struct RateLimitedSubscription<T: DomainEvent> {
-    inner: Subscription<T>,
-    interval: Duration,
-    last_emit: Option<Instant>,
-}
-
-impl<T: DomainEvent> RateLimitedSubscription<T> {
-    pub async fn next(&mut self) -> Option<Ack<T>> {
-        let ack = self.inner.next().await?;
-
-        if let Some(last) = self.last_emit {
-            let now = Instant::now();
-            let elapsed = now.saturating_duration_since(last);
-            if elapsed < self.interval {
-                tokio::time::sleep(self.interval - elapsed).await;
-            }
-        }
-        self.last_emit = Some(Instant::now());
-        Some(ack)
-    }
-
-    pub async fn cursor(&self) -> Seq {
-        self.inner.cursor().await
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Coalesce
-// ─────────────────────────────────────────────────────────────────────────
-
-pub struct CoalescingSubscription<T: DomainEvent, F>
-where
-    F: Fn(&T, &T) -> T + Send + Sync + 'static,
-{
-    inner: Subscription<T>,
-    fold: F,
-}
-
-impl<T: DomainEvent, F> CoalescingSubscription<T, F>
-where
-    F: Fn(&T, &T) -> T + Send + Sync + 'static,
-{
-    /// Emit one event after draining a burst. If no further event arrives
-    /// within `200ms` the current value is released.
-    pub async fn next(&mut self) -> Option<Ack<T>> {
-        let first = self.inner.next().await?;
-        let mut combined_event = (*first.event()).clone();
-        let mut combined_seq = first.seq();
-        let mut combined_attempt = first.attempt();
-        // Ack the initial event silently — we'll issue a new combined ack.
-        let shared = self.inner.shared();
-        let flush_tx = self.inner.flush_signal_tx();
-        first.silent_ack().await;
-
-        loop {
-            match time::timeout(Duration::from_millis(200), self.inner.next()).await {
-                Ok(Some(next)) => {
-                    combined_event = (self.fold)(&combined_event, next.event());
-                    combined_seq = next.seq();
-                    combined_attempt = next.attempt();
-                    next.silent_ack().await;
-                }
-                Ok(None) | Err(_) => {
-                    return Some(wrap_ack(
-                        Arc::new(combined_event),
-                        combined_seq,
-                        combined_attempt,
-                        shared,
-                        flush_tx,
-                    ));
-                }
-            }
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Filter
-// ─────────────────────────────────────────────────────────────────────────
-
-pub struct FilteredSubscription<T: DomainEvent, F>
-where
-    F: Fn(&T) -> bool + Send + Sync + 'static,
-{
-    inner: Subscription<T>,
-    pred: F,
-}
-
-impl<T: DomainEvent, F> FilteredSubscription<T, F>
-where
-    F: Fn(&T) -> bool + Send + Sync + 'static,
-{
-    pub async fn next(&mut self) -> Option<Ack<T>> {
-        loop {
-            let ack = self.inner.next().await?;
-            if (self.pred)(ack.event()) {
-                return Some(ack);
-            }
-            ack.silent_ack().await;
-        }
-    }
-
-    pub async fn cursor(&self) -> Seq {
-        self.inner.cursor().await
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Map
-// ─────────────────────────────────────────────────────────────────────────
-
-pub struct MappedSubscription<T: DomainEvent, U: DomainEvent, F>
-where
-    F: Fn(&T) -> U + Send + Sync + 'static,
-{
-    inner: Subscription<T>,
-    map_fn: F,
-    _p: std::marker::PhantomData<U>,
-}
-
-impl<T: DomainEvent, U: DomainEvent, F> MappedSubscription<T, U, F>
-where
-    F: Fn(&T) -> U + Send + Sync + 'static,
-{
-    pub async fn next(&mut self) -> Option<Ack<U>> {
-        let ack = self.inner.next().await?;
-        let seq = ack.seq();
-        let attempt = ack.attempt();
-        let mapped = (self.map_fn)(ack.event());
-
-        let shared = self.inner.shared();
-        let flush_tx = self.inner.flush_signal_tx();
-        // Silent-ack the source so the map downstream ack controls
-        // cursor advancement — otherwise dropping a mapped ack would
-        // never touch the source cursor.
-        ack.silent_ack().await;
-
-        Some(wrap_ack(Arc::new(mapped), seq, attempt, shared, flush_tx))
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Batch
-// ─────────────────────────────────────────────────────────────────────────
-
-pub struct BatchedSubscription<T: DomainEvent> {
-    inner: Subscription<T>,
-    max: usize,
-    window: Duration,
-}
-
-/// Wrapper type so `BatchedSubscription::next` can return a real
-/// `DomainEvent` (same domain as `T`). We piggyback on the source domain;
-/// `batch` is a consumer-local view that never hits the event log directly.
-#[derive(Debug, Clone)]
-pub struct EventBatch<T: DomainEvent> {
-    pub items: Vec<Arc<T>>,
-    /// The seq of the last event in the batch.
-    pub tail_seq: Seq,
-}
-
-impl<T: DomainEvent> BatchedSubscription<T> {
-    /// Returns `(Vec<Arc<T>>, Ack<T>)` — the batch events are the first
-    /// tuple element; the second is the ack handle for the last seq
-    /// in the batch. Acking this handle advances the cursor past every
-    /// event in the batch.
-    pub async fn next(&mut self) -> Option<(Vec<Arc<T>>, Ack<T>)> {
-        let first = self.inner.next().await?;
-        let mut items = vec![first.event().clone().into()];
-        let mut last_seq = first.seq();
-        let mut last_attempt = first.attempt();
-        let shared = self.inner.shared();
-        let flush_tx = self.inner.flush_signal_tx();
-
-        // The first event's ack is silently auto-acked once the final one
-        // arrives — we'll issue a combined ack at the tail.
-        first.silent_ack().await;
-
-        let deadline = Instant::now() + self.window;
-        while items.len() < self.max {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            match time::timeout(remaining, self.inner.next()).await {
-                Ok(Some(ack)) => {
-                    items.push(ack.event().clone().into());
-                    last_seq = ack.seq();
-                    last_attempt = ack.attempt();
-                    ack.silent_ack().await;
-                }
-                Ok(None) | Err(_) => break,
-            }
-        }
-
-        // A tail ack we DON'T auto-silent — surfaced to the caller so
-        // they can commit only when their batch processing succeeds.
-        let tail_event = items.last().cloned().expect("batch non-empty");
-        let tail_ack = wrap_ack(tail_event, last_seq, last_attempt, shared, flush_tx);
-        Some((items, tail_ack))
-    }
+// Suppress unused-import warnings for re-exported items that aren't
+// referenced in this file's impl blocks directly (Instant is used via
+// tests only; keep for documentation-level consistency).
+#[allow(dead_code)]
+fn _marker_types_referenced() -> Option<Instant> {
+    None
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -399,13 +178,13 @@ impl<T: DomainEvent> BatchedSubscription<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::dispatcher::{register_all_domains, DispatcherBuilder};
     use crate::event::events::BoardEvent;
     use crate::event::log::reader::LoggedEvent;
     use crate::event::log::{AppendAck, AppendError, AppendOpts, Log, LogError, LogReadable};
     use crate::event::subscription::failure::InMemoryDlq;
     use crate::event::subscription::{subscribe, InMemoryCursorStore, StartFrom, SubscriptionOpts};
     use crate::event::{Domain, DomainEvent};
-    use crate::event::dispatcher::{DispatcherBuilder, register_all_domains};
     use async_trait::async_trait;
     use std::time::Duration;
 

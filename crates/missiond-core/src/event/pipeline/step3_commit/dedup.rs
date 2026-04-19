@@ -11,27 +11,43 @@
 //!
 //! # Implementation anchors
 //!
-//! The collision-handling code lives inline inside [`super::log_writer`]:
+//! The collision path is split across three sites:
 //!
-//! * `PgWriterBackend::insert_batch` classifies PostgreSQL SQLSTATE `23505`
-//!   (unique_violation) as [`BackendError::DedupeCollision`].
-//! * `LogWriter::flush` catches that error and walks each pending entry
-//!   through `backend.find_existing_seq(producer_id, dedupe_key)` to
-//!   resolve the `AppendAck::AlreadyExists(seq)` reply without any
-//!   side-effect rollback.
-//! * The in-memory parity bus
-//!   ([`crate::event::in_memory::InMemoryLog`]) uses an explicit
-//!   `HashMap<(String, Uuid), Seq>` to achieve the same contract.
+//! * [`is_unique_violation`] — classifies a PostgreSQL `DatabaseError` as a
+//!   UNIQUE-constraint violation (SQLSTATE `23505`) so the PG backend can
+//!   translate it into [`BackendError::DedupeCollision`]. Lives here rather
+//!   than in the PG adapter because the classifier expresses a contract
+//!   (dedup), not a driver implementation detail.
+//! * [`BackendError::DedupeCollision`] — surfaced by
+//!   [`super::backend::WriterBackend::insert_batch`] when the UNIQUE index
+//!   rejects a row.
+//! * `LogWriter::flush` (in [`super::log_writer`]) catches
+//!   `DedupeCollision`, walks each pending entry through
+//!   `backend.find_existing_seq(producer_id, dedupe_key)` and returns
+//!   `AppendAck::AlreadyExists(seq)` without any side-effect rollback.
 //!
-//! This module intentionally hosts no executable code — it is a single
-//! documentation anchor so readers browsing the 7-step layout can locate
-//! the dedup contract without spelunking through `log_writer.rs`. The
-//! helper below is re-exported for code that wants a named constant for
-//! the unique-index column pair.
+//! The in-memory parity bus
+//! ([`crate::event::in_memory::InMemoryLog`]) uses an explicit
+//! `HashMap<(String, Uuid), Seq>` to achieve the same contract — see
+//! `intent-event-bus-execution.lisp` DC023.
 //!
-//! [`BackendError::DedupeCollision`]: crate::event::pipeline::step3_commit::log_writer
+//! [`BackendError::DedupeCollision`]: super::backend::BackendError::DedupeCollision
 
 /// The UNIQUE-index column pair that drives the dedup contract. Exposed
 /// mostly for integration tests and migrations to cross-check that the SQL
 /// schema and the writer agree on the key shape.
 pub const DEDUP_UNIQUE_COLUMNS: (&str, &str) = ("producer_id", "dedupe_key");
+
+/// PostgreSQL SQLSTATE `23505` = `unique_violation`.
+///
+/// Classify a `sqlx::error::DatabaseError` as the dedup-unique collision so
+/// [`super::pg_backend::PgWriterBackend`] can map it to
+/// [`BackendError::DedupeCollision`]. The helper lives in `dedup.rs` because
+/// it encodes the dedup *contract* (which SQLSTATE = a dedup hit), not a
+/// driver concern.
+///
+/// [`BackendError::DedupeCollision`]: super::backend::BackendError::DedupeCollision
+#[cfg(feature = "postgres")]
+pub(crate) fn is_unique_violation(e: &dyn sqlx::error::DatabaseError) -> bool {
+    e.code().as_deref() == Some("23505")
+}

@@ -30,6 +30,17 @@
 //! functional — otherwise `try_send` would always succeed on an unread
 //! channel and the `LogUnavailable` / `Backpressure` chaos tests would
 //! have no way to trigger.
+//!
+//! # File split
+//!
+//! * `storage.rs`       — [`StoredRow`] + [`IN_MEMORY_APPEND_CAPACITY`].
+//! * `writer_task.rs`   — single-writer loop + [`Pending`] entry + payload
+//!   byte helpers.
+//! * `observability.rs` — [`ObservabilityAppender`] adapter.
+//! * (this file)        — [`InMemoryLog`] public surface + [`Log`] impl.
+//!
+//! [`ObservabilityAppender`]: super::super::metrics::emitter::ObservabilityAppender
+//! [`Pending`]: super::writer_task::Pending
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -46,37 +57,8 @@ use super::super::log::reader::LoggedEvent;
 use super::super::log::{AppendAck, AppendError, AppendOpts, Log, LogError, Seq};
 use super::super::metrics::{BusMetrics, NoopMetrics};
 use super::super::pipeline::step1_guard::check_causation;
-
-/// Bound on the in-memory append channel. Matches the PG default
-/// (frozen lisp §4.2.b) so behavioral parity holds.
-pub const IN_MEMORY_APPEND_CAPACITY: usize = 4096;
-
-/// Entry sent from [`InMemoryLog::append`] to the writer task.
-struct Pending {
-    row: StoredRow,
-    dedupe_key: Option<Uuid>,
-    ephemeral: bool,
-    ack: oneshot::Sender<Result<AppendAck, AppendError>>,
-}
-
-/// Internal stored row. Kept in the Vec verbatim so `read_from` / `head_seq`
-/// can replay.
-#[derive(Debug, Clone)]
-pub struct StoredRow {
-    pub seq: Seq,
-    pub domain: Domain,
-    pub kind: String,
-    pub payload_inline: Option<serde_json::Value>,
-    pub payload_ref: Option<String>,
-    pub producer_id: String,
-    pub dedupe_key: Option<Uuid>,
-    pub causation_depth: i16,
-    pub trace_id: Option<Uuid>,
-    pub span_id: Option<Uuid>,
-    pub parent_span_id: Option<Uuid>,
-    pub ts: chrono::DateTime<chrono::Utc>,
-    pub ephemeral: bool,
-}
+use super::storage::{StoredRow, IN_MEMORY_APPEND_CAPACITY};
+use super::writer_task::{Pending, WriterTask};
 
 /// In-memory [`Log`] implementation.
 pub struct InMemoryLog {
@@ -178,88 +160,6 @@ impl InMemoryLog {
     /// to serve the dispatcher's cross-domain tail.
     pub fn rows_snapshot(&self) -> Vec<StoredRow> {
         self.rows.lock().unwrap().clone()
-    }
-}
-
-/// The writer task — mirrors `PgLogWriter::run` on the PG side.
-struct WriterTask {
-    rx: mpsc::Receiver<Pending>,
-    next_seq: Arc<AtomicI64>,
-    rows: Arc<Mutex<Vec<StoredRow>>>,
-    dedupe: Arc<Mutex<HashMap<(String, Uuid), Seq>>>,
-    failed: Arc<AtomicBool>,
-    metrics: Arc<dyn BusMetrics>,
-}
-
-impl WriterTask {
-    async fn run(mut self) {
-        while let Some(pending) = self.rx.recv().await {
-            self.handle_one(pending).await;
-        }
-    }
-
-    async fn handle_one(&mut self, pending: Pending) {
-        let Pending {
-            mut row,
-            dedupe_key,
-            ephemeral,
-            ack,
-        } = pending;
-
-        // Failed state short-circuits.
-        if self.failed.load(Ordering::Acquire) {
-            self.metrics.record_append(row.domain, false, 0);
-            let _ = ack.send(Err(AppendError::LogUnavailable(
-                "in-memory log failed".into(),
-            )));
-            return;
-        }
-
-        // Dedupe lookup — mirrors PG UNIQUE violation path.
-        if let Some(key) = dedupe_key {
-            let k = (row.producer_id.clone(), key);
-            if let Some(existing) = self.dedupe.lock().unwrap().get(&k).copied() {
-                let _ = ack.send(Ok(AppendAck::AlreadyExists { seq: existing }));
-                return;
-            }
-        }
-
-        // Allocate seq before committing, like `BIGSERIAL` does in PG.
-        let seq = Seq(self.next_seq.fetch_add(1, Ordering::SeqCst));
-        row.seq = seq;
-
-        // Ephemeral path — skip the rows vec, but still consumed a seq.
-        // This matches the principle-6 stability: ephemeral events have
-        // durable seqs even when not persisted, so observability replay
-        // can at least see the gap.
-        if ephemeral {
-            self.metrics.record_append(row.domain, true, payload_bytes(&row));
-            let _ = ack.send(Ok(AppendAck::Volatile { seq }));
-            return;
-        }
-
-        // Persist — single-writer serialization guaranteed by the task.
-        self.rows.lock().unwrap().push(row.clone());
-        if let Some(key) = dedupe_key {
-            self.dedupe
-                .lock()
-                .unwrap()
-                .insert((row.producer_id.clone(), key), seq);
-        }
-        self.metrics
-            .record_append(row.domain, true, payload_bytes(&row));
-
-        let _ = ack.send(Ok(AppendAck::Committed { seq, durable: true }));
-    }
-}
-
-fn payload_bytes(row: &StoredRow) -> usize {
-    match &row.payload_inline {
-        Some(v) => v.to_string().len(),
-        None => match &row.payload_ref {
-            Some(r) => r.len(),
-            None => 0,
-        },
     }
 }
 
@@ -387,21 +287,6 @@ fn stored_to_logged(r: &StoredRow) -> LoggedEvent {
         parent_span_id: r.parent_span_id,
         ts: r.ts,
         ephemeral: r.ephemeral,
-    }
-}
-
-/// Adapter: [`InMemoryLog`] as an [`ObservabilityAppender`]. The metrics
-/// emitter uses this to push ephemeral `BusMetric` events through the
-/// in-memory bus without needing a separate writer.
-#[async_trait]
-impl super::super::metrics::emitter::ObservabilityAppender for InMemoryLog {
-    async fn append_observability(
-        &self,
-        event: super::super::events::ObservabilityEvent,
-        opts: AppendOpts,
-    ) -> Result<Seq, AppendError> {
-        let ack = self.append(event, opts).await?;
-        Ok(ack.seq())
     }
 }
 
