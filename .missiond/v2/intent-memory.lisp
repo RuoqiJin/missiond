@@ -23,7 +23,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.8")
+  (version "draft-v0.4.9")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -39,7 +39,8 @@
     (v0.4.5 "workflow-lisp-templates + flow-yaml-templates 合并到单一 component workflows (:kind methodology | executable), 符合 Option B 设计")
     (v0.4.6 "embedding 契约 SSOT: cross-cutting 新增 capability embedding-storage-governance, 5 处散落描述改用 cross-ref; 确认 5 张承载表 (含 skill_topics / ast_nodes) 及 message_embeddings 的 halfvec 特殊性")
     (v0.4.7 "board 模块按'memory=库'原则精简: autopilot + flow-engine-v2 计算逻辑移到 pillar 二 2.4 orchestration, board 只留 cross-ref")
-    (v0.4.8 "board 新增 helper agent-execution-coordination: 从 intent-event-bus-execution.lisp 提取'并行 agent 共享内存层'模式, 6 slots + storage/manager interface 声明"))
+    (v0.4.8 "board 新增 helper agent-execution-coordination: 从 intent-event-bus-execution.lisp 提取'并行 agent 共享内存层'模式, 6 slots + storage/manager interface 声明")
+    (v0.4.9 "conversation-logs 按 'memory=库' 精简: 10 worker 全改 cross-ref + 新增 writer-removed 墓志铭 (worker-briefing 已在 v1.3.0 删) + 2 egress 消费者改 cross-ref + pillar 二 2.3 同步修正 briefing 删除 + 增 writes-to-memory 注记"))
   (status "草稿 — 大多数 module 已稳定, 可演进")
 
   (purpose "系统长期记忆 — 4 个业务模块自治 + 底层系统支持层 + 横切")
@@ -802,85 +803,74 @@
         :benefit  "跨引擎查询一套工具")
       (goal-3 analysis-layer
         :problem  "原始消息 JSONL 难以直接用于 context 拼接 / 复盘"
-        :solution "briefing (摘要) + embedding (向量) + translation (多语种) + labels (打标) + retrospective (复盘)"
-        :benefit  "多层次派生视图, 服务不同消费场景"))
+        :solution "embedding (向量) + translation (多语种) + labels (打标) + retrospective (复盘) + step-narrator (codex)"
+        :benefit  "多层次派生视图, 服务不同消费场景"
+        :note     "briefing-worker 在 SSOT cutover (v1.3.0) 删除, 语义级消息摘要能力已移除"))
 
     (module-ingress
-      (desc "3 引擎专项摄入 + 多种二次分析 worker")
+      (desc "MCP 库写入 API + 外部 worker 驱动的写入")
+      :principle "memory = 库. 本模块只列'谁来写我的表'; worker 的 tick / 算法 / 错误恢复见 pillar 二 2.3"
 
-      ;; ── 三引擎原始摄入 ──
-      (writer worker-conversation-logger
-        :kind     "local"
-        :code     "crates/missiond-daemon/src/workers/local/conversation_logger.rs"
-        :source   "~/.claude/projects/{encoded}/*.jsonl (PTY JSONL, see non-db-forms)"
-        :writes   "conversations / conversation_messages / conversation_turns / conversation_events"
-        :idempotency "(session_id, turn_id) 去重"
-        :engine-primary "Claude Code")
-
-      (writer worker-codex-ingestion
-        :kind   "local"
-        :code   "crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs"
-        :writes "conversations / conversation_messages (codex engine_type)"
-        :engine-primary "Codex")
-
-      (writer worker-gemini-logger
-        :kind   "local"
-        :code   "crates/missiond-daemon/src/workers/local/gemini_logger.rs"
-        :writes "conversations / conversation_messages (gemini engine_type)"
-        :engine-primary "Gemini")
-
-      (writer worker-gemini-reconcile
-        :kind   "local"
-        :code   "crates/missiond-daemon/src/workers/local/gemini_reconcile_worker.rs"
-        :writes "conversations (对账校正)"
-        :purpose "Gemini 流特殊对账")
-
-      (writer worker-conversation-organizer
-        :kind   "local"
-        :code   "crates/missiond-daemon/src/workers/local/conversation_organizer.rs"
-        :writes "conversation_turns / conversation_tool_calls"
-        :purpose "消息流 → turn 结构化 + tool call 抽取")
-
-      ;; ── 二次分析 ──
-      (writer worker-briefing
-        :kind   "sonnet"
-        :code   "crates/missiond-daemon/src/workers/sonnet/briefing_worker.rs"
-        :writes "message_narrations + narration_cursors"
-        :purpose "LLM 摘要 — 每轮或每会话生成 briefing")
-
-      (writer worker-step-narrator
-        :kind   "codex"
-        :code   "crates/missiond-daemon/src/workers/codex/step_narrator.rs"
-        :writes "message_narrations (codex-specific narrations)")
-
-      (writer worker-embedding
-        :kind   "sonnet (cross-module writer)"
-        :code   "crates/missiond-daemon/src/workers/sonnet/embedding_worker.rs"
-        :writes "message_embeddings (halfvec) / conversation_topic_vectors"
-        :also-writes-in-other-module "kb-manager: knowledge.embedding_vec + ast_nodes.embedding_vec; project-management: skill_topics"
-        :governance "契约 + schema + provider 见 cross-cutting :: capability embedding-storage-governance"
-        :note "不写 conversations.summary_embedding (该列不存在); message_embedding_skips 是 worker 内部去重策略")
-
-      (writer worker-translation
-        :kind   "sonnet"
-        :code   "crates/missiond-daemon/src/workers/sonnet/translation_worker.rs"
-        :writes "message_translations"
-        :purpose "多语种翻译")
-
-      (writer worker-retro
-        :kind   "sonnet"
-        :code   "crates/missiond-daemon/src/workers/sonnet/retro_worker.rs"
-        :writes "retrospective_results"
-        :trigger "会话结束信号 / 手动触发")
-
-      ;; 注: vision_worker 写 image_descriptions 但该表已迁到 category system-support
-      ;; (独立无外键的图片缓存, 非 conversation-scoped), 见该 section
-
-      ;; ── MCP 写入 ──
+      ;; ── MCP 库写入 API (库直接暴露的写入面) ──
       (writer mcp-conversation-reconcile
         :tools  "mission_conversation_reconcile / mission_conversation_analyze"
         :writes "conversations / conversation_messages"
-        :code   "daemon/src/handlers/comm/conversation.rs"))
+        :code   "daemon/src/handlers/comm/conversation.rs")
+
+      ;; ── 三引擎原始摄入 worker (cross-ref pillar 二 2.3 local) ──
+      (writer worker-conversation-logger
+        :cross-ref "pillar 二 2.3 :: workers/local/conversation_logger.rs"
+        :writes    "conversations + conversation_messages + conversation_turns + conversation_events"
+        :library-pov "库暴露 ConversationStore append 接口 + (session_id, turn_id) 幂等; tail JSONL 算法在 worker")
+
+      (writer worker-codex-ingestion
+        :cross-ref "pillar 二 2.3 :: workers/local/codex_ingestion_worker.rs"
+        :writes    "conversations / conversation_messages (engine_type=codex)")
+
+      (writer worker-gemini-logger
+        :cross-ref "pillar 二 2.3 :: workers/local/gemini_logger.rs"
+        :writes    "conversations / conversation_messages (engine_type=gemini)")
+
+      (writer worker-gemini-reconcile
+        :cross-ref "pillar 二 2.3 :: workers/local/gemini_reconcile_worker.rs"
+        :writes    "conversations (对账校正)")
+
+      (writer worker-conversation-organizer
+        :cross-ref "pillar 二 2.3 :: workers/local/conversation_organizer.rs"
+        :writes    "conversation_turns / conversation_tool_calls")
+
+      ;; ── 派生分析 worker (cross-ref pillar 二 2.3 sonnet/codex) ──
+      (writer worker-embedding
+        :cross-ref "pillar 二 2.3 :: workers/sonnet/embedding_worker.rs"
+        :writes    "message_embeddings (halfvec) / conversation_topic_vectors"
+        :cross-module "同一 worker 也写 kb-manager (knowledge.embedding_vec / ast_nodes) + project-management (skill_topics)"
+        :governance "cross-cutting :: capability embedding-storage-governance"
+        :library-pov "库暴露 embedding_vec 列 + halfvec/vector 类型约束; 生成算法在 worker")
+
+      (writer worker-step-narrator
+        :cross-ref "pillar 二 2.3 :: workers/codex/step_narrator.rs"
+        :writes    "message_narrations (codex-specific)")
+
+      (writer worker-translation
+        :cross-ref "pillar 二 2.3 :: workers/sonnet/translation_worker.rs"
+        :writes    "message_translations")
+
+      (writer worker-retro
+        :cross-ref "pillar 二 2.3 :: workers/sonnet/retro_worker.rs"
+        :writes    "retrospective_results"
+        :trigger   "会话结束信号 / 手动触发 (具体时机由 worker 定)")
+
+      ;; ── 已删除的 writer (code 已去, lisp 保留墓志铭) ──
+      (writer-removed worker-briefing
+        :removed-in "SSOT cutover v1.3.0 (commit 6789509)"
+        :was "crates/missiond-daemon/src/workers/sonnet/briefing_worker.rs"
+        :wrote "message_narrations + narration_cursors (LLM 生成每轮会话摘要)"
+        :reason "update_timeline_summary 路径与 append-only event_log 不兼容 + 语义摘要功能按决策不再需要"
+        :impact "message_narrations 现在主要由 worker-step-narrator (codex) 填充")
+
+      ;; 注: vision_worker 写 image_descriptions, 但该表在 v0.4.4 迁到 category system-support
+      ;; (独立图片缓存, 无 conversation FK). vision_worker 不是本模块 ingress.
+      )
 
     (module-core
       (desc "主路径 (path) × 3 + 原始层 plumbing + 派生层 helper + 源与作用域")
@@ -940,11 +930,12 @@
         :generator "worker-embedding (sonnet)"
         :consumer "pillar 二 2.6 search-engines :: vector-hnsw")
 
-      (helper narration-briefing
-        (desc "LLM 生成的摘要 + 游标 (防重处理)")
+      (helper narration
+        (desc "消息摘要 + narration 游标 (防重处理)")
         :tables (message_narrations narration_cursors)
-        :generator "worker-briefing (sonnet) + worker-step-narrator (codex)"
-        :scoping "inherited")
+        :generator "worker-step-narrator (codex) — briefing-worker 已在 SSOT cutover v1.3.0 删除"
+        :scoping "inherited"
+        :history "原由 worker-briefing (sonnet) 生成语义摘要, v1.3.0 删除; message_narrations 现仅由 step-narrator 填充 codex 专项")
 
       (helper translation-multilingual
         (desc "消息翻译 (多语种)")
@@ -980,8 +971,10 @@
         :owner "scope-mechanism 在 project-management"))
 
     (module-egress
-      (desc "会话查询 + 复盘 + 审计 + WS 流 + 内部消费")
+      (desc "MCP 库查询 API + 前端 WS 流 + 外部消费者 cross-ref")
+      :principle "memory = 库. 直接暴露 MCP / WS 读接口; daemon 内部 compute 消费者只列 cross-ref"
 
+      ;; ── MCP 库读取 API ──
       (reader mcp-conversation-query
         :tools "mission_conversation_query / mission_conversation_analyze"
         :actions "get / list / search"
@@ -1001,21 +994,24 @@
         :tool "mission_llm_trace"
         :reads "conversation_tool_calls (+ category system-support :: gemini_requests)")
 
+      ;; ── 前端 WS 流 ──
       (reader frontend-conversation-stream
         :source "pillar 四 event_log / DB watch"
         :emits "新 messages / 新 narrations"
         :via "daemon/src/bus/ws_bridge.rs")
 
+      ;; ── 外部 compute 消费者 (cross-ref, 非库独立 reader) ──
       (reader context-pipeline-history
-        :code "crates/missiond-daemon/src/context/"
-        :reads "最近 messages + narrations (拼 LLM prompt)"
-        :purpose "daemon 内部, 每次 LLM 调用都触发")
+        :cross-ref "pillar 二 context-pipeline (daemon 内部)"
+        :reads "最近 messages + narrations"
+        :purpose "每次 LLM 调用拼 prompt 时触发"
+        :library-pov "库暴露 ConversationStore 查询接口; pipeline 策略 / token 预算在 daemon")
 
       (reader harvester-for-kb
-        :consumer "module kb-manager :: worker-experience-harvester"
+        :cross-ref "module kb-manager :: worker-experience-harvester"
         :reads "conversations"
-        :writes-to "knowledge (via kb-manager ingress)"
-        :note "跨模块链路: conversations 是 KB 的语料库源头"))
+        :writes-to "knowledge (经 kb-manager ingress)"
+        :note "跨模块链路: conversations 是 KB 语料库源头; 本条仅表明 '此 worker 读我的表'"))
 
     (module-tables-owned
       (desc "本模块独占 14 张表")
@@ -1280,7 +1276,17 @@
       "    manager-interface: TBD (future MCP: mission_execution_claim/decide/deviate/complete)"
       "    linked-concepts: methodology (pillar 五 workflows, '怎么做' reusable) vs execution (本 helper, '这次做的过程' operational)"
       "    design-rationale: board = 任务编排中心, 并行 agent = 多 task 协作"
-      "(BB) pilot-instance intent-event-bus-execution.lisp 成为首个正式案例 (D001-D016 / DC001-DC049 / I001-I010)")
+      "(BB) pilot-instance intent-event-bus-execution.lisp 成为首个正式案例 (D001-D016 / DC001-DC049 / I001-I010)"
+      "v0.4.9 (2026-04-19 — conversation-logs 按'memory=库'原则精简):"
+      "(CC) 10 个 worker writer 全改 cross-ref 到 pillar 二 2.3 workers/<kind>/<worker_name>"
+      "     每条加 :library-pov 标明'库只暴露 store 接口 + 类型约束; worker 算法在 pillar 二'"
+      "(DD) 新增 (writer-removed worker-briefing) 墓志铭 — 反映 SSOT cutover (v1.3.0) 实际删除的 briefing_worker.rs"
+      "     helper narration-briefing → narration: :generator 改为 step-narrator, 加 :history 注记"
+      "     goal-3 solution 移除 briefing, 加 :note 说明语义摘要能力已失"
+      "(EE) 2 egress 消费者改 cross-ref: context-pipeline-history / harvester-for-kb"
+      "     库不再假装它们是自己的 reader; 它们是 daemon compute 或跨模块 worker"
+      "(FF) pillar 二 2.3 workers 同步修正: sonnet 组 6→5 (briefing 删) + 增 :writes-to-memory 注记"
+      "     每组标明各 worker 写入哪个 memory 模块, 补强 lisp↔code 同构")
 
     (ownership-summary
       (module-project-management   5 "projects + 4 skills (specs 4 张迁走)")

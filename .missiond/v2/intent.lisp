@@ -195,19 +195,29 @@
         (desc "跨 gateway 共享 system / task prompt 模板")
         :target "llm/prompts.rs"))
 
-    ;; ── 2.3 后台 worker 集群: 21 个计算租户 ──
-    (section workers 21
+    ;; ── 2.3 后台 worker 集群: 20 个计算租户 ──
+    (section workers 20
       (desc "反应式 + 定时 + 外部触发的后台计算单元,按执行介质分组")
       :target "crates/missiond-daemon/src/workers/"
+      :v1.3.0-change "sonnet 组 briefing_worker 删除 (SSOT cutover, commit 6789509); 6 → 5"
 
-      (group sonnet 6
-        :examples "embedding / translation / briefing / arch-maintenance / retro / lisp-survey"
+      (group sonnet 5
+        :examples "embedding / translation / arch-maintenance / retro / lisp-survey"
         :routes-via "SonnetGateway (直接 API)"
-        :target "workers/sonnet/")
+        :target "workers/sonnet/"
+        :writes-to-memory
+          ("embedding → kb-manager(knowledge.embedding_vec + ast) + conv-logs(message_embeddings + topic_vectors) + project-mgmt(skill_topics)"
+           "translation → conv-logs(message_translations)"
+           "arch-maintenance → kb-manager(knowledge category=architecture)"
+           "retro → conv-logs(retrospective_results)"
+           "lisp-survey → 项目 .missiond/intent.lisp 文件 (project-management)"))
       (group codex 2
         :examples "step-narrator / vision"
         :routes-via "Claude Code PTY via slot_orchestrator/cc_controller"
-        :target "workers/codex/")
+        :target "workers/codex/"
+        :writes-to-memory
+          ("step-narrator → conv-logs(message_narrations)"
+           "vision → system-support(image_descriptions)"))
       (group gemini 1
         :examples "strategy"
         :routes-via "Gemini CLI PTY via slot_orchestrator/gemini_controller"
@@ -216,7 +226,13 @@
         :examples "conversation-logger / conversation-organizer / pty-event / tagger-chunker / experience-harvester / reconcile / gemini-reconcile / ast-sync / code-prefetch / codex-ingestion / gemini-logger / xjpcode-briefing"
         :routes-via "纯本地计算,无 LLM 依赖"
         :target "workers/local/"
-        :note "数量最多,承担 JSONL 摄入 / 分块 / 打标 / 时间线同步 / 外部状态对账"))
+        :note "数量最多,承担 JSONL 摄入 / 分块 / 打标 / 时间线同步 / 外部状态对账"
+        :writes-to-memory
+          ("conversation-logger / codex-ingestion / gemini-logger / gemini-reconcile → conv-logs (三引擎摄入)"
+           "conversation-organizer → conv-logs(turns + tool_calls)"
+           "experience-harvester / tagger-chunker → kb-manager(knowledge)"
+           "ast-sync → kb-manager(ast_nodes/beacons)"
+           "gemini-reconcile → system-support(reconcile_watermarks)")))
 
     ;; ── 2.4 编排: 生命周期 + 级联控制 ──
     (section orchestration
