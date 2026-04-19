@@ -23,7 +23,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.10")
+  (version "draft-v0.4.11")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -41,7 +41,8 @@
     (v0.4.7 "board 模块按'memory=库'原则精简: autopilot + flow-engine-v2 计算逻辑移到 pillar 二 2.4 orchestration, board 只留 cross-ref")
     (v0.4.8 "board 新增 helper agent-execution-coordination: 从 intent-event-bus-execution.lisp 提取'并行 agent 共享内存层'模式, 6 slots + storage/manager interface 声明")
     (v0.4.9 "conversation-logs 按 'memory=库' 精简: 10 worker 全改 cross-ref + 新增 writer-removed 墓志铭 (worker-briefing 已在 v1.3.0 删) + 2 egress 消费者改 cross-ref + pillar 二 2.3 同步修正 briefing 删除 + 增 writes-to-memory 注记")
-    (v0.4.10 "kb-manager 按 'memory=库' 精简: 5 worker + 1 context-pipeline writer → cross-ref; 2 egress compute 消费者 → cross-ref; core plumbing 的 :maintained-by 改 cross-ref; helper access-audit + operation-queue 加 :library-pov 分清接口 vs 时机"))
+    (v0.4.10 "kb-manager 按 'memory=库' 精简: 5 worker + 1 context-pipeline writer → cross-ref; 2 egress compute 消费者 → cross-ref; core plumbing 的 :maintained-by 改 cross-ref; helper access-audit + operation-queue 加 :library-pov 分清接口 vs 时机")
+    (v0.4.11 "project-management 按 'memory=库' 精简: lisp-survey-worker → cross-ref pillar 二 2.3; scope-propagation 从 ingress 'writer' 重构为 plumbing scope-mechanism 下的 write-propagation-convention (不是 writer 而是跨模块约定); vault-md-edit 加 :library-pov"))
   (status "草稿 — 大多数 module 已稳定, 可演进")
 
   (purpose "系统长期记忆 — 4 个业务模块自治 + 底层系统支持层 + 横切")
@@ -295,39 +296,36 @@
         :benefit  "项目私有 skill, 避免跨项目污染"))
 
     (module-ingress
-      (desc "项目注册 + spec 变更 + skill 变更 + 作用域传播")
+      (desc "MCP 库写入 API + lisp-survey-worker cross-ref + vault 用户编辑")
+      :principle "memory = 库. 本模块只列'谁来写我的表'; worker 算法在 pillar 二 2.3"
 
+      ;; ── MCP 库写入 API ──
       (writer mcp-project-mutation
         :tools  "mission_project init / sync / set_active / vault_sync / import_universe / survey"
         :writes "projects"
         :code   "daemon/src/handlers/knowledge/project.rs")
-
-      (writer lisp-survey-worker-snapshot
-        :kind   "sonnet"
-        :code   "crates/missiond-daemon/src/workers/sonnet/lisp_survey_worker.rs"
-        :writes "<project>/.missiond/intent.lisp (per-project 代码状态快照 FILE, 非 DB)"
-        :trigger "ContextualCommitDetected → slot dispatch"
-        :debounce "60s per project_id"
-        :note   "DB specs (intent/plan/workflow/user_intents) 归 pillar 五, 不在本模块")
 
       (writer mcp-skill-mutation
         :tools  "mission_skill_mutate"
         :writes "skill_topics / skill_blocks / skill_versions / skill_executions"
         :code   "daemon/src/handlers/knowledge/skill.rs")
 
-      (writer project-memory-vault-edit
-        :source "用户手动 + Claude Code 文件操作"
-        :writes "~/.claude/projects/{encoded}/memory/*.md"
-        :kind   "文件系统, 不走 DB")
+      ;; ── 外部 worker 驱动 (cross-ref) ──
+      (writer lisp-survey-worker-snapshot
+        :cross-ref "pillar 二 2.3 :: workers/sonnet/lisp_survey_worker.rs"
+        :writes    "<project>/.missiond/intent.lisp (per-project 代码快照 FILE, 非 DB)"
+        :library-pov "库不管 FILE 的存在, 只在 projects.intent_path 存路径指针; 扫描 + 写文件策略在 worker"
+        :not-writes "DB intent/plan/workflow 表 — 这些在 pillar 五 intent-layer 不在本模块")
 
-      (writer project-scope-propagation
-        :desc   "其他模块 writer 插入时自动打 project_id"
-        :writers-list
-          ("conversation-logger → conversations.project_id"
-           "mcp-kb-mutation → knowledge.project_id"
-           "mcp-board-lifecycle → board_tasks.project_id"
-           "retro-worker → retrospective_results (inherited 继承)")
-        :resolve-via "ProjectRegistry::resolve(cwd)"))
+      ;; ── 外部 actor (用户 / Claude Code 直接编辑文件) ──
+      (writer vault-md-edit
+        :source "用户手动 / Claude Code Edit tool"
+        :writes "~/.claude/projects/{encoded}/memory/*.md"
+        :kind   "文件系统操作, 不走 DB"
+        :library-pov "库侧无直接写入; 通过 helper project-memories-vault 读取文件"))
+
+    ;; ── 作用域传播机制 (非 ingress writer, 是跨模块约定) ──
+    ;; 移到 module-core plumbing scope-mechanism 下描述更合适 (v0.4.11 已整合)
 
     (module-core
       (desc "主路径 (path) + 共用基础 (plumbing) + 辅助 (helper)")
@@ -364,12 +362,22 @@
         :code "crates/missiond-core/src/{types,db/pg}/project.rs + daemon/src/state.rs")
 
       (plumbing scope-mechanism
-        (desc "project_id 列 + 查询规则")
+        (desc "project_id 列 + 查询规则 + 跨模块 writer 传播约定")
         :rule "WHERE project_id = $X OR IS NULL"
         :semantics "NULL = 全局共享; 非 NULL = 项目私有"
         :applies-to "4 张实际有列: projects / knowledge / conversations / board_tasks"
         :candidates "~15 张可升级 (见 scoping-index :: candidates-for-promotion)"
-        :see-also "顶层 scoping-index / table-catalog")
+        :see-also "顶层 scoping-index / table-catalog"
+
+        (write-propagation-convention
+          (desc "其他模块 writer 插入 scoped 表时的 project_id 填充约定")
+          :resolve-via "ProjectRegistry::resolve(cwd)"
+          (propagators
+            "conversation-logger → conversations.project_id (inferred from PTY path)"
+            "mcp-kb-mutation → knowledge.project_id (explicit param 或 resolve from cwd)"
+            "mcp-board-lifecycle → board_tasks.project_id (explicit param 或 resolve from cwd)"
+            "retro-worker → retrospective_results (inherited 继承 session_id → conversation)")
+          :note "本约定是 library-side invariant: 所有 scoped 表写入必经 resolve; worker 实现在各自模块"))
 
       ;; ── helper ──
       (helper project-context-aggregator
@@ -1303,7 +1311,17 @@
       "(II) core helper access-audit + operation-queue 加 :library-pov 分清'接口在库' vs '触发在 compute'"
       "     operation-queue 的 :consumer 改 :consumer-cross-ref 标 ⚠ TBD 已知缺口"
       "(JJ) egress 6 reader → 4 MCP 库 + 2 compute 消费者 cross-ref"
-      "     context-pipeline-retrieval / worker-code-prefetch 改 cross-ref + :library-pov")
+      "     context-pipeline-retrieval / worker-code-prefetch 改 cross-ref + :library-pov"
+      "v0.4.11 (2026-04-19 — project-management 按'memory=库'原则精简):"
+      "(KK) ingress 5 writer 重组:"
+      "     - 2 MCP 库 writer 保留 (mcp-project-mutation / mcp-skill-mutation)"
+      "     - lisp-survey-worker-snapshot → cross-ref pillar 二 2.3 workers/sonnet"
+      "     - project-memory-vault-edit → vault-md-edit 加 :library-pov (用户 / Claude Code 直接编辑文件)"
+      "     - project-scope-propagation 移出 ingress (它不是 writer, 是跨模块约定)"
+      "(LL) plumbing scope-mechanism 整合 (write-propagation-convention) 子块"
+      "     列 4 个 propagators 说明 conversations/knowledge/board_tasks/retrospective 的 project_id 如何填"
+      "     标明是 'library-side invariant', 每个 worker 实现在各自模块"
+      "(MM) 4 模块 'memory=库' 精简全部完成: board / conversation-logs / kb-manager / project-management")
 
     (ownership-summary
       (module-project-management   5 "projects + 4 skills (specs 4 张迁走)")
