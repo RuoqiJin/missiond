@@ -38,9 +38,9 @@
       "search-engines → pillar 二 2.6 search-engines (搜索是计算不是数据)"
       "event-bus 4 表 → pillar 四 §4.6 persistence-layer (event_log / subscriptions / blob_storage / dlq)")
 
-    ;; ── 结构 (4 模块 + 1 分类 + 横切) ──
+    ;; ── 结构 (9 module: 5 business + 4 support + 横切) + 5 surface (v0.4.18 pillar-interfaces) ──
     (structure
-      ;; 成熟模块 — 各自 in/core/out + 显式 module-tables-owned
+      ;; ── 5 Business Modules — 各自 in/core/out + 显式 module-tables-owned ──
       (module project-management
         :desc   "项目作用域: 注册 + per-project 代码快照 intent.lisp 文件 + skills"
         :target "intent-memory.lisp :: module project-management"
@@ -64,28 +64,64 @@
         :mcp    "mission_kb_* / mission_insight / mission_memory / mission_code_search / mission_universe_graph")
 
       (module conversation-logs
-        :desc   "三引擎(Claude Code/Gemini/Codex)会话记录 + 摘要/翻译/打标/复盘"
+        :desc   "三引擎(Claude Code/Gemini/Codex)会话记录 + 派生分析 + user_intents"
         :target "intent-memory.lisp :: module conversation-logs"
-        :owned-tables 14
+        :owned-tables 15
+        :v0.4.16-change "+1 user_intents 校正回归 (writer=intent_analyst, trait=ConversationStore)"
         :non-db-source "PTY JSONL (~/.claude/projects/{encoded}/*.jsonl)"
         :mcp    "mission_conversation_* / mission_retrospective_manage / mission_audit / mission_llm_trace")
 
-      ;; 分类 — 系统支持层
-      (category system-support
-        :desc   "系统级基础表 — 观测 + 图片缓存 + 基建 + 运行时游标 + legacy"
-        :target "intent-memory.lisp :: category system-support"
-        :owned-tables 20
-        :content "global-observability / vision-assets / infrastructure / compute-runtime / legacy"
-        :v0.4.1-change "-1 (system_timeline 合并进 pillar 四 event_log 作 SSOT)")
+      (module directive-layer
+        :desc   "user utterance → lisp 指令编译 pipeline (directive → plan → workflow 三段式)"
+        :target "intent-memory.lisp :: module directive-layer"
+        :owned-tables 3
+        :status "schema-ready-pending-implementation (v0.4.17 新建, v0.4.19 rename from intent-layer)"
+        :future-writer "pillar 五 actor (TBD) 或 pillar 二 worker 或 MCP 工具直写"
+        :mcp    "mission_directive / mission_plan / mission_workflow (TBD)")
+
+      ;; ── 4 Support Modules (v0.4.13-15 从 category system-support 分化 + v0.4.21 新增 embedding) ──
+      (module llm-support
+        :desc   "LLM 调用观测 — 请求日志 + 文件上传 + token 成本"
+        :target "intent-memory.lisp :: module llm-support"
+        :owned-tables 3
+        :migrated-from "v0.4.13 category system-support :: global-observability"
+        :mcp    "mission_llm_trace / mission_cost_report (🚧)")
+
+      (module slot-support
+        :desc   "Slot 运行时 — session 绑定 + learning-engine AI 任务 + dynamic slot lifecycle"
+        :target "intent-memory.lisp :: module slot-support"
+        :owned-tables 3
+        :migrated-from "v0.4.14 category system-support :: compute-runtime"
+        :mcp    "mission_slots / mission_slot_history / mission_compute_slot")
+
+      (module system-support
+        :desc   "系统级基础 — 告警 + router 归档 + vision 缓存 + infra 游标 + backfill + 4 legacy"
+        :target "intent-memory.lisp :: module system-support"
+        :owned-tables 14
+        :migrated-from "v0.4.15 category 升格为 module (剩 LLM 3 + slot 3 分离后的 10 active + 4 legacy)"
+        :mcp    "mission_incident / mission_router_chat / mission_sys_config / mission_sys_logs / mission_infra_query / mission_inbox (legacy)")
+
+      (module embedding-support
+        :desc   "embedding 列跨表治理 — 0 张独占表, 管 5 承载表 + 1 audit 表的列契约 (column-ownership)"
+        :target "intent-memory.lisp :: module embedding-support"
+        :owned-tables 0
+        :special-nature "column-ownership vs row-ownership 双轨: 本 module 管 '列契约 + policy', 承载表的行归原 module (kb-manager / conversation-logs / project-management)"
+        :migrated-from "v0.4.21 cross-cutting :: capability embedding-storage-governance 升格")
 
       ;; 横切能力
       (cross-cutting
-        :desc   "db-trait-abstraction / retention-policy / migrations-runner"
-        :target "intent-memory.lisp :: cross-cutting"))
+        :desc   "db-trait-abstraction (9 store) / retention-policy / migrations-runner (embedding 治理 v0.4.21 已升格为 module)"
+        :target "intent-memory.lisp :: cross-cutting")
+
+      ;; Pillar Interfaces — 正交维度 (v0.4.18)
+      (pillar-interfaces
+        :desc   "5 surface (mcp / worker-trait / frontend / cross-pillar / external-filesystem) × 9 module 正交矩阵"
+        :target "intent-memory.lisp :: pillar-interfaces"
+        :binding "每个 writer/reader 通过 :binds-to 指向 surface; 96 个 writer/reader 100% 覆盖"))
 
     ;; ── 关键基础设施位置 (快速导航) ──
     (key-locations
-      (mission-store-trait    :at "crates/missiond-core/src/db/traits.rs  — 13 store 超 trait")
+      (mission-store-trait    :at "crates/missiond-core/src/db/traits.rs  — 9 store 超 trait (v0.4.20 修正, 原 13)")
       (projects-table         :at "crates/missiond-core/src/db/pg/project.rs")
       (board-table            :at "crates/missiond-core/src/db/board.rs")
       (knowledge-table        :at "crates/missiond-core/src/db/knowledge.rs")
@@ -100,7 +136,7 @@
       (flow-engine-v2         :at "crates/missiond-daemon/src/engine/flow/")
       (migrations             :at "crates/missiond-core/migrations/"))
 
-    :maturity-ladder "3 module + 2 category + cross-cutting; 某分类稳定后可晋升为 module"
+    :maturity-ladder "v0.4.x 演进: 4 成熟模块 → 5+3 (v0.4.15 category 升格) → 5+4 (v0.4.21 embedding-support 新建) + pillar-interfaces (v0.4.18) 正交维度 + 命名去歧义 (v0.4.19)"
     :note "此 pillar 只列导航; 详细模块内部 in/core/out 在 intent-memory.lisp")
 
 

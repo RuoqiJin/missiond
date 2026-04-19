@@ -14,10 +14,11 @@
 ;;   │  module conversation-logs     15 张 (claude/gemini/codex 会话) │
 ;;   │  module directive-layer        3 张 (directive/plan/workflow)  │
 ;;   └──────────────────────────────────────────────────────────────┘
-;;   ┌── 3 support module (v0.4.13/14/15 从 category 分化) ─────────┐
+;;   ┌── 4 support module ──────────────────────────────────────────┐
 ;;   │  module llm-support            3 张 (gemini/token 观测)        │
 ;;   │  module slot-support           3 张 (slot 运行时)              │
 ;;   │  module system-support        14 张 (infra 游标 / legacy)      │
+;;   │  module embedding-support      0 张 (5 承载表 + 1 audit 的列契约)│
 ;;   └──────────────────────────────────────────────────────────────┘
 ;;   ┌── 横切 ────────────────────────────────────────────────────┐
 ;;   │  db-trait / retention / migrations                             │
@@ -26,7 +27,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.20")
+  (version "draft-v0.4.21")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -52,7 +53,7 @@
     (v0.4.15 "Phase 2 第三步: category system-support upgrade 为 module (14 张表 = 10 active + 4 legacy). 10 active 分: 观测 3 + infra 游标 4 + backfill 2 + daemon_state 1. legacy-zone 4 张 drop 决策: tasks keep / inbox deprecate / events drop / credentials drop (v0.4.15 新发现 dead schema). 关键校正: backfill_* 不是一次性迁移, 是 embedding-worker 持续 phased 作业; router_chat_archive 是 side-table, 主数据在 conversations (chat_type='router_chat'); 每 writer 定位到具体代码行"))
   (status "8 module + 5 surface 定稿 (v0.4.18 pillar-interfaces + v0.4.19 rename + v0.4.20 cleanup); 可演进")
 
-  (purpose "系统长期记忆 — 5 business module + 3 support module (共 8 个) + 5 surface (pillar-interfaces v0.4.18) + 横切")
+  (purpose "系统长期记忆 — 5 business module + 4 support module (共 9 个) + 5 surface (pillar-interfaces v0.4.18) + 横切")
   (storage "PostgreSQL via sqlx::PgPool")
   (gateway "crates/missiond-core/src/db/ — 唯一 DB 入口")
 
@@ -400,8 +401,9 @@
         :managed-by "module project-management (v0.4.20: 作为 lisp-survey trigger 源, 归项目管理)"))
 
     (form embedding-vectors
-      (desc "pgvector 二进制 embedding 列 — 详见 cross-cutting :: embedding-storage-governance")
-      :governance-ssot "cross-cutting :: capability embedding-storage-governance (v0.4.6+)"
+      (desc "pgvector 二进制 embedding 列 — 归 module embedding-support 治理 (v0.4.21)")
+      :managed-by "module embedding-support"
+      :governance-ssot "memory :: module embedding-support :: module-core :: plumbing dimension-contract / storage-tables-catalog (v0.4.21 从 cross-cutting capability 升格)"
       :quick-facts "512 dim / 5 承载表 / qwen3 via sonnet-gateway / HNSW cosine / 禁止降级兜底")
 
     (form side-channel-blobs
@@ -2154,10 +2156,154 @@
 
 
   ;; ═════════════════════════════════════════════════════════════
+  ;;  Support 模块 9: Embedding Support — embedding 列跨表治理
+  ;;  v0.4.21 从 cross-cutting capability 升格为 module
+  ;;  特殊: 0 张独占表, 管 "列契约 + policy" 而非 "表 row ownership"
+  ;; ═════════════════════════════════════════════════════════════
+  (module embedding-support
+    (desc "embedding 列 schema + policy 治理层 — 跨 5 张承载表 + 1 张 audit 表的统一契约")
+    (maturity "成熟 (v0.4.21 从 cross-cutting capability 升格)")
+    :created "v0.4.21 (2026-04-20)"
+    :migrated-from "v0.4.21 从 cross-cutting :: capability embedding-storage-governance 升格为 module"
+    :rationale "embedding 治理横跨 3 business module 的 5 张承载表; 独立成 module 便于集中管 schema + policy + provider + retention + change-protocol"
+    :special-nature "0 张独占表 — 管 '列契约 + policy', 不 own 整表. 承载表的 row-level ownership 仍归原 module (kb-manager / conversation-logs / project-management)"
+
+    (primary-goals
+      (goal-1 schema-uniformity
+        :problem  "embedding 列分散在 5 张表, 维度/索引参数若不统一, 查询相似度不可比"
+        :solution "集中声明 dimension=512 + HNSW 参数 + vector/halfvec 类型选择, 承载表必须遵守"
+        :benefit  "同一 query 可跨表召回; HNSW 参数按表大小调优 (message_embeddings m=24 vs 其他 m=16)")
+      (goal-2 provider-singularity
+        :problem  "若允许多 provider, 向量空间不兼容 — 同一 query 向量不能跨 provider 搜"
+        :solution "唯一 provider qwen3 via pillar 二 2.2 sonnet-gateway, 禁止降级兜底"
+        :benefit  "向量空间单一, 相似度可比; 失败 fail-fast 暴露问题")
+      (goal-3 skip-audit
+        :problem  "embedding_worker 有多种跳过逻辑 (tool_result / system / empty / role), 需审计"
+        :solution "message_embedding_skips audit 表 — 记录 message_id + skip_reason"
+        :benefit  "可追溯跳过决策; 区别于 dedup 表 (dedup 在 EmbedDecision enum)")
+      (goal-4 change-protocol
+        :problem  "维度/provider 变更影响所有 5 张表 + 索引 + 消费者"
+        :solution "明文 change-protocol: dim-change 迁 5 表 + 5 索引 + provider 切换; provider-change 重算全表"
+        :benefit  "变更路径可审阅, 避免悄悄破坏相似度"))
+
+    (module-ingress
+      (desc "writer 不在本 module — embedding 生成在 pillar 二 worker, 本 module 只暴露 schema+policy 契约")
+      :principle "memory = 库. 本 module 治理 '列' 的约束 + policy, 生成任务完全外包 pillar 二"
+
+      (contract-with-generator
+        :binds-to [:worker-trait-surface]
+        :cross-ref "pillar 二 2.3 :: workers/sonnet/embedding_worker.rs"
+        :invariant-1 "失败 fail-fast 不兜底 (见 embedding-worker :provider)"
+        :invariant-2 "批量写入, 单次事务 (insert_message_embeddings_batch / set_conversation_topic_vectors / kb_remember)"
+        :invariant-3 "provider 固定 qwen3, 换需重算全表"
+        :writes-to-tables "承载表由各自 module 管写入接口; 本 module 只约束 '写入的数据形态 (512 dim vector / halfvec)'"
+        :library-pov "embedding-support 暴露列 schema 约束; embedding 生成算法 / 调度 / provider 绑定在 worker"))
+
+    (module-core
+      (desc "5 plumbing: dimension 契约 + 5 承载表目录 + skip audit + retention + change protocol")
+
+      (plumbing dimension-contract
+        (desc "embedding 向量的维度契约 — 全系统唯一")
+        :dimension 512
+        :provider-binding "qwen3 via pillar 二 2.2 sonnet-gateway (唯一 provider, 禁止降级兜底)"
+        :index-type "HNSW (pgvector extension, cosine similarity)")
+
+      (plumbing storage-tables-catalog
+        (desc "5 张承载 embedding_vec 列的表 — 按 column ownership (本 module) vs row ownership (原 module) 双轨")
+        (knowledge
+          :column "embedding_vec"
+          :type "vector (standard)"
+          :hnsw-params "m=16, ef_construction=64"
+          :owned-by-rows "module kb-manager"
+          :owned-by-column "module embedding-support")
+        (conversation_topic_vectors
+          :column "embedding_vec"
+          :type "vector"
+          :hnsw-params "m=16, ef_construction=64"
+          :owned-by-rows "module conversation-logs"
+          :owned-by-column "module embedding-support")
+        (message_embeddings
+          :column "embedding_vec"
+          :type "halfvec (1KB 压缩)"
+          :hnsw-params "m=24, ef_construction=128"
+          :rationale "消息量大, halfvec 节省空间 + 更深索引"
+          :owned-by-rows "module conversation-logs"
+          :owned-by-column "module embedding-support")
+        (skill_topics
+          :column "embedding_vec"
+          :type "vector"
+          :hnsw-params "m=16, ef_construction=64"
+          :owned-by-rows "module project-management"
+          :owned-by-column "module embedding-support")
+        (ast_nodes
+          :column "embedding_vec"
+          :type "vector"
+          :hnsw-params "m=16, ef_construction=64"
+          :owned-by-rows "module kb-manager"
+          :owned-by-column "module embedding-support"))
+
+      (plumbing skip-audit-policy
+        (desc "跳过 embed 决策的 audit trail")
+        :table "message_embedding_skips"
+        :owned-by-rows "module conversation-logs (表在那儿登记)"
+        :owned-by-policy "module embedding-support (policy + writer 约束在本 module)"
+        :schema "message_id (PK, FK→conversation_messages.id) + skip_reason TEXT"
+        :writer "embedding_worker.rs :: insert_message_embedding_skips_batch (backfill 分桶时批量写)"
+        :decision-source "embedding_worker.rs :: should_embed() 返 EmbedDecision enum"
+        :readers "db/pg/conversation.rs 的统计查询 (COUNT + GROUP BY skip_reason)"
+        :note "⚠ 重要: 这是 audit log 不是 dedup 表. 实际去重在 EmbedDecision enum pattern 做, skip 表只留痕"
+        :reasons-examples "tool_result / system message / empty / role-based skip")
+
+      (plumbing retention-strategy
+        (desc "embedding 列 retention 策略")
+        :strategy "follow-parent"
+        :reason "embedding 是 parent row 的派生物, 无独立 TTL"
+        :note "parent row 删除 → embedding 随之失效 (CASCADE 或应用层清理)")
+
+      (plumbing change-protocol
+        (desc "改 embedding 契约的影响面")
+        :dim-change "改 512 → 1024: 需同时迁移 5 承载表 + 5 HNSW 索引 + provider 切换"
+        :provider-change "换 qwen3 → 别的: 需重算所有 5 表 embedding; 中间态不可搜, 建议离线 backfill"
+        :new-table-adding-embedding "(1) 迁移加 embedding_vec 列 + HNSW 索引 (2) 本 module storage-tables-catalog 补记 (3) embedding-worker 加写入路径"))
+
+    (module-egress
+      (desc "reader 不在本 module — embedding 消费在 pillar 二 search-engines, 本 module 只暴露 query 契约")
+
+      (contract-with-consumer
+        :binds-to [:worker-trait-surface]
+        :cross-ref "pillar 二 2.6 search-engines :: engine vector-hnsw"
+        :invariant-1 "consumer 必须容忍 NULL embedding (async 生成未就绪或跳过)"
+        :invariant-2 "查询时用同 provider 生成 query 向量, 否则相似度不可比"
+        :fusion-with "FTS + trigram + tag (见 pillar 二 2.6 fusion-ranker)"
+        :library-pov "embedding-support 暴露 '列存在 + 类型 + HNSW 索引' 契约; 查询策略 / RRF 融合 / 相关性打分在 search-engines"))
+
+    (module-tables-owned
+      (desc "0 张独占表 — 本 module 管 '列契约 + policy', 不 own 整表")
+      (tables)
+      (count 0)
+      (special-ownership-model "column-ownership vs row-ownership 双轨: 承载表的行归原 module (kb-manager / conversation-logs / project-management), embedding 列的 schema + policy 归本 module")
+      (tables-managed-by-column
+        (knowledge                  :column-only "embedding_vec" :rows-owned-by "module kb-manager")
+        (conversation_topic_vectors :column-only "embedding_vec" :rows-owned-by "module conversation-logs")
+        (message_embeddings         :column-only "embedding_vec" :rows-owned-by "module conversation-logs")
+        (skill_topics               :column-only "embedding_vec" :rows-owned-by "module project-management")
+        (ast_nodes                  :column-only "embedding_vec" :rows-owned-by "module kb-manager")
+        (message_embedding_skips    :audit-policy-only "full table"  :rows-owned-by "module conversation-logs"))
+      (non-db-forms-owned
+        (embedding-vectors-form "form 在 non-db-forms, v0.4.21 起归本 module (原只 cross-ref 到 cross-cutting capability)")))
+
+    (cross-module-trait-sharing
+      (desc "本 module 不定义新 trait — 承载表的 trait 仍归原 module, 本 module 只约束列类型")
+      :note "worker 通过 KbStore (knowledge / ast_nodes embedding) + ConversationStore (message / conv_topic / skips) + ProjectStore (skill_topics) 的方法写 embedding; 每个方法签名的 vec 类型由本 module 约束 (512 dim, vector/halfvec)"
+      :known-issue-v0.4.6 "skill_topics embedding 归 project-management 的行 (因 skills 是 project-management 管); 但 search-engines 查 skill 时仍通过 vector-hnsw 统一路径"
+      :known-issue-ast "ast_nodes embedding 归 kb-manager 的行 (kb-ast-linkage + code-search 消费)"))
+
+
+  ;; ═════════════════════════════════════════════════════════════
   ;;  横切能力 (Cross-Cutting)
   ;; ═════════════════════════════════════════════════════════════
   (cross-cutting
-    (desc "贯穿 4 个模块 + system-support 的基础能力")
+    (desc "贯穿 5 business + 4 support module 的基础能力 (v0.4.21: embedding 治理升格为 module)")
 
     (capability db-trait-abstraction
       (desc "MissionStore 超 trait 聚合 9 个领域 store (见 pillar-interfaces worker-trait-surface)")
@@ -2190,77 +2336,9 @@
       :automation "sqlx::migrate! 编译期检查 + 运行期执行")
 
     (capability embedding-storage-governance
-      (desc "embedding 列的 schema + policy SSOT — 存储端契约, 给 worker (生成) + search-engines (消费) 共同遵守")
-      :role "schema + policy authority for embedding columns (NOT generator, NOT search)"
-      :dimension 512
-      :provider-binding "qwen3 via pillar 二 2.2 sonnet-gateway (唯一 provider, 禁止降级兜底)"
-      :index-type "HNSW (pgvector extension, cosine similarity)"
-
-      (storage-tables
-        (desc "5 张表有 embedding_vec 列 — 按模块归属")
-        (knowledge
-          :column "embedding_vec"
-          :type "vector (standard)"
-          :hnsw-params "m=16, ef_construction=64"
-          :owned-by "module kb-manager")
-        (conversation_topic_vectors
-          :column "embedding_vec"
-          :type "vector"
-          :hnsw-params "m=16, ef_construction=64"
-          :owned-by "module conversation-logs")
-        (message_embeddings
-          :column "embedding_vec"
-          :type "halfvec (1KB 压缩)"
-          :hnsw-params "m=24, ef_construction=128"
-          :rationale "消息量大, halfvec 节省空间 + 更深索引"
-          :owned-by "module conversation-logs")
-        (skill_topics
-          :column "embedding_vec"
-          :type "vector"
-          :hnsw-params "m=16, ef_construction=64"
-          :owned-by "module project-management")
-        (ast_nodes
-          :column "embedding_vec"
-          :type "vector"
-          :hnsw-params "m=16, ef_construction=64"
-          :owned-by "module kb-manager"))
-
-      (skip-audit-policy
-        :table "message_embedding_skips"
-        :role "audit trail — 记录跳过 embed 的消息 ID + skip_reason"
-        :schema "message_id (PK, FK→conversation_messages.id) + skip_reason TEXT"
-        :owner-module "conversation-logs"
-        :writer "embedding_worker.rs :: insert_message_embedding_skips_batch (backfill 分桶时批量写)"
-        :decision-source "embedding_worker.rs :: should_embed() 返 EmbedDecision enum"
-        :readers "db/pg/conversation.rs 的统计查询 (COUNT + GROUP BY skip_reason)"
-        :note "⚠ 重要: 这是 audit log 不是 dedup 表. 实际去重在 EmbedDecision enum pattern 做, skip 表只是留痕"
-        :reasons-examples "tool_result / system message / empty / role-based skip")
-
-      (retention
-        :strategy "follow-parent"
-        :reason "embedding 是 parent row 的派生物, 无独立 TTL"
-        :note "parent row 删除 → embedding 随之失效 (CASCADE 或应用层清理)")
-
-      (contract-with-generator
-        :generator "pillar 二 2.3 workers/sonnet/embedding_worker.rs"
-        :invariant-1 "失败 fail-fast 不兜底 (见 embedding-worker :provider)"
-        :invariant-2 "批量写入, 单次事务 (insert_message_embeddings_batch / set_conversation_topic_vectors / kb_remember)"
-        :invariant-3 "provider 固定 qwen3, 换需重算全表")
-
-      (contract-with-consumer
-        :consumer "pillar 二 2.6 search-engines :: engine vector-hnsw"
-        :invariant-1 "consumer 必须容忍 NULL embedding (async 生成未就绪或跳过)"
-        :invariant-2 "查询时用同 provider 生成 query 向量, 否则相似度不可比"
-        :fusion-with "FTS + trigram + tag (见 pillar 二 2.6 fusion-ranker)")
-
-      (change-protocol
-        :dim-change "改 512 → 1024: 需同时迁移 5 承载表 + 5 HNSW 索引 + provider 切换"
-        :provider-change "换 qwen3 → 别的: 需重算所有 5 表 embedding; 中间态不可搜, 建议离线 backfill"
-        :new-table-adding-embedding "(1) 迁移加 embedding_vec 列 + HNSW 索引 (2) 本 capability 的 storage-tables 补记 (3) embedding-worker 加写入路径")
-
-      (known-issue-v0.4.6-moved
-        "skill_topics embedding 归 project-management 而非 kb-manager: 因 skills 是 project-management 管; 但 search-engines 查 skill 时仍通过 vector-hnsw 统一路径"
-        "ast_nodes embedding 归 kb-manager (kb-ast-linkage + code-search 消费)")))
+      :moved-to "memory :: module embedding-support (v0.4.21)"
+      :reason "embedding 治理横跨 3 business module 的 5 张承载表 + 1 张 audit 表, 从 capability 升格为独立 module 管 schema+policy+provider+retention+change-protocol 契约"
+      :see "module embedding-support :: module-core (dimension-contract / storage-tables-catalog / skip-audit-policy / retention-strategy / change-protocol)"))
 
 
   ;; ═════════════════════════════════════════════════════════════
@@ -2466,7 +2544,27 @@
       "     - status 从 '草稿' → '8 module + 5 surface 定稿'"
       "     - retention-policy 补 gemini_requests/embedding 列规则 + default append-only + 未覆盖候选"
       "     - directive-layer :scoping-candidate '项目级意图隔离' → '项目级指令隔离' (v0.4.19 rename 遗漏修正)"
-      "(GGG) 下一步 v0.4.21: 新建 module embedding-support (承接 cross-cutting :: capability embedding-storage-governance)")
+      "(GGG) 下一步 v0.4.21: 新建 module embedding-support (承接 cross-cutting :: capability embedding-storage-governance)"
+      "v0.4.21 (2026-04-20 — embedding-support module 新建, 野生清扫 Phase 2):"
+      "(HHH) 用户决策: 新建 memory pillar 第 9 个 module embedding-support"
+      "     承接原 cross-cutting :: capability embedding-storage-governance 全部内容"
+      "     位置: 第 4 个 support module (llm/slot/system/embedding)"
+      "(III) 特殊 ownership 模型: column-ownership vs row-ownership 双轨"
+      "     - embedding-support own '列契约 + policy' (schema dimension / HNSW 参数 / provider 绑定 / retention / change-protocol)"
+      "     - 承载表的行 (5 张: knowledge / conv_topic_vectors / message_embeddings / skill_topics / ast_nodes) 仍归原 module"
+      "     - audit 表 message_embedding_skips: rows 归 conversation-logs, policy 归 embedding-support"
+      "     - module-tables-owned count=0 但 special-ownership-model 清晰"
+      "(JJJ) 结构 7 块完整:"
+      "     - primary-goals 4 个: schema-uniformity / provider-singularity / skip-audit / change-protocol"
+      "     - module-ingress: contract-with-generator (embedding_worker 约束)"
+      "     - module-core 5 plumbing: dimension-contract / storage-tables-catalog / skip-audit-policy / retention-strategy / change-protocol"
+      "     - module-egress: contract-with-consumer (search-engines 约束)"
+      "     - module-tables-owned: 0 张 + tables-managed-by-column 子块"
+      "     - cross-module-trait-sharing: 不定义新 trait, 共用 KbStore/ConversationStore/ProjectStore 的 embedding 方法"
+      "(KKK) cross-cutting capability embedding-storage-governance 收缩为 cross-ref 一句话指向新 module"
+      "     non-db-forms form embedding-vectors :managed-by 'module embedding-support' (v0.4.20 未决的 #12 解决)"
+      "(LLL) memory pillar 定稿 9 module: 5 business + 4 support; ownership-summary 更新"
+      "     野生清扫完结: 从 v0.4.20 识别的 15 项问题现已 15/15 治理")
 
     (ownership-summary
       ;; 5 business modules
@@ -2479,12 +2577,13 @@
       (module-llm-support          3 "gemini_requests + gemini_file_uploads + token_usage_ledger")
       (module-slot-support         3 "slot_sessions + slot_tasks + dynamic_slots")
       (module-system-support      14 "10 active (3 观测 + 7 infra) + 4 legacy (tasks/inbox/events/credentials)")
+      (module-embedding-support    0 "v0.4.21: 从 cross-cutting capability 升格; 0 张独占表, 管 5 承载表 + 1 audit 表的列契约")
       ;; 外部
       (pillar-four-event-bus       4 "event_log (SSOT for timeline v1.3.0+) + event_subscriptions + blob_storage + dlq (not memory)")
       (pillar-five-intent-layer    0 "v0.4.17: 3 张表剥离到 memory directive-layer; pillar 五 仅保留非 DB 组件")
       (total 60)
-      (memory-pillar-subtotal 56 "memory 管 5+4+9+15+3+3+3+14 = 56 张 (v0.4.20 拆算清晰)")
-      (delta-history "v0.4.4: -4 specs 迁 pillar 五; v0.4.16: +1 user_intents 校正回归; v0.4.17: +3 directive-layer 从 pillar 五 拿回; 净 0"))
+      (memory-pillar-subtotal 56 "memory 管 5+4+9+15+3+3+3+14+0 = 56 张 (v0.4.21: +1 module embedding-support 但 0 独占表)")
+      (delta-history "v0.4.4: -4 specs 迁 pillar 五; v0.4.16: +1 user_intents 校正回归; v0.4.17: +3 directive-layer 从 pillar 五 拿回; v0.4.21: +0 (embedding-support 是 column-only); 净 0"))
 
     (pending-actions
       "A. 给 candidates-for-promotion 中的高价值表加 project_id (token_usage_ledger / prompt_snapshots / directive+plan+workflow / skills 4 表)"
