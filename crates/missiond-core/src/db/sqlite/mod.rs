@@ -66,6 +66,11 @@ impl MissionStore for SqliteMissionStore {
 }
 
 #[async_trait]
+impl super::traits::InfraStore for SqliteMissionStore {
+    // Stage 2B.1 placeholder. Methods will land in Stage 2D (PG only).
+}
+
+#[async_trait]
 impl super::traits::ProjectStore for SqliteMissionStore {
     async fn list_projects(&self) -> DbResult<Vec<crate::types::ProjectConfig>> {
         Ok(vec![])

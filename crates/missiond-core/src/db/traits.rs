@@ -717,6 +717,18 @@ pub trait ObservabilityStore: Send + Sync {
 }
 
 // ============================================================================
+// 13. InfraStore — Infrastructure state management
+// Source: db/... (Stage 2D: 从 ObservabilityStore + SlotStore 拆分方法进来)
+// Scope: watermarks (reconcile/gemini_cli/consumer/watcher) + backfill (progress/failures) + daemon_state
+// ============================================================================
+
+#[async_trait]
+pub trait InfraStore: Send + Sync {
+    // Methods will be migrated from ObservabilityStore and SlotStore in Stage 2D.
+    // Placeholder — no methods defined yet.
+}
+
+// ============================================================================
 // ProjectStore
 // ============================================================================
 
@@ -750,7 +762,7 @@ pub trait MissionStore:
     ConversationStore + MessageStore + ToolCallStore + EventStore
     + RetrospectiveStore + VisionStore + KbStore + BoardStore
     + TimelineStore + SlotStore + SkillStore + ObservabilityStore
-    + ProjectStore
+    + ProjectStore + InfraStore
     + Send + Sync
 {
     /// Schema initialization (called once at startup).
