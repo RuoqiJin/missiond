@@ -72,7 +72,8 @@
           :cargo-toml "core 删 sqlite feature + rusqlite; daemon 删 sqlite feature (codex 仍 rusqlite)"
           :db-mod-rs "422→58 行 (压缩 86%)"
           :cargo-build "--workspace 0 error; --tests --no-run 0 error")
-        (stage-2F "I001 wild files 补分类"                                       :status "pending"))
+        (stage-2F "I001 wild files 补分类 → file-to-module-mapping-complete" :status "completed" :at "2026-04-20"
+          :note "Stage 2A-2E 执行后, 大部分 wild files 自然消除 (删除 / 合并). 剩余文件每个都已归属明确, 记录在 file-to-module-mapping-complete 槽位下"))
       (phase-3 :name "(deprecated — 合并进 phase-2 stage-2B + 独立)"         :status "merged-into-phase-2")
       (phase-4 :name "binds-to cross-ref 验证"                                :status "pending")
       (phase-5 :name "lisp ↔ code 双向同构校验"                               :status "pending")
@@ -380,4 +381,77 @@
   (drop-migration-plan
     :status "pending phase-6"
     :candidates ["message_narrations" "narration_cursors" "tasks" "inbox" "events" "credentials"]
-    :note "lisp 已标 pending-drop; migration 待写"))
+    :note "lisp 已标 pending-drop; migration 待写")
+
+  ;; ─────────────────────────────────────────────────────────
+  ;; Stage 2F 产出: 代码 → module 终极映射 (Stage 2E 后)
+  ;; 体现 lisp target-code-layout :: file-to-module-mapping 实际落地
+  ;; ─────────────────────────────────────────────────────────
+  (file-to-module-mapping-complete
+    (desc "Stage 2A-2E 后代码层最终映射 — memory pillar 9 module × 代码文件")
+    :status "completed-at-stage-2F"
+    :at "2026-04-20"
+
+    (db-root-layer
+      (traits.rs            :serves "all 9 modules" :purpose "MissionStore super-trait 聚合 + 8 primary trait 定义 (ProjectStore / BoardStore / KbStore / ConversationStore / MessageStore / ObservabilityStore / SlotStore / InfraStore / DirectiveLayerStore + 外部 TimelineStore 归 pillar 四)")
+      (shared.rs            :serves "all modules"   :purpose "通用 Row struct + enum + 工具类型 (TimelineRow/AstNodeRow/BackfillPhaseStatus)")
+      (error.rs             :serves "all modules"   :purpose "DbError + DbResult (Stage 2E 删 Sqlite 变体)")
+      (mod.rs               :serves "all modules"   :purpose "db 模块定义 + 工具 fn (derive_conversation_type / extract_parent_session_id)")
+      (project.rs           :serves "project-management" :purpose "D001 补建, re-export ProjectConfig + 架构指针")
+      (observability.rs     :serves "llm-support + system-support + conversation-logs" :purpose "D001 补建, re-export BackfillPhaseStatus")
+      (directive.rs         :serves "directive-layer" :purpose "Stage 2B.2 新建, row struct mapping")
+      (conversation_query.rs :serves "conversation-logs" :purpose "conversation FTS query builder helper"))
+
+    (db-pg-layer
+      (mod.rs               :serves "all" :purpose "PG 模块定义 + PgMissionStore struct")
+      (project.rs           :serves "project-management" :purpose "helper fn 模块 (impl 在 skill.rs)")
+      (skill.rs             :serves "project-management" :purpose "承载 impl ProjectStore (33 方法: projects 8 + skill_* 25)")
+      (board.rs             :serves "board"              :purpose "impl BoardStore (41 方法)")
+      (knowledge.rs         :serves "kb-manager"         :purpose "impl KbStore (56 方法)")
+      (conversation.rs      :serves "conversation-logs"  :purpose "impl ConversationStore (~114 方法合并 ToolCall/Event/Retrospective)")
+      (message.rs           :serves "conversation-logs"  :purpose "impl MessageStore (15 方法)")
+      (observability.rs     :serves "llm/system/conversation" :purpose "impl ObservabilityStore (58 方法, Stage 2D 拆出 watermarks/backfill)")
+      (slot.rs              :serves "slot-support + system-support" :purpose "impl SlotStore (38 方法, Stage 2D 拆出 daemon_state)")
+      (infra.rs             :serves "system-support"     :purpose "impl InfraStore (24 方法, Stage 2D 新填充)")
+      (directive.rs         :serves "directive-layer"    :purpose "impl DirectiveLayerStore (17 方法, Stage 2B.2 新建)")
+      (timeline.rs          :serves "pillar 四 (non-memory)" :purpose "impl TimelineStore projection delegate — 归 pillar 四 event-bus, memory 同构不动")
+      (migrate_from_sqlite.rs :serves "legacy tool"      :purpose "DEPRECATED, feature-gated 'all(sqlite, postgres)' 永不编译, 保留作历史迁移工具"))
+
+    (types-layer
+      ("types/directive.rs" :serves "directive-layer" :purpose "Stage 2B.2 新建: Directive/Plan/Workflow struct + DirectiveStatus/PlanStatus enum")
+      ("types/其他"          :serves "按模块"          :purpose "Row struct + FSM enum, 细节不展开"))
+
+    (mcp-handlers-layer
+      :location "crates/missiond-daemon/src/handlers/"
+      :scope "MCP tool handlers — memory pillar mcp-surface 的实现"
+      :note "按 lisp pillar-interfaces mcp-surface 的 8 tool-families 组织, 具体每文件归属留 phase-4 binds-to 验证补")
+
+    (mcp-tools-layer
+      :location "crates/missiond-mcp/src/tools/"
+      :scope "MCP tool 定义 (client-facing schema)"
+      :note "按 lisp mcp-surface family 分目录: knowledge/ comm/ sysinfra/ compute/ 等")
+
+    (ws-bridge
+      :file "crates/missiond-daemon/src/bus/ws_bridge.rs"
+      :serves "frontend-surface"
+      :note "memory 的 5 streams (conversation / board / project / timeline / llm-trace) 由此桥接")
+
+    (eliminated-wild-files
+      :note "以下 Stage 2A-2E 过程中消除 (删除 / 合并 / rename), 不再是 wild"
+      (gen_*.rs         :phase "2A.1 删 16 文件 (两套均未引用)")
+      (KnowledgeStore   :phase "2A.2 rename → KbStore")
+      (db/timeline.rs   :phase "2A.3 删 (冗余空壳, 归 pillar 四)")
+      (SkillStore       :phase "2C.1 合并进 ProjectStore")
+      (ToolCallStore / EventStore / RetrospectiveStore :phase "2C.2-2C.4 合并进 ConversationStore")
+      (VisionStore      :phase "2C.5 合并进 ObservabilityStore")
+      (db/backfill.rs /db/watermark.rs :phase "2D 方法搬 InfraStore, 原文件 2E 删")
+      (sqlite/ 整目录   :phase "2E 删除 10 文件")
+      (db/ sqlite-gated 21 文件 :phase "2E 删除"))
+
+    (final-code-structure-summary
+      :db-root       "8 文件 (traits / shared / error / mod / project / observability / directive / conversation_query)"
+      :db-pg         "13 文件 (10 business impl + timeline 归 pillar 四 + migrate_from_sqlite deprecated + mod)"
+      :types         "按 module 分"
+      :mcp-handlers  "按 tool family 分目录 (handlers/)"
+      :mcp-tools     "按 tool family 分目录 (tools/)"
+      :ws-bridge     "单文件聚合 5 streams")))
