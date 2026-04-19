@@ -27,7 +27,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.22")
+  (version "draft-v0.4.23")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -140,6 +140,10 @@
     (interface mcp-surface
       (purpose "对 MCP client(Claude Code / 其他 Agent)暴露的 CRUD + query API")
       (protocol "JSON-RPC over stdio (rmcp)")
+      (protocol-impl-by "pillar 三 (工具)"
+        :scope "rmcp server / dispatcher / stdio transport / schema validation 框架"
+        :boundary "memory 管 tool 内容层 (name / 参数 schema / 返回值 / 行为 / 错误码); 工具 pillar 管协议层 (JSON-RPC framing / dispatch / framework-level validation)"
+        :施工-note "本 pillar 代码同构只涉及 tool 内容 (tools/*.rs 里的 tool 定义 + handlers/*.rs 里的 handler 实现); 底层 rmcp framework 代码归工具 pillar, 同构不动")
       (code-location "crates/missiond-mcp/src/tools/*.rs + crates/missiond-daemon/src/handlers/*.rs")
       (stability-contract
         (breaking "参数 schema / response schema 破坏性变更 → 走 forge 冲压 major version")
@@ -343,6 +347,54 @@
         :action "派独立 agent 双向校验: (a) lisp 每个 module 的 trait/writer/reader 在代码里找得到 (b) 代码的 struct/trait/impl 在 lisp 里也被声明")
       (phase-6 "(可选) 野生清理 v2 + pending-drop 表实际 drop migration"
         :action "v0.4.22 标的 2 张 narrations + 4 legacy (tasks/inbox/events/credentials drop-candidate) 执行 migration")))
+
+
+  ;; ═════════════════════════════════════════════════════════════
+  ;;  Future Support Extensions — memory 对未来扩展的开放姿态
+  ;;  v0.4.23 补充 — 告诉施工 agent / 未来 pillar 设计者: memory 怎么接纳新需求
+  ;; ═════════════════════════════════════════════════════════════
+  (future-support-extensions
+    (desc "memory pillar 对其他 pillar 持久化需求的开放姿态 — '数据先于 module' 原则")
+    :principle "memory 的 support module (llm-support / slot-support / system-support / embedding-support) 都是 '数据先存在 → 后归类成 module' 建立的, 不预占位. 未来其他 pillar 若需持久化, 按同路径来."
+
+    (threshold-for-new-support-module
+      :criterion-1 "≥3 张表 (单张表归现有 module 如 system-support 即可)"
+      :criterion-2 "≥1 个稳定 trait (按 .rs 文件自然切出)"
+      :criterion-3 "≥1 个稳定 writer (worker / MCP handler / actor 实际在写)"
+      :decision "三条都满足 → 开新 module; 否则放现有 module (特别是 system-support 作为杂项收容所)")
+
+    (known-candidates
+      (desc "已知可能会要 memory support module 的外部 pillar — 触发建 module 时按此名开始")
+
+      (tools-support
+        :for "pillar 三 (工具)"
+        :probable-tables "tool_invocations (调用审计) / tool_permissions (权限) / tool_rate_limits (限流) / tool_schemas (参数 schema 版本)"
+        :trigger "工具 pillar 设计确认至少 3 张表落 PG 后, 开 module tools-support"
+        :cross-ref "类比 module llm-support 管 LLM 调用观测; tools-support 管 tool 调用观测 + 治理"
+        :status "🚧 未触发 (工具 pillar 尚未设计)")
+
+      (directive-actor-support
+        :for "pillar 五 (意识层 / intent-layer actor 未来实现后)"
+        :note "当前 directive-layer module 管 directive/plan/workflow 3 张 schema; actor 启用后若需额外表 (比如 actor_state / compiler_metrics) 再按此路径新增"
+        :status "🚧 未触发 (actor 未实现)"))
+
+    (non-candidates
+      (desc "这些 pillar 不需要 memory support module — 它们的持久化已由 pillar 自己管或不需要")
+      (pillar-二-workers "worker 状态在 slot_sessions/dynamic_slots (已归 slot-support); watermark 在 system-support — 无新 support")
+      (pillar-四-event-bus "event_log 等 4 表自己管, 不归 memory")
+      (pillar-六-system "system_config 在 system-support (daemon_state); 不需新 support")
+      (pillar-七-flow "flow-engine-v2 读写 board_tasks.flow_context, 落 module board; 不需新 support"))
+
+    (触发流程
+      1 "外部 pillar 设计阶段发现持久化需求 → 清点表 + trait + writer"
+      2 "满足 threshold 3 条件 → 在外部 pillar 的 lisp 里声明 'requires memory :: module <name>-support'"
+      3 "memory 同步开新 module (走 llm-support / slot-support 等的标准模式)"
+      4 "双方 cross-ref 指向彼此, 施工 agent 按本 pillar 的 target-code-layout 做同构")
+
+    (anti-pattern
+      "❌ 预先建空 module 占位 — 违反 '数据先于 module' 原则, 制造虚幻结构"
+      "❌ 小规模数据 (1-2 表) 开新 module — 应放 system-support 杂项收容"
+      "❌ 跨 pillar 写入脱离 memory — 持久化必须经 memory trait, 不允许其他 pillar 直连 PG"))
 
 
   ;; ═════════════════════════════════════════════════════════════
@@ -2697,7 +2749,18 @@
       "     - trait 数字处处 9 一致; 表总数 60 (56 memory + 4 pillar 四) 一致"
       "     - target-code-layout 明确同构范围边界"
       "     - 进入施工阶段后, 本 lisp 不允许修改; 并行 agent 共享内存层另开 intent-memory-execution.lisp"
-      "(OOO) 开工准备就绪; 下一步 commit 此版本作为 frozen 基线")
+      "(OOO) 开工准备就绪; 下一步 commit 此版本作为 frozen 基线"
+      "v0.4.23 (2026-04-20 — 开工前微补: pillar 三 边界 + 未来扩展姿态):"
+      "(PPP) pillar-interfaces :: mcp-surface 加 :protocol-impl-by 'pillar 三 (工具)':"
+      "     明确边界: memory 管 tool 内容层 (name/schema/行为); 工具 pillar 管协议层 (rmcp/dispatch/stdio/validation 框架)"
+      "     施工同构时不动 rmcp framework 代码, 只动 tools/*.rs 和 handlers/*.rs 里的内容部分"
+      "(QQQ) 新增顶层 (future-support-extensions ...) 块:"
+      "     声明 memory 对未来 pillar 持久化需求的开放姿态 — '数据先于 module' 原则"
+      "     门槛: ≥3 张表 + ≥1 个 trait + ≥1 个稳定 writer → 开新 support module"
+      "     known-candidates: tools-support (pillar 三 待触发) / directive-actor-support (pillar 五 actor 待实现)"
+      "     anti-pattern: 反对预占位空 module + 反对小规模数据开 module + 反对跨 pillar 直连 PG"
+      "(RRR) v0.4.23 为真正 frozen 基线: 下一 commit 视为施工开工点, 本 lisp 不再修改"
+      "     并行 agent 共享内存层在 .missiond/v2/intent-memory-execution.lisp")
 
     (ownership-summary
       ;; 5 business modules
