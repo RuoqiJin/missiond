@@ -5,6 +5,9 @@
 ;; Status: 架构基线已冻结 — 所有决策不可动摇,代码按此落地
 ;; 前身: intent-pillar-event-workers.lisp (MPSC facade + dual broadcast + sweeper)
 ;; 核心转变: Log-as-Bus — 追加式日志即总线,tail-and-pull 模式分离 live 与 catch-up
+;;
+;; ⚠ 阅读提示:每个 component / trait / struct / enum 都带 :target,
+;;             读 lisp 后可直接定位代码文件,减少 survey 步数
 
   (pillar event-bus
     (purpose "进程内神经网络 — 追加式事件日志 + 类型化 topic 路由 + 游标式订阅")
@@ -44,13 +47,16 @@
     ;; 4.1 · 入点 (Ingress) — 唯一入口
     ;; ═════════════════════════════════════════════════
     (section ingress
+      :target "crates/missiond-core/src/event/log/mod.rs"
       (desc "全系统唯一入口 — log.append();无 bypass 无 facade 无两套心智")
 
       (component append-api
+        :target "crates/missiond-core/src/event/log/mod.rs"
         (desc "生产者调用的唯一门面;append 成功即事件已定序并持久化")
         :api "log.append(event: impl DomainEvent, opts: AppendOpts) -> Result<AppendAck, AppendError>"
 
         (struct AppendOpts
+          :target "crates/missiond-core/src/event/log/mod.rs"
           (field ephemeral       :type "bool"              :default "false" :desc "true 跳过 DB 持久化")
           (field dedupe-key      :type "Option<Uuid>"      :desc "生产者重试保护 — 同 key 二次 append 返回 AlreadyExists(existing_seq)")
           (field after           :type "Option<Seq>"       :desc "可选因果依赖 — 声明此事件必须在 seq 之后定序")
@@ -58,11 +64,13 @@
           (field span            :type "SpanContext"       :desc "trace_id / span_id / parent_span_id"))
 
         (enum AppendAck
+          :target "crates/missiond-core/src/event/log/mod.rs"
           (Committed     "seq: Seq, durable: true  — 正常提交")
           (Volatile      "seq: Seq, durable: false — ephemeral 路径,仅进 in-memory fan-out")
           (AlreadyExists "seq: Seq — dedupe_key 命中,无副作用"))
 
         (enum AppendError
+          :target "crates/missiond-core/src/event/log/mod.rs"
           (Backpressure   "append channel 满,生产者自决重试/丢弃")
           (CausalLoop     "causation_depth > 10,拒绝入库")
           (LogUnavailable "DB 不可达;恢复后重试")
@@ -73,16 +81,20 @@
         :invariant-3 "大 payload 通过 Arc<T> 传入,内部序列化时触发 Claim-Check")
 
       (dead-bypass
-        (desc "原 MPSC 旁路的归宿")
+        (desc "原 MPSC 旁路的归宿(无代码文件 — 概念映射)")
         (incident-tx    "→ IncidentEvent::Reported,走 log.append()")
-        (cursor-ack-tx  "→ 不作为事件;光标追踪由 conversation-logger worker 内部 Mutex<HashMap> 共享,不占总线")
-        (embedding-tx   "→ 保留为 embedding_worker 的 1:1 内部任务队列,不升级为 DomainEvent(符合 §4.2 prerequisite 的 12 域契约)")
-        (ast-sync-tx    "→ 保留为 ast_sync_worker 的 1:1 内部任务队列,不升级为 DomainEvent(同上)")))
+        (cursor-ack-tx  "→ 不作为事件;光标追踪由 conversation-logger worker 内部 Mutex<HashMap> 共享,不占总线"
+                         :runtime-location "crates/missiond-daemon/src/state.rs (conversation_cursor_map)")
+        (embedding-tx   "→ 保留为 embedding_worker 的 1:1 内部任务队列,不升级为 DomainEvent(符合 §4.2 prerequisite 的 12 域契约)"
+                         :runtime-location "crates/missiond-daemon/src/workers/sonnet/embedding_worker.rs")
+        (ast-sync-tx    "→ 保留为 ast_sync_worker 的 1:1 内部任务队列,不升级为 DomainEvent(同上)"
+                         :runtime-location "crates/missiond-daemon/src/workers/local/ast_sync_worker.rs")))
 
     ;; ═════════════════════════════════════════════════
     ;; 4.2 · 核心 (Core) — 7 步事件处理流水线
     ;; ═════════════════════════════════════════════════
     (section core
+      :target "crates/missiond-core/src/event/pipeline/"
       (desc "事件从 append 到 fan-out 的 7 步流水线 — 模块从上到下对应执行顺序,可观测")
 
       ;; ─ 流水线概览 ─
@@ -107,35 +119,53 @@
       ;; 前置 · 共享基础(非流水线步骤,1-7 步都依赖)
       ;; ═══════════════════════════════════════════════
       (prerequisite event-types
-        (desc "类型体系 — trait + 12 domain enum,是流水线所有步骤的类型基础")
         :target "crates/missiond-core/src/event/"
+        (desc "类型体系 — trait + 12 domain enum,是流水线所有步骤的类型基础")
 
         (trait DomainEvent
+          :target "crates/missiond-core/src/event/event_trait.rs"
           :super "Send + Sync + Serialize + DeserializeOwned + 'static"
           :method "fn domain() -> Domain  // 静态域,编译期已知"
           :method "fn kind(&self) -> &'static str  // variant 名用于 metrics"
           :method "fn payload_size_hint(&self) -> usize  // step 2 claim-check 阈值判断依据")
 
+        (enum Domain
+          :target "crates/missiond-core/src/event/domain.rs"
+          :values "Slot / Board / Task / Question / Llm / Worker / Memory / Message / Session / System / Observability / Incident")
+
         (domain-enums 12
-          (SlotEvent          "BecameIdle / StateChanged / TaskDispatched / Stuck")
-          (BoardEvent         "TaskCreated / StatusChanged / NoteAdded / Claimed / Deleted / Updated")
-          (TaskEvent          "Created / Completed / CascadeTriggered / CascadeCompleted")
-          (QuestionEvent      "Created / Resolved / DecisionResolved")
-          (LlmEvent           "RequestStarted / RequestCompleted / ToolActivity (含 Provider 标签)")
-          (WorkerEvent        "LlmCall / Translation* / Narration* / Briefing*")
-          (MemoryEvent        "PhaseChanged / DeepAnalysisCompleted / KBBatchMutated / TurnExtracted / IntentAnalyzed")
-          (MessageEvent       "Logged / ImageInserted")
-          (SessionEvent       "Completed / JarvisTaskCompleted / SessionOrganized")
-          (SystemEvent        "ConfigChanged / ToolCompleted / InsightGenerated / JarvisProactivePush / ContextualCommitDetected")
-          (ObservabilityEvent "HealthSnapshot / BusMetric / SlowConsumer / RetentionReport — 强制 ephemeral")
-          (IncidentEvent      "Reported / Resolved / StaleSubscription"))
+          :target "crates/missiond-core/src/event/events/"
+          (SlotEvent          :target "crates/missiond-core/src/event/events/slot.rs"
+                              :variants "BecameIdle / StateChanged / TaskDispatched / Stuck")
+          (BoardEvent         :target "crates/missiond-core/src/event/events/board.rs"
+                              :variants "TaskCreated / StatusChanged / NoteAdded / Claimed / Deleted / Updated")
+          (TaskEvent          :target "crates/missiond-core/src/event/events/task.rs"
+                              :variants "Created / Completed / CascadeTriggered / CascadeCompleted")
+          (QuestionEvent      :target "crates/missiond-core/src/event/events/question.rs"
+                              :variants "Created / Resolved / DecisionResolved")
+          (LlmEvent           :target "crates/missiond-core/src/event/events/llm.rs"
+                              :variants "RequestStarted / RequestCompleted / ToolActivity (含 Provider 标签)")
+          (WorkerEvent        :target "crates/missiond-core/src/event/events/worker.rs"
+                              :variants "LlmCall / Translation* / Narration* / Briefing*")
+          (MemoryEvent        :target "crates/missiond-core/src/event/events/memory.rs"
+                              :variants "PhaseChanged / DeepAnalysisCompleted / KBBatchMutated / TurnExtracted / IntentAnalyzed")
+          (MessageEvent       :target "crates/missiond-core/src/event/events/message.rs"
+                              :variants "Logged / ImageInserted")
+          (SessionEvent       :target "crates/missiond-core/src/event/events/session.rs"
+                              :variants "Completed / JarvisTaskCompleted / SessionOrganized")
+          (SystemEvent        :target "crates/missiond-core/src/event/events/system.rs"
+                              :variants "ConfigChanged / ToolCompleted / InsightGenerated / JarvisProactivePush / ContextualCommitDetected")
+          (ObservabilityEvent :target "crates/missiond-core/src/event/events/observability.rs"
+                              :variants "HealthSnapshot / BusMetric / SlowConsumer / RetentionReport — 强制 ephemeral")
+          (IncidentEvent      :target "crates/missiond-core/src/event/events/incident.rs"
+                              :variants "Reported / Resolved / StaleSubscription"))
 
         :topic-discovery "bus.topics() -> [Domain; 12] — 静态编译期契约,无字符串通配"
         :escape-hatch "若某 variant 后期变热点,可单独提升为专属 sub-topic;12 域是起点不是终点")
 
       (prerequisite event-log-schema
+        :target "crates/missiond-core/migrations/20260419000000_event_log.sql"
         (desc "真理源存储 — step 3 写 / step 5 读的公共媒介")
-        :target "crates/missiond-core/migrations/*_event_log.sql"
         :table "event_log"
         :columns
           ("seq             BIGSERIAL PRIMARY KEY  -- tail 主索引兼 seq 权威"
@@ -162,10 +192,11 @@
 
       ;; ─── STEP 1 · guard ───────────────────────────
       (step-1 guard
-        (purpose "入口校验 — 排除循环事件 / 确认类型有效")
         :target "crates/missiond-core/src/event/pipeline/step1_guard/"
+        (purpose "入口校验 — 排除循环事件 / 确认类型有效")
 
         (component causation-guard
+          :target "crates/missiond-core/src/event/pipeline/step1_guard/causation.rs"
           (desc "防 consumer 处理事件 → 触发新事件 → 再次消费 → 无限递归")
           :mechanism "每 append 的 causation_depth = 触发事件.depth + 1"
           :limit     "MAX_DEPTH = 10"
@@ -173,6 +204,7 @@
           :rationale "真实业务链很少超 5 层;10 给余量同时拦 bug")
 
         (component type-resolve
+          :target "crates/missiond-core/src/event/pipeline/step1_guard/type_resolve.rs"
           (desc "调用 DomainEvent::domain() / kind() / payload_size_hint() 准备下一步")
           :uses "trait 返回值驱动后续所有步骤")
 
@@ -181,29 +213,34 @@
 
       ;; ─── STEP 2 · decide ──────────────────────────
       (step-2 decide
+        :target "crates/missiond-core/src/event/pipeline/step2_decide/"
         (purpose "决定 payload 存放方式 + 是否持久化")
 
         (component claim-check
+          :target "crates/missiond-core/src/event/pipeline/step2_decide/claim_check.rs"
           (desc "大 payload 不进 Log 主表,只留 durable pointer")
-          :target "crates/missiond-core/src/event/pipeline/step2_decide/"
           :threshold-inline "payload_size_hint() <= 8KB → 直接 JSONB 存 payload_inline"
           :threshold-ref    "payload_size_hint() >  8KB → blob_store.put(bytes) → 存 payload_ref"
 
           (struct PayloadRef
+            :target "crates/missiond-core/src/event/blob_store/mod.rs"
             (field backend  :type "BlobBackend" :desc "blob-table (默认) / local-file")
             (field uri      :type "String"      :desc "backend 内定位键")
             (field size     :type "u64"         :desc "原始字节数")
             (field checksum :type "Sha256 hex"  :desc "完整性校验"))
 
           (backends 2
-            (blob-table   :desc "PostgreSQL blob_storage(id UUID PK, data BYTEA, size, checksum, ttl)")
-            (local-file   :desc ".missiond/blobs/<prefix>/<uuid>,大 payload 或频繁读但不共享时"))
+            (blob-table   :target "crates/missiond-core/src/event/blob_store/pg_backend.rs"
+                          :desc "PostgreSQL blob_storage(id UUID PK, data BYTEA, size, checksum, ttl)")
+            (local-file   :target "crates/missiond-core/src/event/blob_store/local_file_backend.rs"
+                          :desc ".missiond/blobs/<prefix>/<uuid>,大 payload 或频繁读但不共享时"))
 
           (forbidden
             :in-memory-handle "禁止 — 重启即废"
             :s3-out-of-scope  "missiond 单机,暂不引入"))
 
         (component persistence-policy
+          :target "crates/missiond-core/src/event/pipeline/step2_decide/persistence_policy.rs"
           (desc "ephemeral flag 决定 TTL 与 UI 分流,不决定是否写 DB")
           :default "持久化 — 所有 append 默认写 event_log (ephemeral=false, 30 天 TTL)"
           :ephemeral "AppendOpts.ephemeral=true 仍写 event_log 但标 ephemeral=true,3 天 TTL 自动清理"
@@ -215,31 +252,36 @@
 
       ;; ─── STEP 3 · commit ──────────────────────────
       (step-3 commit
-        (purpose "单写入点批处理 + DB INSERT + 分配 seq + dedup 冲突解析")
         :target "crates/missiond-core/src/event/pipeline/step3_commit/"
+        (purpose "单写入点批处理 + DB INSERT + 分配 seq + dedup 冲突解析")
 
         (component log-writer
+          :target "crates/missiond-core/src/event/pipeline/step3_commit/log_writer.rs"
           :pattern   "唯一 LogWriter task 消费 append channel"
           :batching  "首条到达后 drain ≤100 条 / 10ms deadline,取先到"
           :invariant "append() Ok(Committed) ⟺ DB committed,不存在 in-flight 语义")
 
         (component seq-authority
+          :target "crates/missiond-core/src/event/pipeline/step3_commit/seq_authority.rs"
           :source         "DB BIGSERIAL — 全局严格单调,单点分配"
           :crash-recovery "DB 自己保存 max(seq),无应用层对账"
           :invariant      "seq 只增不减;已分配 seq 终生不变")
 
         (component dedup-semantics
+          :target "crates/missiond-core/src/event/pipeline/step3_commit/dedup.rs"
           :purpose            "Producer 重试保护,非业务去重"
           :key                "(producer_id, dedupe_key) UNIQUE INDEX WHERE dedupe_key IS NOT NULL"
           :collision-behavior "二次 append 相同 key → SELECT existing → 返回 Ok(AlreadyExists(seq)),无副作用"
           :producer-contract  "生产者超时/崩溃重试必须带同一 dedupe_key")
 
         (component backpressure
+          :target "crates/missiond-core/src/event/pipeline/step3_commit/backpressure.rs"
           :channel   "append channel 有界 (默认 4096)"
           :overflow  "满则 append() 返回 Err(Backpressure),生产者决定重试/丢弃/panic"
           :rationale "可见失败 > 静默吞 > 无界内存膨胀")
 
         (component failure-mode
+          :target "crates/missiond-core/src/event/pipeline/step3_commit/failure_mode.rs"
           :retry  "batch INSERT 临时错误 → exp backoff 6 次"
           :fatal  "超限 → LogWriter 进 failed state,拒新 append → AppendError::LogUnavailable"
           :self-report "进 failed 时发 IncidentEvent::Reported(severity=critical)")
@@ -249,9 +291,11 @@
 
       ;; ─── STEP 4 · ack ─────────────────────────────
       (step-4 ack
+        :target "crates/missiond-core/src/event/pipeline/step4_ack/"
         (purpose "给 producer 回确定的 AppendAck / AppendError,同步链终结")
 
         (component ack-transport
+          :target "crates/missiond-core/src/event/pipeline/step4_ack/ack_transport.rs"
           :mechanism     "oneshot::Sender<Result<AppendAck, AppendError>>"
           :return-timing "step 3 batch 落盘后立刻回每一个 pending oneshot"
           :ephemeral-path "ephemeral 事件 skip DB 语义下仍 append 成功 → 回 Ok(Volatile{seq})"
@@ -266,16 +310,18 @@
 
       ;; ─── STEP 5 · tail ────────────────────────────
       (step-5 tail
+        :target "crates/missiond-core/src/event/pipeline/step5_tail/mod.rs"
         (purpose "Dispatcher 独立 task 从 event_log 拉新 seq,不阻塞同步链")
-        :target "crates/missiond-core/src/event/pipeline/step5_tail/"
 
         (component dispatcher-state
+          :target "crates/missiond-core/src/event/pipeline/step5_tail/mod.rs"
           :state    "O(1) — AtomicI64 last_dispatched_seq"
           :does     "live fan-out 最新提交的事件给在线订阅者"
           :does-not "不替离线 consumer 扫库 / 不 global-min replay / 不维护 per-subscription 状态"
           :rationale "离线 consumer 一周不上线 → Dispatcher 零负担;Consumer 上线后自己 pull 补追")
 
         (component tail-mechanism
+          :target "crates/missiond-core/src/event/pipeline/step5_tail/mod.rs"
           :source        "PostgreSQL 长轮询 SELECT WHERE seq > last_dispatched LIMIT 256 每 100ms"
           :future-optim  "可升级 LISTEN/NOTIFY,API 不变(记 revisit-trigger)"
           :ordering      "严格按 seq 升序,同 batch 保持 INSERT 顺序"
@@ -286,10 +332,11 @@
 
       ;; ─── STEP 6 · gate ────────────────────────────
       (step-6 gate
+        :target "crates/missiond-core/src/event/pipeline/step6_gate/mod.rs"
         (purpose "paused domain 的事件不投递(事件仍在 log 中保留)")
-        :target "crates/missiond-core/src/event/pipeline/step6_gate/"
 
         (component control-gate
+          :target "crates/missiond-core/src/event/pipeline/step6_gate/mod.rs"
           :input-source "ControlManager.is_domain_paused(domain) — watch::Receiver<ControlTree>"
           :action       "paused=true 时跳过该 domain 投递,last_dispatched 仍前进"
           :stateless    "Dispatcher 不记录 per-subscription pause 时刻"
@@ -297,24 +344,28 @@
           :never-gated  "ObservabilityEvent / IncidentEvent 永远不被 gated(Domain→CtlDomain 映射 None)")
 
         (component domain-mapping
+          :target "crates/missiond-core/src/event/pipeline/step6_gate/mod.rs"
           :function "fn domain_to_ctl_domain(d: Domain) -> Option<CtlDomain>"
-          :maps     "Memory / Board → 对应 CtlDomain;其余 10 域 → None (永不 gated)")
+          :maps     "Memory / Board → 对应 CtlDomain;其余 10 域 → None (永不 gated)"
+          :daemon-adapter-target "crates/missiond-daemon/src/bus/control_gate_adapter.rs")
 
         :input  "LoggedEvent"
         :output "LoggedEvent (pass) | dropped (silent skip)")
 
       ;; ─── STEP 7 · fanout ──────────────────────────
       (step-7 fanout
-        (purpose "按 domain 送到对应 Topic<T> broadcast channel,出口到 4.3")
         :target "crates/missiond-core/src/event/pipeline/step7_fanout/"
+        (purpose "按 domain 送到对应 Topic<T> broadcast channel,出口到 4.3")
 
         (component topic-registry
+          :target "crates/missiond-core/src/event/pipeline/step7_fanout/registry.rs"
           :type             "static HashMap<Domain, Box<dyn AnyTopic>>"
           :init-time        "Dispatcher 启动时 register::<T>() 注入 12 个 Topic"
           :fanout-transport "tokio::broadcast::channel<Arc<T>> per Topic"
           :buffer-size      "默认每 topic 1024;慢订阅者溢出触发 SlowConsumer incident")
 
         (component per-topic-fanout
+          :target "crates/missiond-core/src/event/pipeline/step7_fanout/topic.rs"
           :mechanism  "event.domain() → registry.get(domain) → topic.broadcast_sender.send(Arc::new(event))"
           :isolation  "单 topic panic 由 supervisor 重启;其他 topic 零感知"
           :slow-subscriber "某订阅 Lagged → 仅该 Receiver 受影响,不传染")
@@ -326,6 +377,7 @@
       ;; 生命周期维护(非流水线,定期触发)
       ;; ═══════════════════════════════════════════════
       (lifecycle-maintenance
+        :target "crates/missiond-core/src/event/lifecycle/"
         (desc "不在 append/dispatch 主路径上的后台任务")
 
         (retention
@@ -348,13 +400,16 @@
     ;; 4.3 · 出点 (Egress) — 订阅 API
     ;; ═════════════════════════════════════════════════
     (section egress
+      :target "crates/missiond-core/src/event/subscription/"
       (desc "消费者声明订阅 → tail-and-pull 双阶段接入 → combinators 声明式处理")
 
       (component subscription-api
+        :target "crates/missiond-core/src/event/subscription/api.rs"
         (desc "类型安全的订阅入口")
         :primary-api "bus.subscribe::<T: DomainEvent>(name: &str, opts: SubscriptionOpts) -> Subscription<T>"
 
         (struct SubscriptionOpts
+          :target "crates/missiond-core/src/event/subscription/options.rs"
           (field start-from     :type "StartFrom"     :default "Latest"                           :desc "Latest / Earliest / Seq(n)")
           (field batch-size     :type "usize"         :default "100"                              :desc "每批最大事件数;per-subscription 可调")
           (field failure-policy :type "FailurePolicy" :default "Retry { max: 3, backoff: exp }"   :desc "处理失败的回退")
@@ -362,20 +417,25 @@
           (field cursor-flush   :type "CursorFlush"   :default "BatchOr1s"                        :desc "Cursor 持久化频率"))
 
         (enum FailurePolicy
+          :target "crates/missiond-core/src/event/subscription/options.rs"
+          :runtime "crates/missiond-core/src/event/subscription/failure.rs"
           (Retry        "max: u8, backoff: exp / fixed — 就地重试,超限转策略")
           (SkipToDLQ    "失败事件入 dead_letter_queue 表,cursor 推进,consumer 不被阻塞")
           (Halt         "失败即停止 consumer,等人工介入 — 适合关键路径"))
 
         (enum PauseBehavior
+          :target "crates/missiond-core/src/event/subscription/options.rs"
           (DropAndLiveResume "默认:paused 期间不投递,resume 时 cursor 跳到 head")
-          (FreezeAndCatchUp  "opt-in:paused 期间 cursor 冻结不前推;resume 时触发 pull catch-up(batch_size 节流)"))
+          (FreezeAndCatchUp  "opt-in:paused 期间 cursor 冻结不前推;resume 时触发 pull catch-up(batch_size 节流)  ⚠ MVP 别名到 DropAndLiveResume,见 §4.5 deferred-implementations"))
 
         (enum CursorFlush
+          :target "crates/missiond-core/src/event/subscription/options.rs"
           (PerEvent          "每条 ack 即 flush — 最小重复量,吞吐最差")
           (BatchOr1s         "默认:每 batch ack + 最长 1s 强制 flush — 平衡")
           (Periodic Duration "自定义周期 flush — 最松")))
 
       (component subscription-lifecycle
+        :target "crates/missiond-core/src/event/subscription/lifecycle.rs"
         (desc "订阅者上线的两阶段模型 — tail-and-pull")
 
         (phase-1-bootstrap
@@ -389,6 +449,8 @@
           :on-disconnect "broadcast Lagged → 记 SlowConsumer incident → 切回 phase-1 重 pull"))
 
       (component cursor-store
+        :target "crates/missiond-core/src/event/subscription/cursor_store.rs"
+        :schema-target "crates/missiond-core/migrations/20260419000001_event_subscriptions.sql"
         (desc "订阅 cursor 持久化")
         :table "event_subscriptions"
         :schema
@@ -405,13 +467,16 @@
           :guarantee "崩溃最多**重复**处理 min(batch_size, 1 秒内事件数) 条;依赖 consumer 幂等消化"))
 
       (component delivery-semantics
+        :target "crates/missiond-core/src/event/subscription/lifecycle.rs"
         :guarantee           "at-least-once — 消费者必须幂等"
         :rationale           "cursor update 与业务副作用不在同一事务,崩溃可能重放最后 batch"
         :idempotency-helper  "SeqDedupSet(Arc<Mutex<BTreeSet<Seq>>>) — consumer 想 seq 级幂等但业务无天然键时可用"
+        :idempotency-helper-target "crates/missiond-core/src/event/subscription/mod.rs"
         :NOT-trait-enforced  "幂等是契约级要求,不走类型强制;强制 idempotency_key 会让天然幂等 consumer 编造伪 key"
         :design-contract     "每个 consumer 设计评审必须回答:同一事件重跑是否安全?如何保证?答案写进文档")
 
       (subscription-combinators
+        :target "crates/missiond-core/src/event/subscription/combinators.rs"
         (desc "声明式订阅组合子,替代每个 consumer 手写样板")
         (debounce   :api "sub.debounce(Duration::from_millis(500))"
                     :semantics "固定 deadline 窗口,到期只触发一次,不滑动")
@@ -431,6 +496,9 @@
       (desc "贯穿 4.1/4.2/4.3 所有相的系统属性 — 不属于任何单一相")
 
       (observability
+        :target "crates/missiond-core/src/event/metrics/"
+        :trait-target "crates/missiond-core/src/event/metrics/mod.rs"
+        :emitter-target "crates/missiond-core/src/event/metrics/emitter.rs"
         :bus-metrics
           ("append_rate / reject_rate"
            "dispatch_lag (tail cursor 相对 max seq)"
@@ -442,17 +510,27 @@
         :isolation-rule  "ObservabilityEvent 的 handler 产生新 append 时,新事件也必须 ephemeral=true")
 
       (fault-isolation
+        :desc "每相独立的错误不扩散,集中契约分散实现"
+        :producer-location   "producer 调用栈 (各 worker / handler)"
+        :log-writer-target   "crates/missiond-core/src/event/pipeline/step3_commit/failure_mode.rs"
+        :dispatcher-target   "crates/missiond-core/src/event/pipeline/step5_tail/mod.rs + step7_fanout/"
+        :subscriber-target   "crates/missiond-core/src/event/subscription/lifecycle.rs"
         :producer   "append 失败抛 Err,不拖垮调用方"
         :log-writer "batch INSERT 失败 → exp backoff 重试 → 超限转 IncidentEvent + 拒新 append + DB unavailable 状态"
         :dispatcher "panic 由 supervisor 重启对应 topic task;Dispatcher 全体崩从 last_dispatched 继续,不替人补发"
         :subscriber "panic 断开该订阅,其他订阅者无感知;自动重订阅由消费者自行决策")
 
       (testing-story
+        :in-memory-bus-target "crates/missiond-core/src/event/in_memory/"
+        :chaos-tests-target   "crates/missiond-core/tests/event_chaos.rs"
+        :integration-tests-target "crates/missiond-core/tests/event_log_integration.rs + event_dispatcher_integration.rs + event_subscription_integration.rs"
+        :e2e-test-target "crates/missiond-daemon/tests/e2e_bus_golden_path.rs"
         :in-memory-bus "必须与生产同语义 — 单 writer 分 seq + append-ack + seq-ordered replay,不是裸 AtomicU64"
         :determinism   "可注入固定 seq / ts / trace_id,单测可重现"
         :replay-debug  "录制 Log 片段 → 换机 replay → 复现 bug")
 
       (chaos-test-matrix
+        :target "crates/missiond-core/tests/event_chaos.rs"
         (desc "必须覆盖的故障模式 — Week 2 chaos testing 基线")
         (log-writer-timeout     "DB INSERT > 超时阈值 → publish Err,生产者可见")
         (log-writer-panic       "重启后从最后提交 seq 继续,in-flight batch 视为丢失")
@@ -468,7 +546,7 @@
     ;; 4.5 · 未来空位(声明不做,防止作用域蔓延)
     ;; ═════════════════════════════════════════════════
     (section deferred
-      (desc "声明范围之外的事情,避免设计蔓延")
+      (desc "声明范围之外的事情,避免设计蔓延 — 无代码 target,未来实现")
 
       (not-now
         (distributed-bus         "单进程设计;未来如需跨进程,Log 可换 NATS/Redpanda,API 层保持")
@@ -483,11 +561,14 @@
         (freeze-and-catch-up
           :declared-in "§4.3 PauseBehavior::FreezeAndCatchUp"
           :current     "MVP alias 到 DropAndLiveResume(默认行为)"
-          :future-work "实现 cursor 冻结 + resume 时 batch_size 节流 pull catch-up;对 Memory 等'不能丢'的域有价值")
+          :future-work "实现 cursor 冻结 + resume 时 batch_size 节流 pull catch-up;对 Memory 等'不能丢'的域有价值"
+          :future-target "crates/missiond-core/src/event/subscription/lifecycle.rs (新增分支)")
         (prometheus-metrics-backend
           :declared-in "§4.4 observability bus-metrics"
           :current     "AtomicBusMetrics MVP + ObservabilityEvent::BusMetric 自吐"
-          :future-work "加 metrics/prometheus.rs 导出 HTTP /metrics endpoint,生产监控接入"))
+          :current-target "crates/missiond-core/src/event/metrics/mod.rs"
+          :future-work "加 metrics/prometheus.rs 导出 HTTP /metrics endpoint,生产监控接入"
+          :future-target "crates/missiond-core/src/event/metrics/prometheus.rs (新建)"))
 
       (revisit-triggers
         (desc "触发重新评估 deferred 的条件")
