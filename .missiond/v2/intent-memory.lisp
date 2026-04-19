@@ -23,7 +23,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.7")
+  (version "draft-v0.4.8")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -38,7 +38,8 @@
     (v0.4.4 "action/instruction specs 迁 pillar 五: intent/plan/workflow/user_intents DB 表 + system-level intent*.lisp + workflows*.lisp + flows/*.yaml; memory 只留'项目代码真实状态'的 per-project intent.lisp")
     (v0.4.5 "workflow-lisp-templates + flow-yaml-templates 合并到单一 component workflows (:kind methodology | executable), 符合 Option B 设计")
     (v0.4.6 "embedding 契约 SSOT: cross-cutting 新增 capability embedding-storage-governance, 5 处散落描述改用 cross-ref; 确认 5 张承载表 (含 skill_topics / ast_nodes) 及 message_embeddings 的 halfvec 特殊性")
-    (v0.4.7 "board 模块按'memory=库'原则精简: autopilot + flow-engine-v2 计算逻辑移到 pillar 二 2.4 orchestration, board 只留 cross-ref"))
+    (v0.4.7 "board 模块按'memory=库'原则精简: autopilot + flow-engine-v2 计算逻辑移到 pillar 二 2.4 orchestration, board 只留 cross-ref")
+    (v0.4.8 "board 新增 helper agent-execution-coordination: 从 intent-event-bus-execution.lisp 提取'并行 agent 共享内存层'模式, 6 slots + storage/manager interface 声明"))
   (status "草稿 — 大多数 module 已稳定, 可演进")
 
   (purpose "系统长期记忆 — 4 个业务模块自治 + 底层系统支持层 + 横切")
@@ -535,7 +536,44 @@
         :purpose "task 执行时的 prompt 快照 + KB 引用审计"
         :writer "autopilot.rs :: save_prompt_snapshot"
         :readers "MCP prompt 调优工具 (待实现) / 复盘分析"
-        :cross-module-note "cited_kb_ids 关联 kb-manager :: knowledge; 但 PK 是 task_id 故归 board"))
+        :cross-module-note "cited_kb_ids 关联 kb-manager :: knowledge; 但 PK 是 task_id 故归 board")
+
+      ;; ── 并行 agent 协作的共享内存层 (从 intent-event-bus-execution.lisp 提取的模式) ──
+      (helper agent-execution-coordination
+        (desc "并行 agent 协作的共享内存层 — 多 agent 同时工作时的冲突避免 / 决策协调 / 进度追踪")
+        :rationale "事件总线重构 (v1.0→v1.3.0) 期间 16+ agent 并行工作, 此模式证明有效; 需作为 board 通用能力管起来"
+        :pilot-instance ".missiond/v2/intent-event-bus-execution.lisp (D001-D016 deviations + DC001-DC049 decisions + I001-I010 issues 都在此)"
+
+        (shared-memory-slots
+          (phase-tracker "每个 agent 当前处于哪个 phase + 完成标记 — 避免重复执行")
+          (claims        "谁锁定了哪个文件 / 模块 — 避免并发写冲突")
+          (deviations    "意图(frozen lisp)与实际(code)的差异留痕 — 格式 D<NNN> + reason + approved-by")
+          (decisions     "决策日志 — 格式 DC<NNN> + context + rationale + decided-at")
+          (completions   "phase 完成清单 — 断点续跑基础")
+          (issues        "阻塞 / 未决问题 — 格式 I<NNN> + severity + resolution"))
+
+        (storage
+          :current-format "Lisp 文件约定: .missiond/v2/<name>-execution.lisp"
+          :pairing "每个 frozen 设计 lisp 有配套 execution lisp (e.g. intent-event-bus.lisp ↔ intent-event-bus-execution.lisp)"
+          :file-governance-ref "frozen lisp 的 (file-governance) 块指向 :companion-log"
+          :why-file "人类可读 + git 版本化 + agent 跨 session 持久"
+          :db-option "未来可选 execution_contexts + execution_entries 2 表 (JSONB entries), 暂不做 — file 够用")
+
+        (manager-interface
+          :current-impl "⚠ 手动 — agent 按约定读写 Lisp 文件, 人类审校"
+          :future-mcp "TBD MCP tools (mission_execution_claim / decide / deviate / complete / tracker-update)"
+          :current-workaround "agent 直接 Edit lisp 文件, 但易冲突 + 无原子保证"
+          :status "板 owns the pattern; 实现 TBD")
+
+        (linked-concepts
+          :methodology "pillar 五 :: workflows :kind methodology (e.g. bus-refactor.lisp) — 可复用方法论模板"
+          :execution "本 helper 管的 — per-run 的 agent 协作实例"
+          :distinction "methodology = '怎么做'的说明书 (reusable); execution = '这次做的过程' (per-run)"
+          :future-board-linkage "可能把 phase → board_task 映射, execution 变成 board_tasks 的 flow_context 超集")
+
+        (design-rationale
+          "归 board 因为: (1) board 是任务编排中心 (2) 并行 agent = 多 task 协作 (3) 每个 phase 可视为 board_task 的 refactor-scoped 子结构"
+          "不归 pillar 五 因为: pillar 五 是'应该做什么'的规约 (prescriptive); 本 helper 是'正在做什么'的实况 (operational state)")))
 
     (module-egress
       (desc "MCP 查询 + 前端 WS 流 — 库对外的读出口")
@@ -1234,7 +1272,15 @@
       "    改为 cross-ref 到 pillar 二 engines, 保留'库侧视角' (schema + interface + FSM 声明)"
       "(Y) board module-ingress 新增 :principle 'memory=库' 原则声明"
       "(Z) plumbing state-machine 的 :recovery 改为 :recovery-interface + :recovery-scheduling 双字段"
-      "    接口在库, 时机由 engine 决定")
+      "    接口在库, 时机由 engine 决定"
+      "v0.4.8 (2026-04-19 — agent 协作共享内存层正式化):"
+      "(AA) board 新增 helper agent-execution-coordination — 从 intent-event-bus-execution.lisp 提取模式"
+      "    6 shared-memory-slots: phase-tracker / claims / deviations / decisions / completions / issues"
+      "    storage: Lisp 文件约定 .missiond/v2/<name>-execution.lisp 配套 frozen 设计 lisp"
+      "    manager-interface: TBD (future MCP: mission_execution_claim/decide/deviate/complete)"
+      "    linked-concepts: methodology (pillar 五 workflows, '怎么做' reusable) vs execution (本 helper, '这次做的过程' operational)"
+      "    design-rationale: board = 任务编排中心, 并行 agent = 多 task 协作"
+      "(BB) pilot-instance intent-event-bus-execution.lisp 成为首个正式案例 (D001-D016 / DC001-DC049 / I001-I010)")
 
     (ownership-summary
       (module-project-management   5 "projects + 4 skills (specs 4 张迁走)")
