@@ -47,7 +47,8 @@
         :owned-tables 5
         :v0.4.4-change "specs 4 表 (intent/plan/workflow/user_intents) 迁到 pillar 五 action-instruction-specs"
         :v0.4.16-correction "user_intents 实际从未迁出, 仍在 conversation-logs (trait=ConversationStore)"
-        :v0.4.17-change "intent/plan/workflow 3 张从 pillar 五 回归 memory 新建 module intent-layer (schema-ready-pending-implementation)"
+        :v0.4.17-change "intent/plan/workflow 3 张从 pillar 五 回归 memory 新建 module directive-layer (schema-ready-pending-implementation)"
+        :v0.4.19-rename "命名去歧义: DB 表 intent → directive; module intent-layer → directive-layer; 避和 <project>/.missiond/intent.lisp (代码画像) 混淆"
         :mcp    "mission_project / mission_intent (只读 FILE) / mission_skill_*")
 
       (module board
@@ -593,34 +594,37 @@
     ;;         本 section 管所有'描述动作和指令'的 DB 表 + 文件
     ;; ═══════════════════════════════════════════════════
     (section action-instruction-specs
-      (desc "所有描述'应该做什么 / 如何做'的规约 — DB 表 + Lisp/YAML 文件")
+      (desc "所有描述'应该做什么 / 如何做'的规约 — DB 表 (schema 归 memory directive-layer) + Lisp/YAML 文件")
       :migrated-from "memory pillar :: project-management (4 tables) + non-db-forms (3 variants + 1 form) in v0.4.4"
       :rationale "memory 记'是什么'(facts); 本层记'应该做什么'(prescriptions) — 分层原则"
+      :v0.4.19-note "DB 表 schema 实际在 memory :: module directive-layer 管, 本 section 只做概念性 cross-ref; intent 表 → directive 表 rename 同步"
 
-      ;; ── DB 表 (v0.4.17: schema 归 memory intent-layer module, 本 section 只概念性描述) ──
+      ;; ── DB 表 (v0.4.17: schema 归 memory directive-layer module, 本 section 只概念性描述) ──
       ;; v0.4.16: user_intents 移回 memory :: conversation-logs (writer=intent_analyst, trait=ConversationStore)
-      ;; v0.4.17: intent/plan/workflow 3 张从 pillar 五 action-specs 剥离到 memory :: intent-layer
+      ;; v0.4.17: intent/plan/workflow 3 张从 pillar 五 action-specs 剥离到 memory :: directive-layer
       ;;          原因: 按 'memory=库' 原则, schema + trait 接口归 memory; pillar 五 actor 是未来 writer
       ;;          撤回 v0.4.16 drop-candidate 误判 — 用户澄清这是 '刚建未启用' 预留 schema
-      (component intent-spec-db
-        (desc "user utterance → sexp 编译记录 — 三段式 pipeline 第一段")
-        :schema-owned-by "memory :: module intent-layer :: plumbing intent-compilation"
-        :cross-ref "intent-memory.lisp :: module intent-layer"
+      (component directive-spec-db
+        (desc "user utterance → lisp 指令编译记录 — 三段式 pipeline 第一段")
+        :table "directive"
+        :schema-owned-by "memory :: module directive-layer :: plumbing directive-compilation"
+        :cross-ref "intent-memory.lisp :: module directive-layer"
         :status "schema-ready-pending-implementation"
         :future-writer "pillar 五 actor (TBD) 或 pillar 二 worker 或 MCP 工具直写"
-        :vs-per-project-intent "memory :: project-management 里的 <project>/.missiond/intent.lisp 是 factual 代码快照; 本表是 instruction 规约 DB 镜像")
+        :v0.4.19-rename "原名 intent 表 → directive 表 (避命名歧义: 和 <project>/.missiond/intent.lisp 代码画像文件区分)"
+        :vs-per-project-intent "memory :: project-management 里的 <project>/.missiond/intent.lisp 是 factual 代码快照; 本表是 'Jarvis 对用户话的 lisp 指令编译'")
 
       (component plan-spec-db
-        (desc "intent 编译出的执行 DAG — 绑 board_task + 版本 + FSM")
-        :schema-owned-by "memory :: module intent-layer :: plumbing plan-execution"
-        :cross-ref "intent-memory.lisp :: module intent-layer"
+        (desc "directive 编译出的执行 DAG — 绑 board_task + 版本 + FSM")
+        :schema-owned-by "memory :: module directive-layer :: plumbing plan-execution"
+        :cross-ref "intent-memory.lisp :: module directive-layer"
         :status "schema-ready-pending-implementation"
         :future-writer "pillar 五 actor (TBD) — plan 编译 / FSM 迁移 / supersede-chain 策略")
 
       (component workflow-spec-db
         (desc "从成功 plan 蒸馏的可复用模板 — 带 match_rules + 统计")
-        :schema-owned-by "memory :: module intent-layer :: plumbing workflow-templates"
-        :cross-ref "intent-memory.lisp :: module intent-layer"
+        :schema-owned-by "memory :: module directive-layer :: plumbing workflow-templates"
+        :cross-ref "intent-memory.lisp :: module directive-layer"
         :status "schema-ready-pending-implementation"
         :future-writer "pillar 五 actor (TBD) — distillation 算法 / 匹配阈值 / LRU 策略")
 
