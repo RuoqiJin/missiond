@@ -23,7 +23,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.4")
+  (version "draft-v0.4.5")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -35,7 +35,8 @@
     (v0.4.1 "SSOT 合并: system_timeline 移除, pillar 四 event_log 成 timeline SSOT (v1.3.0); 总表 61→60")
     (v0.4.2 "4 模块 in/core/out harmonization: board/kb/conv core 统一用 (path/plumbing/helper) 三分法语义")
     (v0.4.3 "CLAUDE.md 分层: 全局 ~/.claude/CLAUDE.md + manager → pillar 五 intent-layer; 项目级 <project>/CLAUDE.md + manager → memory :: project-management")
-    (v0.4.4 "action/instruction specs 迁 pillar 五: intent/plan/workflow/user_intents DB 表 + system-level intent*.lisp + workflows*.lisp + flows/*.yaml; memory 只留'项目代码真实状态'的 per-project intent.lisp"))
+    (v0.4.4 "action/instruction specs 迁 pillar 五: intent/plan/workflow/user_intents DB 表 + system-level intent*.lisp + workflows*.lisp + flows/*.yaml; memory 只留'项目代码真实状态'的 per-project intent.lisp")
+    (v0.4.5 "workflow-lisp-templates + flow-yaml-templates 合并到单一 component workflows (:kind methodology | executable), 符合 Option B 设计"))
   (status "草稿 — 大多数 module 已稳定, 可演进")
 
   (purpose "系统长期记忆 — 4 个业务模块自治 + 底层系统支持层 + 横切")
@@ -1145,7 +1146,13 @@
       "    path project-specs-access → path project-code-snapshot (只访问 per-project intent.lisp FILE, 非 DB specs)"
       "    lisp-survey-worker writer 明确只写 FILE"
       "(S) memory pillar 保留'描述各个项目代码真实状态'的 per-project .missiond/intent.lisp (唯一 lisp-spec 形式)"
-      "    memory pillar ownership: 5+4+9+14+20 = 52 张 (从 v0.4.3 的 56 下降 4)")
+      "    memory pillar ownership: 5+4+9+14+20 = 52 张 (从 v0.4.3 的 56 下降 4)"
+      "v0.4.5 (2026-04-19 — workflow 合并):"
+      "(T) pillar 五 action-instruction-specs 的 workflow-lisp-templates + flow-yaml-templates 合并"
+      "    → 单一 component workflows 带 (kind methodology) + (kind executable)"
+      "    methodology = .missiond/workflows/*.lisp (human, 抽象叙事, 非执行)"
+      "    executable  = $MISSIOND_HOME/flows/*.yaml (machine, 具体节点, flow-engine-v2 执行)"
+      "    受众/粒度/执行性分轴, 但概念统一为'多步工作流规约'")
 
     (ownership-summary
       (module-project-management   5 "projects + 4 skills (specs 4 张迁走)")

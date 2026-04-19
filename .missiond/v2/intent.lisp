@@ -575,18 +575,34 @@
         :moved-from "memory :: non-db-forms :: lisp-spec-files variant system-main/detail (v0.4.4)"
         :note "本层所有 intent*.lisp 都描述'系统应该如何'; 项目 intent.lisp (code snapshot) 不在这里")
 
-      (component workflow-lisp-templates
-        (desc "可复用方法论模板 — e.g. bus-refactor")
-        :path ".missiond/workflows/*.lisp"
-        :purpose "记录成熟的重构/工作流 pattern, 供未来参考"
-        :moved-from "memory :: non-db-forms (v0.4.4)")
+      (component workflows
+        (desc "统一工作流规约 — 两种 kind 共同表达'多步工作流', 但受众/粒度/执行性不同")
+        :unified-in "v0.4.5 (原 workflow-lisp-templates + flow-yaml-templates 合并为单一 component)"
+        :design-rationale "两种 kind 形式差异大但概念一致 — 保留各自格式优势, 统一纳管"
 
-      (component flow-yaml-templates
-        (desc "flow-engine-v2 的声明式节点编排模板")
-        :path "$MISSIOND_HOME/flows/*.yaml"
-        :loader "daemon/src/engine/flow/loader.rs"
-        :executor "pillar 二 2.4 orchestration :: flow-engine-v2"
-        :moved-from "memory :: non-db-forms :: yaml-flow-templates (v0.4.4)")
+        (kind methodology
+          (desc "Lisp 方法论模板 — 人类 / agent 参考, 非运行时执行")
+          :path ".missiond/workflows/*.lisp"
+          :consumers "human + mission_intent tool + agent 参考"
+          :granularity "抽象叙事 — phases / principles / anti-patterns / baseline-numbers / decision-authority"
+          :examples "bus-refactor.lisp (11-phase 事件总线重构方法论)"
+          :executability "✗ 非运行时执行, 纯文档")
+
+        (kind executable
+          (desc "YAML 声明式节点编排 — flow-engine-v2 运行时执行")
+          :path "$MISSIOND_HOME/flows/*.yaml"
+          :loader "daemon/src/engine/flow/loader.rs"
+          :executor "pillar 二 2.4 orchestration :: flow-engine-v2"
+          :parser "serde_yaml::from_str::<FlowDefinition>"
+          :granularity "具体机器操作 — 5 node types: LlmCall / SlotTask / McpTool / DaemonAction / ParallelSlotTasks"
+          :executability "✓ 机器执行")
+
+        (relationship-between-kinds
+          :overlap "都描述'多步工作流'"
+          :split-axis "受众 (human vs machine) + 粒度 (抽象 vs 具体) + 执行性"
+          :why-not-unify-format "Lisp 富元数据给人看, YAML 轻量 schema 给 flow-engine 消费; 硬统一两边都难用"
+          :cross-ref-convention "可约定同名对照 (如 bus-refactor.lisp ↔ bus-refactor.yaml), 非强制"
+          :future-possibility "若需要, 可用 Forge 从 Lisp 冲压 YAML (SSOT Lisp + 冲压副本), 当前不做"))
 
       ;; ── Manager ──
       (component specs-manager
