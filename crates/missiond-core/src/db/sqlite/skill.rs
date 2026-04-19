@@ -1,11 +1,47 @@
+//! ProjectStore — SQLite implementation (stub).
+//!
+//! Per memory pillar v0.4.23, module project-management owns projects +
+//! 4 skill_* tables. SQLite backend only carries skill_* methods (pre-existing
+//! MissionDB sync calls); projects-table methods degenerate to fail-safe stubs
+//! since SQLite is migration-only (no projects table maintained).
+
 use async_trait::async_trait;
 use super::SqliteMissionStore;
 use crate::db::error::DbResult;
-use crate::db::traits::{SkillStore, BeaconInfo, BeaconNode, AstSyncResult, AstSearchHit, AstNodeRow, AstStats, ModuleAstSummary, CodeNode};
+use crate::db::traits::{ProjectStore, BeaconInfo, BeaconNode, AstSyncResult, AstSearchHit, AstNodeRow, AstStats, ModuleAstSummary, CodeNode};
 use crate::types::*;
 
 #[async_trait]
-impl SkillStore for SqliteMissionStore {
+impl ProjectStore for SqliteMissionStore {
+    // ── projects table (stubs — SQLite is migration-only) ────────
+
+    async fn list_projects(&self) -> DbResult<Vec<crate::types::ProjectConfig>> {
+        Ok(vec![])
+    }
+    async fn get_project(&self, _id: &str) -> DbResult<Option<crate::types::ProjectConfig>> {
+        Ok(None)
+    }
+    async fn upsert_project(&self, _config: &crate::types::ProjectConfig) -> DbResult<()> {
+        Ok(())
+    }
+    async fn set_project_active(&self, _id: &str, _active: bool) -> DbResult<bool> {
+        Ok(false)
+    }
+    async fn backfill_project_id(&self, _project_id: &str, _path_pattern: &str) -> DbResult<u64> {
+        Ok(0)
+    }
+    async fn conversation_stats_by_project(&self, _project_id: &str) -> DbResult<serde_json::Value> {
+        Ok(serde_json::json!({"total": 0, "active": 0, "completed": 0, "last_activity": null}))
+    }
+    async fn recent_conversations_by_project(&self, _project_id: &str, _limit: i64) -> DbResult<Vec<serde_json::Value>> {
+        Ok(vec![])
+    }
+    async fn kb_stats_by_project(&self, _project_id: &str) -> DbResult<serde_json::Value> {
+        Ok(serde_json::json!({"total": 0, "by_category": {}}))
+    }
+
+    // ── skill_topics / blocks / versions / executions (from SkillStore v0.4.x) ──
+
     // ── skill.rs: topics ──────────────────────────────────────────
 
     async fn skill_topic_upsert(&self, topic: &str, description: Option<&str>, aka: Option<&str>, allowed_tools: Option<&str>, file_path: &str, requires_json: Option<&str>, actions_json: Option<&str>) -> DbResult<()> {

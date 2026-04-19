@@ -4,6 +4,7 @@ pub mod error;
 pub mod traits;
 pub mod shared;
 pub(crate) mod directive;
+pub(crate) mod project;
 
 #[cfg(feature = "postgres")]
 pub mod pg;

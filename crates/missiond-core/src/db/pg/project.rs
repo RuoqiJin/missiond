@@ -1,48 +1,11 @@
 //! Project registry — PostgreSQL persistence layer.
+//!
+//! Free-function helpers consumed by the unified ProjectStore impl
+//! in `pg/skill.rs` (merged per memory pillar v0.4.23).
 
-use async_trait::async_trait;
 use sqlx::PgPool;
 use serde_json::json;
-use crate::db::error::DbResult;
-use crate::db::traits::ProjectStore;
 use crate::types::ProjectConfig;
-use super::PgMissionStore;
-
-#[cfg(feature = "postgres")]
-#[async_trait]
-impl ProjectStore for PgMissionStore {
-    async fn list_projects(&self) -> DbResult<Vec<ProjectConfig>> {
-        Ok(list_projects(&self.pool).await?)
-    }
-
-    async fn get_project(&self, id: &str) -> DbResult<Option<ProjectConfig>> {
-        Ok(get_project(&self.pool, id).await?)
-    }
-
-    async fn upsert_project(&self, config: &ProjectConfig) -> DbResult<()> {
-        Ok(upsert_project(&self.pool, config).await?)
-    }
-
-    async fn set_project_active(&self, id: &str, active: bool) -> DbResult<bool> {
-        Ok(update_project_active(&self.pool, id, active).await?)
-    }
-
-    async fn backfill_project_id(&self, project_id: &str, path_pattern: &str) -> DbResult<u64> {
-        Ok(backfill_project_id(&self.pool, project_id, path_pattern).await?)
-    }
-
-    async fn conversation_stats_by_project(&self, project_id: &str) -> DbResult<serde_json::Value> {
-        Ok(conversation_stats_by_project(&self.pool, project_id).await?)
-    }
-
-    async fn recent_conversations_by_project(&self, project_id: &str, limit: i64) -> DbResult<Vec<serde_json::Value>> {
-        Ok(recent_conversations_by_project(&self.pool, project_id, limit).await?)
-    }
-
-    async fn kb_stats_by_project(&self, project_id: &str) -> DbResult<serde_json::Value> {
-        Ok(kb_stats_by_project(&self.pool, project_id).await?)
-    }
-}
 
 pub async fn upsert_project(pool: &PgPool, config: &ProjectConfig) -> Result<(), sqlx::Error> {
     sqlx::query(

@@ -237,30 +237,5 @@ impl super::traits::DirectiveLayerStore for SqliteMissionStore {
     }
 }
 
-#[async_trait]
-impl super::traits::ProjectStore for SqliteMissionStore {
-    async fn list_projects(&self) -> DbResult<Vec<crate::types::ProjectConfig>> {
-        Ok(vec![])
-    }
-    async fn get_project(&self, _id: &str) -> DbResult<Option<crate::types::ProjectConfig>> {
-        Ok(None)
-    }
-    async fn upsert_project(&self, _config: &crate::types::ProjectConfig) -> DbResult<()> {
-        Ok(())
-    }
-    async fn set_project_active(&self, _id: &str, _active: bool) -> DbResult<bool> {
-        Ok(false)
-    }
-    async fn backfill_project_id(&self, _project_id: &str, _path_pattern: &str) -> DbResult<u64> {
-        Ok(0)
-    }
-    async fn conversation_stats_by_project(&self, _project_id: &str) -> DbResult<serde_json::Value> {
-        Ok(serde_json::json!({"total": 0, "active": 0, "completed": 0, "last_activity": null}))
-    }
-    async fn recent_conversations_by_project(&self, _project_id: &str, _limit: i64) -> DbResult<Vec<serde_json::Value>> {
-        Ok(vec![])
-    }
-    async fn kb_stats_by_project(&self, _project_id: &str) -> DbResult<serde_json::Value> {
-        Ok(serde_json::json!({"total": 0, "by_category": {}}))
-    }
-}
+// ProjectStore impl moved to sqlite/skill.rs (merged with skill_* methods per
+// memory pillar v0.4.23 — single impl per trait coherence rule).

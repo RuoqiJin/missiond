@@ -532,80 +532,6 @@ pub trait SlotStore: Send + Sync {
 }
 
 // ============================================================================
-// 11. SkillStore — Skill engine, beacons, AST index
-// Source: skill.rs + beacon.rs + ast.rs
-// ============================================================================
-
-#[async_trait]
-pub trait SkillStore: Send + Sync {
-    // -- skill.rs: topics --
-    async fn skill_topic_upsert(&self, topic: &str, description: Option<&str>, aka: Option<&str>, allowed_tools: Option<&str>, file_path: &str, requires_json: Option<&str>, actions_json: Option<&str>) -> DbResult<()>;
-    async fn skill_topic_upsert_full(&self, topic: &str, description: Option<&str>, aka: Option<&str>, allowed_tools: Option<&str>, file_path: &str, requires_json: Option<&str>, actions_json: Option<&str>, context_hooks_json: Option<&str>) -> DbResult<()>;
-    async fn skill_topic_get(&self, topic: &str) -> DbResult<Option<SkillTopic>>;
-    async fn skill_topic_list(&self) -> DbResult<Vec<SkillTopic>>;
-    async fn skill_topic_hit(&self, topic: &str) -> DbResult<()>;
-    async fn skill_topic_update_stats(&self, topic: &str, total_lines: i32, checksum: &str) -> DbResult<()>;
-
-    // -- skill.rs: blocks --
-    async fn skill_block_insert(&self, topic: &str, block_type: &str, title: Option<&str>, content: &str, sort_order: i32) -> DbResult<String>;
-    async fn skill_block_update(&self, id: &str, content: &str) -> DbResult<bool>;
-    async fn skill_blocks_for_topic(&self, topic: &str) -> DbResult<Vec<SkillBlock>>;
-    async fn skill_block_set_status(&self, id: &str, status: &str) -> DbResult<bool>;
-    async fn skill_blocks_delete_topic(&self, topic: &str) -> DbResult<usize>;
-
-    // -- skill.rs: search --
-    async fn skill_search_fts(&self, query: &str) -> DbResult<Vec<SkillSearchResult>>;
-    async fn skill_search_topics(&self, query: &str) -> DbResult<Vec<SkillTopic>>;
-    async fn skill_rebuild_fts(&self) -> DbResult<()>;
-
-    // -- skill.rs: embeddings --
-    async fn skill_set_topic_embedding(&self, topic: &str, embedding: &[f32], provider: &str) -> DbResult<()>;
-    async fn skill_load_topic_embeddings(&self) -> DbResult<Vec<(String, Vec<f32>)>>;
-    async fn skill_topics_missing_embedding(&self, limit: i64) -> DbResult<Vec<(String, String)>>;
-    async fn skill_topics_stale_embedding(&self, current_provider: &str, limit: i64) -> DbResult<Vec<(String, String)>>;
-
-    // -- skill.rs: executions --
-    async fn skill_execution_insert(&self, id: &str, skill_topic: &str, action_id: &str, steps_total: i32, triggered_by: &str) -> DbResult<()>;
-    async fn skill_execution_update(&self, id: &str, status: &str, steps_completed: i32, context_json: Option<&str>, error: Option<&str>) -> DbResult<()>;
-    async fn skill_execution_update_with_duration(&self, id: &str, status: &str, steps_completed: i32, context_json: Option<&str>, error: Option<&str>, duration_ms: Option<i64>) -> DbResult<()>;
-    async fn skill_execution_stats(&self, topic: Option<&str>) -> DbResult<Vec<SkillExecutionStat>>;
-    async fn skill_execution_is_running(&self, skill_topic: &str, action_id: &str) -> DbResult<bool>;
-
-    // -- skill.rs: versions --
-    async fn skill_version_save(&self, topic: &str, content: &str, checksum: &str) -> DbResult<()>;
-    async fn skill_version_list(&self, topic: &str, limit: i64) -> DbResult<Vec<SkillVersion>>;
-    async fn skill_version_get(&self, id: i64) -> DbResult<Option<SkillVersion>>;
-
-    // -- beacon.rs --
-    async fn beacon_list(&self) -> DbResult<Vec<BeaconInfo>>;
-    async fn beacon_ensure(&self, name: &str) -> DbResult<String>;
-    async fn beacon_increment_harvest(&self, name: &str) -> DbResult<i64>;
-    async fn beacon_set_description(&self, name: &str, description: &str) -> DbResult<bool>;
-    async fn beacon_node_upsert(&self, beacon_id: &str, repo: &str, file_path: &str, symbol_name: &str, annotation: Option<&str>) -> DbResult<()>;
-    async fn beacon_map(&self, beacon_name: &str) -> DbResult<Vec<BeaconNode>>;
-    async fn beacon_nodes_delete_file(&self, repo: &str, file_path: &str) -> DbResult<usize>;
-    async fn beacon_node_annotate(&self, beacon_name: &str, repo: &str, file_path: &str, symbol_name: &str, annotation: &str) -> DbResult<bool>;
-    async fn beacon_search(&self, query: &str) -> DbResult<Vec<BeaconInfo>>;
-    async fn beacon_cleanup_empty(&self) -> DbResult<usize>;
-
-    // -- ast.rs --
-    async fn ast_sync_file(&self, repo: &str, file_path: &str, commit_hash: &str, nodes: &[CodeNode]) -> DbResult<AstSyncResult>;
-    async fn ast_delete_file(&self, repo: &str, file_path: &str) -> DbResult<usize>;
-    async fn ast_search(&self, query: &str, limit: usize) -> DbResult<Vec<AstSearchHit>>;
-    async fn ast_get_file_nodes(&self, repo: &str, file_path: &str) -> DbResult<Vec<AstNodeRow>>;
-    async fn ast_find_related(&self, name: &str, limit: usize) -> DbResult<Vec<AstSearchHit>>;
-    async fn ast_get_file_commit(&self, repo: &str, file_path: &str) -> DbResult<Option<String>>;
-    async fn ast_stats(&self) -> DbResult<AstStats>;
-    async fn ast_set_embedding(&self, node_id: &str, embedding: &[u8], provider: &str) -> DbResult<()>;
-    async fn ast_find_unembedded(&self, limit: usize) -> DbResult<Vec<(String, String, String)>>;
-    async fn ast_load_all_embeddings(&self) -> DbResult<Vec<(String, Vec<f32>)>>;
-    async fn ast_search_ranked(&self, query: &str, limit: usize) -> DbResult<Vec<(String, usize)>>;
-    async fn ast_get_search_hit(&self, node_id: &str) -> DbResult<Option<AstSearchHit>>;
-    async fn ast_get_node(&self, node_id: &str) -> DbResult<Option<AstNodeRow>>;
-    async fn ast_module_summaries(&self, repo: &str) -> DbResult<Vec<ModuleAstSummary>>;
-}
-
-// ============================================================================
 // 12. ObservabilityStore — Gemini log, incidents, tokens, watermarks, backfill, router chat
 // Source: gemini_log.rs + incident.rs + watermark.rs + backfill.rs + router_chat.rs
 // ============================================================================
@@ -787,7 +713,9 @@ pub trait DirectiveLayerStore: Send + Sync {
 }
 
 // ============================================================================
-// ProjectStore
+// ProjectStore — module project-management
+// Source: db/project.rs + db/skill.rs + db/beacon.rs + db/ast.rs
+// Scope: projects + skill_topics/blocks/versions/executions (5 tables per v0.4.23)
 // ============================================================================
 
 #[async_trait]
@@ -807,6 +735,74 @@ pub trait ProjectStore: Send + Sync {
 
     /// Get KB entry count grouped by category for a project.
     async fn kb_stats_by_project(&self, project_id: &str) -> DbResult<serde_json::Value>;
+
+    // -- skill_topics / blocks / versions / executions (from SkillStore v0.4.x) --
+
+    // -- skill.rs: topics --
+    async fn skill_topic_upsert(&self, topic: &str, description: Option<&str>, aka: Option<&str>, allowed_tools: Option<&str>, file_path: &str, requires_json: Option<&str>, actions_json: Option<&str>) -> DbResult<()>;
+    async fn skill_topic_upsert_full(&self, topic: &str, description: Option<&str>, aka: Option<&str>, allowed_tools: Option<&str>, file_path: &str, requires_json: Option<&str>, actions_json: Option<&str>, context_hooks_json: Option<&str>) -> DbResult<()>;
+    async fn skill_topic_get(&self, topic: &str) -> DbResult<Option<SkillTopic>>;
+    async fn skill_topic_list(&self) -> DbResult<Vec<SkillTopic>>;
+    async fn skill_topic_hit(&self, topic: &str) -> DbResult<()>;
+    async fn skill_topic_update_stats(&self, topic: &str, total_lines: i32, checksum: &str) -> DbResult<()>;
+
+    // -- skill.rs: blocks --
+    async fn skill_block_insert(&self, topic: &str, block_type: &str, title: Option<&str>, content: &str, sort_order: i32) -> DbResult<String>;
+    async fn skill_block_update(&self, id: &str, content: &str) -> DbResult<bool>;
+    async fn skill_blocks_for_topic(&self, topic: &str) -> DbResult<Vec<SkillBlock>>;
+    async fn skill_block_set_status(&self, id: &str, status: &str) -> DbResult<bool>;
+    async fn skill_blocks_delete_topic(&self, topic: &str) -> DbResult<usize>;
+
+    // -- skill.rs: search --
+    async fn skill_search_fts(&self, query: &str) -> DbResult<Vec<SkillSearchResult>>;
+    async fn skill_search_topics(&self, query: &str) -> DbResult<Vec<SkillTopic>>;
+    async fn skill_rebuild_fts(&self) -> DbResult<()>;
+
+    // -- skill.rs: embeddings --
+    async fn skill_set_topic_embedding(&self, topic: &str, embedding: &[f32], provider: &str) -> DbResult<()>;
+    async fn skill_load_topic_embeddings(&self) -> DbResult<Vec<(String, Vec<f32>)>>;
+    async fn skill_topics_missing_embedding(&self, limit: i64) -> DbResult<Vec<(String, String)>>;
+    async fn skill_topics_stale_embedding(&self, current_provider: &str, limit: i64) -> DbResult<Vec<(String, String)>>;
+
+    // -- skill.rs: executions --
+    async fn skill_execution_insert(&self, id: &str, skill_topic: &str, action_id: &str, steps_total: i32, triggered_by: &str) -> DbResult<()>;
+    async fn skill_execution_update(&self, id: &str, status: &str, steps_completed: i32, context_json: Option<&str>, error: Option<&str>) -> DbResult<()>;
+    async fn skill_execution_update_with_duration(&self, id: &str, status: &str, steps_completed: i32, context_json: Option<&str>, error: Option<&str>, duration_ms: Option<i64>) -> DbResult<()>;
+    async fn skill_execution_stats(&self, topic: Option<&str>) -> DbResult<Vec<SkillExecutionStat>>;
+    async fn skill_execution_is_running(&self, skill_topic: &str, action_id: &str) -> DbResult<bool>;
+
+    // -- skill.rs: versions --
+    async fn skill_version_save(&self, topic: &str, content: &str, checksum: &str) -> DbResult<()>;
+    async fn skill_version_list(&self, topic: &str, limit: i64) -> DbResult<Vec<SkillVersion>>;
+    async fn skill_version_get(&self, id: i64) -> DbResult<Option<SkillVersion>>;
+
+    // -- beacon.rs --
+    async fn beacon_list(&self) -> DbResult<Vec<BeaconInfo>>;
+    async fn beacon_ensure(&self, name: &str) -> DbResult<String>;
+    async fn beacon_increment_harvest(&self, name: &str) -> DbResult<i64>;
+    async fn beacon_set_description(&self, name: &str, description: &str) -> DbResult<bool>;
+    async fn beacon_node_upsert(&self, beacon_id: &str, repo: &str, file_path: &str, symbol_name: &str, annotation: Option<&str>) -> DbResult<()>;
+    async fn beacon_map(&self, beacon_name: &str) -> DbResult<Vec<BeaconNode>>;
+    async fn beacon_nodes_delete_file(&self, repo: &str, file_path: &str) -> DbResult<usize>;
+    async fn beacon_node_annotate(&self, beacon_name: &str, repo: &str, file_path: &str, symbol_name: &str, annotation: &str) -> DbResult<bool>;
+    async fn beacon_search(&self, query: &str) -> DbResult<Vec<BeaconInfo>>;
+    async fn beacon_cleanup_empty(&self) -> DbResult<usize>;
+
+    // -- ast.rs --
+    async fn ast_sync_file(&self, repo: &str, file_path: &str, commit_hash: &str, nodes: &[CodeNode]) -> DbResult<AstSyncResult>;
+    async fn ast_delete_file(&self, repo: &str, file_path: &str) -> DbResult<usize>;
+    async fn ast_search(&self, query: &str, limit: usize) -> DbResult<Vec<AstSearchHit>>;
+    async fn ast_get_file_nodes(&self, repo: &str, file_path: &str) -> DbResult<Vec<AstNodeRow>>;
+    async fn ast_find_related(&self, name: &str, limit: usize) -> DbResult<Vec<AstSearchHit>>;
+    async fn ast_get_file_commit(&self, repo: &str, file_path: &str) -> DbResult<Option<String>>;
+    async fn ast_stats(&self) -> DbResult<AstStats>;
+    async fn ast_set_embedding(&self, node_id: &str, embedding: &[u8], provider: &str) -> DbResult<()>;
+    async fn ast_find_unembedded(&self, limit: usize) -> DbResult<Vec<(String, String, String)>>;
+    async fn ast_load_all_embeddings(&self) -> DbResult<Vec<(String, Vec<f32>)>>;
+    async fn ast_search_ranked(&self, query: &str, limit: usize) -> DbResult<Vec<(String, usize)>>;
+    async fn ast_get_search_hit(&self, node_id: &str) -> DbResult<Option<AstSearchHit>>;
+    async fn ast_get_node(&self, node_id: &str) -> DbResult<Option<AstNodeRow>>;
+    async fn ast_module_summaries(&self, repo: &str) -> DbResult<Vec<ModuleAstSummary>>;
 }
 
 // ============================================================================
@@ -819,7 +815,7 @@ pub trait ProjectStore: Send + Sync {
 pub trait MissionStore:
     ConversationStore + MessageStore + ToolCallStore + EventStore
     + RetrospectiveStore + VisionStore + KbStore + BoardStore
-    + TimelineStore + SlotStore + SkillStore + ObservabilityStore
+    + TimelineStore + SlotStore + ObservabilityStore
     + ProjectStore + InfraStore + DirectiveLayerStore
     + Send + Sync
 {

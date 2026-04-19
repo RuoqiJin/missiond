@@ -1,20 +1,65 @@
-//! SkillStore — PostgreSQL implementation.
+//! ProjectStore — PostgreSQL implementation (unified per memory pillar v0.4.23).
 //!
-//! Covers: skill topics, blocks, FTS search, embeddings, executions,
-//!         versions, beacons, and AST index.
+//! Covers the full ProjectStore surface for PG backend:
+//!   - projects table CRUD (7 methods, helpers in `pg/project.rs`)
+//!   - skill topics, blocks, FTS search, embeddings, executions, versions
+//!   - beacons, AST index
+//!
+//! Note: Rust coherence requires a single `impl ProjectStore for PgMissionStore`
+//! block per crate. All 32 methods live here; `pg/project.rs` provides
+//! free-function helpers that delegate to sqlx directly.
 
 use async_trait::async_trait;
 use crate::db::error::DbResult;
 use crate::db::traits::{
-    SkillStore, BeaconInfo, BeaconNode, AstSyncResult, AstSearchHit, AstNodeRow, AstStats,
+    ProjectStore, BeaconInfo, BeaconNode, AstSyncResult, AstSearchHit, AstNodeRow, AstStats,
     ModuleAstSummary, CodeNode,
 };
 use crate::types::*;
 use super::PgMissionStore;
+use super::project::{
+    list_projects, get_project, upsert_project, update_project_active,
+    backfill_project_id, conversation_stats_by_project,
+    recent_conversations_by_project, kb_stats_by_project,
+};
 
 #[cfg(feature = "postgres")]
 #[async_trait]
-impl SkillStore for PgMissionStore {
+impl ProjectStore for PgMissionStore {
+    // ── projects table (from pg/project.rs) ───────────────────────
+
+    async fn list_projects(&self) -> DbResult<Vec<crate::types::ProjectConfig>> {
+        Ok(list_projects(&self.pool).await?)
+    }
+
+    async fn get_project(&self, id: &str) -> DbResult<Option<crate::types::ProjectConfig>> {
+        Ok(get_project(&self.pool, id).await?)
+    }
+
+    async fn upsert_project(&self, config: &crate::types::ProjectConfig) -> DbResult<()> {
+        Ok(upsert_project(&self.pool, config).await?)
+    }
+
+    async fn set_project_active(&self, id: &str, active: bool) -> DbResult<bool> {
+        Ok(update_project_active(&self.pool, id, active).await?)
+    }
+
+    async fn backfill_project_id(&self, project_id: &str, path_pattern: &str) -> DbResult<u64> {
+        Ok(backfill_project_id(&self.pool, project_id, path_pattern).await?)
+    }
+
+    async fn conversation_stats_by_project(&self, project_id: &str) -> DbResult<serde_json::Value> {
+        Ok(conversation_stats_by_project(&self.pool, project_id).await?)
+    }
+
+    async fn recent_conversations_by_project(&self, project_id: &str, limit: i64) -> DbResult<Vec<serde_json::Value>> {
+        Ok(recent_conversations_by_project(&self.pool, project_id, limit).await?)
+    }
+
+    async fn kb_stats_by_project(&self, project_id: &str) -> DbResult<serde_json::Value> {
+        Ok(kb_stats_by_project(&self.pool, project_id).await?)
+    }
+
     // ── skill topics ──────────────────────────────────────────────
 
     async fn skill_topic_upsert(

@@ -599,7 +599,7 @@ pub fn parse_sections(body: &str) -> Vec<ParsedSection> {
 
 /// Ingest all SKILL.md files into the database.
 /// Scans ~/.claude/skills/, parses frontmatter + sections, writes to skill_topics + skill_blocks.
-pub async fn ingest_skills(store: &dyn crate::db::traits::SkillStore, skills_dir: &Path) -> usize {
+pub async fn ingest_skills(store: &dyn crate::db::traits::ProjectStore, skills_dir: &Path) -> usize {
     let index = SkillIndex::build(skills_dir);
     let skills = index.list();
     let mut ingested = 0;
@@ -713,7 +713,7 @@ fn md5_hash(data: &[u8]) -> u64 {
 }
 
 /// Materialize a single topic from DB to SKILL.md
-pub async fn materialize_topic(store: &dyn crate::db::traits::SkillStore, topic: &str) -> Result<String, String> {
+pub async fn materialize_topic(store: &dyn crate::db::traits::ProjectStore, topic: &str) -> Result<String, String> {
     let topic_meta = store
         .skill_topic_get(topic).await
         .map_err(|e| format!("DB error: {}", e))?
@@ -809,7 +809,7 @@ pub async fn materialize_topic(store: &dyn crate::db::traits::SkillStore, topic:
 }
 
 /// Materialize all topics from DB to SKILL.md files
-pub async fn materialize_all(store: &dyn crate::db::traits::SkillStore) -> Result<usize, String> {
+pub async fn materialize_all(store: &dyn crate::db::traits::ProjectStore) -> Result<usize, String> {
     let topics = store
         .skill_topic_list().await
         .map_err(|e| format!("DB error: {}", e))?;

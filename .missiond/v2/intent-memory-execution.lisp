@@ -54,7 +54,12 @@
             :cargo-build "workspace 通过"
             :side-effect "Cargo.toml 加 'serde' 到 uuid features (DTO 需 Serialize)"
             :at "2026-04-20"))
-        (stage-2C "合并子 trait (SkillStore / ToolCall / Event / Retrospective / Vision)" :status "pending")
+        (stage-2C "合并子 trait (SkillStore / ToolCall / Event / Retrospective / Vision)" :status "in-progress"
+          (2C.1 "SkillStore → ProjectStore (25+8=33 方法) + 补建 db/project.rs" :status "completed" :at "2026-04-20" :cargo "通过")
+          (2C.2 "ToolCallStore → ConversationStore (8 方法)" :status "pending")
+          (2C.3 "EventStore → ConversationStore (6 方法)" :status "pending")
+          (2C.4 "RetrospectiveStore → ConversationStore (13 方法)" :status "pending")
+          (2C.5 "VisionStore → ObservabilityStore (8 方法) + 补建 db/observability.rs" :status "pending"))
         (stage-2D "跨 trait 拆分 (watermarks/backfill/daemon_state → InfraStore)" :status "pending")
         (stage-2E "清理 sqlite 生态 (验证迁移 → 删 cfg → 删目录)"             :status "pending")
         (stage-2F "I001 wild files 补分类"                                       :status "pending"))
@@ -204,7 +209,8 @@
       :at "2026-04-20")
 
     (comp-007 :phase "2B.1" :summary "InfraStore trait 空壳" :cargo "通过" :at "2026-04-20")
-    (comp-008 :phase "2B.2" :agent "a29e205bbc09f4a16" :summary "DirectiveLayerStore 17 方法完整 PG impl (types+db+pg 3 新文件)" :cargo "通过" :at "2026-04-20"))
+    (comp-008 :phase "2B.2" :agent "a29e205bbc09f4a16" :summary "DirectiveLayerStore 17 方法完整 PG impl (types+db+pg 3 新文件)" :cargo "通过" :at "2026-04-20")
+    (comp-009 :phase "2C.1" :agent "a1ceaa5a700e618e1" :summary "SkillStore 25 方法合并进 ProjectStore (+8=33 total); pg/project.rs 的 8 方法搬进 pg/skill.rs 单一 impl; 补建 db/project.rs (18L re-export + D001 达成)" :cargo-workspace "通过" :rust-analyzer-note "E0119/E0046 IDE 误报, cargo feature 组合不同导致" :at "2026-04-20"))
 
   ;; ─────────────────────────────────────────────────────────
   ;; issues — 阻塞 / 未决问题
