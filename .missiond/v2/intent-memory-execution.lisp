@@ -36,7 +36,12 @@
         (stage-2A "轻量独立动作 (热身)"
           (2A.1 "删除两套 gen_*.rs (16 文件 8302 LOC ~285KB, 未被 mod.rs 导入)" :status "completed" :at "2026-04-20" :cargo-build "通过")
           (2A.2 "kb-manager: KnowledgeStore → KbStore rename"                    :status "completed" :at "2026-04-20" :cargo-build "通过")
-          (2A.3 "delete TimelineStore (traits.rs + db/timeline.rs + pg/timeline.rs)" :status "pending")
+          (2A.3 "TimelineStore 归属重审 + 删 db/timeline.rs 空壳"
+            :status "completed"
+            :correction "**原前提错** — Stage 2A.3 原说 'TimelineStore deprecated 应删'. 调研发现 TimelineStore 是 pillar 四 event-bus 的 projection 读接口 (见 intent-event-bus-execution.lisp L170), 不是 memory pillar 的 trait"
+            :actually-done "(a) 保留 TimelineStore trait 原样 (归 pillar 四 所有); (b) 删 db/timeline.rs (551B 冗余空壳 — re-export 已由 db/mod.rs:61 shared:: 替代); (c) mod.rs 删掉 sqlite-gated 'pub(crate) mod timeline;' 一行"
+            :deviation-from-plan "D003"
+            :at "2026-04-20" :cargo-build "通过")
           (2A.4 "I001 wild files 文档分类 → stage-2F (主会话批量补执行 lisp)"    :status "moved-to-2F"))
         (stage-2B "新建 trait 壳 — InfraStore + DirectiveLayerStore 空壳先建"  :status "pending")
         (stage-2C "合并子 trait (SkillStore / ToolCall / Event / Retrospective / Vision)" :status "pending")
@@ -83,7 +88,7 @@
         (VisionStore          :行 288  :方法  8 :lisp-无 "system-support sub-trait (image_descriptions), 应合并 ObservabilityStore")
         (KnowledgeStore       :行 308  :方法 56 :lisp-有-rename "lisp 叫 KbStore, 代码叫 KnowledgeStore — 命名不符!")
         (BoardStore           :行 396  :方法 41 :lisp-有 "BoardStore")
-        (TimelineStore        :行 462  :方法  6 :lisp-无 "⚠ DEPRECATED — v1.3.0 后 timeline 归 event_log; 应删")
+        (TimelineStore        :行 462  :方法  6 :lisp-无 "v0.4.20 误判为 deprecated; 实际是 pillar 四 event-bus projection 读接口 (event-bus-execution.lisp L170 声明重构为 projection delegate); 归 pillar 四, 不是 memory trait; 保留原样")
         (SlotStore            :行 478  :方法 41 :lisp-有 "SlotStore")
         (SkillStore           :行 540  :方法 25 :lisp-无 "lisp 把 skill 归 ProjectStore; 代码是独立 trait")
         (ObservabilityStore   :行 614  :方法 75 :lisp-有 "ObservabilityStore")
@@ -107,7 +112,17 @@
                                           :lisp-说 "InfraStore 归 system-support: infrastructure_state + backfill_* + daemon_state")
         (建-DirectiveLayerStore           :priority P1 :effort large "phase-3 专项, 新建 15 方法")
       :status "approved-decided"
-      :at "2026-04-20 phase-1.5"))
+      :at "2026-04-20 phase-1.5")
+
+    (D003
+      :lisp-said "Stage 2A.3 原计划 delete TimelineStore (基于 '它已 deprecated' 的假设)"
+      :actually-found "TimelineStore 不是 deprecated; 它是 pillar 四 event-bus 的 projection 读接口 (event-bus-execution.lisp L170 明确声明 'db/pg/timeline.rs 重写: 每个 TimelineStore 方法 2-3 行 delegate 到 projection::*'); 被 ws/server.rs catch-up 和 handlers/comm/timeline.rs 的 5 MCP 工具 active 调用"
+      :reason "phase-1.5 agent 对 traits.rs 13 trait 的分类把 TimelineStore 标 deprecated 是错的; TimelineStore 归 pillar 四 不归 memory"
+      :decided "Stage 2A.3 动作修正: 保留 TimelineStore trait + 删 db/timeline.rs 冗余空壳 (551B re-export, 已被 shared:: 替代)"
+      :scope-clarification "pg/timeline.rs / sqlite/timeline.rs / TimelineStore trait 全部归 pillar 四 event-bus 管, memory pillar 同构不动"
+      :impact "memory pillar D002 的 13 code traits 重新计数: 9 primary 属 memory + DirectiveLayerStore TBD + 3 sub-traits (ToolCall/Event/Retrospective 合并 ConversationStore) + ...; 注意 TimelineStore 属 pillar 四 不计入 memory"
+      :status "approved-decided"
+      :at "2026-04-20 stage-2A.3"))
 
   ;; ─────────────────────────────────────────────────────────
   ;; decisions — 决策日志 (非 frozen lisp 改动, 施工过程的小决策)

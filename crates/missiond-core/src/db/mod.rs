@@ -43,8 +43,6 @@ pub mod beacon;
 #[cfg(feature = "sqlite")]
 mod migration;
 #[cfg(feature = "sqlite")]
-pub(crate) mod timeline;
-#[cfg(feature = "sqlite")]
 mod dynamic_slot;
 #[cfg(feature = "sqlite")]
 mod narration;
