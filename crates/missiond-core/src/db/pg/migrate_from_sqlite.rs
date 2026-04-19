@@ -57,7 +57,7 @@ const MIGRATION_ORDER: &[&str] = &[
     // Observability
     "gemini_requests",
     "incidents",
-    "system_timeline",
+    // system_timeline dropped in v1.3.0 SSOT cutover (event_log is the truth).
     "router_chat_archive",
     // AST
     "ast_nodes",
@@ -420,7 +420,7 @@ async fn fix_identity_sequences(pool: &sqlx::PgPool) {
         ("conversation_messages", "id", "conversation_messages_id_seq"),
         ("conversation_events", "id", "conversation_events_id_seq"),
         ("token_usage_ledger", "id", "token_usage_ledger_id_seq"),
-        ("system_timeline", "seq", "system_timeline_seq_seq"),
+        // system_timeline dropped in v1.3.0 SSOT cutover.
     ];
 
     for (table, col, seq) in &sequences {

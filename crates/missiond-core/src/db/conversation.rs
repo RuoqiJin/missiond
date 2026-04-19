@@ -403,11 +403,11 @@ impl MissionDB {
         let time_clause = {
             let mut parts = Vec::new();
             if let Some(s) = since {
-                let ts = Self::parse_since(s).replace(' ', "T");
+                let ts = crate::db::shared::parse_since(s).replace(' ', "T");
                 parts.push(format!("started_at >= '{}'", ts.replace('\'', "''")));
             }
             if let Some(u) = until {
-                let ts = Self::parse_until(u).replace(' ', "T");
+                let ts = crate::db::shared::parse_until(u).replace(' ', "T");
                 parts.push(format!("started_at <= '{}'", ts.replace('\'', "''")));
             }
             if parts.is_empty() { String::new() } else { format!(" AND {}", parts.join(" AND ")) }

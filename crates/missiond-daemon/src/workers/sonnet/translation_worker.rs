@@ -349,14 +349,29 @@ async fn process_single(state: &AppState, ctx: ThinkingTraceCtx) -> bool {
 }
 
 /// Poll DB for thinking messages that don't have translations yet.
+///
+/// v1.3.0 SSOT cutover: event_log.kind="logged" carries MessageEvent::Logged;
+/// filter by `role=="thinking"` via the payload projection downstream.
 async fn poll_pending(state: &AppState, consecutive_failures: &mut u32) {
-    // Find thinking_message timeline entries from the last 24h that lack translations
     let rows = match state
         .store
-        .query_timeline_filtered(Some("thinking_message"), None, None, None, 50, 0)
+        .query_timeline_filtered(Some("message::logged"), None, None, None, 50, 0)
         .await
     {
-        Ok(r) => r,
+        Ok(r) => r
+            .into_iter()
+            .filter(|r| {
+                serde_json::from_str::<serde_json::Value>(&r.payload)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("Logged")
+                            .and_then(|inner| inner.get("role"))
+                            .and_then(|role| role.as_str())
+                            .map(|s| s == "thinking")
+                    })
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>(),
         Err(e) => {
             warn!(error = %e, "Translation poll: DB query failed");
             return;
@@ -371,9 +386,14 @@ async fn poll_pending(state: &AppState, consecutive_failures: &mut u32) {
             break;
         }
 
-        // Extract message_id from payload
+        // Extract message_id from externally-tagged payload:
+        //   `{"Logged":{"message_id": N, ...}}`
         let payload: serde_json::Value = serde_json::from_str(&row.payload).unwrap_or_default();
-        let msg_id = match payload.get("message_id").and_then(|v| v.as_i64()) {
+        let msg_id = match payload
+            .get("Logged")
+            .and_then(|inner| inner.get("message_id"))
+            .and_then(|v| v.as_i64())
+        {
             Some(id) => id,
             None => continue,
         };

@@ -172,26 +172,23 @@ async fn test_pg_slot_store() {
 
 #[tokio::test]
 #[ignore]
-async fn test_pg_timeline_store() {
+async fn test_pg_timeline_store_projection() {
+    // v1.3.0 SSOT cutover: TimelineStore is read-only projection over event_log.
+    // Writes go through the bus (`bus.publish_*`); we only verify reads here.
     let (store, _container) = setup_pg().await;
 
-    // Insert
-    let entries = vec![
-        (Some("trace-1"), "span-1", Some("test_event"), "test", Some("Test summary"), r#"{"action":"test"}"#),
-    ];
-    let refs: Vec<(Option<&str>, &str, Option<&str>, &str, Option<&str>, &str)> = entries.iter()
-        .map(|(a, b, c, d, e, f)| (*a, *b, *c, *d, *e, *f))
-        .collect();
-    let seqs = store.insert_timeline_batch(&refs).await.unwrap();
-    assert_eq!(seqs.len(), 1);
-
-    // Query
+    // Read APIs must all succeed even on an empty event_log.
     let latest = store.timeline_latest_seq().await.unwrap();
-    assert!(latest >= seqs[0]);
+    assert!(latest >= 0);
 
-    // Stats
     let stats = store.query_timeline_stats(None, None).await.unwrap();
-    assert!(stats.total_events >= 1);
+    assert!(stats.total_events >= 0);
+
+    let _ = store
+        .query_timeline_filtered(None, None, None, None, 10, 0)
+        .await
+        .unwrap();
+    let _ = store.query_timeline_since(0, 10).await.unwrap();
 }
 
 #[tokio::test]

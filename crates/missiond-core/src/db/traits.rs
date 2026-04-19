@@ -450,24 +450,23 @@ pub trait BoardStore: Send + Sync {
 }
 
 // ============================================================================
-// 9. TimelineStore — System event timeline
-// Source: timeline.rs
+// 9. TimelineStore — timeline read projection over event_log (SSOT)
+// v1.3.0 SSOT cutover: event_log is the timeline truth source (frozen lisp §4.6).
+// All methods are pure reads, shaped via `event::projection`. Writes no longer
+// exist — insert/update/cleanup paths went away with the legacy
+// `system_timeline` table (drop migration 20260420200000).
+// Source: db/pg/timeline.rs → missiond_core::event::projection
 // ============================================================================
 
 #[async_trait]
 pub trait TimelineStore: Send + Sync {
-    async fn insert_timeline_batch(&self, entries: &[(Option<&str>, &str, Option<&str>, &str, Option<&str>, &str)]) -> DbResult<Vec<i64>>;
     async fn query_timeline_since(&self, since_seq: i64, limit: usize) -> DbResult<Vec<TimelineRow>>;
     async fn timeline_latest_seq(&self) -> DbResult<i64>;
-    async fn cleanup_timeline_ttl(&self, days: i64) -> DbResult<usize>;
-    async fn find_timeline_needing_briefing(&self, min_content_chars: usize, limit: usize) -> DbResult<Vec<(i64, String, String, Option<String>)>>;
-    async fn update_timeline_summary(&self, seq: i64, summary: &str) -> DbResult<bool>;
     async fn query_timeline_filtered(&self, event_type: Option<&str>, trace_id: Option<&str>, since: Option<&str>, until: Option<&str>, limit: i64, offset: i64) -> DbResult<Vec<TimelineRow>>;
     async fn query_timeline_stratified(&self, since: &str, until: &str, per_type_limit: i64, type_limits: &HashMap<String, i64>) -> DbResult<Vec<TimelineRow>>;
     async fn query_timeline_by_trace(&self, trace_id: &str) -> DbResult<Vec<TimelineRow>>;
     async fn query_timeline_stats(&self, since: Option<&str>, until: Option<&str>) -> DbResult<TimelineStats>;
     async fn query_timeline_search(&self, keyword: &str, since: Option<&str>, until: Option<&str>, limit: i64) -> DbResult<Vec<TimelineRow>>;
-    async fn get_briefing_summaries_for_session(&self, session_id: &str) -> DbResult<HashMap<i64, String>>;
 }
 
 // ============================================================================

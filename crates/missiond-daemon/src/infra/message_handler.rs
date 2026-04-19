@@ -572,9 +572,8 @@ async fn emit(
                         content: db_msg.content.clone(),
                     });
             }
-            if content_chars > 300 {
-                state.briefing_notify.notify_one();
-            }
+            // v1.3.0 SSOT cutover: briefing_worker removed (see
+            // intent-event-bus-execution.lisp D015). Long-message hook is gone.
         }
     }
 

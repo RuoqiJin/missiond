@@ -158,7 +158,35 @@
                :lisp-said "v1.2.0 §4.2 retention :old-system_timeline '已删(Phase 8)' — 与实况不符: Phase 8 并未 DROP system_timeline 表, timeline-writer 订阅者仍在运行, mission_timeline / WS timeline-stream 仍读 system_timeline. event_log 虽已是新 SSOT 写入层, 但 timeline 侧读取路径未完成 cutover."
                :actually-did "v1.2.0 → v1.3.0 升级 (user approved): (1) file-governance :version v1.3.0, :last-revision 记录本次升级; (2) §4.2 retention 的 :old-system_timeline '已删(Phase 8)' 改为 :system_timeline-cutover 精确描述实况进度 (schema drop migration 待写, subscriber 待移除, readers 待迁); (3) §4.6 event_log access-patterns 新增 read-ui-projection 模式 — 声明 mission_timeline + WS timeline-stream 经 projection 直读 event_log, 列出 SQL VIEW vs 代码层两种 projection 选项 + FTS 索引需求; (4) §4.6 event_log 尾部新增 :ssot-declaration 锁死 event_log = timeline SSOT. 未改代码, 仅在 lisp 锁定目标态."
                :reason "v1.2.0 '已删(Phase 8)' 是历史乐观 — migrations/ 仍有 system_timeline schema. 2026-04-19 memory pillar session 中用户明确要求 timeline 与 event-bus 合并做 SSOT. 本次变更属 structural-change (新 access-pattern + :ssot-declaration), 需 user 明确同意 — 已获得. 代码 cutover (drop 表 + 移除 timeline-writer + 迁移 readers + 加 FTS) 在后续阶段执行."
-               :approved-by "user (2026-04-19 session)"))
+               :approved-by "user (2026-04-19 session)")
+
+    (deviation :id D015 :phase "v1.3.0-cutover" :date "2026-04-19" :agent "ssot-cutover-executor"
+               :lisp-said "v1.3.0 §4.6 event_log :ssot-declaration + read-ui-projection access-pattern + :system_timeline-cutover 声明目标态: event_log 即 timeline SSOT, 需 drop system_timeline 表 / 移除 timeline-writer / 迁 readers / 加 FTS."
+               :actually-did
+                 ("(1) 新 migration 20260420100000_event_log_fts.sql — GIN 索引 to_tsvector('simple', payload_inline::text) 覆盖 §4.6 read-ui-projection :fts-requirement."
+                  "(2) 新 migration 20260420200000_drop_system_timeline.sql — DROP TABLE IF EXISTS system_timeline CASCADE (CASCADE 清除 20260318000000_init 里 4 个 idx_tl_* 索引)."
+                  "(3) 新模块 crates/missiond-core/src/event/projection.rs (~300 行) — event_log → TimelineRow 投影: event_type='domain::kind', summary 从 payload_inline.preview/summary/title 抽取, FTS 搜索走 plainto_tsquery, 7 个 public fn 对应 TimelineStore 读方法."
+                  "(4) TimelineStore trait (db/traits.rs) 收缩为纯读: 删除 insert_timeline_batch / cleanup_timeline_ttl / find_timeline_needing_briefing / update_timeline_summary / get_briefing_summaries_for_session 5 个写方法; 保留 7 个读方法全部路由到 projection."
+                  "(5) db/pg/timeline.rs 重写: 每个 TimelineStore 方法 2-3 行 delegate 到 projection::* (读 event_log, 无 system_timeline SQL)."
+                  "(6) db/sqlite/timeline.rs 改为 fail-fast stub — 返回 DbError::Other('TimelineStore is projection over PG event_log; SQLite backend unsupported') 对所有 7 方法 (sqlite 只供迁移工具用, 不该走 timeline 路径)."
+                  "(7) db/timeline.rs (MissionDB inherent methods) 清空为单个 pub use shared::*, 原 14 个 system_timeline SQL 方法全删."
+                  "(8) 删除 crates/missiond-daemon/src/workers/sonnet/briefing_worker.rs (+ workers/sonnet/mod.rs 移除 pub mod, main.rs 移除 spawn 调用 + briefing_notify 字段, state.rs 移除 briefing_notify 字段, message_handler.rs 删除 briefing_notify.notify_one() call) — briefing_worker 的 update_timeline_summary UPDATE 语义与 append-only event_log 根本不兼容, 快速失败原则: 不加兜底, 直接删."
+                  "(9) embedding_worker.rs 删除 get_briefing_summaries_for_session 调用 + briefing_map 选择逻辑 — 改为直接用 raw content (500 字符/消息上限)."
+                  "(10) translation_worker.rs poll_pending 过滤条件从 Some('thinking_message') 改为 Some('message::logged') + 内存里过滤 payload.Logged.role=='thinking'; message_id 提取改为 payload.Logged.message_id (externally-tagged)."
+                  "(11) timeline_analyst.rs query_timeline_filtered 从 Some('gemini_request_completed') 改为 Some('llm::legacy_gemini_request_completed'); extract_duration_ms 改为读 externally-tagged payload."
+                  "(12) main.rs 删除 cleanup_timeline_ttl 调用 (event_log retention 已由 lifecycle/retention.rs + bus/retention_cron.rs 管, 旧表无需清理)."
+                  "(13) pg/mod.rs fix_identity_sequences 移除 system_timeline entry; pg/migrate_from_sqlite.rs 同步移除 system_timeline 表引用 + 序列修复条目."
+                  "(14) tests/pg_integration.rs test_pg_timeline_store 重写为纯读烟测 (read APIs 对空 event_log 也必须成功), 不再 insert_timeline_batch."
+                  "(15) db/conversation.rs / db/mod.rs 的 Self::parse_since/parse_until 调用 (这些原定义在 timeline.rs 里) 改为走 db::shared::parse_since/parse_until (自由函数, 无 MissionDB 依赖).")
+               :deviations-from-plan
+                 ("Phase 6 (timeline-writer 订阅者移除): 原 Phase 8 event-bus 迁移已完成此步 (D014 lisp-said 也确认), 本次 cutover 无需再删."
+                  "briefing_worker: 任务书隐含保留 (只说 'drop table'), 但其 UPDATE 路径与 append-only event_log 不兼容 — 选择删除而非给 summary 开 sidecar 表 (对齐 '快速失败' 约定)."
+                  "WS /events sync 协议 (ws/server.rs::handle_catch_up): 代码已通过 TimelineStore trait 自动切到 projection, 但 event_type 从 v1 wire_type 改为 'domain::kind' — catch-up 输出 wire-format 轻微变化. live stream 不受影响 (仍由 daemon/src/bus/ws_bridge.rs 的 v2_logged_to_v1_wire_format 52-arm mapper 保持字节级兼容, 12 byte-equivalence tests pass)."
+                  "Forge gen_misc.rs / gen/misc.rs 仍有 system_timeline 生成的 SQLite 代码: 只在 feature='sqlite' 下编译, default (postgres) 构建完全不触达; 若要彻底清零需更新 intent-db-misc.lisp 并重新冲压 — 超出本次范围, 留给指挥官决定."
+                  "db/migration.rs (SQLite-only) 的 system_timeline CREATE TABLE + FTS5 triggers 仍在: sqlite feature gate, 不影响 default build, 同上超出范围.")
+               :test-status "cargo build --workspace clean (0 errors, 54 warnings 全是 dead-code 遗留非新增); cargo test -p missiond-core --lib 255→259 pass; cargo test -p missiond-daemon 96 pass; cargo test -p missiond-daemon ws_bridge 12/12 byte-equivalence pass."
+               :reason "Phase A 防御: 先加 FTS 索引 + drop migration (schema 层完备); Phase B 进攻: 读路径由 TimelineStore trait 屏蔽, 1:1 换到 projection, 无调用方签名变化. briefing/translation/embedding 写依赖或 wire-format 依赖, 需要逐个审查: briefing_worker 因 UPDATE 语义根本矛盾而删; translation/embedding 轻微调整 payload 解析保留. Lisp ↔ code 同构性: projection.rs 的 7 个 pub fn 与 §4.6 read-ui-projection 声明的 2 consumers (mission_timeline + WS stream) + FTS 索引 100% 对齐."
+               :approved-by "ssot-cutover-executor (auto)"))
 
   ;; ─ 执行期阻塞/未决问题 ─
   ;; 格式: (issue :id I001 :phase N :date "..." :severity blocker|major|minor

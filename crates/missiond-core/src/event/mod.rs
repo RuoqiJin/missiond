@@ -41,6 +41,7 @@ pub mod lifecycle;
 pub mod log;
 pub mod metrics;
 pub mod pipeline;
+pub mod projection;
 pub mod subscription;
 
 pub use domain::Domain;

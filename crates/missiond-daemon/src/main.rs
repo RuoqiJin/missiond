@@ -38,7 +38,7 @@ use llm::{
 };
 use workers::codex::{step_narrator, vision_worker};
 use workers::local::{ast_sync_worker, code_prefetch, experience_harvester};
-use workers::sonnet::{briefing_worker, embedding_worker, translation_worker};
+use workers::sonnet::{embedding_worker, translation_worker};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -693,7 +693,6 @@ async fn main() -> Result<()> {
         bus: Arc::clone(&bus_services),
         stats: Arc::clone(&daemon_stats),
         prompts: Arc::new(prompts::PromptStore::load()),
-        briefing_notify: Arc::new(tokio::sync::Notify::new()),
         strategy_notify: Arc::new(tokio::sync::Notify::new()),
         retro_notify: Arc::new(tokio::sync::Notify::new()),
         ast_sync_tx,
@@ -1066,19 +1065,17 @@ async fn main() -> Result<()> {
         Arc::new(state.clone()),
         shutdown_rx.clone(),
     );
+    // v1.3.0 SSOT cutover: briefing_worker deleted — its `update_timeline_summary`
+    // UPDATE pattern is incompatible with the append-only event_log. Message
+    // previews come from payload_inline directly; semantic briefing is deferred.
     if state.sonnet.is_some() {
-        workers::spawn_worker(
-            briefing_worker::BriefingWorker,
-            Arc::new(state.clone()),
-            shutdown_rx.clone(),
-        );
         workers::spawn_worker(
             translation_worker::TranslationWorker,
             Arc::new(state.clone()),
             shutdown_rx.clone(),
         );
     } else {
-        warn!("MinimaxGateway not available, briefing and translation workers disabled");
+        warn!("SonnetGateway not available, translation worker disabled");
     }
 
     // --- P0: IPC listener in dedicated task (never starved by other work) ---
@@ -1288,19 +1285,9 @@ async fn main() -> Result<()> {
         ws_port
     );
 
-    // Legacy `system_timeline` TTL cleanup still runs at startup for the
-    // 3-month read-only archive window (see execution lisp global-notes).
-    {
-        let store = Arc::clone(&state.store);
-        tokio::spawn(async move {
-            match store.cleanup_timeline_ttl(7).await {
-                Ok(deleted) if deleted > 0 => {
-                    info!(deleted, "system_timeline (legacy): cleaned up old entries (>7 days)")
-                }
-                _ => {}
-            }
-        });
-    }
+    // v1.3.0 SSOT cutover: `system_timeline` table dropped (migration
+    // 20260420200000). Its TTL cleanup is gone — event_log retention is the
+    // single source (see lifecycle/retention.rs + bus/retention_cron.rs).
 
     // WS webhook → v2 bus bridge: the core WS server can't call into
     // `BusServices` directly, so it forwards via `incident_webhook_tx`

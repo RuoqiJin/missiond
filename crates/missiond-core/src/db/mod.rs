@@ -205,11 +205,11 @@ impl MissionDB {
         f(&conn)
     }
 
-    /// Parse time string for "since" context (instance wrapper for Self::parse_since)
-    pub fn parse_time_since(&self, s: &str) -> String { Self::parse_since(s) }
+    /// Parse time string for "since" context — delegates to `db::shared::parse_since`.
+    pub fn parse_time_since(&self, s: &str) -> String { shared::parse_since(s) }
 
-    /// Parse time string for "until" context (instance wrapper for Self::parse_until)
-    pub fn parse_time_until(&self, s: &str) -> String { Self::parse_until(s) }
+    /// Parse time string for "until" context — delegates to `db::shared::parse_until`.
+    pub fn parse_time_until(&self, s: &str) -> String { shared::parse_until(s) }
 
     /// Execute a closure with the read connection locked.
     /// WARNING: The closure MUST NOT contain any `.await` calls (rusqlite is synchronous).

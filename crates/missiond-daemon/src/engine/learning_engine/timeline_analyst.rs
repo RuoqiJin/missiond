@@ -89,10 +89,14 @@ async fn collect_analysis_data(state: &AppState) -> Result<AnalysisData> {
         .unwrap_or_default();
 
     // 3. Slow Gemini requests (>60s, from recent gemini events, max 50 → filter → take 20)
+    //
+    // v1.3.0 SSOT cutover: event_log projection uses "domain::kind" for event_type
+    // (frozen lisp §4.6 read-ui-projection). Gemini completions live in
+    // LlmEvent::LegacyGeminiRequestCompleted under domain="llm".
     let all_gemini = state
         .store
         .query_timeline_filtered(
-            Some("gemini_request_completed"),
+            Some("llm::legacy_gemini_request_completed"),
             None,
             Some("12h"),
             None,
@@ -133,9 +137,16 @@ async fn collect_analysis_data(state: &AppState) -> Result<AnalysisData> {
 }
 
 fn extract_duration_ms(row: &TimelineRow) -> i64 {
+    // v1.3.0 projection: payload is externally-tagged
+    //   `{"LegacyGeminiRequestCompleted":{"duration_ms":...}}`.
     serde_json::from_str::<serde_json::Value>(&row.payload)
         .ok()
-        .and_then(|v| v.get("duration_ms")?.as_i64())
+        .and_then(|v| {
+            v.as_object()
+                .and_then(|obj| obj.values().next())
+                .and_then(|inner| inner.get("duration_ms"))
+                .and_then(|d| d.as_i64())
+        })
         .unwrap_or(0)
 }
 

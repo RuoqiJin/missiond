@@ -59,7 +59,7 @@ impl PgMissionStore {
             ("conversation_messages", "id", "conversation_messages_id_seq"),
             ("conversation_events", "id", "conversation_events_id_seq"),
             ("token_usage_ledger", "id", "token_usage_ledger_id_seq"),
-            ("system_timeline", "seq", "system_timeline_seq_seq"),
+            // system_timeline dropped in v1.3.0 SSOT cutover (event_log SSOT).
         ];
 
         let mut fixed = 0usize;

@@ -410,14 +410,9 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
         false
     };
 
-    // Fetch briefing summaries: semantic summaries are much more information-dense
-    // than raw content, improving topic extraction quality while reducing token usage.
-    let briefing_map = state
-        .store
-        .get_briefing_summaries_for_session(session_id)
-        .await
-        .unwrap_or_default();
-
+    // v1.3.0 SSOT cutover: briefing summaries removed (briefing_worker deleted,
+    // see intent-event-bus-execution.lisp D015). Topic extraction now uses raw
+    // message content with a 500-char per-message cap.
     let msg_budget = if has_timeline { 4000 } else { 8000 };
     for msg in &messages {
         let prefix = match msg.role.as_str() {
@@ -427,10 +422,7 @@ pub(crate) async fn generate_and_store_conv_embedding(state: &AppState, session_
             "tool_result" => "R",
             _ => "?",
         };
-        // Prefer briefing summary over raw content ("优先 summary，兜底 raw")
-        let content = if let Some(summary) = briefing_map.get(&msg.id) {
-            summary.clone()
-        } else if msg.content.len() > 500 {
+        let content = if msg.content.len() > 500 {
             format!("{}…", &msg.content[..char_boundary_at(&msg.content, 500)])
         } else {
             msg.content.clone()

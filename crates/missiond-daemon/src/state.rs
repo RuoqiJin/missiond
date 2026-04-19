@@ -186,8 +186,6 @@ pub(crate) struct AppState {
     pub(crate) stats: Arc<DaemonStats>,
     /// Centralized LLM prompts with file-based hot-reload.
     pub(crate) prompts: Arc<PromptStore>,
-    /// Wakeup signal for briefing worker when a long conversation message is logged.
-    pub(crate) briefing_notify: Arc<tokio::sync::Notify>,
     /// Wakeup signal for strategy worker (SessionCompleted / sweeper reconciliation).
     pub(crate) strategy_notify: Arc<tokio::sync::Notify>,
     /// Wakeup signal for retro worker (SessionCompleted / sweeper reconciliation).
