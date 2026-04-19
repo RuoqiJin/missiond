@@ -35,9 +35,9 @@
         :stages-order "2A 热身 → 2B 新建 trait 壳 → 2C 合并子 trait → 2D 跨 trait 拆分 → 2E sqlite 生态清理 → 2F wild files 补分类"
         (stage-2A "轻量独立动作 (热身)"
           (2A.1 "删除两套 gen_*.rs (16 文件 8302 LOC ~285KB, 未被 mod.rs 导入)" :status "completed" :at "2026-04-20" :cargo-build "通过")
-          (2A.2 "kb-manager: KnowledgeStore → KbStore rename"                    :status "pending")
-          (2A.3 "board: 补 I001 wild files 归属 (question/audit/beacon)"        :status "pending")
-          (2A.4 "delete TimelineStore (traits.rs + db/timeline.rs + pg/timeline.rs)" :status "pending"))
+          (2A.2 "kb-manager: KnowledgeStore → KbStore rename"                    :status "completed" :at "2026-04-20" :cargo-build "通过")
+          (2A.3 "delete TimelineStore (traits.rs + db/timeline.rs + pg/timeline.rs)" :status "pending")
+          (2A.4 "I001 wild files 文档分类 → stage-2F (主会话批量补执行 lisp)"    :status "moved-to-2F"))
         (stage-2B "新建 trait 壳 — InfraStore + DirectiveLayerStore 空壳先建"  :status "pending")
         (stage-2C "合并子 trait (SkillStore / ToolCall / Event / Retrospective / Vision)" :status "pending")
         (stage-2D "跨 trait 拆分 (watermarks/backfill/daemon_state → InfraStore)" :status "pending")
@@ -156,6 +156,21 @@
       :verified-mod-rs "无 mod gen_* / 无 pub mod gen; 确认未导入"
       :cargo-build "通过 (Finished dev profile in 12.93s, 仅 pg/board.rs:852 unused_mut pre-existing warning)"
       :resolved ["I005"]
+      :at "2026-04-20")
+
+    (comp-005
+      :phase "phase-2-stage-2A.2"
+      :agent "general-purpose agent (a7c3bc9b9e93c7bd5)"
+      :summary "KnowledgeStore → KbStore rename (代码对齐 lisp)"
+      :files-modified 3
+      :details
+        ("db/traits.rs — 2 matches (trait decl + MissionStore super-trait bound)"
+         "db/pg/knowledge.rs — 3 matches (doc comment + import + impl)"
+         "db/sqlite/knowledge.rs — 2 matches (import + impl)")
+      :total-edits "7 line changes"
+      :cargo-build "workspace 通过 (54 pre-existing warnings, 无新错误)"
+      :untouched-per-spec "表名 knowledge / module knowledge / 类型 KnowledgeEntry/KnowledgeRow / 变量 knowledge_store"
+      :remaining-occurrences 0 "全 repo grep 干净"
       :at "2026-04-20"))
 
   ;; ─────────────────────────────────────────────────────────

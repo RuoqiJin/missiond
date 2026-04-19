@@ -1,8 +1,8 @@
-//! KnowledgeStore — PostgreSQL implementation.
+//! KbStore — PostgreSQL implementation.
 
 use async_trait::async_trait;
 use crate::db::error::DbResult;
-use crate::db::traits::KnowledgeStore;
+use crate::db::traits::KbStore;
 use crate::db::shared::{token_jaccard_similarity, infer_kb_type, contains_sensitive_data};
 use crate::types::*;
 use super::PgMissionStore;
@@ -61,7 +61,7 @@ const KB_COLS: &str = "id, category, key, summary, detail, source, confidence, a
 
 #[cfg(feature = "postgres")]
 #[async_trait]
-impl KnowledgeStore for PgMissionStore {
+impl KbStore for PgMissionStore {
     // ========== Core CRUD ==========
 
     async fn kb_remember(&self, input: &KBRememberInput) -> DbResult<KBRememberResult> {

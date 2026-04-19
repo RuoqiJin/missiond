@@ -300,12 +300,12 @@ pub trait VisionStore: Send + Sync {
 }
 
 // ============================================================================
-// 7. KnowledgeStore — KB CRUD, FTS, embedding, graph, ops, AST links
+// 7. KbStore — KB CRUD, FTS, embedding, graph, ops, AST links
 // Source: knowledge.rs (53 methods) + migration.rs (kb_rebuild_fts_if_dirty)
 // ============================================================================
 
 #[async_trait]
-pub trait KnowledgeStore: Send + Sync {
+pub trait KbStore: Send + Sync {
     // -- Core CRUD --
     async fn kb_remember(&self, input: &KBRememberInput) -> DbResult<KBRememberResult>;
     async fn kb_get(&self, key: &str) -> DbResult<Option<KnowledgeEntry>>;
@@ -748,7 +748,7 @@ pub trait ProjectStore: Send + Sync {
 #[async_trait]
 pub trait MissionStore:
     ConversationStore + MessageStore + ToolCallStore + EventStore
-    + RetrospectiveStore + VisionStore + KnowledgeStore + BoardStore
+    + RetrospectiveStore + VisionStore + KbStore + BoardStore
     + TimelineStore + SlotStore + SkillStore + ObservabilityStore
     + ProjectStore
     + Send + Sync

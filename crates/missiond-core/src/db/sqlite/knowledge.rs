@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 use super::SqliteMissionStore;
 use crate::db::error::DbResult;
-use crate::db::traits::KnowledgeStore;
+use crate::db::traits::KbStore;
 use crate::types::*;
 use std::collections::HashMap;
 
 #[async_trait]
-impl KnowledgeStore for SqliteMissionStore {
+impl KbStore for SqliteMissionStore {
     // -- Core CRUD --
 
     async fn kb_remember(&self, input: &KBRememberInput) -> DbResult<KBRememberResult> {
