@@ -270,7 +270,47 @@
           :worker-await "Worker 在 select! 中 await watch::Receiver::changed() — 零成本异步推送,非 HashMap 轮询"
           (mutations "set_global_paused / set_provider / set_domain / set_worker / set_slot_role / set_project"))
 
-        :project-pause-note "is_project_paused(id) 由 handler 独立检查,不属于 is_effectively_paused() 的 worker 级联 — 项目控制数据流,不控制 worker"))
+        :project-pause-note "is_project_paused(id) 由 handler 独立检查,不属于 is_effectively_paused() 的 worker 级联 — 项目控制数据流,不控制 worker")
+
+      ;; ── 驱动 memory state transitions 的 engine (非 worker 也非 dispatcher) ──
+      (component autopilot
+        (desc "任务队列自主推进引擎 — tick 扫 board → CAS 占用 → 派发 → lease 回收")
+        :target "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
+        :tick "5-10s 可配"
+        :tick-pipeline "memory-scheduler → extraction-check → board-task-dispatch → flow-progression → supervision-check"
+
+        (dispatch-logic
+          "list_autopilot_tasks: WHERE auto_execute=1 AND status='open' ORDER BY (assignee 存在) → order_idx"
+          "claim_board_task(id, autopilot_id, 'pty_slot') 原子 CAS 占用"
+          "claim 成功 → status→running + 派给 assignee 或自动选 slot"
+          "list_running_autopilot_tasks: 监控已 claim 任务的租约"
+          "lease 超期 → recover_stale_running_tasks 强制 reset open")
+
+        (writes-to-memory
+          :primary "board_tasks (CAS claim / status 推进 / lease 回收)"
+          :auxiliary "prompt_snapshots (save_prompt_snapshot: task 执行时 prompt + KB citation 存档)")
+
+        :serves "pillar 一 memory :: module board :: path task-queue-lifecycle"
+        :scan-reads "board_tasks (内部决策前置读取, 自读自写闭环)"
+        :invariant "CAS 原子保证多 executor 并发安全; lease 保证崩溃后任务可回收")
+
+      (component flow-engine-v2
+        (desc "声明式工作流编排引擎 — flow YAML 节点的运行时执行器")
+        :target "crates/missiond-daemon/src/engine/flow/{mod,runner,handlers,loader}.rs"
+        :node-types 5 "LlmCall / SlotTask / McpTool / DaemonAction / ParallelSlotTasks"
+        :loads "$MISSIOND_HOME/flows/*.yaml (pillar 五 :: workflows :kind executable)"
+
+        (execution-model
+          "逐节点执行; 每节点完成后 persist_context → update_board_task(flow_context JSON)"
+          "flow_phase 推进 + 变量插值"
+          "支持分支 + 并行 (ParallelSlotTasks)")
+
+        (writes-to-memory
+          :primary "board_tasks.flow_context (每节点 persist 保证崩溃可恢复)"
+          :storage "flow_context JSONB 独立于 status 变动存续")
+
+        :serves "pillar 一 memory :: module board :: path task-queue-lifecycle"
+        :invariant "每节点执行后必须 persist; 失败时上游节点结果保留"))
 
     ;; ── 2.5 Code Generation (Forge 冲压) ──
     (section code-generation

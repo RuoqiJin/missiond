@@ -23,7 +23,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.6")
+  (version "draft-v0.4.7")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -37,7 +37,8 @@
     (v0.4.3 "CLAUDE.md 分层: 全局 ~/.claude/CLAUDE.md + manager → pillar 五 intent-layer; 项目级 <project>/CLAUDE.md + manager → memory :: project-management")
     (v0.4.4 "action/instruction specs 迁 pillar 五: intent/plan/workflow/user_intents DB 表 + system-level intent*.lisp + workflows*.lisp + flows/*.yaml; memory 只留'项目代码真实状态'的 per-project intent.lisp")
     (v0.4.5 "workflow-lisp-templates + flow-yaml-templates 合并到单一 component workflows (:kind methodology | executable), 符合 Option B 设计")
-    (v0.4.6 "embedding 契约 SSOT: cross-cutting 新增 capability embedding-storage-governance, 5 处散落描述改用 cross-ref; 确认 5 张承载表 (含 skill_topics / ast_nodes) 及 message_embeddings 的 halfvec 特殊性"))
+    (v0.4.6 "embedding 契约 SSOT: cross-cutting 新增 capability embedding-storage-governance, 5 处散落描述改用 cross-ref; 确认 5 张承载表 (含 skill_topics / ast_nodes) 及 message_embeddings 的 halfvec 特殊性")
+    (v0.4.7 "board 模块按'memory=库'原则精简: autopilot + flow-engine-v2 计算逻辑移到 pillar 二 2.4 orchestration, board 只留 cross-ref"))
   (status "草稿 — 大多数 module 已稳定, 可演进")
 
   (purpose "系统长期记忆 — 4 个业务模块自治 + 底层系统支持层 + 横切")
@@ -452,33 +453,31 @@
         :benefit  "支撑 autopilot 自主编排"))
 
     (module-ingress
-      (desc "任务创建 + 状态推进 + 级联 + 问题 + 执行存档的写入路径")
+      (desc "任务创建 + 问题 API (库的写入口) + 外部 engine 驱动")
+      :principle "memory = 库. 本模块只列'谁来写我的表'; engine 内部逻辑 (tick/决策/recovery) 见 pillar 二"
 
+      ;; ── MCP 写入 API (库的直接写入面) ──
       (writer mcp-board-lifecycle
         :tools "mission_board_create / update / claim / decompose / retry / note_add / delete"
         :count 7
         :writes "board_tasks / board_task_notes"
         :code "daemon/src/handlers/knowledge/board.rs")
 
-      (writer autopilot-engine
-        :code "daemon/src/engine/intent_engine/autopilot.rs"
-        :tick "5-10s"
-        :writes "board_tasks (CAS claim / status 推进 / lease 回收)")
-
-      (writer flow-engine-v2
-        :code "daemon/src/engine/flow/*.rs"
-        :writes "board_tasks.flow_context (每节点 persist)")
-
       (writer mcp-question-lifecycle
         :tool "mission_question (独立 MCP 工具, 非 board 工具面)"
         :writes "agent_questions (+ 自动 UPDATE 关联 board_tasks.status='blocked')"
-        :code "daemon/src/handlers/.../question.rs (创建问题时 CAS 关联 task)")
+        :code "daemon/src/handlers/.../question.rs")
 
-      (writer autopilot-prompt-snapshot
-        :code "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs :: save_prompt_snapshot"
-        :writes "prompt_snapshots"
-        :purpose "task 执行时的 prompt + KB 引用存档 — KB citation 审计 + prompt 调优"
-        :note "PK 是 task_id, 故归本模块"))
+      ;; ── 外部 engine 驱动的写入 (计算逻辑不在库内) ──
+      (writer autopilot
+        :cross-ref "pillar 二 2.4 orchestration :: component autopilot"
+        :writes "board_tasks (CAS claim / status 推进 / lease 回收) + prompt_snapshots (task 执行存档)"
+        :library-pov "库只暴露 BoardStore 原子操作 + prompt_snapshots schema; tick / 决策 / recovery 时机 由 engine 管")
+
+      (writer flow-engine-v2
+        :cross-ref "pillar 二 2.4 orchestration :: component flow-engine-v2"
+        :writes "board_tasks.flow_context (每节点 persist)"
+        :library-pov "库只暴露 update_board_task 接口 + flow_context JSONB 列; 节点执行顺序 / 变量插值 由 engine 管"))
 
     (module-core
       (desc "主路径 (path) + 数据/FSM/操作/事件 (plumbing) + 附属 (helper)")
@@ -503,7 +502,10 @@
         :states (open running verifying done failed blocked skipped)
         :transitions "open→running(CAS) / open→blocked / running→verifying/done/failed / blocked→open / terminal→open(retry)"
         :atomicity "open→running 是 SQL CAS"
-        :recovery "lease_expires_at 超期 → recover_stale_running_tasks")
+        :lease-column "lease_expires_at (超期判定字段)"
+        :recovery-interface "BoardStore::recover_stale_running_tasks() 提供强制 reset 接口"
+        :recovery-scheduling "何时调用此接口由 pillar 二 2.4 :: autopilot 决定 — 库只暴露接口"
+        :note "库只定义 FSM + 原子性; engine 负责'何时推进'")
 
       (plumbing core-operations
         :operations 8 "create / claim / update / decompose / retry / note-add / delete / query"
@@ -536,7 +538,8 @@
         :cross-module-note "cited_kb_ids 关联 kb-manager :: knowledge; 但 PK 是 task_id 故归 board"))
 
     (module-egress
-      (desc "MCP 查询 + 前端 WS 流 + autopilot 内部扫描")
+      (desc "MCP 查询 + 前端 WS 流 — 库对外的读出口")
+      :principle "autopilot 的 tick-scan 是 engine 内部自读自写闭环 (见 pillar 二 2.4 :: autopilot), 非库的独立 reader"
 
       (reader mcp-board-query
         :tool "mission_board_query"
@@ -545,11 +548,7 @@
       (reader frontend-board-stream
         :source "pillar 四 event_log subscribe BoardEvent"
         :emits "BoardTask* 事件 → 前端实时更新"
-        :via "daemon/src/bus/ws_bridge.rs")
-
-      (reader autopilot-tick-scan
-        :query "WHERE auto_execute=1 AND status='open'"
-        :note "autopilot 自读自写"))
+        :via "daemon/src/bus/ws_bridge.rs"))
 
     (module-tables-owned
       (desc "本模块独占 4 张表")
@@ -1226,7 +1225,16 @@
       "    发现 message_embeddings 用 halfvec (1KB 压缩), HNSW 参数 m=24 ef=128 (vs 其他 4 表 m=16 ef=64)"
       "    澄清 conversations.summary_embedding 列不存在 (之前 lisp 错列, 已修)"
       "(V) 5 处散落描述改用 cross-ref 指向 governance SSOT (kb/conv writer / non-db-forms / pillar 二 2.6)"
-      "    减少维护负担 + 单点真理")
+      "    减少维护负担 + 单点真理"
+      "v0.4.7 (2026-04-19 — board 按'memory=库'原则精简):"
+      "(W) pillar 二 2.4 orchestration 新增 2 engine component: autopilot + flow-engine-v2"
+      "    autopilot: tick pipeline / dispatch-logic / writes-to-memory / 5-10s tick / CAS 决策"
+      "    flow-engine-v2: 5 node types / execution-model / flow_context persist"
+      "(X) board 模块精简: 把 autopilot + flow-engine-v2 + autopilot-prompt-snapshot + autopilot-tick-scan"
+      "    改为 cross-ref 到 pillar 二 engines, 保留'库侧视角' (schema + interface + FSM 声明)"
+      "(Y) board module-ingress 新增 :principle 'memory=库' 原则声明"
+      "(Z) plumbing state-machine 的 :recovery 改为 :recovery-interface + :recovery-scheduling 双字段"
+      "    接口在库, 时机由 engine 决定")
 
     (ownership-summary
       (module-project-management   5 "projects + 4 skills (specs 4 张迁走)")
