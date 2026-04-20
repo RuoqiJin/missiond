@@ -156,8 +156,11 @@
   ;;  = 三种传输介质 (PTY / LLM API / 本地) + 统一编排
   ;; ═══════════════════════════════════════════════════
   (pillar worker
-    :draft-ref ".missiond/v2/drafts/gptpro/intent-worker.lisp"
-    :draft-note "gptpro v0.1 starter-scaffold (2026-04-21), 下次 pillar refactor phase-A 起点"
+    :canonical-ref ".missiond/v2/intent-worker.lisp"
+    :canonical-status "v0.2 phase-A frozen 2026-04-21 (gptpro design + 主 Claude fs-inference fixes)"
+    :v0.1-archive ".missiond/v2/drafts/gptpro/intent-worker.lisp"
+    :v0.2-gptpro-archive ".missiond/v2/drafts/gptpro/intent-worker-v0.2.lisp"
+    :execution-log ".missiond/v2/worker-pillar-execution.lisp"
     (purpose "系统如何把计算派出去 — 三种传输 + 统一调度抽象")
 
     ;; ── 2.1 PTY 传输: 直接控制 CLI 进程 ──
