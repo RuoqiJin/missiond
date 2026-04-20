@@ -27,7 +27,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.23")
+  (version "draft-v0.4.24")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -171,6 +171,20 @@
         (additive "加新方法 → default impl 或 require all impls")
         (vs-mcp "trait 可先于 MCP 工具实现 (库早于 API), 这是 v0.4.10+ cross-ref 分工的基础"))
       (cross-trait-sharing-policy "trait 按 .rs 文件切, module 按业务切, 允许 trait 跨 module (impedance mismatch 显式披露)")
+
+      (trait-organization-principle
+        :added-in "v0.4.24 (施工 Phase 2C 大量实战后归纳)"
+        :desc "9 primary traits vs sub-traits 的设计原则 — 给施工 agent 明晰边界"
+        :primary-traits "lisp 声明的 9 个, 是 memory 对外稳定契约 (MCP handlers + workers 依赖的)"
+        :sub-traits "代码层可能按 .rs 文件切出的细粒度 trait (如 ToolCallStore / EventStore 等) — 实现细节, 不在 lisp 列表"
+        :merging-rule "sub-trait 随时可合并入 primary trait (按业务 module 归属). Phase 2C 合并了 5 个: SkillStore→ProjectStore / ToolCallStore+EventStore+RetrospectiveStore→ConversationStore / VisionStore→ObservabilityStore"
+        :rust-coherence-constraint "⚠ Rust 一 type 一 trait 只能一个 impl block. 合并后方法全部集中到一个 .rs 文件 (如 pg/skill.rs 承载 ProjectStore 全 33 方法, pg/project.rs 仅 helper)"
+        :cross-boundary-judgment
+          "施工时遇到跨 trait 归属模糊的方法 (如 conversations_missing_summary_cursor 算 conversation 分析还是 infra watermarks), 判断原则:"
+          "1. 业务语义优先 — 这方法解决什么业务问题"
+          "2. 数据源二 — 读/写哪张表 → 归表所在 module"
+          "3. 不确定时保留在原 trait, 加 :boundary-note 说明"
+      )
       (current-traits
         (ProjectStore      :module "project-management" :scope "projects + skill_* 4 张")
         (BoardStore        :module "board"              :scope "board_tasks + notes + questions + prompt_snapshots")
@@ -183,7 +197,18 @@
         (DirectiveLayerStore  :module "directive-layer"       :scope "directive + plan + workflow, 约 15 方法, TBD v0.4.17")
         (SlotStore         :spans ["slot-support" "conversation-logs"]
                            :scope "slot_sessions + slot_tasks + dynamic_slots, traits.rs:478")
-        (InfraStore        :module "system-support"     :scope "infrastructure_state + backfill_* + daemon_state")))
+        (InfraStore        :module "system-support"     :scope "watermarks (13) + backfill (9) + daemon_state (2) = 24 方法"
+                           :methods-signature-v0.4.24
+                             "watermarks: watermark_get / watermark_advance_time / watermark_advance_msg_id / watermark_advance_full / watermark_list (5, consumer_watermarks)"
+                             "watermarks: load_watcher_cursors / upsert_watcher_cursors_batch / delete_watcher_cursor (3, watcher_cursors)"
+                             "watermarks: get_reconcile_watermark / upsert_reconcile_watermark / get_all_reconcile_watermarks (3, reconcile_watermarks)"
+                             "watermarks: load_gemini_cursors / save_gemini_cursor (2, gemini_cli_watermarks)"
+                             "backfill: backfill_get_phase / backfill_list_phases / backfill_start_phase / backfill_update_progress / backfill_complete_phase / backfill_record_failure / backfill_retryable_failures / backfill_retryable_failures_no_cooldown / backfill_clear_failure (9)"
+                             "daemon_state: daemon_state_get / daemon_state_set (2)")
+        (TimelineStore     :owned-by "pillar 四 event-bus (非 memory)"
+                           :why-listed-here "MissionStore super-trait bound 包含它, memory pillar 代码同构中不动; 实际是 pillar 四 projection 读接口, delegate 到 event_log"
+                           :code-location "db/pg/timeline.rs (pillar 四 所有)"
+                           :callers "ws/server.rs catch-up + handlers/comm/timeline.rs 的 5 MCP 工具")))
 
     ;; ─────────────────────────────────────────────
     ;; Surface 3: Frontend Surface — 对前端 WS 暴露
@@ -232,7 +257,27 @@
 
       (to-pillar-七-flow
         (mechanism "flow-engine-v2 通过 worker-trait-surface 读写 board_tasks + prompt_snapshots")
-        (note "flow-engine 本质是 pillar 二 worker 的一种, 统一走 worker-trait-surface")))
+        (note "flow-engine 本质是 pillar 二 worker 的一种, 统一走 worker-trait-surface"))
+
+      (memory-hook-pipeline
+        :added-in "v0.4.24 (施工发现)"
+        :desc "memory pillar 很重要的 '记忆自动触发 LLM' 业务机制 — 横跨 memory (tasks 表) + pillar 二 (memory_scheduler engine)"
+        :pipeline
+          "1. conversation 落地 / KB 更新 → 触发 memory hook"
+          "2. state::submit_task (memory pillar 入口) → INSERT tasks 表 (role='memory')"
+          "3. memory_scheduler (pillar 二 engine) 轮询 tasks 表 status='queued'"
+          "4. dispatch_queued_submit_tasks → 调 slot_dispatch 给某 slot"
+          "5. slot 执行 prompt → result 写回 tasks.result + status='done'"
+          "6. reap_stale_submit_tasks 清理超时 task"
+        :active-callers-in-memory-pillar
+          "handlers/knowledge/kb.rs (记忆钩子触发点)"
+          "workers/local/conversation_logger.rs (会话落地触发)"
+          "workers/local/pty_event_worker.rs (PTY 事件触发)"
+          "handlers/knowledge/board.rs (board 创建时附带)"
+        :pillar-二-consumers
+          "engine/intent_engine/memory_scheduler.rs (核心调度 + 反刍)"
+        :why-documented-here "v0.4.24 前 lisp 只 cross-ref scheduler 代码位置, 未说明这是 tasks 表存在的核心理由. 施工 D009 发现 tasks KEEP 的真正原因在此"
+        :future-evolution "v0.5+ 将 memory-hook 迁 board_tasks (role='memory' + trigger_source='memory_hook' 新列); tasks 表 drop 前置条件"))
 
     ;; ─────────────────────────────────────────────
     ;; Surface 5: External-Filesystem Surface — 非 DB 文件系统直写/直读
@@ -300,37 +345,91 @@
       :reason-1 "trait 跨 module 现实普遍: ObservabilityStore 跨 3 module (llm-support / system-support / conversation-logs), SlotStore 跨 2 module (slot-support / system-support + conversation-logs); 目录化制造假整洁"
       :reason-2 "按 trait 文件切 + 现有代码阻抗最小; 重组成本 >> 收益"
       :reason-3 "lisp 的 module 概念已足够 cohesive; 代码层通过 pillar-interfaces :: worker-trait-surface :: current-traits 做 module ↔ trait ↔ files 三方映射即可"
-      :concrete-result "每个 memory module 对应若干 trait (:primary-traits) + 可能共享的 trait (:consumes-shared-trait); 每个 trait 对应一个 .rs 文件 (db/*.rs + db/pg/*.rs)")
+      :concrete-result "每个 memory module 对应若干 trait (:primary-traits) + 可能共享的 trait (:consumes-shared-trait); 每个 trait 对应一个 .rs 文件 (db/*.rs + db/pg/*.rs)"
+      :v0.4.24-rust-coherence-addendum
+        "⚠ Rust coherence: 一 type (PgMissionStore) 对一 trait (e.g. ProjectStore) 只能一个 impl block. 故 sub-trait 合并 primary 后, 所有方法集中到一个 .rs 文件:"
+        "- pg/skill.rs 承载 ProjectStore 全 33 方法 (合并 SkillStore 后, pg/project.rs 瘦身为 helper)"
+        "- pg/conversation.rs 承载 ConversationStore 全 ~114 方法 (合并 ToolCallStore + EventStore + RetrospectiveStore)"
+        "施工 agent 合并 sub-trait 时遵守: 选 1 个 .rs 承载完整 impl, 另一个文件转 helper 或删")
+
+    (drop-execution-principle
+      :added-in "v0.4.24 (施工 Phase 6 经验)"
+      :desc "执行 drop migration 时的安全守则 — 从 lisp legacy-zone 标签到代码"
+      :rules
+        "1. 只 drop lisp 明标 'DROP-CANDIDATE' 或 'DROPPED' 的表. 标 KEEP/DEPRECATE 的不碰"
+        "2. drop 前 grep 全 repo 确认 caller 活跃度 (caller-count). 标 KEEP 但 caller-count 30+ 的属 🔴 CORE, 绝不盲目 drop"
+        "3. trait 方法同步删 — 否则 impl 引用不存在的表, 编译失败"
+        "4. 对应 caller 改写或删 (如 Phase 6 删 step_narrator 整文件 + 改 5 处 handler)"
+        "5. migration 文件用 DROP TABLE IF EXISTS 幂等"
+        "6. 保留墓志铭 — lisp 的 legacy-zone 条目改 status ✅ DROPPED, 留 pre-drop-schema + removed-at, 供后续知情"
+      :mcp-tool-judgment
+        "MCP tool 的删除:"
+        "- 若 tool 对应表被 drop 且 lisp 未说明保留: 删 handler + dispatcher 路由 (如 mission_session_narrations)"
+        "- 若 tool 对应表保留 (如 inbox): 保留 tool 原样, 不动"
+        "- 若 tool 有未来计划: 降 deprecated stub + 注释说明")
 
     (file-to-module-mapping
-      (desc "代码文件 → memory module 的映射 — 施工第一步扫描补齐")
-      :status "🚧 v0.4.22 初始骨架, phase-1 扫描时 施工 agent 补齐 + 校验"
-      :mapping-style "一个文件可能归一个 module, 也可能跨 module (trait 阻抗)"
+      (desc "代码文件 → memory module 的映射 — v0.4.24 Phase 2 施工后终极落地")
+      :status "✅ v0.4.24 更新为施工完成后实况 (原 v0.4.22 骨架已过期, Phase 2 后结构大变)"
+      :mapping-style "按 Rust coherence: 一 trait 一 impl block per type. 故 impl 文件位置 ≠ module 归属"
 
-      (db/project.rs            :serves "module project-management"  :trait "ProjectStore")
-      (db/skill.rs              :serves "module project-management"  :trait "ProjectStore (skill_* 4 张)")
-      (db/board.rs              :serves "module board"               :trait "BoardStore (board_tasks 主)")
-      (db/question.rs           :serves "module board"               :trait "BoardStore (agent_questions)")
-      (db/knowledge.rs          :serves "module kb-manager"          :trait "KbStore (knowledge + edges + access_log + op_queue + ast_links)")
-      (db/ast.rs                :serves "module kb-manager"          :trait "KbStore (ast_nodes + ast_file_meta + beacons + beacon_nodes)")
-      (db/conversation.rs       :serves "module conversation-logs"   :trait "ConversationStore + MessageStore")
-      (db/slot.rs               :serves ["slot-support" "system-support (daemon_state)" "conversation-logs (sessions)"]
-                                :trait "SlotStore (cross-module, 25 方法)")
-      (db/observability.rs      :serves ["llm-support" "system-support" "conversation-logs"]
-                                :trait "ObservabilityStore (cross-module, 36 方法)")
-      (db/gemini_log.rs         :serves "module llm-support"         :trait "ObservabilityStore (gemini_log_* + gemini_file_cache_*)")
-      (db/incident.rs           :serves ["system-support (incidents)" "llm-support (token_usage)"]
-                                :trait "ObservabilityStore (insert_incident + insert_token_usage + token_stats)")
-      (db/task.rs               :serves "module system-support"      :trait "SlotStore (legacy tasks/inbox/events)")
-      (db/backfill.rs           :serves "module system-support"      :inherent "MissionDB inherent 方法 (非 trait)")
-      (db/traits.rs             :serves "all modules"                :purpose "9 trait 定义 + MissionStore 聚合 super-trait")
-      (db/pg/*.rs               :serves "各 trait PG impl"           :purpose "对应 store trait 的 PG 实现")
-      (types/*                  :serves "all modules"                :purpose "Row struct + FSM enum")
+      (db-root-layer
+        :desc "db/ 根下 8 文件 (trait 定义 + shared types + 中间层)"
+        (traits.rs            :serves "all 9 modules"
+                              :purpose "MissionStore super-trait 聚合 + 9 primary trait + TimelineStore (pillar 四)"
+                              :traits "ProjectStore / BoardStore / KbStore / ConversationStore / MessageStore / ObservabilityStore / SlotStore / InfraStore / DirectiveLayerStore + TimelineStore (pillar 四)")
+        (shared.rs            :serves "all" :purpose "Row struct + enum 通用类型")
+        (error.rs             :serves "all" :purpose "DbError + DbResult")
+        (mod.rs               :serves "all" :purpose "db 模块定义 + 工具 fn")
+        (project.rs           :serves "project-management" :purpose "helper + re-export (D001 补建)")
+        (observability.rs     :serves "cross-module" :purpose "helper + re-export (D001 补建)")
+        (directive.rs         :serves "directive-layer" :purpose "row mapping (Stage 2B.2 新建)")
+        (conversation_query.rs :serves "conversation-logs" :purpose "FTS query builder helper"))
 
-      (directive-layer-TBD
-        :status "🚧 未实现"
-        :expected-files "db/directive.rs (新) + db/pg/directive.rs (新) + types 加 Directive/Plan/Workflow struct + status enums"
-        :trait "DirectiveLayerStore"))
+      (db-pg-layer
+        :desc "db/pg/ 13 文件 (PG impl, 按 Rust coherence 切)"
+        (mod.rs               :serves "all" :purpose "PG 模块 + PgMissionStore struct")
+        (board.rs             :serves "board"              :impls "BoardStore (41 方法)")
+        (knowledge.rs         :serves "kb-manager"         :impls "KbStore (56 方法, 含 ast/beacon)")
+        (message.rs           :serves "conversation-logs"  :impls "MessageStore (15 方法)")
+        (conversation.rs      :serves "conversation-logs"  :impls "ConversationStore ~114 方法 (合并 ToolCall+Event+Retrospective 后)")
+        (project.rs           :serves "project-management" :purpose "helper 模块 (实际 impl 在 skill.rs)")
+        (skill.rs             :serves "project-management" :impls "ProjectStore 全 33 方法 (Rust coherence: 承载 SkillStore 合并后的统一 impl block)"
+                              :coherence-note "因 Rust 一 trait 一 impl block, pg/project.rs 的 8 方法也挪到此处")
+        (observability.rs     :serves "llm-support + system-support + conversation-logs"
+                              :impls "ObservabilityStore 58 方法 (2D 后 -22 拆 InfraStore + 合并 VisionStore)")
+        (slot.rs              :serves "slot-support + conversation-logs (sessions)"
+                              :impls "SlotStore 38 方法 (2D 后 -2 daemon_state 拆 InfraStore)")
+        (infra.rs             :serves "system-support"     :impls "InfraStore 24 方法 (2D 填充: watermarks 13 + backfill 9 + daemon_state 2)")
+        (directive.rs         :serves "directive-layer"    :impls "DirectiveLayerStore 17 方法 (Stage 2B.2 新建: directive 6 + plan 6 + workflow 5)")
+        (timeline.rs          :owned-by "pillar 四"         :impls "TimelineStore (projection delegate), memory 不管")
+        (migrate_from_sqlite.rs :status "DEPRECATED" :gated "all(sqlite, postgres)" :purpose "一次性迁移工具, 当前 feature set 永不编译"))
+
+      (types-layer
+        :desc "types/ 下 Row struct + FSM enum"
+        ("types/directive.rs" :serves "directive-layer" :content "Directive/Plan/Workflow struct + DirectiveStatus/PlanStatus enum")
+        ("types/其他"          :serves "按 module" :note "未全列, 细节不是施工热点"))
+
+      (mcp-layer
+        :desc "MCP 工具 — lisp 归 memory, 物理分布"
+        (mcp-tools   :location "crates/missiond-mcp/src/tools/"           :scope "tool 定义 (client-facing)")
+        (mcp-handlers :location "crates/missiond-daemon/src/handlers/"    :scope "tool handler 实现 (调 trait)"))
+
+      (ws-bridge
+        :file "crates/missiond-daemon/src/bus/ws_bridge.rs"
+        :serves "frontend-surface" :scope "5 streams 路由")
+
+      (eliminated-wild-files-v0.4.24
+        :desc "Phase 2 施工过程中消除的文件, 记录供知情"
+        (gen_*.rs×16          "Stage 2A.1 删 (两套 forge 旧产物均未被 mod.rs 导入)")
+        (KnowledgeStore       "Stage 2A.2 rename → KbStore")
+        (db/timeline.rs       "Stage 2A.3 删 (551B 冗余空壳, pillar 四 归属)")
+        (SkillStore trait     "Stage 2C.1 合并进 ProjectStore")
+        (ToolCallStore / EventStore / RetrospectiveStore "Stage 2C.2-4 合并进 ConversationStore")
+        (VisionStore trait    "Stage 2C.5 合并进 ObservabilityStore")
+        (sqlite/ 整目录 + db/ sqlite-gated 21 文件 "Stage 2E -14018 LOC")
+        (step_narrator.rs     "Phase 6 删 (worker, 属 pillar 二)")
+        (narration trait 9 方法 + events trait 2 方法 "Phase 6 zombie cleanup")))
 
     (施工-roadmap
       (phase-1 "file-to-module-mapping 扫描补齐 + 校验"
@@ -2088,19 +2187,32 @@
         :trait-methods "SlotStore::daemon_state_get / _set"
         :note "trait 归 SlotStore (db/slot.rs 同文件), 实际用途是 daemon 全局 KV")
 
-      ;; ── Legacy zone writers (2 active + 2 dead) ──
-      (writer legacy-task-api-writers
+      ;; ── Legacy zone writers (v0.4.24 细化: tasks CORE + inbox 1 caller + events/credentials DROPPED) ──
+      (writer memory-hook-tasks-writers
         :binds-to [:worker-trait-surface]
-        :cross-ref "crates/missiond-core/src/db/task.rs + db/pg/slot.rs (legacy v1 slot API 路径)"
-        :writes "tasks (active) / inbox (轻度) / events (疑似 dead, 仅 legacy 写入)"
-        :status "⚠ tasks/inbox 尚在 — events 仅 legacy 写"
-        :note "详见 core :: legacy-zone 每表状态")
+        :criticality "🔴 CORE — memory_scheduler 的 memory hook 入口 (见 cross-pillar-surface :: memory-hook-pipeline)"
+        :cross-ref "memory pillar 入口: state.rs::submit_task + handlers/knowledge/kb.rs + workers/local/conversation_logger.rs + workers/local/pty_event_worker.rs + handlers/knowledge/board.rs"
+        :writes "tasks (role='memory' 居多, 也有 user 手提)"
+        :status "✅ active, 30+ caller"
+        :library-pov "库暴露 insert_task + update_task + 状态转换方法; 触发策略 (何时提交) 在 memory pillar 各 handler/worker")
+
+      (writer strategy-worker-inbox
+        :binds-to [:worker-trait-surface]
+        :cross-ref "pillar 二 :: workers/gemini/strategy_worker.rs:745 (仅此一处)"
+        :writes "inbox (from_role + content, 给某 task 发消息)"
+        :status "⚠ DEPRECATE — 轻度使用, 单 caller"
+        :library-pov "库暴露 insert_inbox_message; 何时发由 strategy worker")
+
+      (writer-removed events-writers
+        :removed-at "v0.4.24 Phase 6 (migration 20260421000000)"
+        :was "task.rs :: insert_event (legacy 路径)"
+        :superseded-by "pillar 四 event_log SSOT")
 
       (writer-removed credentials-writers
-        :removed-finding "v0.4.15 调查发现 — credentials 表零 Rust CRUD"
-        :was "无实际 writer (仅创建 schema)"
-        :investigation "grep 全 crates/ 只找到 resolve_llm_credentials() 函数名字符串 (不操作此表)"
-        :action "推荐 DROP — 见 legacy-zone 下 credentials"))
+        :removed-finding "v0.4.15 调查发现 — 零 Rust CRUD"
+        :removed-at "v0.4.24 Phase 6 (migration 20260421000000)"
+        :was "无实际 writer (仅 schema)"
+        :note "墓志铭保留, 供知情"))
 
     (module-core
       (desc "观测 (3) + infra 游标 + backfill (7) + legacy-zone (4)")
@@ -2184,37 +2296,53 @@
 
         (table tasks
           :status "✓ KEEP — legacy slot API 仍在使用"
-          :writers "crates/missiond-core/src/db/task.rs + db/pg/slot.rs"
+          :criticality "🔴 CORE — 是 memory_scheduler 的 memory hook → LLM 触发队列核心"
+          :caller-count "30+ 活跃调用链"
+          :active-callers
+            (state.rs::submit_task                 "PK 入口")
+            (handlers/knowledge/kb.rs              "记忆钩子触发")
+            (workers/local/conversation_logger.rs  "会话落地时 submit memory task")
+            (engine/intent_engine/memory_scheduler.rs "dispatch_queued_submit_tasks + reap_stale_submit_tasks 调度")
+            (workers/local/pty_event_worker.rs     "PTY 事件触发")
+            (handlers/knowledge/board.rs           "board 创建时附带 submit")
           :schema-cols "id (PK) / role / prompt / status (default 'queued') / manual / slot_id / session_id / result / error / created_at / started_at / finished_at / notified_at"
           :indexes "4: (status), (role), (created_at), (manual)"
           :trait "SlotStore trait (insert_task / update_task / get_task / get_tasks_by_status / get_queued_tasks_by_role / requeue_running_tasks_for_slot / get_all_tasks / ack_completed_tasks)"
-          :action "保留; 若未来 slot API 全换 board_tasks, 可再 drop")
+          :migration-cost "🔴 HIGH — memory_scheduler 需迁到 board_tasks (role=memory + trigger_source=memory_hook), 涉及 6+ caller 改写"
+          :suggested-successor "board_tasks with role='memory' + 新列 trigger_source"
+          :action "保留. drop 前必须完成 memory_scheduler → board_tasks 迁移; 盲目 drop 会废掉'记忆自动触发 LLM'核心功能")
 
         (table inbox
           :status "⚠ DEPRECATE — 轻度使用"
+          :criticality "🟢 LOW — 仅 1 处 active writer"
+          :caller-count 1
+          :active-callers (workers/gemini/strategy_worker.rs:745 "Gemini 策略 worker 发消息给某 task (insert_inbox_message)")
           :writers "crates/missiond-core/src/db/task.rs (insert_inbox_message / get_inbox_messages / mark_inbox_read)"
           :schema-cols "id (PK) / task_id / from_role / content / read / created_at"
           :indexes "(read), (created_at)"
           :trait "SlotStore trait (3 inbox 方法)"
-          :mcp "mission_inbox (共用 misc handler)"
-          :action "标 deprecated; 下轮清理时 drop")
+          :mcp "mission_inbox (共用 misc handler, v0.4.24 仍保留)"
+          :migration-cost "🟢 LOW — 单 caller, 迁到 board_task_notes 或直接删"
+          :suggested-successor "board_task_notes (加 from_role 列)"
+          :action "v0.4.25+ 迁移 strategy_worker 到 board_task_notes 后 drop")
 
         (table events
-          :status "❌ DROP-CANDIDATE — dead (pillar 四 event_log 已取代)"
-          :writers "仅 task.rs :: insert_event (legacy 路径, 无外部 active 消费)"
-          :schema-cols "id (PK auto) / task_id / type / data / timestamp"
-          :indexes "(task_id), (timestamp)"
-          :trait "SlotStore trait (insert_event / get_events_by_task, 标 legacy)"
-          :action "推荐下个 migration DROP; 需确认无外部系统查询"
-          :superseded-by "pillar 四 event_log (SSOT)")
+          :status "✅ DROPPED — Phase 6 执行 (migration 20260421000000_drop_deprecated_tables.sql)"
+          :pre-drop-writers "仅 task.rs :: insert_event (legacy 路径, 无外部 active 消费)"
+          :pre-drop-schema "id (PK auto) / task_id / type / data / timestamp"
+          :superseded-by "pillar 四 event_log (SSOT)"
+          :removed-at "v0.4.24 施工 Phase 6"
+          :trait-method-removed "SlotStore::insert_event + get_events_by_task (2 方法, 连同 2 caller 清理)"
+          :note "lisp v0.4.24 保留此条目作墓志铭 (tombstone), 供施工 agent 知历史")
 
         (table credentials
-          :status "❌ DROP-CANDIDATE — dead schema (v0.4.15 新发现)"
-          :writers "无 Rust CRUD 代码"
-          :readers "无"
-          :schema-cols "id (PK) / knowledge_id (FK → knowledge ON DELETE CASCADE) / name / value_encrypted / created_at / updated_at"
-          :investigation "grep 全 crates/ 显示 'credentials' 在代码中仅作函数名字符串 (resolve_llm_credentials 不操作此表); 表创建但零 CRUD"
-          :action "推荐下个 migration DROP — 除非有未发现的运行时写入")))
+          :status "✅ DROPPED — Phase 6 执行 (migration 20260421000000_drop_deprecated_tables.sql)"
+          :pre-drop-writers "无 Rust CRUD 代码"
+          :pre-drop-readers "无"
+          :pre-drop-schema "id (PK) / knowledge_id (FK → knowledge ON DELETE CASCADE) / name / value_encrypted / created_at / updated_at"
+          :investigation "grep 全 crates/ 显示零 CRUD; 表创建但从未使用"
+          :removed-at "v0.4.24 施工 Phase 6"
+          :note "墓志铭保留, 供知情")))
 
     (module-egress
       (desc "MCP 读 + daemon 内部 consumer")
@@ -2760,7 +2888,26 @@
       "     known-candidates: tools-support (pillar 三 待触发) / directive-actor-support (pillar 五 actor 待实现)"
       "     anti-pattern: 反对预占位空 module + 反对小规模数据开 module + 反对跨 pillar 直连 PG"
       "(RRR) v0.4.23 为真正 frozen 基线: 下一 commit 视为施工开工点, 本 lisp 不再修改"
-      "     并行 agent 共享内存层在 .missiond/v2/intent-memory-execution.lisp")
+      "     并行 agent 共享内存层在 .missiond/v2/intent-memory-execution.lisp"
+      "v0.4.24 (2026-04-20 — 施工后 unfreeze 补漏; 记入施工发现的 13 处 lisp 不足):"
+      "(SSS) 🔴 高优先级 (3 项):"
+      "     1. file-to-module-mapping 骨架严重过期 → 回灌 Stage 2F complete 版, 反映 Phase 2 后代码实况"
+      "     2. TimelineStore 归属澄清 → pillar-interfaces current-traits 明示归 pillar 四, memory 仅 super-trait bound"
+      "     3. tasks 表 criticality 披露 → legacy-zone 加 :caller-count 30+ + :criticality 🔴 CORE + :migration-cost high + active-callers 清单"
+      "(TTT) 🟡 中优先级 (4 项):"
+      "     4. 新增 cross-pillar-surface :: memory-hook-pipeline — memory pillar '记忆自动触发 LLM' 业务机制首次在 lisp 声明 (6 步 pipeline)"
+      "     5. inbox 表 caller 披露 → :caller-count 1 + active-caller (strategy_worker)"
+      "     6. 新增 trait-organization-principle 块 — primary vs sub-trait 合并规则 + Rust coherence 约束 + 跨边界归属判定"
+      "     7. target-code-layout :: layout-decision 加 rust-coherence-addendum — 阐明 impl 文件位置 ≠ module 归属"
+      "(UUU) 🟢 锦上添花 (6 项):"
+      "     8. strategy_worker 作为 inbox 唯一 writer 的 cross-ref 显式声明"
+      "     9. drop-execution-principle 新增块 (施工 Phase 6 经验) — drop 安全守则 + MCP tool 判定"
+      "     10. trait-organization-principle 含跨 trait 归属模糊方法的判断原则 (业务语义 > 数据源)"
+      "     11. InfraStore 24 方法签名详列 (原 v0.4.23 只有概念, 无具体签名)"
+      "     12. 墓志铭更新 — events/credentials 标 ✅ DROPPED (Phase 6 执行); 供未来知情"
+      "     13. legacy-zone :migration-cost + :suggested-successor 字段 — 指导迁移决策"
+      "(VVV) 本次 unfreeze 改动 13 处 (非结构性, 都是补文档/细化字段); 未动核心架构 (9 module + 5 surface)"
+      "(WWW) v0.4.24 再 freeze — 下次 unfreeze 需指挥官明确批准 (对齐 event-bus frozen 模式)")
 
     (ownership-summary
       ;; 5 business modules
