@@ -1,8 +1,8 @@
 ;; ══════════════════════════════════════════════════════
 ;; MissionD — Worker Pillar Execution Log
-;; Parent:   .missiond/v2/intent-worker.lisp (v0.2 integrated, phase-A frozen)
+;; Parent:   .missiond/v2/intent-worker.lisp (v0.3 phase-B informed, 1831 行)
 ;; Created:  2026-04-21 (phase-0 预热 snapshot)
-;; Updated:  2026-04-21 (phase-A completed, phase-B-scan ready)
+;; Updated:  2026-04-21 (phase-B informed — 吸收 8 份老图, v0.2→v0.3)
 ;; Protocol: v0.5.1 (id-counters + claims lease + audit/repair)
 ;;
 ;; 读写规则 (和 intent-memory.lisp :: helper agent-execution-coordination 一致):
@@ -21,10 +21,11 @@
   (meta
     :execution_id "worker-pillar-2026-04-21"
     :parent_design "intent-worker.lisp"
-    :parent_status "v0.2-phase-A-integrated"
+    :parent_status "v0.3-phase-B-informed"
     :companion_of "design"
     :opened_at "2026-04-21"
     :phase-A-completed-at "2026-04-21"
+    :phase-B-informed-at "2026-04-21"
     :scope ".missiond/v2/intent-worker.lisp + 对应 code:
             crates/missiond-daemon/src/workers/
             crates/missiond-daemon/src/engine/
@@ -35,28 +36,31 @@
             crates/missiond-pty/src/
             crates/missiond-core/src/semantic_parsing/
             crates/semantic-terminal-napi/src/"
-    :status "phase-A-completed, phase-B-scan-ready")
+    :status "phase-B-informed, phase-C-施工-ready")
 
   (id-counters
     :next-claim-id 1
-    :next-deviation-id 12         ; D001..D011 已用, 下一个从 D012 起
-    :next-decision-id 11          ; DC001..DC010 已用, 下一个从 DC011 起
-    :next-issue-id 6              ; I001..I005 已用, 下一个从 I006 起
-    :next-completion-id 2         ; COMP001 已用, 下一个从 COMP002 起
+    :next-deviation-id 13         ; D001..D012 已用, 下一个从 D013 起
+    :next-decision-id 16          ; DC001..DC015 已用 (DC011-DC015 对应 Q-B1..Q-B5), 下一个从 DC016 起
+    :next-issue-id 10             ; I001..I009 已用, 下一个从 I010 起
+    :next-completion-id 3         ; COMP001 (phase-A) + COMP002 (phase-B-informed) 已用
     :next-pre-deviation-id 11)    ; P-D001..P-D010 已全部升格, 无新增
 
   (phase-tracker
-    :current_phase "phase-B-scan"
-    :phases [phase-0-warmup phase-A-design phase-B-scan phase-C-施工 phase-D-validation phase-E-polish]
-    :current_owner "主 Claude (phase-B scan 待启)"
+    :current_phase "phase-C-施工 (pending 指挥官 kick off)"
+    :phases [phase-0-warmup phase-A-design phase-B-informed phase-C-施工 phase-D-validation phase-E-polish]
+    :current_owner "主 Claude (v0.3 just written, waiting for kick)"
     :phase-0-warmup :started-at "2026-04-21" :completed-at "2026-04-21" :status "completed"
       :output "10 pre-deviations (升格 D001-D010) + drift-audit 配套数据"
     :phase-A-design :started-at "2026-04-21" :completed-at "2026-04-21" :status "completed"
       :gptpro-delivery "intent-worker-v0.2.lisp (1430 行), Q1-Q10 全答, 10 pre-D disposition 明确"
       :主-Claude-followup "3 处 fs inference 修正, 1434 行正位到 .missiond/v2/intent-worker.lisp"
-    :phase-B-scan :status "ready-to-start"
-      :intent "基于 v0.2 frozen design, 对 5 个 need-more-ground-truth 项做 agent scan: slot_manager 残留 / workflow_executor R/W / learning_engine 精确表契约 / retrieval-fusion 真实绑定 / experience_harvester 去留"
-    :phase-C-施工 :status "pending" :intent "代码向 lisp 对齐 (stage 化)"
+    :phase-B-informed :started-at "2026-04-21" :completed-at "2026-04-21" :status "completed"
+      :scope "本会话主驾, 不再依赖 gptpro (gptpro 无法查代码)"
+      :input "8 份 .missiond/intent-pillar-*.lisp 老图 + 指挥官 5 问题"
+      :output "intent-worker.lisp v0.3 (1831 行, 13 大变更, paren 696=696)"
+      :key-changes "section pty 重构 5 subsection / 新 section xjp-router-gateway / engine-cluster 瘦身 / functional-groups / mcp-surface-to-tools / event-categories 9 类 / flow-engine v1-v2 区分 / ControlTree 6 层 / bootstrap depends-graph / sole-spawn-bottleneck / learned-permissions / registered-tasks / 双重归属"
+    :phase-C-施工 :status "ready-to-start" :intent "代码向 v0.3 lisp 对齐 — xjp_router_client 新建 / learned_permissions 可能补接口 / flow-engine v1 迁 intent-layer / learning-engine primary-ownership 搬家"
     :phase-D-validation :status "pending" :intent "lisp↔code 双向同构校验"
     :phase-E-polish :status "pending" :intent "memory pillar cross-ref 回填 + table-level contract 入 intent-memory.lisp + 归档 drift-audit")
 
@@ -140,7 +144,7 @@
       :remaining "experience_harvester phase-A 保留 path 设计骨架; phase-B 需确认它是 planned 功能还是将删 prototype (见 I005)")
 
     (D011
-      :origin "主 Claude 2026-04-21 集成补丁"
+      :origin "主 Claude 2026-04-21 phase-A 集成补丁"
       :scope "gptpro v0.2 的 3 处 fs inference 错误"
       :disposition "fixed-in-integration"
       :applied-in ".missiond/v2/intent-worker.lisp (vs .missiond/v2/drafts/gptpro/intent-worker-v0.2.lisp 原版)"
@@ -157,6 +161,31 @@
            :gptpro-claimed "crates/missiond-daemon/src/slot_manager/"
            :ground-truth "目录不存在, 已合入 slot_orchestrator/"
            :fix "section pty 的 :need-more-ground-truth 改成 '目录实际不存在, phase-B 确认残留引用清理'; file-level item 同步")])
+
+    (D012
+      :origin "主 Claude 2026-04-21 phase-B-informed 大 refactor"
+      :scope "v0.2 → v0.3: 吸收 8 份老图 ground-truth + 修指挥官 5 问题"
+      :disposition "applied-in-v0.3"
+      :trigger "指挥官 5 问题 + 发现 v0.2 压缩了 v1 pillar 级的详尽设计"
+      :gptpro-skipped "gptpro 无法查代码, 本会话自己驾驶 v0.3 而不是发 brief"
+      :summary
+        [(v0.3-lines "1831 行 (v0.2 1434 → +397)")
+         (paren-balance "696 = 696 ✓")
+         (change-count 13)]
+      :changes
+        [(change-1 "section pty 重构为 5 subsection — pty-transport / semantic-parser / pty-state-machine / slot-orchestrator / learned-permissions")
+         (change-2 "新 (section xjp-router-gateway) — embedding 走 xjp-router, sonnet-priority-gateway 去 embedding")
+         (change-3 "engine-cluster 瘦身: learning-engine 标 primary-ownership intent-layer pillar; flow-engine v1 迁 intent-layer; v2 留 worker")
+         (change-4 "worker-local 加 :functional-groups (6 组: cli-ingestion / 认知管道 / observability-log / code-intel / pty-runtime-hook / meta-briefing)")
+         (change-5 "pillar-egress 新 :mcp-surface-to-tools (14 compute-tools + 4 sysinfra-tools 完整映射)")
+         (change-6 "event-categories 补到 9 类 (v0.2 只 5 类)")
+         (change-7 "flow-engine v2 补 7 fail-fast-invariants + 5 node-types 详细 spec")
+         (change-8 "ControlTree 6 字段 + cascade-priority 3 层 + ControlManager watch channel 零轮询 + persistence")
+         (change-9 "bootstrap 6 phase + depends-graph 9 关系 + app-state fields + supervisor")
+         (change-10 "slot-orchestrator 加 sole-spawn-bottleneck 不变量 (10 callers 全列) + slot-config-fields + registered-tasks 4")
+         (change-11 "learned-permissions 完整: multi-scope 4 (global/role/project/slot) + REQUIRES_PARAM_PATTERN + permission-persistence flow 6 步 + read/write path 分离 + mcp-merged-view")
+         (change-12 "semantic-parser: parser-pipeline 5-stage + 8 parser components (claude-code / gemini / fingerprint / confirm / tool / status / title / helpers) + semantic-terminal-napi 前端壳")
+         (change-13 "pty-state-machine: pty-session FSM 8 states + 14 transitions 完整转载; 其他 5 FSM 标归属 (memory/intent-layer pillar)")])
   )
 
   ;; ─────────────────────────────────────────────────────
@@ -248,6 +277,46 @@
       :related-Q Q10
       :decision "保留 :actual-state-sources 顶部元信息, 主材料指向 .missiond/v2/{drift-audit, intent-pillar-source-index, worker-pillar-execution}, 旧图退到 :historical-footprint-sources"
       :decided-by "gptpro phase-A-decisions"
+      :decided-at "2026-04-21")
+
+    ;; ── phase-B-informed 决策 DC011-DC015 ──
+    (DC011
+      :related-Q-B Q-B1
+      :related-D D012
+      :decision "embedding 独立 section xjp-router-gateway. sonnet-priority-gateway 去 embedding"
+      :rationale "Windows 12900KF + QWEN3 路由, 已接通但未接入 missiond"
+      :code-status "pending HTTP client (I006)"
+      :decided-by "指挥官 2026-04-21"
+      :decided-at "2026-04-21")
+
+    (DC012
+      :related-Q-B Q-B2
+      :decision "worker-local 加 :functional-groups 6 组"
+      :rationale "cli-ingestion / 认知管道 / observability-log / code-intel / pty-runtime-hook / meta-briefing 横切"
+      :decided-by "指挥官"
+      :decided-at "2026-04-21")
+
+    (DC013
+      :related-Q-B Q-B3
+      :decision "section pty 重构为 5 subsection"
+      :rationale "吸收 intent-pillar-semantic-parser + state-machines + transport-bootstrap + engines 老图的详尽设计"
+      :decided-by "指挥官"
+      :decided-at "2026-04-21")
+
+    (DC014
+      :related-Q-B Q-B4
+      :decision "engine-cluster 分拆: runtime-mechanics 留 worker, 学习/规划逻辑归 intent-layer (含 flow-engine v1 + learning-engine 7 sub); lisp-survey/arch-maintenance 双重归属"
+      :rationale "v2 intent.lisp 已声明 intent-layer 拥有 lisp files + specs + workflows + lisp-survey-worker component"
+      :follow-up "intent-layer pillar phase-A 时正式迁移 (I007)"
+      :decided-by "指挥官"
+      :decided-at "2026-04-21")
+
+    (DC015
+      :related-Q-B Q-B5
+      :decision "pillar-egress 新 :mcp-surface-to-tools"
+      :coverage "14 compute-tools + 4 sysinfra-tools"
+      :rationale "对齐 memory pillar v0.5.1 的 :mcp-surface 模式"
+      :decided-by "指挥官"
       :decided-at "2026-04-21"))
 
   ;; ─────────────────────────────────────────────────────
@@ -258,7 +327,7 @@
       :phase "phase-A-design"
       :completed-at "2026-04-21"
       :artifacts
-        [".missiond/v2/intent-worker.lisp (1434 行, frozen)"
+        [".missiond/v2/intent-worker.lisp (1434 行, phase-A frozen)"
          ".missiond/v2/drafts/gptpro/intent-worker-v0.2.lisp (gptpro 原始归档)"
          ".missiond/v2/drafts/gptpro/intent-worker.lisp (v0.1 starter 归档)"
          ".missiond/v2/drafts/gptpro/worker-pillar-phase-A-brief.md (493 行本会话施工反馈包)"]
@@ -267,6 +336,21 @@
         (gptpro-bytes "~80 KB v0.2 delivery")
         (pre-deviations-resolved 10)
         (fs-inference-corrections 3)
+      :sign-off-by "指挥官 + 主 Claude (2026-04-21)")
+
+    (COMP002
+      :phase "phase-B-informed"
+      :completed-at "2026-04-21"
+      :artifacts
+        [".missiond/v2/intent-worker.lisp (1831 行 v0.3)"
+         ".missiond/v2/worker-pillar-execution.lisp (D012 + DC011-DC015 + COMP002 + I006-I009 更新)"]
+      :meta
+        (phase-B-rounds 1)
+        (gptpro-role "跳过 — 本次无需 gptpro, 本会话自己吸收 8 份老图")
+        (change-count 13)
+        (added-lines 397)
+        (paren-balance "696 = 696 ✓")
+        (sources-absorbed "8 份 .missiond/intent-pillar-*.lisp 老图 + 指挥官 5 问题 Q-B1..Q-B5")
       :sign-off-by "指挥官 + 主 Claude (2026-04-21)"))
 
   ;; ─────────────────────────────────────────────────────
@@ -309,19 +393,52 @@
       :source "gptpro v0.2 need-more-ground-truth item 5"
       :scope "experience_harvester.rs 去留 (D010 partial 的 followup)"
       :question "experience_harvester 是 planned 功能还是未接线 prototype? 是否要从磁盘删除?"
-      :phase "phase-B-scan"
+      :phase "phase-C-施工"
       :priority "low"
-      :resolver-hint "Read experience_harvester.rs 全文 + grep 所有 import 判断 callers"))
+      :resolver-hint "Read experience_harvester.rs 全文 + grep 所有 import 判断 callers")
+
+    ;; ── phase-B-informed 新发现的 issues I006-I009 ──
+    (I006
+      :source "v0.3 DC011 decision 附带"
+      :scope "xjp_router_client 实际落点"
+      :question "crates/missiond-daemon/src/llm/xjp_router_client.rs 还是别处? Cargo.toml 依赖是否够 (reqwest?)?"
+      :phase "phase-C-施工"
+      :priority "high"
+      :resolver-hint "phase-C 启动时新建文件 + 配置 endpoint + auth_token")
+
+    (I007
+      :source "v0.3 DC014 decision 附带"
+      :scope "intent-layer pillar phase-A 后的迁移动作"
+      :question "board-phase-engine + learning-engine 7 sub 正式迁离 worker pillar 的执行时机和负责人?"
+      :phase "phase-E-polish (intent-layer phase-A 后)"
+      :priority "medium"
+      :resolver-hint "intent-layer pillar phase-A 完成后, worker 侧做 cleanup commit")
+
+    (I008
+      :source "v0.3 boundary-shift 附带"
+      :scope "flow-engine v1 (flow_engine.rs) 具体执行逻辑"
+      :question "项目-lifecycle phases 的推进细节 — intent-layer pillar phase-A 需吸收"
+      :phase "intent-layer pillar phase-A"
+      :priority "medium"
+      :resolver-hint "intent-layer phase-A 时主 Claude 扫 flow_engine.rs + autopilot 的调用")
+
+    (I009
+      :source "v0.3 slot-orchestrator subsection 未完全展开"
+      :scope "compute_slot vs slot_orchestrator 并发 FSM"
+      :question "EXCLUDED_ROLES + persistent Mutex + ephemeral 信号量的完整 FSM 是否需独立文档?"
+      :phase "phase-E-polish (若指挥官要求)"
+      :priority "low"
+      :resolver-hint "可做, 但当前 v0.3 slot-orchestrator 已较完整"))
 
   (derived-indexes
     (active_claims [])
     (unresolved_deviations [D010-partial])
-    (open_issues [I001 I002 I003 I004 I005])
-    (completed_phases [phase-0-warmup phase-A-design])
+    (open_issues [I001 I002 I003 I004 I005 I006 I007 I008 I009])
+    (completed_phases [phase-0-warmup phase-A-design phase-B-informed])
     (pre_deviations_upgraded_count 10)
-    (decisions_count 10)
-    (deviations_count 11)
-    (completions_count 1))
+    (decisions_count 15)
+    (deviations_count 12)
+    (completions_count 2))
 
   ;; ─────────────────────────────────────────────────────
   ;; phase-A-completion-report — 本轮施工 summary

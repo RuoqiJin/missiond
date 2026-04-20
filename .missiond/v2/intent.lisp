@@ -157,7 +157,7 @@
   ;; ═══════════════════════════════════════════════════
   (pillar worker
     :canonical-ref ".missiond/v2/intent-worker.lisp"
-    :canonical-status "v0.2 phase-A frozen 2026-04-21 (gptpro design + 主 Claude fs-inference fixes)"
+    :canonical-status "v0.3 phase-B informed 2026-04-21 (gptpro phase-A + 主 Claude 吸收 8 份老图 ground-truth, 1831 行)"
     :v0.1-archive ".missiond/v2/drafts/gptpro/intent-worker.lisp"
     :v0.2-gptpro-archive ".missiond/v2/drafts/gptpro/intent-worker-v0.2.lisp"
     :execution-log ".missiond/v2/worker-pillar-execution.lisp"
