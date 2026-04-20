@@ -2305,20 +2305,27 @@
         (desc "v0.4.15 实地调查后的 4 张老版 schema 分级")
 
         (table tasks
-          :status "✅ DROPPED v0.5.0 — memory-hook 已迁到 board_tasks (trigger_source='memory_hook')"
-          :pre-drop-criticality "🔴 CORE (v0.4.x) — memory_scheduler 的 memory hook → LLM 触发队列核心"
-          :pre-drop-caller-count "30+"
-          :pre-drop-schema "id (PK) / role / prompt / status / manual / slot_id / session_id / result / error + 4 timestamps"
-          :migration-executed-at "v0.5.0 施工"
-          :migration-path
-            "1. board_tasks ALTER TABLE ADD COLUMN trigger_source TEXT"
-            "2. BoardStore::insert_board_task 支持 trigger_source 参数"
-            "3. BoardStore 新增 list_board_tasks_by_trigger(trigger_source, status)"
-            "4. state::submit_task 改写 board_tasks"
-            "5. memory_scheduler 改 poll board_tasks WHERE trigger_source='memory_hook'"
-            "6. reap_stale → BoardStore::recover_stale_running_tasks"
-            "7. DROP TABLE tasks + 删 SlotStore 8 tasks 方法"
-          :note "墓志铭保留, 供知情. board_tasks 现在是 task SSOT.")
+          :status "⚠ PARTIAL MIGRATION v0.5.0 — memory-hook 迁 board_tasks, tasks 表保留给 pillar 二 compute"
+          :D010-correction "v0.5.0 设计 agent 调研发现 tasks 实际跨 pillar: 30+ caller 中 25 处在 pillar 二 (mission_task_submit MCP 族 + supervisor + pty + context_pipeline + extraction)"
+          :ownership-revelation "tasks 表按代码使用实际归 pillar 二 compute, 不是 memory pillar. memory pillar 只管 memory-hook 子集"
+          :v0.5-actions-done
+            "✅ board_tasks ALTER TABLE ADD COLUMN trigger_source TEXT (28 列)"
+            "✅ BoardStore::list_board_tasks_by_trigger 新增"
+            "✅ state::submit_task 改写 board_tasks (trigger_source='memory_hook', role='memory')"
+            "✅ memory_scheduler poll board_tasks WHERE trigger_source='memory_hook'"
+            "✅ reap_stale → BoardStore::recover_stale_running_tasks"
+            "✅ memory pillar 5 caller 迁移: state / kb / conversation_logger / pty_event_worker / board"
+          :v0.5-actions-NOT-done
+            "❌ DROP TABLE tasks (pillar 二 仍在用)"
+            "❌ SlotStore 8 tasks 方法 (mission_task_submit MCP family 仍依赖)"
+          :pillar-二-remaining-callers
+            "handlers/compute/task.rs (mission_task_submit/_query/_cancel/_ack/_track MCP 族, 500+ 行)"
+            "supervisor.rs (slot 死亡恢复)"
+            "handlers/compute/pty.rs (PTY 重启 requeue)"
+            "context/context_pipeline.rs (ack_completed_tasks)"
+            "engine/learning_engine/extraction.rs (get_tasks_by_status)"
+          :next-step "pillar 二 compute 整理时决定 — 可能: (a) 把 mission_task_submit 改写到 board_tasks; (b) tasks 保留作 compute 专用队列; (c) 其他策略"
+          :cross-pillar-ref "按 'ownership by usage' 原则, tasks 按'使用方'应归 pillar 二; memory pillar 不再管. 类比 TimelineStore 归 pillar 四 的模式.")
 
         (table inbox
           :status "⚠ DEPRECATE — 轻度使用"
@@ -2446,7 +2453,7 @@
       (desc "本 module 涉及的 trait 跨模块共享关系 — 同 llm-support / slot-support 的阻抗不匹配模式")
       :primary-traits
         ("ObservabilityStore (db/traits.rs:614) — 大 trait, 本模块用其中的: incident 方法 (3) + watcher_cursors (3) + reconcile_watermarks (3) + gemini_cli_watermarks (2) + consumer_watermarks via watermark_* (5) + router_chat (22)"
-         "SlotStore (db/traits.rs:478) — v0.5.0 后: daemon_state 已拆到 InfraStore (v0.4.x Stage 2D); tasks 8 方法已删 (v0.5.0 迁 board_tasks); events 2 方法已删 (v0.4.x Phase 6); 本 trait 在 system-support 剩: inbox (3 方法, v0.5.0 保留)")
+         "SlotStore (db/traits.rs:478) — v0.5.0 后: daemon_state 已拆到 InfraStore (Stage 2D); events 2 方法已删 (Phase 6); tasks 8 方法保留给 pillar 二 mission_task_submit 族 (D010 发现); inbox 3 方法保留 (单 caller pillar 二 strategy_worker)")
       :inherent-methods "backfill.rs 9 方法是 MissionDB inherent 方法, 不在 trait"
       :other-modules-use-same-traits
         ("llm-support: ObservabilityStore 的 gemini_log + gemini_file_cache + token_usage + token_stats 方法"
@@ -2916,26 +2923,24 @@
       "     13. legacy-zone :migration-cost + :suggested-successor 字段 — 指导迁移决策"
       "(VVV) 本次 unfreeze 改动 13 处 (非结构性, 都是补文档/细化字段); 未动核心架构 (9 module + 5 surface)"
       "(WWW) v0.4.24 再 freeze — 下次 unfreeze 需指挥官明确批准 (对齐 event-bus frozen 模式)"
-      "v0.5.0 (2026-04-20 — 架构升级: memory-hook 迁 board_tasks + tasks 表 drop):"
-      "(XXX) 指挥官决策: tasks 表迁移到 board_tasks, inbox 保留 (待 worker pillar 整理时决定)"
-      "(YYY) 迁移设计 — 6 步 pipeline 改写:"
+      "v0.5.0 (2026-04-20 — 架构升级: memory-hook 迁 board_tasks, tasks 表 PARTIAL, inbox 保留):"
+      "(XXX) 指挥官决策: tasks 表迁移, inbox 保留"
+      "(YYY) 迁移设计 — 6 步 pipeline 改写 (memory-hook 子集):"
       "     旧: state::submit_task → tasks 表 → memory_scheduler poll → slot dispatch"
       "     新: state::submit_task → board_tasks (trigger_source='memory_hook', role='memory') → memory_scheduler poll board_tasks → BoardStore::claim"
-      "(ZZZ) schema 动作:"
+      "(ZZZ) v0.5.0 执行 agent 暴露 D010: tasks 表 30+ caller 里 25 个在 pillar 二 (mission_task_submit MCP族/supervisor/pty/context_pipeline/extraction), memory-hook 仅 5 caller"
+      "(AAAA) 决策: 选 phased 方案 B — 迁移 memory 侧 5 caller, tasks 表保留给 pillar 二"
       "     - board_tasks ALTER TABLE ADD COLUMN trigger_source TEXT NULL (28 列)"
-      "     - DROP TABLE tasks (migration 20260421100000)"
-      "     - SlotStore 删 8 tasks 方法 (insert_task / update_task / get_task / get_tasks_by_status / get_queued_tasks_by_role / requeue_running_tasks_for_slot / get_all_tasks / ack_completed_tasks)"
-      "     - BoardStore 加 list_board_tasks_by_trigger / 其他便捷查询方法"
-      "(AAAA) caller 迁移 — 6 处:"
-      "     state.rs::submit_task (PK 入口, 写 board_tasks 而非 tasks)"
-      "     handlers/knowledge/kb.rs (记忆钩子)"
-      "     workers/local/conversation_logger.rs (会话落地)"
-      "     workers/local/pty_event_worker.rs (PTY 事件)"
-      "     handlers/knowledge/board.rs (已用 board_tasks, 确认)"
-      "     engine/intent_engine/memory_scheduler.rs (poll + reap 改 board_tasks)"
-      "(BBBB) inbox 保留 (caller-count 1 = strategy_worker) — 待 pillar 二 worker 清理时再决定"
-      "(CCCC) v0.5.0 为主版本升级, 标志 memory pillar 架构清理 '从散到统一' 阶段完成"
-      "     board_tasks 成为任务 SSOT, 不再有独立 tasks 表"
+      "     - BoardStore 加 list_board_tasks_by_trigger 等便捷方法"
+      "     - 5 memory pillar caller 改写 (state/kb/conversation_logger/pty_event/memory_scheduler)"
+      "     - tasks 表 **不 drop** (pillar 二 仍用)"
+      "     - SlotStore 8 tasks 方法 **保留** (mission_task_submit MCP 族 依赖)"
+      "(BBBB) D011 归属澄清: tasks 表实际按'使用方'归 pillar 二 compute, 类比 TimelineStore 归 pillar 四 模式"
+      "     memory pillar 本版本中不再声明 tasks 为自己的表; legacy-zone 标 'PARTIAL + cross-pillar-ref'"
+      "     后续 pillar 二 compute lisp 整理时处理 tasks 最终归属"
+      "(CCCC) inbox 保留 (caller-count 1 = strategy_worker, pillar 二) — 同理待 pillar 二 清理时决定"
+      "(DDDD) v0.5.0 成果: memory-hook 已统一到 board_tasks; board_tasks 成为 memory pillar 任务 SSOT"
+      "     (pillar 二 的 compute 任务仍在 tasks 表 — 那是 pillar 二 的 SSOT 选择)"
       "     frozen 恢复; 再 unfreeze 需明确批准")
 
     (ownership-summary

@@ -16,8 +16,8 @@ impl BoardStore for PgMissionStore {
         let depends_on_json = serde_json::to_string(&task.depends_on)
             .unwrap_or_else(|_| "[]".to_string());
         sqlx::query(
-            "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, hidden, retry_count, max_retries, order_idx, created_at, updated_at, depends_on, dedupe_key, timeout_secs, context_intent)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)"
+            "INSERT INTO board_tasks (id, title, description, status, priority, category, project, server, due_date, parent_id, assignee, auto_execute, prompt_template, hidden, retry_count, max_retries, order_idx, created_at, updated_at, depends_on, dedupe_key, timeout_secs, context_intent, trigger_source)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)"
         )
         .bind(task.id.as_str())
         .bind(&task.title)
@@ -42,6 +42,7 @@ impl BoardStore for PgMissionStore {
         .bind(&task.dedupe_key)
         .bind(task.timeout_secs)
         .bind(&task.context_intent)
+        .bind(&task.trigger_source)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -129,6 +130,7 @@ impl BoardStore for PgMissionStore {
             dedupe_key: input.dedupe_key.clone(),
             timeout_secs: input.timeout_secs,
             context_intent: input.context_intent.clone(),
+            trigger_source: None,
             notes_count: 0,
         };
 
@@ -180,6 +182,22 @@ impl BoardStore for PgMissionStore {
             .fetch_all(&self.pool)
             .await?
         };
+        Ok(rows.into_iter().map(|r| r.into_board_task()).collect())
+    }
+
+    async fn list_board_tasks_by_trigger(&self, trigger_source: &str, status: &str, limit: i64) -> DbResult<Vec<BoardTask>> {
+        let rows = sqlx::query_as::<_, PgBoardTaskRow>(
+            "SELECT *, (SELECT COUNT(*) FROM board_task_notes WHERE task_id = board_tasks.id) AS notes_count
+             FROM board_tasks
+             WHERE trigger_source = $1 AND status = $2
+             ORDER BY order_idx ASC, created_at ASC
+             LIMIT $3"
+        )
+        .bind(trigger_source)
+        .bind(status)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows.into_iter().map(|r| r.into_board_task()).collect())
     }
 
@@ -1392,6 +1410,7 @@ struct PgBoardTaskRow {
     dedupe_key: Option<String>,
     timeout_secs: Option<i64>,
     context_intent: Option<String>,
+    trigger_source: Option<String>,
     notes_count: Option<i64>,
 }
 
@@ -1435,6 +1454,7 @@ impl PgBoardTaskRow {
             dedupe_key: self.dedupe_key,
             timeout_secs: self.timeout_secs,
             context_intent: self.context_intent,
+            trigger_source: self.trigger_source,
             notes_count: self.notes_count.unwrap_or(0),
         }
     }

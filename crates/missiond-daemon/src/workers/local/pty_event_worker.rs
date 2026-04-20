@@ -16,7 +16,6 @@ use crate::state::{
     AppState, EmbeddingTask, ExtractionPhase, CURRENT_ANALYSIS_VERSION, MEMORY_SLOT_ID,
     MEMORY_SLOW_SLOT_ID,
 };
-use crate::supervisor::get_task_jsonl_path;
 use missiond_core::event::events::{
     IncidentEvent, MemoryEvent, SessionEndStatus, SessionEvent, SlotEvent, TaskEvent,
 };
@@ -315,116 +314,134 @@ async fn handle_memory_lane_state(
 }
 
 async fn handle_submit_task_closure(s: &AppState, slot_id: &str) {
-    if let Ok(running_tasks) = s
+    // v0.5.0: memory-hook tasks now live in board_tasks (trigger_source='memory_hook').
+    // Poll running memory-hook tasks claimed by this slot.
+    let running_tasks = match s
         .store
-        .get_tasks_by_status(missiond_core::types::TaskStatus::Running)
+        .list_board_tasks_by_trigger("memory_hook", "running", 256)
         .await
     {
-        let now = chrono::Utc::now().timestamp_millis();
-        const MIN_EXECUTION_MS: i64 = 5_000;
-        const MIN_JSONL_EXECUTION_MS: i64 = 3_000;
-        let pty_resp = s.slot_last_responses.write().await.remove(slot_id);
-        let jsonl_resp = match s.store.get_slot_session(slot_id).await {
-            Ok(Some(session_uuid)) => match s.store.get_conversation(&session_uuid).await {
-                Ok(Some(conv)) => {
-                    if let Some(ref jsonl_path) = conv.jsonl_path {
-                        missiond_core::extract_last_assistant_text(std::path::Path::new(jsonl_path))
-                            .await
-                    } else {
-                        None
-                    }
+        Ok(t) => t,
+        Err(e) => {
+            warn!(error = %e, "Failed to query running memory-hook board_tasks");
+            // Still emit completion signal so dispatcher wakes up.
+            let _ = s
+                .bus
+                .publish_task(TaskEvent::Completed { task_id: String::new() })
+                .await;
+            return;
+        }
+    };
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    const MIN_EXECUTION_MS: i64 = 5_000;
+    const MIN_JSONL_EXECUTION_MS: i64 = 3_000;
+    let pty_resp = s.slot_last_responses.write().await.remove(slot_id);
+    let jsonl_resp = match s.store.get_slot_session(slot_id).await {
+        Ok(Some(session_uuid)) => match s.store.get_conversation(&session_uuid).await {
+            Ok(Some(conv)) => {
+                if let Some(ref jsonl_path) = conv.jsonl_path {
+                    missiond_core::extract_last_assistant_text(std::path::Path::new(jsonl_path))
+                        .await
+                } else {
+                    None
                 }
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    let jsonl_confirmed = {
+        let session_uuid = s.store.get_slot_session(slot_id).await.ok().flatten();
+        let jsonl_path = match session_uuid {
+            Some(uuid) => match s.store.get_conversation(&uuid).await {
+                Ok(Some(conv)) => conv.jsonl_path,
                 _ => None,
             },
-            _ => None,
+            None => None,
         };
-        let jsonl_confirmed = if let Some(jsonl_path) = get_task_jsonl_path(
-            s,
-            &missiond_core::types::Task {
-                id: String::new(),
-                role: String::new(),
-                prompt: String::new(),
-                status: missiond_core::types::TaskStatus::Running,
-                slot_id: Some(slot_id.to_string()),
-                session_id: None,
-                result: None,
-                error: None,
-                created_at: 0,
-                started_at: None,
-                finished_at: None,
-            },
-        )
-        .await
-        {
-            missiond_core::jsonl_has_completed_turn(std::path::Path::new(&jsonl_path)).await
-        } else {
-            false
-        };
-        for task in &running_tasks {
-            if task.slot_id.as_deref() == Some(slot_id) {
-                let started = task.started_at.unwrap_or(task.created_at);
-                let elapsed = now - started;
-                if elapsed < MIN_JSONL_EXECUTION_MS {
-                    debug!(
-                        task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,
-                        "Submit task NOT closed: too short even for JSONL ({elapsed}ms < {MIN_JSONL_EXECUTION_MS}ms)"
-                    );
-                    continue;
-                }
-                if elapsed < MIN_EXECUTION_MS && !jsonl_confirmed {
-                    debug!(
-                        task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,
-                        "Submit task NOT closed: execution too short ({elapsed}ms < {MIN_EXECUTION_MS}ms) and no JSONL confirmation"
-                    );
-                    continue;
-                }
-                let result_text = jsonl_resp.clone()
-                    .or_else(|| {
-                        if pty_resp.is_some() {
-                            warn!(task_id = %task.id, "JSONL result unavailable, falling back to PTY");
-                        }
-                        pty_resp.clone()
-                    })
-                    .unwrap_or_else(|| "completed".to_string());
-                let result_text = if result_text.len() > 4096 {
-                    let mut end = 4096;
-                    while !result_text.is_char_boundary(end) && end > 0 {
-                        end -= 1;
-                    }
-                    format!("{}...(truncated)", &result_text[..end])
-                } else {
-                    result_text
-                };
-                let _ = s
-                    .store
-                    .update_task(
-                        &task.id,
-                        &missiond_core::types::TaskUpdate {
-                            status: Some(missiond_core::types::TaskStatus::Done),
-                            finished_at: Some(now),
-                            result: Some(result_text.clone()),
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-                if let Ok(true) = s
-                    .store
-                    .kb_ops_complete_by_task_id(&task.id, "done", Some(&result_text))
-                    .await
-                {
-                    info!(task_id = %task.id, "KB operation marked done via task completion");
-                }
-                info!(task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,
-                    jsonl_result = jsonl_resp.is_some(),
-                    "Submit task closed: slot returned to Idle");
-                let _ = s
-                    .bus
-                    .publish_task(TaskEvent::Completed {
-                        task_id: task.id.clone(),
-                    })
-                    .await;
+        match jsonl_path {
+            Some(path) => {
+                missiond_core::jsonl_has_completed_turn(std::path::Path::new(&path)).await
             }
+            None => false,
         }
+    };
+
+    for task in &running_tasks {
+        if task.claim_executor_id.as_deref() != Some(slot_id) {
+            continue;
+        }
+        let started_ms = parse_rfc3339_to_ms(task.claimed_at.as_deref().unwrap_or(&task.updated_at))
+            .unwrap_or(now_ms);
+        let elapsed = now_ms - started_ms;
+        if elapsed < MIN_JSONL_EXECUTION_MS {
+            debug!(
+                task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,
+                "Submit task NOT closed: too short even for JSONL ({elapsed}ms < {MIN_JSONL_EXECUTION_MS}ms)"
+            );
+            continue;
+        }
+        if elapsed < MIN_EXECUTION_MS && !jsonl_confirmed {
+            debug!(
+                task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,
+                "Submit task NOT closed: execution too short ({elapsed}ms < {MIN_EXECUTION_MS}ms) and no JSONL confirmation"
+            );
+            continue;
+        }
+        let result_text = jsonl_resp.clone()
+            .or_else(|| {
+                if pty_resp.is_some() {
+                    warn!(task_id = %task.id, "JSONL result unavailable, falling back to PTY");
+                }
+                pty_resp.clone()
+            })
+            .unwrap_or_else(|| "completed".to_string());
+        let result_text = if result_text.len() > 4096 {
+            let mut end = 4096;
+            while !result_text.is_char_boundary(end) && end > 0 {
+                end -= 1;
+            }
+            format!("{}...(truncated)", &result_text[..end])
+        } else {
+            result_text
+        };
+        let _ = s
+            .store
+            .update_board_task(
+                task.id.as_str(),
+                &missiond_core::types::UpdateBoardTaskInput {
+                    status: Some("done".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        // Append the result as a board_task note for audit trail (replaces TaskUpdate.result).
+        let _ = s
+            .store
+            .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                task_id: task.id.as_str().to_string(),
+                content: result_text.clone(),
+                note_type: Some("summary".to_string()),
+                author: Some("memory-hook".to_string()),
+            })
+            .await;
+        if let Ok(true) = s
+            .store
+            .kb_ops_complete_by_task_id(task.id.as_str(), "done", Some(&result_text))
+            .await
+        {
+            info!(task_id = %task.id, "KB operation marked done via task completion");
+        }
+        info!(task_id = %task.id, slot_id = %slot_id, elapsed_ms = elapsed,
+            jsonl_result = jsonl_resp.is_some(),
+            "Submit task closed: slot returned to Idle");
+        let _ = s
+            .bus
+            .publish_task(TaskEvent::Completed {
+                task_id: task.id.as_str().to_string(),
+            })
+            .await;
     }
     // Always signal submit dispatcher when any slot becomes Idle
     let _ = s
@@ -433,6 +450,13 @@ async fn handle_submit_task_closure(s: &AppState, slot_id: &str) {
             task_id: String::new(),
         })
         .await;
+}
+
+/// Parse RFC3339 timestamp string back to epoch millis for elapsed-time math.
+fn parse_rfc3339_to_ms(ts: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
 }
 
 async fn handle_confirm_required(

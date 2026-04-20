@@ -361,6 +361,10 @@ pub trait BoardStore: Send + Sync {
     async fn create_board_task(&self, input: &CreateBoardTaskInput) -> DbResult<BoardTask>;
     async fn get_board_task(&self, id: &str) -> DbResult<Option<BoardTask>>;
     async fn list_board_tasks(&self, status: Option<&str>, include_hidden: bool) -> DbResult<Vec<BoardTask>>;
+    /// v0.5.0: List board tasks filtered by trigger_source + status.
+    /// Used by memory_scheduler to poll `trigger_source='memory_hook'` tasks after the
+    /// legacy `tasks`-table → `board_tasks` migration.
+    async fn list_board_tasks_by_trigger(&self, trigger_source: &str, status: &str, limit: i64) -> DbResult<Vec<BoardTask>>;
     async fn update_board_task(&self, id: &str, update: &UpdateBoardTaskInput) -> DbResult<Option<BoardTask>>;
     async fn delete_board_task(&self, id: &str) -> DbResult<i64>;
     async fn toggle_board_task(&self, id: &str) -> DbResult<Option<BoardTask>>;

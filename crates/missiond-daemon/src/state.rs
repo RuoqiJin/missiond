@@ -254,42 +254,81 @@ pub(crate) struct AppState {
         Arc<tokio::sync::Mutex<HashMap<String, u64>>>,
 }
 
-/// M4: Async task submission — replaces MissionControl::submit() to avoid split-brain.
-/// All task creation goes through `store` (the active backend) instead of MissionControl's
-/// internal SQLite, ensuring data consistency when using PostgreSQL.
+/// v0.5.0: Memory-hook task submission.
+///
+/// Writes to `board_tasks` with `trigger_source='memory_hook'` + `category=<role>`.
+/// The legacy `tasks` table is kept for pillar 二 (mission_task_submit MCP family);
+/// memory pillar's 5 callers (state / kb / conversation_logger / pty_event / memory_scheduler)
+/// all route through this function into `board_tasks` instead.
+///
+/// The `role` arg (e.g. `"memory"`) is stored as `category`; memory_scheduler uses
+/// slot.config.role to match candidate slots.
 pub(crate) async fn submit_task(
     store: &dyn MissionStore,
     role: &str,
     prompt: &str,
 ) -> anyhow::Result<String> {
-    use missiond_core::types::{Task, TaskStatus};
+    use missiond_core::types::{BoardTask, BoardTaskStatus, TaskId};
 
-    let now = chrono::Utc::now().timestamp_millis();
-    let task = Task {
-        id: uuid::Uuid::new_v4().to_string(),
-        role: role.to_string(),
-        prompt: prompt.to_string(),
-        status: TaskStatus::Queued,
-        slot_id: None,
-        session_id: None,
-        result: None,
-        error: None,
-        created_at: now,
-        started_at: None,
-        finished_at: None,
+    let now_rfc = chrono::Utc::now().to_rfc3339();
+    // Short preview for title (UI friendliness), full prompt stays in prompt_template.
+    let title = {
+        const MAX_TITLE: usize = 120;
+        let first_line = prompt.lines().next().unwrap_or(prompt).trim();
+        if first_line.is_empty() {
+            format!("[memory] {}", &prompt[..prompt.len().min(MAX_TITLE)])
+        } else if first_line.len() > MAX_TITLE {
+            let mut end = MAX_TITLE;
+            while !first_line.is_char_boundary(end) && end > 0 { end -= 1; }
+            format!("{}…", &first_line[..end])
+        } else {
+            first_line.to_string()
+        }
     };
 
+    let task = BoardTask {
+        id: TaskId::new(),
+        title,
+        description: String::new(),
+        status: BoardTaskStatus::Open,
+        priority: "medium".to_string(),
+        category: role.to_string(),
+        project: None,
+        server: None,
+        due_date: None,
+        parent_id: None,
+        assignee: None,
+        auto_execute: false,
+        prompt_template: Some(prompt.to_string()),
+        hidden: true, // hide from default list views (memory-hook noise)
+        retry_count: 0,
+        max_retries: 2,
+        order_idx: 0,
+        created_at: now_rfc.clone(),
+        updated_at: now_rfc,
+        claim_executor_id: None,
+        claim_executor_type: None,
+        claimed_at: None,
+        flow_phase: None,
+        flow_context: None,
+        flow_template: None,
+        depends_on: Vec::new(),
+        lease_expires_at: None,
+        dedupe_key: None,
+        timeout_secs: None,
+        context_intent: None,
+        trigger_source: Some("memory_hook".to_string()),
+        notes_count: 0,
+    };
+
+    let task_id = task.id.as_str().to_string();
     store
-        .insert_task(&task)
+        .insert_board_task(&task)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to create task: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to create board task: {}", e))?;
 
-    // v0.4.23 Phase 6: legacy `events` table dropped — task-event audit
-    // moved to pillar 四 event_log (SSOT). Task state transitions emit via
-    // the event bus; per-task audit here is removed.
-
-    tracing::info!(task_id = %task.id, role = %role, "Task created (via store)");
-    Ok(task.id)
+    tracing::info!(task_id = %task_id, role = %role, "Memory-hook task created (board_tasks)");
+    Ok(task_id)
 }
 
 /// Event-driven embedding tasks — the Worker sleeps until triggered.

@@ -5,7 +5,6 @@ use crate::slot_env::build_slot_tracking_env;
 use crate::slot_env::capture_slot_session_uuid;
 use crate::state::AppState;
 use crate::state::MEMORY_SLOT_ID;
-use crate::supervisor::get_task_jsonl_path;
 use missiond_core::PTYSpawnOptions;
 use missiond_core::SessionState;
 use std::collections::HashSet;
@@ -99,19 +98,25 @@ pub(crate) async fn schedule_memory_tasks(state: &AppState) {
     check_kb_consolidation(state).await;
 }
 
-/// Dispatch queued tasks from the `tasks` table (created by mission_submit).
+/// Dispatch queued memory-hook tasks from `board_tasks` (trigger_source='memory_hook', status='open').
+///
+/// v0.5.0: migrated from legacy `tasks` table. Field mapping:
+///   - `role` → `category` (e.g. "memory")
+///   - `prompt` → `prompt_template`
+///   - `slot_id` pin → `assignee`
+///   - Queued→open, Running→running, Done→done, Failed→failed.
+///
 /// Returns true if at least one task was dispatched.
-/// Part of the unified priority scheduler — called before extraction checks.
 pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
-    // spawn_blocking: batch table scan
+    // Batch scan: all open memory-hook board_tasks.
     let queued = match state
         .store
-        .get_tasks_by_status(missiond_core::types::TaskStatus::Queued)
+        .list_board_tasks_by_trigger("memory_hook", "open", 256)
         .await
     {
         Ok(tasks) => tasks,
         Err(e) => {
-            warn!(error = %e, "Failed to query queued submit tasks");
+            warn!(error = %e, "Failed to query queued memory-hook board_tasks");
             return false;
         }
     };
@@ -120,7 +125,7 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
         return false;
     }
 
-    info!(count = queued.len(), "Autopilot: found queued submit tasks");
+    info!(count = queued.len(), "Autopilot: found queued memory-hook tasks");
 
     let mut any_dispatched = false;
     // Track slots used in this dispatch round to avoid sending multiple tasks to the same slot
@@ -130,12 +135,19 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
         let slots = state.mission.list_slots();
         let mut dispatched = false;
 
-        let candidates: Vec<String> = if let Some(ref target) = task.slot_id {
+        let role = task.category.as_str();
+        let prompt = task.prompt_template.as_deref().unwrap_or("");
+        if prompt.is_empty() {
+            warn!(task_id = %task.id, "Memory-hook task has empty prompt_template, skipping");
+            continue;
+        }
+
+        let candidates: Vec<String> = if let Some(ref target) = task.assignee {
             vec![target.clone()]
         } else {
             slots
                 .iter()
-                .filter(|s| s.config.role == task.role)
+                .filter(|s| s.config.role == role)
                 .map(|s| s.config.id.clone())
                 .collect()
         };
@@ -159,7 +171,7 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
             let sent = if status.state == missiond_core::pty::SessionState::Idle {
                 state
                     .pty
-                    .send_fire_and_forget(slot_id, &task.prompt)
+                    .send_fire_and_forget(slot_id, prompt)
                     .await
                     .ok()
                     .is_some()
@@ -169,40 +181,32 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
             state.slot_dispatch.release(slot_id);
 
             if sent {
-                let now = chrono::Utc::now().timestamp_millis();
+                // Claim the board task atomically (sets status=running + claim_executor + claimed_at).
                 let _ = state
                     .store
-                    .update_task(
-                        &task.id,
-                        &missiond_core::types::TaskUpdate {
-                            status: Some(missiond_core::types::TaskStatus::Running),
-                            slot_id: Some(slot_id.clone()),
-                            started_at: Some(now),
-                            ..Default::default()
-                        },
-                    )
+                    .claim_board_task(task.id.as_str(), slot_id, "pty_slot")
                     .await;
-                let preview = if task.prompt.len() > 200 {
+                let preview = if prompt.len() > 200 {
                     let mut end = 200;
-                    while end > 0 && !task.prompt.is_char_boundary(end) {
+                    while end > 0 && !prompt.is_char_boundary(end) {
                         end -= 1;
                     }
-                    format!("{}...", &task.prompt[..end])
+                    format!("{}...", &prompt[..end])
                 } else {
-                    task.prompt.clone()
+                    prompt.to_string()
                 };
                 let _ = state
                     .bus
                     .publish_slot(missiond_core::event::events::SlotEvent::TaskDispatched {
                         slot_id: slot_id.clone(),
-                        task_id: Some(task.id.clone()),
+                        task_id: Some(task.id.as_str().to_string()),
                         purpose: "submit".to_string(),
-                        prompt_chars: task.prompt.len(),
+                        prompt_chars: prompt.len(),
                         preview,
                         cited_kb_ids: vec![],
                     })
                     .await;
-                info!(task_id = %task.id, slot_id = %slot_id, role = %task.role, "Autopilot: dispatched queued submit task");
+                info!(task_id = %task.id, slot_id = %slot_id, role = %role, "Autopilot: dispatched queued memory-hook task");
                 state
                     .stats
                     .tasks_dispatched
@@ -215,16 +219,16 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
         }
 
         if !dispatched {
-            debug!(task_id = %task.id, role = %task.role, "Autopilot: no idle slot for queued task");
+            debug!(task_id = %task.id, role = %role, "Autopilot: no idle slot for queued memory-hook task");
         }
     }
 
     // Phase 2: Wake-on-Demand — auto-spawn stopped slots for queued tasks
-    // Respects pinned slot_id: if task specifies a slot, only wake that exact slot.
+    // Respects pinned assignee: if task specifies a slot, only wake that exact slot.
     {
         let remaining = match state
             .store
-            .get_tasks_by_status(missiond_core::types::TaskStatus::Queued)
+            .list_board_tasks_by_trigger("memory_hook", "open", 256)
             .await
         {
             Ok(t) => t,
@@ -234,25 +238,30 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
             let slots = state.mission.list_slots();
             let mut woken_slots: HashSet<String> = HashSet::new();
             for task in &remaining {
+                let role = task.category.as_str();
                 // Determine target slot(s) to wake
-                let target_slot_id = if let Some(ref pinned) = task.slot_id {
+                let target_slot_id = if let Some(ref pinned) = task.assignee {
                     // Pinned task: only wake the exact slot
                     if !slots.iter().any(|s| s.config.id == *pinned) {
-                        warn!(task_id = %task.id, slot_id = %pinned, "Autopilot: pinned slot not found, marking task Failed");
-                        let now = chrono::Utc::now().timestamp_millis();
+                        warn!(task_id = %task.id, slot_id = %pinned, "Autopilot: pinned slot not found, marking memory-hook task Failed");
                         let _ = state
                             .store
-                            .update_task(
-                                &task.id,
-                                &missiond_core::types::TaskUpdate {
-                                    status: Some(missiond_core::types::TaskStatus::Failed),
-                                    finished_at: Some(now),
-                                    result: Some(format!(
-                                        "pinned slot '{pinned}' not found in slots.yaml"
-                                    )),
+                            .update_board_task(
+                                task.id.as_str(),
+                                &missiond_core::types::UpdateBoardTaskInput {
+                                    status: Some("failed".to_string()),
                                     ..Default::default()
                                 },
                             )
+                            .await;
+                        let _ = state
+                            .store
+                            .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                                task_id: task.id.as_str().to_string(),
+                                content: format!("pinned slot '{pinned}' not found in slots.yaml"),
+                                note_type: Some("note".to_string()),
+                                author: Some("memory-hook".to_string()),
+                            })
                             .await;
                         continue;
                     }
@@ -260,7 +269,7 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
                 } else {
                     // Unpinned: find any slot with matching role
                     match slots.iter().find(|s| {
-                        s.config.role == task.role
+                        s.config.role == role
                             && !used_slots.contains(&s.config.id)
                             && !woken_slots.contains(&s.config.id)
                     }) {
@@ -285,7 +294,7 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
                 woken_slots.insert(target_slot_id.clone());
                 let state_clone = state.clone();
                 let slot_id_clone = target_slot_id.clone();
-                info!(slot_id = %target_slot_id, role = %task.role, task_id = %task.id, "Autopilot: auto-spawning slot for queued task (Wake-on-Demand)");
+                info!(slot_id = %target_slot_id, role = %role, task_id = %task.id, "Autopilot: auto-spawning slot for queued memory-hook task (Wake-on-Demand)");
                 tokio::spawn(async move {
                     if ensure_memory_slot_by_id(&state_clone, &slot_id_clone).await {
                         let _ = state_clone
@@ -303,13 +312,21 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
     any_dispatched
 }
 
-/// Reap submit tasks stuck in Running state for too long (15 min).
-/// If the slot is Idle, mark Done; otherwise mark Failed after timeout.
+/// Reap memory-hook board_tasks stuck in Running state for too long (15 min).
+///
+/// v0.5.0: migrated to board_tasks. Uses:
+///   - `list_board_tasks_by_trigger("memory_hook", "running", _)` for scan
+///   - `BoardStore::recover_stale_running_tasks` for the hard-timeout path
+///   - JSONL compensation preserved for tasks between 2–15 min elapsed.
+///
+/// If the slot is Idle at hard timeout, mark Done; otherwise mark Failed.
 pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
-    // spawn_blocking: batch table scan
+    // Hard-timeout path — release pillar 二 pattern: recover_stale_running_tasks handles
+    // stale-lease recovery (status=running → open, clear claim) for tasks whose lease is
+    // way past. For memory-hook our lease is not set, so we fall back to manual scan.
     let running = match state
         .store
-        .get_tasks_by_status(missiond_core::types::TaskStatus::Running)
+        .list_board_tasks_by_trigger("memory_hook", "running", 256)
         .await
     {
         Ok(t) => t,
@@ -319,79 +336,44 @@ pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
         return;
     }
 
-    let now = chrono::Utc::now().timestamp_millis();
+    let now_ms = chrono::Utc::now().timestamp_millis();
     const JSONL_CHECK_THRESHOLD_MS: i64 = 2 * 60 * 1000; // 2 minutes: start checking JSONL
     const SUBMIT_TASK_TIMEOUT_MS: i64 = 15 * 60 * 1000; // 15 minutes: hard timeout
 
     for task in &running {
-        let started = task.started_at.unwrap_or(task.created_at);
-        let elapsed = now - started;
+        let started_ms = parse_rfc3339_to_ms(task.claimed_at.as_deref().unwrap_or(&task.updated_at))
+            .unwrap_or(now_ms);
+        let elapsed = now_ms - started_ms;
 
         if elapsed < JSONL_CHECK_THRESHOLD_MS {
             continue;
         }
 
+        let slot_id = task.claim_executor_id.as_deref();
+
         // --- JSONL completion detection (compensating path for missed PTY Idle events) ---
         if elapsed < SUBMIT_TASK_TIMEOUT_MS {
-            if let Some(ref slot_id) = task.slot_id {
-                // Guard 1: slot's current session must match task's session
-                let session_matches = match (
-                    state.store.get_slot_session(slot_id).await,
-                    &task.session_id,
-                ) {
-                    (Ok(Some(current_session)), Some(task_session)) => {
-                        current_session == *task_session
-                    }
-                    // No session tracking → can't verify, skip JSONL check
-                    _ => false,
-                };
-
-                if session_matches {
-                    if let Some(jsonl_path) = get_task_jsonl_path(state, task).await {
-                        let path = std::path::Path::new(&jsonl_path);
-                        if missiond_core::jsonl_has_completed_turn(path).await {
-                            // JSONL confirms turn completed — extract result and close
-                            let result_text = missiond_core::extract_last_assistant_text(path)
-                                .await
-                                .unwrap_or_else(|| "completed (JSONL turn_duration)".to_string());
-                            // Safe UTF-8 truncation to 4KB
-                            let result_text = if result_text.len() > 4096 {
-                                let mut end = 4096;
-                                while !result_text.is_char_boundary(end) && end > 0 {
-                                    end -= 1;
-                                }
-                                format!("{}...(truncated)", &result_text[..end])
-                            } else {
-                                result_text
-                            };
-                            let _ = state
-                                .store
-                                .update_task(
-                                    &task.id,
-                                    &missiond_core::types::TaskUpdate {
-                                        status: Some(missiond_core::types::TaskStatus::Done),
-                                        finished_at: Some(now),
-                                        result: Some(result_text.clone()),
-                                        ..Default::default()
-                                    },
-                                )
-                                .await;
-                            // Update associated kb_operation
-                            let _ = state
-                                .store
-                                .kb_ops_complete_by_task_id(&task.id, "done", Some(&result_text))
-                                .await;
-                            // Board progress extraction: parse JSON output and write notes
-                            if task.prompt.starts_with("[board_progress]") {
-                                apply_board_progress_result(state, &result_text).await;
-                            }
-                            info!(
-                                task_id = %task.id, slot_id = %slot_id,
-                                age_min = elapsed / 60000,
-                                "Submit task closed via JSONL turn_duration compensation"
-                            );
-                            continue;
+            if let Some(slot_id) = slot_id {
+                if let Some(jsonl_path) = resolve_jsonl_path(state, slot_id).await {
+                    let path = std::path::Path::new(&jsonl_path);
+                    if missiond_core::jsonl_has_completed_turn(path).await {
+                        // JSONL confirms turn completed — extract result and close
+                        let result_text = missiond_core::extract_last_assistant_text(path)
+                            .await
+                            .unwrap_or_else(|| "completed (JSONL turn_duration)".to_string());
+                        let result_text = truncate_result(&result_text);
+                        close_memory_task(state, task, "done", &result_text).await;
+                        // Board progress extraction: parse JSON output and write notes
+                        let prompt = task.prompt_template.as_deref().unwrap_or("");
+                        if prompt.starts_with("[board_progress]") {
+                            apply_board_progress_result(state, &result_text).await;
                         }
+                        info!(
+                            task_id = %task.id, slot_id = %slot_id,
+                            age_min = elapsed / 60000,
+                            "Memory-hook task closed via JSONL turn_duration compensation"
+                        );
+                        continue;
                     }
                 }
             }
@@ -400,21 +382,21 @@ pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
         }
 
         // --- Hard timeout (15 min) ---
-        let slot_idle = if let Some(ref sid) = task.slot_id {
+        let slot_idle = if let Some(sid) = slot_id {
             state
                 .pty
                 .get_status(sid)
                 .await
                 .map(|s| s.state == missiond_core::pty::SessionState::Idle)
-                .unwrap_or(true) // no session = treat as idle
+                .unwrap_or(true)
         } else {
             true
         };
 
         let (new_status, result_msg) = if slot_idle {
             // Try JSONL result even at timeout
-            let jsonl_result = if task.slot_id.is_some() {
-                if let Some(jsonl_path) = get_task_jsonl_path(state, task).await {
+            let jsonl_result = if let Some(sid) = slot_id {
+                if let Some(jsonl_path) = resolve_jsonl_path(state, sid).await {
                     missiond_core::extract_last_assistant_text(std::path::Path::new(&jsonl_path))
                         .await
                 } else {
@@ -424,55 +406,94 @@ pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
                 None
             };
             (
-                missiond_core::types::TaskStatus::Done,
+                "done",
                 jsonl_result.unwrap_or_else(|| "completed (timeout reaper)".to_string()),
             )
         } else {
-            (
-                missiond_core::types::TaskStatus::Failed,
-                "timed out after 15 minutes".to_string(),
-            )
+            ("failed", "timed out after 15 minutes".to_string())
         };
 
-        let _ = state
-            .store
-            .update_task(
-                &task.id,
-                &missiond_core::types::TaskUpdate {
-                    status: Some(new_status),
-                    finished_at: Some(now),
-                    result: Some(result_msg.clone()),
-                    ..Default::default()
-                },
-            )
-            .await;
-        // Update associated kb_operation (done or failed depending on task status)
-        let kb_status = if new_status == missiond_core::types::TaskStatus::Done {
-            "done"
-        } else {
-            "failed"
-        };
+        let result_msg = truncate_result(&result_msg);
+        close_memory_task(state, task, new_status, &result_msg).await;
+        let kb_status = new_status;
         if let Ok(true) = state
             .store
-            .kb_ops_complete_by_task_id(&task.id, kb_status, Some(&result_msg))
+            .kb_ops_complete_by_task_id(task.id.as_str(), kb_status, Some(&result_msg))
             .await
         {
             info!(task_id = %task.id, kb_status = kb_status, "KB operation updated via reaper");
         }
-        // Board progress extraction: parse JSON output and write notes (timeout path)
-        if new_status == missiond_core::types::TaskStatus::Done
-            && task.prompt.starts_with("[board_progress]")
-        {
+        let prompt = task.prompt_template.as_deref().unwrap_or("");
+        if new_status == "done" && prompt.starts_with("[board_progress]") {
             apply_board_progress_result(state, &result_msg).await;
         }
         warn!(
             task_id = %task.id,
-            slot_id = ?task.slot_id,
-            status = ?new_status,
+            slot_id = ?slot_id,
+            status = %new_status,
             age_min = elapsed / 60000,
-            "Reaped stale submit task"
+            "Reaped stale memory-hook task"
         );
     }
+}
+
+/// Parse RFC3339 timestamp to epoch millis (for elapsed-time math on board_tasks columns).
+fn parse_rfc3339_to_ms(ts: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
+}
+
+/// Resolve the JSONL path for a given slot via slot_sessions → conversations.
+async fn resolve_jsonl_path(state: &AppState, slot_id: &str) -> Option<String> {
+    let session_uuid = state.store.get_slot_session(slot_id).await.ok().flatten()?;
+    let conv = state.store.get_conversation(&session_uuid).await.ok().flatten()?;
+    conv.jsonl_path
+}
+
+/// Safe UTF-8 truncation to 4KB for result text (shared by JSONL + timeout paths).
+fn truncate_result(text: &str) -> String {
+    const LIMIT: usize = 4096;
+    if text.len() <= LIMIT {
+        return text.to_string();
+    }
+    let mut end = LIMIT;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...(truncated)", &text[..end])
+}
+
+/// Close a memory-hook board task: set status + append result note.
+async fn close_memory_task(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    new_status: &str,
+    result_text: &str,
+) {
+    let _ = state
+        .store
+        .update_board_task(
+            task.id.as_str(),
+            &missiond_core::types::UpdateBoardTaskInput {
+                status: Some(new_status.to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+    let _ = state
+        .store
+        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+            task_id: task.id.as_str().to_string(),
+            content: result_text.to_string(),
+            note_type: Some("summary".to_string()),
+            author: Some("memory-hook".to_string()),
+        })
+        .await;
+    let _ = state
+        .store
+        .kb_ops_complete_by_task_id(task.id.as_str(), new_status, Some(result_text))
+        .await;
 }
 
 /// Parse structured JSON from board_progress extraction task and write notes/status to DB.

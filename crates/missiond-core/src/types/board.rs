@@ -260,6 +260,10 @@ pub struct BoardTask {
     /// Used by autopilot for context_build keyword enhancement.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_intent: Option<String>,
+    /// v0.5.0: Trigger source for this task (memory_hook / user / autopilot / flow / cli).
+    /// Set by memory-hook migration (state::submit_task) so memory_scheduler can filter its queue.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger_source: Option<String>,
     /// Number of notes attached to this task (populated by list queries)
     #[serde(default, skip_serializing_if = "is_zero")]
     pub notes_count: i64,

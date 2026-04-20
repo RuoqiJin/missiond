@@ -81,7 +81,11 @@
         :result "lisp→code 0 orphan (60 表 + 9 trait 全部在代码存在); code→lisp 发现 5 documentation drift (D-004 ~ D-008)")
       (phase-6 :name "drop migration + zombie cleanup" :status "completed" :at "2026-04-20"
         :scope "按 frozen lisp 实际声明保守执行 — 只 drop 4 张 (narrations 2 + events + credentials), 不 drop lisp 仍 KEEP 的 tasks + DEPRECATE 的 inbox"
-        :deliverable "migration 20260421000000_drop_deprecated_tables.sql + traits 删 11 方法 + pg/ 删 ~290L zombie code + step_narrator.rs 整文件删 + 5 caller 清理"))
+        :deliverable "migration 20260421000000_drop_deprecated_tables.sql + traits 删 11 方法 + pg/ 删 ~290L zombie code + step_narrator.rs 整文件删 + 5 caller 清理")
+      (v0.5.0-migration :name "memory-hook 迁 board_tasks (phased B 方案)" :status "completed" :at "2026-04-20"
+        :lisp "v0.5.0 from v0.4.24, D010 修订 partial migration (非全 drop)"
+        :deliverable "migration 20260421100000_add_board_tasks_trigger_source.sql + 5 memory-pillar caller 迁移 + BoardStore::list_board_tasks_by_trigger + BoardTask.trigger_source 字段"
+        :untouched "tasks 表 / SlotStore 8 tasks 方法 / inbox / pillar 二 的 25 caller (mission_task_submit MCP 族等)"))
 
   ;; ─────────────────────────────────────────────────────────
   ;; claims — 谁锁定了什么, 防并发写冲突
@@ -175,6 +179,17 @@
       :finding "types/async_job.rs / types/dynamic_slot.rs / types/gen_types.rs 不在 lisp file-to-module-mapping"
       :status "tracked-minor")
 
+    (D010
+      :source "v0.5.0 设计执行 agent (a6e8e73cafad2d6e5) 调研后 stop"
+      :lisp-said "v0.5.0 设计: tasks 表 ✅ DROPPED, 所有 30+ caller 迁 board_tasks"
+      :actually-found "tasks 表实际 30+ caller 里 25 个在 pillar 二: handlers/compute/task.rs (mission_task_submit MCP 族 500+L) / supervisor.rs (slot 死亡恢复) / handlers/compute/pty.rs / context/context_pipeline.rs / engine/learning_engine/extraction.rs"
+      :memory-pillar-only "仅 5 caller 在 memory pillar: state.rs / kb.rs / conversation_logger / pty_event_worker / memory_scheduler"
+      :agent-decision "stop 执行, 不硬推 drop. 报主会话, 记 D010"
+      :main-claude-decision "选方案 B phased: 迁 memory 侧 5 caller, tasks 表保留给 pillar 二. 类比 TimelineStore 归 pillar 四 的模式 — 按 'ownership by usage' 原则, tasks 实际归 pillar 二 compute"
+      :lisp-revised "v0.5.0 lisp 修订: tasks status 从 ✅ DROPPED 改为 ⚠ PARTIAL MIGRATION; memory-hook 迁出 board_tasks, tasks 表保留给 pillar 二"
+      :executed-at "v0.5.0 B 方案 agent (a80620afcfcc98c5d)"
+      :at "2026-04-20")
+
     (D009
       :source "Phase 6 agent (a1101c5e5020c65fa) 遵循 lisp 而非任务 prompt"
       :lisp-says "module system-support :: legacy-zone:"
@@ -188,6 +203,50 @@
       :next-step "指挥官接手后决定: (a) 迁移 tasks/inbox 活跃 caller 到新接口 → 后续 drop; (b) 保留 tasks/inbox 作 legacy 永久保存; (c) 其他策略"
       :status "approved-decided by agent, 留给指挥官 review"
       :at "2026-04-20 phase-6")
+
+    (D010
+      :source "v0.5.0 迁移 agent (主 Claude Opus 4.7) stop-and-report per 任务 '保守迁移' 规则"
+      :task-prompt-said
+        "memory-hook v0.5.0: tasks → board_tasks. 6 caller + 8 SlotStore 方法删 + tasks DROP."
+        "active-callers-in-memory-pillar: state.rs::submit_task / handlers/knowledge/kb.rs / workers/local/conversation_logger.rs / workers/local/pty_event_worker.rs / handlers/knowledge/board.rs (已 board_tasks)"
+      :ground-truth-scope-survey "grep 全仓后 tasks 相关 caller 实际分布:"
+      :callers-within-memory-hook-scope-5
+        ("state.rs::submit_task           — 入口, insert_task (1 site)"
+         "handlers/knowledge/kb.rs:1726   — state::submit_task 调用 (1 site)"
+         "handlers/knowledge/board.rs:637,659 — update_task (2 sites, 和 submit_task 配对)"
+         "workers/local/conversation_logger.rs:370,375 — submit_task + update_task (2 sites)"
+         "workers/local/pty_event_worker.rs:317-410 — get_tasks_by_status + update_task (2+ sites)")
+      :callers-outside-memory-hook-scope-surprise-6
+        ("handlers/compute/task.rs (500+ 行) — mission_task_submit/_query/_cancel/_ack/_track MCP 工具族的 handler;"
+         "                                      使用 insert_task/update_task/get_task/get_tasks_by_status/get_all_tasks/ack_completed_tasks 共 6 方法 × 10+ call sites;"
+         "                                      是外部 MCP client (Claude Code 主会话) 通用任务提交 API, 不是 memory-hook"
+         "supervisor.rs:44,122,468 — requeue_running_tasks_for_slot (3 sites, slot 死亡后任务回收)"
+         "handlers/compute/pty.rs:238 — requeue_running_tasks_for_slot (1 site, PTY 重启)"
+         "context/context_pipeline.rs:1137 — ack_completed_tasks (1 site, Hook 源任务 ack)"
+         "engine/intent_engine/memory_scheduler.rs — 除 dispatch_queued_submit_tasks/reap_stale_submit_tasks 外另有 update_task 5 sites (内部 FSM 推进)"
+         "engine/learning_engine/extraction.rs:75,335 — get_tasks_by_status Running (2 sites, 学习引擎查当前 running)"
+         "(小计: 10 文件 / 30+ call sites / 8 方法全部在用)")
+      :mcp-tool-surface-impact
+        "mission_task_submit (async/sync)"
+        "mission_task_query (status/list/ack/track)"
+        "mission_task_cancel"
+        "4 个 legacy name alias (mission_submit/ask/status/cancel/task/task_ack/task_track)"
+        "→ 全部走 tasks 表; lisp mcp-surface :: family-system 里未列, 但代码实存"
+      :scope-discrepancy
+        "任务 prompt 说 6 callers + 保守迁移. 实际是 10 文件 30+ sites, 含 MCP 工具族这种用户 API"
+        "按 prompt 直接 drop tasks 表会: (a) mission_task_submit 编译失败 (b) supervisor/extraction 编译失败 (c) 整个任务 MCP API 消失"
+        "D009 已明确 tasks 是 🔴 CORE, 30+ 调用, KEEP"
+      :lisp-v0.5-stance "frozen lisp 把 tasks 写成 ✅ DROPPED v0.5.0 — 乐观态度先于代码"
+      :agent-decision "stop-and-report. 不执行 migration, 不改 traits, 不改 state.rs, 不 drop tasks. 主会话需澄清:"
+      :options-for-commander
+        "(A) 真全面迁移: 迁 mission_task_submit MCP 工具族到 board_tasks (含 role 字段映射/status 迁移) + 迁 supervisor/extraction/pipeline. 工作量 = 原 prompt × 5x. 多 session 任务, 不是单 agent 能办"
+        "(B) 分阶段迁移: v0.5.0 先只迁 memory-hook 5 callers, tasks 表保留给 mission_task_submit 族; 等 v0.5.1+ 再迁 MCP 工具. lisp v0.5.0 改为渐进式声明 (不立即 DROP tasks)"
+        "(C) 架构澄清: mission_task_submit/_query/_cancel 是否应在 memory pillar? 从 MCP 工具族看, 它也许属 pillar 二/三, 不属 memory. lisp 需澄清归属"
+        "(D) 放弃 v0.5.0 tasks drop, 只加 trigger_source 列预备; mission_task_submit 继续用 tasks, memory-hook 也继续用 tasks + 用 trigger_source 区分来源. 软过渡"
+      :agent-recommendation "(B) 分阶段最稳. mission_task_submit 迁 board_tasks 需重设计 (role 字段→category 映射, 或引入 board_tasks.role 列)"
+      :no-code-changes-made "未动 migration / trait / state.rs / 任何 caller; 仅记录此 D010 + execution log"
+      :status "blocking — 等指挥官选 A/B/C/D"
+      :at "2026-04-21 v0.5.0-attempt")
 
     (D003
       :lisp-said "Stage 2A.3 原计划 delete TimelineStore (基于 '它已 deprecated' 的假设)"
@@ -278,14 +337,27 @@
     (comp-014 :phase "phase-4+5 audit" :agent "ab3a924be68435f5a"
       :summary "lisp ↔ code 双向校验: 9/9 trait + 60/60 表 + 51/51 cross-ref 全通过; 5 D-series non-critical doc drift"
       :at "2026-04-20")
-    (comp-015 :phase "phase-6" :agent "a1101c5e5020c65fa"
-      :summary "Drop migration + zombie cleanup (保守 4 张)"
-      :migration "20260421000000_drop_deprecated_tables.sql (narrations + narration_cursors + events + credentials)"
-      :traits-deleted "ConversationStore narration 9 方法 + SlotStore events 2 方法 = 11"
-      :code-deleted "pg/conversation.rs ~250L narration block + pg/slot.rs ~40L events = ~290L + step_narrator.rs 整文件 ~400L + 5 caller 清理"
-      :mcp-impact "mission_session_narrations 整删 (内部无注册); mission_inbox 保留 (inbox 表未 drop)"
-      :agent-decision "任务要求 drop 6 张, 但 frozen lisp 明标 tasks=KEEP/inbox=DEPRECATE 仍在用; 保守执行 drop 4 张, 记 D009 报指挥官"
-      :cargo "--workspace 0 error"
+    (comp-015 :phase "phase-6" :agent "a1101c5e5020c65fa" :summary "Drop 4 legacy 表 + zombie cleanup" :cargo "通过" :at "2026-04-20")
+    (comp-016 :phase "v0.5.0-scout" :agent "a6e8e73cafad2d6e5"
+      :summary "v0.5.0 memory-hook 迁移前调研 — 发现 tasks 表 30+ caller 中 25 在 pillar 二"
+      :action "stop 执行, 记 D010, 等主会话决策"
+      :cargo "未 build (未改代码)"
+      :at "2026-04-20")
+    (comp-017 :phase "v0.5.0-phased-B" :agent "a80620afcfcc98c5d"
+      :summary "D010 决策后执行: memory-hook 5 caller 迁 board_tasks, tasks 表保留"
+      :files
+        ("migrations/20260421100000_add_board_tasks_trigger_source.sql (ALTER + INDEX, 不 DROP)"
+         "types/board.rs: BoardTask 加 trigger_source 字段"
+         "traits.rs: BoardStore 加 list_board_tasks_by_trigger"
+         "pg/board.rs: impl + insert_board_task + PgBoardTaskRow 更新")
+      :callers-migrated
+        ("state::submit_task → insert_board_task (trigger_source='memory_hook', category=role)"
+         "handlers/knowledge/kb.rs:1726 (自然跟进)"
+         "workers/local/conversation_logger.rs:370-383 update_task → update_board_task"
+         "workers/local/pty_event_worker.rs handle_submit_task_closure 重写用 board_tasks poll"
+         "engine/intent_engine/memory_scheduler.rs: dispatch + reap 改 board + claim_board_task")
+      :verification "grep memory-pillar 侧 insert_task/get_tasks_by_status/requeue 0 match"
+      :cargo "--workspace 0 error; cargo test -p missiond-core 272/272 passed"
       :at "2026-04-20"))
 
   ;; ─────────────────────────────────────────────────────────
