@@ -27,30 +27,14 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "v0.5.0")
+  (version "v0.5.0"
+    :polish "v0.5.0 L1 语义压缩 (2026-04-20): history + migration-log 外移到 intent-memory-history.lisp; table-catalog 表详情 SSOT 合并到各 module (保持 count + 表名索引). 不做 L2/L3 DSL 压缩 (会破坏 :binds-to / :library-pov 的 grep 明显性 + 施工 agent 体验). 行数: 2999 → 2629 (-12.7%).")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
-    (v0.1   "4 分类扁平")
-    (v0.2   "仿 event-bus 三段式 (ingress/core/egress)")
-    (v0.3   "3 成熟模块 + 平铺 + 横切 (embedding/gen-crud 迁出)")
-    (v0.3.1 "搜索引擎迁出到 pillar 二 2.6 (搜索是计算不是数据)")
-    (v0.4   "4 成熟模块各管自己的表: kb-manager + conversation-logs 两个新模块; skill/specs 归 project-management; event-bus 4 表归 pillar 四")
-    (v0.4.1 "SSOT 合并: system_timeline 移除, pillar 四 event_log 成 timeline SSOT (v1.3.0); 总表 61→60")
-    (v0.4.2 "4 模块 in/core/out harmonization: board/kb/conv core 统一用 (path/plumbing/helper) 三分法语义")
-    (v0.4.3 "CLAUDE.md 分层: 全局 ~/.claude/CLAUDE.md + manager → pillar 五 intent-layer; 项目级 <project>/CLAUDE.md + manager → memory :: project-management")
-    (v0.4.4 "action/instruction specs 迁 pillar 五: intent/plan/workflow/user_intents DB 表 + system-level intent*.lisp + workflows*.lisp + flows/*.yaml; memory 只留'项目代码真实状态'的 per-project intent.lisp")
-    (v0.4.5 "workflow-lisp-templates + flow-yaml-templates 合并到单一 component workflows (:kind methodology | executable), 符合 Option B 设计")
-    (v0.4.6 "embedding 契约 SSOT: cross-cutting 新增 capability embedding-storage-governance, 5 处散落描述改用 cross-ref; 确认 5 张承载表 (含 skill_topics / ast_nodes) 及 message_embeddings 的 halfvec 特殊性")
-    (v0.4.7 "board 模块按'memory=库'原则精简: autopilot + flow-engine-v2 计算逻辑移到 pillar 二 2.4 orchestration, board 只留 cross-ref")
-    (v0.4.8 "board 新增 helper agent-execution-coordination: 从 intent-event-bus-execution.lisp 提取'并行 agent 共享内存层'模式, 6 slots + storage/manager interface 声明")
-    (v0.4.9 "conversation-logs 按 'memory=库' 精简: 10 worker 全改 cross-ref + 新增 writer-removed 墓志铭 (worker-briefing 已在 v1.3.0 删) + 2 egress 消费者改 cross-ref + pillar 二 2.3 同步修正 briefing 删除 + 增 writes-to-memory 注记")
-    (v0.4.10 "kb-manager 按 'memory=库' 精简: 5 worker + 1 context-pipeline writer → cross-ref; 2 egress compute 消费者 → cross-ref; core plumbing 的 :maintained-by 改 cross-ref; helper access-audit + operation-queue 加 :library-pov 分清接口 vs 时机")
-    (v0.4.11 "project-management 按 'memory=库' 精简: lisp-survey-worker → cross-ref pillar 二 2.3; scope-propagation 从 ingress 'writer' 重构为 plumbing scope-mechanism 下的 write-propagation-convention (不是 writer 而是跨模块约定); vault-md-edit 加 :library-pov")
-    (v0.4.12 "野生逻辑清理 Phase 1: L1 修正 (agent-questions auto-unblock 实际已实现) + L1 移除摘要 (message_narrations/cursors 下线 + step-narrator 删) + L2 TBD 修正 (kb_operation_queue 有 consumer / message_embedding_skips 是 audit trail) + L2 设计 (project-claudemd / agent-execution-coordination / prompt-snapshot 三个 MCP tool interface)")
-    (v0.4.13 "Phase 2 第一步: 新增 module llm-support (3 表: gemini_requests / gemini_file_uploads / token_usage_ledger, 从 category system-support 分离); 调查确认 3 writer 实际路径 (token 纠正为 message_handler.rs, 不是 gateway); 确认 observability-consumer 存在 (timeline.rs enrichment); cross-module-trait-sharing 诚实披露 ObservabilityStore 跨模块使用")
-    (v0.4.14 "Phase 2 第二步: 新增 module slot-support (3 表: slot_sessions / slot_tasks / dynamic_slots, 从 category system-support :: compute-runtime 分离); 校正 slot_tasks 实际语义为 learning engine 的 AI 任务 (extraction + decision), 不是通用 slot 任务; cross-module-trait-sharing 披露 SlotStore 跨模块 (daemon_state + legacy tasks/inbox/events)")
-    (v0.4.15 "Phase 2 第三步: category system-support upgrade 为 module (14 张表 = 10 active + 4 legacy). 10 active 分: 观测 3 + infra 游标 4 + backfill 2 + daemon_state 1. legacy-zone 4 张 drop 决策: tasks keep / inbox deprecate / events drop / credentials drop (v0.4.15 新发现 dead schema). 关键校正: backfill_* 不是一次性迁移, 是 embedding-worker 持续 phased 作业; router_chat_archive 是 side-table, 主数据在 conversations (chat_type='router_chat'); 每 writer 定位到具体代码行"))
+    :see "intent-memory-history.lisp :: memory-history :: short-version-log"
+    :contains "v0.1 → v0.5.0 完整演进日志 (每版本 1 句总结)"
+    :note "长历史外移, 减少主 lisp context 消耗 (v0.5.0 L1 polish)")
   (status "8 module + 5 surface 定稿 (v0.4.18 pillar-interfaces + v0.4.19 rename + v0.4.20 cleanup); 可演进")
 
   (purpose "系统长期记忆 — 5 business module + 4 support module (共 9 个) + 5 surface (pillar-interfaces v0.4.18) + 横切")
@@ -523,100 +507,30 @@
   ;;  Table Catalog — 61 张 PG 表按模块 ownership 归类
   ;; ═════════════════════════════════════════════════════════════
   (table-catalog
-    (desc "migrations/*.sql 的 CREATE TABLE 实际统计 — 按 module / category ownership 分组")
+    (desc "60 PG 表索引. L1 polish: 表详情 SSOT 在各 module 的 (module-tables-owned ...); 本 section 只列名单 + count.")
     (total 60)
-    (total-note "61 migrations 定义, -1 = system_timeline 合并进 event_log (v0.4.1 SSOT 整合)")
-    (source "crates/missiond-core/migrations/")
+    (source "crates/missiond-core/migrations/ — CREATE TABLE 实际统计")
+    (ssot-ref "各 module :: module-tables-owned 为 :purpose / :scoping / :schema 真相")
 
-    (by-owner module-project-management (count 5)
-      (projects         :purpose "项目注册 — id/path/intent_path/active/slots/github_url/vault")
-      (skill_topics     :purpose "技能主题 (顶层分类)")
-      (skill_blocks     :purpose "技能内容块")
-      (skill_versions   :purpose "技能版本")
-      (skill_executions :purpose "技能执行记录")
-      (moved-out-v0.4.4 "intent / plan / workflow 3 张先迁到 pillar 五, v0.4.17 认识到是待实现 schema 不是 dead, 划给新 module directive-layer 管 schema+trait")
-      (v0.4.16-correction "user_intents 本就在 conversation-logs, 未迁出 (详见 v0.4.16 history)"))
+    (by-module
+      (module-project-management  5 [projects skill_topics skill_blocks skill_versions skill_executions])
+      (module-directive-layer     3 [directive plan workflow])
+      (module-board               4 [board_tasks board_task_notes agent_questions prompt_snapshots])
+      (module-kb-manager          9 [knowledge knowledge_edges kb_access_log kb_operation_queue kb_ast_links ast_nodes ast_file_meta beacons beacon_nodes])
+      (module-conversation-logs  15 [conversations conversation_messages conversation_turns conversation_events conversation_tool_calls conversation_topic_vectors conversation_labels message_embeddings message_embedding_skips message_narrations narration_cursors message_translations message_labels retrospective_results user_intents])
+      (module-llm-support         3 [gemini_requests gemini_file_uploads token_usage_ledger])
+      (module-slot-support        3 [slot_sessions slot_tasks dynamic_slots])
+      (module-system-support     12 [incidents router_chat_archive image_descriptions watcher_cursors reconcile_watermarks gemini_cli_watermarks consumer_watermarks backfill_progress backfill_failures daemon_state inbox tasks])
+      (pillar-four-event-bus      4 [event_log event_subscriptions blob_storage dlq]
+                                     :owned-by "pillar 四, 非 memory"))
 
-    (by-owner module-directive-layer (count 3)
-      :owned-section ".missiond/v2/intent-memory.lisp :: module directive-layer"
-      :status "schema-ready-pending-implementation — migration 已就位, writer/reader 待 pillar 五 actor 启用"
-      :v0.4.17-rationale "这 3 张是刚建的 directive→plan→workflow 三段式编译 pipeline 的 DB 层 (v0.4.19 rename); 按 'memory=库' 原则先把 schema+trait 接口立起来, writer/reader TBD 等其他 pillar 整理时填"
-      (directive :purpose "user utterance → lisp 指令编译记录 (带 FSM draft→compiled→archived + version)")
-      (plan      :purpose "directive sexp 编译出的执行 DAG (pinned to board_task, 带 approval + FSM)")
-      (workflow  :purpose "从成功 plan 蒸馏的可复用模板 (带 match_rules + 执行统计)"))
-
-    (by-owner module-board (count 4)
-      (board_tasks      :purpose "任务队列 — 27 列 + v0.5.0 加 trigger_source 列 (28 列), 7 态 FSM" :scoping secondary
-                        :v0.5-addition ":trigger_source TEXT NULL — 记录任务触发源 (memory_hook / user / autopilot / flow / cli). 替代原 tasks 表的 role+manual 字段组合")
-      (board_task_notes :purpose "任务附注"                                      :scoping inherited)
-      (agent_questions  :purpose "Agent 卡住时提的问题 (FK→board_tasks nullable)")
-      (prompt_snapshots :purpose "task 执行 prompt 快照 + KB citation 审计"      :note "PK=task_id"))
-
-    (by-owner module-kb-manager (count 9)
-      (knowledge           :purpose "语义级记忆 40+ category"    :scoping primary)
-      (knowledge_edges     :purpose "KB 条目间关系图"            :scoping inherited)
-      (kb_access_log       :purpose "KB 共访问记录 (prefetch 触发)" :scoping inherited)
-      (kb_operation_queue  :purpose "KB 变更异步队列"            :scoping inherited)
-      (kb_ast_links        :purpose "KB ↔ AST 节点关联")
-      (ast_nodes           :purpose "AST 节点 — 文件/函数/类结构化")
-      (ast_file_meta       :purpose "文件级元数据 (hash/size/modified)")
-      (beacons             :purpose "代码 beacon — 关注点标记")
-      (beacon_nodes        :purpose "beacon 关联的 AST 节点"))
-
-    (by-owner module-conversation-logs (count 15)
-      (conversations              :purpose "会话主表 — session_id/summary/project_id/engine_type" :scoping secondary)
-      (conversation_messages      :purpose "消息原始记录 (PTY JSONL 来源)")
-      (conversation_turns         :purpose "turn 级切分 (user ↔ assistant)" :note "v0.4.16: turns.intent_group_id 回指 user_intents")
-      (conversation_events        :purpose "会话事件流 (tool use / status change)")
-      (conversation_tool_calls    :purpose "工具调用详情")
-      (conversation_topic_vectors :purpose "话题向量 — 语义聚类")
-      (conversation_labels        :purpose "会话级打标")
-      (message_embeddings         :purpose "消息级向量 (halfvec 512)")
-      (message_embedding_skips    :purpose "跳过 embedding 的记录 (独立写入路径)")
-      (message_narrations         :purpose "消息 LLM 摘要 (briefing 产)")
-      (narration_cursors          :purpose "narration 游标 (防重)")
-      (message_translations       :purpose "消息多语种翻译")
-      (message_labels             :purpose "消息级打标")
-      (retrospective_results      :purpose "会话复盘 JSON (PK=session_id)")
-      (user_intents               :purpose "会话 turn 级意图识别记录 (v0.4.16 校正: 归 conversation-logs, 非 pillar 五)" :scoping "secondary via session_id → conversations.project_id"))
-
-    (by-owner pillar-four-event-bus (count 4)
-      :owned-section "pillar 四 §4.6 persistence-layer"
-      :note "这 4 表不在 memory pillar 管辖, 只在此列名方便索引")
-
-    (by-owner module-llm-support (count 3)
-      :migrated-from "v0.4.13 从 category system-support 分化"
-      (gemini_requests       :purpose "Gemini API 调用日志"   :scoping candidate)
-      (gemini_file_uploads   :purpose "Gemini 文件上传缓存")
-      (token_usage_ledger    :purpose "LLM 调用成本追踪"      :scoping candidate))
-
-    (by-owner module-slot-support (count 3)
-      :migrated-from "v0.4.14 从 category system-support 分化"
-      (slot_sessions         :purpose "槽位会话生命周期")
-      (slot_tasks            :purpose "槽位任务队列 (learning engine 用)"  :scoping candidate)
-      (dynamic_slots         :purpose "按需创建的动态槽位"))
-
-    (by-owner module-system-support (count 14)
-      :migrated-from "v0.4.15 category 升级为 module, 10 active + 4 legacy"
-      ;; active 观测 (3)
-      (incidents             :purpose "告警/异常聚合"         :scoping candidate)
-      (router_chat_archive   :purpose "Router 聊天归档"       :scoping candidate)
-      (image_descriptions    :purpose "图片描述缓存 (vision_worker 写, 按 hash 去重, 无 FK)")
-      ;; active infra (7)
-      (watcher_cursors       :purpose "观察者游标")
-      (reconcile_watermarks  :purpose "对账游标")
-      (gemini_cli_watermarks :purpose "Gemini CLI 水位游标")
-      (consumer_watermarks   :purpose "消费者水位")
-      (backfill_progress     :purpose "回填进度追踪")
-      (backfill_failures     :purpose "回填失败记录")
-      (daemon_state          :purpose "daemon 级全局状态")
-      ;; legacy (4)
-      (credentials           :status "❌ drop-candidate — dead schema (v0.4.15 新发现)")
-      (inbox                 :status "⚠ deprecate")
-      (events                :status "❌ drop-candidate (event_log 取代)")
-      (tasks                 :status "⚠ keep — legacy slot API"))
-
-    (legacy-note "⚠ tasks / inbox / events / credentials 4 张 legacy; 详见 module system-support :: legacy-zone"))
+    (status-annotations
+      (tasks        :status "⚠ PARTIAL MIGRATION v0.5.0 — memory-hook 迁 board_tasks, 表保留给 pillar 二 compute")
+      (inbox        :status "⚠ DEPRECATE — caller 1 (pillar 二 strategy_worker)")
+      (events       :status "✅ DROPPED v0.4.24 Phase 6")
+      (credentials  :status "✅ DROPPED v0.4.24 Phase 6")
+      (narrations-2 :status "✅ DROPPED v0.4.24 Phase 6 (message_narrations + narration_cursors)")
+      :note "v0.5.0 后 system-support 从 14 → 12 (events + credentials drop)"))
 
 
   ;; ═════════════════════════════════════════════════════════════
@@ -2675,294 +2589,9 @@
   (cross-cutting-notes
 
     (migration-log
-      "v0.4 (2026-04-19 session):"
-      "(1) 抽 kb-manager 模块: 从 system-support 划 9 张表 (knowledge + 4 kb_* + 4 ast/beacon)"
-      "(2) 抽 conversation-logs 模块: 从 system-support 划 14 张表 (conversations + 10 派生 + retrospective_results)"
-      "(3) project-management 吸收 skills (4 表) + specs (4 表: intent/plan/workflow/user_intents)"
-      "(4) project-specs category 并入 project-management (移除)"
-      "(5) board 补 owned-tables 4 张 (含新增 prompt_snapshots)"
-      "(6) system-support 从 ~45 张表瘦身到 21 张"
-      "(7) 每个模块加 :module-tables-owned 显式声明 ownership"
-      "v0.4 第二轮修正 (基于代码调查):"
-      "(A) kb-manager: 移除 code-prefetch + xjpcode-briefing (一个是 reader 一个写文件系统)"
-      "(B) kb-manager: 修正 kb-access-audit writer 实际在 context_pipeline.rs"
-      "(C) prompt_snapshots: kb-manager → board (PK=task_id, autopilot 写)"
-      "(D) image_descriptions: conversation-logs → system-support (独立无 FK)"
-      "(E) embedding-worker: 标记为 cross-module writer (写两个模块的表)"
-      "(F) spec-db-sync: 明确标注为 UNIMPLEMENTED (intent/plan/workflow 是 dead schema)"
-      "(G) retrospective_results: 标注 PK=session_id 可经 FK 推断 project_id"
-      "v0.4.1 (2026-04-19 后续):"
-      "(H) SSOT 合并: system_timeline 从 category system-support 移除"
-      "    pillar 四 升级到 v1.3.0, 正式锁定 event_log = timeline SSOT"
-      "    UI readers (mission_timeline + WS timeline-stream) 目标改读 event_log (via projection)"
-      "    代码 cutover (drop 表 + 移除 timeline-writer + 迁 reader + FTS 索引) 待后续执行"
-      "    总表数 61 → 60"
-      "v0.4.2 (2026-04-19 — 4 模块 in/core/out 结构 harmonization):"
-      "(I) board 模块: 3 section 补 (desc) + core 从纯 (component) 改用 (path/plumbing/helper) 三分法"
-      "    主路径: task-queue-lifecycle (serves goal-1+2)"
-      "    plumbing: data-model / state-machine / core-operations / events-emitted"
-      "    helper: task-notes / agent-questions / prompt-snapshot"
-      "(J) kb-manager 模块: core 从 6 component + 2 plumbing 改为 2 path + 5 plumbing + 2 helper"
-      "    path: kb-semantic-recall (goal-1) / kb-code-awareness (goal-2)"
-      "    helper: access-audit / operation-queue (serves goal-3)"
-      "(K) conversation-logs 模块: core 从 10 component 改为 3 path + 5 plumbing (原始层) + 5 helper (派生层)"
-      "    path: pty-to-structured-db (goal-1) / multi-engine-dispatch (goal-2) / derived-analysis-layer (goal-3)"
-      "    plumbing: 原始 5 表 (session/raw/turn/events/tool_calls)"
-      "    helper: 派生 5 类 (vectors/narration/translation/labels/retrospective)"
-      "(L) 4 模块语义标签统一: (path) 主路径服务 primary-goal / (plumbing) 共用基础 / (helper) 附属"
-      "    与 project-management 风格完全对齐, 每个 path 条目标 :serves goal-N"
-      "v0.4.3 (2026-04-19 — CLAUDE.md 分层):"
-      "(M) 全局 ~/.claude/CLAUDE.md + manager 从 memory pillar non-db-forms 移到 pillar 五 intent-layer"
-      "    rationale: 全局 CLAUDE.md 是'系统如何被指挥'的元层声明, 非业务记忆"
-      "(N) 项目级 <project>/CLAUDE.md 留在 memory pillar, 新增 project-management :: helper project-claudemd-manager"
-      "    明确 per-project CLAUDE.md 的读/写/reload 归属"
-      "v0.4.4 (2026-04-19 — 动作/指令 specs 迁出):"
-      "(O) intent / plan / workflow / user_intents 4 DB 表从 project-management 迁到 pillar 五 intent-layer"
-      "    rationale: 这些是 action/instruction 规约 (元层), 非项目 factual data"
-      "(P) .missiond/v2/intent.lisp + intent-*.lisp + workflows/*.lisp 从 non-db-forms :: lisp-spec-files 迁出"
-      "    rationale: system-level lisp + 方法论模板都是 action/instruction 层"
-      "(Q) .missiond/flows/*.yaml 从 non-db-forms :: yaml-flow-templates 迁到 pillar 五"
-      "    rationale: flow 模板是 action/instruction"
-      "(R) project-management goal-1 改: 从'mcp-specs-precision'变'per-project-code-snapshot-access'"
-      "    path project-specs-access → path project-code-snapshot (只访问 per-project intent.lisp FILE, 非 DB specs)"
-      "    lisp-survey-worker writer 明确只写 FILE"
-      "(S) memory pillar 保留'描述各个项目代码真实状态'的 per-project .missiond/intent.lisp (唯一 lisp-spec 形式)"
-      "    memory pillar ownership: 5+4+9+14+20 = 52 张 (从 v0.4.3 的 56 下降 4)"
-      "v0.4.5 (2026-04-19 — workflow 合并):"
-      "(T) pillar 五 action-instruction-specs 的 workflow-lisp-templates + flow-yaml-templates 合并"
-      "    → 单一 component workflows 带 (kind methodology) + (kind executable)"
-      "    methodology = .missiond/workflows/*.lisp (human, 抽象叙事, 非执行)"
-      "    executable  = $MISSIOND_HOME/flows/*.yaml (machine, 具体节点, flow-engine-v2 执行)"
-      "    受众/粒度/执行性分轴, 但概念统一为'多步工作流规约'"
-      "v0.4.6 (2026-04-19 — embedding 治理):"
-      "(U) cross-cutting 新增 capability embedding-storage-governance (schema + policy SSOT)"
-      "    确定 5 承载表: knowledge / conversation_topic_vectors / message_embeddings / skill_topics / ast_nodes"
-      "    发现 message_embeddings 用 halfvec (1KB 压缩), HNSW 参数 m=24 ef=128 (vs 其他 4 表 m=16 ef=64)"
-      "    澄清 conversations.summary_embedding 列不存在 (之前 lisp 错列, 已修)"
-      "(V) 5 处散落描述改用 cross-ref 指向 governance SSOT (kb/conv writer / non-db-forms / pillar 二 2.6)"
-      "    减少维护负担 + 单点真理"
-      "v0.4.7 (2026-04-19 — board 按'memory=库'原则精简):"
-      "(W) pillar 二 2.4 orchestration 新增 2 engine component: autopilot + flow-engine-v2"
-      "    autopilot: tick pipeline / dispatch-logic / writes-to-memory / 5-10s tick / CAS 决策"
-      "    flow-engine-v2: 5 node types / execution-model / flow_context persist"
-      "(X) board 模块精简: 把 autopilot + flow-engine-v2 + autopilot-prompt-snapshot + autopilot-tick-scan"
-      "    改为 cross-ref 到 pillar 二 engines, 保留'库侧视角' (schema + interface + FSM 声明)"
-      "(Y) board module-ingress 新增 :principle 'memory=库' 原则声明"
-      "(Z) plumbing state-machine 的 :recovery 改为 :recovery-interface + :recovery-scheduling 双字段"
-      "    接口在库, 时机由 engine 决定"
-      "v0.4.8 (2026-04-19 — agent 协作共享内存层正式化):"
-      "(AA) board 新增 helper agent-execution-coordination — 从 intent-event-bus-execution.lisp 提取模式"
-      "    6 shared-memory-slots: phase-tracker / claims / deviations / decisions / completions / issues"
-      "    storage: Lisp 文件约定 .missiond/v2/<name>-execution.lisp 配套 frozen 设计 lisp"
-      "    manager-interface: TBD (future MCP: mission_execution_claim/decide/deviate/complete)"
-      "    linked-concepts: methodology (pillar 五 workflows, '怎么做' reusable) vs execution (本 helper, '这次做的过程' operational)"
-      "    design-rationale: board = 任务编排中心, 并行 agent = 多 task 协作"
-      "(BB) pilot-instance intent-event-bus-execution.lisp 成为首个正式案例 (D001-D016 / DC001-DC049 / I001-I010)"
-      "v0.4.9 (2026-04-19 — conversation-logs 按'memory=库'原则精简):"
-      "(CC) 10 个 worker writer 全改 cross-ref 到 pillar 二 2.3 workers/<kind>/<worker_name>"
-      "     每条加 :library-pov 标明'库只暴露 store 接口 + 类型约束; worker 算法在 pillar 二'"
-      "(DD) 新增 (writer-removed worker-briefing) 墓志铭 — 反映 SSOT cutover (v1.3.0) 实际删除的 briefing_worker.rs"
-      "     helper narration-briefing → narration: :generator 改为 step-narrator, 加 :history 注记"
-      "     goal-3 solution 移除 briefing, 加 :note 说明语义摘要能力已失"
-      "(EE) 2 egress 消费者改 cross-ref: context-pipeline-history / harvester-for-kb"
-      "     库不再假装它们是自己的 reader; 它们是 daemon compute 或跨模块 worker"
-      "(FF) pillar 二 2.3 workers 同步修正: sonnet 组 6→5 (briefing 删) + 增 :writes-to-memory 注记"
-      "     每组标明各 worker 写入哪个 memory 模块, 补强 lisp↔code 同构"
-      "v0.4.10 (2026-04-19 — kb-manager 按'memory=库'原则精简):"
-      "(GG) ingress 6 writer → 1 MCP + 5 cross-ref + 1 context-pipeline cross-ref"
-      "     5 worker (arch-maintenance / experience-harvester / tagger-chunker / ast-sync / embedding) 全 cross-ref"
-      "     context-pipeline-kb-audit 明确标为 daemon 内部非 worker"
-      "(HH) core plumbing code-indexing 的 :maintained-by → :maintenance-cross-ref"
-      "     core path kb-code-awareness 的 :maintained-by → :library-pov 强调库只暴露表接口"
-      "(II) core helper access-audit + operation-queue 加 :library-pov 分清'接口在库' vs '触发在 compute'"
-      "     operation-queue 的 :consumer 改 :consumer-cross-ref 标 ⚠ TBD 已知缺口"
-      "(JJ) egress 6 reader → 4 MCP 库 + 2 compute 消费者 cross-ref"
-      "     context-pipeline-retrieval / worker-code-prefetch 改 cross-ref + :library-pov"
-      "v0.4.11 (2026-04-19 — project-management 按'memory=库'原则精简):"
-      "(KK) ingress 5 writer 重组:"
-      "     - 2 MCP 库 writer 保留 (mcp-project-mutation / mcp-skill-mutation)"
-      "     - lisp-survey-worker-snapshot → cross-ref pillar 二 2.3 workers/sonnet"
-      "     - project-memory-vault-edit → vault-md-edit 加 :library-pov (用户 / Claude Code 直接编辑文件)"
-      "     - project-scope-propagation 移出 ingress (它不是 writer, 是跨模块约定)"
-      "(LL) plumbing scope-mechanism 整合 (write-propagation-convention) 子块"
-      "     列 4 个 propagators 说明 conversations/knowledge/board_tasks/retrospective 的 project_id 如何填"
-      "     标明是 'library-side invariant', 每个 worker 实现在各自模块"
-      "(MM) 4 模块 'memory=库' 精简全部完成: board / conversation-logs / kb-manager / project-management"
-      "v0.4.16 (2026-04-19 — pillar 五 intent-layer 清算 + user_intents 归属校正):"
-      "(NN) 原计划新增 directive-layer-bridge module, 调查后取消 — memory pillar 保持 8 module 不变"
-      "     原因: bridge module 前提不成立"
-      "     - user_intents: writer=engine/learning_engine/intent_analyst.rs, reader=autopilot+self"
-      "       trait=ConversationStore::insert_user_intent + 5 查询方法 (traits.rs-150)"
-      "       从未真正迁到 pillar 五; v0.4.4 lisp 声明与代码事实不符, 现归 conversation-logs"
-      "     - intent / plan / workflow 3 张: grep 确认 zero writer/reader/trait"
-      "       migration 20260420000000 存在但 Rust 代码无任何 CRUD, 纯 schema-only"
-      "       标记 drop-candidate, 待 pillar 五 actor 实现或 v0.5 前直接 drop"
-      "(OO) table-catalog by-owner 更新: module-conversation-logs 14→15, pillar-five-intent-layer 4→3"
-      "     module-tables-owned conversation-logs 12→13 (tables 列表 + user_intents)"
-      "     ingress 新增 worker-intent-analyst writer, egress 新增 2 reader (self + autopilot)"
-      "(PP) intent.lisp 同步修正: pillar 五 action-instruction-specs user-intents-db component 移除"
-      "     intent/plan/workflow 3 component 加 :drop-candidate 状态标记"
-      "v0.4.17 (2026-04-19 — directive-layer module 新建, 撤回 v0.4.16 drop-candidate 误判):"
-      "(QQ) 用户澄清: intent/plan/workflow 3 张是 '刚建未启用' 的预留 schema, 非 dead"
-      "     (migration 20260420000000 是新建的 intent→plan→workflow 三段编译 pipeline)"
-      "     按 'memory=库' 原则, 即使 writer/reader 暂未实现, schema + trait 接口也应由 memory 管"
-      "(RR) 新建 module directive-layer (memory pillar 第 8 个 module, 5 business + 3 support)"
-      "     拥有 intent / plan / workflow 3 张表"
-      "     3 plumbing: intent-compilation / plan-execution / workflow-templates"
-      "     ingress 3 writer 均 TBD (option A/B/C 待 pillar 整理时决定)"
-      "     egress 3 MCP reader + 1 autopilot consumer 均 TBD"
-      "     cross-module-invariants: board_tasks.source_directive_id 反向指针显式披露"
-      "     新 trait DirectiveLayerStore (待新增, 建议独立不混 ConversationStore)"
-      "     pending-implementation-checklist 列 6 步启用路径"
-      "(SS) table-catalog by-owner pillar-five-intent-layer (count 3→0); 新增 by-owner module-directive-layer (count 3)"
-      "     ownership-summary: pillar-five 4→0, memory 新增 directive-layer 3; memory 总量 53→56"
-      "(TT) intent.lisp 同步: pillar 五 action-instruction-specs 改 cross-ref 到 memory directive-layer"
-      "     drop-candidate 标记全撤, 改为 schema-ready-pending-implementation"
-      "v0.4.18 (2026-04-20 — pillar-interfaces 正交维度引入, 方案 B):"
-      "(UU) 用户洞察: memory pillar 单 module 有 in/core/out 三层, 但 pillar 自己对外没有 interface 聚合"
-      "     各 module 的 writer/reader 通过隐式消费者分类散落 (MCP/worker/frontend/daemon), 缺正式契约"
-      "(VV) 新增顶层 (pillar-interfaces ...) section, 5 个 surface:"
-      "     - mcp-surface (JSON-RPC over stdio, 8 tool families)"
-      "     - worker-trait-surface (Rust async trait, 9 trait 跨 module 共享)"
-      "     - frontend-surface (WS via ws_bridge.rs, 5 streams)"
-      "     - cross-pillar-surface (伞 — 对 pillar 二/四/五/六/七 的契约)"
-      "     - external-filesystem (lisp/md/jsonl 文件 IO, 不经 trait, pillar 五补充发现)"
-      "     每 surface 都声明 purpose / protocol / code-location / stability-contract / current-endpoints"
-      "(WW) 所有 96 个 active writer/reader 加 :binds-to [:surface-name] 标签, 覆盖率 100%"
-      "     8 module × 5 surface 正交矩阵建立, SSOT 仍在 module"
-      "     :binds-to-note 标注歧义场景 (e.g. directive-layer TBD-directive-compiler 未来若选 option C 追加 :mcp-surface)"
-      "(XX) 设计原则: module 是 SSOT (具体 writer/reader), pillar-interfaces 是契约层"
-      "     反对 splitter (代码层虚幻), 支持 catalog (纯文档索引)"
-      "     未来整理 pillar 二/四/五/六/七 时, 翻 pillar-interfaces 即可知'和 memory 对接什么'"
-      "v0.4.19 (2026-04-20 — 命名去歧义: intent 表 → directive 表):"
-      "(YY) 用户澄清 directive 表的真实语义: Jarvis 接到用户的话, 先用 lisp 写出指令和用户对齐意图, 再编译"
-      "     与项目 <project>/.missiond/intent.lisp 文件 (代码状态画像) 语义完全不同"
-      "     两者都叫 intent + 都是 sexp, 是命名碰撞; 其中 DB 表的 intent 是'指令'而非'意图'"
-      "(ZZ) 重命名链 (表 + 列 + 模块 + trait):"
-      "     DB 表: intent → directive, idx_intent_status → idx_directive_status"
-      "     FK 列: plan.source_intent_id → plan.source_directive_id"
-      "           board_tasks.source_intent_id → board_tasks.source_directive_id (ALTER 加的反向指针)"
-      "     Module: memory :: module intent-layer → module directive-layer"
-      "     Trait: IntentLayerStore → DirectiveLayerStore"
-      "     Trait 方法前缀: intent_* → directive_* (intent_insert / intent_get / intent_update_status / intent_approve / intent_list_by_status / intent_get_version_chain)"
-      "     MCP tool: mission_intent (directive-layer 的) → mission_directive (TBD)"
-      "     注: project-management 的 mission_intent (读 <project>/.missiond/intent.lisp 文件, 语义是'项目画像') 保留不变"
-      "     Migration 文件: 20260420000000_intent_plan_workflow.sql → 20260420000000_directive_plan_workflow.sql"
-      "(AAA) pillar 五 intent-layer 名保留 (元层: 系统如何描述自己); 反倒分层更清:"
-      "     pillar 五 intent-layer = 元意图 (系统自我描述)"
-      "     memory directive-layer = 用户指令 (说话 → lisp 指令编译)"
-      "(BBB) 代码改动 = 0 (trait 和 writer/reader 都还没实现); 只改 lisp 声明 + migration SQL"
-      "v0.4.20 (2026-04-20 — 野生逻辑清扫 Phase 1: 声明自洽 + 命名归一):"
-      "(CCC) 声明自相矛盾修正:"
-      "     - db-trait-abstraction :stores 13 → 9 (对齐 pillar-interfaces current-traits)"
-      "     - header purpose + 顶部注释: '4 业务模块' → '5 business + 3 support = 8 module'"
-      "     - pending-actions C (compute-runtime 归属) → 标 [已解决 v0.4.14]"
-      "     - pending-actions D (spec-db-sync 双向同步) → 标 [已撤回 v0.4.19] (forge 是单向服务方, 方向错)"
-      "     - 新增 pending-action F (实现 directive-layer trait+writer/reader) + G (drop narration migration)"
-      "(DDD) category system-support 命名陈旧清扫 (v0.4.13-15 已分化成 3 module, 但多处 cross-ref 遗留):"
-      "     - table-catalog: by-owner category-system-support (20) → 拆成 module-llm-support (3) + module-slot-support (3) + module-system-support (14)"
-      "     - scoping-index group global-infrastructure :owned-by → 'module system-support (+ slot-support for slot_*)'"
-      "     - candidates-for-promotion 6 处 :owner-note → 具体 module"
-      "     - non-db-forms side-channel-blobs gemini-file-remote :owned-by → module llm-support"
-      "     - ownership-summary 拆 3 行 + memory-pillar-subtotal 公式细化 (5+4+9+15+3+3+3+14)"
-      "(EEE) 未归 module 的载体:"
-      "     - git-commit-history source 加 :managed-by 'module project-management' (作为 lisp-survey trigger 源)"
-      "     - embedding-vectors form 归属待 v0.4.21 处理 (新建 embedding-support module)"
-      "(FFF) 锦上添花:"
-      "     - status 从 '草稿' → '8 module + 5 surface 定稿'"
-      "     - retention-policy 补 gemini_requests/embedding 列规则 + default append-only + 未覆盖候选"
-      "     - directive-layer :scoping-candidate '项目级意图隔离' → '项目级指令隔离' (v0.4.19 rename 遗漏修正)"
-      "(GGG) 下一步 v0.4.21: 新建 module embedding-support (承接 cross-cutting :: capability embedding-storage-governance)"
-      "v0.4.21 (2026-04-20 — embedding-support module 新建, 野生清扫 Phase 2):"
-      "(HHH) 用户决策: 新建 memory pillar 第 9 个 module embedding-support"
-      "     承接原 cross-cutting :: capability embedding-storage-governance 全部内容"
-      "     位置: 第 4 个 support module (llm/slot/system/embedding)"
-      "(III) 特殊 ownership 模型: column-ownership vs row-ownership 双轨"
-      "     - embedding-support own '列契约 + policy' (schema dimension / HNSW 参数 / provider 绑定 / retention / change-protocol)"
-      "     - 承载表的行 (5 张: knowledge / conv_topic_vectors / message_embeddings / skill_topics / ast_nodes) 仍归原 module"
-      "     - audit 表 message_embedding_skips: rows 归 conversation-logs, policy 归 embedding-support"
-      "     - module-tables-owned count=0 但 special-ownership-model 清晰"
-      "(JJJ) 结构 7 块完整:"
-      "     - primary-goals 4 个: schema-uniformity / provider-singularity / skip-audit / change-protocol"
-      "     - module-ingress: contract-with-generator (embedding_worker 约束)"
-      "     - module-core 5 plumbing: dimension-contract / storage-tables-catalog / skip-audit-policy / retention-strategy / change-protocol"
-      "     - module-egress: contract-with-consumer (search-engines 约束)"
-      "     - module-tables-owned: 0 张 + tables-managed-by-column 子块"
-      "     - cross-module-trait-sharing: 不定义新 trait, 共用 KbStore/ConversationStore/ProjectStore 的 embedding 方法"
-      "(KKK) cross-cutting capability embedding-storage-governance 收缩为 cross-ref 一句话指向新 module"
-      "     non-db-forms form embedding-vectors :managed-by 'module embedding-support' (v0.4.20 未决的 #12 解决)"
-      "(LLL) memory pillar 定稿 9 module: 5 business + 4 support; ownership-summary 更新"
-      "     野生清扫完结: 从 v0.4.20 识别的 15 项问题现已 15/15 治理"
-      "v0.4.22 (2026-04-20 — 施工开工前最后审计 + 上锁候选):"
-      "(MMM) 审计发现 + 修正 3 项:"
-      "     🔴 conversation-logs count 不一致: by-owner 15 vs tables-owned 13"
-      "       → 统一为 15 (实际数据库现状) + active-count 13 + pending-drop 2 (narrations 系列)"
-      "       → narrations 2 张带 :status 'pending-drop-v0.4.12' + :施工-action"
-      "     🟡 conversation-logs 缺 cross-module-trait-sharing 区块"
-      "       → 补上: ConversationStore/MessageStore 主 trait + 消费 ObservabilityStore 部分方法"
-      "     💡 顶部新增 (target-code-layout ...) 块 — 施工前必读"
-      "       声明 in-scope (memory pillar 管辖的 5 类路径)"
-      "       声明 out-of-scope (pillar 二/四/五 的代码, 同构只验不改)"
-      "       决定不做目录重组 (保持 flat trait-file 切分, 理由 3 条)"
-      "       给出 file-to-module-mapping 骨架 (施工 phase-1 扫描补齐)"
-      "       6 phase 施工 roadmap"
-      "(NNN) lisp 进入上锁候选状态:"
-      "     - 9 module × 6 核心区块 100% (直到 conversation-logs 也补上)"
-      "     - 96 writer/reader × :binds-to 100% 覆盖"
-      "     - 98 处 cross-ref/code 施工锚点"
-      "     - trait 数字处处 9 一致; 表总数 60 (56 memory + 4 pillar 四) 一致"
-      "     - target-code-layout 明确同构范围边界"
-      "     - 进入施工阶段后, 本 lisp 不允许修改; 并行 agent 共享内存层另开 intent-memory-execution.lisp"
-      "(OOO) 开工准备就绪; 下一步 commit 此版本作为 frozen 基线"
-      "v0.4.23 (2026-04-20 — 开工前微补: pillar 三 边界 + 未来扩展姿态):"
-      "(PPP) pillar-interfaces :: mcp-surface 加 :protocol-impl-by 'pillar 三 (工具)':"
-      "     明确边界: memory 管 tool 内容层 (name/schema/行为); 工具 pillar 管协议层 (rmcp/dispatch/stdio/validation 框架)"
-      "     施工同构时不动 rmcp framework 代码, 只动 tools/*.rs 和 handlers/*.rs 里的内容部分"
-      "(QQQ) 新增顶层 (future-support-extensions ...) 块:"
-      "     声明 memory 对未来 pillar 持久化需求的开放姿态 — '数据先于 module' 原则"
-      "     门槛: ≥3 张表 + ≥1 个 trait + ≥1 个稳定 writer → 开新 support module"
-      "     known-candidates: tools-support (pillar 三 待触发) / directive-actor-support (pillar 五 actor 待实现)"
-      "     anti-pattern: 反对预占位空 module + 反对小规模数据开 module + 反对跨 pillar 直连 PG"
-      "(RRR) v0.4.23 为真正 frozen 基线: 下一 commit 视为施工开工点, 本 lisp 不再修改"
-      "     并行 agent 共享内存层在 .missiond/v2/intent-memory-execution.lisp"
-      "v0.4.24 (2026-04-20 — 施工后 unfreeze 补漏; 记入施工发现的 13 处 lisp 不足):"
-      "(SSS) 🔴 高优先级 (3 项):"
-      "     1. file-to-module-mapping 骨架严重过期 → 回灌 Stage 2F complete 版, 反映 Phase 2 后代码实况"
-      "     2. TimelineStore 归属澄清 → pillar-interfaces current-traits 明示归 pillar 四, memory 仅 super-trait bound"
-      "     3. tasks 表 criticality 披露 → legacy-zone 加 :caller-count 30+ + :criticality 🔴 CORE + :migration-cost high + active-callers 清单"
-      "(TTT) 🟡 中优先级 (4 项):"
-      "     4. 新增 cross-pillar-surface :: memory-hook-pipeline — memory pillar '记忆自动触发 LLM' 业务机制首次在 lisp 声明 (6 步 pipeline)"
-      "     5. inbox 表 caller 披露 → :caller-count 1 + active-caller (strategy_worker)"
-      "     6. 新增 trait-organization-principle 块 — primary vs sub-trait 合并规则 + Rust coherence 约束 + 跨边界归属判定"
-      "     7. target-code-layout :: layout-decision 加 rust-coherence-addendum — 阐明 impl 文件位置 ≠ module 归属"
-      "(UUU) 🟢 锦上添花 (6 项):"
-      "     8. strategy_worker 作为 inbox 唯一 writer 的 cross-ref 显式声明"
-      "     9. drop-execution-principle 新增块 (施工 Phase 6 经验) — drop 安全守则 + MCP tool 判定"
-      "     10. trait-organization-principle 含跨 trait 归属模糊方法的判断原则 (业务语义 > 数据源)"
-      "     11. InfraStore 24 方法签名详列 (原 v0.4.23 只有概念, 无具体签名)"
-      "     12. 墓志铭更新 — events/credentials 标 ✅ DROPPED (Phase 6 执行); 供未来知情"
-      "     13. legacy-zone :migration-cost + :suggested-successor 字段 — 指导迁移决策"
-      "(VVV) 本次 unfreeze 改动 13 处 (非结构性, 都是补文档/细化字段); 未动核心架构 (9 module + 5 surface)"
-      "(WWW) v0.4.24 再 freeze — 下次 unfreeze 需指挥官明确批准 (对齐 event-bus frozen 模式)"
-      "v0.5.0 (2026-04-20 — 架构升级: memory-hook 迁 board_tasks, tasks 表 PARTIAL, inbox 保留):"
-      "(XXX) 指挥官决策: tasks 表迁移, inbox 保留"
-      "(YYY) 迁移设计 — 6 步 pipeline 改写 (memory-hook 子集):"
-      "     旧: state::submit_task → tasks 表 → memory_scheduler poll → slot dispatch"
-      "     新: state::submit_task → board_tasks (trigger_source='memory_hook', role='memory') → memory_scheduler poll board_tasks → BoardStore::claim"
-      "(ZZZ) v0.5.0 执行 agent 暴露 D010: tasks 表 30+ caller 里 25 个在 pillar 二 (mission_task_submit MCP族/supervisor/pty/context_pipeline/extraction), memory-hook 仅 5 caller"
-      "(AAAA) 决策: 选 phased 方案 B — 迁移 memory 侧 5 caller, tasks 表保留给 pillar 二"
-      "     - board_tasks ALTER TABLE ADD COLUMN trigger_source TEXT NULL (28 列)"
-      "     - BoardStore 加 list_board_tasks_by_trigger 等便捷方法"
-      "     - 5 memory pillar caller 改写 (state/kb/conversation_logger/pty_event/memory_scheduler)"
-      "     - tasks 表 **不 drop** (pillar 二 仍用)"
-      "     - SlotStore 8 tasks 方法 **保留** (mission_task_submit MCP 族 依赖)"
-      "(BBBB) D011 归属澄清: tasks 表实际按'使用方'归 pillar 二 compute, 类比 TimelineStore 归 pillar 四 模式"
-      "     memory pillar 本版本中不再声明 tasks 为自己的表; legacy-zone 标 'PARTIAL + cross-pillar-ref'"
-      "     后续 pillar 二 compute lisp 整理时处理 tasks 最终归属"
-      "(CCCC) inbox 保留 (caller-count 1 = strategy_worker, pillar 二) — 同理待 pillar 二 清理时决定"
-      "(DDDD) v0.5.0 成果: memory-hook 已统一到 board_tasks; board_tasks 成为 memory pillar 任务 SSOT"
-      "     (pillar 二 的 compute 任务仍在 tasks 表 — 那是 pillar 二 的 SSOT 选择)"
-      "     frozen 恢复; 再 unfreeze 需明确批准")
+      :see "intent-memory-history.lisp :: memory-history :: (v0.4 ... v0.5.0 letter-numbered decisions A-DDDD)"
+      :note "~290 行完整 migration log 外移, 减主 lisp context (L1 polish)")
+
 
     (ownership-summary
       ;; 5 business modules
