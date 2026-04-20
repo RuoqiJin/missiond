@@ -17,6 +17,15 @@
   (parent "intent.lisp (v1, 27 个分文件)")
   (note "v2 按概念重组,不按物理代码层。v1 保留为历史参考。")
 
+  ;; ── 2026-04-21 系统级导航资产 (开 pillar refactor 前必读) ──
+  (navigation-assets
+    (source-of-truth-index "intent-pillar-source-index.lisp"
+      :desc "判真索引 — 哪个旧图代表哪 pillar 的代码真相 (gptpro 2026-04-21 产出)")
+    (drift-audit "drift-audit-2026-04-21.md"
+      :desc "跨 pillar 代码 snapshot — worker/engine/infra footprint + bootstrap count + zombie + 跨 pillar 表 caller 精确数字")
+    (refactor-methodology ".missiond/workflows/pillar-refactor.lisp"
+      :desc "memory pillar 实战凝结方法论 — 5 phase × 原则 × anti-patterns × checklist"))
+
 
   ;; ═══════════════════════════════════════════════════
   ;;  一 · 记忆 (Memory)
@@ -147,6 +156,8 @@
   ;;  = 三种传输介质 (PTY / LLM API / 本地) + 统一编排
   ;; ═══════════════════════════════════════════════════
   (pillar worker
+    :draft-ref ".missiond/v2/drafts/gptpro/intent-worker.lisp"
+    :draft-note "gptpro v0.1 starter-scaffold (2026-04-21), 下次 pillar refactor phase-A 起点"
     (purpose "系统如何把计算派出去 — 三种传输 + 统一调度抽象")
 
     ;; ── 2.1 PTY 传输: 直接控制 CLI 进程 ──
@@ -470,6 +481,8 @@
   ;;  MCP 协议 + 对外暴露的全部能力
   ;; ═══════════════════════════════════════════════════
   (pillar tools
+    :draft-ref ".missiond/v2/drafts/gptpro/intent-tools.lisp"
+    :draft-note "gptpro v0.1 starter-scaffold"
     (purpose "通过 MCP JSON-RPC 协议暴露给 Claude Code / 其他 Agent 的能力集")
 
     (component mcp-server
@@ -575,6 +588,8 @@
   ;;  系统的自我描述 + 自感知 + 自演化
   ;; ═══════════════════════════════════════════════════
   (pillar intent-layer
+    :draft-ref ".missiond/v2/drafts/gptpro/intent-intent-layer.lisp"
+    :draft-note "gptpro v0.1 starter-scaffold"
     (purpose "元层: 系统如何描述自己, 如何感知变化, 如何演进, 以及全局用户指令")
 
     (component intent-files
@@ -725,6 +740,8 @@
   ;;  类型 + 传输 + RPC Gateway + 工具 — 运行时底座 (DB / 观测 已迁入 pillar 一)
   ;; ═══════════════════════════════════════════════════
   (pillar system-layer
+    :draft-ref ".missiond/v2/drafts/gptpro/intent-system-layer.lisp"
+    :draft-note "gptpro v0.1 starter-scaffold"
     (purpose "无业务语义的运行时底座 — 类型 / 进程 / 传输 / RPC / 工具; DB 与观测已迁入 pillar 一 memory")
 
     ;; ── 6.1 核心共享类型 ──
@@ -819,6 +836,8 @@
   ;;  跨 pillar 的动作前后流程 — 把 memory 静态与 worker 计算串联成 narrative
   ;; ═══════════════════════════════════════════════════
   (pillar flow
+    :draft-ref ".missiond/v2/drafts/gptpro/intent-flow.lisp"
+    :draft-note "gptpro v0.1 starter-scaffold"
     (purpose "跨 pillar 的动作前后流程 — 把 memory 静态与 worker 计算串联成 narrative")
     (rationale "v0.4.7 从 board 拆出 autopilot/flow-engine 后, 丢失了 end-to-end narrative; 本 pillar 补上")
 
