@@ -11,7 +11,7 @@
 
 ### 按子目录分布
 
-#### local/ (10 files, 10 spawned)
+#### local/ (12 files, 10 spawned, 2 non-spawn)
 - `ast_sync_worker.rs` — 增量代码索引（git diff → AST 解析）
 - `code_prefetch.rs` — P3 混合搜索引擎（FTS5 + embedding）
 - `codex_ingestion_worker.rs` — CodeX SQLite 轮询 + JSONL 提取
