@@ -27,7 +27,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "draft-v0.4.24")
+  (version "v0.5.0")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -260,24 +260,26 @@
         (note "flow-engine 本质是 pillar 二 worker 的一种, 统一走 worker-trait-surface"))
 
       (memory-hook-pipeline
-        :added-in "v0.4.24 (施工发现)"
-        :desc "memory pillar 很重要的 '记忆自动触发 LLM' 业务机制 — 横跨 memory (tasks 表) + pillar 二 (memory_scheduler engine)"
-        :pipeline
+        :added-in "v0.4.24 (施工发现) → v0.5.0 (已迁到 board_tasks)"
+        :desc "memory pillar '记忆自动触发 LLM' 业务机制 — v0.5.0 从独立 tasks 表迁移到 board_tasks 主队列"
+        :pipeline-v0.5
           "1. conversation 落地 / KB 更新 → 触发 memory hook"
-          "2. state::submit_task (memory pillar 入口) → INSERT tasks 表 (role='memory')"
-          "3. memory_scheduler (pillar 二 engine) 轮询 tasks 表 status='queued'"
-          "4. dispatch_queued_submit_tasks → 调 slot_dispatch 给某 slot"
-          "5. slot 执行 prompt → result 写回 tasks.result + status='done'"
-          "6. reap_stale_submit_tasks 清理超时 task"
+          "2. state::submit_task (memory pillar 入口) → INSERT board_tasks (trigger_source='memory_hook', role='memory')"
+          "3. memory_scheduler (pillar 二 engine) 轮询 board_tasks WHERE trigger_source='memory_hook' AND status='open'"
+          "4. dispatch_queued_submit_tasks → BoardStore::claim_board_task → 派给某 slot"
+          "5. slot 执行 prompt → BoardStore::update_board_task (status='done' + result)"
+          "6. recover_stale_running_tasks (BoardStore 现成接口) 清理超时"
         :active-callers-in-memory-pillar
+          "state.rs::submit_task (入口, 写 board_tasks)"
           "handlers/knowledge/kb.rs (记忆钩子触发点)"
           "workers/local/conversation_logger.rs (会话落地触发)"
           "workers/local/pty_event_worker.rs (PTY 事件触发)"
-          "handlers/knowledge/board.rs (board 创建时附带)"
+          "handlers/knowledge/board.rs (已经直接用 board_tasks, 无需改)"
         :pillar-二-consumers
-          "engine/intent_engine/memory_scheduler.rs (核心调度 + 反刍)"
-        :why-documented-here "v0.4.24 前 lisp 只 cross-ref scheduler 代码位置, 未说明这是 tasks 表存在的核心理由. 施工 D009 发现 tasks KEEP 的真正原因在此"
-        :future-evolution "v0.5+ 将 memory-hook 迁 board_tasks (role='memory' + trigger_source='memory_hook' 新列); tasks 表 drop 前置条件"))
+          "engine/intent_engine/memory_scheduler.rs (v0.5 改为 poll board_tasks)"
+        :v0.5-migration-history
+          "v0.4.x: memory-hook 用独立 tasks 表 (legacy slot API)"
+          "v0.5.0: 迁到 board_tasks (统一任务 SSOT), 加 trigger_source 列区分来源. tasks 表 drop, SlotStore 8 tasks 方法删"))
 
     ;; ─────────────────────────────────────────────
     ;; Surface 5: External-Filesystem Surface — 非 DB 文件系统直写/直读
@@ -523,7 +525,8 @@
       (workflow  :purpose "从成功 plan 蒸馏的可复用模板 (带 match_rules + 执行统计)"))
 
     (by-owner module-board (count 4)
-      (board_tasks      :purpose "任务队列 — 27 列, 7 态 FSM"                    :scoping secondary)
+      (board_tasks      :purpose "任务队列 — 27 列 + v0.5.0 加 trigger_source 列 (28 列), 7 态 FSM" :scoping secondary
+                        :v0.5-addition ":trigger_source TEXT NULL — 记录任务触发源 (memory_hook / user / autopilot / flow / cli). 替代原 tasks 表的 role+manual 字段组合")
       (board_task_notes :purpose "任务附注"                                      :scoping inherited)
       (agent_questions  :purpose "Agent 卡住时提的问题 (FK→board_tasks nullable)")
       (prompt_snapshots :purpose "task 执行 prompt 快照 + KB citation 审计"      :note "PK=task_id"))
@@ -916,7 +919,16 @@
         :binds-to [:worker-trait-surface]
         :cross-ref "pillar 二 2.4 orchestration :: component flow-engine-v2"
         :writes "board_tasks.flow_context (每节点 persist)"
-        :library-pov "库只暴露 update_board_task 接口 + flow_context JSONB 列; 节点执行顺序 / 变量插值 由 engine 管"))
+        :library-pov "库只暴露 update_board_task 接口 + flow_context JSONB 列; 节点执行顺序 / 变量插值 由 engine 管")
+
+      ;; v0.5.0 新增: memory-hook 迁入 board_tasks
+      (writer memory-hook-submitter
+        :added-in "v0.5.0 (从 legacy tasks 表迁入)"
+        :binds-to [:worker-trait-surface]
+        :cross-ref "memory pillar 多 caller: state.rs::submit_task / handlers/knowledge/kb.rs / workers/local/conversation_logger.rs / workers/local/pty_event_worker.rs"
+        :writes "board_tasks (role='memory' + trigger_source='memory_hook')"
+        :library-pov "库暴露 insert_board_task + 新 list_board_tasks_by_trigger 查询接口; 触发时机 (会话落地/KB 更新/PTY 事件) 在 memory pillar 各 caller"
+        :pipeline-ref "cross-pillar-surface :: memory-hook-pipeline (v0.5.0 版)"))
 
     (module-core
       (desc "主路径 (path) + 数据/FSM/操作/事件 (plumbing) + 附属 (helper)")
@@ -932,8 +944,9 @@
       ;; ── plumbing: 支撑主路径的数据 + 逻辑 ──
       (plumbing data-model
         :table "board_tasks"
-        :columns 27
-        :grouping "身份 / 内容 / 生命周期 / 占用 / 层级 / 执行 / 流程 / 作用域 / 去重 / UI"
+        :columns 28
+        :v0.5-addition "trigger_source TEXT NULL (v0.5.0 新加, 记 memory_hook / user / autopilot / flow / cli; 替代 legacy tasks 表)"
+        :grouping "身份 / 内容 / 生命周期 / 占用 / 层级 / 执行 / 流程 / 作用域 / 去重 / 触发源 / UI"
         :indexes 5
         :code "crates/missiond-core/src/db/board.rs")
 
@@ -2187,14 +2200,11 @@
         :trait-methods "SlotStore::daemon_state_get / _set"
         :note "trait 归 SlotStore (db/slot.rs 同文件), 实际用途是 daemon 全局 KV")
 
-      ;; ── Legacy zone writers (v0.4.24 细化: tasks CORE + inbox 1 caller + events/credentials DROPPED) ──
-      (writer memory-hook-tasks-writers
-        :binds-to [:worker-trait-surface]
-        :criticality "🔴 CORE — memory_scheduler 的 memory hook 入口 (见 cross-pillar-surface :: memory-hook-pipeline)"
-        :cross-ref "memory pillar 入口: state.rs::submit_task + handlers/knowledge/kb.rs + workers/local/conversation_logger.rs + workers/local/pty_event_worker.rs + handlers/knowledge/board.rs"
-        :writes "tasks (role='memory' 居多, 也有 user 手提)"
-        :status "✅ active, 30+ caller"
-        :library-pov "库暴露 insert_task + update_task + 状态转换方法; 触发策略 (何时提交) 在 memory pillar 各 handler/worker")
+      ;; ── Legacy zone writers (v0.5.0: tasks 已 DROP, 迁到 board_tasks) ──
+      (writer-removed memory-hook-tasks-writers
+        :removed-at "v0.5.0 (tasks 表迁到 board_tasks)"
+        :was "memory_scheduler 的 memory hook 入口, 写 tasks 表"
+        :now "改写 board_tasks with trigger_source='memory_hook', 详见 module board :: writer memory-hook-submitter")
 
       (writer strategy-worker-inbox
         :binds-to [:worker-trait-surface]
@@ -2295,22 +2305,20 @@
         (desc "v0.4.15 实地调查后的 4 张老版 schema 分级")
 
         (table tasks
-          :status "✓ KEEP — legacy slot API 仍在使用"
-          :criticality "🔴 CORE — 是 memory_scheduler 的 memory hook → LLM 触发队列核心"
-          :caller-count "30+ 活跃调用链"
-          :active-callers
-            (state.rs::submit_task                 "PK 入口")
-            (handlers/knowledge/kb.rs              "记忆钩子触发")
-            (workers/local/conversation_logger.rs  "会话落地时 submit memory task")
-            (engine/intent_engine/memory_scheduler.rs "dispatch_queued_submit_tasks + reap_stale_submit_tasks 调度")
-            (workers/local/pty_event_worker.rs     "PTY 事件触发")
-            (handlers/knowledge/board.rs           "board 创建时附带 submit")
-          :schema-cols "id (PK) / role / prompt / status (default 'queued') / manual / slot_id / session_id / result / error / created_at / started_at / finished_at / notified_at"
-          :indexes "4: (status), (role), (created_at), (manual)"
-          :trait "SlotStore trait (insert_task / update_task / get_task / get_tasks_by_status / get_queued_tasks_by_role / requeue_running_tasks_for_slot / get_all_tasks / ack_completed_tasks)"
-          :migration-cost "🔴 HIGH — memory_scheduler 需迁到 board_tasks (role=memory + trigger_source=memory_hook), 涉及 6+ caller 改写"
-          :suggested-successor "board_tasks with role='memory' + 新列 trigger_source"
-          :action "保留. drop 前必须完成 memory_scheduler → board_tasks 迁移; 盲目 drop 会废掉'记忆自动触发 LLM'核心功能")
+          :status "✅ DROPPED v0.5.0 — memory-hook 已迁到 board_tasks (trigger_source='memory_hook')"
+          :pre-drop-criticality "🔴 CORE (v0.4.x) — memory_scheduler 的 memory hook → LLM 触发队列核心"
+          :pre-drop-caller-count "30+"
+          :pre-drop-schema "id (PK) / role / prompt / status / manual / slot_id / session_id / result / error + 4 timestamps"
+          :migration-executed-at "v0.5.0 施工"
+          :migration-path
+            "1. board_tasks ALTER TABLE ADD COLUMN trigger_source TEXT"
+            "2. BoardStore::insert_board_task 支持 trigger_source 参数"
+            "3. BoardStore 新增 list_board_tasks_by_trigger(trigger_source, status)"
+            "4. state::submit_task 改写 board_tasks"
+            "5. memory_scheduler 改 poll board_tasks WHERE trigger_source='memory_hook'"
+            "6. reap_stale → BoardStore::recover_stale_running_tasks"
+            "7. DROP TABLE tasks + 删 SlotStore 8 tasks 方法"
+          :note "墓志铭保留, 供知情. board_tasks 现在是 task SSOT.")
 
         (table inbox
           :status "⚠ DEPRECATE — 轻度使用"
@@ -2438,7 +2446,7 @@
       (desc "本 module 涉及的 trait 跨模块共享关系 — 同 llm-support / slot-support 的阻抗不匹配模式")
       :primary-traits
         ("ObservabilityStore (db/traits.rs:614) — 大 trait, 本模块用其中的: incident 方法 (3) + watcher_cursors (3) + reconcile_watermarks (3) + gemini_cli_watermarks (2) + consumer_watermarks via watermark_* (5) + router_chat (22)"
-         "SlotStore (db/traits.rs:478) — 大 trait, 本模块用其中的: daemon_state (2) + legacy tasks (8) + inbox (3) + events (2)")
+         "SlotStore (db/traits.rs:478) — v0.5.0 后: daemon_state 已拆到 InfraStore (v0.4.x Stage 2D); tasks 8 方法已删 (v0.5.0 迁 board_tasks); events 2 方法已删 (v0.4.x Phase 6); 本 trait 在 system-support 剩: inbox (3 方法, v0.5.0 保留)")
       :inherent-methods "backfill.rs 9 方法是 MissionDB inherent 方法, 不在 trait"
       :other-modules-use-same-traits
         ("llm-support: ObservabilityStore 的 gemini_log + gemini_file_cache + token_usage + token_stats 方法"
@@ -2907,7 +2915,28 @@
       "     12. 墓志铭更新 — events/credentials 标 ✅ DROPPED (Phase 6 执行); 供未来知情"
       "     13. legacy-zone :migration-cost + :suggested-successor 字段 — 指导迁移决策"
       "(VVV) 本次 unfreeze 改动 13 处 (非结构性, 都是补文档/细化字段); 未动核心架构 (9 module + 5 surface)"
-      "(WWW) v0.4.24 再 freeze — 下次 unfreeze 需指挥官明确批准 (对齐 event-bus frozen 模式)")
+      "(WWW) v0.4.24 再 freeze — 下次 unfreeze 需指挥官明确批准 (对齐 event-bus frozen 模式)"
+      "v0.5.0 (2026-04-20 — 架构升级: memory-hook 迁 board_tasks + tasks 表 drop):"
+      "(XXX) 指挥官决策: tasks 表迁移到 board_tasks, inbox 保留 (待 worker pillar 整理时决定)"
+      "(YYY) 迁移设计 — 6 步 pipeline 改写:"
+      "     旧: state::submit_task → tasks 表 → memory_scheduler poll → slot dispatch"
+      "     新: state::submit_task → board_tasks (trigger_source='memory_hook', role='memory') → memory_scheduler poll board_tasks → BoardStore::claim"
+      "(ZZZ) schema 动作:"
+      "     - board_tasks ALTER TABLE ADD COLUMN trigger_source TEXT NULL (28 列)"
+      "     - DROP TABLE tasks (migration 20260421100000)"
+      "     - SlotStore 删 8 tasks 方法 (insert_task / update_task / get_task / get_tasks_by_status / get_queued_tasks_by_role / requeue_running_tasks_for_slot / get_all_tasks / ack_completed_tasks)"
+      "     - BoardStore 加 list_board_tasks_by_trigger / 其他便捷查询方法"
+      "(AAAA) caller 迁移 — 6 处:"
+      "     state.rs::submit_task (PK 入口, 写 board_tasks 而非 tasks)"
+      "     handlers/knowledge/kb.rs (记忆钩子)"
+      "     workers/local/conversation_logger.rs (会话落地)"
+      "     workers/local/pty_event_worker.rs (PTY 事件)"
+      "     handlers/knowledge/board.rs (已用 board_tasks, 确认)"
+      "     engine/intent_engine/memory_scheduler.rs (poll + reap 改 board_tasks)"
+      "(BBBB) inbox 保留 (caller-count 1 = strategy_worker) — 待 pillar 二 worker 清理时再决定"
+      "(CCCC) v0.5.0 为主版本升级, 标志 memory pillar 架构清理 '从散到统一' 阶段完成"
+      "     board_tasks 成为任务 SSOT, 不再有独立 tasks 表"
+      "     frozen 恢复; 再 unfreeze 需明确批准")
 
     (ownership-summary
       ;; 5 business modules
