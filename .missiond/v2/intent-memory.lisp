@@ -57,6 +57,27 @@
   (storage "PostgreSQL via sqlx::PgPool")
   (gateway "crates/missiond-core/src/db/ — 唯一 DB 入口")
 
+  ;; ─────────────────────────────────────────────────────────
+  ;; Path Convention — v0.5.0 加入 (施工后 line 号 stale, 改用函数/概念标签)
+  ;; ─────────────────────────────────────────────────────────
+  (path-convention
+    (desc "lisp 中 file path 约定, 帮 agent 精准 seek 代码")
+    :prefix-aliases
+      ("db/*     → crates/missiond-core/src/db/*")
+      ("pg/*     → crates/missiond-core/src/db/pg/*")
+      ("types/*  → crates/missiond-core/src/types/*")
+      ("daemon/src/* → crates/missiond-daemon/src/*")
+      ("mcp/src/*    → crates/missiond-mcp/src/*")
+      ("migrations/* → crates/missiond-core/migrations/*")
+    :reference-format
+      "file + :: function/struct/trait/concept (稳定, 不随施工变化)"
+      "避免 file:line_number 形式 (行号施工后 stale)"
+    :examples
+      ("traits.rs :: ConversationStore trait — agent grep 'trait ConversationStore' 即可定位")
+      ("autopilot.rs :: tick-time intent lookup — agent grep 'get_recent_intents' 定位调用点")
+      ("engine/intent_engine/memory_scheduler.rs :: dispatch_queued_submit_tasks")
+    :stale-line-numbers-policy "v0.5.0 起不再用 line 号. 已有的 file:line 引用视为 'as-of-施工前 snapshot, may drift'")
+
   (migrated-out
     "embedding-provider → pillar 二 2.2 sonnet-gateway (qwen3 双角色)"
     "gen-crud (Forge 冲压) → pillar 二 2.5 code-generation"
@@ -189,14 +210,14 @@
         (ProjectStore      :module "project-management" :scope "projects + skill_* 4 张")
         (BoardStore        :module "board"              :scope "board_tasks + notes + questions + prompt_snapshots")
         (KbStore           :module "kb-manager"         :scope "knowledge + edges + access_log + operation_queue + ast + beacon")
-        (ConversationStore :module "conversation-logs"  :scope "conversations + messages + turns + events + user_intents + labels, 36+ 方法, traits.rs:36-151" :cross-module "user_intents 的 6 方法")
-        (MessageStore      :module "conversation-logs"  :scope "messages 细粒度 + 搜索 + 分页, traits.rs:158+")
+        (ConversationStore :module "conversation-logs"  :scope "conversations + messages + turns + events + user_intents + labels, 36+ 方法, traits.rs :: ConversationStore trait body" :cross-module "user_intents 的 6 方法")
+        (MessageStore      :module "conversation-logs"  :scope "messages 细粒度 + 搜索 + 分页, traits.rs :: MessageStore trait body")
         (ObservabilityStore :spans ["llm-support" "system-support" "conversation-logs"]
-                            :scope "gemini_requests + file_uploads + token_ledger + incidents + labels, 36 方法, traits.rs:614"
+                            :scope "gemini_requests + file_uploads + token_ledger + incidents + labels, 36 方法, traits.rs :: ObservabilityStore trait body"
                             :note "典型 cross-module trait, 按 .rs 文件切粒度")
         (DirectiveLayerStore  :module "directive-layer"       :scope "directive + plan + workflow, 约 15 方法, TBD v0.4.17")
         (SlotStore         :spans ["slot-support" "conversation-logs"]
-                           :scope "slot_sessions + slot_tasks + dynamic_slots, traits.rs:478")
+                           :scope "slot_sessions + slot_tasks + dynamic_slots, traits.rs :: SlotStore trait body")
         (InfraStore        :module "system-support"     :scope "watermarks (13) + backfill (9) + daemon_state (2) = 24 方法"
                            :methods-signature-v0.4.24
                              "watermarks: watermark_get / watermark_advance_time / watermark_advance_msg_id / watermark_advance_full / watermark_list (5, consumer_watermarks)"
@@ -1585,7 +1606,7 @@
 
       (reader autopilot-recent-intents
         :binds-to [:worker-trait-surface]
-        :cross-ref "pillar 二 :: engine/intent_engine/autopilot.rs:1496"
+        :cross-ref "pillar 二 :: engine/intent_engine/autopilot.rs :: get_recent_intents caller (tick-time intent lookup)"
         :reads "user_intents (get_recent_intents 1800s 时窗)"
         :purpose "autopilot tick 判断时读近 30min 的用户意图, 辅助决策"
         :library-pov "库暴露 get_recent_intents(since_secs); 时窗 / 调用频率在 autopilot"))
@@ -1613,10 +1634,10 @@
     (cross-module-trait-sharing
       (desc "本 module 的 trait 跨模块共享关系 — 主 trait 独占, 消费部分共享 trait")
       :primary-traits
-        ("ConversationStore (db/traits.rs:36-151) — 本 module 主 trait, 36+ 方法覆盖 conversations/messages/turns/events/user_intents/labels"
-         "MessageStore (db/traits.rs:158+) — 消息级细粒度 CRUD + 搜索 + 分页")
+        ("ConversationStore (db/traits.rs :: ConversationStore trait body) — 本 module 主 trait, 36+ 方法覆盖 conversations/messages/turns/events/user_intents/labels"
+         "MessageStore (db/traits.rs :: MessageStore trait body) — 消息级细粒度 CRUD + 搜索 + 分页")
       :consumes-shared-trait
-        ("ObservabilityStore (db/traits.rs:614) 的 label_* + conversations_missing_summary_* 方法 — trait 挂 observability.rs 文件但语义归本模块消费"
+        ("ObservabilityStore (db/traits.rs :: ObservabilityStore trait body) 的 label_* + conversations_missing_summary_* 方法 — trait 挂 observability.rs 文件但语义归本模块消费"
          "SlotStore 的极少方法 (slot_id 反查场景, 主归 slot-support)")
       :design-note "ConversationStore/MessageStore 和本 module 1:1 无阻抗; ObservabilityStore/SlotStore 跨 module 是 trait 按 .rs 文件切分产生的阻抗不匹配, 接受 + 显式披露"
       :施工-note "本模块代码同构时, ConversationStore/MessageStore 全部 impl 在本 module 范围; ObservabilityStore 的 label_* 方法 impl 在 db/pg/observability.rs 但逻辑按本 module 约束"))
@@ -1829,7 +1850,7 @@
 
       (writer token-usage-accounting
         :binds-to [:worker-trait-surface]
-        :cross-ref "daemon/src/infra/message_handler.rs:674 (PTY JSONL 摄入下游)"
+        :cross-ref "crates/missiond-daemon/src/infra/message_handler.rs :: PTY JSONL 摄入下游 (grep "insert_token_usage") (PTY JSONL 摄入下游)"
         :trigger "conversation-logger 摄入时, 对含 usage 字段的消息调 insert_token_usage"
         :writes  "token_usage_ledger (每消息一条: conversation_id + slot_id + model + 4 个 tokens + message_id)"
         :api     "ObservabilityStore::insert_token_usage"
@@ -1838,7 +1859,7 @@
 
     (module-core
       (desc "3 张 LLM 观测表 — schema + 语义; 统一通过 ObservabilityStore super-trait 访问")
-      :trait "ObservabilityStore (crates/missiond-core/src/db/traits.rs:614) — 注: 此 trait 还管 incidents / watermark / labels, 跨 llm-support / system-support / conversation-logs 多模块"
+      :trait "ObservabilityStore (crates/missiond-core/src/db/traits.rs :: ObservabilityStore trait body) — 注: 此 trait 还管 incidents / watermark / labels, 跨 llm-support / system-support / conversation-logs 多模块"
 
       (plumbing llm-request-log
         (desc "每次 LLM 请求的日志项")
@@ -1889,7 +1910,7 @@
 
       (reader timeline-enrichment
         :binds-to [:worker-trait-surface]
-        :cross-ref "daemon/src/handlers/comm/timeline.rs:125"
+        :cross-ref "crates/missiond-daemon/src/handlers/comm/timeline.rs :: gemini_request_completed enrich"
         :reads "gemini_requests (用于 enrich gemini_request_completed 事件的 timeline 展示)"
         :api "ObservabilityStore::gemini_log_get_content(request_id)"
         :purpose "Timeline UI/CLI 显示 LLM 调用事件时, 从 gemini_requests 拉完整 prompt/response 细节")
@@ -1909,7 +1930,7 @@
 
     (cross-module-trait-sharing
       (desc "ObservabilityStore super-trait 横跨多模块, 本模块只用其中一部分")
-      :shared-trait "ObservabilityStore (db/traits.rs:614)"
+      :shared-trait "ObservabilityStore (db/traits.rs :: ObservabilityStore trait body)"
       :this-module-uses "gemini_log_* (6 方法) + gemini_file_cache_* (3 方法) + insert_token_usage / token_stats"
       :other-modules-use
         ("incident 方法 (insert_incident / has_recent_incident / list_incidents) → module system-support"
@@ -1950,18 +1971,18 @@
       ;; ── slot_sessions writers (4 处) ──
       (writer slot-orchestrator-bind
         :binds-to [:worker-trait-surface]
-        :cross-ref "pillar 二 2.1 :: daemon/src/slot_orchestrator/mod.rs:42"
+        :cross-ref "pillar 二 2.1 :: daemon/src/slot_orchestrator/mod.rs"
         :writes    "slot_sessions (slot 启动时绑定 session)"
         :library-pov "库暴露 set_slot_session (upsert on conflict); orchestrator 决定何时绑定")
 
       (writer slot-env-bind
         :binds-to [:worker-trait-surface]
-        :cross-ref "pillar 二 2.1 :: daemon/src/context/slot_env.rs:197"
+        :cross-ref "pillar 二 2.1 :: daemon/src/context/slot_env.rs"
         :writes    "slot_sessions (slot 环境构建时同步)")
 
       (writer ingestion-router-bind
         :binds-to [:worker-trait-surface]
-        :cross-ref "daemon/src/infra/ingestion_router.rs:79,104"
+        :cross-ref "daemon/src/infra/ingestion_router.rs"
         :writes    "slot_sessions (JSONL 摄入发现新 session 时更新)")
 
       ;; ── slot_tasks writers (learning engine 专属) ──
@@ -1973,7 +1994,7 @@
 
       (writer learning-engine-decision
         :binds-to [:worker-trait-surface]
-        :cross-ref "pillar 二 :: daemon/src/engine/learning_engine/decision_engine.rs:805"
+        :cross-ref "pillar 二 :: daemon/src/engine/learning_engine/decision_engine.rs"
         :writes    "slot_tasks (task_type=decision)")
 
       ;; ── dynamic_slots writers (MCP + 清理) ──
@@ -1986,19 +2007,19 @@
 
       (writer daemon-restart-cleanup
         :binds-to [:worker-trait-surface]
-        :cross-ref "daemon/src/main.rs:297"
+        :cross-ref "daemon/src/main.rs"
         :writes    "dynamic_slots (terminate on 'daemon_restart')"
         :library-pov "库暴露 terminate_dynamic_slot; 重启策略 (全部强制终止 active slot) 在 daemon bootstrap")
 
       (writer autopilot-ttl-gc
         :binds-to [:worker-trait-surface]
-        :cross-ref "pillar 二 2.4 :: autopilot (daemon/src/engine/intent_engine/autopilot.rs:1357)"
+        :cross-ref "pillar 二 2.4 :: autopilot (daemon/src/engine/intent_engine/autopilot.rs)"
         :writes    "dynamic_slots (terminate on 'ttl_expired')"
         :library-pov "库暴露 find_expired_dynamic_slots 扫描接口 + terminate; tick 频率 + 决策在 autopilot"))
 
     (module-core
       (desc "3 张 slot 运行时表 — schema + 语义; 统一通过 SlotStore super-trait 访问")
-      :trait "SlotStore (crates/missiond-core/src/db/traits.rs:478) — 注: 此 trait 还管 daemon_state + legacy tasks/inbox/events, 跨 slot-support / system-support / legacy 多模块"
+      :trait "SlotStore (crates/missiond-core/src/db/traits.rs :: SlotStore trait body) — 注: 此 trait 还管 daemon_state + legacy tasks/inbox/events, 跨 slot-support / system-support / legacy 多模块"
 
       (plumbing slot-sessions
         (desc "slot ↔ PTY session 的 1:1 绑定表")
@@ -2007,7 +2028,7 @@
         :write-pattern "upsert on conflict (slot_id) DO UPDATE"
         :trait-methods "get_slot_session / set_slot_session / delete_slot_session / get_all_slot_sessions / get_slot_for_session / cleanup_pty_placeholder"
         :bidirectional "slot→session (get_slot_session) + session→slot (get_slot_for_session, 用于 reconcile)"
-        :code "crates/missiond-core/src/db/slot.rs:28")
+        :code "crates/missiond-core/src/db/slot.rs")
 
       (plumbing slot-tasks
         (desc "learning engine AI 任务队列 (extraction + decision 两类)")
@@ -2017,7 +2038,7 @@
         :state-machine "pending → running → completed / failed"
         :trait-methods "insert_slot_task / slot_task_set_running / _set_completed / _set_failed / list_slot_tasks / slot_task_stats / reap_stale_slot_tasks / find_stale_decision_tasks / cleanup_orphan_slot_tasks / last_completed_slot_task_at / get_running_slot_task"
         :note "task_type 实际 values 由 learning engine 决定 (extraction / decision 是已知两类)"
-        :code "crates/missiond-core/src/db/slot.rs:96-137")
+        :code "crates/missiond-core/src/db/slot.rs-137")
 
       (plumbing dynamic-slots
         (desc "按需创建的临时 slot + TTL + parent 继承")
@@ -2044,26 +2065,26 @@
         :binds-to [:mcp-surface]
         :tool "mission_slot_history"
         :reads "slot_tasks"
-        :code "daemon/src/handlers/sysinfra/misc.rs:349 (调 list_slot_tasks)"
+        :code "daemon/src/handlers/sysinfra/misc.rs (调 list_slot_tasks)"
         :purpose "slot 内 AI 任务历史 (含 pending / running / completed / failed)")
 
       (reader mcp-compute-slot-query
         :binds-to [:mcp-surface]
         :tool "mission_compute_slot (action=list)"
         :reads "dynamic_slots"
-        :code "daemon/src/handlers/compute/compute_slot.rs:413 (调 list_dynamic_slots)")
+        :code "daemon/src/handlers/compute/compute_slot.rs (调 list_dynamic_slots)")
 
       (reader mission-memory-task-trail
         :binds-to [:mcp-surface]
         :tool "mission_memory (附加 slot task 快照)"
-        :code "daemon/src/handlers/knowledge/memory.rs:269"
+        :code "daemon/src/handlers/knowledge/memory.rs"
         :reads "slot_tasks (按 slot_id 拉最近 10 条)"
         :purpose "项目 memory 查询时附带 slot 执行轨迹")
 
       ;; ── daemon 内部 readers ──
       (reader daemon-startup-recovery
         :binds-to [:worker-trait-surface]
-        :cross-ref "daemon/src/main.rs:294,423"
+        :cross-ref "daemon/src/main.rs"
         :reads "list_dynamic_slots('active') + get_all_slot_sessions"
         :purpose "daemon 启动时: (1) 扫 active 动态 slot 做 terminate 清理 (2) 恢复现有 slot↔session 映射")
 
@@ -2075,19 +2096,19 @@
 
       (reader events-sync-lookup
         :binds-to [:worker-trait-surface]
-        :cross-ref "daemon/src/events_sync.rs:948"
+        :cross-ref "daemon/src/events_sync.rs"
         :reads "get_slot_for_session"
         :purpose "PTY 事件同步时 session → slot 反查")
 
       (reader ingestion-router-lookup
         :binds-to [:worker-trait-surface]
-        :cross-ref "daemon/src/infra/ingestion_router.rs:123"
+        :cross-ref "daemon/src/infra/ingestion_router.rs"
         :reads "get_slot_for_session"
         :purpose "JSONL 摄入路由时反查")
 
       (reader session-util
         :binds-to [:worker-trait-surface]
-        :cross-ref "daemon/src/infra/session_util.rs:25"
+        :cross-ref "daemon/src/infra/session_util.rs"
         :reads "get_all_slot_sessions"
         :purpose "infra 工具读全部绑定"))
 
@@ -2099,7 +2120,7 @@
 
     (cross-module-trait-sharing
       (desc "SlotStore super-trait 横跨多模块, 本模块只用其中一部分")
-      :shared-trait "SlotStore (db/traits.rs:478)"
+      :shared-trait "SlotStore (db/traits.rs :: SlotStore trait body)"
       :this-module-uses "slot_sessions 方法 (6) + slot_tasks 方法 (11) + dynamic_slots 方法 (8) = 25 方法"
       :other-modules-use
         ("daemon_state 方法 (daemon_state_get / _set) → module system-support"
@@ -2139,8 +2160,8 @@
       ;; ── 观测 writers (3) ──
       (writer aiops-incident-reactor
         :binds-to [:worker-trait-surface]
-        :cross-ref "daemon/src/infra/aiops.rs:145 process_incident (写入点 192 / 338)"
-        :trigger "event-bus IncidentEvent::Reported subscriber (bus/v2_subscribers.rs:98 v2_incident_reactor)"
+        :cross-ref "daemon/src/infra/aiops.rs process_incident (写入点 192 / 338)"
+        :trigger "event-bus IncidentEvent::Reported subscriber (bus/v2_subscribers.rs v2_incident_reactor)"
         :writes "incidents (含 dedupe_key 去重)"
         :trait-methods "ObservabilityStore::insert_incident / has_recent_incident / list_incidents"
         :library-pov "库暴露 insert + dedup check; triage 逻辑在 aiops")
@@ -2208,7 +2229,7 @@
 
       (writer strategy-worker-inbox
         :binds-to [:worker-trait-surface]
-        :cross-ref "pillar 二 :: workers/gemini/strategy_worker.rs:745 (仅此一处)"
+        :cross-ref "pillar 二 :: workers/gemini/strategy_worker.rs (仅此一处)"
         :writes "inbox (from_role + content, 给某 task 发消息)"
         :status "⚠ DEPRECATE — 轻度使用, 单 caller"
         :library-pov "库暴露 insert_inbox_message; 何时发由 strategy worker")
@@ -2331,7 +2352,7 @@
           :status "⚠ DEPRECATE — 轻度使用"
           :criticality "🟢 LOW — 仅 1 处 active writer"
           :caller-count 1
-          :active-callers (workers/gemini/strategy_worker.rs:745 "Gemini 策略 worker 发消息给某 task (insert_inbox_message)")
+          :active-callers (workers/gemini/strategy_worker.rs "Gemini 策略 worker 发消息给某 task (insert_inbox_message)")
           :writers "crates/missiond-core/src/db/task.rs (insert_inbox_message / get_inbox_messages / mark_inbox_read)"
           :schema-cols "id (PK) / task_id / from_role / content / read / created_at"
           :indexes "(read), (created_at)"
@@ -2452,8 +2473,8 @@
     (cross-module-trait-sharing
       (desc "本 module 涉及的 trait 跨模块共享关系 — 同 llm-support / slot-support 的阻抗不匹配模式")
       :primary-traits
-        ("ObservabilityStore (db/traits.rs:614) — 大 trait, 本模块用其中的: incident 方法 (3) + watcher_cursors (3) + reconcile_watermarks (3) + gemini_cli_watermarks (2) + consumer_watermarks via watermark_* (5) + router_chat (22)"
-         "SlotStore (db/traits.rs:478) — v0.5.0 后: daemon_state 已拆到 InfraStore (Stage 2D); events 2 方法已删 (Phase 6); tasks 8 方法保留给 pillar 二 mission_task_submit 族 (D010 发现); inbox 3 方法保留 (单 caller pillar 二 strategy_worker)")
+        ("ObservabilityStore (db/traits.rs :: ObservabilityStore trait body) — 大 trait, 本模块用其中的: incident 方法 (3) + watcher_cursors (3) + reconcile_watermarks (3) + gemini_cli_watermarks (2) + consumer_watermarks via watermark_* (5) + router_chat (22)"
+         "SlotStore (db/traits.rs :: SlotStore trait body) — v0.5.0 后: daemon_state 已拆到 InfraStore (Stage 2D); events 2 方法已删 (Phase 6); tasks 8 方法保留给 pillar 二 mission_task_submit 族 (D010 发现); inbox 3 方法保留 (单 caller pillar 二 strategy_worker)")
       :inherent-methods "backfill.rs 9 方法是 MissionDB inherent 方法, 不在 trait"
       :other-modules-use-same-traits
         ("llm-support: ObservabilityStore 的 gemini_log + gemini_file_cache + token_usage + token_stats 方法"
@@ -2771,7 +2792,7 @@
       "(NN) 原计划新增 directive-layer-bridge module, 调查后取消 — memory pillar 保持 8 module 不变"
       "     原因: bridge module 前提不成立"
       "     - user_intents: writer=engine/learning_engine/intent_analyst.rs, reader=autopilot+self"
-      "       trait=ConversationStore::insert_user_intent + 5 查询方法 (traits.rs:136-150)"
+      "       trait=ConversationStore::insert_user_intent + 5 查询方法 (traits.rs-150)"
       "       从未真正迁到 pillar 五; v0.4.4 lisp 声明与代码事实不符, 现归 conversation-logs"
       "     - intent / plan / workflow 3 张: grep 确认 zero writer/reader/trait"
       "       migration 20260420000000 存在但 Rust 代码无任何 CRUD, 纯 schema-only"
