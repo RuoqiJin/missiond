@@ -745,8 +745,9 @@
   ;;  类型 + 传输 + RPC Gateway + 工具 — 运行时底座 (DB / 观测 已迁入 pillar 一)
   ;; ═══════════════════════════════════════════════════
   (pillar system-layer
-    :draft-ref ".missiond/v2/drafts/gptpro/intent-system-layer.lisp"
-    :draft-note "gptpro v0.1 starter-scaffold"
+    :canonical-ref ".missiond/v2/intent-system-layer.lisp"
+    :canonical-status "v0.1 phase-A 2026-04-21 (本会话主驾, 573 行, 6 section 含 state-machines overview + infra 7 文件 ownership + bootstrap primary)"
+    :gptpro-v0.1-archive ".missiond/v2/drafts/gptpro/intent-system-layer.lisp"
     (purpose "无业务语义的运行时底座 — 类型 / 进程 / 传输 / RPC / 工具; DB 与观测已迁入 pillar 一 memory")
 
     ;; ── 6.1 核心共享类型 ──
