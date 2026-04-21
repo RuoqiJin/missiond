@@ -592,8 +592,9 @@
   ;;  系统的自我描述 + 自感知 + 自演化
   ;; ═══════════════════════════════════════════════════
   (pillar intent-layer
-    :draft-ref ".missiond/v2/drafts/gptpro/intent-intent-layer.lisp"
-    :draft-note "gptpro v0.1 starter-scaffold"
+    :canonical-ref ".missiond/v2/intent-intent-layer.lisp"
+    :canonical-status "v0.1 phase-A 2026-04-21 (本会话主驾; 吸收 worker v0.3 DC14 迁入: learning-engine 7 sub + flow-engine v1 + 双重归属)"
+    :gptpro-v0.1-archive ".missiond/v2/drafts/gptpro/intent-intent-layer.lisp"
     (purpose "元层: 系统如何描述自己, 如何感知变化, 如何演进, 以及全局用户指令")
 
     (component intent-files
