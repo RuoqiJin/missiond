@@ -841,8 +841,9 @@
   ;;  跨 pillar 的动作前后流程 — 把 memory 静态与 worker 计算串联成 narrative
   ;; ═══════════════════════════════════════════════════
   (pillar flow
-    :draft-ref ".missiond/v2/drafts/gptpro/intent-flow.lisp"
-    :draft-note "gptpro v0.1 starter-scaffold"
+    :canonical-ref ".missiond/v2/intent-flow.lisp"
+    :canonical-status "v0.1 phase-A 2026-04-21 (本会话主驾, 851 行, 20+ flow 覆盖核心, tool-backed-flows-index 78 映射)"
+    :gptpro-v0.1-archive ".missiond/v2/drafts/gptpro/intent-flow.lisp"
     (purpose "跨 pillar 的动作前后流程 — 把 memory 静态与 worker 计算串联成 narrative")
     (rationale "v0.4.7 从 board 拆出 autopilot/flow-engine 后, 丢失了 end-to-end narrative; 本 pillar 补上")
 
