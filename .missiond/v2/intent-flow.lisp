@@ -654,7 +654,279 @@
          "ParallelSlotTasks no running non-excluded slots → immediate err"
          "Async recursion cycle broken via Box::pin"]
       :tools-backref ["mission_flow_run"]
-      :note "仅此 flow 是真正的 tool→flow→worker→memory 完整 5 跳链路. 其他 tools 当前 3 跳 (tool→handler→memory/worker) 无 flow 抽象"))
+      :note "仅此 flow 是真正的 tool→flow→worker→memory 完整 5 跳链路. 其他 tools 当前 3 跳 (tool→handler→memory/worker) 无 flow 抽象")
+
+    (flow F-workflow-slot-full-lifecycle
+      :desc "通用 slot 全生命周期 E2E — 开工位 → 工位就绪 → 指挥执行 → 监控 → 完成检测 → 回收 → 审计. 覆盖 4 类 workflow 源"
+      :triggers
+        ["指挥官或 intent-layer 发起 workflow 执行"
+         "autopilot board_task dispatch (带 flow_template)"
+         "mission_task_delegate (声明式委派)"
+         "skill workflow 执行 (mission_skill_exec)"]
+      :purpose "回答'按现在设计能否开工位/指挥/回收 workflow'的完整 flow; 做 MCP/worker/memory 覆盖率检查"
+
+      (workflow-kinds-supported
+        :desc "4 类 workflow 源, 各类对应不同 s4 dispatch tool"
+        (methodology-lisp
+          :path ".missiond/workflows/*.lisp (intent-layer :: workflows :: methodology)"
+          :example "pillar-refactor.lisp / bus-refactor.lisp"
+          :dispatch-status "⚠ GAP-1: 无直接执行 tool, 需包装 (见下)")
+        (executable-yaml
+          :path "$MISSIOND_HOME/flows/*.yaml (intent-layer :: workflows :: executable)"
+          :dispatch "✓ mission_flow_run (flow-engine-v2) — 完整路径")
+        (skill-workflow
+          :path "kb_entries skill topic action block"
+          :dispatch "✓ mission_skill_exec — 30s/step + MAX_DEPTH=3")
+        (free-task
+          :path "自然语言 prompt (ad-hoc)"
+          :dispatch "✓ mission_task_submit / mission_task_delegate / mission_pty_send"))
+
+      :stages
+
+        ;; ── Stage 1: 载入 workflow 定义 ──
+        ((s1-workflow-definition-load
+            :at "tools pillar + intent-layer"
+            :tools-alternatives
+              ((methodology  "⚠ GAP-1: mission_intent(read) 只读 <project>/.missiond/intent.lisp; .missiond/workflows/*.lisp 没有专门 read tool. 临时 workaround: 直接 Read file + 塞 prompt")
+               (executable   "✓ mission_flow_run(action=list|status) → loader.rs 从 $MISSIOND_HOME/flows/<id>.yaml 载入")
+               (skill        "✓ mission_skill_query(action=list|get) + mission_skill_context(action=resolve)")
+               (free         "无需定义载入"))
+            :reads ["<project>/.missiond/intent.lisp (intent tool)" "$MISSIOND_HOME/flows/*.yaml (loader.rs)" "kb_entries (skill)"]
+            :writes [])
+
+         ;; ── Stage 2: Slot Provision (5 种路径) ──
+         (s2-slot-provision
+            :at "worker pillar :: section pty :: subsection slot-orchestrator"
+            :worker-path "invariant sole-spawn-bottleneck (spawner.rs::spawn_tracked_slot — ALL 10 callers 经此, 0 direct pty.spawn)"
+            :tools-alternatives
+              ((option-A-复用-persistent
+                  :desc "复用 slots.yaml 里 auto_start=true 的 registered slot (4 种): arch-surveyor / strategy / gemini-router / lisp-surveyor"
+                  :tool "无需开, mission_slots(list) 查现有 state, 直接 s4 dispatch"
+                  :constraint "只适用 task_type 匹配 registered-task 的场景 (arch_maintenance / strategy_analyst / gemini_router / lisp_survey)")
+               (option-B-开固定-slotId
+                  :desc "按固定 slot_id 开 PTY session (如手动 spawn claude-code-opus)"
+                  :tool "mission_pty_spawn(slotId, waitForIdle?, timeoutSecs?, autoRestart?, mcpConfigPath?)"
+                  :worker-path "spawn_tracked_slot 经 perm-inject → tracking-env → pty-spawn → uuid-capture → initial-prompt")
+               (option-C-动态-TTL
+                  :desc "动态 compute_slot (5 active 上限, 4h default / 8h max TTL)"
+                  :tool "mission_compute_slot(action=create, template=coder|ops, objective, cwd, max_ttl)"
+                  :writes ["dynamic_slots (new row)" "slot_sessions"]
+                  :constraint "max 5 active; TTL 可 extend (action=extend, +3600s max 每次)")
+               (option-D-声明式-委派
+                  :desc "daemon 自主选 slot — 给 objective 让它挑"
+                  :tool "mission_task_delegate(objective, intent=code|ops|research|general, cwd, timeout_secs≤7200, priority, depends_on)"
+                  :worker-path "autopilot + slot selection heuristics")
+               (option-E-隐式-board
+                  :desc "创建 board_task 带 flow_template, autopilot 扫 + claim + 派发"
+                  :tool "mission_board_create(title, flowTemplate, ...) + autopilot-tick claim"
+                  :flow-ref "F1-board-task-main-lifecycle s1→s3"))
+            :writes ["slot_sessions" "dynamic_slots (若 option C)" "board_tasks (若 option E)"]
+            :via-bus ["SlotSessionChanged"])
+
+         ;; ── Stage 3: Slot Readiness (等 Idle) ──
+         (s3-slot-readiness
+            :desc "等 slot 到 FSM Idle state 方可发 prompt"
+            :at "worker pillar :: section pty :: subsection pty-state-machine + semantic-parser"
+            :fsm-path "pty-session FSM: Starting → Idle (trigger prompt-detected)"
+            :mechanisms
+              ((阻塞式 "mission_pty_spawn(waitForIdle=true, timeoutSecs=60) — 一步到位, 开 + 等 Idle")
+               (轮询式 "mission_pty_status 看 FSM 当前 state, 循环到 Idle")
+               (事件式 "subscribe ManagerEvent::StateChange 到 Idle (semantic-parser 识别 prompt)"))
+            :semantic-parser-role "CC detection-order: trust-dialog → confirm-dialog → idle-or-slash → processing → responding → error; Gemini: error → thinking → responding → tool-running → idle → idle-placeholder → idle-transitional"
+            :gap-check "semantic-parser 需准确识别 CC/Gemini/Codex 3 种 CLI 的 Idle 签名 — 已有实现 (missiond-core/src/semantic_parsing/ Forge 冲压)")
+
+         ;; ── Stage 4: Dispatch Workflow (最核心) ──
+         (s4-dispatch-workflow
+            :at "tools pillar + worker pillar 执行点"
+            :tools-alternatives
+              ((methodology-lisp
+                  :desc "⚠ GAP-1 无直接执行. 当前 workaround:"
+                  :option-1 "人工 Read .missiond/workflows/<name>.lisp → 塞内容到 mission_task_delegate(objective=lisp-content-summary)"
+                  :option-2 "mission_pty_send(slotId, message=lisp-content 拼 prompt) 直接塞 Claude Code"
+                  :future-option-3 "补 mission_workflow_execute(workflow_path, params) 新 tool"
+                  :future-option-4 "forge 冲压 methodology.lisp → executable.yaml 然后走 mission_flow_run")
+               (executable-yaml
+                  :desc "✓ 完整路径: 载入 YAML → run flow-engine-v2"
+                  :tool "mission_flow_run(flow_id, params, action=run)"
+                  :flow-ref "F5-flow-engine-v2-node-execution")
+               (skill-workflow
+                  :desc "✓ skill topic 的 action block 执行 (类似小 orchestrator)"
+                  :tool "mission_skill_exec(skill, action, dry_run?, params?)"
+                  :worker-path "section engine-cluster :: intent-engine :: workflow-executor-runtime (30s/step MCP dispatch + MAX_DEPTH=3)")
+               (free-simple
+                  :desc "直接塞 prompt, 阻塞等回复"
+                  :tool "mission_pty_send(slotId, message, waitForResponse=true, timeoutMs?)")
+               (free-async
+                  :desc "异步任务 — 提交后轮询"
+                  :tool "mission_task_submit(role, prompt, action=async) → mission_task_query(action=status|track) / mission_job_poll(job_id)")
+               (multi-agent-swarm
+                  :desc "多 agent 并发 (适合大任务拆分)"
+                  :tool "mission_cc_swarm(slotId, tasks[], teammateCount=3, timeoutMs?)"
+                  :cross-ref "flow-engine v2 的 ParallelSlotTasks 节点类型 (JoinSet + Arc<Semaphore>)"))
+            :worker-paths
+              ["section pty :: subsection slot-orchestrator :: claude-slot-dispatch (CC 类)"
+               "section pty :: subsection slot-orchestrator :: gemini-slot-dispatch (Gemini 类)"
+               "section engine-cluster :: flow-engine-v2 :: flow-node-handler-dispatch (YAML)"
+               "section engine-cluster :: intent-engine :: workflow-executor-runtime (skill)"]
+            :writes ["board_tasks (若走 flow_run 或 task_delegate)" "slot_tasks" "conversation_messages (prompt 进 CC JSONL)"]
+            :via-bus ["ManagerEvent::TextComplete (on reply)" "LlmEvent::* (若走 LLM gateway)"])
+
+         ;; ── Stage 5: Monitor Execution ──
+         (s5-monitor-execution
+            :at "worker pillar :: section pty :: subsection pty-state-machine + pty-transport"
+            :tools-alternatives
+              ((read-screen "mission_pty_read(action=screen|history|logs, slotId, lines?)")
+               (status      "mission_pty_status(slotId?) — 返回 FSM 当前 state")
+               (screenshot  "mission_pty_screenshot(slotId) — PNG 截图")
+               (task-track  "mission_task_query(action=status|track, taskId)")
+               (job-poll    "mission_job_poll(job_id, action=poll|list|cancel)")
+               (watch-events "subscribe SlotBecameIdle / SlotStuck / ManagerEvent::* (适合 daemon 内部订阅)"))
+            :fsm-transitions-observed "Idle → Thinking (spinner) → Responding (output) → ToolRunning → [Confirming?] → Idle"
+            :anomaly-detection "missiond-pty/anomaly.rs 被动监控 stuck / parser 信心低 / anchor 缺失")
+
+         ;; ── Stage 6: Completion Detection ──
+         (s6-completion-detection
+            :at "worker + memory pillar + event-bus"
+            :mechanisms
+              ((event-trigger
+                  :event "SlotBecameIdle + ManagerEvent::TextComplete"
+                  :适用 "所有 slot dispatch"
+                  :subscriber "daemon 内部 (worker / flow-engine-v2)")
+               (task-poll
+                  :tool "mission_task_query(taskId, status=done/failed)"
+                  :适用 "option-D 声明式委派 / option-E board task")
+               (job-poll
+                  :tool "mission_job_poll(job_id, status=completed/failed)"
+                  :适用 "异步 task_submit")
+               (status-check
+                  :tool "mission_pty_status 看 FSM 回 Idle"
+                  :适用 "手动监控")
+               (autopilot-report-completion
+                  :at "F1 s5 report-completion"
+                  :适用 "board_task 自动推进"))
+            :writes ["board_tasks.status=done/failed (flow/board)" "slot_tasks.status" "skill_execution (若 skill)"]
+            :via-bus ["SlotBecameIdle" "SessionCompleted (可能触发)" "BoardEvent::StatusChanged"])
+
+         ;; ── Stage 7: Teardown ──
+         (s7-teardown
+            :at "worker pillar :: section pty :: subsection slot-orchestrator :: slot-manager-runtime-authority"
+            :tools-alternatives
+              ((persistent-保留
+                  :desc "registered-tasks 的 slot 保留不杀, 等下次复用"
+                  :action "仅 release claim (autopilot report-completion 自动做)"
+                  :writes "board_tasks.claim_executor_id=NULL")
+               (dynamic-terminate
+                  :tool "mission_compute_slot(action=terminate, slot_id)"
+                  :适用 "option-C 动态 slot 主动清")
+               (force-kill
+                  :tool "mission_pty_signal(action=kill, slotId)"
+                  :适用 "冻死 / 手动强杀")
+               (interrupt
+                  :tool "mission_pty_signal(action=interrupt, slotId)"
+                  :适用 "软中断当前任务但保留 slot")
+               (auto-reap-supervisor
+                  :at "supervisor.rs (599 行)"
+                  :阈值 "Graceful: context < 15% → 标记 Idle 时 restart; Emergency: context < 3% → 强 kill"
+                  :recovery "requeue running tasks + release Board claims + sleep 3s + respawn via ensure_memory_slot_by_id"))
+            :worker-path "supervision-check (autopilot s5 的 lease recovery / stale task / zombie slot)"
+            :writes ["slot_sessions (close)" "dynamic_slots (若 terminate)" "board_tasks (claim 清除)"]
+            :via-bus ["SlotSessionChanged (on close)"])
+
+         ;; ── Stage 8: Audit & Retrospective ──
+         (s8-audit
+            :at "memory pillar"
+            :automatic
+              ["tool_calls 表 (gen_gateway 每 tool 调用前后自动写)"
+               "slot_tasks 历史 (slot_orchestrator 管)"
+               "conversation_messages (JSONL 经 conversation_logger 摄入)"]
+            :retrospective-trigger
+              ["SessionCompleted → retro_worker (sonnet) → deep_analysis + retrospectives"
+               "flow-ref: F8-retrospective-to-memory"]
+            :tools-for-query
+              ["mission_audit(action=trace|detail|stats|export) — 按 sessionId/toolId/taskId 查审计"
+               "mission_slot_history(slotId?) — 工位历史"
+               "mission_llm_trace(gemini_trace/stats) — LLM 调用链路"])
+        )
+
+      ;; ── 覆盖率检查 ──
+      :tools-coverage-check
+        :spawn "✓ 5 options (persistent/fixed/dynamic/delegate/board) 齐备"
+        :dispatch "✓ 6 paths (methodology⚠ / executable / skill / free-simple / free-async / cc-swarm) — methodology 一条缺直接 tool"
+        :monitor "✓ 6 tools (pty_read/status/screenshot/task_query/job_poll/ManagerEvent) 齐备"
+        :teardown "✓ 5 paths (persistent-保留/dynamic-terminate/force-kill/interrupt/auto-reap) 齐备"
+        :audit "✓ 自动写 + 3 query tool 齐备"
+        :overall "95% 齐备 — 仅 GAP-1 (methodology 直接执行) 需补"
+
+      :worker-coverage-check
+        :spawn-bottleneck "✓ spawner::spawn_tracked_slot 10 callers 统一 (perm-inject + tracking-env + pty-spawn + uuid-capture + initial-prompt 5 stage)"
+        :fsm "✓ pty-session FSM 8 states + 14 transitions 完整"
+        :semantic-parser "✓ CC+Gemini+Codex 3 种 CLI Idle/Thinking/etc 识别 (Forge 冲压)"
+        :supervisor "✓ 599 行 graceful/emergency restart + extraction-phase FSM + recovery 3s"
+        :registered-tasks "✓ 4 persistent slot (arch-surveyor/strategy/gemini-router/lisp-surveyor)"
+        :dynamic-pool "✓ compute_slot 5 active + 8h TTL"
+        :control-tree "✓ 6 层 cascade (global/provider/domain/worker/slot_role/project) + push-based watch"
+        :overall "100% 齐备 — worker 侧无缺"
+
+      :memory-coverage-check
+        :slot-lifecycle-tables "✓ slot_sessions + slot_tasks + dynamic_slots"
+        :board-coordination "✓ board_tasks (含 flow_phase / flow_context / flow_template / claim_executor_id / lease)"
+        :audit "✓ tool_calls + conversation_messages + retrospectives + deep_analysis"
+        :fsm-persistence "✓ BoardTaskStatus + EngineeringPhase + TaskStatus + SlotTrait 枚举"
+        :overall "100% 齐备 — memory 侧 schema 完备"
+
+      ;; ── GAP 清单 ──
+      :gaps-identified
+        ((GAP-1 (methodology-lisp-execution)
+            :severity "medium"
+            :desc "'.missiond/workflows/*.lisp' (pillar-refactor / bus-refactor 等人类方法论) 无直接执行 tool. 当前只能人工读 + 塞 prompt 或包装成 task_delegate"
+            :options
+              ["(A) 新加 mission_workflow_execute(workflow_path, params) — 读 lisp + LLM 解析 phases + 逐 phase 派 slot (开发量中)"
+               "(B) forge 冲压 methodology.lisp → executable.yaml (workflows-kinds-split 的 future-possibility, 当前未做)"
+               "(C) 接受现状 — methodology 永远是'人看文档', 不机器执行"]
+            :recommendation "选 (A) — 补 tool, 从 intent-layer pillar 扩"
+            :affects ["intent-layer :: workflows :: kind methodology 的 executability 字段"
+                      "tools pillar :: knowledge domain 加新 tool"])
+         (GAP-2 (orchestration-path-overlap)
+            :severity "low-medium"
+            :desc "3 条 orchestration 路径并存, 每类 workflow 该走哪条不明确: skill_exec (30s MCP dispatch) vs flow_run (YAML node sequence) vs task_delegate (自然语言)"
+            :cross-ref "tools v0.1 T007 决策项"
+            :recommendation "指挥官评审: 保留 3 条 / 合并 skill_exec 到 flow_run / 明确分工规则")
+         (GAP-3 (long-running-workflow-ttl)
+            :severity "low"
+            :desc "动态 slot 8h max TTL vs registered persistent slot 永久. 长任务 (>8h) 必须用 persistent, 但 persistent 是 role-based 路由, 灵活度不够"
+            :recommendation "未来若需要: 补 'long-running dynamic slot' 概念 或 persistent slot 加 task-based 路由")
+         (GAP-4 (slot-failure-retry-flow)
+            :severity "low"
+            :desc "slot 失败 retry 限于 board_tasks (mission_board_retry), 不针对 slot 本身. 若 dispatch 成功但 slot 内任务失败 (非 board 路径), 无标准 retry 机制"
+            :recommendation "对 option-D (task_delegate) / option-F (free-async) 补 slot-level retry 字段")
+         (GAP-5 (slot-pool-abstraction-gap)
+            :severity "low"
+            :desc "动态 slot (compute_slot) vs 持久 slot (registered) 无统一 'slot pool' 抽象. MCP 调用方要自己决定 (用 pty_spawn 还是 compute_slot)"
+            :recommendation "未来可补 mission_slot_pool (unified) 抽象; 当前问题不大"))
+
+      :tools-backref-full-list
+        ["mission_intent (s1 methodology, ⚠)"
+         "mission_flow_run (s1+s4 executable)"
+         "mission_skill_query + mission_skill_context + mission_skill_exec (s1+s4 skill)"
+         "mission_slots (s2 persistent list)"
+         "mission_pty_spawn (s2 固定 slot, s3 waitForIdle)"
+         "mission_compute_slot (s2 动态 create + s7 terminate)"
+         "mission_task_delegate (s2 声明式 + s4 free-async)"
+         "mission_task_submit (s4 free-async)"
+         "mission_board_create/claim (s2 隐式 board + F1 s1-s3)"
+         "mission_pty_send (s4 free-simple / methodology workaround)"
+         "mission_pty_read (s5 monitor screen)"
+         "mission_pty_status (s3 poll Idle + s5 monitor)"
+         "mission_pty_screenshot (s5 monitor)"
+         "mission_task_query (s5+s6 poll done)"
+         "mission_job_poll (s5+s6 async poll)"
+         "mission_cc_swarm (s4 multi-agent)"
+         "mission_pty_signal (s7 kill/interrupt)"
+         "mission_audit + mission_slot_history + mission_llm_trace (s8 audit query)"
+         "mission_pause + mission_worker (orthogonal control-tree pause/resume)"]
+
+      :overall-conclusion
+        "✅ 工具面 + worker 执行 + memory 表 基本齐备 (95%). 唯一 medium-severity 缺口是 GAP-1 methodology lisp 无直接执行 tool. 其他 4 gap 是 low-severity 优化项."))
 
   ;; ══════════════════════════════════════════════════════════
   ;; 7.7 Category: Forge Flows
