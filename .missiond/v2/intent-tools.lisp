@@ -1242,14 +1242,24 @@
   ;; Need-more-ground-truth (T001-T010)
   ;; ══════════════════════════════════════════════════════════
   (need-more-ground-truth
-    (T001 "实际 tool 总数确认 — mcp-defs 头说 67, 实际按 mcp-dispatch + 磁盘应是 78. 已按 78 计数")
-    (T002 "每 tool :flow-ref 具体值 — 全部 'pending-flow-pillar', 待 flow pillar 设计后逐条填")
-    (T003 "每 tool :necessity-pending-review — 指挥官逐条评审, 评审后改 false 或标 'remove-candidate'")
-    (T004 "跨 mcp 壳 vs handler 位置的 tool (pause / slot_history / beacon / inbox / incident / gemini_auth / submit_phase_result) — 是历史还是设计? 是否要挪位?")
-    (T005 "mission_minimax_process deprecated — 评审何时真删")
-    (T006 "mission_memory 3 action (pending/pause/token_stats) 职责差异大 — 是否要拆 3 个 tool?")
-    (T007 "mission_skill_exec vs flow-engine-v2 职责重叠 — 评审是否合并")
-    (T008 "mission_kb_ops 6 action (gc/analyze/discover/queue_status/execute_plan/compact) 较杂 — 是否拆")
-    (T009 "mcp-defs 40KB 我只读了约一半 (头 800 行), 剩余部分需回看 — sys_config / daemon_update / power_control / infra_query / permission 等 schema 具体")
-    (T010 "flow pillar 设计时, 需评估每 tool 的 flow 应该是 single-node 还是 multi-node — 若 single-node, 是否真有必要包装 flow?"))
+    (T001 :status RESOLVED :resolved-at "2026-04-21"
+          :finding "78 tools 确认 (按 mcp-dispatch 老图 + handler 文件枚举). mcp-defs 头部 '67 tools' 旧注释未更新. 本 v0.1 按 78 计数准确")
+    (T002 :status "resolved-by-flow-v0.1"
+          :finding "flow v0.1 已建 tool-backed-flows-index, 78 tools 映射为: ~20 non-trivial flow-backed + ~58 trivial-single-step. tools v0.2 可逐条填 :flow-ref")
+    (T003 :status "awaiting-decision"
+          :note "78 tool 必要性评审 — 指挥官逐条 review")
+    (T004 :status RESOLVED :resolved-at "2026-04-21"
+          :finding "6 历史原因 (pause / slot_history / inbox / incident / gemini_auth / submit_phase_result) + 1 故意设计 (mission_beacon in KB domain). 根因: old-slot→new-slot 迁移时工具定义留原 group, handler 集中到 misc.rs. 详 phase-B-scan-findings § B.4")
+    (T005 :status "awaiting-decision"
+          :note "mission_minimax_process deprecated 真删时机")
+    (T006 :status "awaiting-decision"
+          :note "mission_memory 3 action 拆否")
+    (T007 :status "awaiting-decision"
+          :note "mission_skill_exec vs flow-engine-v2 职责重叠 — 评审是否合并")
+    (T008 :status "awaiting-decision"
+          :note "mission_kb_ops 6 action 拆否")
+    (T009 :status "partial-resolved"
+          :note "phase-B scan 补了 handler 层面 (sys_config/daemon_update/power_control/infra/permission handler 位置). mcp-defs 40KB 后半文字细节可按需再读")
+    (T010 :status "future-design"
+          :note "每 tool 的 flow single-node vs multi-node 价值评估 — flow v0.1 已给初步判断 (单 step 约 58 tool 不值得包 flow)"))
 )

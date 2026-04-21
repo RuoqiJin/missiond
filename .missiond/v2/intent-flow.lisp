@@ -839,13 +839,24 @@
   ;; Need-more-ground-truth (F-T001…)
   ;; ══════════════════════════════════════════════════════════
   (need-more-ground-truth
-    (F-T001 "cascade 相关 flow (mission_cascade_plan/trigger) 具体 staging — 待代码 scan")
-    (F-T002 "mission_task_submit/query/cancel 的精确 flow staging — 与 skill_exec 可能重叠")
-    (F-T003 "flow-engine-v2 的 fire-and-forget vs Phase-2 reflow 设计 — ParallelSlotTasks 当前是 POC")
-    (F-T004 "incident-reaction flow 具体 playbook — aiops 产 incident 后如何自动 remediation")
-    (F-T005 "methodology lisp 与 executable YAML 是否有自动转换 pipeline (当前人工)")
-    (F-T006 "F1 的 auto_execute 扫描频率与 CAS 实际实现细节")
-    (F-T007 "F8 retrospective 触发条件 (当前 SessionCompleted, 但 SessionCompleted 如何 emit?)")
-    (F-T008 "F7 embedding-pipeline 在 xjp-router 接入前后的差异 — 迁移 flow 设计")
-    (F-T009 "F-learned-permission 的 100% 覆盖率 (mcp-defs + pty_event_worker 路径是否还有 gap?)"))
+    (F-T001 :status "future-design"
+            :note "cascade flow (mission_cascade_plan/trigger) 具体 staging — 待 cascade 整体设计")
+    (F-T002 :status "awaiting-decision"
+            :note "mission_task_submit/query/cancel 与 skill_exec 可能重叠 — 职责分工决策")
+    (F-T003 :status "future-implementation"
+            :note "flow-engine-v2 ParallelSlotTasks Phase-2 reflow (当前 fire-and-forget POC)")
+    (F-T004 :status "partial-resolved"
+            :phase-B-finding "aiops 自动 remediation 已实现 (详 phase-B-scan-findings § C.4): health 恢复自动 close Board task + 加 recovery note, health 失败建 Board task + incident, PtySlot incident 派 Opus slot. incident-reaction 作为完整 flow 的独立 narrative 仍待整理"
+            :remaining "把现有 remediation 逻辑整理为 flow narrative")
+    (F-T005 :status "awaiting-decision"
+            :note "methodology lisp → executable YAML 自动转换 pipeline — 未来可 forge 冲压")
+    (F-T006 :status RESOLVED :resolved-at "2026-04-21"
+            :finding "autopilot.rs 60s tick (worker v0.3 path autopilot-tick 已确认, phase-B A.2 补: 60s 主编排脉搏 / 双内存槽管理 / 故障隔离). CAS claim 具体 @ memory pillar board state-machine")
+    (F-T007 :status "partial-resolved"
+            :phase-B-finding "SessionCompleted (及 NarrationSessionCompleted) 由 bus/v2_subscribers 路径 emit (phase-B B.3 发现 experience_harvester 经此路径激活). 完整 emit 机制待补"
+            :remaining "SessionCompleted emit 点完整清单 (pty_event_worker 还是别处?)")
+    (F-T008 :status "pending-phase-C"
+            :note "xjp-router 接入后 F7 embedding-pipeline 变化 — 需 xjp_router_client 实现后补 flow 迁移设计 (同 worker I006)")
+    (F-T009 :status "future-validation"
+            :note "F-learned-permission 100% 覆盖率验证 — 需 code audit 所有 ConfirmRequired 路径"))
 )

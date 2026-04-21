@@ -908,7 +908,7 @@
 
     (zombie-ledger
       (code-prefetch         :lifecycle-style on-demand       :status "disk-present / runtime-called / not spawned")
-      (experience-harvester  :lifecycle-style planned         :status "disk-present / not spawned / plan-or-prototype — I005 待确认")
+      (experience-harvester  :lifecycle-style spawned-via-bus :status "ACTIVE — complete 420L impl, Gemini-reviewed, spawn via bus/v2_subscribers.rs:237 on NarrationSessionCompleted (phase-B 2026-04-21 RESOLVED, 原 planned 分类已反转)")
       (briefing-worker       :lifecycle-style zombie-deleted  :status "removed from sonnet/ v1.3.0 — UPDATE 语义不兼容")
       (step-narrator         :lifecycle-style zombie-deleted  :status "removed from codex/ v0.4.23 — message_narrations 表删除")
       (event-analyzer-worker :lifecycle-style zombie-absorbed :status "65c8b59 新增 → 1ea1838 吸收进 tagger_chunker 的 commit detection"))
@@ -1123,12 +1123,13 @@
       :disk-count 12
       :spawned-count 10
       :on-demand-count 1
-      :planned-count 1
+      :planned-count 0
+      :bus-spawned-count 1  ; experience_harvester via bus/v2_subscribers
       :active-roster
         ["ast_sync_worker" "code_prefetch" "codex_ingestion_worker" "conversation_logger"
          "conversation_organizer" "gemini_logger" "gemini_reconcile_worker" "pty_event_worker"
          "reconcile_worker" "tagger_chunker" "xjpcode_briefing_worker"]
-      :planned-roster ["experience_harvester"]
+      :bus-spawned-roster ["experience_harvester (via bus/v2_subscribers.rs on NarrationSessionCompleted)"]
       :targets
         ["crates/missiond-daemon/src/workers/local/ast_sync_worker.rs"
          "crates/missiond-daemon/src/workers/local/code_prefetch.rs"
@@ -1276,23 +1277,28 @@
           :memory-cross-ref ["conversation-logs"]
           :returns "organized session ids / follow-up signal"))
 
-      (path experience-harvester-prototype
-        :lifecycle-style planned
+      (path experience-harvester-active
+        :lifecycle-style spawned-via-bus
         :functional-group "code-intel"
-        :status "disk-present / not spawned / I005 待确认 planned vs zombie"
+        :status "ACTIVE (phase-B 2026-04-21 RESOLVED — 420L complete impl, Gemini-reviewed, 原 planned 归类已反转)"
+        :phase-B-verified "phase-B-scan-findings-2026-04-21.md § B.3"
         (ingress
-          :source "暂无稳定 subscription; 老图写 interval 60s"
-          :entry-components ["crates/missiond-daemon/src/workers/local/experience_harvester.rs"])
+          :source "NarrationSessionCompleted (via bus/v2_subscribers.rs:237)"
+          :entry-components
+            ["crates/missiond-daemon/src/workers/local/experience_harvester.rs (420 行 complete)"
+             "crates/missiond-daemon/src/bus/v2_subscribers.rs:237 (harvest_session caller)"])
         (logic-core
-          (step s1 "读 ast_nodes / conversations / tool_calls 寻高价值经验")
-          (step s2 "候选归纳为 beacon / board follow-up")
-          (step s3 "phase-A 保留骨架, phase-B I005 确认"))
+          (step s1 "消费 NarrationSessionCompleted 事件 → harvest_session(&state, &session_id).await")
+          (step s2 "读 ast_nodes / conversations / tool_calls 提取探索路径 + AST 解析")
+          (step s3 "创建 beacon_nodes (Virtual Beacon)")
+          (step s4 "同一区域探索 3 次 → 建议 Skill 合成 (skill synthesis trigger)"))
         (egress
           :writes ["beacon_nodes" "board_tasks"]
           :reads ["ast_nodes" "conversations" "tool_calls"]
-          :via-bus []
+          :via-bus ["NarrationSessionCompleted (consumed)"]
           :memory-cross-ref ["kb-manager" "board" "conversation-logs"]
-          :returns "planned harvester result"))
+          :returns "harvester result / beacon creations / skill synthesis suggestions"
+          :design-reference "docs/designs/code-intelligence-acceleration.md"))
 
       (path gemini-logger-cycle
         :lifecycle-style spawned
@@ -1819,13 +1825,22 @@
   ;; need-more-ground-truth (phase-B I001-I005 + 新发现)
   ;; ══════════════════════════════════════════════════════════
   (need-more-ground-truth
-    (I001 "slot_manager/ 残留引用 — grep 'slot_manager' crates/ 看是否还有 mod/use 引用需清理")
-    (I002 "workflow_executor.rs 精确表级 R/W")
-    (I003 "learning-engine 7 sub-engine 除 intent_analyst 外的 precise table contract (归 intent-layer pillar 后考察)")
-    (I004 "retrieval-fusion 的 fusion ranker 真实文件 (是否有专门实现?)")
-    (I005 "experience_harvester.rs 去留 — planned 功能还是将删 prototype")
-    (I006 "xjp-router HTTP client 实际落点 (crates/missiond-daemon/src/llm/xjp_router_client.rs? 或别处?) — v0.3 声明 pending, phase-C 施工确定")
-    (I007 "intent-layer pillar phase-A 后, board-phase-engine + learning-engine 7 sub 正式迁离 worker pillar 的清理动作 (何时执行 / 谁执行)")
-    (I008 "flow-engine v1 (flow_engine.rs) 当前 project-lifecycle phases 具体执行逻辑 — intent-layer pillar phase-A 需吸收")
-    (I009 "Global compute_slot vs per-role slot_orchestrator 并发语义 (EXCLUDED_ROLES + persistent Mutex + ephemeral 信号量) 完整 FSM 是否需要独立 pillar 文档"))
+    (I001 :status RESOLVED :resolved-at "2026-04-21"
+          :finding "8 处命中全是 '变量名保留 AgentSlotManager 类型' — 故意 API 稳定性, 无清理需求. 详 phase-B-scan-findings § B.1")
+    (I002 :status RESOLVED :resolved-at "2026-04-21"
+          :finding "workflow_executor writes skill_execution + reads skill_topic + MCP tool dispatch (30s timeout, MAX_DEPTH=3). 详 § A.2")
+    (I003 :status RESOLVED :resolved-at "2026-04-21"
+          :finding "7 sub 精确表契约全 confirmed. 详 § A.1 + intent-layer v0.1 learning-engine-contract-summary 已补 full matrix")
+    (I004 :status RESOLVED :resolved-at "2026-04-21"
+          :finding "无独立 ranker 文件. RRF 内联 context_pipeline.rs:886-893 + 1008-1026 + kb.rs:733 mmr_rerank_cosine. 详 § B.2")
+    (I005 :status RESOLVED :resolved-at "2026-04-21"
+          :finding "反转 — experience_harvester 是 COMPLETE + ACTIVE (非 planned). Spawn via bus/v2_subscribers.rs:237 on NarrationSessionCompleted. 详 § B.3. zombie-ledger + functional-groups + experience-harvester-active path 已更新")
+    (I006 :status "pending-phase-C"
+          :note "xjp_router_endpoint + xjp_router_auth_token 代码中确认不存在 (phase-B 扫 env 清单验证). phase-C 施工新增 crates/missiond-daemon/src/llm/xjp_router_client.rs + 配置")
+    (I007 :status "future-implementation"
+          :note "intent-layer pillar phase-A 后, board-phase-engine + learning-engine 7 sub 迁离清理. 时机待 intent-layer v0.2")
+    (I008 :status RESOLVED :resolved-at "2026-04-21"
+          :finding "flow-engine v1 EngineeringPhase 7 phase 全实现 + 闭环 decision_harvest. intent-layer v0.1 board-phase-engine path 已补 transitions-full-implementation 表. 详 § A.4")
+    (I009 :status "awaiting-decision"
+          :note "compute_slot FSM 独立文档决策 — 当前 slot-orchestrator section 已较完整"))
 )

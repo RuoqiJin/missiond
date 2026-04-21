@@ -131,26 +131,47 @@
     :forge-role "core-types.lisp → Forge → gen_types.rs (Generation Gap)"
 
     (enums-shared
-      :count 11
+      :count 13
+      :phase-B-verified "phase-B-scan-findings-2026-04-21.md § C.1"
       :list
-        ["BoardTaskStatus (Open/Running/Done/Failed/Blocked)"
-         "EngineeringPhase (Investigate/Consult/Plan/Execute/Finalize/Done)"
-         "TaskStatus (Queued/Running/Completed/Failed)"
-         "EventType"
-         "AsyncJobStatus"
-         "AgentQuestionStatus (Pending/Answered/Dismissed)"
-         "IncidentSeverity"
-         "IncidentSource"
-         "CliEngine (Claude/Gemini/Codex/Minimax/Sonnet)"
-         "Lifecycle"
-         "SlotTrait"])
+        ["BoardTaskStatus (7: Open/Running/Verifying/Done/Blocked/Failed/Skipped)"
+         "BoardNoteType (3: Progress/Summary/Note)"
+         "EngineeringPhase (7: Investigate/ConsultGemini1/Plan/ConsultGemini2/Execute/Finalize/Done)"
+         "TaskStatus (4: Queued/Running/Completed/Failed)"
+         "EventType (6)"
+         "AsyncJobStatus (5)"
+         "AgentQuestionStatus (5: Pending/Answered/Dismissed/Expired/Harvested)"
+         "IncidentSeverity (5: Critical/High/Medium/Low/Info)"
+         "IncidentSource (5: Monitoring/AlertManager/Manual/System/Webhook — 注: 代码里还有 HealthCheck/PtySlot 为 aiops 路径用)"
+         "DependencyStatus (as_str:false)"
+         "CliEngine (2: ClaudeCode/ClaudeMd)"
+         "Lifecycle (2: Persistent/Transient)"
+         "SlotTrait (5: Memory/Sonnet/AutoPilot/Decision/Strategy)"])
 
     (structs-shared
-      :count 12
+      :count 20
+      :phase-B-verified "phase-B-scan-findings-2026-04-21.md § C.1"
       :list
-        ["BoardTask" "ConversationMessage" "KnowledgeEntry" "Task" "InboxMessage"
-         "TaskEvent" "AgentQuestion" "IncidentRow" "DynamicSlot" "SkillTopic"
-         "ToolCallRecord" "ProjectConfig (等)"])
+        ["FlowContext (6)"
+         "BoardTask (37 fields — 最大)"
+         "CompactBoardTask (7)"
+         "BoardTaskNote (6)"
+         "CreateBoardTaskInput (16)"
+         "UpdateBoardTaskInput (20)"
+         "Conversation (24)"
+         "ConversationMessage (19)"
+         "KnowledgeEntry (16)"
+         "KBRememberInput (6)"
+         "KBEdge (5)"
+         "Task (16)"
+         "InboxMessage (6)"
+         "TaskEvent (5)"
+         "AgentQuestion (15)"
+         "IncidentRow (10)"
+         "DynamicSlot (12)"
+         "SkillTopic (15)"
+         "SkillBlock (9)"
+         "ToolCallRecord (11)"])
 
     (path shared-type-usage
       :lifecycle-style "compile-time"
@@ -559,15 +580,23 @@
       :note "各 FSM 的 enum 定义源 Lisp 在 .missiond/intent-types.lisp, 由 Forge 冲压到对应 gen_types.rs"))
 
   ;; ══════════════════════════════════════════════════════════
-  ;; Need-more-ground-truth (SL-T001 …)
+  ;; Need-more-ground-truth (SL-T001 … — phase-B scanned 2026-04-21)
   ;; ══════════════════════════════════════════════════════════
   (need-more-ground-truth
-    (SL-T001 "intent-types.lisp 当前详细 enum/struct 清单 — 验证 v0.1 头部 11 enum + 12 struct 数是否准")
-    (SL-T002 "ipc_handler.rs 的具体实现 — 当前与 mcp_client.rs 之间的 daemon↔mcp 通信拓扑")
-    (SL-T003 "ws_bridge.rs 在 crates/missiond-daemon/src/bus/ 下的角色 — 与 ws/server.rs 关系 (bus 子目录的 ws_bridge 是 event-bus v2 的一部分)")
-    (SL-T004 "infra/aiops.rs 的 300s 扫描 playbook 细节 (扫什么 + 怎么判异常)")
-    (SL-T005 "crates/missiond-core/src/util/ 其他未覆盖文件 — 可能还有 pure-utils 组件未列")
-    (SL-T006 "gen_types.rs 的手写扩展 (除 Forge-generated 部分之外)")
-    (SL-T007 "supervisor.rs 的具体实现 — 是否有复杂 restart 策略")
-    (SL-T008 "FORGE_BIN / xjp_router_endpoint 等 env/config 的完整清单 + 读取位置"))
+    (SL-T001 :status RESOLVED :resolved-at "2026-04-21"
+             :finding "13 enum + 20 struct (v0.1 估 11+12 偏差). 详见 phase-B-scan-findings-2026-04-21.md § C.1. 头部 enums-shared + structs-shared 已更新准确数字")
+    (SL-T002 :status RESOLVED :resolved-at "2026-04-21"
+             :finding "详见 § C.2. 拓扑: [external MCP client] →stdio→ [missiond-mcp bin] →Unix socket→ [daemon ipc_handler] | daemon 反向 [mcp_client] →child process stdio→ [xjp-mcp] (max 200 calls/recycle, 30s timeout)")
+    (SL-T003 :status RESOLVED :resolved-at "2026-04-21"
+             :finding "详见 § C.3. bus/ws_bridge.rs 是 event-bus v2 → 前端桥 (100ms 轮询 event_log, v2→v1 byte-compat); ws/server.rs 是通用 WS 多路复用. 互补非重叠")
+    (SL-T004 :status RESOLVED :resolved-at "2026-04-21"
+             :finding "详见 § C.4. 300s 确认. Pre-check connectivitycheck.gstatic.com 防假警. 扫所有 health_endpoint servers, HTTP GET 5s timeout. 自动 remediation: 恢复→自动 close Board task + aiops author note; 失败→建 Board task + incident (state-based dedup); PtySlot incident → Claude Code (Opus) slot")
+    (SL-T005 :status RESOLVED :resolved-at "2026-04-21"
+             :finding "详见 § C.5. util/ 仅 string_helpers/ (mod + custom + generated), 无其他文件. 注: semantic-parsing-helpers 实际在 missiond-core/src/semantic/gen_parsing.rs (非 util/)")
+    (SL-T006 :status RESOLVED :resolved-at "2026-04-21"
+             :finding "详见 § C.6. 14 手写 types 文件 (含 mod/async_job/board/conversation/directive/dynamic_slot/incident/infra/knowledge/project/question/skill/slot/task). 模式: gen_types.rs = struct 定义 + derives, 手写 = impl + helper + trait")
+    (SL-T007 :status RESOLVED :resolved-at "2026-04-21"
+             :finding "详见 § C.7. 599 行. ExtractionPhase enum + ExtractionState struct + 15% graceful / 3% emergency 阈值. Restart 策略: graceful(Idle 时 restart) / emergency(强 kill 立即) / recovery(requeue+release+sleep 3s+respawn). 独立于 ControlTree")
+    (SL-T008 :status RESOLVED :resolved-at "2026-04-21"
+             :finding "详见 § C.8. 25+ env vars 全列 (MISSIOND_HOME/FORGE_BIN/MISSION_IPC_SOCKET/MISSION_PG_URL/OLLAMA_HOST 等). 关键: xjp_router_endpoint + xjp_router_auth_token **代码中不存在**, 确认 worker v0.3 I006 为真 — phase-C 施工项"))
 )

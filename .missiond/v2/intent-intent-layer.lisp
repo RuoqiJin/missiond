@@ -546,21 +546,31 @@
       (path decision-cascade
         :lifecycle-style event-driven
         :target "crates/missiond-daemon/src/engine/learning_engine/decision_engine.rs"
+        :phase-B-verified "2026-04-21 — 4 tier 全部已实现 (详 phase-B-scan-findings § A.3)"
         (ingress
           :source "agent question / decision need / escalation path"
           :entry-components ["decision_engine.rs"])
         (logic-core
           :cascade
-            [(tier-1 kb-lookup "先查 KB 有没有现成答案")
-             (tier-2 gemini-consult "KB 未命中 → 咨询 Gemini CLI")
-             (tier-3 decision-slot "Gemini 不定 → 派 decision slot 深度分析")
-             (tier-4 human-escalation "slot 仍不定 → 升级指挥官")])
+            [(tier-1 kb-lookup
+                :status "✓ implemented @ decision_engine.rs:155-180"
+                :impl "kb_search_ranked() + dual scoring + confidence ≥0.5 threshold for auto-apply")
+             (tier-2 gemini-consult
+                :status "✓ implemented @ decision_engine.rs:210-260"
+                :impl "call_gemini_for_flow() + JSON contract (answer/reasoning/action) + confidence 0.7")
+             (tier-3 decision-slot
+                :status "✓ implemented @ decision_engine.rs:290-340"
+                :impl "request_execution_slot(slot-decision) + pty.send(120s timeout)")
+             (tier-4 human-escalation
+                :status "✓ implemented @ decision_engine.rs:360-380"
+                :impl "agent_questions (target=master) + board_task priority 升级")])
         (egress
-          :writes []
-          :reads ["kb_entries"]
-          :via-bus []
-          :returns "decision result (tier / answer / needs-human)"
-          :need-more-ground-truth "精确写表路径 待 phase-B"))
+          :writes ["agent_questions" "question_routing_trace"]
+          :reads ["agent_questions (pending)" "kb_entries (search_ranked/get_by_id)" "board_tasks" "board_task_notes"]
+          :via-bus ["QuestionEvent::Resolved" "QuestionEvent::DecisionResolved" "TaskEvent::Created"]
+          :llm-calls "Gemini (tier-2)"
+          :slot-calls "slot-decision (tier-3 dispatch via pty.send)"
+          :returns "decision result (tier / answer / needs-human)"))
 
       (path decision-harvest-generalization
         :lifecycle-style spawned
@@ -677,10 +687,42 @@
           :need-more-ground-truth "precise table contract 待 phase-B")))
 
     (learning-engine-contract-summary
-      :writes-confirmed ["user_intents" "conversation_turns.intent_group_id (via intent_analyst)"]
-      :writes-uncertain "其他 6 sub-engine 精确写表待 phase-B scan (worker v0.3 I003)"
-      :reads-common ["conversations" "conversation_messages" "conversation_turns" "kb_entries"]
-      :via-bus-produces ["可能产 CascadeTriggered / CascadeCompleted"]))
+      :phase-B-verified "2026-04-21 — 7 sub R/W 矩阵全 confirmed (详 phase-B-scan-findings § A.1)"
+      :writes-full-matrix
+        (decision_engine     :writes ["agent_questions (answer/retry_count)" "question_routing_trace"])
+        (decision_harvest    :writes ["kb_entries (policy:decision category)" "kb_update (confidence)"])
+        (extraction          :writes ["realtime_forwarded_at (watermarks)" "deep_checkpoint" "slot_tasks" "conversation_task_id" "kb_update" "kb_forget"])
+        (historical_scanner  :writes ["mark_habit_scanned" "daemon_state (last_habit_scan_at)"])
+        (idle_explorer       :writes ["board_tasks (create, auto_execute=true)" "kb_remember" "daemon_state"])
+        (intent_analyst      :writes ["user_intents" "conversation_turns.intent_group_id"])
+        (timeline_analyst    :writes ["board_tasks (create)" "kb_remember (category=ops:insight)" "daemon_state"])
+      :reads-full-matrix
+        (decision_engine     :reads ["agent_questions (pending)" "kb_entries" "board_tasks" "board_task_notes"])
+        (decision_harvest    :reads ["agent_questions (target=master)"])
+        (extraction          :reads ["pending_realtime_messages" "conversation status" "pending_deep_analysis conversations" "conversation_messages" "daemon_state" "kb_list_low_utility"])
+        (historical_scanner  :reads ["daemon_state" "conversation counts" "unscanned_conversations"])
+        (idle_explorer       :reads ["daemon_state (last_idle_explore_at)" "kb_entries" "board_tasks" "beacons" "snapshots"])
+        (intent_analyst      :reads ["conversation_turns (intent_coverage, turns_after)" "caller source"])
+        (timeline_analyst    :reads ["timeline_stats (12h)" "timeline_search (errors)" "board_tasks (dedup)"])
+      :llm-usage
+        (gemini ["decision_engine (tier-2)" "decision_harvest (Few-Shot)" "timeline_analyst (12h insight JSON)"])
+        (sonnet ["extraction (KB reflection)" "intent_analyst (intent pattern detection)"])
+      :slot-usage
+        ["decision_engine → slot-decision (tier-3)"
+         "extraction → request_default_slot + request_execution_slot (300-900s)"
+         "historical_scanner → MEMORY_SLOW_SLOT_ID"]
+      :via-bus-produces
+        ["QuestionEvent::Resolved/DecisionResolved (decision)"
+         "SlotEvent::TaskDispatched (extraction/scanner)"
+         "MemoryEvent::PhaseChanged (extraction)"
+         "MemoryEvent::IntentAnalyzed (intent_analyst)"
+         "BoardEvent::StatusChanged (idle_explorer)"
+         "SystemEvent::InsightGenerated (timeline)"]
+      :sub-engine-details
+        (idle_explorer :8-categories ["一致性" "陈旧" "信标" "重复" "聚合" "巩固" "状态" "影子回放"])
+        (intent_analyst :limits "15 轮批量 (防翻页 bug)" :patterns ["stuck_retry" "architecture_explore" "refactor_shift" "scope_creep"])
+        (historical_scanner :interval "4h 周期")
+        (timeline_analyst :interval "12h 周期")))
 
   ;; ══════════════════════════════════════════════════════════
   ;; 5.9 Flow-Engine v1 — Project Lifecycle Phases
@@ -694,24 +736,37 @@
 
     (path board-phase-engine
       :lifecycle-style spawned
+      :phase-B-verified "2026-04-21 — 7 phase 全部已实现 + decision_harvest closure loop (详 phase-B-scan-findings § A.4)"
+      :completeness "✓ FULL — Investigate/ConsultGemini1/Plan/ConsultGemini2/Execute/Finalize/Done 全 transition 有代码 + artifact 存储"
       (ingress
         :source "autopilot claim 后的 board task phase progression"
         :entry-components
           ["crates/missiond-daemon/src/engine/intent_engine/flow_engine.rs"
            "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs (worker pillar 触发)"])
       (logic-core
-        (step s1 "按 board lifecycle phase 把任务从 Investigate / Consult_Gemini_1 / Plan / Consult_Gemini_2 / Execute / Finalize / Done 推进")
-        (step s2 "每 phase 转换需对应 mission_submit_phase_result 提交的 artifactType (investigation_report / execution_plan / execution_result / commit_hash)")
-        (step s3 "某些 phase 需 Decision Engine 审核 (requiresMasterDecision)")
-        (step s4 "在需要 slot 时请求 slot runtime; 需要工具时委托 workflow / tool path")
-        (step s5 "阶段推进结果与失败状态回写 board_tasks.flow_phase"))
+        (step s1 "按 board lifecycle phase 把任务从 Investigate / ConsultGemini1 / Plan / ConsultGemini2 / Execute / Finalize / Done 推进")
+        (step s2 "每 phase 转换需对应 mission_submit_phase_result 提交的 artifactType (investigation_report / gemini_advice_1 / execution_plan / gemini_advice_2 / execution_result / commit_hash)")
+        (step s3 "ConsultGemini1/2 阶段 daemon 直调 Gemini (非 slot), call_gemini_for_flow + JSON 契约解析")
+        (step s4 "Investigate/Plan/Execute/Finalize 阶段走 slot (pty.send)")
+        (step s5 "Finalize→Done 自动 trigger decision_harvest → policy:decision KB 条目沉淀")
+        (step s6 "re-entry guard 防并发; phase 推进结果与失败状态回写 board_tasks.flow_phase"))
+      (transitions-full-implementation
+        ((Investigate -> ConsultGemini1 :at "flow_engine.rs:150-200" :artifact "investigation_report")
+         (ConsultGemini1 -> Plan         :at "flow_engine.rs:200-250" :artifact "gemini_advice_1")
+         (Plan -> ConsultGemini2         :at "flow_engine.rs:250-300" :artifact "execution_plan")
+         (ConsultGemini2 -> Execute      :at "flow_engine.rs:300-350" :artifact "gemini_advice_2")
+         (Execute -> Finalize            :at "flow_engine.rs:350-400" :artifact "execution_result" :note "with error handling + retry guard")
+         (Finalize -> Done               :at "flow_engine.rs:400-450" :artifact "commit_hash + decision_harvest trigger")))
       (egress
-        :writes ["board_tasks.flow_phase" "board_tasks.status"]
-        :reads ["board_tasks"]
-        :via-bus ["BoardEvent::*"]
+        :writes ["board_tasks.status" "board_tasks.flow_phase" "board_tasks.flow_context" "board_tasks.flow_artifacts" "board_task_notes"]
+        :reads ["board_task (flow_phase, flow_context, questions, notes)" "flow_template definitions"]
+        :via-bus ["TaskEvent::PhaseChanged"]
+        :llm-calls "Gemini (ConsultGemini1/2 direct, 非 slot)"
+        :slot-calls "pty.send for Investigate/Plan/Execute/Finalize phases"
         :memory-cross-ref ["board"]
         :tools-surface "mission_submit_phase_result (sysinfra domain via misc handler)"
-        :returns "board phase progression result"))
+        :returns "board phase progression result"
+        :closure-with-learning-engine "Finalize→Done auto-harvests decisions into policy:decision KB 条目 (→ learning-engine decision_harvest 闭环)"))
 
   ;; ══════════════════════════════════════════════════════════
   ;; 5.10 Action-Instruction Actor (Future)
@@ -819,16 +874,27 @@
   ;; Need-more-ground-truth (IL-T001 …)
   ;; ══════════════════════════════════════════════════════════
   (need-more-ground-truth
-    (IL-T001 "learning-engine 6 sub-engine (除 intent_analyst 外) 精确表级 R/W — 与 worker v0.3 I003 同步")
-    (IL-T002 "3 actor (directive-compiler / plan-compiler / workflow-distiller) 真实实现何时启动")
-    (IL-T003 "mission_directive / mission_plan / mission_workflow MCP tool 何时实现")
-    (IL-T004 "global-claudemd-manager daemon 侧何时建 (mission_global_instruction)")
-    (IL-T005 "mission_execution (agent-execution-coordination v0.5.1, 12 actions) handler 实现 — 与 worker I007 同步")
-    (IL-T006 "forge-daemon/src/intent_graph.rs 的当前实现程度 — graph build 是真功能还是 stub")
-    (IL-T007 "decision-engine cascade 4 tier (kb/gemini/slot/human) 当前哪几 tier 有实现")
-    (IL-T008 "workflow-distiller 的 match_rules + LRU 策略 设计")
-    (IL-T009 "flow-engine v1 (board-phase-engine) 当前已经完整工作还是 partial — 应对比 v2 补齐")
-    (IL-T010 "未来 forge 冲压 methodology-lisp → executable-yaml 是否值得做 (当前人工维护)")
-    (IL-T011 "本 pillar 未来独立 crate 还是嵌入 missiond-daemon (当前: engine/learning_engine + engine/intent_engine 在 daemon 内部)"))
+    (IL-T001 :status RESOLVED :resolved-at "2026-04-21"
+             :finding "7 sub R/W 矩阵全 confirmed. 详 phase-B-scan-findings-2026-04-21.md § A.1 + learning-engine-contract-summary 已补 full matrix")
+    (IL-T002 :status "awaiting-decision"
+             :note "3 actor (directive-compiler / plan-compiler / workflow-distiller) 真实实现时机 — 指挥官决策")
+    (IL-T003 :status "awaiting-decision"
+             :note "mission_directive / mission_plan / mission_workflow MCP tool 实现时机")
+    (IL-T004 :status "awaiting-decision"
+             :note "global-claudemd-manager daemon 侧实现 (mission_global_instruction) 时机")
+    (IL-T005 :status "future-implementation"
+             :note "mission_execution (agent-execution-coordination v0.5.1, 12 actions) handler — 同步 worker I007")
+    (IL-T006 :status "pending-external-scan"
+             :note "forge-daemon/src/intent_graph.rs 在外部仓 ~/Projects/jarvis-forge, 本次 phase-B 未扫")
+    (IL-T007 :status RESOLVED :resolved-at "2026-04-21"
+             :finding "4 tier 全部已实现 (kb-lookup/gemini-consult/decision-slot/human-escalation). 详 § A.3 + decision-cascade path 已补 :status implemented")
+    (IL-T008 :status "future-design"
+             :note "workflow-distiller match_rules + LRU 策略 — actor 实现时设计")
+    (IL-T009 :status RESOLVED :resolved-at "2026-04-21"
+             :finding "flow-engine v1 EngineeringPhase 7 phase 全部实现 + 到 Finalize→Done 自动 trigger decision_harvest 形成闭环. 详 § A.4 + board-phase-engine path 已补 transitions-full-implementation 表")
+    (IL-T010 :status "awaiting-decision"
+             :note "未来 forge 冲压 methodology-lisp → executable-yaml (当前人工) — 决策")
+    (IL-T011 :status "future-design"
+             :note "本 pillar 独立 crate vs 嵌入 (当前嵌入 missiond-daemon)"))
   ;; close sections 5.2-5.11 (6 unclosed) + close pillar
   ))))))))
