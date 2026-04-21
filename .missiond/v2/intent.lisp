@@ -484,8 +484,9 @@
   ;;  MCP 协议 + 对外暴露的全部能力
   ;; ═══════════════════════════════════════════════════
   (pillar tools
-    :draft-ref ".missiond/v2/drafts/gptpro/intent-tools.lisp"
-    :draft-note "gptpro v0.1 starter-scaffold"
+    :canonical-ref ".missiond/v2/intent-tools.lisp"
+    :canonical-status "v0.1 phase-A 2026-04-21 (本会话主驾, 1255 行, 78 tools 全列)"
+    :gptpro-v0.1-archive ".missiond/v2/drafts/gptpro/intent-tools.lisp"
     (purpose "通过 MCP JSON-RPC 协议暴露给 Claude Code / 其他 Agent 的能力集")
 
     (component mcp-server
