@@ -166,9 +166,11 @@
   ;; ──────────────────────────────────────────────────
   (source-index v2
     :scope "missiond-v2"
-    :version "v0.2 — section-id baseline 2026-04-26"
+    :version "v0.3 — section-id baseline + precompression coverage expansion 2026-04-26"
     :status-taxonomy-ref "architecture-dsl.lisp :: status-taxonomy"
     :section-id-policy-ref "architecture-dsl.lisp :: section-id-policy"
+    :section-entry-extended-ref "architecture-dsl.lisp :: section-entry-extended (wave 12 task 06)"
+    :compression-safe-field-policy "true=可走 compression-policy.allowed; false=保护正文 (frozen / control-plane / contract-zone); 缺省视为 unknown, 默认按 false 处理"
 
     ;; ── pillar memory ──
     (pillar-section-index
@@ -718,34 +720,325 @@
         :status architecture-designed
         :note "execution Lisp control plane + scoped git commit durability plane"))
 
+    ;; ──────────────────────────────────────────────────
+    ;; v0.3 (wave 12 / task 06) — precompression coverage expansion
+    ;; ──────────────────────────────────────────────────
+    ;; 目的:
+    ;;   - 在主 Lisp 真正压缩前, 把 7 个高变动语义区扩成 stable section-id anchor
+    ;;   - 新增 :compression-safe? 字段 (optional, see architecture-dsl :: section-entry-extended)
+    ;;   - 本批 entry 仅做"语义锚点"声明, 不动任何主 Lisp 正文
+    ;;   - status 全部落在 architecture-dsl :: status-taxonomy 7 值之内
+    ;; 7 区域:
+    ;;   1) execution coordination / scoped commit handoff
+    ;;   2) file-first artifacts
+    ;;   3) review gate
+    ;;   4) PLAN DAG scheduler
+    ;;   5) methodology compiler / semantic lifting
+    ;;   6) capability usage semantic evidence
+    ;;   7) workstation orchestration
+    ;; ──────────────────────────────────────────────────
+    (precompression-coverage-expansion v0.3
+      :date "2026-04-26"
+      :decided-by "wave 12 / task 06 lisp source-index expansion session"
+      :scope "为 7 个高变动语义区落 stable section-id, 让未来压缩/拆 shard 有锚点"
+      :non-goal "本任务不真正压缩主 Lisp、不拆 shard"
+      :compression-safe-field-rule "true=可走 compression-policy.allowed; false=保护正文 (frozen / control-plane / contract-zone)"
+
+      ;; ── 区域 1 · execution coordination / scoped commit handoff ──
+      (section-entry
+        :section-id "memory.helper.agent-execution-coordination"
+        :title "helper agent-execution-coordination (control-plane protocol)"
+        :source-file ".missiond/v2/intent-memory.lisp"
+        :local-path "pillar memory :: module board :: helper agent-execution-coordination"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+           "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"
+           "crates/missiond-core/src/db/board.rs"]
+        :note "v0.5.8 双平面协议: control-plane (claim/lease/heartbeat/deviation/decision/issue/completion/verification); D010 教训锁 — 不允许 scheduler 自建 ID 池")
+
+      (section-entry
+        :section-id "memory.helper.scoped-commit-contract"
+        :title "scoped-commit-contract (durability-plane)"
+        :source-file ".missiond/v2/intent-memory.lisp"
+        :local-path "pillar memory :: module board :: helper agent-execution-coordination :: scoped-commit-contract"
+        :status architecture-designed
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+           "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
+        :cross-ref ["flow.scoped-commit-handoff" "intent-layer.execution-handoff-dual-plane"]
+        :note "task-file operational-practice; daemon enforce (auto stage/commit/preflight) pending — 契约段, 不压缩")
+
+      (section-entry
+        :section-id "intent-layer.execution-handoff-dual-plane"
+        :title "execution-handoff dual-plane rule (R013/R014 anchor)"
+        :source-file ".missiond/v2/architecture-dsl.lisp"
+        :local-path "defdsl architecture-v1 :: semantic-rules :: R013 + R014"
+        :status code-aligned
+        :compression-safe? false
+        :note "R013 execution-dual-plane / R014 scoped-commit-subset 是契约规则, 不压缩")
+
+      ;; ── 区域 2 · file-first artifacts ──
+      (section-entry
+        :section-id "memory.directive-layer.file-first-artifacts"
+        :title "file-first-artifacts (artifact registry)"
+        :source-file ".missiond/v2/intent-memory.lisp"
+        :local-path "pillar memory :: module directive-layer :: file-first-artifacts"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/file_artifacts.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/directive.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/workflow.rs"]
+        :note "5 artifact: intent-alignment-lisp / plan-lisp / workflow-lisp / plan-evidence-sidecar / plan-node-state-projection — schema 字段是契约不压缩")
+
+      (section-entry
+        :section-id "intent-layer.unified-entry-pipeline.file-first-ssot"
+        :title "unified-entry-pipeline :file-first-ssot anchor"
+        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: :file-first-ssot"
+        :status code-aligned-partial
+        :compression-safe? true
+        :cross-ref ["memory.directive-layer.file-first-artifacts" "flow.unified-entry-pipeline"]
+        :note "writer 当前在 directive/plan/workflow handler 内联; foundation helper handlers/knowledge/file_artifacts.rs (wave11 task 完成) — status 段可压缩, 内容/路径不动")
+
+      (section-entry
+        :section-id "flow.file-vs-db-contract"
+        :title "F-intent-alignment-plan-execution-loop :: :file-vs-db-contract"
+        :source-file ".missiond/v2/intent-flow.lisp"
+        :local-path "pillar flow :: F-intent-alignment-plan-execution-loop :: :file-vs-db-contract"
+        :status code-aligned-partial
+        :compression-safe? false
+        :note "file 是 SSOT, DB 是镜像 — 这是契约, 不允许压缩正文")
+
+      ;; ── 区域 3 · review gate ──
+      (section-entry
+        :section-id "intent-layer.unified-entry-pipeline.alignment-review-gate"
+        :title "role alignment-review-gate"
+        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: role alignment-review-gate"
+        :status code-aligned-partial
+        :compression-safe? true
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/directive.rs"
+           "crates/missiond-mcp/src/tools/knowledge/directive.rs"]
+        :note "compile/persist 后可选发 QuestionEvent::Created; emission 字段 emit_review_question / review_question_id 已 code-aligned")
+
+      (section-entry
+        :section-id "intent-layer.unified-entry-pipeline.plan-review-gate"
+        :title "role plan-review-gate"
+        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: role plan-review-gate"
+        :status code-aligned-partial
+        :compression-safe? true
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+           "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+        :note "compile/persist 后可选发 QuestionEvent::Created; approve/archive/mark/supersede 可选发 Resolved/Decision")
+
+      (section-entry
+        :section-id "flow.alignment-review-gate-stage"
+        :title "F-intent-alignment-plan-execution-loop :: s3 alignment-review-gate"
+        :source-file ".missiond/v2/intent-flow.lisp"
+        :local-path "pillar flow :: F-intent-alignment-plan-execution-loop :: s3 alignment-review-gate"
+        :status code-aligned-partial
+        :compression-safe? true
+        :cross-ref ["intent-layer.unified-entry-pipeline.alignment-review-gate"])
+
+      (section-entry
+        :section-id "flow.plan-review-gate-stage"
+        :title "F-intent-alignment-plan-execution-loop :: s5 plan-review-gate"
+        :source-file ".missiond/v2/intent-flow.lisp"
+        :local-path "pillar flow :: F-intent-alignment-plan-execution-loop :: s5 plan-review-gate"
+        :status code-aligned-partial
+        :compression-safe? true
+        :cross-ref ["intent-layer.unified-entry-pipeline.plan-review-gate"])
+
+      ;; ── 区域 4 · PLAN DAG scheduler ──
+      (section-entry
+        :section-id "intent-layer.actor.plan-dag-scheduler"
+        :title "actor plan-dag-scheduler (full DAG architecture)"
+        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler"
+        :status architecture-designed
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+           "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+        :cross-ref ["memory.helper.agent-execution-coordination"
+                    "memory.directive-layer.file-first-artifacts"
+                    "flow.execution-runner-dag-scheduler"]
+        :note "v0 plan-runner 单节点 dispatch 已 code-aligned; v1 完整 11-stage / per-node FSM / claim-lease 复用 agent-execution-coordination, 协议正文不压缩")
+
+      (section-entry
+        :section-id "flow.execution-runner-dag-scheduler"
+        :title "F-intent-alignment-plan-execution-loop :: s6 execution-runner :: dag-scheduler"
+        :source-file ".missiond/v2/intent-flow.lisp"
+        :local-path "pillar flow :: F-intent-alignment-plan-execution-loop :: s6 execution-runner :: dag-scheduler"
+        :status architecture-designed
+        :compression-safe? false
+        :note "11-stage logic-core + node schema + node FSM + claim-lease + anti-patterns + open-questions; 协议契约段不压缩")
+
+      (section-entry
+        :section-id "memory.directive-layer.plan-node-state-projection"
+        :title "artifact plan-node-state-projection (DAG evidence sidecar)"
+        :source-file ".missiond/v2/intent-memory.lisp"
+        :local-path "pillar memory :: module directive-layer :: file-first-artifacts :: artifact plan-node-state-projection"
+        :status architecture-designed
+        :compression-safe? false
+        :note "evidence sidecar nodes[<node_id>] block: per-node attempts/claim_id/start-end/inner_result/acceptance_pass/rollback_path; v0 plan_runner_dispatch entry shape 必须向后兼容")
+
+      ;; ── 区域 5 · methodology compiler / semantic lifting ──
+      (section-entry
+        :section-id "intent-layer.unified-entry-pipeline.methodology-compiler"
+        :title "methodology compiler v0 (unified-entry-pipeline path)"
+        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: path methodology-to-executable-compile"
+        :status code-aligned-partial
+        :compression-safe? true
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/workflow.rs"
+           "crates/missiond-mcp/src/tools/knowledge/workflow.rs"]
+        :note "v0 paren-validate + (step …) 抽取 + executable YAML; 高阶 semantic lifting / forge compiler 仍 pending — pending 段可压缩, 阶段步骤不压缩")
+
+      (section-entry
+        :section-id "flow.methodology-to-executable-compile"
+        :title "F-methodology-to-executable-compile"
+        :source-file ".missiond/v2/intent-flow.lisp"
+        :local-path "pillar flow :: F-methodology-to-executable-compile"
+        :status code-aligned-partial
+        :compression-safe? true
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/workflow.rs"
+           "crates/missiond-daemon/src/engine/flow/loader.rs"
+           "crates/missiond-daemon/src/handlers/compute/flow_run.rs"
+           "crates/missiond-mcp/src/tools/compute/flow_run.rs"]
+        :note "methodology Lisp SSOT → executable YAML → flow-engine-v2 run; semantic lifting (phases/anti-patterns/authority) + longest-prefix cwd resolver + record_execution-distill 联动 仍 pending")
+
+      (section-entry
+        :section-id "intent-layer.unified-entry-pipeline.semantic-lifting-pending"
+        :title "semantic lifting pending anchor"
+        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: pending semantic-lifting"
+        :status pending
+        :compression-safe? true
+        :note "高阶 semantic phase / anti-pattern lifting / forge compiler 入口尚未排期")
+
+      ;; ── 区域 6 · capability usage semantic evidence ──
+      (section-entry
+        :section-id "intent-layer.capability-evolution-governance.semantic-evidence-v1"
+        :title "capability-evolution-governance semantic evidence v1"
+        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :local-path "pillar intent-layer :: section capability-evolution-governance"
+        :status code-aligned-partial
+        :compression-safe? true
+        :implements
+          ["crates/missiond-daemon/src/handlers/comm/capability_usage.rs"
+           "crates/missiond-mcp/src/tools/comm/capability_usage.rs"]
+        :cross-ref ["flow.capability-usage-monitoring"
+                    "tools.surface.mission-capability-usage"
+                    "memory.system-support.capability-usage-read-model"]
+        :note "5 sources + lisp hint merge-candidate 已 code-aligned; semantic merge 自动决策 / DispatcherEvent / WorkerEvent / ExecutionEvent 聚合 / workflow stats 仍 pending — pending 块可压缩")
+
+      (section-entry
+        :section-id "memory.system-support.capability-usage-read-model"
+        :title "derived-read-model capability-usage-read-model"
+        :source-file ".missiond/v2/intent-memory.lisp"
+        :local-path "pillar memory :: module system-support :: derived-read-model capability-usage-read-model"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/comm/capability_usage.rs"]
+        :note "5 sources read-only; schema 是契约段不压缩, status 句子可压缩")
+
+      (section-entry
+        :section-id "tools.surface.mission-capability-usage"
+        :title "implemented-surface mission_capability_usage"
+        :source-file ".missiond/v2/intent-tools.lisp"
+        :local-path "pillar tools :: section mcp-surface-lifecycle :: implemented-surface mission_capability_usage"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-mcp/src/tools/comm/capability_usage.rs"
+           "crates/missiond-daemon/src/handlers/comm/capability_usage.rs"]
+        :note "schema (action/window/scope/replacement_target/dry_run) 是契约段不压缩")
+
+      ;; ── 区域 7 · workstation orchestration ──
+      (section-entry
+        :section-id "worker.section.claudecode-workstation-orchestration.dispatch-decision-matrix"
+        :title "dispatch-decision-matrix (策略决策表)"
+        :source-file ".missiond/v2/intent-worker.lisp"
+        :local-path "pillar worker :: section claudecode-workstation-orchestration :: dispatch-decision-matrix"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan.rs"]
+        :note "策略 ∈ {resident-lisp / fresh-code-alignment / agent-team / mixed / prompt-fallback}; 表格本身是契约不压缩")
+
+      (section-entry
+        :section-id "worker.section.claudecode-workstation-orchestration.execution-strategy-record"
+        :title "execution-strategy-record (companion log meta)"
+        :source-file ".missiond/v2/intent-worker.lisp"
+        :local-path "pillar worker :: section claudecode-workstation-orchestration :: execution-strategy-record"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+           "crates/missiond-core/src/event/events/execution.rs"]
+        :note "dispatch_strategy / target_project / requested_cwd 已写入 companion log meta; ExecutionEvent::Opened 扩展同字段 (wave12 task 03 进行中)")
+
+      (section-entry
+        :section-id "intent-layer.unified-entry-pipeline.workstation-dispatch-policy"
+        :title "workstation-dispatch-policy (intent-layer cross-ref)"
+        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: workstation-dispatch-policy"
+        :status operational-practice
+        :compression-safe? true
+        :cross-ref ["worker.section.claudecode-workstation-orchestration"
+                    "worker.section.claudecode-workstation-orchestration.dispatch-decision-matrix"
+                    "worker.section.claudecode-workstation-orchestration.execution-strategy-record"
+                    "flow.workstation-dispatch-policy"]
+        :note "narrative 段, 重复 rationale 文本可压缩 (compression-policy.allowed.compress-redundant-pointers)"))
+
     ;; ── 已声明但本次未细化的 section, 后续再补 ──
     (deferred-coverage
-      :reason "首批只覆盖 pillar 顶层 + 高变动 section; 子 section 等 file-first writer 跑稳后再扩"
+      :reason "v0.2 baseline 覆盖 7 pillar 顶层; v0.3 (wave 12 task 06) 扩了 7 高变动语义区; 仍有以下未细化项, 等后续 wave 再补"
       :scope-deferred
         ["pillar memory 内 cross-cutting / pillar-interfaces 的 5 surface 矩阵"
          "pillar worker section workers 内 19 worker 的 per-worker entry"
-         "pillar tools 83 tool 的 per-tool section-id (现仅按 section 分组)"
-         "pillar intent-layer 各 actor 内部 step (directive-compiler / plan-compiler 内部)"
+         "pillar tools 83 tool 的 per-tool section-id (现仅按 section 分组, capability_usage 已有专项)"
+         "pillar intent-layer 各 actor 内部 step (directive-compiler / plan-compiler / workflow-distiller 内部)"
          "pillar event-bus 4 表内部字段索引 (frozen 文件, 不强行细化)"
-         "pillar flow 其他 ~17 个非主线 flow"]))
+         "pillar flow 其他 ~17 个非主线 flow (F9-project-init / F-incident-reaction / F-execution-log-governance 等)"
+         "scoped-commit-handoff 的 daemon enforce step-level entry (待 daemon 实现后回填)"
+         "PLAN DAG scheduler 内部 11 stage 的 per-stage entry (待 v1 plan-runner 实现后回填)"]))
 
   ;; ──────────────────────────────────────────────────
   ;; Part 3 · 当前判断与下一步路径
   ;; ──────────────────────────────────────────────────
   (judgement-now
     :date "2026-04-26"
-    :decided-by "wave 11 lisp-source-index-precompression session"
+    :decided-by "wave 11 lisp-source-index-precompression + wave 12 task 06 source-index-expansion sessions"
+    :wave12-task-06-non-goal
+      ["本任务不真正压缩主 Lisp"
+       "本任务不拆任何 shard (拆 shard 仍要等 split-policy.wait-for-conditions 全满足之后)"
+       "本任务只扩 stable section-id / source-index 覆盖面, 让未来压缩有锚点"]
     :why-no-main-compression-yet
       ["主大 lisp 正文是其他并行会话 (file-first writer / review gate / PLAN DAG) 的 anchor"
        "若现在压缩, 那些会话的 cross-ref 会失锚, 出现回退成本"
-       "压缩需要的 section-id / status taxonomy / split rule 必须先冻结 — 这正是本次工作"]
+       "压缩需要的 section-id / status taxonomy / split rule 必须先冻结 — 这正是 wave 11 + wave 12 task 06 的工作"]
     :pre-compression-checklist
-      ["section-id 在 source index 已落 (本次完成 7 pillar baseline)"
+      ["section-id 在 source index 已落 (wave 11 完成 7 pillar baseline; wave 12 task 06 扩 7 高变动语义区, 共 +22 entry, 含 :compression-safe? 标注)"
        "status-taxonomy 已在 architecture-dsl.lisp 冻结 7 值"
        "split-policy 已写明 wait-for-conditions"
        "compression-policy 已写明 forbidden 红线 (ingress/logic-core/egress 不动)"
        "frozen 文件 (event-bus / event-bus-execution) 在本 index 标 protected, 不参与压缩"
-       "checker phase-3-precompression 已写入 architecture-dsl.lisp (待 checker 升级实现)"]
+       "checker phase-3-precompression 已写入 architecture-dsl.lisp (待 checker 升级实现)"
+       "wave 12 新增 checker phase-3.1: section-id 唯一性 / file+local-path+status 必填 (待 checker 升级实现)"]
     :unblock-conditions-for-real-compression
       ["条件 1 — file-first writer (alignment.lisp / PLAN.lisp / workflow.lisp) 落地"
        "条件 2 — review gate 能基于 artifact 自动出 QuestionEvent"
@@ -753,4 +1046,5 @@
     :next-step
       ["条件全满足后, 由 lisp-review skill 牵头, 按 compression-policy.allowed 三类做批量压缩"
        "压缩 PR 必须带 git diff --check + checker --all-v2 + 对应 *-execution.lisp D-deviation"
-       "物理 split (拆 shard) 是压缩之后的事, 不和压缩混在一起"]))
+       "物理 split (拆 shard) 是压缩之后的事, 不和压缩混在一起"
+       "压缩前以 :compression-safe? 字段做白名单过滤 — false 的 section 即使在 compression-policy.allowed 之内也保留正文"]))

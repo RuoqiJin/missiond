@@ -6,15 +6,16 @@
 ;; ═════════════════════════════════════════════════════════════
 
 (defdsl architecture-v1
-  :version "v0.3"
-  :status "declarative schema 2026-04-26 — reader/checker first; v0.2 adds source-index taxonomy (precompression); v0.3 adds execution handoff dual-plane rule"
+  :version "v0.4"
+  :status "declarative schema 2026-04-26 — reader/checker first; v0.2 adds source-index taxonomy (precompression); v0.3 adds execution handoff dual-plane rule; v0.4 (wave 12 task 06) adds source-index entry mandatory-fields rule + section-id uniqueness rule + :compression-safe? optional field"
   :checker "scripts/check-architecture-lisp.mjs"
 
   (purpose
     "声明架构 Lisp 的通用语法骨架; 第一阶段只做 parse + shape validation, 不做代码生成"
     "v0.2 扩: 在 主 Lisp 真正压缩/拆分前, 先固定 section-id / status / split / compression 约定,"
     "        让 pillar source index 可机器读, 后续压缩不丢 cross-ref"
-    "v0.3 扩: 执行型 flow 可声明 control-plane / durability-plane handoff, 防止 operational report 与代码成果脱节")
+    "v0.3 扩: 执行型 flow 可声明 control-plane / durability-plane handoff, 防止 operational report 与代码成果脱节"
+    "v0.4 扩: source-index entry 强制三必填 (file / local-path / status), section-id 全局唯一; 加 :compression-safe? 字段, 让未来批量压缩可白名单驱动")
 
   (reader-contract
     :syntax "S-expression + bracket vector"
@@ -79,7 +80,21 @@
       :desc "单个可寻址章节, stable id 不随标题文案改名"
       :required [:section-id :title :source-file :status]
       :optional [:local-path :implements :implementation-targets :children
-                 :cross-ref :owns-tables :owns-tools :owns-flows :note]))
+                 :cross-ref :owns-tables :owns-tools :owns-flows :note
+                 :compression-safe? :prev-id :pillar-section-index-ref]))
+
+  ;; ── v0.4 新增: source-index entry 扩展约定 (wave 12 task 06) ──
+  (section-entry-extended
+    :desc "对 section-entry 节点的扩展规则 — 让 wave 12 起的所有新 entry 满足 file/local-path/status 必填 + section-id 全局唯一 + :compression-safe? 可选"
+    :mandatory-fields-on-write [:section-id :source-file :local-path :status]
+    :uniqueness-scope "intent-pillar-source-index.lisp 全文; section-id 全局唯一, 与 pillar 无关"
+    :compression-safe-field
+      ((true   :meaning "section 正文允许走 compression-policy.allowed 中三类压缩; 仍受 forbidden 红线约束")
+       (false  :meaning "section 正文是契约 / control-plane / durability-plane / frozen, 即使 compression-policy 允许也不动")
+       (absent :meaning "缺省视为 unknown, 默认按 false 处理 — 必须先显式标 true 才允许压缩"))
+    :rename-policy "改名走 :prev-id 字段, 旧 entry 不删 — 与 R008 保持一致"
+    :back-compat "v0.2 的 baseline 7 pillar entry 没有 :compression-safe?, 后续可 lazy 补; 不视为 lint 阻断"
+    :checker-future-rule "phase-3.1-precompression-coverage; 详 checker-contract")
 
   (required-shape
     (pillar   [pillar-ingress pillar-core pillar-egress])
@@ -227,7 +242,12 @@
     (R013 :name "execution-dual-plane"
           :rule "写文件/代码的 execution 必须同时声明 control-plane(共享 execution Lisp/manager) 与 durability-plane(git commit/patch/artifact), 不允许只写 operational completion")
     (R014 :name "scoped-commit-subset"
-          :rule "scoped commit 的 staged_files 必须是 claimed_scope 子集; 越界必须先写 deviation/issue 并重新 claim"))
+          :rule "scoped commit 的 staged_files 必须是 claimed_scope 子集; 越界必须先写 deviation/issue 并重新 claim")
+    ;; ── v0.4 新增 (wave 12 task 06) ──
+    (R015 :name "source-index-entry-mandatory-fields"
+          :rule "intent-pillar-source-index.lisp 内每个 section-entry 必须三必填: :source-file (file) + :local-path + :status; 缺任一字段 checker phase-3.1 报 missing-required-field")
+    (R016 :name "section-id-global-unique"
+          :rule "intent-pillar-source-index.lisp 内 :section-id 全局唯一; 重名 checker phase-3.1 报 duplicate-section-id; 改名走 :prev-id, 不删旧 entry"))
 
   (checker-contract
     :phase-1 ["parse all files" "balanced () and []" "unterminated string" "unexpected delimiter"]
@@ -240,6 +260,13 @@
        "section-entry :status 落在 status-taxonomy 7 值之内 (后续 checker 升级时启用)"
        "section-entry :source-file 都存在于 .missiond/v2/ 下"
        "frozen 文件清单 (event-bus / unlocked-record-required) 不被改 (git diff --check 留给外部)"]
+    ;; ── v0.4 新增 (wave 12 task 06) — checker future rule ──
+    :phase-3.1-precompression-coverage
+      ["每个 section-entry 必填三字段: :source-file (file) + :local-path + :status (R015)"
+       ":section-id 全局唯一 — 在 intent-pillar-source-index.lisp 全文聚合, 重名报 duplicate-section-id (R016)"
+       ":compression-safe? 字段若出现, 值必须是 true / false 之一; 缺省按 false 处理 (无强制要求)"
+       ":local-path 字符串必须以 'pillar ' 或 'defdsl ' 开头, 表示从 root context 起算的语义路径 (软规则, warn-only)"
+       ":implements 路径都是仓库根起算相对路径 (R011 复用)"]
     :future-phases ["load this defdsl as data"
                     "validate required-shape dynamically"
                     "emit JSON IR"
@@ -248,7 +275,11 @@
   ;; ── v0.2 新增: 当前主决策记录 ──
   (judgement-now
     :date "2026-04-26"
-    :decided-by "wave 11 lisp-source-index-precompression session"
+    :decided-by "wave 11 lisp-source-index-precompression + wave 12 task 06 source-index-expansion sessions"
+    :wave12-task-06-non-goal
+      ["本任务不真正压缩主 Lisp"
+       "本任务不拆任何 shard"
+       "本任务只扩 stable section-id / source-index 覆盖面 + 加 R015/R016 checker future rule"]
     :decisions
       ((d1 :name "no-main-lisp-compression-yet"
            :reason "在 file-first writer / review gate / PLAN DAG 最小闭环稳定前, 压缩主 Lisp 会让其他并行会话失锚")
@@ -259,4 +290,6 @@
              ["file-first writer (alignment.lisp / PLAN.lisp / workflow.lisp) 自动写入 stable"
               "review gate 能基于 artifact 自动出 QuestionEvent"
               "PLAN DAG scheduler 跑过最小闭环 + ExecutionEvent dispatch metadata code-aligned"]
-           :then "再回头按 compression-policy 批量压缩状态文本; 最后才物理 split shard"))))
+           :then "再回头按 compression-policy 批量压缩状态文本; 最后才物理 split shard")
+       (d4 :name "compression-safe-flag-required-for-batch-compression"
+           :reason "section-entry-extended 引入 :compression-safe? 字段; 未来批量压缩必须以该字段做白名单, 缺省按 false 处理 (wave 12 task 06)"))))

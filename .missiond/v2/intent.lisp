@@ -20,13 +20,13 @@
   ;; ── 2026-04-21 系统级导航资产 (开 pillar refactor 前必读) ──
   (navigation-assets
     (source-of-truth-index "intent-pillar-source-index.lisp"
-      :desc "判真索引 — 哪个旧图代表哪 pillar 的代码真相 (gptpro 2026-04-21 产出); v0.2 (2026-04-26) 增 stable section-id registry: 7 pillar baseline + status taxonomy + implements 路径, 主 Lisp 后续压缩/拆分的 cross-ref 锚点都走这里")
+      :desc "判真索引 — 哪个旧图代表哪 pillar 的代码真相 (gptpro 2026-04-21 产出); v0.2 (2026-04-26) 增 stable section-id registry: 7 pillar baseline + status taxonomy + implements 路径; v0.3 (2026-04-26 wave 12 task 06) 扩 7 高变动语义区 (execution-coordination / file-first-artifacts / review-gate / PLAN DAG / methodology-compiler / capability-usage / workstation-orchestration), 共 +22 entry, 加 :compression-safe? 字段; 主 Lisp 后续压缩/拆分的 cross-ref 锚点都走这里")
     (drift-audit "drift-audit-2026-04-21.md"
       :desc "跨 pillar 代码 snapshot — worker/engine/infra footprint + bootstrap count + zombie + 跨 pillar 表 caller 精确数字")
     (refactor-methodology ".missiond/workflows/pillar-refactor.lisp"
       :desc "memory pillar 实战凝结方法论 — 5 phase × 原则 × anti-patterns × checklist")
     (architecture-dsl "architecture-dsl.lisp"
-      :desc "可复用架构 DSL: pillar/function/flow/tool 的 ingress → logic-core → egress 结构与检查规则; v0.3 (2026-04-26) 加 execution dual-plane handoff rule (control-plane + durability-plane) 与 scoped-commit-subset; 主 Lisp 暂不压缩, 先建索引和 checker 约定")
+      :desc "可复用架构 DSL: pillar/function/flow/tool 的 ingress → logic-core → egress 结构与检查规则; v0.3 (2026-04-26) 加 execution dual-plane handoff rule (control-plane + durability-plane) 与 scoped-commit-subset; v0.4 (2026-04-26 wave 12 task 06) 加 R015 (source-index entry file/local-path/status 必填) + R016 (section-id 全局唯一) + section-entry-extended (:compression-safe?) + checker phase-3.1-precompression-coverage; 主 Lisp 暂不压缩, 先建索引和 checker 约定")
     (precompression-note
       :desc "本次 wave 11 决议: 主 Lisp 不压缩 — 等 file-first writer + review gate + PLAN DAG 最小闭环稳定后, 才按 compression-policy.allowed 批量压缩状态文本; 物理 split shard 是再下一步; 详见 architecture-dsl.lisp :: judgement-now / intent-pillar-source-index.lisp :: judgement-now")
     (plan-dag-scheduler-design
