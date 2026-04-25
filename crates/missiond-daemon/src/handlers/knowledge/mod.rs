@@ -13,4 +13,5 @@ pub(crate) mod plan_dag;
 pub(crate) mod project;
 pub(crate) mod project_memory;
 pub(crate) mod skill;
+pub(crate) mod unified_entry;
 pub(crate) mod workflow;
