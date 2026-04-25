@@ -1,19 +1,12 @@
 ;; ╔════════════════════════════════════════════════════════════════════╗
-;; ║  🔒 LOCKED — DO NOT MODIFY WITHOUT EXPLICIT USER APPROVAL          ║
-;; ║  🔒 已锁定 — 未经指挥官明确同意,agent / LLM 禁止修改本文件        ║
+;; ║  ARCHITECTURE-UNLOCKED — DIRECT EDITS ALLOWED BY USER              ║
+;; ║  已解锁 — 指挥官明确授权: 架构完整性需要时可直接修改本文件        ║
 ;; ║                                                                    ║
-;; ║  If you are an LLM or agent and you want to change this file:      ║
-;; ║    1. STOP.                                                        ║
-;; ║    2. Ask the user: "我想修改 intent-event-bus.lisp 的 X,可以吗?" ║
-;; ║    3. Wait for explicit "yes / 同意 / 可以" (not inferred).        ║
-;; ║    4. Only after approval: apply change + bump :version in         ║
-;; ║       (file-governance) below + log rationale to                   ║
-;; ║       intent-event-bus-execution.lisp.                             ║
-;; ║                                                                    ║
-;; ║  Typo / path drift correction 属于 :allowed-without-ask 清单,     ║
-;; ║  但仍需在 execution lisp 的 (deviations) 留痕。                    ║
-;; ║                                                                    ║
-;; ║  违反此锁 = 协议违规:回退变更,停止当前操作,向用户报告。          ║
+;; ║  规则:                                                             ║
+;; ║    1. 若跨 pillar 设计需要 event-bus 变更,直接改。                ║
+;; ║    2. 必须标清 implemented / architecture-designed / pending。     ║
+;; ║    3. 重大事件契约或治理变化仍写 companion execution log。         ║
+;; ║    4. 代码实现留待统一 ClaudeCode 同构阶段。                       ║
 ;; ╚════════════════════════════════════════════════════════════════════╝
 ;;
 ;; MissionD v2 — Pillar: event-bus (FROZEN DESIGN)
@@ -28,31 +21,35 @@
 ;;             读 lisp 后可直接定位代码文件,减少 survey 步数
 
 (file-governance
-  :lock                "frozen"
-  :version             "v1.3.0"
+  :lock                "architecture-unlocked"
+  :version             "v1.3.4"
   :sealed-at           "2026-04-19"
-  :last-revision       "2026-04-19: v1.2.0 → v1.3.0 — event_log 正式锁定为 timeline SSOT (原 system_timeline 表废弃); event_log 新增 read-ui-projection 访问模式 + §4.2 retention 更新 cutover 状态; approved by user"
+  :last-revision       "2026-04-25: v1.3.3 → v1.3.4 — code-aligned ExecutionEvent as Domain::Execution and ObservabilityEvent CapabilityUsageSnapshot/CapabilityStaleCandidate; LlmProviderLifecycle remains planned"
   :prior-revisions
-    ("v1.1.0 → v1.2.0: §4.6 persistence-layer 新增 (4 表所有权从 memory pillar 划回), D013 deviation"
+    ("v1.3.2 → v1.3.3: added planned ObservabilityEvent capability usage snapshot/candidate markers for tool+flow usage monitor; no code implementation implied"
+     "v1.3.1 → v1.3.2: user unlocked memory/event-bus for direct architecture edits; added SessionEvent completion emit contract; no code implementation implied"
+     "v1.3.0 → v1.3.1: planning-only extension markers for mission_execution ExecutionEvent and xjp-router provider lifecycle events; no change to implemented 12-domain contract; approved by user"
+     "v1.2.0 → v1.3.0: event_log 正式锁定为 timeline SSOT (原 system_timeline 表废弃); event_log 新增 read-ui-projection 访问模式 + §4.2 retention 更新 cutover 状态"
+     "v1.1.0 → v1.2.0: §4.6 persistence-layer 新增 (4 表所有权从 memory pillar 划回), D013 deviation"
      "v1.0.0 → v1.1.0: god-file split design (approved), D008-D012 deviations")
   :approved-by         "指挥官 (user)"
-  :change-policy       "ask-before-edit"
+  :change-policy       "direct-edit-when-cross-pillar-architecture-requires; record major contract changes in companion log"
   :companion-log       ".missiond/v2/intent-event-bus-execution.lisp"
-  :who-can-approve     "human user only — agents/LLMs cannot self-approve"
-  :who-must-ask        "any agent / LLM / automated tool before any edit"
+  :who-can-approve     "human user approved full architecture unlock on 2026-04-25"
+  :who-must-ask        "no ask required for architecture design edits; implementation code still follows normal review/code-alignment process"
 
   (allowed-without-ask
     (typo-fix             "错别字 / 标点修正,execution lisp 留痕即可")
     (path-drift-correct   ":target 路径因代码移动而过时,更新 :target 并在 execution lisp 记 drift")
     (new-target-addition  "代码新增子模块可补 :target,不可改已存在的"))
 
-  (requires-approval
-    (design-decision-change  "任何 decided-options / design-philosophy 字段变动")
-    (invariant-change        "invariants / 契约 / :stateless / :guarantee 字段")
-    (structural-change       "新增/删除 step / section / component 层级")
-    (enum-variant-change     "AppendAck / AppendError / FailurePolicy 等枚举的增删改")
-    (schema-change           "event_log / event_subscriptions / blob_storage schema")
-    (lock-release            "把 :lock 改为其他值"))
+  (record-required
+    (design-decision-change  "任何 decided-options / design-philosophy 字段变动,写 execution log decision")
+    (invariant-change        "invariants / 契约 / :stateless / :guarantee 字段变动,写 execution log decision")
+    (structural-change       "新增/删除 step / section / component 层级,写 execution log completion")
+    (enum-variant-change     "AppendAck / AppendError / FailurePolicy 等枚举的增删改,标明 code-alignment pending or implemented")
+    (schema-change           "event_log / event_subscriptions / blob_storage schema,必须标明 migration/code-alignment 状态")
+    (governance-change       "治理规则变化,写 execution log decision"))
 
   (enforcement-layers
     (layer-1-banner      "文件顶部大横幅警告,任何 LLM reader 第一眼可见")
@@ -62,7 +59,7 @@
     (layer-5-auto-memory "Claude Code 长期记忆,跨 session 生效"))
 
   :violation-protocol
-    "若发现已被未授权修改:1) git diff 查差异 2) git checkout -- 此文件还原 3) 向用户报告违规 4) 询问是否确实需要此改动")
+    "v1.3.2+ 后不再按未授权修改处理架构编辑;若发现未标 implemented/pending 或未写重大变更记录,补 execution log 并修正状态标注")
 
   (pillar event-bus
     (purpose "进程内神经网络 — 追加式事件日志 + 类型化 topic 路由 + 游标式订阅")
@@ -178,7 +175,7 @@
       ;; ═══════════════════════════════════════════════
       (prerequisite event-types
         :target "crates/missiond-core/src/event/"
-        (desc "类型体系 — trait + 12 domain enum,是流水线所有步骤的类型基础")
+        (desc "类型体系 — trait + 13 domain enum,是流水线所有步骤的类型基础")
 
         (trait DomainEvent
           :target "crates/missiond-core/src/event/event_trait.rs"
@@ -218,8 +215,54 @@
           (IncidentEvent      :target "crates/missiond-core/src/event/events/incident.rs"
                               :variants "Reported / Resolved / StaleSubscription"))
 
-        :topic-discovery "bus.topics() -> [Domain; 12] — 静态编译期契约,无字符串通配"
-        :escape-hatch "若某 variant 后期变热点,可单独提升为专属 sub-topic;12 域是起点不是终点")
+        (session-completion-contract
+          :status "architecture-designed; verify/code-alignment pending"
+          :domain "Session"
+          :primary-variant "SessionEvent::Completed"
+          :related-worker-variant "WorkerEvent::Narration* may still produce NarrationSessionCompleted-like semantics; should bridge to SessionEvent::Completed when session-level completion is known"
+          :producers
+            ["pty_event_worker when semantic parser observes stable idle after user task completion"
+             "conversation organizer when a persisted conversation/session is closed or organized"
+             "flow-engine-v2 when a flow-bound session reaches terminal completed/failed state"
+             "manual/maintenance path may synthesize Completed for backfilled history with explicit source=backfill"]
+          :payload-fields
+            ["session_id" "project_id?" "slot_id?" "conversation_id?" "completion_source" "ended_at" "last_message_seq?" "summary_ref?" "dedupe_key"]
+          :dedupe-key "session_id + completion_source + ended_at_window; producer retries must reuse key"
+          :consumers
+            ["F8-retrospective-to-memory :: retro_worker"
+             "F-strategy-analysis :: strategy_worker"
+             "experience_harvester / session_reflection subscribers"
+             "timeline/ws projection for user-visible session close"]
+          :idempotency "Consumers key by session_id + event seq; duplicate Completed must not create duplicate retrospectives/deep_analysis rows"
+          :cross-ref ["flow :: F-session-completion-event-chain" "flow :: F8-retrospective-to-memory" "flow :: F-strategy-analysis" "worker :: pty_event_worker / conversation organizer"])
+
+        :topic-discovery "bus.topics() -> [Domain; 13] — 静态编译期契约,无字符串通配"
+        :escape-hatch "若某 variant 后期变热点,可单独提升为专属 sub-topic;13 域是当前状态,域集合允许按 planned extension 晋升"
+
+        (event-extensions
+          :status "ExecutionEvent + CapabilityUsageObservability code-aligned; LlmProviderLifecycle still planned"
+          (ExecutionEvent
+            :status "implemented"
+            :trigger "mission_execution mutating actions emit live projection events"
+            :domain "Execution"
+            :variants "Opened / Claimed / Heartbeat / Released / DeviationRecorded / DecisionRecorded / IssueRecorded / Completed / Audited / Repaired / StaleClaim"
+            :rationale "agent-execution-coordination is operational state that needs live status/audit projection; durable truth remains companion Lisp log"
+            :cross-ref ["memory :: helper agent-execution-coordination" "worker :: agent-execution-manager-interface" "flow :: F-execution-log-governance"])
+          (LlmProviderLifecycle
+            :status "planned"
+            :trigger "xjp-router client bootstrap/provider health becomes runtime-visible"
+            :candidate-placement "extend existing LlmEvent, not new domain"
+            :candidate-variants "ProviderConfigured / ProviderUnavailable / ProviderRecovered"
+            :rationale "provider lifecycle belongs to Llm domain; xjp-router embedding failures should be observable without adding an embedding domain")
+          (CapabilityUsageObservability
+            :status "implemented"
+            :trigger "mission_capability_usage snapshot/report/candidates after read-model computation succeeds"
+            :placement "extend existing ObservabilityEvent, not new domain"
+            :variants "CapabilityUsageSnapshot / CapabilityStaleCandidate"
+            :payload-shape "window, scope, generated_at, counts_by_capability, stale_candidates, merge_candidates, protected_ids, report_ref"
+            :ephemeral-default true
+            :rationale "tool/flow usage monitor is observability over existing capabilities, not a new business domain; durable evidence remains in memory/tool audit, while bus event is for live projection and review notification"
+            :cross-ref ["memory :: capability-usage-read-model" "flow :: F-capability-usage-monitoring" "intent-layer :: capability-evolution-governance" "tools :: mission_capability_usage"])))
 
       (prerequisite event-log-schema
         :target "crates/missiond-core/migrations/20260419000000_event_log.sql"
@@ -681,7 +724,16 @@
           :current     "AtomicBusMetrics MVP + ObservabilityEvent::BusMetric 自吐"
           :current-target "crates/missiond-core/src/event/metrics/mod.rs"
           :future-work "加 metrics/prometheus.rs 导出 HTTP /metrics endpoint,生产监控接入"
-          :future-target "crates/missiond-core/src/event/metrics/prometheus.rs (新建)"))
+          :future-target "crates/missiond-core/src/event/metrics/prometheus.rs (新建)")
+        (execution-event-domain
+          :declared-in "§4.2 prerequisite event-types :: event-extensions"
+          :current "implemented; Domain::ALL includes Execution, current domain count 13"
+          :target "crates/missiond-core/src/event/events/execution.rs")
+        (llm-provider-lifecycle-events
+          :declared-in "§4.2 prerequisite event-types :: planned-event-extensions"
+          :current "not implemented; xjp-router client should first return fail-fast provider errors"
+          :future-work "xjp_router_client bootstrap/health 需要运行时可观测后,扩展 LlmEvent provider lifecycle variants"
+          :future-target "crates/missiond-core/src/event/events/llm.rs"))
 
       (revisit-triggers
         (desc "触发重新评估 deferred 的条件")

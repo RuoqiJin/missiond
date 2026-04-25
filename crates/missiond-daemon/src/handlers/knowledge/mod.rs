@@ -1,10 +1,13 @@
 pub(crate) mod agent_execution;
 pub(crate) mod board;
 pub(crate) mod cascade;
+pub(crate) mod directive;
 pub(crate) mod insight;
 pub(crate) mod intent;
 pub(crate) mod kb;
 pub(crate) mod memory;
+pub(crate) mod plan;
 pub(crate) mod project;
 pub(crate) mod project_memory;
 pub(crate) mod skill;
+pub(crate) mod workflow;

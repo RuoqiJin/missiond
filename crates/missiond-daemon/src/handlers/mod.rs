@@ -24,8 +24,11 @@ pub(crate) use comm::retrospective;
 // Domain aliases for dispatch readability
 use comm::{audit, capability_usage, codex_ops, conversation, question, router_chat, timeline};
 use compute::{cc_tasks, compute_slot, flow_run, forge, job, minimax, process, pty, task, task_delegate, worker};
-use knowledge::{agent_execution, board, cascade, insight, intent, kb, memory, project, skill};
-use sysinfra::{health, infra, misc, permission, system};
+use knowledge::{
+    agent_execution, board, cascade, directive, insight, intent, kb, memory, plan, project, skill,
+    workflow,
+};
+use sysinfra::{global_instruction, health, infra, misc, permission, system};
 
 // @beacon: mcp
 /// Dispatch a tool call to the appropriate handler module.
@@ -60,6 +63,9 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
             router_chat::handle(state, name, args).await
         }
         "mission_intent" => intent::handle(state, name, args).await,
+        "mission_directive" => directive::handle(state, name, args).await,
+        "mission_plan" => plan::handle(state, name, args).await,
+        "mission_workflow" => workflow::handle(state, name, args).await,
         "mission_execution" => agent_execution::handle(state, name, args).await,
         "mission_capability_usage" => capability_usage::handle(state, name, args).await,
         "mission_project" => project::handle(state, name, args).await,
@@ -73,6 +79,7 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         "mission_sys_logs" | "mission_sys_config" | "mission_daemon_update" => {
             system::handle(state, name, args).await
         }
+        "mission_global_instruction" => global_instruction::handle(state, name, args).await,
         "mission_compute_slot" => compute_slot::handle(state, name, args).await,
         "mission_task_delegate" => task_delegate::handle(state, name, args).await,
         "mission_job_poll" => job::handle(state, name, args).await,

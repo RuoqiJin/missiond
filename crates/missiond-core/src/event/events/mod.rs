@@ -1,10 +1,11 @@
-//! 12 domain-event enums (see frozen lisp §4.2.a).
+//! Domain-event enums (see frozen lisp §4.2.a).
 //!
 //! Each submodule defines one `DomainEvent` implementer. `pub use` here
 //! lets callers write `missiond_core::event::BoardEvent` instead of
 //! `missiond_core::event::events::board::BoardEvent`.
 
 pub mod board;
+pub mod execution;
 pub mod incident;
 pub mod llm;
 pub mod memory;
@@ -18,6 +19,7 @@ pub mod task;
 pub mod worker;
 
 pub use board::BoardEvent;
+pub use execution::ExecutionEvent;
 pub use incident::IncidentEvent;
 pub use llm::{LlmEvent, Provider};
 pub use memory::MemoryEvent;

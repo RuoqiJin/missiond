@@ -1,10 +1,11 @@
-//! SonnetGateway — centralized Actor for all Claude Sonnet API calls.
+//! SonnetGateway — centralized Actor for all Claude Sonnet **chat** API calls.
 //!
-//! Replaces MinimaxGateway: same priority-based actor model, different backend.
-//! Routes through xjp-router's claude-sonnet endpoint.
+//! v0.3 (intent-worker.lisp § xjp-router-gateway): embedding has moved to the
+//! xjp-router client. Sonnet only handles chat lanes (interactive / translation /
+//! briefing / intent). The legacy `embedding` priority lane has been removed.
 //!
 //! Architecture:
-//! - 4 priority channels (interactive > embedding > translation > briefing)
+//! - 4 priority channels (interactive > translation > briefing > intent)
 //! - `tokio::select! { biased; }` ensures strict priority ordering
 //! - Independent rate limiter (30 RPM, separate from Gemini governor)
 //! - Semaphore-based concurrency limit (max 3 in-flight)
@@ -49,7 +50,6 @@ const SONNET_MODEL: &str = "claude-sonnet";
 #[derive(Clone)]
 pub(crate) struct SonnetHandle {
     tx_interactive: mpsc::Sender<GatewayRequest>,
-    tx_embedding: mpsc::Sender<GatewayRequest>,
     tx_translation: mpsc::Sender<GatewayRequest>,
     tx_briefing: mpsc::Sender<GatewayRequest>,
     tx_intent: mpsc::Sender<GatewayRequest>,
@@ -104,26 +104,6 @@ impl SonnetHandle {
             caller,
             Priority::Interactive,
             None,
-            None,
-            None,
-        )
-        .await
-    }
-
-    /// P1: Embedding worker calls.
-    pub async fn call_embedding(
-        &self,
-        messages: Vec<ChatMessage>,
-        max_tokens: Option<u32>,
-        task_id: Option<String>,
-    ) -> Result<String> {
-        Self::send(
-            &self.tx_embedding,
-            messages,
-            max_tokens,
-            "embedding",
-            Priority::Embedding,
-            task_id,
             None,
             None,
         )
@@ -271,7 +251,6 @@ impl SonnetBackend {
 /// The gateway actor — runs as an independent tokio task.
 pub(crate) struct SonnetGateway {
     rx_interactive: mpsc::Receiver<GatewayRequest>,
-    rx_embedding: mpsc::Receiver<GatewayRequest>,
     rx_translation: mpsc::Receiver<GatewayRequest>,
     rx_briefing: mpsc::Receiver<GatewayRequest>,
     rx_intent: mpsc::Receiver<GatewayRequest>,
@@ -310,11 +289,10 @@ impl SonnetGateway {
                 }
             };
 
-            // 2. Biased priority select
+            // 2. Biased priority select (no embedding lane — moved to xjp-router v0.3)
             let req = tokio::select! {
                 biased;
                 Some(r) = self.rx_interactive.recv() => r,
-                Some(r) = self.rx_embedding.recv() => r,
                 Some(r) = self.rx_translation.recv() => r,
                 Some(r) = self.rx_briefing.recv() => r,
                 Some(r) = self.rx_intent.recv() => r,
@@ -449,7 +427,6 @@ pub(crate) fn create_sonnet_gateway() -> (SonnetHandle, SonnetGateway) {
     let backend = SonnetBackend::new();
 
     let (tx_interactive, rx_interactive) = mpsc::channel(CHANNEL_CAPACITY);
-    let (tx_embedding, rx_embedding) = mpsc::channel(CHANNEL_CAPACITY);
     let (tx_translation, rx_translation) = mpsc::channel(CHANNEL_CAPACITY);
     let (tx_briefing, rx_briefing) = mpsc::channel(CHANNEL_CAPACITY);
     let (tx_intent, rx_intent) = mpsc::channel(CHANNEL_CAPACITY);
@@ -461,7 +438,6 @@ pub(crate) fn create_sonnet_gateway() -> (SonnetHandle, SonnetGateway) {
 
     let handle = SonnetHandle {
         tx_interactive,
-        tx_embedding,
         tx_translation,
         tx_briefing,
         tx_intent,
@@ -469,7 +445,6 @@ pub(crate) fn create_sonnet_gateway() -> (SonnetHandle, SonnetGateway) {
 
     let gateway = SonnetGateway {
         rx_interactive,
-        rx_embedding,
         rx_translation,
         rx_briefing,
         rx_intent,

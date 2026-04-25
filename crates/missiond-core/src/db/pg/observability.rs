@@ -425,6 +425,42 @@ impl ObservabilityStore for PgMissionStore {
         }).collect())
     }
 
+    async fn get_incident_by_id(&self, id: &str) -> DbResult<Option<IncidentRow>> {
+        let row = sqlx::query(
+            "SELECT id, severity, source, title, description, server_id, board_task_id, dedupe_key, created_at
+             FROM incidents WHERE id = $1 LIMIT 1"
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| {
+            use sqlx::Row;
+            IncidentRow {
+                id: r.get("id"),
+                severity: r.get("severity"),
+                source: r.get("source"),
+                title: r.get("title"),
+                description: r.get("description"),
+                server_id: r.get("server_id"),
+                board_task_id: r.get("board_task_id"),
+                dedupe_key: r.get("dedupe_key"),
+                created_at: r.get("created_at"),
+            }
+        }))
+    }
+
+    async fn update_incident_board_task_id(&self, id: &str, board_task_id: &str) -> DbResult<bool> {
+        let result = sqlx::query(
+            "UPDATE incidents SET board_task_id = $2 WHERE id = $1"
+        )
+        .bind(id)
+        .bind(board_task_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     // ── token ledger ──────────────────────────────────────────────
 
     async fn insert_token_usage(

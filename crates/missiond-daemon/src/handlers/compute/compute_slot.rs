@@ -166,7 +166,45 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     let short_id = &uuid::Uuid::new_v4().to_string()[..8];
     let slot_id = format!("slot-dyn-{}", short_id);
 
-    // Build SlotConfig
+    // Resolve canonical_cwd to a registered project root (per
+    // intent-worker.lisp :: invariant project-root-spawn-cwd). For
+    // ClaudeCode this is currently the only engine wired through compute_slot,
+    // but the resolver enforces project-bound semantics regardless: cwd must
+    // resolve under a registered project; subdir is preserved as
+    // requested_cwd metadata; process cwd is the canonical project root.
+    let resolution = match crate::slot_orchestrator::project_root::resolve_target_project_root(
+        None,
+        Some(std::path::Path::new(&canonical_cwd)),
+        None,
+        &state.project_registry,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    "PROJECT_ROOT_UNRESOLVED",
+                    format!(
+                        "compute_slot create requires cwd under a registered project: {}",
+                        e
+                    ),
+                )
+                .with_suggestion(
+                    "register the project via mission_project(action=\"init\") or pass cwd inside an existing project",
+                ),
+            ));
+        }
+    };
+    let project_root_str = resolution.project_root.to_string_lossy().to_string();
+    let requested_cwd = resolution
+        .requested_cwd
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string());
+
+    // Build SlotConfig — `cwd` becomes the canonical project root so that
+    // spawn_tracked_slot picks it up as process cwd. The original requested
+    // path (subdir) is retained in `requested_cwd` for prompt/context only.
     let slot_config = SlotConfig {
         id: slot_id.clone(),
         role: template.role.to_string(),
@@ -177,7 +215,9 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             objective.unwrap_or("(none)")
         ),
         engine: Default::default(),
-        cwd: Some(canonical_cwd),
+        cwd: Some(project_root_str.clone()),
+        project_root: Some(project_root_str),
+        requested_cwd,
         mcp_config: template.mcp_config.map(|s| s.to_string()),
         lifecycle: Some(Lifecycle::OnDemand),
         auto_start: None,

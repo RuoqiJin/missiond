@@ -68,10 +68,29 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 .mission
                 .get_slot(&slot_id)
                 .ok_or_else(|| anyhow!("Slot not found: {}", slot_id))?;
+            let cwd_path = slot
+                .config
+                .cwd
+                .as_deref()
+                .map(std::path::PathBuf::from);
+            let resolved_cwd = match cwd_path.as_ref() {
+                Some(cwd) => match crate::slot_orchestrator::project_root::resolve_target_project_root(
+                    None,
+                    Some(cwd),
+                    None,
+                    &state.project_registry,
+                )
+                .await
+                {
+                    Ok(r) => Some(r.project_root),
+                    Err(_) => Some(cwd.clone()),
+                },
+                None => None,
+            };
             let pty_slot = missiond_core::PTYSlot {
                 id: slot.config.id.clone(),
                 role: slot.config.role.clone(),
-                cwd: slot.config.cwd.as_deref().map(std::path::PathBuf::from),
+                cwd: resolved_cwd,
                 engine: slot.config.engine,
             };
             let mcp_config = slot.config.mcp_config.clone().map(std::path::PathBuf::from);
@@ -117,10 +136,29 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 .mission
                 .get_slot(&slot_id)
                 .ok_or_else(|| anyhow!("Slot not found: {}", slot_id))?;
+            let cwd_path = slot
+                .config
+                .cwd
+                .as_deref()
+                .map(std::path::PathBuf::from);
+            let resolved_cwd = match cwd_path.as_ref() {
+                Some(cwd) => match crate::slot_orchestrator::project_root::resolve_target_project_root(
+                    None,
+                    Some(cwd),
+                    None,
+                    &state.project_registry,
+                )
+                .await
+                {
+                    Ok(r) => Some(r.project_root),
+                    Err(_) => Some(cwd.clone()),
+                },
+                None => None,
+            };
             let pty_slot = missiond_core::PTYSlot {
                 id: slot.config.id.clone(),
                 role: slot.config.role.clone(),
-                cwd: slot.config.cwd.as_deref().map(std::path::PathBuf::from),
+                cwd: resolved_cwd,
                 engine: slot.config.engine,
             };
             let mcp_config = slot.config.mcp_config.clone().map(std::path::PathBuf::from);

@@ -294,9 +294,15 @@ impl missiond_core::embedding::EmbeddingProvider for OllamaProvider {
     }
 }
 
-/// Initialize embedding provider: try Ollama first (better quality), fall back to FastEmbed.
+/// Initialize embedding provider.
 ///
-/// Set `MISSIOND_DISABLE_EMBEDDING=1` to skip entirely (useful on CPUs without AVX2).
+/// Selection order (per `.missiond/v2/intent-worker.lisp :: section xjp-router-gateway`, v0.3):
+/// 1. xjp-router (`POST /embed` → QWEN3) — chosen when env / `llm.yaml` config is present.
+///    If chosen but unreachable, **fail fast** — no fallback to local providers.
+/// 2. Ollama (`/api/embed`) — local convenience when xjp-router is not configured.
+/// 3. FastEmbed (in-process) — last-resort local backend.
+///
+/// Set `MISSIOND_DISABLE_EMBEDDING=1` to skip entirely (e.g. CPUs without AVX2).
 
 pub(crate) async fn init_embedding_provider(
     http_client: &reqwest::Client,
@@ -306,13 +312,31 @@ pub(crate) async fn init_embedding_provider(
         return None;
     }
 
-    // Try Ollama first
+    // 1. xjp-router (preferred per v0.3 intent). Fail fast when configured but init fails —
+    //    no silent downgrade to local providers (feedback_no_fallback_embedding).
+    if crate::xjp_router_client::XjpRouterConfig::is_configured() {
+        match crate::xjp_router_client::try_init_provider().await {
+            Ok(provider) => {
+                info!("Embedding provider: xjp-router");
+                return Some(provider);
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "xjp-router configured but provider init failed; embedding disabled (no fallback)"
+                );
+                return None;
+            }
+        }
+    }
+
+    // 2. Ollama (only when xjp-router not configured — keeps local dev ergonomic).
     if let Some(ollama) = OllamaProvider::try_new(http_client).await {
         return Some(Arc::new(ollama));
     }
     info!("Ollama not available, falling back to FastEmbed");
 
-    // Fallback to FastEmbed (requires AVX2)
+    // 3. FastEmbed (requires AVX2).
     missiond_core::embedding::EmbeddingService::new()
         .map(|svc| Arc::new(svc) as Arc<dyn missiond_core::embedding::EmbeddingProvider>)
 }

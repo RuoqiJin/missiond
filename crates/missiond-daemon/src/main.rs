@@ -34,7 +34,7 @@ use engine::{
 use infra::{aiops, daemon_stats, ipc_handler, mcp_client};
 use llm::{
     codex_cli, gemini_cli, gemini_client, llm_gate, llm_gateway, minimax_client, minimax_gateway,
-    prompts, sonnet_gateway,
+    prompts, sonnet_gateway, xjp_router_client,
 };
 use workers::codex::vision_worker;
 use workers::local::{ast_sync_worker, code_prefetch, experience_harvester};

@@ -84,7 +84,7 @@ impl Dispatcher {
     pub fn topic<T: DomainEvent>(&self) -> Topic<T> {
         self.registry
             .topic::<T>()
-            .expect("domain topic registered; DispatcherBuilder must cover 12 domains")
+            .expect("domain topic registered; DispatcherBuilder must cover every Domain")
     }
 
     /// Snapshot of the last-dispatched seq. Tests and metrics use this.
@@ -122,7 +122,7 @@ impl Dispatcher {
     }
 }
 
-/// Builder that registers the 12 domain topics up front.
+/// Builder that registers every domain topic up front.
 ///
 /// Usage: chain a `register::<T>()` call per domain event, then `.build()`.
 /// `build()` must be called exactly once.
@@ -160,7 +160,7 @@ impl Default for DispatcherBuilder {
     }
 }
 
-/// Convenience shortcut: register all 12 built-in domains. Daemon code
+/// Convenience shortcut: register all built-in domains. Daemon code
 /// typically uses this to avoid listing every `register::<T>()` call.
 pub fn register_all_domains(builder: DispatcherBuilder) -> DispatcherBuilder {
     use super::events::*;
@@ -177,6 +177,7 @@ pub fn register_all_domains(builder: DispatcherBuilder) -> DispatcherBuilder {
         .register::<SystemEvent>()
         .register::<ObservabilityEvent>()
         .register::<IncidentEvent>()
+        .register::<ExecutionEvent>()
 }
 
 #[cfg(test)]
@@ -184,10 +185,10 @@ mod tests {
     use super::*;
     use super::super::domain::Domain;
 
-    /// Smoke-check: `DispatcherBuilder` + `register_all_domains` covers all 12
-    /// values of [`Domain`] and every `.topic::<T>()` resolves.
+    /// Smoke-check: `DispatcherBuilder` + `register_all_domains` covers every
+    /// value of [`Domain`] and every `.topic::<T>()` resolves.
     #[test]
-    fn register_all_domains_covers_12_domains() {
+    fn register_all_domains_covers_every_domain() {
         let dispatcher = register_all_domains(DispatcherBuilder::new()).build();
         for d in Domain::ALL {
             assert!(

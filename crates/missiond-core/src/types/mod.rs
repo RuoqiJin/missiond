@@ -101,6 +101,8 @@ mod tests {
             description: "A worker slot".to_string(),
             engine: CliEngine::default(),
             cwd: Some("/path/to/work".to_string()),
+            project_root: None,
+            requested_cwd: None,
             mcp_config: None,
             lifecycle: None,
             auto_start: Some(true),
@@ -149,7 +151,7 @@ mod tests {
         let mut config = SlotConfig {
             id: "s1".into(), role: "worker".into(), description: "test".into(),
             engine: CliEngine::ClaudeCode,
-            cwd: None, mcp_config: None, lifecycle: None, auto_start: None,
+            cwd: None, project_root: None, requested_cwd: None, mcp_config: None, lifecycle: None, auto_start: None,
             dangerously_skip_permissions: None, model: None, traits: vec![], env: None, category: None, initial_prompt: None,
         };
         config.apply_default_traits();
@@ -160,7 +162,7 @@ mod tests {
         let mut config = SlotConfig {
             id: "s2".into(), role: "vision".into(), description: "test".into(),
             engine: CliEngine::Codex,
-            cwd: None, mcp_config: None, lifecycle: None, auto_start: None,
+            cwd: None, project_root: None, requested_cwd: None, mcp_config: None, lifecycle: None, auto_start: None,
             dangerously_skip_permissions: None, model: None, traits: vec![], env: None, category: None, initial_prompt: None,
         };
         config.apply_default_traits();
@@ -171,7 +173,7 @@ mod tests {
         let mut config = SlotConfig {
             id: "s3".into(), role: "memory".into(), description: "test".into(),
             engine: CliEngine::ClaudeCode,
-            cwd: None, mcp_config: None, lifecycle: None, auto_start: None,
+            cwd: None, project_root: None, requested_cwd: None, mcp_config: None, lifecycle: None, auto_start: None,
             dangerously_skip_permissions: None, model: None, traits: vec![], env: None, category: None, initial_prompt: None,
         };
         config.apply_default_traits();

@@ -11,7 +11,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent missiond-v2
-  (version "v2-draft")
+  (version "v2-draft-recursive-standard")
   (granularity L2-Topology)
   (created "2026-04-19")
   (parent "intent.lisp (v1, 27 个分文件)")
@@ -24,7 +24,28 @@
     (drift-audit "drift-audit-2026-04-21.md"
       :desc "跨 pillar 代码 snapshot — worker/engine/infra footprint + bootstrap count + zombie + 跨 pillar 表 caller 精确数字")
     (refactor-methodology ".missiond/workflows/pillar-refactor.lisp"
-      :desc "memory pillar 实战凝结方法论 — 5 phase × 原则 × anti-patterns × checklist"))
+      :desc "memory pillar 实战凝结方法论 — 5 phase × 原则 × anti-patterns × checklist")
+    (architecture-dsl "architecture-dsl.lisp"
+      :desc "可复用架构 DSL: pillar/function/flow/tool 的 ingress → logic-core → egress 结构与检查规则"))
+
+  ;; ── v2 递归同构标准: 原子 / 分子 / pillar ──
+  (recursive-architecture-standard
+    :goal "所有 pillar 都按 ingress → logic-core → egress 描述; logic-core 内继续按功能递归展开"
+    :shape
+      ((pillar "pillar-ingress → pillar-core → pillar-egress")
+      (function "ingress → logic-core(step s1/s2/...) → egress")
+      (step "ordered action with owner pillar + reads/writes/emits/returns")
+      (tool "schema ingress → dispatch logic-core → ToolResult/audit egress")
+      (flow "trigger/state ingress → ordered cross-pillar steps → writes/emits/returns/downstream egress"))
+    :ownership-rules
+      ["memory owns durable schema/state"
+       "event-bus owns append/subscribe/persistence log"
+       "tools owns external endpoint schema/routing/audit"
+       "worker owns runtime mechanics/execution"
+       "intent-layer owns prescription/reasoning/self-description"
+       "system-layer owns type/process/transport/RPC/pure runtime substrate"
+       "flow owns cross-pillar choreography narrative"]
+    :editing-rule "后续梳理任何功能时, 先定位所属 pillar, 再按 ingress/core/egress 下钻到 step")
 
 
   ;; ═══════════════════════════════════════════════════
@@ -34,7 +55,7 @@
   ;; 详细规格在 intent-memory.lisp (草稿),本处只作导航摘要
   (pillar memory
     :file ".missiond/v2/intent-memory.lisp"
-    :status "草稿 v0.4.4 — 4 成熟模块 + 精简 system-support; action/instruction specs 已迁 pillar 五"
+    :status "v0.5.5 — 9 modules + directive artifacts + agent-execution contract + capability usage read-model + directive/plan/workflow manager surfaces code-aligned partial + unified-entry-pipeline file-first SSOT (alignment/plan/workflow .lisp + plan evidence sidecar) 与 DB 镜像契约"
     :paradigm "4 mature modules (project-management / board / kb-manager / conversation-logs) 自治 + 系统支持 + 横切"
 
     (purpose "系统长期记忆: 4 个业务模块自治管理自己的表 + 底层系统支持层 + 横切")
@@ -42,7 +63,7 @@
     (gateway "crates/missiond-core/src/db/ — 唯一 DB 入口")
 
     (migrated-out
-      "embedding-provider → pillar 二 2.2 sonnet-gateway (qwen3 双角色)"
+      "embedding-provider → pillar 二 worker :: xjp-router-gateway (qwen3 独立 provider, code-aligned for embedding)"
       "gen-crud (Forge 冲压) → pillar 二 2.5 code-generation"
       "search-engines → pillar 二 2.6 search-engines (搜索是计算不是数据)"
       "event-bus 4 表 → pillar 四 §4.6 persistence-layer (event_log / subscriptions / blob_storage / dlq)")
@@ -56,7 +77,7 @@
         :owned-tables 5
         :v0.4.4-change "specs 4 表 (intent/plan/workflow/user_intents) 迁到 pillar 五 action-instruction-specs"
         :v0.4.16-correction "user_intents 实际从未迁出, 仍在 conversation-logs (trait=ConversationStore)"
-        :v0.4.17-change "intent/plan/workflow 3 张从 pillar 五 回归 memory 新建 module directive-layer (schema-ready-pending-implementation)"
+        :v0.4.17-change "intent/plan/workflow 3 张从 pillar 五 回归 memory 新建 module directive-layer; v0.4.25 校正为 store-ready actor-pending"
         :v0.4.19-rename "命名去歧义: DB 表 intent → directive; module intent-layer → directive-layer; 避和 <project>/.missiond/intent.lisp (代码画像) 混淆"
         :mcp    "mission_project / mission_intent (只读 FILE) / mission_skill_*")
 
@@ -84,9 +105,9 @@
         :desc   "user utterance → lisp 指令编译 pipeline (directive → plan → workflow 三段式)"
         :target "intent-memory.lisp :: module directive-layer"
         :owned-tables 3
-        :status "schema-ready-pending-implementation (v0.4.17 新建, v0.4.19 rename from intent-layer)"
-        :future-writer "pillar 五 actor (TBD) 或 pillar 二 worker 或 MCP 工具直写"
-        :mcp    "mission_directive / mission_plan / mission_workflow (TBD)")
+        :status "store+manager code-aligned partial (DirectiveLayerStore + Pg impl + mission_directive/plan/workflow read/control/draft surfaces exist; actors pending)"
+        :future-writer "pillar 五 actor preferred: directive-compiler / plan-compiler / workflow-distiller; MCP tools are manager/read/control surface"
+        :mcp    "mission_directive / mission_plan / mission_workflow (code-aligned partial)")
 
       ;; ── 4 Support Modules (v0.4.13-15 从 category system-support 分化 + v0.4.21 新增 embedding) ──
       (module llm-support
@@ -104,7 +125,7 @@
         :mcp    "mission_slots / mission_slot_history / mission_compute_slot")
 
       (module system-support
-        :desc   "系统级基础 — 告警 + router 归档 + vision 缓存 + infra 游标 + backfill + 4 legacy"
+        :desc   "系统级基础 — 告警 + router 归档 + vision 缓存 + infra 游标 + backfill + capability usage derived monitor + 4 legacy"
         :target "intent-memory.lisp :: module system-support"
         :owned-tables 14
         :migrated-from "v0.4.15 category 升格为 module (剩 LLM 3 + slot 3 分离后的 10 active + 4 legacy)"
@@ -157,7 +178,7 @@
   ;; ═══════════════════════════════════════════════════
   (pillar worker
     :canonical-ref ".missiond/v2/intent-worker.lisp"
-    :canonical-status "v0.3 phase-B informed 2026-04-21 (gptpro phase-A + 主 Claude 吸收 8 份老图 ground-truth, 1831 行)"
+    :canonical-status "v0.5 phase-C 2026-04-25 (recursive contract + xjp-router provider + mission_execution manager + project-root spawn cwd design + claudecode-workstation-orchestration policy: resident-lisp / fresh-code-alignment / agent-team-hint / spawn-over-prompt-mode / project-root-cwd-contract — operational-practice + architecture-designed; plan-runner auto-selection code-alignment pending)"
     :v0.1-archive ".missiond/v2/drafts/gptpro/intent-worker.lisp"
     :v0.2-gptpro-archive ".missiond/v2/drafts/gptpro/intent-worker-v0.2.lisp"
     :execution-log ".missiond/v2/worker-pillar-execution.lisp"
@@ -193,7 +214,7 @@
         :authority "SlotManager 是槽位生命周期的唯一权威")
 
       (component slot-orchestrator
-        (desc "按 slot 角色驱动对应 PTY 控制器,代码中 CC/Gemini 两类控制器")
+        (desc "按 slot 角色驱动对应 PTY 控制器,代码中 CC/Gemini 两类控制器; project-bound spawn cwd 必须是目标项目根")
         :target "crates/missiond-daemon/src/slot_orchestrator/"
         :children ("cc_controller.rs — Claude Code PTY 控制器"
                    "gemini_controller.rs — Gemini CLI PTY 控制器"
@@ -222,12 +243,19 @@
         :target "llm/llm_gate.rs")
 
       (component sonnet-gateway
-        (desc "Claude Sonnet API + 千问 qwen3 embedding provider (同一 gateway 双角色)")
+        (desc "Claude Sonnet API chat gateway")
         :target "llm/sonnet_gateway.rs"
-        :routes-to "Anthropic API (chat) + 千问 qwen3 API (embedding)"
-        :used-by "embedding / translation / briefing / arch-maintenance / retro workers"
-        :embedding-invariant "qwen3 是唯一 embedding provider, 禁止降级兜底 — 失败直接报错"
-        :migrated-in "memory v0.2 :: 1.4 cross-cutting :: embedding-provider (2026-04-19)")
+        :routes-to "Anthropic API (chat)"
+        :used-by "translation / arch-maintenance / retro / lisp-survey workers"
+        :embedding-removed "embedding 已迁 xjp-router-gateway; sonnet 只做 chat")
+
+      (component xjp-router-gateway
+        (desc "QWEN3 embedding 独立 provider adapter; 未来可扩 chat/rerank")
+        :target "llm/xjp_router_client.rs"
+        :routes-to "xjp-router HTTP /embed on Windows 12900KF + RTX3090Ti"
+        :used-by "embedding-worker → kb_embeddings / ast_embeddings / turn_topics"
+        :status "code-aligned for embedding; chat/rerank deferred"
+        :embedding-invariant "qwen3 是唯一 embedding provider, 禁止降级兜底 — 失败直接报错")
 
       (component gemini-gateway
         (desc "Gemini 多路适配 — driver 分派 + CLI PTY / Cloud API / File API 三种模式")
@@ -419,7 +447,7 @@
         (source embedding-column-writes
           :desc "embedding 列写入 → HNSW 索引增量更新 (pgvector 原生)"
           :writer   "2.3 workers :: embedding-worker (sonnet 组)"
-          :provider "2.2 llm-gateways :: sonnet-gateway (qwen3 路由)"
+          :provider "2.2 llm-gateways :: xjp-router-gateway (qwen3 路由, code-aligned)"
           :writes   "5 张表 embedding_vec 列 (knowledge / conversation_topic_vectors / message_embeddings / skill_topics / ast_nodes)"
           :governance "契约见 pillar 一 memory :: cross-cutting :: capability embedding-storage-governance (v0.4.6+)"
           :invariant "禁止降级兜底, 失败直接报错")
@@ -485,7 +513,7 @@
   ;; ═══════════════════════════════════════════════════
   (pillar tools
     :canonical-ref ".missiond/v2/intent-tools.lisp"
-    :canonical-status "v0.1 phase-A 2026-04-21 (本会话主驾, 1255 行, 78 tools 全列)"
+    :canonical-status "v0.7 phase-C 2026-04-25 (83 actual tools classified; mission_execution + mission_capability_usage + mission_directive/plan/workflow + mission_global_instruction code-aligned; future backlog empty; unified-entry-pipeline 复用 mission_directive/plan/workflow/execution 既有 surface, 不新增 tool — mission_message/mission_invoke 仅为 future-candidate; mission_pty_spawn / mission_pty_send / mission_compute_slot / mission_task_delegate 标记为 unified-entry pipeline 的 preferred workstation dispatch substrate, 同样不新增 tool)"
     :gptpro-v0.1-archive ".missiond/v2/drafts/gptpro/intent-tools.lisp"
     (purpose "通过 MCP JSON-RPC 协议暴露给 Claude Code / 其他 Agent 的能力集")
 
@@ -498,7 +526,7 @@
       :target "crates/missiond-daemon/src/infra/mcp_client.rs")
 
     (component tool-schema
-      (desc "所有工具的 JSON Schema 声明(67+ 个工具,4 大域)")
+      (desc "所有工具的 JSON Schema 声明(当前 83 个工具,4 大域)")
       :target ".missiond/intent-mcp-defs.lisp"
       :count "67+ tools")
 
@@ -517,17 +545,17 @@
   ;;  四 · 事件总线 (Event Bus) — Log-as-Bus
   ;;  追加式日志即总线,7 步流水线处理 + tail-and-pull 订阅
   ;; ═══════════════════════════════════════════════════
-  ;; 详细规格在独立的冻结 lisp(v1.1.0 锁定),本处只作导航摘要
+  ;; 详细规格在独立 lisp(v1.3.4 architecture-unlocked),本处只作导航摘要
   (pillar event-bus
     :file ".missiond/v2/intent-event-bus.lisp"
     :execution-log ".missiond/v2/intent-event-bus-execution.lisp"
-    :lock-status "frozen v1.1.0 — ask-before-edit"
+    :lock-status "architecture-unlocked v1.3.4 — direct edit allowed; Domain::Execution + CapabilityUsage ObservabilityEvent code-aligned, current domain count 13"
     :paradigm "Log-as-Bus(追加式日志是唯一真理源,不是 broadcast + 补漏)"
 
     (purpose "进程内神经网络 — 追加式日志 + 类型化 topic 路由 + 游标式订阅")
 
     (one-line-spec
-      "DB seq + 12 domain topic + at-least-once + batch-ack cursor (双阈值) "
+      "DB seq + 13 domain topic + at-least-once + batch-ack cursor (双阈值) "
       "+ subscription-name PK + pause=drop/live-resume + >8KB side-channel "
       "+ producer-ack-after-commit + no-global-min-replay + tail-and-pull catch-up")
 
@@ -566,7 +594,7 @@
     ;; ── 关键基础设施位置(快速导航)──
     (key-locations
       (log-schema         :at "crates/missiond-core/migrations/20260419000000_event_log.sql")
-      (domain-types       :at "crates/missiond-core/src/event/events/ (12 个 domain enum)")
+      (domain-types       :at "crates/missiond-core/src/event/events/ (13 个 domain enum)")
       (log-trait          :at "crates/missiond-core/src/event/log/mod.rs")
       (log-writer         :at "crates/missiond-core/src/event/pipeline/step3_commit/log_writer.rs")
       (dispatcher         :at "crates/missiond-core/src/event/pipeline/step5_tail/")
@@ -578,7 +606,7 @@
     ;; ── 重构来龙去脉 ──
     (refactor-lineage
       :migrated-from "v1: DaemonEvent god enum + Timeline Writer + event_router 8 consumers + 4 MPSC bypass + sweeper"
-      :migrated-to   "v2: 12 domain enum + event_log 单一真理源 + Dispatcher live-only + 14 typed subscribers"
+      :migrated-to   "v2: 13 domain enum + event_log 单一真理源 + Dispatcher live-only + 14 typed subscribers"
       :branch        "refactor/event-bus-v2 (merged to main commit e139ecf, 2026-04-19)"
       :refactor-commits 16
       :refactor-summary ".missiond/v2/_refactor-summary.md"
@@ -593,7 +621,7 @@
   ;; ═══════════════════════════════════════════════════
   (pillar intent-layer
     :canonical-ref ".missiond/v2/intent-intent-layer.lisp"
-    :canonical-status "v0.1 phase-A 2026-04-21 (本会话主驾; 吸收 worker v0.3 DC14 迁入: learning-engine 7 sub + flow-engine v1 + 双重归属)"
+    :canonical-status "v0.4 phase-B 2026-04-25 (directive/plan/workflow manager surfaces code-aligned partial; compiler/distiller actors pending + methodology compile dry-run + capability evolution governance backed by mission_capability_usage + unified-entry-pipeline architecture-designed: 8 logical roles message-intake-manager/alignment-author/alignment-review-gate/plan-compiler/plan-review-gate/plan-runner/evidence-collector/workflow-distiller, double review gate, plan-runner internal dispatch contract; workstation-dispatch-policy: alignment-author 默认 resident-claudecode-slot, plan-runner 按 PLAN.lisp :dispatch-strategy 选 resident-lisp/fresh-code-alignment/agent-team/mixed/prompt-fallback, 任务 .md 必须 self-contained, 常驻上下文不替代 checker)"
     :gptpro-v0.1-archive ".missiond/v2/drafts/gptpro/intent-intent-layer.lisp"
     (purpose "元层: 系统如何描述自己, 如何感知变化, 如何演进, 以及全局用户指令")
 
@@ -636,11 +664,11 @@
     (component global-claudemd-manager
       (desc "全局 ~/.claude/CLAUDE.md 的读/写/reload 管理")
       :actions "read / edit / reload"
-      :code "TBD — 目前 Claude Code 直接读, 无 daemon 侧 MCP manager"
-      :future "未来可补 mission_global_instruction (read/edit/reload) MCP tool"
+      :code "crates/missiond-daemon/src/handlers/sysinfra/global_instruction.rs + crates/missiond-mcp/src/tools/sysinfra/global_instruction.rs"
+      :mcp "mission_global_instruction (read/edit/reload)"
       :readers "Claude Code 每次会话启动"
-      :writers "用户手动 / Claude Code Edit tool (文件层)"
-      :status "文件层存在, daemon/MCP 层无 manager — 待实现"
+      :writers "mission_global_instruction(action=edit) / 用户手动 / Claude Code Edit tool (文件层)"
+      :status "code-aligned; read/edit full, reload manual-reload-required because Claude Code owns session bootstrap"
       :cross-ref "项目级 <project>/CLAUDE.md 的 manager 在 memory pillar :: project-management :: helper project-claudemd-manager")
 
     ;; ═══════════════════════════════════════════════════
@@ -665,8 +693,8 @@
         :table "directive"
         :schema-owned-by "memory :: module directive-layer :: plumbing directive-compilation"
         :cross-ref "intent-memory.lisp :: module directive-layer"
-        :status "schema-ready-pending-implementation"
-        :future-writer "pillar 五 actor (TBD) 或 pillar 二 worker 或 MCP 工具直写"
+        :status "store+manager code-aligned partial"
+        :future-writer "pillar 五 directive-compiler actor; mission_directive 是管理面 (compile dry-run/persist draft)")
         :v0.4.19-rename "原名 intent 表 → directive 表 (避命名歧义: 和 <project>/.missiond/intent.lisp 代码画像文件区分)"
         :vs-per-project-intent "memory :: project-management 里的 <project>/.missiond/intent.lisp 是 factual 代码快照; 本表是 'Jarvis 对用户话的 lisp 指令编译'")
 
@@ -674,15 +702,15 @@
         (desc "directive 编译出的执行 DAG — 绑 board_task + 版本 + FSM")
         :schema-owned-by "memory :: module directive-layer :: plumbing plan-execution"
         :cross-ref "intent-memory.lisp :: module directive-layer"
-        :status "schema-ready-pending-implementation"
-        :future-writer "pillar 五 actor (TBD) — plan 编译 / FSM 迁移 / supersede-chain 策略")
+        :status "store+manager code-aligned partial"
+        :future-writer "pillar 五 plan-compiler actor — plan 编译 / FSM 迁移 / supersede-chain 策略; mission_plan 当前提供 dry-run/draft + execute bridge")
 
       (component workflow-spec-db
         (desc "从成功 plan 蒸馏的可复用模板 — 带 match_rules + 统计")
         :schema-owned-by "memory :: module directive-layer :: plumbing workflow-templates"
         :cross-ref "intent-memory.lisp :: module directive-layer"
-        :status "schema-ready-pending-implementation"
-        :future-writer "pillar 五 actor (TBD) — distillation 算法 / 匹配阈值 / LRU 策略")
+        :status "store+manager code-aligned partial"
+        :future-writer "pillar 五 workflow-distiller actor — distillation 算法 / 匹配阈值 / LRU 策略; mission_workflow 当前提供 match/apply/read-only/distill dry-run")
 
       ;; v0.4.16: user-intents-db component 已删除 — 该表归属 memory :: conversation-logs
       ;; writer: engine/learning_engine/intent_analyst.rs
@@ -693,8 +721,8 @@
       (component system-level-intent-files
         (desc "系统主架构 + pillar 级细节规约 Lisp 文件")
         :paths (".missiond/v2/intent.lisp 系统主架构"
-                ".missiond/v2/intent-event-bus.lisp frozen v1.3.0"
-                ".missiond/v2/intent-memory.lisp 草稿 v0.4.4"
+                ".missiond/v2/intent-event-bus.lisp architecture-unlocked v1.3.3"
+                ".missiond/v2/intent-memory.lisp v0.5.4"
                 ".missiond/intent-db-*.lisp Forge 源 lisp"
                 ".missiond/intent-pillar-*.lisp v1 分 pillar lisp")
         :purpose "系统自我描述 + Forge 冲压源"
@@ -707,12 +735,12 @@
         :design-rationale "两种 kind 形式差异大但概念一致 — 保留各自格式优势, 统一纳管"
 
         (kind methodology
-          (desc "Lisp 方法论模板 — 人类 / agent 参考, 非运行时执行")
+          (desc "Lisp 方法论模板 — 人类 / agent 参考的 SSOT; 机器执行需先编译成 executable YAML")
           :path ".missiond/workflows/*.lisp"
-          :consumers "human + mission_intent tool + agent 参考"
+          :consumers "human + mission_intent tool + agent 参考 + future methodology compiler"
           :granularity "抽象叙事 — phases / principles / anti-patterns / baseline-numbers / decision-authority"
           :examples "bus-refactor.lisp (11-phase 事件总线重构方法论)"
-          :executability "✗ 非运行时执行, 纯文档")
+          :executability "human-readable source; machine execution via F-methodology-to-executable-compile → generated YAML → mission_flow_run")
 
         (kind executable
           (desc "YAML 声明式节点编排 — flow-engine-v2 运行时执行")
@@ -728,16 +756,16 @@
           :split-axis "受众 (human vs machine) + 粒度 (抽象 vs 具体) + 执行性"
           :why-not-unify-format "Lisp 富元数据给人看, YAML 轻量 schema 给 flow-engine 消费; 硬统一两边都难用"
           :cross-ref-convention "可约定同名对照 (如 bus-refactor.lisp ↔ bus-refactor.yaml), 非强制"
-          :future-possibility "若需要, 可用 Forge 从 Lisp 冲压 YAML (SSOT Lisp + 冲压副本), 当前不做"))
+          :future-possibility "已升级为 architecture target: F-methodology-to-executable-compile; 当前代码对齐待实现"))
 
       ;; ── Manager ──
       (component specs-manager
         (desc "action/instruction specs 的读/写/reload — 大部分 TBD")
-        :actions "read / write / reload / sync-with-file"
-        :status "mostly TBD — DB 4 表是 schema-only, 无 Rust 实现"
+        :actions "compile / approve / list / get / supersede / match / record-execution / sync-with-file"
+        :status "manager/tools code-aligned partial — mission_directive / mission_plan / mission_workflow 提供 read/control/draft persistence/execute bridge; runtime writer actor 未实现"
         :files-status "intent/workflow/flow 文件层已有 readers (mission_intent / flow-engine-v2); writers 多为手动编辑"
         :cross-ref "memory :: project-management :: path project-code-snapshot (读 per-project 代码快照 FILE, 职责不同)"
-        :future-work "要么实现 4 DB 表的 sync worker, 要么下次 migration DROP 以消除 dead schema")))
+        :future-work "实现 directive-compiler / plan-compiler / workflow-distiller actor, 并把 dry-run compile/distill 升级为 LLM-backed writer"))
 
 
   ;; ═══════════════════════════════════════════════════
@@ -746,7 +774,7 @@
   ;; ═══════════════════════════════════════════════════
   (pillar system-layer
     :canonical-ref ".missiond/v2/intent-system-layer.lisp"
-    :canonical-status "v0.1 phase-A 2026-04-21 (本会话主驾, 573 行, 6 section 含 state-machines overview + infra 7 文件 ownership + bootstrap primary)"
+    :canonical-status "v0.2 phase-B 2026-04-25 (runtime substrate + sysinfra/daemon/control surfaces)"
     :gptpro-v0.1-archive ".missiond/v2/drafts/gptpro/intent-system-layer.lisp"
     (purpose "无业务语义的运行时底座 — 类型 / 进程 / 传输 / RPC / 工具; DB 与观测已迁入 pillar 一 memory")
 
@@ -809,7 +837,7 @@
 
       (dispatch
         :rule "数据驱动: tool_name → handler 映射,非硬编码 match"
-        :scope "78 tools × 8 groups (schema 归 pillar 三)")
+        :scope "83 tools × 4 domains / 8 legacy groups (schema 归 pillar 三)")
 
       (error-codes "UNKNOWN_TOOL / UNKNOWN_ACTION / MISSING_PARAM / INVALID_PARAM / NOT_FOUND / PERMISSION_DENIED / IPC_TIMEOUT / SPAWN_FAILED / DB_ERROR")
 
@@ -843,7 +871,7 @@
   ;; ═══════════════════════════════════════════════════
   (pillar flow
     :canonical-ref ".missiond/v2/intent-flow.lisp"
-    :canonical-status "v0.1 phase-A 2026-04-21 (本会话主驾, 851 行, 20+ flow 覆盖核心, tool-backed-flows-index 78 映射)"
+    :canonical-status "v0.7 phase-C 2026-04-25 (83 actual tools indexed + execution/capability usage/directive-plan-workflow/global-instruction code-aligned flows + project-root spawn cwd flows; F-intent-alignment-plan-execution-loop 升级为 MissionD canonical 统一入口 pipeline: message → alignment → plan → execution → workflow, 8 stages + 双 review gate + plan-runner 内部调度契约, 不引入新 tool; F-workstation-dispatch-policy 串接 ClaudeCode 工位调度策略 — operational-practice + architecture-designed, plan-runner 自动选路 code-alignment pending)"
     :gptpro-v0.1-archive ".missiond/v2/drafts/gptpro/intent-flow.lisp"
     (purpose "跨 pillar 的动作前后流程 — 把 memory 静态与 worker 计算串联成 narrative")
     (rationale "v0.4.7 从 board 拆出 autopilot/flow-engine 后, 丢失了 end-to-end narrative; 本 pillar 补上")

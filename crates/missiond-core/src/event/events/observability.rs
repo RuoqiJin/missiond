@@ -49,6 +49,44 @@ pub enum ObservabilityEvent {
         /// Arbitrary JSON summary: counts of events/blobs/orphans deleted.
         summary: serde_json::Value,
     },
+    /// `mission_capability_usage(action=snapshot|report)` finished computing
+    /// a capability hotness snapshot. Live notification only — durable
+    /// evidence remains in `conversation_tool_calls` / `board_tasks` and the
+    /// JSON sidecar at `.missiond/v2/capability-usage-review.json`. See
+    /// frozen lisp `planned-event-extensions :: CapabilityUsageObservability`.
+    CapabilityUsageSnapshot {
+        /// Primary classification window: `"7d" | "30d" | "90d" | "all"`.
+        window: String,
+        /// `"tool" | "flow" | "both"`.
+        scope: String,
+        /// RFC3339 timestamp the snapshot was generated at.
+        generated_at: String,
+        /// Total capability rows considered (registered ∪ observed).
+        capability_count: u32,
+        /// Subset flagged as protected by capability-evolution-governance.
+        protected_count: u32,
+        /// Subset eligible for review (stale | never-used | shadowed | quiet).
+        candidate_count: u32,
+    },
+    /// `mission_capability_usage(action=candidates)` surfaced one capability
+    /// that the read-model classifies as a review candidate. Emitted once
+    /// per non-protected, non-active row so notifiers can de-dupe by
+    /// `capability_id` per snapshot run. Producers must still emit a
+    /// preceding `CapabilityUsageSnapshot` so consumers can group by
+    /// `generated_at`.
+    CapabilityStaleCandidate {
+        capability_id: String,
+        /// `"tool" | "flow"`.
+        kind: String,
+        /// `"stale" | "never-used" | "shadowed-by-better-capability" |
+        /// "quiet" | "merge-candidate"`.
+        classification: String,
+        last_used_at: Option<String>,
+        /// Same RFC3339 stamp as the parent `CapabilityUsageSnapshot` it
+        /// belongs to — lets consumers correlate without joining on a
+        /// stronger key.
+        generated_at: String,
+    },
 }
 
 impl DomainEvent for ObservabilityEvent {
@@ -62,6 +100,8 @@ impl DomainEvent for ObservabilityEvent {
             Self::BusMetric { .. } => "bus_metric",
             Self::SlowConsumer { .. } => "slow_consumer",
             Self::RetentionReport { .. } => "retention_report",
+            Self::CapabilityUsageSnapshot { .. } => "capability_usage_snapshot",
+            Self::CapabilityStaleCandidate { .. } => "capability_stale_candidate",
         }
     }
 
@@ -70,6 +110,8 @@ impl DomainEvent for ObservabilityEvent {
             // Snapshots bundle slot state + worker stats → a few KB.
             Self::HealthSnapshot { .. } => 4096,
             Self::RetentionReport { .. } => 1024,
+            // CapabilityUsageSnapshot carries only summary counts (no per-row
+            // arrays); ~256 B is enough.
             _ => 256,
         }
     }
@@ -105,10 +147,51 @@ mod tests {
             ObservabilityEvent::RetentionReport {
                 summary: serde_json::json!({}),
             },
+            ObservabilityEvent::CapabilityUsageSnapshot {
+                window: "30d".into(),
+                scope: "both".into(),
+                generated_at: "2026-04-25T00:00:00Z".into(),
+                capability_count: 0,
+                protected_count: 0,
+                candidate_count: 0,
+            },
+            ObservabilityEvent::CapabilityStaleCandidate {
+                capability_id: "mission_minimax_process".into(),
+                kind: "tool".into(),
+                classification: "stale".into(),
+                last_used_at: None,
+                generated_at: "2026-04-25T00:00:00Z".into(),
+            },
         ];
         for c in &cases {
             assert!(!c.kind().is_empty());
         }
+    }
+
+    #[test]
+    fn capability_usage_serde_round_trip() {
+        let snapshot = ObservabilityEvent::CapabilityUsageSnapshot {
+            window: "30d".into(),
+            scope: "both".into(),
+            generated_at: "2026-04-25T01:02:03Z".into(),
+            capability_count: 87,
+            protected_count: 14,
+            candidate_count: 9,
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let back: ObservabilityEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(snapshot, back);
+
+        let candidate = ObservabilityEvent::CapabilityStaleCandidate {
+            capability_id: "mission_some_legacy".into(),
+            kind: "tool".into(),
+            classification: "shadowed-by-better-capability".into(),
+            last_used_at: Some("2026-01-12T08:00:00Z".into()),
+            generated_at: "2026-04-25T01:02:03Z".into(),
+        };
+        let json = serde_json::to_string(&candidate).unwrap();
+        let back: ObservabilityEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(candidate, back);
     }
 
     #[test]

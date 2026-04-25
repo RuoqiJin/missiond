@@ -51,8 +51,9 @@ pub use event_trait::DomainEvent;
 // Flatten event re-exports so downstream crates can write
 // `use missiond_core::event::{BoardEvent, LlmEvent}` etc.
 pub use events::{
-    BoardEvent, IncidentEvent, LlmEvent, MemoryEvent, MessageEvent, ObservabilityEvent, Provider,
-    QuestionEvent, SessionEndStatus, SessionEvent, SlotEvent, SystemEvent, TaskEvent, WorkerEvent,
+    BoardEvent, ExecutionEvent, IncidentEvent, LlmEvent, MemoryEvent, MessageEvent,
+    ObservabilityEvent, Provider, QuestionEvent, SessionEndStatus, SessionEvent, SlotEvent,
+    SystemEvent, TaskEvent, WorkerEvent,
 };
 
 // Convenience re-exports for the storage layer. Specific types stay under

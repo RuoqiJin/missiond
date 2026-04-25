@@ -27,9 +27,14 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "v0.5.1"
+  (version "v0.5.5"
     :polish "v0.5.0 L1 语义压缩 (2026-04-20): history + migration-log 外移到 intent-memory-history.lisp; table-catalog 表详情 SSOT 合并到各 module (保持 count + 表名索引). 不做 L2/L3 DSL 压缩 (会破坏 :binds-to / :library-pov 的 grep 明显性 + 施工 agent 体验). 行数: 2999 → 2629 (-12.7%)."
-    :v0.5.1-patch "v0.5.1 (2026-04-21 — gptpro agent-execution-coordination 协议升级): (EEEE) 回应 D010 重复编号 — execution-log helper 从 pilot 升格为正式协议. id-counters / claims-with-lease / audit/repair / derived-indexes 等结构性升级. 12 MCP actions (mission_execution *) 设计完整. 未来 execution lisp 按协议产生, 避免手工编号复发 D010 类问题.")
+    :v0.5.1-patch "v0.5.1 (2026-04-21 — gptpro agent-execution-coordination 协议升级): (EEEE) 回应 D010 重复编号 — execution-log helper 从 pilot 升格为正式协议. id-counters / claims-with-lease / audit/repair / derived-indexes 等结构性升级. 12 MCP actions (mission_execution *) 设计完整. 未来 execution lisp 按协议产生, 避免手工编号复发 D010 类问题."
+    :v0.5.2-patch "v0.5.2 (2026-04-25 — recursive-contract alignment): agent-execution-coordination helper 补 ingress/core/egress 与实现状态标注; xjp-router embedding provider 归属校正为 worker pillar. 不改表归属,只补架构标注."
+    :v0.5.3-patch "v0.5.3 (2026-04-25 — file-first implementation alignment): directive-layer 补 intent-alignment.lisp / PLAN.lisp / workflow.lisp 三段文件产物契约,允许先文件评审再镜像 DB,服务后续 MissionD 工位代码同构闭环."
+    :v0.5.4-patch "v0.5.4 (2026-04-25 — capability usage monitor): system-support 新增 capability-usage-read-model; 当前代码用 conversation_tool_calls + board_tasks.flow_template + MCP/YAML registry 形成 tool+flow 调用热度快照,只产出治理候选,不自动删除; event_log/workflow stats/semantic merge 留后续增强."
+    :v0.5.5-patch "v0.5.5 (2026-04-25 — directive/plan/workflow manager alignment): directive-layer 标注 mission_directive / mission_plan / mission_workflow 管理面已代码同构; compile/distill 仍为 dry-run, LLM compiler/distiller actors 待实现."
+    :v0.5.5-pipeline-note "v0.5.5 (2026-04-25 — unified-entry-pipeline file-first 加固): directive-layer file-first-artifacts 补 status lifecycle / review-gate-owner / evidence sidecar 契约, 与 flow pillar F-intent-alignment-plan-execution-loop + intent-layer section unified-entry-pipeline 对齐. 不改表归属与 schema; 仅补文件级 lifecycle 与 DB 镜像约定.")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -64,7 +69,7 @@
     :stale-line-numbers-policy "v0.5.0 起不再用 line 号. 已有的 file:line 引用视为 'as-of-施工前 snapshot, may drift'")
 
   (migrated-out
-    "embedding-provider → pillar 二 2.2 sonnet-gateway (qwen3 双角色)"
+    "embedding-provider → worker pillar :: xjp-router-gateway (qwen3 独立 provider, code-aligned for embedding)"
     "gen-crud (Forge 冲压) → pillar 二 2.5 code-generation"
     "search-engines → pillar 二 2.6 search-engines (搜索是计算不是数据)"
     "event-bus 4 表 (event_log / event_subscriptions / blob_storage / dead_letter_queue) → pillar 四 §4.6 persistence-layer")
@@ -120,7 +125,7 @@
         (agent_questions       :benefit "项目级 agent 问题集" :owner-note "module board; 可经 task_id → board_tasks.project_id 推断")
         (slot_tasks            :benefit "项目级 slot 任务"   :owner-note "module slot-support (v0.4.14 已归)")
         (user_intents          :benefit "项目级意图识别"     :owner-note "module conversation-logs (v0.4.16 校正: 实际从未真正迁出, ConversationStore trait 仍拥有 6 个方法); 缺 project_id 列")
-        (intent plan workflow  :benefit "specs 三表应加 project_id" :owner-note "module directive-layer (v0.4.17): schema-ready-pending-implementation, writer/reader 待 pillar 五 actor 启用")
+        (intent plan workflow  :benefit "specs 三表应加 project_id" :owner-note "module directive-layer (v0.5.5): store+manager code-aligned partial, compiler/distiller actors 待 pillar 五 启用")
         (ast_nodes ast_file_meta beacons beacon_nodes :benefit "项目级代码索引" :owner-note "module kb-manager; 缺列")
         (skill_topics skill_blocks skill_versions skill_executions :benefit "项目私有技能库" :owner-note "module project-management; 缺列")
         (image_descriptions    :benefit "项目级图片注释"    :owner-note "module system-support; 独立按 hash 去重")
@@ -162,7 +167,7 @@
         (family-conversation "mission_conversation_query / _analyze / _reconcile / mission_retrospective_manage / mission_audit")
         (family-observability "mission_llm_trace / mission_cost_report (🚧) / mission_incident / mission_infra_query")
         (family-slot "mission_slots / mission_slot_history / mission_compute_slot")
-        (family-directive-layer "mission_directive / mission_plan / mission_workflow (TBD, v0.4.17 声明 + v0.4.19 rename)")
+        (family-directive-layer "mission_directive / mission_plan / mission_workflow (code-aligned partial: read/control + draft persistence; compiler actors pending)")
         (family-system "mission_sys_config / mission_sys_logs / mission_inbox / mission_router_chat")))
 
     ;; ─────────────────────────────────────────────
@@ -200,7 +205,7 @@
         (ObservabilityStore :spans ["llm-support" "system-support" "conversation-logs"]
                             :scope "gemini_requests + file_uploads + token_ledger + incidents + labels, 36 方法, traits.rs :: ObservabilityStore trait body"
                             :note "典型 cross-module trait, 按 .rs 文件切粒度")
-        (DirectiveLayerStore  :module "directive-layer"       :scope "directive + plan + workflow, 约 15 方法, TBD v0.4.17")
+        (DirectiveLayerStore  :module "directive-layer"       :scope "directive + plan + workflow, 20 方法, code-aligned partial; directive_list_recent / plan_list_recent / workflow_get_by_id added for manager surfaces")
         (SlotStore         :spans ["slot-support" "conversation-logs"]
                            :scope "slot_sessions + slot_tasks + dynamic_slots, traits.rs :: SlotStore trait body")
         (InfraStore        :module "system-support"     :scope "watermarks (13) + backfill (9) + daemon_state (2) = 24 方法"
@@ -240,7 +245,7 @@
     (interface cross-pillar-surface
       (purpose "对其他 pillar 暴露的事件 + schema 宿主关系 — lisp 层契约, 非单一代码点")
       (protocol "多种: event_log kind 约定 / schema 承载 / config 读取 / trait 调用")
-      (stability-contract "跨 pillar 契约改动需对应 pillar 同步修改 + 事件总线 SSOT 遵守 v1.3.0 frozen")
+      (stability-contract "跨 pillar 契约改动需对应 pillar 同步修改 + 事件总线 SSOT 遵守 v1.3.3 architecture-unlocked direct-edit-with-record")
 
       (to-pillar-二-workers
         (mechanism "workers 通过 worker-trait-surface 的 trait 方法 CRUD 本 pillar 的表")
@@ -249,11 +254,11 @@
 
       (to-pillar-四-event-bus
         (mechanism "本 pillar 的 modules 作为 event producer, 写 event_log 表")
-        (cross-ref "pillar 四 event-bus (v1.3.0 frozen) 的 event_log 接收来自 memory 8 module 的业务事件")
+        (cross-ref "pillar 四 event-bus (v1.3.3 architecture-unlocked) 的 event_log 接收来自 memory 9 module 的业务事件")
         (producer-modules-list "conversation-logs (message-ingested) / board (task-state-changed) / kb-manager (knowledge-added) / 等"))
 
       (to-pillar-五-intent-layer
-        (mechanism "pillar 五 actor (TBD) 将是 memory directive-layer module 的 writer")
+        (mechanism "pillar 五 actor (pending) 将是 memory directive-layer module 的 intelligent writer; MCP manager 已提供 dry-run/draft 管理入口")
         (schema-hosting "intent / plan / workflow 3 张表 schema 在 memory (v0.4.17), actor 在 pillar 五")
         (cross-ref "见 module directive-layer :: pending-implementation-checklist"))
 
@@ -342,7 +347,7 @@
       (pillar-二-engines  "crates/missiond-daemon/src/engine/"
         :reason "autopilot / flow-engine / learning engine 归 pillar 二")
       (pillar-四-event-bus "crates/missiond-daemon/src/event/ + bus/ (非 ws_bridge 部分)"
-        :reason "event_log 等 4 表 + 事件总线 v1.3.0 frozen")
+        :reason "event_log 等 4 表 + 事件总线 v1.3.1 frozen")
       (pillar-五-actor    "TBD"
         :reason "directive-layer 未来 writer 在 pillar 五, 本 pillar 只声明 schema+trait 契约")
       (施工规则 "同构只动 in-scope; 对 out-of-scope 的 :cross-ref 只做 '指向的文件/函数存在性' 验证, 不改内容, 不做重构"))
@@ -952,11 +957,48 @@
       ;; ── 并行 agent 协作的共享内存层 — v0.5.1 gptpro 升级为正式协议 ──
       (helper agent-execution-coordination
         (desc "并行 agent 协作的共享内存层 — 从单次 pilot 升级为可复用的正式协议")
-        :status "v0.5.1 patch"
+        :status "v0.5.3 recursive-contract; protocol code-aligned via mission_execution manager + ExecutionEvent live projection"
+        :implementation-status
+          (:file-protocol "implemented-by-practice — intent-event-bus-execution.lisp / intent-memory-execution.lisp / worker-pillar-execution.lisp 已实战复用"
+           :schema-shape "architecture-designed — meta/id-counters/phase-tracker/claims/deviations/decisions/issues/completions/derived-indexes"
+           :manager-code "code-aligned — crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs implements 12 actions"
+           :mcp-tool "code-aligned — mission_execution exposed via crates/missiond-mcp/src/tools/knowledge/agent_execution.rs")
         :actual-evidence
           ["intent-event-bus-execution.lisp — 首个成功 pilot"
            "intent-memory-execution.lisp — 第二次复用"
            "intent-memory-execution.lisp 出现重复 D010 — 暴露手工编号缺口"]
+
+        (helper-recursive-contract
+          :shape "helper = ingress(execution request / companion log) → logic-core(atomic coordination slots) → egress(status/audit/repair + optional board/event signals)"
+          :unit "execution 是一次多 agent 协作任务实例; slot 是可验证的 operational state 原子"
+          :rule-1 "memory owns durable protocol/file shape, not runtime manager mechanics"
+          :rule-2 "ID allocation / lease / audit / repair must be manager-controlled before MCP write access is enabled"
+          :rule-3 "execution-log records operational truth; methodology/workflow remains intent-layer owned"
+          :rule-4 "status/audit can rebuild derived-indexes from durable slots; derived-indexes are cache, not truth")
+
+        (helper-ingress
+          (entry-1 "mission_execution(action=open|list|claim|heartbeat|release|deviate|decide|issue|complete|status|audit|repair)")
+          (entry-2 "human/agent file edit following file-protocol (current implemented practice)")
+          (entry-3 "board_task / flow_context linkage when execution scope is tied to a board task")
+          (entry-4 "architecture-lisp checker before any manager commit"))
+
+        (helper-core
+          :contract "把并行 agent 的协作状态写成固定 slot, 让 claim / ID / deviation / completion 不再靠口头约定"
+          (step s1 "open/load execution: locate companion log, initialize/read meta + id-counters + phase-tracker")
+          (step s2 "claim lifecycle: detect scope overlap, allocate claim_id, set lease_expires_at, require heartbeat, release or mark stale")
+          (step s3 "record facts: deviate/decide/issue/complete allocate D/DC/I/COMP ids atomically and append typed entries")
+          (step s4 "validate write: paren balance + schema shape + monotonic id + no open conflicting claim")
+          (step s5 "rebuild derived-indexes: active_claims / open_issues / unresolved_deviations / latest_decisions / completed_phases")
+          (step s6 "audit/repair: report semantic risks; apply only structural repair with explicit dry_run/apply mode"))
+
+        (helper-egress
+          :writes ["execution companion Lisp slots" "derived-indexes cache"]
+          :reads ["parent design Lisp" "existing execution companion log"]
+          :returns "status report / audit report / repair plan or receipt"
+          :optional-emits ["event-bus ExecutionEvent::*" "BoardTaskStatusChanged when linked to board scope"]
+          :cross-ref-worker "intent-worker.lisp :: orchestration-governance :: agent-execution-manager-interface"
+          :cross-ref-flow "intent-flow.lisp :: F-execution-log-governance"
+          :cross-ref-tools "mission_execution MCP surface")
 
         (actual-findings-from-pilots
           (finding-1
@@ -1023,13 +1065,20 @@
 
         ;; ── 对外接口 ────────────────────────────────────────
         (manager-interface
-          :status "应该从 'Edit lisp 文件' 升级为受控 manager"
+          :status "code-aligned; 4ab7994 upgrades 'Edit lisp 文件' practice into controlled manager"
           :implementation-plan "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
 
           (mcp-tool-design mission_execution
+            :surface-status "code-aligned"
+            :action-count 12
             (action open
               :args "execution_id + parent_design + scope + owner?"
               :writes "meta + id-counters 初始化 + phase-tracker 初始态")
+
+            (action list
+              :args "parent_design? + status? + scope_prefix? + limit?"
+              :reads "execution companion logs / derived-indexes"
+              :returns "execution summaries for dashboard / manager selection")
 
             (action claim
               :args "execution_id + phase + claimer_name + scope + lease_secs"
@@ -1650,11 +1699,11 @@
 
   ;; ═════════════════════════════════════════════════════════════
   ;;  业务模块 5: Directive-Layer Store (directive → plan → workflow 三段编译 pipeline)
-  ;;  schema-ready-pending-implementation — writer/reader 待 pillar 五 actor
+  ;;  store+manager code-aligned partial — writer actors 待 pillar 五 actor
   ;; ═════════════════════════════════════════════════════════════
   (module directive-layer
     (desc "user utterance → lisp 指令(directive) → executable plan DAG → reusable workflow template 三段式编译 pipeline 的持久化层")
-    (maturity "schema-ready — migration 已就位 (20260420000000), writer/reader 待 pillar 五 actor 启用")
+    (maturity "store+manager code-aligned partial — migration + DirectiveLayerStore + MCP manager surfaces 已就位; LLM compiler/distiller actors 待启用")
     :created "v0.4.17 (2026-04-19)"
     :rationale "v0.4.4 原计划迁 pillar 五, v0.4.16 误判为 dead, v0.4.17 用户澄清是'刚建未启用'的预留 schema; 按 memory=库 原则, 先把 schema+trait 接口立起来, writer/reader 留 TBD cross-ref"
 
@@ -1672,19 +1721,65 @@
         :solution "workflow 表: name UNIQUE + sexp_text + match_rules JSONB + learned_from FK → plan + executions/success_count/avg_cost_usd/last_used_at"
         :benefit  "plan → workflow 蒸馏闭环; LRU + 成功率指标支持 workflow 推荐"))
 
+    (file-first-artifacts
+      :status "architecture-designed; manager code-aligned partial; file-first review remains SSOT before DB mirror"
+      :rationale "代码同构阶段需要人类/Codex 可审阅的文件产物先行; DB 三表作为可查询镜像,不强迫第一版就全自动写库"
+      :unified-pipeline-anchor "flow pillar :: F-intent-alignment-plan-execution-loop (canonical message → alignment → plan → execution → workflow) + intent-layer pillar :: section unified-entry-pipeline"
+      :ssot-policy "file-first SSOT — alignment/plan/workflow .lisp 是真正 review 边界; directive/plan/workflow 表是可查询镜像 + 状态管理面 (mission_directive/mission_plan/mission_workflow)"
+
+      (artifact intent-alignment-lisp
+        :path ".missiond/alignment/<topic>/intent-alignment.lisp"
+        :maps-to "directive table (DB 镜像; 通过 mission_directive(action=compile, persist=true) 落 draft / 通过 approve/archive 流转)"
+        :purpose "本轮架构变更或 message 的目标/边界/非目标/验收条件/涉及 pillar"
+        :status-lifecycle "draft → reviewing → approved | rejected | superseded"
+        :review-gate "alignment-review-gate (intent-layer section unified-entry-pipeline)"
+        :review-gate-owner "human/Codex"
+        :gate-rule "未通过 approval 不允许进入 plan-authoring 阶段"
+        :writer "alignment-author actor (architecture-designed; pending) — 当前由 ClaudeCode 主会话或外部 LLM 手工产出"
+        :manager-surface "mission_directive (compile / approve / archive / version_chain / list / get)")
+
+      (artifact plan-lisp
+        :path ".missiond/plans/<topic>/PLAN.lisp"
+        :maps-to "plan table (DB 镜像; 通过 mission_plan(action=compile, persist=true) 落 draft / 通过 approve/mark/supersede 流转)"
+        :purpose "LLM 规划 + human/Codex review 后的可执行计划,含 files/phases/tasks/tests/risks/rollback"
+        :status-lifecycle "draft → reviewing → approved → executing → succeeded | failed | superseded"
+        :review-gate "plan-review-gate (intent-layer section unified-entry-pipeline)"
+        :review-gate-owner "human/Codex"
+        :gate-rule "未通过 approval 不允许进入 execution-runner 阶段"
+        :writer "plan-compiler actor (architecture-designed; pending)"
+        :manager-surface "mission_plan (compile / approve / mark / supersede / execute / record_evidence / list / get / by_task)")
+
+      (artifact workflow-lisp
+        :path ".missiond/workflows/<topic>.lisp"
+        :maps-to "workflow table (DB 镜像; 通过 mission_workflow(action=distill, persist=true) 落 draft / 通过 record_execution 累计统计)"
+        :purpose "多次成功执行后的可复用方法论; 可继续走 F-methodology-to-executable-compile 编译为 YAML 供 mission_flow_run 执行"
+        :status-lifecycle "draft → published → deprecated"
+        :created-when "成功 plan 多次重复 或 human 显式标 reusable"
+        :writer "workflow-distiller actor (architecture-designed; pending)"
+        :manager-surface "mission_workflow (distill / record_execution / compile_methodology / run_methodology / match / apply / list / get)")
+
+      (artifact plan-evidence-sidecar
+        :path ".missiond/v2/plans/<plan_id>.evidence.json"
+        :maps-to "未来可升级为 plan_evidence DB JSONB 列或独立表; 当前为 file-only sidecar"
+        :purpose "plan 执行证据落盘 — git diff / tests / tool_calls refs / event_log refs / execution companion log refs / deviations / decisions / completions"
+        :writer "evidence-collector role — 当前由 mission_plan(action=record_evidence) 显式写入 (code-aligned partial)"
+        :status "code-aligned partial; auto evidence-collector actor pending"
+        :consumer "workflow-distiller (s8) + retrospective + capability-usage-monitor (间接)"
+        :ssot-note "当前文件即真相; 升级为 DB 时保留文件作为长期归档"))
+
     (module-ingress
-      (desc "写入 3 张表的路径 — v0.4.17: 全部 TBD, 待 pillar 五 actor 或 MCP 工具启用")
-      :principle "memory = 库. 本模块只声明 schema + trait 接口形态; writer 暂未存在, 接口设计必须能承载未来的 compile/approve/execute/distill 四组动作"
-      :status-note "ingress 具体组件 TBD — 可能的 writer 形态 (3 选 1 或组合):"
+      (desc "写入 3 张表的路径 — MCP 管理面已启用, LLM writer actors 待 pillar 五 实现")
+      :principle "memory = 库. 本模块声明 schema + trait 接口形态; 管理面可做 draft/control 写入, utterance→directive / directive→plan / plan→workflow 的智能编译仍在 actor/worker 侧"
+      :status-note "ingress 当前为 MCP 管理面 + 未来 actor 组合:"
       :option-A "pillar 二 新 worker (类似 intent_analyst 之于 user_intents)"
       :option-B "pillar 五 intent-layer actor (目前 pillar 五 只有 intent-files/graph/forge/governance 元层组件, 需新增 actor)"
-      :option-C "MCP 工具直写 (mission_intent(action=upsert) / mission_plan / mission_workflow 三族)"
+      :option-C "MCP 工具直写 (mission_directive / mission_plan / mission_workflow 三族, code-aligned partial)"
 
       ;; ── 未来 writer 占位 (待 pillar 整理时替换为真实 cross-ref) ──
       (writer TBD-directive-compiler
         :binds-to [:worker-trait-surface]
         :binds-to-note "如最终选 option C (MCP 工具直写), 追加 :mcp-surface"
-        :status "未实现"
+        :status "actor 未实现; mission_directive(action=compile) dry-run/persist draft 已实现为临时管理入口"
         :expected-writes "directive (create / update status / set approved_at / set compiler_model)"
         :expected-trigger "user utterance 到达 (可能经 MCP 或 autopilot tick)"
         :expected-api "DirectiveLayerStore::directive_insert / directive_update_status / directive_approve"
@@ -1692,7 +1787,7 @@
 
       (writer TBD-plan-compiler
         :binds-to [:worker-trait-surface]
-        :status "未实现"
+        :status "actor 未实现; mission_plan(action=compile) dry-run/persist draft + execute bridge 已实现为临时管理入口"
         :expected-writes "plan (create from directive / update status / set executing/succeeded/failed / superseded-chain)"
         :expected-trigger "directive status → compiled 时触发 plan 生成; 或 board_task 创建时编译"
         :expected-api "DirectiveLayerStore::plan_insert / plan_update_status / plan_supersede"
@@ -1700,7 +1795,7 @@
 
       (writer TBD-workflow-distiller
         :binds-to [:worker-trait-surface]
-        :status "未实现"
+        :status "actor 未实现; mission_workflow(action=distill|compile_methodology) dry-run + record_execution 已实现为临时管理入口"
         :expected-writes "workflow (create from successful plan / 累加 executions+success_count / update last_used_at / upsert match_rules)"
         :expected-trigger "plan status → succeeded 时触发蒸馏; 或定期后台扫 top-N plan 抽取模板"
         :expected-api "DirectiveLayerStore::workflow_insert / workflow_record_execution / workflow_find_by_match"
@@ -1708,7 +1803,7 @@
 
     (module-core
       (desc "3 张表 schema + trait 接口 — 三段式 pipeline 的持久化约束")
-      :trait "DirectiveLayerStore (TBD — crates/missiond-core/src/db/traits.rs 待新增; 建议独立 trait 不和 ConversationStore 混)"
+      :trait "DirectiveLayerStore (code-aligned in crates/missiond-core/src/db/traits.rs; PG impl in crates/missiond-core/src/db/pg/directive.rs; 独立 trait 不和 ConversationStore 混)"
       :migration "crates/missiond-core/migrations/20260420000000_directive_plan_workflow.sql"
 
       (plumbing directive-compilation
@@ -1717,7 +1812,7 @@
         :schema-cols "id UUID PK / utterance_text / sexp_text / version INT / status TEXT / compiler_model / references_json JSONB / created_at / approved_at"
         :fsm "draft → refining → approved → compiled → archived"
         :invariant "UNIQUE(id, version) — 同一 directive 多版本演进保留历史"
-        :expected-trait-methods "directive_insert / directive_get / directive_update_status / directive_approve / directive_list_by_status / directive_get_version_chain"
+        :expected-trait-methods "directive_insert / directive_get / directive_update_status / directive_approve / directive_list_by_status / directive_get_version_chain / directive_list_recent"
         :scoping-candidate "加 project_id 列 — 项目级指令隔离")
 
       (plumbing plan-execution
@@ -1726,7 +1821,7 @@
         :schema-cols "id UUID PK / board_task_id TEXT FK→board_tasks / source_directive_id UUID FK→directive / version INT / sexp_text / sexp_hash / status TEXT / compiler_model / compiled_from TEXT / created_at / approved_at / finished_at"
         :fsm "draft → awaiting_approval → approved → executing → succeeded / failed / superseded"
         :invariants "UNIQUE(board_task_id, version); ON DELETE CASCADE from board_tasks; compiled_from = 源 directive 的 sexp_hash (血统追溯)"
-        :expected-trait-methods "plan_insert / plan_get / plan_update_status / plan_supersede / plan_list_by_task / plan_get_latest"
+        :expected-trait-methods "plan_insert / plan_get / plan_update_status / plan_supersede / plan_list_by_task / plan_get_latest / plan_list_recent"
         :cross-module-note "board_tasks.source_directive_id 列 (v0.4.4 ALTER TABLE) 是 board → directive 的反向指针; 见 cross-module-invariants")
 
       (plumbing workflow-templates
@@ -1734,7 +1829,7 @@
         :table "workflow"
         :schema-cols "id UUID PK / name UNIQUE / sexp_text / match_rules JSONB / learned_from UUID FK→plan / executions INT / success_count INT / avg_cost_usd NUMERIC(10,4) / last_used_at / created_at"
         :invariant "name UNIQUE; learned_from 可为 NULL (手写模板); executions/success_count 单调递增"
-        :expected-trait-methods "workflow_insert / workflow_get_by_name / workflow_find_by_match / workflow_record_execution / workflow_list_top_n"
+        :expected-trait-methods "workflow_insert / workflow_get_by_name / workflow_get_by_id / workflow_find_by_match / workflow_record_execution / workflow_list_top_n"
         :scoping-candidate "加 project_id 列 — 项目私有 workflow 库 (区别全局模板)")
 
       ;; ── 跨模块约束 ──
@@ -1752,29 +1847,29 @@
           :semantic "UUID FK 给查询用, sexp_hash 给防 directive 变更时旧 plan 仍保留血统快照; 即 directive 改版后 plan 仍知自己来源哪个 hash")))
 
     (module-egress
-      (desc "读取 3 张表 — v0.4.17: 全部 TBD, 等 MCP 工具或 consumer actor 实现")
+      (desc "读取 3 张表 — MCP 管理面已实现, autopilot/actor consumer 仍待接入")
       :principle "memory = 库. egress 暴露查询原语, 消费策略在外"
 
-      (reader TBD-mcp-directive
+      (reader mcp-directive
         :binds-to [:mcp-surface]
-        :status "未实现"
-        :expected-tool "mission_directive (action=list / get / get-version-chain / by-status)"
+        :status "code-aligned partial"
+        :expected-tool "mission_directive (action=list / get / version_chain / approve / archive / compile dry-run)"
         :expected-reads "directive (按 status / version / utterance 模糊查)"
-        :expected-api "DirectiveLayerStore::directive_list_by_status / directive_get_version_chain")
+        :expected-api "DirectiveLayerStore::directive_list_by_status / directive_list_recent / directive_get_version_chain")
 
-      (reader TBD-mcp-plan
+      (reader mcp-plan
         :binds-to [:mcp-surface]
-        :status "未实现"
-        :expected-tool "mission_plan (action=list / get / by-task / provenance)"
+        :status "code-aligned partial"
+        :expected-tool "mission_plan (action=list / get / by_task / approve / mark / supersede / execute / record_evidence / compile dry-run)"
         :expected-reads "plan (按 board_task_id 查版本链 / 按 status 查 awaiting_approval / 按 sexp_hash 查 provenance)"
-        :expected-api "DirectiveLayerStore::plan_list_by_task / plan_get_latest")
+        :expected-api "DirectiveLayerStore::plan_list_by_task / plan_list_recent / plan_get_latest")
 
-      (reader TBD-mcp-workflow
+      (reader mcp-workflow
         :binds-to [:mcp-surface]
-        :status "未实现"
-        :expected-tool "mission_workflow (action=list / match / top-n / apply)"
+        :status "code-aligned partial"
+        :expected-tool "mission_workflow (action=list / get / match / apply / distill / record_execution / compile_methodology / run_methodology)"
         :expected-reads "workflow (按 match_rules 查匹配 / 按 executions 排 top-n / 按 name get)"
-        :expected-api "DirectiveLayerStore::workflow_find_by_match / workflow_list_top_n")
+        :expected-api "DirectiveLayerStore::workflow_get_by_id / workflow_find_by_match / workflow_list_top_n")
 
       (reader TBD-autopilot-workflow-match
         :binds-to [:worker-trait-surface]
@@ -1791,6 +1886,9 @@
       (schema-source "crates/missiond-core/migrations/20260420000000_directive_plan_workflow.sql")
       (non-db-forms-owned
         (per-project-intent-file "<project>/.missiond/intent.lisp — 注: 这是 memory :: project-management 管的文件, 记 factual 代码快照, 不是本 module; 本 module 的 directive 表是 instruction 规约 DB 镜像")
+        (intent-alignment-file ".missiond/alignment/<topic>/intent-alignment.lisp — directive 表的 file-first source,用于代码同构前的人机对齐")
+        (plan-file ".missiond/plans/<topic>/PLAN.lisp — plan 表的 file-first source,用于人类审核/修订后再执行")
+        (workflow-methodology-file ".missiond/workflows/<topic>.lisp — workflow 表的 file-first source,多次成功后沉淀")
         (system-intent-files "pillar 五 :: component intent-files — .missiond/v2/*.lisp 系统级规约文件, 不是本 module; 但未来 forge 冲压链路可能把 lisp → directive 表做双向同步")))
 
     (cross-module-trait-sharing
@@ -1801,12 +1899,12 @@
 
     (pending-implementation-checklist
       (desc "启用本 module 需要的代码侧动作 — 按依赖顺序")
-      "1. crates/missiond-core/src/db/traits.rs 新增 trait DirectiveLayerStore (约 15 方法)"
-      "2. crates/missiond-core/src/db/pg/intent_layer.rs 新建 PG impl"
-      "3. crates/missiond-core/src/types/ 新增 Intent / Plan / Workflow struct + status enum"
-      "4. pillar 二 或 五 决定 actor 归属后新增 writer (compile / approve / distill 三路)"
-      "5. MCP 工具 mission_intent / mission_plan / mission_workflow 三族 handler"
-      "6. (可选) 加 project_id 列做项目级 scoping — 详见 candidates-for-promotion"))
+      "[done] 1. crates/missiond-core/src/db/traits.rs 新增 trait DirectiveLayerStore (含 recent/get_by_id manager 方法)"
+      "[done] 2. crates/missiond-core/src/db/pg/directive.rs PG impl 扩展 directive_list_recent / plan_list_recent / workflow_get_by_id"
+      "[done] 3. crates/missiond-core/src/types/ 已有 Directive / Plan / Workflow struct + status enum"
+      "[pending] 4. pillar 二 或 五 决定 actor 归属后新增 writer (directive-compile / plan-compile / workflow-distill 三路)"
+      "[done-partial] 5. MCP 工具 mission_directive / mission_plan / mission_workflow 三族 handler: read/control/draft persistence/execute bridge 已实现; compile/distill actor 仍 dry-run"
+      "[optional] 6. 加 project_id 列做项目级 scoping — 详见 candidates-for-promotion"))
 
 
   ;; ═════════════════════════════════════════════════════════════
@@ -2156,7 +2254,48 @@
       (goal-3 legacy-cleanup
         :problem  "4 张老版 schema 活跃度不一, 需逐个判决"
         :solution "legacy-zone 明确 4 表状态 (tasks keep / inbox deprecate / events drop / credentials drop 新发现)"
-        :benefit  "下轮 migration 可定向 DROP"))
+        :benefit  "下轮 migration 可定向 DROP")
+      (goal-4 capability-usage-observability
+        :problem "tool / flow 会随更好实现出现而落灰; 单看 registry 无法判断保留、合并、废弃"
+        :solution "派生 read-model 统一读取 tool_calls / event_log / flow_context / workflow stats,生成 capability usage snapshot 与治理候选"
+        :benefit "持续优化工具面和 flow catalog,让删改合并有证据而不是凭感觉"))
+
+    (derived-read-model capability-usage-read-model
+      :status "code-aligned v0.5.4; c55fd61 implements mission_capability_usage read-only snapshot/report/candidates + sidecar mark/ack"
+      :owner-module "system-support"
+      :storage-policy "当前实现按需聚合,不缓存 snapshot: daemon_state trait 只支持 i64,不能存 JSON; mark/ack 治理决定写 <project_root>/.missiond/v2/capability-usage-review.json sidecar"
+      :truth-sources
+        ((tool-calls
+           :status "implemented"
+           :reads ["conversation_tool_calls via ConversationStore::get_tool_call_global_stats(since_iso)"]
+           :grain "tool_name + action + project_id? + caller + outcome + started_at/completed_at"
+           :purpose "统计每个 MCP tool/action 的调用次数、最近调用、成功率、调用来源")
+         (flow-runs
+           :status "partial-implemented"
+           :reads ["board_tasks.flow_template" "engine::flow::loader::list_flows() YAML registry"]
+           :grain "flow_id/flow_template + node/action + project_id? + terminal status"
+           :purpose "统计 named flow 与 executable workflow 的启动、完成、失败、最近使用"
+           :pending ["event_log domain=Task/System/Observability" "workflow execution stats" "flow_context deep evidence"])
+         (replacement-evidence
+           :status "deferred"
+           :reads [".missiond/v2/intent-tools.lisp :flow-ref" ".missiond/v2/intent-flow.lisp tool-backed-flows-index" "intent-layer capability lifecycle decisions"]
+           :purpose "识别两个 capability 是否语义重叠、是否存在 preferred replacement"
+           :current-behavior "merge-candidate bucket 固定存在但为空; semantic-overlap 解析留给 Lisp index 批次"))
+      (ingress
+        :source "mission_capability_usage(action=snapshot|report|candidates|mark|ack); future periodic monitor tick"
+        :entry-components ["tools audit log" "event-bus event_log" "board/workflow state" "intent-layer governance rules"])
+      (logic-core
+        (step s1 "collect tool usage by window: 7d / 30d / 90d / all-time from conversation_tool_calls")
+        (step s2 "collect flow usage from board_tasks.flow_template and YAML flow registry")
+        (step s3 "normalize against MCP registry; mark unregistered/legacy observed ids as shadowed evidence")
+        (step s4 "apply protected capability patterns from intent-layer governance")
+        (step s5 "emit categories: active / quiet / stale / never-used / shadowed-by-better-capability / merge-candidate / protected")
+        (step s6 "return source_coverage with read-only persistence note; never mutate registry or Lisp directly")
+        (step s7 "mark/ack write review sidecar only; ack requires follow_up_ref"))
+      (egress
+        :writes ["<project_root>/.missiond/v2/capability-usage-review.json for mark/ack only" "ObservabilityEvent::CapabilityUsageSnapshot / CapabilityStaleCandidate"]
+        :reads ["conversation_tool_calls" "board_tasks.flow_template" "MCP registry" "YAML flow registry" "review sidecar"]
+        :returns "capability usage snapshot + stale/merge/deprecate candidates with evidence"))
 
     (module-ingress
       (desc "观测 + infra + legacy 3 类写入")
@@ -2643,7 +2782,7 @@
       :trait "MissionStore"
       :code "crates/missiond-core/src/db/traits.rs (~750 行)"
       :stores 9
-      :stores-list "ProjectStore / BoardStore / KbStore / ConversationStore / MessageStore / ObservabilityStore / DirectiveLayerStore (TBD) / SlotStore / InfraStore"
+      :stores-list "ProjectStore / BoardStore / KbStore / ConversationStore / MessageStore / ObservabilityStore / DirectiveLayerStore (code-aligned partial) / SlotStore / InfraStore"
       :v0.4.20-correction "原 lisp 标 13, 和 pillar-interfaces current-traits 9 不一致; 以 pillar-interfaces 为准"
       :invariant "其他 crate 只依赖 trait 不依赖实现"
       (impl pg-store :target "crates/missiond-core/src/db/pg_*/" :status production)
@@ -2690,7 +2829,7 @@
       (module-board                4 "board_tasks + board_task_notes + agent_questions + prompt_snapshots")
       (module-kb-manager           9 "knowledge + 4 kb_* + 4 ast/beacon")
       (module-conversation-logs   15 "conversations + 10 conv/message 派生 + retrospective_results + user_intents")
-      (module-directive-layer      3 "directive + plan + workflow (schema-ready-pending-implementation)")
+      (module-directive-layer      3 "directive + plan + workflow (store+manager code-aligned partial; actors pending)")
       ;; 3 support modules (v0.4.13/14/15 从 category system-support 分化)
       (module-llm-support          3 "gemini_requests + gemini_file_uploads + token_usage_ledger")
       (module-slot-support         3 "slot_sessions + slot_tasks + dynamic_slots")
@@ -2709,7 +2848,7 @@
       "[已解决 v0.4.14] ~~C. compute-runtime 归属~~ — slot-support module 建立后归属明确"
       "[已撤回 v0.4.19] ~~D. spec-db-sync~~ — 方向错 (forge 是单向服务方, 不是协作者); 且命名歧义已在 v0.4.19 rename 解决"
       "E. 派 agent 验证每个模块 owned-tables 在实际代码中是否被正确隔离 (不被其他 pillar 越界读写)"
-      "F. 实现 directive-layer module 的 trait + writer/reader (pending-implementation-checklist 见该 module)"
+      "F. directive-layer 剩余实现: directive-compiler / plan-compiler / workflow-distiller actors + project_id scoping; trait/reader/MCP manager 已完成 partial code-alignment"
       "G. drop 老的 narration 系列表 migration (message_narrations / narration_cursors, v0.4.12 声明但 migration 未写)")
 
     (design-rationale

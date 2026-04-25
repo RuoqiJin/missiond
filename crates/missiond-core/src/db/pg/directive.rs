@@ -217,6 +217,31 @@ impl DirectiveLayerStore for PgMissionStore {
         Ok(rows.into_iter().map(directive_row_to_directive).collect())
     }
 
+    async fn directive_list_recent(
+        &self,
+        status: Option<DirectiveStatus>,
+        limit: i64,
+    ) -> DbResult<Vec<Directive>> {
+        let rows: Vec<DirectiveRow> = match status {
+            Some(s) => sqlx::query_as(&format!(
+                "SELECT {} FROM directive WHERE status = $1 ORDER BY created_at DESC LIMIT $2",
+                DIRECTIVE_COLS
+            ))
+            .bind(s.as_str())
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?,
+            None => sqlx::query_as(&format!(
+                "SELECT {} FROM directive ORDER BY created_at DESC LIMIT $1",
+                DIRECTIVE_COLS
+            ))
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?,
+        };
+        Ok(rows.into_iter().map(directive_row_to_directive).collect())
+    }
+
     // ================================================================
     // plan 表 (6 方法)
     // ================================================================
@@ -328,6 +353,31 @@ impl DirectiveLayerStore for PgMissionStore {
         Ok(row.map(plan_row_to_plan))
     }
 
+    async fn plan_list_recent(
+        &self,
+        status: Option<PlanStatus>,
+        limit: i64,
+    ) -> DbResult<Vec<Plan>> {
+        let rows: Vec<PlanRow> = match status {
+            Some(s) => sqlx::query_as(&format!(
+                "SELECT {} FROM plan WHERE status = $1 ORDER BY created_at DESC LIMIT $2",
+                PLAN_COLS
+            ))
+            .bind(s.as_str())
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?,
+            None => sqlx::query_as(&format!(
+                "SELECT {} FROM plan ORDER BY created_at DESC LIMIT $1",
+                PLAN_COLS
+            ))
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?,
+        };
+        Ok(rows.into_iter().map(plan_row_to_plan).collect())
+    }
+
     // ================================================================
     // workflow 表 (5 方法)
     // ================================================================
@@ -360,6 +410,17 @@ impl DirectiveLayerStore for PgMissionStore {
             WORKFLOW_COLS_WITH_CAST
         ))
         .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(workflow_row_to_workflow))
+    }
+
+    async fn workflow_get_by_id(&self, id: Uuid) -> DbResult<Option<Workflow>> {
+        let row: Option<WorkflowRow> = sqlx::query_as(&format!(
+            "SELECT {} FROM workflow WHERE id = $1",
+            WORKFLOW_COLS_WITH_CAST
+        ))
+        .bind(id)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(workflow_row_to_workflow))

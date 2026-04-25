@@ -10,3 +10,4 @@ pub mod minimax_client;
 pub mod minimax_gateway;
 pub mod prompts;
 pub mod sonnet_gateway;
+pub mod xjp_router_client;

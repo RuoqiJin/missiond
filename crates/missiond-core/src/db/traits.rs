@@ -524,6 +524,8 @@ pub trait ObservabilityStore: Send + Sync {
     async fn insert_incident(&self, id: &str, severity: &str, source: &str, title: &str, description: &str, server_id: Option<&str>, raw_payload: Option<&str>, board_task_id: Option<&str>, dedupe_key: &str) -> DbResult<()>;
     async fn has_recent_incident(&self, dedupe_key: &str, window_secs: i64) -> DbResult<bool>;
     async fn list_incidents(&self, limit: i64) -> DbResult<Vec<IncidentRow>>;
+    async fn get_incident_by_id(&self, id: &str) -> DbResult<Option<IncidentRow>>;
+    async fn update_incident_board_task_id(&self, id: &str, board_task_id: &str) -> DbResult<bool>;
 
     // -- incident.rs: token ledger --
     async fn insert_token_usage(&self, conversation_id: &str, slot_id: Option<&str>, slot_task_id: Option<&str>, model: Option<&str>, input_tokens: i64, cache_creation_tokens: i64, cache_read_tokens: i64, output_tokens: i64, message_id: Option<i64>) -> DbResult<()>;
@@ -665,6 +667,8 @@ pub trait DirectiveLayerStore: Send + Sync {
     async fn directive_approve(&self, id: uuid::Uuid, version: i32) -> DbResult<()>;
     async fn directive_list_by_status(&self, status: DirectiveStatus, limit: i64) -> DbResult<Vec<Directive>>;
     async fn directive_get_version_chain(&self, id: uuid::Uuid) -> DbResult<Vec<Directive>>;
+    /// Recent directives, optionally filtered by status. `limit` capped by caller.
+    async fn directive_list_recent(&self, status: Option<DirectiveStatus>, limit: i64) -> DbResult<Vec<Directive>>;
 
     // -- plan 表 (6 方法) --
     async fn plan_insert(
@@ -683,6 +687,8 @@ pub trait DirectiveLayerStore: Send + Sync {
     async fn plan_supersede(&self, old_id: uuid::Uuid, new_id: uuid::Uuid) -> DbResult<()>;
     async fn plan_list_by_task(&self, board_task_id: &str) -> DbResult<Vec<Plan>>;
     async fn plan_get_latest(&self, board_task_id: &str) -> DbResult<Option<Plan>>;
+    /// Recent plans, optionally filtered by status (cross-task, manager-surface only).
+    async fn plan_list_recent(&self, status: Option<PlanStatus>, limit: i64) -> DbResult<Vec<Plan>>;
 
     // -- workflow 表 (5 方法) --
     async fn workflow_insert(
@@ -693,6 +699,7 @@ pub trait DirectiveLayerStore: Send + Sync {
         learned_from: Option<uuid::Uuid>,
     ) -> DbResult<uuid::Uuid>;
     async fn workflow_get_by_name(&self, name: &str) -> DbResult<Option<Workflow>>;
+    async fn workflow_get_by_id(&self, id: uuid::Uuid) -> DbResult<Option<Workflow>>;
     /// Find workflows whose `match_rules` JSONB contains any token of `query_utterance`.
     /// Simplified: substring match via JSONB `@>`-like text search.
     async fn workflow_find_by_match(&self, query_utterance: &str) -> DbResult<Vec<Workflow>>;

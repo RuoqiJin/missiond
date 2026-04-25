@@ -1,3 +1,4 @@
+pub(crate) mod global_instruction;
 pub(crate) mod health;
 pub(crate) mod infra;
 pub(crate) mod misc;

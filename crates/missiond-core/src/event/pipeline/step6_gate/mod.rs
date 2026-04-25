@@ -67,11 +67,13 @@ pub enum CtlDomain {
 /// |--------------------|----------------|
 /// | Memory             | Memory         |
 /// | Board              | Board          |
-/// | others (10)        | None           |
+/// | others (11)        | None           |
 ///
-/// * `Slot / Task / Question / Llm / Worker / Message / Session / System`
-///   are not bound to a v1 pause bucket — pausing them would require a
-///   new v1 bucket first. For now they are always delivered.
+/// * `Slot / Task / Question / Llm / Worker / Message / Session / System /
+///   Execution` are not bound to a v1 pause bucket — pausing them would
+///   require a new v1 bucket first. For now they are always delivered.
+///   `Execution` carries `mission_execution` claim/audit projection; it is
+///   operational state, not memory mutation, so it stays unbucketed.
 /// * `Observability / Incident` are bus-self-report channels and must
 ///   never be pause-gated (frozen lisp §4.4).
 /// * `Flow` and `Strategy` in v1 `CtlDomain` have no direct v2 `Domain`
@@ -81,7 +83,7 @@ pub fn domain_to_ctl_domain(d: Domain) -> Option<CtlDomain> {
     match d {
         Domain::Memory => Some(CtlDomain::Memory),
         Domain::Board => Some(CtlDomain::Board),
-        // See module doc — remaining 10 domains are intentionally not
+        // See module doc — remaining 11 domains are intentionally not
         // gate-bound. When adding a new CtlDomain bucket, update this
         // match arm and the doc table above.
         Domain::Slot
@@ -93,7 +95,8 @@ pub fn domain_to_ctl_domain(d: Domain) -> Option<CtlDomain> {
         | Domain::Session
         | Domain::System
         | Domain::Observability
-        | Domain::Incident => None,
+        | Domain::Incident
+        | Domain::Execution => None,
     }
 }
 
@@ -173,6 +176,7 @@ mod tests {
             Domain::System,
             Domain::Observability,
             Domain::Incident,
+            Domain::Execution,
         ];
         for d in expected_none {
             assert_eq!(

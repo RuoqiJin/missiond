@@ -159,6 +159,7 @@ pub(crate) fn domain_from_str(s: &str) -> Option<Domain> {
         "system" => Domain::System,
         "observability" => Domain::Observability,
         "incident" => Domain::Incident,
+        "execution" => Domain::Execution,
         _ => return None,
     })
 }

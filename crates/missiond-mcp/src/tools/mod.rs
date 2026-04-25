@@ -172,10 +172,13 @@ mod comm;
 mod sysinfra;
 
 // Domain aliases for readability
-use knowledge::{agent_execution, board, cascade, insight, intent, kb, skill, memory, project};
+use knowledge::{
+    agent_execution, board, cascade, directive, insight, intent, kb, memory, plan, project, skill,
+    workflow,
+};
 use compute::{task, task_delegate, process, pty, cc_tasks, minimax, worker, slot, compute_slot, job, flow_run, forge};
 use comm::{audit, capability_usage, codex_ops, conversation, question, router_chat, timeline};
-use sysinfra::{infra, permission, power, system};
+use sysinfra::{global_instruction, infra, permission, power, system};
 
 /// Generate all tool definitions
 pub fn all_tools() -> Vec<ToolDefinition> {
@@ -188,6 +191,9 @@ pub fn all_tools() -> Vec<ToolDefinition> {
     tools.extend(insight::definitions());
     tools.extend(cascade::definitions());
     tools.extend(intent::definitions());
+    tools.extend(directive::definitions());
+    tools.extend(plan::definitions());
+    tools.extend(workflow::definitions());
     tools.extend(project::definitions());
     tools.extend(agent_execution::definitions());
     // compute
@@ -216,6 +222,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
     tools.extend(permission::definitions());
     tools.extend(power::definitions());
     tools.extend(system::definitions());
+    tools.extend(global_instruction::definitions());
     tools
 }
 
@@ -314,5 +321,94 @@ mod tests {
         let tools = all_tools();
         let names: HashSet<_> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains("mission_job_poll"), "mission_job_poll tool not registered");
+    }
+
+    #[test]
+    fn test_directive_plan_workflow_surfaces_registered() {
+        let tools = all_tools();
+        let names: HashSet<_> = tools.iter().map(|t| t.name.as_str()).collect();
+        for n in ["mission_directive", "mission_plan", "mission_workflow"] {
+            assert!(names.contains(n), "{} not registered", n);
+        }
+    }
+
+    #[test]
+    fn test_global_instruction_surface_registered() {
+        let def = get_tool("mission_global_instruction")
+            .expect("mission_global_instruction not registered");
+        let enums: HashSet<_> = def
+            .input_schema
+            .pointer("/properties/action/enum")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for a in ["read", "edit", "reload"] {
+            assert!(enums.contains(a), "mission_global_instruction missing action `{}`", a);
+        }
+    }
+
+    fn action_enum<'a>(def: &'a ToolDefinition) -> Vec<&'a str> {
+        def.input_schema
+            .pointer("/properties/action/enum")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn test_directive_actions_match_lisp() {
+        let def = get_tool("mission_directive").unwrap();
+        let enums: HashSet<_> = action_enum(&def).into_iter().collect();
+        for a in [
+            "compile",
+            "list",
+            "get",
+            "approve",
+            "archive",
+            "version_chain",
+        ] {
+            assert!(enums.contains(a), "mission_directive missing action `{}`", a);
+        }
+    }
+
+    #[test]
+    fn test_plan_actions_match_lisp() {
+        let def = get_tool("mission_plan").unwrap();
+        let enums: HashSet<_> = action_enum(&def).into_iter().collect();
+        for a in [
+            "compile",
+            "list",
+            "get",
+            "by_task",
+            "approve",
+            "mark",
+            "supersede",
+            "execute",
+            "record_evidence",
+        ] {
+            assert!(enums.contains(a), "mission_plan missing action `{}`", a);
+        }
+    }
+
+    #[test]
+    fn test_workflow_actions_match_lisp() {
+        let def = get_tool("mission_workflow").unwrap();
+        let enums: HashSet<_> = action_enum(&def).into_iter().collect();
+        for a in [
+            "list",
+            "get",
+            "match",
+            "apply",
+            "distill",
+            "record_execution",
+            "compile_methodology",
+            "run_methodology",
+        ] {
+            assert!(enums.contains(a), "mission_workflow missing action `{}`", a);
+        }
     }
 }

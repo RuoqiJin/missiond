@@ -1,13 +1,13 @@
 ;; ═════════════════════════════════════════════════════════════
-;; MissionD — Worker Pillar (phase-B informed v0.3)
+;; MissionD — Worker Pillar (phase-C recursive-contract v0.5)
 ;; 目标: 按 7 subsection pty / llm / xjp-router / context / worker / engine / orchestration
 ;;       重整, 基于 8 份老图 ground-truth 回填 v0.2 缺失的 "详尽设计"
 ;; 底稿: .missiond/intent-pillar-*.lisp (8 份) + drift-audit + memory v0.5.1 frozen
 ;; ═════════════════════════════════════════════════════════════
 
 (pillar worker
-  :version "v0.3"
-  :status "phase-B informed 2026-04-21 — 吸收 8 份老图 ground-truth + 修 v0.2 结构盲区"
+  :version "v0.5"
+  :status "phase-C recursive architecture contract 2026-04-25 — runtime path → ordered mechanics → explicit egress; project-root spawn cwd contract added; claudecode workstation orchestration policy (resident-lisp / fresh-code-alignment / agent-team-hint / spawn-over-prompt-mode / project-root-cwd) operational-practice + architecture-designed; auto-selection by plan-runner code-alignment pending"
   :predecessor "v0.2 2026-04-21 (integrated by 主 Claude)"
   :target-path ".missiond/v2/intent-worker.lisp"
   :integration-notes
@@ -39,7 +39,7 @@
   :design-correction-sources
     [".missiond/v2/intent.lisp :: pillar worker"
      ".missiond/v2/intent.lisp :: pillar intent-layer (含 lisp-survey-worker + learning-engine 迁移依据)"
-     ".missiond/v2/intent-memory.lisp v0.5.1 frozen"
+     ".missiond/v2/intent-memory.lisp v0.5.4 (ProjectRegistry + memory surfaces)"
      ".missiond/workflows/pillar-refactor.lisp"]
   :historical-footprint-sources
     ["旧 semantic-terminal crate (已 Forge 冲压到 missiond-core/src/semantic_parsing/)"
@@ -79,8 +79,8 @@
     (Q-B1
       :question "embedding 是否该留 sonnet_gateway, 还是独立走 xjp-router?"
       :decision "独立 section xjp-router-gateway. sonnet_gateway 去掉 embedding 职责"
-      :rationale "embedding 实际要接入 Windows 12900KF 上的 QWEN 模型, 经 xjp-router HTTP 服务路由. 目前 xjp-router 已接通, missiond 端尚未接入. 此 lisp 描述理想态"
-      :code-status "pending — 需新增 HTTP client (路径 phase-C 施工确定)"
+      :rationale "embedding 实际接入 Windows 12900KF 上的 QWEN 模型, 经 xjp-router HTTP 服务路由. xjp-router typed client 已落地, Sonnet 不再承担 embedding"
+      :code-status "code-aligned — xjp_router_client + EmbeddingProvider adapter + fail-fast no fallback"
       :effect "embedding_worker step 3 从 sonnet_gateway.embed 改指 xjp-router-gateway.embed")
 
     (Q-B2
@@ -119,9 +119,18 @@
       :question "是否向 tools pillar 显式暴露 mcp-surface?"
       :decision "pillar-egress 新增 :mcp-surface-to-tools, 列所有 worker 相关 MCP 工具到 worker path 的映射"
       :coverage "14 compute-tools (pty_* 7 + task_* 3 + compute_slot / slots / worker / job_poll / flow_run / forge_build / forge_lint / sonnet_process / minimax_process / agent) + 4 sysinfra-tools (control / pause / permission_query / permission_mutate)"
-      :rationale "memory pillar v0.5.1 每个 module 都有 :mcp-surface, worker 应对齐"))
+      :rationale "memory pillar v0.5.4 每个 module 都有 :mcp-surface, worker 应对齐"))
 
   (purpose "系统如何把计算派出去 — 7 层执行架构: PTY / LLM / xjp-router / context / worker / engine (runtime-mechanics) / orchestration-governance")
+
+  (recursive-architecture-contract
+    :shape "pillar = ingress → logic-core → egress; path/worker/engine = ingress → logic-core(ordered mechanics) → egress"
+    :unit "worker path 是执行原子; subsection 是执行分子; section 是 execution domain"
+    :rule-1 "worker pillar 只写 runtime mechanics: 何时触发、如何调度、如何执行、如何回写"
+    :rule-2 "认知理由/规划语义归 intent-layer, durable schema 归 memory, endpoint schema 归 tools"
+    :rule-3 "每个 path 的 egress 必须显式列 :writes / :reads / :via-bus / :returns"
+    :rule-4 "所有 slot spawn 必须经过 sole-spawn-bottleneck, 所有长跑 worker 必须声明 lifecycle-style"
+    :rule-5 "所有 CLI slot spawn 必须先解析 target_project_root, 进程 cwd 固定为目标项目根; requested subdir 只能作为 prompt/context, 不能作为 spawn cwd")
 
   (pillar-ingress
     (entry-1 "工具与外部入口: mission_pty_* 7 / mission_compute_slot / mission_worker / mission_task_* 3 / mission_flow_run / mission_forge_{build,lint} / mission_sonnet_process / mission_minimax_process / mission_agent / board task")
@@ -132,18 +141,62 @@
     (entry-6 "文件系统与项目变化: ContextualCommitDetected / git diff / project intent 更新 / ~/.codex / ~/.gemini / ~/.claude/projects"))
 
   (pillar-core
-    (core-1 "WorkerKind 是 ontology (BackgroundWorker::KIND 必须匹配子目录); active-roster 只是实例清单")
-    (core-2 "worker-cluster 与 engine-cluster 并列: worker = 被治理的计算租户; engine = 运行时机制 (timer/DAG/dispatch)")
-    (core-3 "PTY / LLM / xjp-router / context 是 ingress adapter, 负责把外界输入变成可执行计算, 不是 memory owner")
-    (core-4 "worker 对 memory 的所有 durable 读写必须 path-level 显式列出, 对齐 intent-memory.lisp 的 writer/reader 注册表")
-    (core-5 "infra/ 归 system pillar, 但 worker data-plane 穿越点必须显式声明而非暗耦合")
-    (core-6 "lifecycle-style 四分: spawned / on-demand / planned / zombie-deleted")
-    (core-7 "search / retrieval / forge 属于 computation, 留在 worker pillar")
-    (core-8 "sole-spawn-bottleneck: 所有 slot spawn 必经 spawner.rs::spawn_tracked_slot, 0 direct pty.spawn() 调用")
-    (core-9 "LLM 优先级 actor 隔离: sonnet/gemini/minimax 各自独立限流 actor, llm_gate 做全局 kill-switch")
-    (core-10 "embedding 独立 provider via xjp-router (非 sonnet_gateway), 禁止 fallback")
-    (core-11 "learning-engine 的推理逻辑归 intent-layer pillar; worker pillar 只留 BackgroundWorker 触发机制")
-    (core-12 "lisp-survey-worker 与 arch-maintenance-worker 双重归属: 触发 on worker pillar, 语义 ownership on intent-layer pillar"))
+    :contract "worker 把外部信号/工具请求变成可运行计算, 再把结果回写 memory/event-bus 或返回 caller"
+
+    (function execution-adapters
+      (ingress
+        :sources ["PTY terminal frames" "LLM gateway request" "xjp-router HTTP" "context retrieval" "tool dispatch"])
+      (logic-core
+        (step s1 "把外部介质输入规整为 worker path 可消费的 request")
+        (step s2 "套用 provider/slot/control-tree 限流与 pause gate")
+        (step s3 "交给对应 section path 执行"))
+      (egress
+        :to-paths ["pty" "llm-gateways" "xjp-router-gateway" "context-assembly" "worker-side-computation"]))
+
+    (function long-running-worker-cluster
+      (ingress
+        :sources ["event-bus subscription" "interval tick" "filesystem polling"])
+      (logic-core
+        (step s1 "BackgroundWorker::KIND 匹配 worker ontology")
+        (step s2 "按 lifecycle-style spawned/on-demand/planned/zombie-deleted 管理")
+        (step s3 "执行 worker-local / worker-sonnet / worker-pty / worker-gemini path"))
+      (egress
+        :writes "memory pillar owned tables"
+        :emits "domain events or debug telemetry"))
+
+    (function runtime-engines
+      (ingress
+        :sources ["autopilot tick" "mission_flow_run" "mission_skill_exec" "board auto_execute" "task_delegate"])
+      (logic-core
+        (step s1 "选择 runtime: autopilot / flow-engine-v2 / skill workflow executor / task queue")
+        (step s2 "执行 ordered mechanics, 不拥有业务 prescription")
+        (step s3 "把阶段状态、错误、产物回写 memory 或 flow context"))
+      (egress
+        :to-memory ["board_tasks" "skill_executions" "slot_tasks" "tasks"]
+        :to-flow "flow pillar named-flow narrative"))
+
+    (function orchestration-governance
+      (ingress
+        :sources ["mission_control" "mission_pause" "ControlTree watch channel" "provider gates"])
+      (logic-core
+        (step s1 "读取 control-tree / pause state")
+        (step s2 "把治理状态传播到 worker / provider / domain")
+        (step s3 "阻止、恢复或限速执行路径"))
+      (egress
+        :returns "control decision"
+        :writes ["control_tree.json" "daemon_state / incidents as needed"]))
+
+    (core-invariants
+      (core-1 "WorkerKind 是 ontology (BackgroundWorker::KIND 必须匹配子目录); active-roster 只是实例清单")
+      (core-2 "worker-cluster 与 engine-cluster 并列: worker = 被治理的计算租户; engine = 运行时机制")
+      (core-3 "PTY / LLM / xjp-router / context 是 ingress adapter, 不是 memory owner")
+      (core-4 "worker 对 memory 的 durable 读写必须 path-level 显式列出")
+      (core-5 "infra/ 归 system pillar, 但 worker data-plane 穿越点必须显式声明")
+      (core-6 "sole-spawn-bottleneck: 所有 slot spawn 必经 spawner.rs::spawn_tracked_slot")
+      (core-6b "project-root-spawn-cwd: ClaudeCode/Gemini/Codex CLI 工位 spawn cwd 必须是 target_project_root; Gemini/Codex 不允许跨文件夹执行, ClaudeCode 也优先项目根以保证 JSONL/project memory/工具路径稳定")
+      (core-7 "LLM 优先级 actor 隔离: sonnet/gemini/minimax 各自独立限流 actor")
+      (core-8 "embedding 独立 provider via xjp-router (非 sonnet_gateway), 禁止 fallback")
+      (core-9 "learning-engine 推理逻辑归 intent-layer; worker 只留 BackgroundWorker 触发机制")))
 
   (pillar-egress
     (egress-1 "把 durable state 写回 memory pillar 的 conversation-logs / board / kb-manager / slot-support / system-support / llm-support / embedding-support 模块")
@@ -155,7 +208,7 @@
     (cross-pillar-notes
       (memory
         :principle "worker 负责计算与时机, memory 负责 schema / trait / durable ownership"
-        :writer-reader-pattern "每 path egress :writes / :reads / :via-bus 与 intent-memory.lisp v0.5.1 的 :binds-to 对齐"
+        :writer-reader-pattern "每 path egress :writes / :reads / :via-bus 与 intent-memory.lisp v0.5.4 的 :binds-to / ProjectRegistry 契约对齐"
         :table-cross-ref
           (conversation-logs ["conversations" "conversation_messages" "compaction_fragments" "message_labels" "message_translations" "tool_calls" "turns" "turn_topics" "retrospectives" "user_intents" "conversation_turns"])
           (board            ["board_tasks" "board_task_snapshots" "prompt_snapshots"])
@@ -224,11 +277,11 @@
         (mission_pty_status      :path "section pty :: subsection pty-state-machine (查询 FSM 当前 state)")
         (mission_pty_signal      :path "section pty :: subsection pty-transport :: path pty-session-lifecycle (send signal)")
         (mission_pty_confirm     :path "section pty :: subsection learned-permissions (confirm dialog 手动 MCP 路径, 对偶于 auto-approve)")
-        (mission_task_submit     :path "section engine-cluster :: intent-engine :: workflow-executor-runtime")
-        (mission_task_query      :path "section engine-cluster :: intent-engine :: workflow-executor-runtime")
-        (mission_task_cancel     :path "section engine-cluster :: intent-engine :: workflow-executor-runtime")
-        (mission_task_delegate   :path "section engine-cluster :: intent-engine :: workflow-executor-runtime")
-        (mission_compute_slot    :path "section pty :: subsection slot-orchestrator :: path {claude,gemini}-slot-dispatch")
+        (mission_task_submit     :path "handlers/compute/task.rs → legacy tasks queue + slot_dispatch guard + optional spawn_tracked_slot")
+        (mission_task_query      :path "handlers/compute/task.rs → legacy tasks read/control + PTY/progress aggregation for track")
+        (mission_task_cancel     :path "handlers/compute/task.rs → guarded legacy tasks status update")
+        (mission_task_delegate   :path "handlers/compute/task_delegate.rs → idle slot guard / optional compute_slot / board_task auto_execute / dispatch notify")
+        (mission_compute_slot    :path "section pty :: subsection slot-orchestrator :: dynamic slot lifecycle + spawn_tracked_slot")
         (mission_slots           :path "section pty :: subsection slot-orchestrator :: mod.rs (list)")
         (mission_worker          :path "section orchestration-governance :: path pause-resume-cascade (含 set_project P2+P3)")
         (mission_job_poll        :path "section engine-cluster :: intent-engine :: workflow-executor-runtime")
@@ -237,7 +290,8 @@
         (mission_forge_lint      :path "section worker-side-computation :: path forge-build-bridge")
         (mission_sonnet_process  :path "section llm-gateways :: path sonnet-priority-gateway")
         (mission_minimax_process :path "section llm-gateways :: path minimax-legacy-gateway")
-        (mission_agent           :path "section pty :: subsection slot-orchestrator :: path claude-slot-dispatch (cc_tasks)"))
+        (mission_agent           :path "section pty :: subsection slot-orchestrator :: path claude-slot-dispatch (cc_tasks)")
+        (mission_cc_swarm        :path "handlers/compute/cc_tasks.rs → state.pty.send(slot_id, teammate prompt, timeout_ms); prompt-level swarm, not flow-engine-v2 ParallelSlotTasks"))
 
       (sysinfra-tools
         :handler-namespace "crates/missiond-mcp/src/tools/sysinfra/"
@@ -250,6 +304,8 @@
         :note "knowledge-tools (kb/memory/board/skill/intent 等) 主要归 memory pillar + intent-layer pillar; worker pillar 仅在 retrieval-fusion 与 forge 有 co-ownership"
         (mission_code_search      :cross-ref "worker-side-computation :: retrieval-fusion (code_prefetch + fusion ranker)")
         (mission_embedding_ops    :cross-ref "xjp-router-gateway :: path xjp-router-embedding")
+        (mission_board_decompose :cross-ref "knowledge/board handler builds decompose prompt, then optional PTY fire-and-forget dispatch")
+        (mission_submit_phase_result :cross-ref "sysinfra/misc handler advances board flow_phase and may create decision questions")
         (mission_intent           :cross-ref "intent-layer pillar :: lisp files"))))
 
   ;; ══════════════════════════════════════════════════════════
@@ -451,17 +507,41 @@
            "main::handle_slots_reload"
            "cc_controller::spawn_and_register"]
         :pipeline
-          [(step perm-inject    "从 learned_permissions.yaml 读 global+role+project+slot union → settings.local.json")
-           (step tracking-env   "注入 session tracking 环境变量")
-           (step pty-spawn      "实际调 PTYManager.spawn (唯一落点)")
-           (step uuid-capture   "捕获 session UUID, 归入 slot_sessions 表")
-           (step initial-prompt "可选 initial_prompt 注入 (待 Idle 后发送)")])
+                  [(step perm-inject    "从 learned_permissions.yaml 读 global+role+project+slot union → settings.local.json")
+                   (step tracking-env   "注入 session tracking 环境变量")
+                   (step pty-spawn      "实际调 PTYManager.spawn (唯一落点)")
+                   (step uuid-capture   "捕获 session UUID, 归入 slot_sessions 表")
+                   (step initial-prompt "可选 initial_prompt 注入 (待 Idle 后发送)")])
+
+      (invariant project-root-spawn-cwd
+        :status "code-aligned in current worktree; project_root.rs resolver + spawner enforcement + SlotConfig project_root/requested_cwd fields"
+        :function "spawner::spawn_tracked_slot input validation"
+        :statement "任何 ClaudeCode/Gemini/Codex CLI 工位进程的 cwd 必须是目标项目根目录, 不得在跨项目目录或任意子目录 spawn"
+        :why
+          ["ClaudeCode 在项目根内 spawn 时 project memory / JSONL encoded path / tools path 最稳定"
+           "Gemini CLI 与 Codex CLI 不能可靠跨文件夹执行, 必须从要工作的项目根启动"
+           "跨项目复用 slot 会污染上下文、权限学习、conversation.project_id 和文件写入边界"]
+        :resolution-order
+          [(r1 "explicit project_id → projects.path canonical root")
+           (r2 "explicit cwd → ProjectRegistry::resolve(cwd) longest-prefix → projects.path canonical root")
+           (r3 "board_task.project_id / dynamic_slots.config.project_id → projects.path canonical root")
+           (r4 "slot config default project_root only for registered project-bound slots")]
+        :engine-policy
+          ((claude-code :spawn-cwd "target_project_root" :subdir-policy "requested subdir goes into prompt/context; never process cwd")
+           (gemini-cli  :spawn-cwd "target_project_root" :subdir-policy "hard fail if target root unresolved; no cross-folder workaround")
+           (codex-cli   :spawn-cwd "target_project_root" :subdir-policy "hard fail if target root unresolved; no cross-folder workaround"))
+        :reuse-rule "existing slot may be reused for a project-bound task only when slot.project_root == target_project_root; otherwise spawn/select another slot"
+        :fail-fast ["unresolved project root" "cwd outside registered project" "slot project_root mismatch" "engine attempts spawn cwd != target_project_root"]
+        :cross-ref ["memory :: project-management :: project-registry (ProjectRegistry::resolve)"
+                    "flow :: F-workflow-slot-full-lifecycle :: s1b-target-project-root"])
 
       ;; ── SlotConfig 字段 ──
       (slot-config-fields
         (initial_prompt              :type "Option<String>" :doc "首条消息待 slot Idle 后注入")
         (dangerously_skip_permissions :type bool :serde-alias "dangerouslySkipPermissions")
         (mcp_config                  :type "Option<McpConfig>" :serde-alias "mcpConfig")
+        (project_root                :type "Option<PathBuf>" :doc "resolved target_project_root; required for project-bound ClaudeCode/Gemini/Codex CLI spawn")
+        (requested_cwd               :type "Option<PathBuf>" :doc "caller supplied cwd/subdir, preserved for prompt/context only; never used as process cwd after root resolution")
         (auto_start                  :type bool :serde-alias "autoStart"))
 
       ;; ── Registered Tasks (main.rs: "SlotManager: 4 tasks registered") ──
@@ -476,6 +556,43 @@
           :added "commit 79a877f"
           :cross-ref "workers/sonnet/lisp_survey_worker — 触发 on worker, 语义 ownership intent-layer"))
 
+      (fsm dynamic-compute-slot
+        :status "code-aligned for project-root create validation; explicit full FSM docs/tests still incremental"
+        :owner "worker pillar owns runtime state transitions; memory slot-support owns dynamic_slots persistence"
+        :entry-tool "mission_compute_slot(action=create|extend|terminate|list)"
+        :states
+          ["Requested" "Validating" "Persisted" "Spawning" "Idle" "Assigned" "Extending" "Terminating" "Terminated" "Failed" "Expired"]
+        :transitions
+          ((Requested -> Validating :trigger "create action accepted")
+           (Validating -> Persisted :guard "template valid, target_project_root resolved, spawn cwd = project root, active_count < 5, ttl within 5m..8h")
+           (Validating -> Failed :guard "validation error")
+           (Persisted -> Spawning :action "write dynamic_slots active row + async job running")
+           (Spawning -> Idle :action "spawn_tracked_slot reaches FSM Idle")
+           (Spawning -> Failed :action "spawn failure; unregister runtime slot + mark DB failed/terminated")
+           (Idle -> Assigned :trigger "task_delegate / flow SlotTask / manual pty_send claims slot")
+           (Assigned -> Idle :trigger "task completion and slot returns idle")
+           (Idle -> Extending :trigger "extend action")
+           (Assigned -> Extending :trigger "extend action while active task continues")
+           (Extending -> Idle :action "ttl extended if <= max extension policy")
+           (Extending -> Assigned :action "ttl extended while task remains assigned")
+           (Idle -> Terminating :trigger "terminate action or TTL expiry")
+           (Assigned -> Terminating :trigger "force terminate / emergency expiry")
+           (Terminating -> Terminated :action "kill PTY if running, update dynamic_slots, unregister runtime slot")
+           (Idle -> Expired :trigger "supervisor detects ttl expired")
+           (Expired -> Terminating :action "auto reap")
+           (Failed -> Terminated :action "cleanup completed"))
+        :invariants
+          ["active dynamic slot count <= 5"
+           "all create paths go through spawn_tracked_slot"
+           "dynamic slot process cwd must equal resolved target_project_root"
+           "terminate must clear runtime registry and dynamic_slots active row"
+           "extend never exceeds global max TTL policy"
+           "failed spawn must not leak slot_sessions without dynamic_slots linkage"]
+        :events
+          ["SlotSessionChanged on spawn/terminate"
+           "future IncidentEvent::Reported on repeated spawn failure"
+           "TaskEvent/BoardEvent only if slot is bound to delegated task"])
+
       (path claude-slot-dispatch
         :lifecycle-style "on-demand"
         (ingress
@@ -489,8 +606,9 @@
              "crates/missiond-daemon/src/infra/session_util.rs"])
         (logic-core
           (step s1 "agent.rs 依据 task_type / engine / lifecycle 选定 ClaudeCodeSlotManager + SlotTaskConfig")
+          (step s1b "resolve target_project_root from project_id/cwd/task context; reject project-bound spawn if unresolved")
           (step s2 "claude_code.rs 治理 persistent Mutex (memory/supervisor/strategy/lisp-surveyor/arch-surveyor 长驻) 与 ephemeral 信号量并发额度")
-          (step s3 "若复用现有 slot, cc_controller.rs 把 prompt 写入已绑定 PTY; 否则经 spawner.rs → sole-bottleneck → perm_injector.rs → pty.spawn")
+          (step s3 "若复用现有 slot, 必须 slot.project_root == target_project_root; 否则经 spawner.rs → project-root-spawn-cwd → perm_injector.rs → pty.spawn(project_root)")
           (step s4 "cc_controller.rs 绑定 JSONL session (~/.claude/projects/<encoded>/<session_id>.jsonl), 等 TextComplete / idle")
           (step s5 "session_util.rs 辅助 session UUID / project_id 解析, ownership 不在 worker"))
         (egress
@@ -513,9 +631,10 @@
              "crates/missiond-daemon/src/llm/gemini_driver.rs"])
         (logic-core
           (step s1 "agent.rs 选 GeminiCliSlotManager 路径, 同 task_type / config 路由协议")
+          (step s1b "resolve target_project_root; Gemini CLI spawn/dispatch 不允许 unresolved root 或跨项目 cwd")
           (step s2 "gemini_cli.rs 管理 persistent / ephemeral lifecycle 并发门禁")
           (step s3 "gemini_controller.rs 委托 gemini_driver 执行 '/clear + send' 等原子会话动作, synthetic session_id")
-          (step s4 "spawner.rs / perm_injector.rs 仍是统一 bottleneck")
+          (step s4 "spawner.rs / perm_injector.rs 仍是统一 bottleneck, PTY process cwd=target_project_root")
           (step s5 "执行结果与运行态经 PTY 事件 + slot receipt 回流"))
         (egress
           :writes []
@@ -578,7 +697,7 @@
            (step s3 "LearnedPermissions::learn(role, role_id, tool, allow, pattern) [always]")
            (step s4 "if project_path Some → ProjectRegistry::resolve → LearnedPermissions::learn(project, pid, tool, allow, pattern)")
            (step s5 "ConfirmResponse::Option(2) 作为 PTY 写入 (digit + Enter, 80ms apart; unicode curly apostrophe U+2019 归一)")
-           (step s6 "next spawn: perm_injector::sync_learned_to_local_settings(cwd, role, project_id, slot_id, learned) — 合并进 <cwd>/.claude/settings.local.json (idempotent, dedup)")])
+           (step s6 "next spawn: perm_injector::sync_learned_to_local_settings(project_root, role, project_id, slot_id, learned) — 合并进 <project-root>/.claude/settings.local.json (idempotent, dedup)")])
 
       (path learned-permission-read
         :lifecycle-style "on-demand"
@@ -589,12 +708,12 @@
              "crates/missiond-daemon/src/slot_orchestrator/perm_injector.rs"])
         (logic-core
           (step s1 "按 scope-model precedence 从 learned_permissions.yaml 读取 union")
-          (step s2 "perm_injector 合并到 <cwd>/.claude/settings.local.json (preserves existing, dedup 按 (tool_pattern, param_pattern))")
+          (step s2 "perm_injector 合并到 <project-root>/.claude/settings.local.json (preserves existing, dedup 按 (tool_pattern, param_pattern))")
           (step s3 "供 slot spawn 使用, slot 启动后 CC/Gemini CLI 自动从该文件读权限白名单"))
         (egress
           :writes []
           :reads []
-          :file-writes ["<cwd>/.claude/settings.local.json (merged, idempotent)"]
+          :file-writes ["<project-root>/.claude/settings.local.json (merged, idempotent)"]
           :returns "learned permission union"))
 
       (path learned-permission-write
@@ -765,35 +884,65 @@
   ;; ══════════════════════════════════════════════════════════
   (section xjp-router-gateway
     :desc "missiond ↔ xjp-router 服务的统一 HTTP 门面; xjp-router 运行在 Windows 12900KF + RTX3090Ti, 承载 QWEN embedding (+ 未来 chat/rerank)"
-    :status "**已接通未接入** — xjp-router 端已 ready, missiond 端尚无 HTTP client, 本 section 描述理想态, 文件落点 phase-C 施工确定"
+    :status "code-aligned for embedding; xjp_router_client.rs + EmbeddingProvider adapter + fail-fast init implemented, chat/rerank deferred"
     :external-service
       ["service-name: xjp-router"
        "host: Windows 12900KF + RTX3090Ti (tailscale + 公网反代可选)"
        "protocol: HTTP JSON"
        "current-endpoints: POST /embed (QWEN3)"
        "future-endpoints: POST /chat (QWEN chat) / POST /rerank"]
+    :runtime-contract
+      "xjp-router 是独立 provider adapter, 不从 sonnet_gateway 继承 embedding 职责; 所有 embedding caller 只能看见 typed client/embedding path, 不直接拼 HTTP"
     :design-constraints
       ["禁止 fallback (feedback_fail_fast_no_fallback, feedback_no_fallback_embedding)"
        "embedding 只用 QWEN3, 失败直接报错 (不降级到其他 provider)"
        "配置经 secret-store / xjp-mcp-config / daemon env (phase-C 决定)"]
-    :targets-pending
-      ["crates/missiond-daemon/src/llm/xjp_router_client.rs (pending — 新建 HTTP client)"
-       "可能加进 Cargo.toml: reqwest/hyper (多半已存在 transitively)"
-       "daemon config: xjp_router_endpoint / xjp_router_auth_token"]
+    :implemented-targets
+      ["crates/missiond-daemon/src/llm/xjp_router_client.rs"
+       "crates/missiond-daemon/src/workers/sonnet/embedding_worker.rs :: init_embedding_provider"
+       "crates/missiond-daemon/src/llm/sonnet_gateway.rs embedding lane removed"]
+    :config-surface
+      ["MISSION_XJP_ROUTER_ENDPOINT"
+       "MISSION_XJP_ROUTER_AUTH_TOKEN"
+       "MISSION_XJP_ROUTER_EMBED_MODEL (default qwen3)"
+       "MISSION_XJP_ROUTER_EMBED_DIM"
+       "~/.missiond/llm.yaml xjp_router.*"]
+
+    (path xjp-router-client-bootstrap
+      :lifecycle-style "bootstrap / lazy-on-first-use"
+      :status "code-aligned"
+      (ingress
+        :source "daemon bootstrap Phase 3 / first embedding request"
+        :entry-components
+          ["crates/missiond-daemon/src/llm/xjp_router_client.rs"
+           "daemon config/secret source for xjp_router_endpoint + xjp_router_auth_token"])
+      (logic-core
+        (step s1 "resolve endpoint/auth/model from config/secret/env; no hard-coded production default")
+        (step s2 "construct typed XjpRouterClient with timeout, request id, and provider metadata")
+        (step s3 "optional health/capability probe records /embed availability, model=qwen3, vector dimension")
+        (step s4 "register client handle for embedding-worker-loop; chat/rerank remain feature-gated future paths")
+        (step s5 "failure returns explicit provider-init error; no silent fallback to sonnet/gemini"))
+      (egress
+        :writes []
+        :reads ["daemon config / secret source"]
+        :via-bus ["future LlmEvent::ProviderConfigured / ProviderUnavailable"]
+        :returns "XjpRouterClient handle or fail-fast provider init error"))
 
     (path xjp-router-embedding
       :lifecycle-style "on-demand"
-      :status "pending-implementation"
+      :status "code-aligned; no sonnet/gemini fallback"
       (ingress
         :source "embedding_worker EmbeddingTask 处理管道 + 未来 retrieval 预热"
         :entry-components
-          ["crates/missiond-daemon/src/llm/xjp_router_client.rs (pending)"])
+          ["crates/missiond-daemon/src/llm/xjp_router_client.rs"])
       (logic-core
         (step s1 "embedding_worker 组装 EmbeddingTask batch (text 列表)")
-        (step s2 "xjp_router_client.embed(texts) → HTTP POST /embed {model: qwen3, texts: [...]}")
-        (step s3 "路由到 Windows 12900KF 上的 QWEN3 embedding server")
-        (step s4 "返回向量数组, 失败直接上抛 (禁止 fallback 到 sonnet/gemini)")
-        (step s5 "embedding_worker 写回 kb_embeddings / ast_embeddings / turn_topics"))
+        (step s2 "validate batch: non-empty texts, stable item order, caller-provided target kind for writeback")
+        (step s3 "xjp_router_client.embed(texts) → HTTP POST /embed {model: qwen3, texts: [...]}")
+        (step s4 "路由到 Windows 12900KF 上的 QWEN3 embedding server")
+        (step s5 "validate response: vector count equals text count, dimension matches configured model")
+        (step s6 "返回向量数组, 失败直接上抛 (禁止 fallback 到 sonnet/gemini)")
+        (step s7 "embedding_worker 写回 kb_embeddings / ast_embeddings / turn_topics"))
       (egress
         :writes []
         :reads []
@@ -802,13 +951,13 @@
 
     (path xjp-router-chat-future
       :lifecycle-style "planned"
-      :status "not-yet-designed"
-      :rationale "未来 xjp-router 可承载 QWEN chat, 供 agent 级 chat 调用 (替代部分 gemini/sonnet 路径). 现阶段仅占位, 实际 endpoint 与 caller 设计待需求明确")
+      :status "deferred-extension; not needed for current architecture closure"
+      :rationale "当前 code-alignment 只要求 embedding client. QWEN chat 可作为后续 provider extension, 等 xjp-router embedding 稳定后再按 LlmEvent provider lifecycle 扩展")
 
     (path xjp-router-rerank-future
       :lifecycle-style "planned"
-      :status "not-yet-designed"
-      :rationale "检索融合 (retrieval-fusion) 后做 rerank 可能需要更强模型, 走 xjp-router 是候选路径之一"))
+      :status "deferred-extension; not needed for current architecture closure"
+      :rationale "retrieval-fusion 现阶段已可用 vector/fulltext/fuzzy/tag + MMR. xjp-router rerank 是后续质量优化, 不阻塞 embedding provider code-alignment"))
 
   ;; ══════════════════════════════════════════════════════════
   ;; 2.4 Context Assembly (独立于 LLM gateway)
@@ -937,7 +1086,7 @@
           :source "EmbeddingTask MPSC channel from ast_sync_worker / backfill path"
           :entry-components
             ["crates/missiond-daemon/src/workers/sonnet/embedding_worker.rs"
-             "crates/missiond-daemon/src/llm/xjp_router_client.rs (pending v0.3)"])
+             "crates/missiond-daemon/src/llm/xjp_router_client.rs"])
         (logic-core
           (step s1 "消费 embedding_rx / embedding_tx 通道 EmbeddingTask, 分派成 conversation/KB/AST embedding 子路径")
           (step s2 "读 conversations / ast_nodes / kb_entries / compaction_fragments / 既有 embedding 表, 决定增量 upsert 或 backfill")
@@ -1491,18 +1640,22 @@
         :lifecycle-style on-demand
         :depends ["db" "slot_manager"]
         (ingress
-          :source "skill workflow step / engine-side tool dispatch / mission_task_*"
+          :source "mission_skill_exec / skill workflow step / engine-side tool dispatch"
           :entry-components ["crates/missiond-daemon/src/engine/intent_engine/workflow_executor.rs"])
         (logic-core
-          (step s1 "接收 workflow step 定义 / skill execution 请求 / task_submit")
-          (step s2 "按步骤调 MCP 工具 / slot / runtime primitive")
-          (step s3 "结果回上层 engine / handler"))
+          (step s1 "skill_topic_get → 读 skill 文件 → parse_workflow_blocks → 找 action_id")
+          (step s2 "requires_approval / dry_run preview gate")
+          (step s3 "skill_execution_insert + context_hooks(10s timeout)")
+          (step s4 "逐 step resolve ${var} → AppState::call_tool → handlers::dispatch_tool, 每 step 30s timeout")
+          (step s5 "错误策略 stop / skip / retry / fallback:step_id, MAX_STEP_VISITS=5, MAX_DEPTH=3")
+          (step s6 "skill_execution_update(_with_duration) 写 success/failed/context_json"))
         (egress
-          :writes []
-          :reads []
+          :writes ["skill_executions"]
+          :reads ["skill_topics" "skill file content"]
           :via-bus []
-          :returns "workflow step result"
-          :need-more-ground-truth "phase-B I002: workflow_executor 精确表交互")))
+          :memory-cross-ref ["project-management :: skill_*"]
+          :returns "WorkflowResult::Preview/PendingApproval/Success/Failed"
+          :flow-cross-ref "flow pillar :: F-skill-workflow-execution")))
 
     (subsection flow-engine-v2
       :desc "General-purpose declarative YAML → node-sequence 执行器 (与 v1 并存)"
@@ -1636,7 +1789,7 @@
          (timeline-analyst    :role "时间轴分析")]
 
       (intent-analyst-concrete-contract
-        :reason "仅此 sub-engine 在 memory pillar v0.5.1 frozen 里有明确 writer 声明 (ConversationStore::insert_user_intent)"
+        :reason "仅此 sub-engine 在 memory pillar v0.5.4 里有明确 writer 声明 (ConversationStore::insert_user_intent)"
         :path "intent-layer pillar 具体 path (待 phase-A)"
         :cross-ref "intent-memory.lisp :: module conversation-logs :: binds-to intent_analyst")
 
@@ -1725,6 +1878,37 @@
         :file-writes ["control_tree.json"]
         :returns "pause/resume status summary"))
 
+    (path agent-execution-manager-interface
+      :lifecycle-style "on-demand-manager"
+      :status "code-aligned; mission_execution handler/tool wiring + ExecutionEvent live projection implemented"
+      :boundary "memory pillar owns protocol/schema; worker pillar owns runtime manager mechanics; tools pillar owns MCP surface"
+      (ingress
+        :source "mission_execution(action=...) MCP tool / internal multi-agent execution coordinator"
+        :entry-components
+          ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+           ".missiond/v2/*-execution.lisp companion logs"
+           "intent-memory.lisp :: module board :: helper agent-execution-coordination"])
+      (logic-core
+        (step s1 "route 12 actions: open / list / claim / heartbeat / release / deviate / decide / issue / complete / status / audit / repair")
+        (step s2 "open: create execution meta, initialize id-counters and phase-tracker, bind parent_design + scope")
+        (step s3 "claim/heartbeat/release: enforce scope-overlap lock, lease_expires_at, heartbeat extension, stale-claim visibility")
+        (step s4 "deviate/decide/issue/complete: allocate D/DC/I/COMP ids atomically; append typed record; update derived indexes")
+        (step s5 "status/audit: reconstruct active_claims/open_issues/unresolved_deviations/latest_decisions/completed_phases from durable slots")
+        (step s6 "repair: dry-run first; only structural repair is allowed (duplicate id suggestion, stale claim mark, derived-index rebuild)")
+        (step s7 "optional board linkage: if scope references board_task/flow_context, expose execution status to board progress without owning board state"))
+      (egress
+        :writes ["*-execution.lisp meta" "id-counters" "phase-tracker" "claims" "deviations" "decisions" "issues" "completions" "derived-indexes"]
+        :reads ["parent design Lisp" "execution companion log"]
+        :via-bus ["ExecutionEvent::* / BoardTaskStatusChanged when linked"]
+        :memory-cross-ref ["memory :: board :: helper agent-execution-coordination"]
+        :flow-cross-ref "flow pillar :: F-execution-log-governance"
+        :returns "mission_execution action receipt / status report / audit report")
+      (invariants
+        :inv-1 "ID allocation only through manager; no human-written next id"
+        :inv-2 "claim must have lease + heartbeat; stale claim is visible and repairable"
+        :inv-3 "all writes run Lisp paren/schema validation before commit"
+        :inv-4 "repair cannot silently change semantic records; deviations still require commander approval"))
+
     (path daemon-bootstrap-spawn-order
       :lifecycle-style bootstrap
       :authority "intent-pillar-transport-bootstrap.lisp :: daemon-init + v2 intent.lisp :: system-layer :: bootstrap"
@@ -1738,7 +1922,7 @@
           [(Phase-1 "Infrastructure: db pool → embed_model → event_bus")
            (Phase-1.5 "ProjectRegistry: store.list_projects() → ProjectRegistry::new(projects) → SharedProjectRegistry (commit e18d0bf, 需早于 slot_manager)")
            (Phase-2 "Core modules: pty_manager → slot_manager → mission_control")
-           (Phase-3 "Gateways: gemini_gateway → sonnet_gateway → llm_gateway (pending: xjp_router_client)")
+           (Phase-3 "Gateways: gemini_gateway → sonnet_gateway → llm_gateway → xjp_router_client")
            (Phase-4 "Pipelines: context_pipeline → worker_registry → control_tree")
            (Phase-5 "Workers: 17 BackgroundWorker spawn (见 workers/ 子目录)")
            (Phase-6 "Engines & IO: autopilot → ipc-handler → ws-server")])
@@ -1773,6 +1957,122 @@
         :memory-cross-ref ["project-management"]
         :returns "booted runtime topology"
         :need-more-ground-truth "worker 数 / spawn 位点随 main.rs 演化, phase-B 需再扫")))
+
+  ;; ══════════════════════════════════════════════════════════
+  ;; 2.7b ClaudeCode Workstation Orchestration — 把人工运维经验沉淀为一等调度策略
+  ;; ══════════════════════════════════════════════════════════
+  (section claudecode-workstation-orchestration
+    :desc "MissionD 调度 ClaudeCode 工作时的默认策略 — 何时复用常驻 Lisp 会话 / 何时新开代码同构会话 / 何时提示 agent-team / 为何优先 spawn 工位 / 项目根 cwd 契约"
+    :status "operational-practice (人工流程已在用) + architecture-designed (Lisp 已声明); auto-selection by plan-runner code-alignment pending"
+    :rationale "用户提的 5 条真实经验需要从'临时使用技巧'升级为 MissionD plan-runner / worker orchestration 的默认调度规则, 不再依赖某次会话的临时记忆"
+    :scope "本 section 描述 worker pillar 视角的调度策略 — 决策语义同时挂在 intent-layer pillar :: section unified-entry-pipeline :: workstation-dispatch-policy"
+    :flow-cross-ref "flow pillar :: F-workstation-dispatch-policy + F-intent-alignment-plan-execution-loop :: s2 / s4 / s6"
+    :intent-layer-cross-ref "intent-layer pillar :: section unified-entry-pipeline :: workstation-dispatch-policy"
+
+    (policy resident-lisp-architect-session
+      :purpose "持续改 .missiond/v2/*.lisp / 维护架构上下文 / 减少重新定位成本"
+      :preferred-dispatch "复用已有常驻 ClaudeCode slot/session (PTY slot 长期保持, 接 mission_pty_send / mission_task_delegate; 不为每次 Lisp 改动重开会话)"
+      :substrate-tools ["mission_pty_spawn (initial spawn — sole-spawn-bottleneck)"
+                        "mission_pty_send / mission_pty_read (持续对话)"
+                        "mission_task_delegate (用既有 slot 执行新任务)"
+                        "mission_compute_slot (若需要新建 dynamic slot 角色为 lisp-architect)"]
+      :context-asset "已加载的 v2/*.lisp 文件结构、checker 行为、最近一次 alignment topic; 重新定位成本几乎为零"
+      :risk ["上下文可能漂移 — 长期会话中早期错误判断可能被后续累积引用"
+             "每次新任务仍必须读对应 .missiond/claudecode/<topic>.md 任务文件"
+             "每次写完仍必须运行 node scripts/check-architecture-lisp.mjs --all-v2 校验"]
+      :status "operational-practice; spawn 与 send 已是 code-aligned tool; 自动'识别本次任务属于 Lisp 改动并路由到常驻 slot'还需要 plan-runner 实现"
+      :anti-pattern "不要为每次 Lisp 修改重开 fresh ClaudeCode 会话 — 会丢失架构上下文,变成纯 .md 重读")
+
+    (policy fresh-code-alignment-session
+      :purpose "代码同构任务 — Rust / SQL / JS 修改 / 跨多 crate 重构"
+      :preferred-dispatch "新开 ClaudeCode 工位 (mission_pty_spawn 新 slot; 或 mission_compute_slot create dynamic slot)"
+      :substrate-tools ["mission_pty_spawn (新 slot, project-root cwd)"
+                        "mission_compute_slot (create dynamic slot for code-alignment role)"
+                        "mission_task_delegate (把任务挂载到新 slot)"]
+      :why-fresh ["任务 .md 文件自包含 — scope / no-goals / acceptance / files / risks 全部写清楚"
+                  "隔离度更好 — 不被前序 Lisp 设计讨论污染"
+                  "可并发多个独立代码同构任务 (multi-slot fan-out)"
+                  "崩溃 / 上下文炸了 / 中途换主导 agent 都不影响其它 slot"]
+      :requirement ".missiond/claudecode/<topic>.md 必须 self-contained — 任务范围、禁止事项、验收命令、文件列表"
+      :status "operational-practice; spawn 与 task_delegate 已 code-aligned; 自动'识别本次任务属于 code-alignment 并 spawn 新 slot' 待 plan-runner 实现"
+      :risk "若任务 .md 不够自包含, fresh slot 缺乏上下文会反复返工 — 写 .md 的成本由 alignment-author 承担")
+
+    (policy agent-team-hint
+      :purpose "复杂任务可拆分为多个独立读/查/验证子任务 或 跨多个 pillar 定位时的并行加速"
+      :trigger-conditions
+        ["任务可拆成 N≥2 个独立可并行的读/查/扫描子任务"
+         "需要在多个 pillar (memory / worker / flow / intent-layer / tools) 同时定位 anchor"
+         "需要从多个文件并行读取或验证, 而最终汇总写入由单点完成"]
+      :directive "在给 ClaudeCode 的任务 .md 中加入'使用 agent-team 提高效率'文字; ClaudeCode 主会话即会并发开 Explore / general-purpose 子 agent"
+      :guardrail
+        [(read-side "并行子 agent 可以读和给建议 — 不限并发数, 但避免重复搜索同一 anchor")
+         (write-side "最终写入必须由主 agent 串行落笔 — 严禁多个子 agent 并发写同一 Lisp 块, 会造成结构漂移")
+         (file-claim "如必须多 agent 写, 用 mission_execution claims 字段绑定 file scope, 显式 lease + heartbeat")
+         (review-still-required "agent-team 不替代 review gate — alignment / plan 仍要走 unified-entry-pipeline 的 alignment-review-gate 与 plan-review-gate")]
+      :status "operational-practice — 当前由 ClaudeCode 主会话识别 agent-team 提示后调用 Agent tool 并发派 sub-agent; MissionD 自身的 plan-runner 自动加 hint 待实现"
+      :code-alignment-pending "plan-runner 根据 PLAN.lisp 节点的 :parallelism 标签自动在派工 .md 里添加 agent-team 提示"
+      :anti-pattern "不要为简单单文件修改触发 agent-team — 只会增加 token 成本, 不加速")
+
+    (policy spawn-over-prompt-mode
+      :purpose "默认通过 MissionD spawn / resident workstation 调度 ClaudeCode, 尽量少用 `claude -p` 一次性 prompt"
+      :preferred-dispatch "mission_pty_spawn (常驻 slot) 或 mission_compute_slot (动态 slot) — 进入 sole-spawn-bottleneck → spawner.rs::spawn_tracked_slot"
+      :why-spawn-wins
+        ["spawn 工位有显式 cwd / project_root (project-root-spawn-cwd invariant)"
+         "spawn 工位有 MCP config 注入 (perm-injector + mcp_config 字段)"
+         "spawn 工位的 stdout/stderr 进 PTY session, 可被 mission_pty_read / mission_pty_screenshot / extractor pipeline 持续观测"
+         "spawn 工位的 tool_calls 进 conversation_tool_calls 表, 自动纳入 capability-usage-monitor 与 retrospective"
+         "spawn 工位的执行可挂入 mission_execution 12-action 协调面 (claim/heartbeat/release + ExecutionEvent)"
+         "spawn 工位的产物自动落 evidence sidecar (.missiond/v2/plans/<plan_id>.evidence.json)"
+         "session_id 稳定 — JSONL ingest / conversation-logger / retrospective 可线性追溯"]
+      :why-prompt-mode-loses
+        ["`claude -p` 一次性 prompt 没有持久 session_id, conversation 进不了 conversation-logger pipeline"
+         "无 PTY session, extractor / anomaly / screenshot 全部失效"
+         "无 cwd 治理 — project-root-spawn-cwd 不强制"
+         "无法纳入 mission_execution / mission_capability_usage / workflow-distillation 闭环"
+         "崩溃恢复不可观测 — supervisor / ControlTree 看不到此进程"]
+      :exception "仅在以下情况退到 prompt-mode: (1) MissionD daemon 不可用时的人工应急; (2) 真正一次性、无需观测、无需 evidence 的 throwaway 查询; (3) CI/CD 脚本里 ClaudeCode 一行命令"
+      :status "operational-practice; spawn-side 已 code-aligned; '禁止 plan-runner 默认走 -p' 是架构规则, 不是代码 enforce — code-alignment pending"
+      :enforcement-future "plan-runner 默认通过 spawn 路径; 显式 dispatch_strategy=prompt-fallback 才允许 -p; 否则 fail-fast")
+
+    (policy project-root-cwd-contract
+      :purpose "fresh code-alignment 工位的 cwd 必须落在目标项目根 — 与 sole-spawn-bottleneck 的 project-root-spawn-cwd invariant 是同一规则的两端表述"
+      :cross-ref "section pty :: invariant project-root-spawn-cwd (line 516) + worker pillar :: core-6b"
+      :resident-lisp-session-rule "常驻 Lisp 架构会话的 cwd 通常是 missiond 仓库根 (因为本仓 .missiond/v2/*.lisp 是工作面)"
+      :fresh-code-alignment-session-rule "fresh 代码同构会话必须 spawn 在目标项目 root (例: 改 cuthub Rust → spawn cwd = ~/Projects/cuthub; 改 missiond Rust → spawn cwd = ~/Projects/missiond)"
+      :validation "spawner::spawn_tracked_slot 已强制 cwd 解析; 跨项目复用 slot 必须 slot.project_root == target_project_root, 否则另开 slot"
+      :status "code-aligned for spawn cwd enforcement; 任务 .md 中显式声明 :target_project 字段, 让 plan-runner 决定 reuse 还是 new spawn — 这一段的自动选路待实现"
+      :anti-pattern "不要把 missiond 常驻 Lisp 会话用来执行 cuthub 的 Rust 修改 — cwd 不对, project memory / JSONL / tool path 全错位")
+
+    (dispatch-decision-matrix
+      :desc "plan-runner 选择策略的决策表 — 当前由人/上层 actor 手动应用; 未来由 plan-runner 读取 PLAN.lisp 自动应用"
+      :status "architecture-designed; code-alignment pending"
+      (rule lisp-architecture-task
+        :pattern "PLAN.lisp 仅修改 .missiond/v2/*.lisp / .missiond/intent-*.lisp / .missiond/workflows/*.lisp"
+        :strategy "resident-lisp-architect-session — 复用常驻 slot, 不另开"
+        :rationale "架构改动需要 cumulative context; fresh slot 反复读 27+ lisp 文件浪费 token")
+      (rule code-alignment-task
+        :pattern "PLAN.lisp 含 Rust / SQL / JS / TS / Swift 文件修改"
+        :strategy "fresh-code-alignment-session — spawn 新 slot, project-root cwd"
+        :rationale "代码同构需要隔离 + 任务自包含; 任务 .md 已是 self-contained contract")
+      (rule cross-pillar-scan
+        :pattern "PLAN.lisp 含 N≥2 个独立可并行的扫描/读取/验证步骤"
+        :strategy "fresh session + agent-team-hint"
+        :rationale "并行 sub-agent 加速 anchor 定位; 但写入仍由主 agent 单点")
+      (rule mixed-task
+        :pattern "PLAN.lisp 既改 Lisp 又改代码"
+        :strategy "拆 plan: Lisp 改动给 resident-lisp-session, 代码改动给 fresh-code-alignment-session; 用 mission_execution coordination 串接"
+        :rationale "单 slot 同时持两种上下文会互相污染; 最好按文件类型划分 phase")
+      (rule emergency-throwaway
+        :pattern "无需观测 / 无需 evidence / 一次性查询 (例: 临时调试问答)"
+        :strategy "可退到 prompt-mode (claude -p) — fallback only"
+        :rationale "spawn 成本不值得; 但任何会写文件 / 改状态的任务必须走 spawn"))
+
+    (execution-strategy-record
+      :desc "把 plan-runner 选择的策略写进 mission_execution 协调面, 让 evidence-collector 与 capability-usage-monitor 能事后回放"
+      :field "execution.dispatch_strategy ∈ {resident-lisp / fresh-code-alignment / agent-team / prompt-fallback / mixed}"
+      :writer "mission_execution(action=open) 时由 plan-runner 写入"
+      :consumer "evidence-collector 落到 evidence sidecar; capability-usage-monitor 统计各策略命中率"
+      :status "architecture-designed; mission_execution schema 暂未含此字段, 需 code-alignment 时补"))
 
   ;; ══════════════════════════════════════════════════════════
   ;; 2.8 Worker-side Computation (retrieval + forge)
@@ -1835,12 +2135,14 @@
           :finding "无独立 ranker 文件. RRF 内联 context_pipeline.rs:886-893 + 1008-1026 + kb.rs:733 mmr_rerank_cosine. 详 § B.2")
     (I005 :status RESOLVED :resolved-at "2026-04-21"
           :finding "反转 — experience_harvester 是 COMPLETE + ACTIVE (非 planned). Spawn via bus/v2_subscribers.rs:237 on NarrationSessionCompleted. 详 § B.3. zombie-ledger + functional-groups + experience-harvester-active path 已更新")
-    (I006 :status "pending-phase-C"
-          :note "xjp_router_endpoint + xjp_router_auth_token 代码中确认不存在 (phase-B 扫 env 清单验证). phase-C 施工新增 crates/missiond-daemon/src/llm/xjp_router_client.rs + 配置")
-    (I007 :status "future-implementation"
-          :note "intent-layer pillar phase-A 后, board-phase-engine + learning-engine 7 sub 迁离清理. 时机待 intent-layer v0.2")
+    (I006 :status "code-aligned-embedding; chat-rerank-deferred"
+          :note "xjp-router provider adapter 已代码对齐: typed HTTP client + embedding path + config/env + sonnet embedding lane removed; chat/rerank 仍为 deferred extension")
+    (I007 :status "code-aligned"
+          :note "mission_execution 12-action manager-interface 已代码对齐; ExecutionEvent 发射与 Domain::Execution 也已落地")
     (I008 :status RESOLVED :resolved-at "2026-04-21"
           :finding "flow-engine v1 EngineeringPhase 7 phase 全实现 + 闭环 decision_harvest. intent-layer v0.1 board-phase-engine path 已补 transitions-full-implementation 表. 详 § A.4")
-    (I009 :status "awaiting-decision"
-          :note "compute_slot FSM 独立文档决策 — 当前 slot-orchestrator section 已较完整"))
+    (I009 :status "architecture-designed-code-alignment-pending"
+          :note "compute_slot FSM 已补为 slot-orchestrator :: fsm dynamic-compute-slot; 代码对齐阶段补 handler/state tests 与文档锚点")
+    (I010 :status "future-refactor"
+          :note "intent-layer pillar phase-A 后, board-phase-engine + learning-engine 7 sub 迁离清理. 时机待 intent-layer v0.2"))
 )

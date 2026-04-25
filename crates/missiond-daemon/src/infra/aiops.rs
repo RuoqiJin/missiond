@@ -135,6 +135,58 @@ pub(crate) async fn health_scan(state: &AppState) {
 
 // ============ AIOps Reactor ============
 
+/// Parse a free-form severity string into an `IncidentSeverity`.
+/// Unknown values default to `Warning` so user-supplied input stays harmless.
+pub(crate) fn parse_severity(s: &str) -> missiond_core::types::IncidentSeverity {
+    match s {
+        "critical" => missiond_core::types::IncidentSeverity::Critical,
+        "high" => missiond_core::types::IncidentSeverity::High,
+        _ => missiond_core::types::IncidentSeverity::Warning,
+    }
+}
+
+/// Parse a free-form source string into an `IncidentSource`.
+/// Unknown values default to `Manual`.
+pub(crate) fn parse_source(s: &str) -> missiond_core::types::IncidentSource {
+    match s {
+        "health_check" => missiond_core::types::IncidentSource::HealthCheck,
+        "deploy_center" => missiond_core::types::IncidentSource::DeployCenter,
+        "sentry" => missiond_core::types::IncidentSource::Sentry,
+        "pty_slot" => missiond_core::types::IncidentSource::PtySlot,
+        _ => missiond_core::types::IncidentSource::Manual,
+    }
+}
+
+/// Build the dedupe key used to aggregate alerts about the same logical incident.
+///
+/// Pure helper — used both by the bus reactor and the `mission_incident`
+/// `remediate`/`status`/`close` actions.
+pub(crate) fn build_dedupe_key(
+    source: &missiond_core::types::IncidentSource,
+    title: &str,
+) -> String {
+    format!("{}:{}", source, title)
+}
+
+/// Whether a board task linked to an incident is safe for an aiops `close`
+/// action to mark as `done`.
+///
+/// Conservative: only auto-/explicit-close for tasks that aiops itself
+/// created. We identify those by `category == "ops"` and a non-empty
+/// `dedupe_key` (aiops always sets one). User-owned tasks lack the
+/// dedupe_key/ops marker and must be closed manually.
+pub(crate) fn is_safe_to_close_task(
+    task: &missiond_core::types::BoardTask,
+) -> Result<(), &'static str> {
+    if task.dedupe_key.is_none() {
+        return Err("linked board task has no dedupe_key — likely user-owned, refuse auto-close");
+    }
+    if task.category != "ops" {
+        return Err("linked board task category is not 'ops' — refuse auto-close");
+    }
+    Ok(())
+}
+
 /// Process a single incident: state-based alert aggregation.
 ///
 /// Instead of time-window dedup (which races with the 5min scan interval),
@@ -146,7 +198,17 @@ pub(crate) async fn process_incident(
     state: &AppState,
     incident: missiond_core::types::MissionIncident,
 ) {
-    let dedupe_key = format!("{}:{}", incident.source, incident.title);
+    let _ = triage_incident(state, incident).await;
+}
+
+/// Same as [`process_incident`], but returns the linked board task id if one
+/// was created or found. The handler `remediate` action calls this directly
+/// to obtain a deterministic return value without going through the bus.
+pub(crate) async fn triage_incident(
+    state: &AppState,
+    incident: missiond_core::types::MissionIncident,
+) -> Option<String> {
+    let dedupe_key = build_dedupe_key(&incident.source, &incident.title);
 
     // PtySlot incidents: dispatch remediation to a Claude Code (Opus) slot
     if matches!(
@@ -162,7 +224,7 @@ pub(crate) async fn process_incident(
                 .await
                 .ok()
                 .flatten();
-            if let Some(ref task) = existing {
+            let pty_task_id = if let Some(ref task) = existing {
                 let note = format!(
                     "🔄 告警重复触发 +1 ({})",
                     chrono::Utc::now().format("%m-%d %H:%M UTC")
@@ -177,6 +239,7 @@ pub(crate) async fn process_incident(
                     })
                     .await;
                 debug!(task_id = %task.id, status = task.status.as_str(), "AIOps: PTY alert aggregated into existing task");
+                Some(task.id.to_string())
             } else {
                 create_pty_remediation_task(
                     state,
@@ -185,8 +248,8 @@ pub(crate) async fn process_incident(
                     &incident.description,
                     &dedupe_key,
                 )
-                .await;
-            }
+                .await
+            };
             if let Err(e) = state
                 .store
                 .insert_incident(
@@ -197,14 +260,14 @@ pub(crate) async fn process_incident(
                     &incident.description,
                     incident.server_id.as_deref(),
                     Some(&incident.raw_payload.to_string()),
-                    None,
+                    pty_task_id.as_deref(),
                     &dedupe_key,
                 )
                 .await
             {
                 warn!(error = %e, "AIOps: failed to insert incident record");
             }
-            return;
+            return pty_task_id;
         }
     }
 
@@ -350,19 +413,23 @@ pub(crate) async fn process_incident(
     {
         warn!(error = %e, "AIOps: failed to insert incident record");
     }
+
+    board_task_id
 }
 
 // ============ PTY Auto-Remediation ============
 
 /// Dispatch a remediation Board task to a Claude Code (Opus) slot.
 /// The slot will use MCP tools (pty_screen, pty_send, pty_kill) to observe and fix.
+///
+/// Returns the new board task id on success, or None if creation failed.
 pub(crate) async fn create_pty_remediation_task(
     state: &AppState,
     target_slot_id: &str,
     incident_title: &str,
     incident_description: &str,
     dedupe_key: &str,
-) {
+) -> Option<String> {
     let description = format!(
         "## PTY 工位自愈任务\n\n\
          **目标工位**: `{target_slot}`\n\
@@ -405,8 +472,9 @@ pub(crate) async fn create_pty_remediation_task(
 
     match state.store.create_board_task(&task_input).await {
         Ok(task) => {
+            let id = task.id.to_string();
             info!(
-                task_id = %task.id,
+                task_id = %id,
                 target_slot = %target_slot_id,
                 "PTY remediation: Board task created for Opus slot"
             );
@@ -417,9 +485,110 @@ pub(crate) async fn create_pty_remediation_task(
                     task_id: String::new(),
                 })
                 .await;
+            Some(id)
         }
         Err(e) => {
             error!(error = %e, "PTY remediation: failed to create Board task");
+            None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use missiond_core::types::{
+        BoardTask, BoardTaskStatus, IncidentSeverity, IncidentSource, TaskId,
+    };
+
+    fn make_task(category: &str, dedupe_key: Option<&str>) -> BoardTask {
+        BoardTask {
+            id: TaskId::from_trusted("task-1".to_string()),
+            title: "t".into(),
+            description: String::new(),
+            status: BoardTaskStatus::Open,
+            priority: "medium".into(),
+            category: category.into(),
+            project: None,
+            server: None,
+            due_date: None,
+            parent_id: None,
+            assignee: None,
+            auto_execute: false,
+            prompt_template: None,
+            hidden: false,
+            retry_count: 0,
+            max_retries: 2,
+            order_idx: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+            claim_executor_id: None,
+            claim_executor_type: None,
+            claimed_at: None,
+            flow_phase: None,
+            flow_context: None,
+            flow_template: None,
+            depends_on: Vec::new(),
+            lease_expires_at: None,
+            dedupe_key: dedupe_key.map(|s| s.to_string()),
+            timeout_secs: None,
+            context_intent: None,
+            trigger_source: None,
+            notes_count: 0,
+        }
+    }
+
+    #[test]
+    fn dedupe_key_combines_source_and_title() {
+        let key = build_dedupe_key(&IncidentSource::HealthCheck, "Disk full");
+        assert_eq!(key, "health_check:Disk full");
+    }
+
+    #[test]
+    fn dedupe_key_distinguishes_sources() {
+        let a = build_dedupe_key(&IncidentSource::Manual, "Disk full");
+        let b = build_dedupe_key(&IncidentSource::HealthCheck, "Disk full");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn parse_severity_known_values() {
+        assert_eq!(parse_severity("critical"), IncidentSeverity::Critical);
+        assert_eq!(parse_severity("high"), IncidentSeverity::High);
+        assert_eq!(parse_severity("warning"), IncidentSeverity::Warning);
+    }
+
+    #[test]
+    fn parse_severity_falls_back_to_warning() {
+        assert_eq!(parse_severity("garbage"), IncidentSeverity::Warning);
+        assert_eq!(parse_severity(""), IncidentSeverity::Warning);
+    }
+
+    #[test]
+    fn parse_source_known_values() {
+        assert!(matches!(
+            parse_source("health_check"),
+            IncidentSource::HealthCheck
+        ));
+        assert!(matches!(parse_source("pty_slot"), IncidentSource::PtySlot));
+        assert!(matches!(parse_source("garbage"), IncidentSource::Manual));
+    }
+
+    #[test]
+    fn safe_close_requires_dedupe_key() {
+        let task = make_task("ops", None);
+        assert!(is_safe_to_close_task(&task).is_err());
+    }
+
+    #[test]
+    fn safe_close_requires_ops_category() {
+        let task = make_task("dev", Some("k"));
+        assert!(is_safe_to_close_task(&task).is_err());
+    }
+
+    #[test]
+    fn safe_close_accepts_aiops_owned_task() {
+        let task = make_task("ops", Some("health_check:foo"));
+        assert!(is_safe_to_close_task(&task).is_ok());
     }
 }

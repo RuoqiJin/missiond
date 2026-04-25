@@ -1,10 +1,11 @@
-//! `Domain` — the 12 static domains of the event bus.
+//! `Domain` — the static domains of the event bus.
 //!
 //! Frozen lisp §4.2.a: every `DomainEvent` enum maps to exactly one `Domain`,
-//! and the topic registry is keyed by `Domain`. 12 values is a starting point
-//! — a hot variant can later be promoted to its own sub-topic (see frozen
-//! lisp `escape-hatch`), but the 12-domain cardinality is the compile-time
-//! contract today.
+//! and the topic registry is keyed by `Domain`. The set started at 12 in
+//! Phase 1; `planned-event-extensions` in the same lisp explicitly anticipates
+//! growth ("12 域是起点不是终点"). `Execution` was added when
+//! `mission_execution` (commit 4ab7994) needed live status / audit
+//! projection alongside the durable companion log.
 
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +28,7 @@ pub enum Domain {
     System,
     Observability,
     Incident,
+    Execution,
 }
 
 impl Domain {
@@ -46,12 +48,13 @@ impl Domain {
             Self::System => "system",
             Self::Observability => "observability",
             Self::Incident => "incident",
+            Self::Execution => "execution",
         }
     }
 
     /// Full ordered list — used by `bus.topics()` to enumerate topics at
     /// startup. Order is stable and mirrors declaration order.
-    pub const ALL: [Domain; 12] = [
+    pub const ALL: [Domain; 13] = [
         Domain::Slot,
         Domain::Board,
         Domain::Task,
@@ -64,6 +67,7 @@ impl Domain {
         Domain::System,
         Domain::Observability,
         Domain::Incident,
+        Domain::Execution,
     ];
 }
 
@@ -77,7 +81,7 @@ mod tests {
         for d in Domain::ALL {
             assert!(seen.insert(d.as_str()), "duplicate label: {}", d.as_str());
         }
-        assert_eq!(seen.len(), 12);
+        assert_eq!(seen.len(), Domain::ALL.len());
     }
 
     #[test]

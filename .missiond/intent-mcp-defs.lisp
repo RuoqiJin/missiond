@@ -614,14 +614,18 @@
     :returns "Value")
 
   (tool mission_incident
-    :description "AIOps Incident 管理。test: 手动注入; list: 列出记录"
+    :description "AIOps Incident 管理。test/list/get/remediate/status/close — F-incident-reaction"
     (input
-      (action   string :required :enum (test list))
-      (severity string :default "warning" :description "[test] critical/high/warning")
-      (title    string :default "Test incident" :description "[test] Incident 标题")
-      (source   string :default "manual" :description "[test] health_check/deploy_center/sentry/manual")
-      (server_id string :description "[test] 关联 infra server ID")
-      (limit    number :default 20 :description "[list] 返回条数(最大 100)"))
+      (action   string :required :enum (test list get remediate status close))
+      (id       string :description "[get/remediate/status/close] Incident ID")
+      (severity string :default "warning" :description "[test/remediate] critical/high/warning")
+      (title    string :description "[test/remediate] Incident 标题")
+      (description string :description "[remediate] 详细描述（仅新建 incident 时使用）")
+      (source   string :default "manual" :description "[test/remediate] health_check/deploy_center/sentry/manual/pty_slot")
+      (server_id string :description "[test/remediate] 关联 infra server ID")
+      (limit    number :default 20 :description "[list] 返回条数(最大 100)")
+      (reason   string :description "[close] 关闭理由（必填，自由文本）")
+      (actor    string :description "[close] 执行者标识（必填，如 commander/slot-ops/oncall）"))
     :returns "Value"
     :dispatch-on action))
 

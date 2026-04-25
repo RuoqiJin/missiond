@@ -17,7 +17,7 @@
     :branch       "refactor/event-bus-v2"
     :started      "2026-04-19"
     :status       "completed"
-    :phase-cursor 10)
+    :phase-cursor 15)
 
   ;; ─ 阶段追踪 ─
   (phases
@@ -45,6 +45,14 @@
              :summary "god-file split per lisp v1.1.0: step3_commit(1008→8 files) / step5_tail(883→4) / combinators(600→6 in subdir) / lifecycle(498→2) / in_memory(575→4) — 零功能改动,保持 358 tests 零回归")
     (phase-10 :status "completed" :owner "phase10-reorg" :started "2026-04-19" :completed "2026-04-19"
              :summary "pipeline/ 七步模块化重组,lisp target 路径对齐。零功能改动,仅物理重排:`event/` 下新建 `pipeline/step{1..7}_*/` 目录 + `lifecycle/` 目录;`guards/` 删除(内容迁入 step1_guard/);`log/writer.rs` → `pipeline/step3_commit/log_writer.rs`;`log/retention.rs` → `lifecycle/retention.rs`;`dispatcher/{tail,control_gate,topic,registry}.rs` → `pipeline/step{5,6,7}_*/`;`blob_store/claim_check.rs` → `pipeline/step2_decide/claim_check.rs`。所有 legacy `event::{log,guards,dispatcher,blob_store}::…` 导入路径保留可用(通过 back-compat re-export)。frozen lisp §4.2 共 7 条 :target 路径更新对齐新结构。测试状态:missiond-core --lib 255 pass(原 250 + 5 个 Phase 10 新增 doc-anchor 测试:step1_guard/type_resolve×1 + step2_decide/persistence_policy×2 + step4_ack/ack_transport×2);event_chaos 12 pass 无 regression;missiond-daemon 96 pass 无 regression。"))
+    (phase-12 :status "completed" :owner "codex-lisp-architecture" :started "2026-04-25" :completed "2026-04-25"
+             :summary "v1.3.1 planning-only 架构标注: 为 future mission_execution 增加 ExecutionEvent planned extension, 为 xjp-router provider bootstrap 增加 LlmEvent provider lifecycle planned variants. 不改当前 12 domain implemented contract,不改代码。")
+    (phase-13 :status "completed" :owner "codex-lisp-architecture" :started "2026-04-25" :completed "2026-04-25"
+             :summary "v1.3.2 架构解锁与 SessionCompleted 契约: 用户彻底解锁 event-bus/memory Lisp,允许跨 pillar 设计时直接修改; 增加 SessionEvent completion emit contract,明确 producers/payload/consumers/idempotency。")
+    (phase-14 :status "completed" :owner "codex-lisp-architecture" :started "2026-04-25" :completed "2026-04-25"
+             :summary "v1.3.3 capability usage observability marker: 为 tool/flow 调用热度监控追加 planned ObservabilityEvent::CapabilityUsageSnapshot / CapabilityStaleCandidate,不改当前 12-domain implemented contract。")
+    (phase-15 :status "completed" :owner "claudecode-event-bus-code-alignment + codex-lisp-architecture" :started "2026-04-25" :completed "2026-04-25"
+             :summary "v1.3.4 code alignment: 新增 Domain::Execution + ExecutionEvent enum, mission_execution mutating/audit/repair actions 发 live projection; ObservabilityEvent 增 CapabilityUsageSnapshot / CapabilityStaleCandidate, mission_capability_usage snapshot/report/candidates 发射。Domain::ALL 当前 13。"))
 
   ;; ─ 并行锁表(防 agent 冲突) ─
   ;; 格式: (claim :phase N :scope "path/description" :agent "name" :claimed-at "..." :released-at "..."|nil)
@@ -67,6 +75,14 @@
            :claimed-at "2026-04-19T00:00:00Z" :released-at "2026-04-19T00:00:00Z")
     (claim :phase 11 :scope "crates/missiond-core/src/event/pipeline/step3_commit/** + crates/missiond-core/src/event/pipeline/step5_tail/**" :agent "phase11-alpha-pipeline"
            :claimed-at "2026-04-19T00:00:00Z" :released-at "2026-04-19T00:00:00Z")
+    (claim :phase 12 :scope ".missiond/v2/intent-event-bus.lisp planned-event-extensions + execution log rationale" :agent "codex-lisp-architecture"
+           :claimed-at "2026-04-25T00:00:00+08:00" :released-at "2026-04-25T00:00:00+08:00")
+    (claim :phase 13 :scope ".missiond/v2/intent-event-bus.lisp unlock governance + SessionEvent completion contract" :agent "codex-lisp-architecture"
+           :claimed-at "2026-04-25T00:00:00+08:00" :released-at "2026-04-25T00:00:00+08:00")
+    (claim :phase 14 :scope ".missiond/v2/intent-event-bus.lisp planned capability usage ObservabilityEvent markers" :agent "codex-lisp-architecture"
+           :claimed-at "2026-04-25T00:00:00+08:00" :released-at "2026-04-25T00:00:00+08:00")
+    (claim :phase 15 :scope ".missiond/v2/intent-event-bus.lisp v1.3.4 event extension implementation status" :agent "codex-lisp-architecture"
+           :claimed-at "2026-04-25T00:00:00+08:00" :released-at "2026-04-25T00:00:00+08:00")
     )
 
   ;; ─ 偏离 frozen lisp 的记录 ─
@@ -534,7 +550,26 @@
               :topic "legacy import path 的 back-compat 策略:立即下架 vs 保留 re-export shim"
               :chose "保留 `event::{log,dispatcher,guards,blob_store}::…` 作为 re-export shim,每个 old-path module 在 mod.rs 顶部加'canonical home pointer'注释"
               :rationale "Phase 10 的契约是零功能改动 + 测试零回归。一次性重命名导入路径会在 daemon / tests / missiond-mcp 造成 ~50+ 行 churn,与'物理重排只影响目录结构'的 Phase 10 范围冲突。保留 shim 让重构对下游透明,旧路径清零可在将来独立的 Phase 11(imports-cleanup)做。shim 模块(`dispatcher/mod.rs` 的 `pub mod control_gate { pub use crate::event::pipeline::step6_gate::*; }` 等)只是 `pub use` 转发,无任何运行时成本。")
-)
+
+    (decision :id DC055 :phase 12 :date "2026-04-25"
+              :topic "future mission_execution / xjp-router 是否现在改 12 domain 契约"
+              :chose "不改当前实现的 12 domain contract; 只在 intent-event-bus.lisp v1.3.1 追加 planned-event-extensions"
+              :rationale "mission_execution manager 与 xjp_router_client 都还处于 Lisp 架构设计/代码对齐待做阶段。现在直接新增 Domain::Execution 或 LlmEvent provider lifecycle variants 会让 frozen event-bus 的代码同构状态失真。用 planned-event-extensions 先把未来事件形状记录清楚,同时保留 implemented 12-domain contract 的准确性。")
+
+    (decision :id DC056 :phase 13 :date "2026-04-25"
+              :topic "event-bus / memory Lisp 是否继续 frozen ask-before-edit"
+              :chose "按用户新指令改为 architecture-unlocked: 跨 pillar 设计需要时直接修改,但重大事件契约仍写 execution log"
+              :rationale "后续 ClaudeCode 代码同构前需要先把 Lisp 架构闭合。若 memory/event-bus 仍冻结,flow/worker/tools 设计会为迁就旧锁而绕路。用户已明确要求彻底解锁,所以治理从 ask-before-edit 改为 direct-edit-with-record。")
+
+    (decision :id DC057 :phase 13 :date "2026-04-25"
+              :topic "SessionCompleted emit contract 放哪里"
+              :chose "不新增 domain; 使用现有 SessionEvent::Completed,在 event-types 下补 session-completion-contract"
+              :rationale "Session domain 与 Completed variant 已实现于 v1.3.1 的 12-domain 契约内。当前缺的是生产者、payload、消费者和幂等规则的架构说明,不是新 enum。补 contract 能直接服务 F8 retrospective / strategy / experience_harvester 的代码对齐。")
+
+    (decision :id DC058 :phase 14 :date "2026-04-25"
+              :topic "tool/flow 用量监控是否新增事件 domain"
+              :chose "不新增 domain; 作为 planned ObservabilityEvent variants: CapabilityUsageSnapshot / CapabilityStaleCandidate"
+              :rationale "用量监控是对现有 capability 的观测,不是新的业务实体。耐久证据仍来自 memory/tool audit 与 event_log,ObservabilityEvent 只服务 live projection / review notification,并默认 ephemeral 避免自观测数据污染主日志。")
 
   ;; ─ 阶段完成记录 ─
   ;; 格式: (completion :phase N :date "..." :agent "name"
@@ -866,7 +901,43 @@
         ".missiond/v2/intent-event-bus-execution.lisp (updated — phase-11 α claim + D008/D009 + phase-11 α completion entry)")
       :tests-added 0
       :verified-by "cargo build -p missiond-core clean;cargo build --workspace clean;cargo test -p missiond-core --lib → 255 passed,0 failed(无 regression vs Phase 10 基准);cargo test -p missiond-core --test event_chaos → 12 passed,0 failed(chaos 无 regression);cargo test -p missiond-daemon → 96 passed,0 failed(daemon 无 regression)"
-      :notes "零功能改动的 pipeline 物理拆分,对应 frozen lisp v1.1.0 §4.2 step-3 commit / §4.2 step-5 tail 两处 god-file 切分要求。2 task 全部完成 + 测试零回归:(1) step3_commit/log_writer.rs 1008 行 → 8 文件:log_writer.rs(~676 含 tests) + handle.rs(140) + backend.rs(58) + pg_backend.rs(118) + dedup.rs(53) + backpressure.rs(61) + failure_mode.rs(61) + seq_authority.rs(34,Phase 10 unchanged),mod.rs 45 行,总 ~1246 行(含扩展 doc 和 tests);(2) step5_tail/mod.rs 883 行 → 4 文件:mod.rs(636 含 tests) + tail_source.rs(60) + pg_tail.rs(128) + dispatcher.rs(155),总 ~979 行(含扩展 doc)。核心移动:is_unique_violation 从 pg_backend 抽入 dedup(表达 contract 而非驱动细节);exp_backoff + retry 常量从 log_writer 抽入 failure_mode(与 failure docs 同居);PendingAppend + 3 个 const 从 log_writer 抽入 backpressure。公共 API 100% 兼容:event::pipeline::step3_commit::* / event::pipeline::step5_tail::* / event::log::{writer mod,spawn_log_writer,LogWriterHandle,PendingAppend,...} / event::dispatcher::{TailSource,PgTailSource,DispatchMetrics,DispatchError,TailError,run_tail,...} 所有既有导入路径继续工作。未触 subscription/ / in_memory/(agent β 的分区),未改 frozen lisp。"))
+      :notes "零功能改动的 pipeline 物理拆分,对应 frozen lisp v1.1.0 §4.2 step-3 commit / §4.2 step-5 tail 两处 god-file 切分要求。2 task 全部完成 + 测试零回归:(1) step3_commit/log_writer.rs 1008 行 → 8 文件:log_writer.rs(~676 含 tests) + handle.rs(140) + backend.rs(58) + pg_backend.rs(118) + dedup.rs(53) + backpressure.rs(61) + failure_mode.rs(61) + seq_authority.rs(34,Phase 10 unchanged),mod.rs 45 行,总 ~1246 行(含扩展 doc 和 tests);(2) step5_tail/mod.rs 883 行 → 4 文件:mod.rs(636 含 tests) + tail_source.rs(60) + pg_tail.rs(128) + dispatcher.rs(155),总 ~979 行(含扩展 doc)。核心移动:is_unique_violation 从 pg_backend 抽入 dedup(表达 contract 而非驱动细节);exp_backoff + retry 常量从 log_writer 抽入 failure_mode(与 failure docs 同居);PendingAppend + 3 个 const 从 log_writer 抽入 backpressure。公共 API 100% 兼容:event::pipeline::step3_commit::* / event::pipeline::step5_tail::* / event::log::{writer mod,spawn_log_writer,LogWriterHandle,PendingAppend,...} / event::dispatcher::{TailSource,PgTailSource,DispatchMetrics,DispatchError,TailError,run_tail,...} 所有既有导入路径继续工作。未触 subscription/ / in_memory/(agent β 的分区),未改 frozen lisp。")
+
+    (completion
+      :phase 12 :date "2026-04-25" :agent "codex-lisp-architecture"
+      :deliverables (".missiond/v2/intent-event-bus.lisp v1.3.1 planned-event-extensions"
+                     ".missiond/v2/intent-event-bus-execution.lisp phase-12 + DC055")
+      :tests-added 0
+      :verified-by "node scripts/check-architecture-lisp.mjs --all-v2; git diff --check"
+      :notes "只做架构标注,不改代码实现。ExecutionEvent 被记录为 mission_execution manager 落地后的 candidate domain,但当前 Domain::ALL 仍是 12 个已实现域。xjp-router provider lifecycle 被记录为未来 LlmEvent variant extension,当前 xjp_router_client 代码仍待 worker I006 对齐。")
+
+    (completion
+      :phase 13 :date "2026-04-25" :agent "codex-lisp-architecture"
+      :deliverables (".missiond/v2/intent-event-bus.lisp v1.3.2 architecture-unlocked governance"
+                     ".missiond/v2/intent-event-bus.lisp session-completion-contract"
+                     ".missiond/v2/intent-event-bus-execution.lisp phase-13 + DC056/DC057")
+      :tests-added 0
+      :verified-by "node scripts/check-architecture-lisp.mjs --all-v2; git diff --check"
+      :notes "只做 Lisp 架构设计,不改代码实现。SessionEvent::Completed 保持现有 Session domain,新增 contract 指明 pty_event_worker / conversation organizer / flow-engine-v2 / backfill 等生产入口,以及 retro_worker、strategy_worker、experience_harvester、timeline/ws projection 等消费者。")
+
+    (completion
+      :phase 14 :date "2026-04-25" :agent "codex-lisp-architecture"
+      :deliverables (".missiond/v2/intent-event-bus.lisp v1.3.3 planned capability usage ObservabilityEvent markers"
+                     ".missiond/v2/intent-event-bus-execution.lisp phase-14 + DC058")
+      :tests-added 0
+      :verified-by "node scripts/check-architecture-lisp.mjs --all-v2; git diff --check"
+      :notes "只做 Lisp 架构设计,不改代码实现。CapabilityUsageSnapshot / CapabilityStaleCandidate 被标为 planned ObservabilityEvent extension; 当前 Domain::ALL 和 ObservabilityEvent 已实现 variants 不变。")
+
+    (completion
+      :phase 15 :date "2026-04-25" :agent "codex-lisp-architecture"
+      :deliverables (".missiond/v2/intent-event-bus.lisp v1.3.4 implemented ExecutionEvent + CapabilityUsage ObservabilityEvent status"
+                     "crates/missiond-core/src/event/events/execution.rs"
+                     "crates/missiond-core/src/event/events/observability.rs"
+                     "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+                     "crates/missiond-daemon/src/handlers/comm/capability_usage.rs")
+      :tests-added "reported by claudecode: ExecutionEvent serde/domain tests + ObservabilityEvent variant tests + handler compile coverage"
+      :verified-by "reported by claudecode: cargo build --workspace; cargo test -p missiond-core --lib; cargo test -p missiond-daemon; node scripts/check-architecture-lisp.mjs --all-v2; git diff --check"
+      :notes "代码同构批次已把 phase-12/14 planned markers 落地为真实事件:Domain::Execution 加入 Domain::ALL(13),mission_execution 读操作 list/status 不发事件,mutating/audit/repair 发 ExecutionEvent;mission_capability_usage snapshot/report/candidates 发 ObservabilityEvent::CapabilityUsageSnapshot, candidates 额外按行发 CapabilityStaleCandidate; mark/ack 不发。"))
 
   ;; ─ 全局备忘(跨阶段需要记住的事) ─
   (global-notes

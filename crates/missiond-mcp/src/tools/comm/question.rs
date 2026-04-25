@@ -78,17 +78,21 @@ pub fn definitions() -> Vec<ToolDefinition> {
         // ===== mission_incident =====
         ToolDefinition::new(
             "mission_incident",
-            "AIOps Incident 管理。test: 手动注入; list: 列出记录",
+            "AIOps Incident 管理。test/list/get/remediate/status/close — F-incident-reaction",
             json!({
                 "type": "object",
                 "required": ["action"],
                 "properties": {
-                    "action": {"type": "string", "enum": ["test", "list"]},
-                    "severity": {"type": "string", "description": "[test] critical/high/warning", "default": "warning"},
-                    "title": {"type": "string", "description": "[test] Incident 标题", "default": "Test incident"},
-                    "source": {"type": "string", "description": "[test] health_check/deploy_center/sentry/manual", "default": "manual"},
-                    "server_id": {"type": "string", "description": "[test] 关联 infra server ID"},
-                    "limit": {"type": "number", "description": "[list] 返回条数(最大 100)", "default": 20}
+                    "action": {"type": "string", "enum": ["test", "list", "get", "remediate", "status", "close"]},
+                    "id": {"type": "string", "description": "[get/remediate/status/close] Incident ID"},
+                    "severity": {"type": "string", "description": "[test/remediate] critical/high/warning", "default": "warning"},
+                    "title": {"type": "string", "description": "[test/remediate] Incident 标题"},
+                    "description": {"type": "string", "description": "[remediate] 详细描述（仅新建 incident 时使用）"},
+                    "source": {"type": "string", "description": "[test/remediate] health_check/deploy_center/sentry/manual/pty_slot", "default": "manual"},
+                    "server_id": {"type": "string", "description": "[test/remediate] 关联 infra server ID"},
+                    "limit": {"type": "number", "description": "[list] 返回条数(最大 100)", "default": 20},
+                    "reason": {"type": "string", "description": "[close] 关闭理由（必填，自由文本）"},
+                    "actor": {"type": "string", "description": "[close] 执行者标识（必填，如 commander/slot-ops/oncall）"}
                 }
             }),
         ),

@@ -34,8 +34,9 @@ use missiond_core::event::{
         TailSource,
     },
     events::{
-        BoardEvent, IncidentEvent, LlmEvent, MemoryEvent, MessageEvent, ObservabilityEvent,
-        QuestionEvent, SessionEvent, SlotEvent, SystemEvent, TaskEvent, WorkerEvent,
+        BoardEvent, ExecutionEvent, IncidentEvent, LlmEvent, MemoryEvent, MessageEvent,
+        ObservabilityEvent, QuestionEvent, SessionEvent, SlotEvent, SystemEvent, TaskEvent,
+        WorkerEvent,
     },
     log::{
         writer::spawn_log_writer, AppendAck, AppendError, AppendOpts, Log, LogWriterHandle, Seq,
@@ -301,6 +302,15 @@ impl BusServices {
         ev: IncidentEvent,
     ) -> Result<AppendAck, AppendError> {
         self.publish(ev, default_opts("incident")).await
+    }
+
+    pub async fn publish_execution(
+        &self,
+        ev: ExecutionEvent,
+    ) -> Result<AppendAck, AppendError> {
+        // Execution events are durable projections of the on-disk companion
+        // log — keep them persistent (default) so audit consumers can replay.
+        self.publish(ev, default_opts("execution")).await
     }
 
     /// Core `append` wrapper. Producer sites that need custom `AppendOpts`

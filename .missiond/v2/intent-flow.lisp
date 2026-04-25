@@ -1,5 +1,5 @@
 ;; ═════════════════════════════════════════════════════════════
-;; MissionD — Flow Pillar (phase-A first-draft v0.1)
+;; MissionD — Flow Pillar (phase-C recursive-contract v0.7)
 ;; 目标: 跨 pillar 的 narrative — 串 memory 状态 + worker 计算 + tools 端点 + intent-layer 元层
 ;; 底稿: gptpro intent-flow.lisp (179 行) + v2/intent.lisp 详细 flows catalog
 ;;       + intent-flows.lisp 老图 10 简洁 flow
@@ -7,8 +7,8 @@
 ;; ═════════════════════════════════════════════════════════════
 
 (pillar flow
-  :version "v0.1"
-  :status "phase-A first-draft 2026-04-21 — 本会话主驾"
+  :version "v0.7"
+  :status "phase-C recursive architecture contract 2026-04-25 — trigger/state → ordered cross-pillar stages → egress; directive/incident/methodology/capability-usage flows + project-root spawn cwd contract designed; F-intent-alignment-plan-execution-loop promoted to MissionD canonical unified entry pipeline (message → alignment → plan → execution → workflow, architecture-designed; manager surfaces partial; runner/distiller actors pending); F-workstation-dispatch-policy (resident-lisp / fresh-code-alignment / agent-team / spawn-over-prompt / project-root-cwd) operational-practice + architecture-designed, plan-runner auto-selection code-alignment pending"
   :predecessor "drafts/gptpro/intent-flow.lisp (179 行 starter) + v2/intent.lisp flow pillar 详细 catalog"
   :target-path ".missiond/v2/intent-flow.lisp"
 
@@ -16,10 +16,11 @@
     [".missiond/v2/intent.lisp :: pillar flow (最详细, 已有 catalog + stages)"
      ".missiond/intent-flows.lisp (v1 老图 10 简洁 flow 定义)"
      ".missiond/intent-pillar-engines.lisp (autopilot tick + flow-engine-v2 runtime)"
-     ".missiond/v2/intent-memory.lisp v0.5.1 (board state-machine + 各 module lifecycle)"
-     ".missiond/v2/intent-worker.lisp v0.3 (触发点 + 执行 mechanics + pty FSM)"
-     ".missiond/v2/intent-tools.lisp v0.1 (78 tools :flow-ref pending)"
-     ".missiond/v2/intent-intent-layer.lisp v0.1 (元层 ownership + 认知推理)"]
+     ".missiond/v2/intent-memory.lisp v0.5.5 (board state-machine + directive artifacts + execution protocol + capability usage read-model + directive manager surfaces)"
+     ".missiond/v2/intent-worker.lisp v0.5 (执行 mechanics + pty FSM + xjp-router/mission_execution + project-root spawn cwd)"
+     ".missiond/v2/intent-tools.lisp v0.7 (83 actual tools classified + execution/capability usage/directive-plan-workflow/global-instruction surfaces + project-root spawn cwd)"
+     ".missiond/v2/intent-intent-layer.lisp v0.4 (元层 ownership + methodology compile + capability governance)"
+     "2026-04-25 code scan: handlers/compute/{task_delegate,compute_slot,flow_run}.rs + handlers/knowledge/{kb,cascade,skill}.rs + handlers/comm/conversation.rs::mission_embedding_ops + engine/{flow, intent_engine/workflow_executor}.rs"]
 
   :design-correction-sources
     ["gptpro intent-flow.lisp 9 flows + 3 future — 吸收为骨架"
@@ -49,10 +50,10 @@
       :effect "每 stage 的 :at 跨 pillar 引用, 本文件纯是'跨 pillar 故事线'")
 
     (Q-F2
-      :question "78 tools 是否每个都有对应 flow?"
+      :question "83 tools 是否每个都有对应 flow?"
       :decision "不 — 多数 single-step read/write 不值得独立 flow. 仅'有显著多 stage 跨 pillar 语义'的 tool 配 flow"
       :estimated-count "约 15-20 flow 覆盖核心 tool. 其余 tool 的 :flow-ref 指向 'trivial-single-step' 或共享已有 flow"
-      :effect "本文件 flow 数量 ~20 而非 78")
+      :effect "本文件 flow 数量 ~20 而非 83")
 
     (Q-F3
       :question "flow 如何分类?"
@@ -68,9 +69,23 @@
     (Q-F5
       :question "对 tools v0.1 的 :flow-ref pending 字段, 本 v0.1 提供什么?"
       :decision "提供 flow catalog + tool→flow 映射表 (section tool-backed-flows-index)"
-      :effect "tools v0.2 可按本 index 填 :flow-ref 具体值"))
+      :effect "tools v0.2 可按本 index 填 :flow-ref 具体值")
+
+    (Q-F6
+      :question "从 tools 反推 flow 时, 第一批应该补哪些?"
+      :decision "先补真实代码已存在但 v2 flow 仍标 pending/future 的主干: task_delegate auto-provision / skill workflow executor / cascade execution"
+      :rationale "三者都不是 trivial-single-step: 它们跨 tool schema、daemon handler、worker runtime、memory state、event-bus/audit, 且已有代码真相可锚定"
+      :effect "本 v0.2 不扩大到 83 tool 全量重写, 只把高价值 flow 从 pending 提升为 named flow"))
 
   (purpose "跨 pillar 编排 — 把 memory 状态 + worker 计算 + tools 端点 + intent-layer 元层 串成 end-to-end narrative")
+
+  (recursive-architecture-contract
+    :shape "pillar = ingress → logic-core → egress; flow = ingress(trigger/state) → logic-core(ordered cross-pillar steps) → egress(writes/emits/returns/next-flow)"
+    :unit "flow 是跨 pillar 的分子; stage 是 flow 内的原子; stage 内不展开 owner pillar 的私有实现细节"
+    :rule-1 "所有 flow 必须按执行顺序写 step, 每个 step 标 :at owner pillar"
+    :rule-2 "flow 只描述 choreography, 不拥有 worker runtime / memory schema / tool schema"
+    :rule-3 "从 tools 反推 flow 时, 先判断 named-flow / shared-flow / trivial-single-step, 禁止 83 tools 机械生成 83 flows"
+    :rule-4 "一个 flow 的 egress 必须列 writes / emits / returns / downstream 至少一种")
 
   (pillar-ingress
     (entry-1 "tools pillar 调用 → 启动 flow 的 trigger")
@@ -79,11 +94,60 @@
     (entry-4 "外部 (用户 / agent) 手动触发"))
 
   (pillar-core
-    (core-1 "flow = 多 stage 的 narrative, 每 stage :at 跨 pillar 跳点")
-    (core-2 "flow 无代码, 只有 lisp 描述 + YAML (executable kind)")
-    (core-3 "tools 的 :flow-ref 是反向指向 — tool → flow → 跨 pillar stages")
-    (core-4 "flow-engine-v2 是 executable kind 的 runtime (worker pillar 实现)")
-    (core-5 "methodology-lisp (intent-layer :: workflows :: methodology) 是人类方法论 flow, 不机器执行"))
+    :contract "flow catalog 只做跨 pillar 顺序叙事: trigger/state 进入, ordered stage 串联, 产物从 egress 指向 owner pillar"
+
+    (function flow-authoring-contract
+      (ingress
+        :source ["tools :flow-ref pending" "event-bus event" "timer/autopilot" "human methodology"])
+      (logic-core
+        (step s1 "确认 trigger 与 preconditions")
+        (step s2 "按真实执行顺序列 stages")
+        (step s3 "每个 stage 标 owner pillar 与读写/事件/工具")
+        (step s4 "把 egress 回填到 tools / worker / memory / intent-layer 对应 cross-ref"))
+      (egress
+        :writes "本 lisp 的 named flow spec"
+        :updates ["tools pillar :flow-ref" "worker pillar cross-ref" "intent-layer workflow ownership"]))
+
+    (function tool-to-flow-classification
+      (ingress
+        :source "tools pillar 83 endpoints")
+      (logic-core
+        (step s1 "若 tool 跨多个 pillar 且有顺序状态推进 → named-flow")
+        (step s2 "若多个 tool 共用同一链路 → shared-flow")
+        (step s3 "若单纯读写/配置查询 → trivial-single-step")
+        (step s4 "若代码真相未查清 → pending-with-ground-truth-question"))
+      (egress
+        :to "section tool-backed-flows-index"
+        :review "need-more-ground-truth"))
+
+    (function executable-flow-bridge
+      (ingress
+        :source "$MISSIOND_HOME/flows/*.yaml / mission_flow_run")
+      (logic-core
+        (step s1 "intent-layer owns executable YAML definition")
+        (step s2 "worker pillar flow-engine-v2 loads and runs YAML")
+        (step s3 "flow pillar narrates node order and cross-pillar effects"))
+      (egress
+        :to-worker "F5-flow-engine-v2-node-execution"
+        :to-intent-layer "workflows :: executable"))
+
+    (function methodology-flow-bridge
+      (ingress
+        :source ".missiond/workflows/*.lisp")
+      (logic-core
+        (step s1 "intent-layer owns human-readable methodology")
+        (step s2 "flow pillar references methodology as narrative source")
+        (step s3 "future forge path may compile methodology lisp → executable YAML"))
+      (egress
+        :to-intent-layer "workflows :: methodology"
+        :future "methodology lisp → executable YAML compiler"))
+
+    (core-invariants
+      (core-1 "flow = 多 stage narrative, 每 stage :at 跨 pillar 跳点")
+      (core-2 "flow 无代码, 只有 lisp 描述 + YAML/executable 引用")
+      (core-3 "tools 的 :flow-ref 是反向指向 — tool → flow → 跨 pillar stages")
+      (core-4 "flow-engine-v2 是 executable kind 的 runtime (worker pillar 实现)")
+      (core-5 "methodology-lisp 是人类方法论 flow, 不直接机器执行")))
 
   (pillar-egress
     (egress-1 "→ tools pillar: 提供 flow-backed tool 的 :flow-ref 具体值 (供 tools v0.2 填)")
@@ -152,22 +216,42 @@
       :tools-backref ["mission_board_create" "mission_board_claim" "mission_board_update" "mission_board_retry"])
 
     (flow F2-board-task-decompose
-      :desc "父任务 AI 分析 → 子任务 DAG"
+      :desc "父任务校验 → decompose prompt → 指定 slot 执行 → slot 回写子任务 DAG"
       :triggers ["mission_board_decompose(task_id, slot_id, hints)"]
+      :phase-C-verified "2026-04-25 — crates/missiond-daemon/src/handlers/knowledge/board.rs :: mission_board_decompose"
       :stages
-        ((s1 request
-            :at "memory pillar :: module board :: mcp-board-lifecycle"
-            :action "组装拆解请求并指定 slot"
+        ((s1 validate-parent
+            :at "tools/memory boundary :: board handler"
+            :reads "board_tasks by task_id + child count"
+            :guards ["parent status == open" "parent has no existing subtasks"]
             :tools-consumed ["mission_board_decompose"])
-         (s2 analyze
+         (s2 assemble-decompose-prompt
+            :at "board handler"
+            :reads ["parent title/description/category/priority/project" "state.skills.build_context(task.title)" "optional hints"]
+            :action "生成要求 slot 调 mission_board_create + mission_board_note_add 的结构化 prompt")
+         (s3 create-submit-task
+            :at "crate::state::submit_task(role=coder)"
+            :writes "legacy tasks queue entry for decompose execution")
+         (s4 bind-target-slot
+            :at "task store"
+            :writes "submit task slot_id")
+         (s5 immediate-dispatch-if-idle
             :at "worker pillar :: section pty :: subsection slot-orchestrator"
-            :action "slot LLM 执行结构化 subtask plan 产出")
-         (s3 write-dag
+            :action "若目标 slot Idle, state.pty.send_fire_and_forget(decompose_prompt)"
+            :emits "SlotEvent::TaskDispatched{purpose=decompose}")
+         (s6 parent-progress-note
+            :at "memory pillar :: board notes"
+            :writes "父任务 progress note: decompose submit_task_id + slot_id")
+         (s7 slot-writes-child-dag
             :at "memory pillar :: module board"
+            :action "slot 按 prompt 调 mission_board_create / mission_board_note_add"
             :writes "多个 child board_tasks rows (parent_id + depends_on JSONB)"
             :emits "BoardTaskCreated (每子任务一次)"))
       :result "父任务 → DAG of children with dependency links"
-      :tools-backref ["mission_board_decompose"])
+      :tools-backref ["mission_board_decompose"]
+      :open-questions
+        ["daemon 当前不验证 slot 产出的 child DAG 是否覆盖父任务全部需求"
+         "默认 slot_id=slot-coder-1 是否应改为动态 slot selection / task_delegate 复用"])
 
     (flow F3-agent-question-block-resume
       :desc "Agent 卡住 → 提问 → task 被 block → 回答后 auto-unblock"
@@ -214,19 +298,32 @@
     (flow F-board-submit-phase
       :desc "Flow 任务阶段产出物提交 → 下一阶段推进"
       :triggers ["mission_submit_phase_result"]
+      :phase-C-verified "2026-04-25 — crates/missiond-daemon/src/handlers/sysinfra/misc.rs :: mission_submit_phase_result"
       :stages
-        ((s1 submit
-            :at "memory pillar :: module board"
-            :writes "board_tasks.flow_phase 推进 (按 engineering-phase FSM)"
+        ((s1 load-and-validate-flow-task
+            :at "sysinfra misc handler + memory pillar :: board"
+            :reads "board_tasks by task_id"
+            :guards ["flow_phase is not null" "artifact_type matches current EngineeringPhase"]
             :tools-consumed ["mission_submit_phase_result"])
-         (s2 decision-engine-gate
-            :at "intent-layer pillar :: learning-engine :: decision :: decision-cascade"
-            :optional "requiresMasterDecision 字段存在时触发"
-            :action "Decision Engine 审核 → 通过或升级指挥官")
+         (s2 persist-artifact
+            :at "memory pillar :: board"
+            :writes "board_tasks.flow_context.{investigation_report|execution_plan|execution_result|commit_hash}")
          (s3 advance-phase
-            :at "intent-layer pillar :: flow-engine-v1 :: board-phase-engine"
-            :writes "board_tasks.flow_phase 下一 state (Investigate→Consult→Plan→Execute→Finalize→Done)"
-            :fsm "engineering-phase FSM"))
+            :at "memory pillar :: board + intent-layer engineering-phase FSM"
+            :writes "board_tasks.flow_phase 下一 state")
+         (s4 progress-note
+            :at "memory pillar :: board notes"
+            :writes "phase completed progress note")
+         (s5 hard-plan-execute-intercept
+            :at "intent-layer decision gate + event-bus question stream"
+            :trigger "phase == Plan"
+            :writes "agent_questions(decision_type=risk)"
+            :emits "QuestionEvent::Created")
+         (s6 soft-uncertainty-intercept
+            :at "intent-layer decision gate + event-bus question stream"
+            :trigger "requiresMasterDecision present"
+            :writes "agent_questions(decision_type=implementation)"
+            :emits "QuestionEvent::Created"))
       :tools-backref ["mission_submit_phase_result"]
       :fsm-ref "intent-layer pillar :: state-machines-owned :: engineering-phase"))
 
@@ -270,7 +367,7 @@
 
     (flow F7-embedding-pipeline
       :desc "新内容 → embedding 生成 → 向量存储 → 索引就绪"
-      :triggers ["EmbeddingTask MPSC (from F6-s6 或 backfill)"]
+      :triggers ["EmbeddingTask MPSC (from F6-s6 / KB mutation / Skill mutation / explicit backfill)"]
       :stages
         ((s1 consume-task
             :at "worker pillar :: worker-sonnet :: embedding-worker-loop"
@@ -282,7 +379,7 @@
             :at "worker pillar :: section xjp-router-gateway :: xjp-router-embedding (v0.3 新)"
             :action "HTTP → Windows 12900KF QWEN3"
             :fail-fast "禁止 fallback"
-            :pending "xjp_router_client 尚未实现, 临时仍用 sonnet_gateway (I006)")
+            :code-alignment "code-aligned: xjp_router_client.rs + embedding_worker provider selection; sonnet embedding lane removed")
          (s4 vector-upsert
             :at "worker pillar :: embedding-worker-loop"
             :writes "kb_embeddings / ast_embeddings / turn_topics"
@@ -290,15 +387,112 @@
          (s5 index-ready
             :at "memory pillar :: module kb-manager (FTS5 + HNSW 索引)"
             :action "检索可见性释放"))
-      :tools-backref ["mission_embedding_ops"])
+      :tools-backref ["mission_embedding_ops" "mission_kb_remember" "mission_kb_mutate" "mission_skill_mutate"])
+
+    (flow F-kb-mutation-to-index
+      :desc "KB 写入/更新/删除/导入/项目归属 → memory state + graph links + embedding/index refresh"
+      :triggers ["mission_kb_remember" "mission_kb_mutate(action=forget|update|import)" "mission_kb_batch_set_project"]
+      :phase-C-verified "2026-04-25 — crates/missiond-daemon/src/handlers/knowledge/kb.rs"
+      :stages
+        ((s1 parse-and-quality-guard
+            :at "tools pillar :: knowledge/kb schema + kb handler"
+            :action "remember/update 先过 content quality guard; mutate 先按 action 归一到 legacy handler")
+         (s2 write-kb-state
+            :at "memory pillar :: kb-manager"
+            :writes ["kb_entries upsert/update/delete/import" "project_id metadata"])
+         (s3 maintain-graph-links
+            :at "memory pillar :: kb graph + AST links"
+            :action "remember consolidated_from → supersedes edges; symbol/file_hint → ast link; delete 清 edges/ast_links")
+         (s4 trigger-embedding-refresh
+            :at "worker pillar :: embedding-worker-loop"
+            :condition "created/updated/content_changed/imported entries"
+            :action "embedding_tx.try_send(EmbeddingTask::ProcessKBEntry)")
+         (s5 emit-memory-event
+            :at "event-bus pillar :: MemoryEvent"
+            :emits "KBBatchMutated{count,categories,action}")
+         (s6 conflict-detection
+            :at "knowledge/kb handler + embedding cache"
+            :condition "new remember only"
+            :action "semantic conflict check; optional confidence downweight; contradicts edge")
+         (s7 return-result
+            :returns "remember/mutate/batch project json; downstream F7 makes embedding/index visible"))
+      :tools-backref ["mission_kb_remember" "mission_kb_mutate" "mission_kb_batch_set_project"]
+      :downstream ["F7-embedding-pipeline when content changes" "F10-context-assembly retrieval sees refreshed KB after index ready"])
+
+    (flow F-kb-governance-ops
+      :desc "KB 运维治理 — gc/compact/analyze/discover/plan queue/execute plan"
+      :triggers ["mission_kb_ops(action=gc|compact|analyze|discover|queue_status|execute_plan)"]
+      :phase-C-verified "2026-04-25 — crates/missiond-daemon/src/handlers/knowledge/kb.rs"
+      :stages
+        ((s1 action-dispatch
+            :at "tools pillar :: mission_kb_ops"
+            :action "compact 直接进 handle_kb_compact; analyze/discover/queue_status/execute_plan/gc 归一到 legacy handler")
+         (s2 gc-or-compact
+            :at "memory pillar :: kb-manager"
+            :actions ["gc stats/stale/duplicates/clean_stale/clean_duplicates" "compact rule-based dryRun/delete"])
+         (s3 analyze-kb
+            :at "worker pillar :: llm-gateways :: gemini gateway"
+            :action "分页读取 KB, 可注入 board context, 构造 overview/consolidation/custom prompt")
+         (s4 save-consolidation-plan
+            :at "memory pillar :: kb operation queue"
+            :condition "mode=consolidation_plan and save_plan=true"
+            :writes "kb_ops queue")
+         (s5 queue-status
+            :at "memory pillar :: kb operation queue"
+            :reads "plan operations + optional summary")
+         (s6 execute-plan
+            :at "knowledge/kb handler + memory/task"
+            :action "expire stale ops, mark running, apply delete/update directly; merge/distill dispatch legacy memory task")
+         (s7 discover-infra
+            :at "system-layer/worker boundary :: SSH probe"
+            :action "resolve infra key/credentials, probe remote host, remember infra KB entry")
+         (s8 return-and-notify
+            :emits "TaskEvent::Created when execute_plan dispatches merge/distill task"
+            :returns "governance stats/analysis/plan/queue/execution/discovery result"))
+      :tools-backref ["mission_kb_ops"]
+      :downstream ["F-kb-mutation-to-index for remembered infra/update/delete effects" "F-task-submit-dispatch when merge/distill dispatches legacy memory task"])
+
+    (flow F-session-completion-event-chain
+      :desc "slot/session terminal signal → SessionEvent::Completed → retro/strategy/experience consumers"
+      :status "architecture-designed; emit-point audit/code-alignment pending"
+      :triggers ["stable PTY idle after task completion" "conversation/session close" "flow-engine terminal state" "manual backfill"]
+      :event-bus-contract "event-bus v1.3.2 :: session-completion-contract"
+      :stages
+        ((s1 detect-terminal-condition
+            :at "worker pillar :: pty_event_worker / conversation organizer / flow-engine-v2"
+            :action "detect task/session terminal boundary, not every transient Idle")
+         (s2 collect-session-identity
+            :at "memory pillar :: conversation-logs + slot-support"
+            :reads ["session_id" "project_id" "slot_id" "conversation_id" "last_message_seq" "flow_id/board_task_id if any"])
+         (s3 build-completed-event
+            :at "event-bus producer boundary"
+            :event "SessionEvent::Completed"
+            :payload ["session_id" "project_id?" "slot_id?" "conversation_id?" "completion_source" "ended_at" "summary_ref?" "dedupe_key"])
+         (s4 append-with-dedupe
+            :at "event-bus pillar :: log.append"
+            :dedupe "session_id + completion_source + ended_at_window")
+         (s5 retro-consume
+            :at "worker pillar :: retro_worker"
+            :downstream "F8-retrospective-to-memory")
+         (s6 strategy-consume
+            :at "worker pillar :: strategy_worker / experience_harvester"
+            :downstream "F-strategy-analysis")
+         (s7 projection
+            :at "event-bus ws_bridge + timeline readers"
+            :action "surface session completion to timeline/UI without duplicating analysis"))
+      :egress
+        (writes ["event_log(Session::Completed)" "retrospectives/deep_analysis via downstream consumers"]
+         emits ["SessionEvent::Completed"]
+         returns "session completion fan-out status")
+      :tools-backref ["mission_timeline" "mission_conversation_analyze" "mission_retrospective_manage"])
 
     (flow F8-retrospective-to-memory
       :desc "会话结束 → 复盘 → 沉淀到 memory + KB"
       :triggers ["SessionCompleted 事件"]
       :stages
         ((s1 session-end-detection
-            :at "worker pillar :: worker-local :: pty_event_worker"
-            :emits "SessionCompleted (inferred 或 direct)")
+            :at "event-bus pillar :: SessionEvent::Completed"
+            :via "F-session-completion-event-chain")
          (s2 retro-analysis
             :at "worker pillar :: worker-sonnet :: retro-worker-cycle"
             :reads "conversations (session window)")
@@ -341,7 +535,45 @@
          (s3 persist
             :at "memory pillar :: conversation-logs"
             :writes ["message_translations"]))
-      :tools-backref []))
+      :tools-backref [])
+
+    (flow F-router-chat-session
+      :desc "router chat 请求 → 上下文/附件装配 → Gemini/Router 调用 → 可选历史保存与压缩"
+      :triggers ["mission_router_chat" "mission_router_chat_manage(action=history|list|delete|clear|delete_message|restore|stats|compress)"]
+      :phase-C-verified "2026-04-25 — crates/missiond-daemon/src/handlers/comm/router_chat.rs"
+      :stages
+        ((s1 ingress-normalize
+            :at "tools pillar :: mission_router_chat"
+            :action "message shorthand 归一为 messages[]; 解析 model/context/search/files/channel/api_key_alias/task_id")
+         (s2 task-chat-context
+            :at "memory pillar :: conversation-logs/router_chat"
+            :condition "task_id present"
+            :reads ["router_chat_conversations" "router_chat_summary" "active unsummarized router_chat_messages"]
+            :action "summary + active history prepend为 system/history context; new_messages 单独保留用于保存")
+         (s3 optional-domain-context
+            :at "memory pillar :: kb-manager + board"
+            :condition "context=kb|board|both"
+            :reads ["kb_entries excluding credentials" "board_tasks"]
+            :action "注入第一条 user message; 概念上复用 F10 context assembly 的 retrieval 输入面")
+         (s4 file-attachment-prep
+            :at "system-layer boundary :: file access + Gemini File API"
+            :action "canonicalize file paths, denylist sensitive paths, inline text/truncated text, binary via Gemini File API when available")
+         (s5 budget-and-llm-call
+            :at "worker pillar :: llm-gateways :: gemini-unified-gateway"
+            :action "附件模式拒绝截断; 否则 apply context budget; multimodal 走 direct Gemini, normal path 走 Router/GeminiClient")
+         (s6 persist-session
+            :at "memory pillar :: conversation-logs/router_chat"
+            :condition "task_id present"
+            :writes ["new user messages" "assistant response" "conversation_id"])
+         (s7 manage-history
+            :at "tools pillar :: mission_router_chat_manage"
+            :actions ["history/load by task" "list" "delete/clear/delete_message with archive" "restore" "stats"])
+         (s8 compress-history
+            :at "worker pillar :: llm-gateways + memory pillar"
+            :condition "action=compress"
+            :action "load compressible old messages, call Gemini summarizer, optimistic-lock update rolling summary cursor"))
+      :tools-backref ["mission_router_chat" "mission_router_chat_manage"]
+      :downstream ["F10-context-assembly (conceptual dependency when context injects KB/board)" "LLM trace/audit read models observe downstream effects"]))
 
   ;; ══════════════════════════════════════════════════════════
   ;; 7.3 Category: Cognition Flows (认知 / 决策 / 学习)
@@ -530,6 +762,130 @@
             :init "autopilot → ipc-handler → ws-server"))
       :tools-backref [])
 
+    (flow F-daemon-update-restart
+      :desc "daemon 自更新 — cargo build → 原子替换当前二进制 → codesign → 延迟重启"
+      :triggers ["mission_daemon_update(skip_build?)"]
+      :phase-C-verified "2026-04-25 — crates/missiond-daemon/src/handlers/sysinfra/system.rs"
+      :stages
+        ((s1 resolve-runtime-paths
+            :at "tools pillar :: sysinfra/system :: mission_daemon_update"
+            :action "resolve current_exe as binary_dest; derive project_root/build_target from CARGO_MANIFEST_DIR")
+         (s2 optional-build
+            :condition "skip_build=false"
+            :action "run cargo build --release --package missiond-daemon from project_root")
+         (s3 atomic-replace
+            :action "copy target/release/missiond to temp path, chmod 755, rename over current binary")
+         (s4 codesign-macos
+            :condition "target_os=macos"
+            :action "codesign -s - --force new binary")
+         (s5 restart-selection
+            :action "check launchctl gui/<uid>/com.missiond.daemon")
+         (s6 launchd-restart
+            :condition "launchd service exists"
+            :action "spawn delayed launchctl kickstart -k after response is sent")
+         (s7 script-fallback
+            :condition "launchd service missing"
+            :action "write temp restart script, terminate old PID, remove socket, nohup new binary"))
+      :tools-backref ["mission_daemon_update"]
+      :risks ["self-update kills current MCP connection after response" "cargo build/code signing can fail"])
+
+    (flow F-infra-diagnostics
+      :desc "infra registry/health/reachability/diagnose — 本地状态 + 网络通道 + 远端 SSH 检查"
+      :triggers ["mission_infra_query" "mission_infra_ops(action=health|reachability|diagnose)" "mission_power_control(status)"]
+      :phase-C-verified "2026-04-25 — crates/missiond-daemon/src/handlers/sysinfra/infra.rs + misc.rs"
+      :stages
+        ((s1 registry-read
+            :at "system-layer pillar :: infra registry"
+            :reads ["servers.yaml runtime registry" "state.infra"])
+         (s2 health-snapshot
+            :at "sysinfra/misc :: mission_health"
+            :condition "action=health"
+            :reads ["PTY slot status" "ControlTree memory pause" "extraction states" "stats snapshot"])
+         (s3 reachability-probes
+            :at "sysinfra/infra :: mission_reachability"
+            :condition "action=reachability"
+            :action "run selected lan_ping/public_ping/tailscale/ssh/deploy_agent probes in parallel")
+         (s4 diagnose-target
+            :at "sysinfra/infra :: mission_os_diagnose"
+            :condition "action=diagnose"
+            :action "resolve SSH targets from registry or direct target")
+         (s5 credential-fallback
+            :at "memory pillar :: kb-manager"
+            :condition "diagnose needs password fallback"
+            :reads "credential KB search by target")
+         (s6 remote-probe
+            :at "system-layer boundary :: SSH process"
+            :action "run selected shell checks: system/crashes/top_cpu/temperatures/journal_errors/docker/network/gpu")
+         (s7 severity-return
+            :action "parse probe output, compute green/yellow/red severity, return structured diagnostics"))
+      :tools-backref ["mission_infra_query" "mission_infra_ops" "mission_power_control(status)"])
+
+    (flow F-incident-reaction
+      :desc "incident candidate → persist/dedupe → classify → board remediation → optional worker dispatch → observe resolution"
+      :status "code-aligned; mission_incident get/remediate/status/close + aiops triage helpers implemented"
+      :triggers
+        ["worker pillar :: infra::aiops incident candidate"
+         "mission_incident(action=test|list|get|remediate|status|close)"
+         "mission_infra_ops(action=health|diagnose) red/yellow result"
+         "event-bus :: IncidentEvent"]
+      :ingress
+        (entry "incident source with severity/title/source/server_id/evidence")
+      :stages
+        ((s1 incident-source
+            :at "system-layer/worker boundary :: infra aiops or sysinfra tool"
+            :action "normalize health failure, pty-slot incident, synthetic test incident, or diagnostic red result")
+         (s2 persist-and-dedupe
+            :at "memory pillar :: system-support :: incidents"
+            :action "write incident row, dedupe by source/server/title/window, attach evidence and first_seen/last_seen")
+         (s3 classify-remediation
+            :at "intent-layer pillar :: aiops policy (future) + worker existing health scan"
+            :action "classify severity, remediation playbook, auto-close eligibility, and escalation target")
+         (s4 board-task-link
+            :at "memory pillar :: board"
+            :action "create or update remediation board_task; add recovery note when health recovers")
+         (s5 dispatch-remediation
+            :at "worker pillar :: slot/task dispatch"
+            :condition "playbook actionable and safe"
+            :action "delegate remediation to Opus/ops slot or task_delegate; otherwise leave board task for human")
+         (s6 observe-resolution
+            :at "worker pillar :: aiops periodic scan + tools mission_incident(list)"
+            :action "observe recovered/degraded/still-failing state; close board task or escalate")
+         (s7 audit-return
+            :at "event-bus + tools"
+            :emits ["IncidentEvent::Reported / IncidentEvent::Resolved where implemented" "BoardEvent::StatusChanged when board linked"]
+            :returns "incident id/status/remediation task/ref"))
+      :egress
+        (writes ["incidents" "board_tasks" "board notes" "optional slot_tasks"]
+         reads ["health snapshot" "infra registry" "recent incidents"]
+         returns "incident reaction receipt / list / remediation status")
+      :tools-backref ["mission_incident" "mission_infra_ops" "mission_board_query" "mission_task_delegate"])
+
+    (flow F-capability-usage-monitoring
+      :desc "tool / flow 调用热度监控 → 落灰/替代/合并候选 → 人工治理决策"
+      :status "code-aligned partial; mission_capability_usage snapshot/report/candidates/mark/ack + ObservabilityEvent emission implemented, event_log/workflow-stats/semantic-merge deferred"
+      :triggers
+        ["periodic daily/weekly monitor tick"
+         "mission_capability_usage(action=snapshot|report|candidates|mark|ack)"
+         "manual architecture cleanup review before removing/merging tools or flows"]
+      :ingress
+        (entry "monitor request with window={7d|30d|90d|all}, scope={tool|flow|both}, project_id?, include_protected?")
+      (logic-core
+        (step s1 "collect-tool-usage: read memory :: system-support :: capability-usage-read-model over conversation_tool_calls")
+        (step s2 "collect-flow-usage: implemented source is board_tasks.flow_template + YAML flow registry; event_log/workflow stats deferred")
+        (step s3 "normalize-capabilities: map MCP registry ids, deprecated names, consolidated dispatchers, and tool-backed flow refs into canonical capability ids")
+        (step s4 "join-architecture-index: read intent-tools current/future registry and intent-flow tool-backed-flows-index to know declared purpose and replacement hints")
+        (step s5 "classify-usage: active / quiet / stale / never-used / protected / shadowed-by-better-capability / merge-candidate")
+        (step s6 "score-candidates: combine count, recency, success rate, criticality, age since introduction, and explicit replacement link")
+        (step s7 "emit-review-report: produce evidence-first report; do not delete, hide, or mutate tools/flows")
+        (step s8 "governance-decision: intent-layer may mark keep / consolidate / deprecate / remove-after-compat-window")
+        (step s9 "follow-up-implementation: approved changes become Lisp edits first, then Forge/ClaudeCode code-alignment tasks"))
+      :egress
+        (writes ["capability-usage-review.json sidecar for mark/ack" "ObservabilityEvent::CapabilityUsageSnapshot / CapabilityStaleCandidate" "future review note / board task"])
+        (reads ["conversation_tool_calls" "board_tasks.flow_template" "MCP tool registry" "YAML flow registry" "intent-tools registry" "intent-flow index"])
+        (returns "capability usage snapshot + candidate governance actions with evidence")
+        (downstream ["intent-layer :: capability-evolution-governance" "tools :: mission_capability_usage" "memory :: capability-usage-read-model"]))
+      :tools-backref ["mission_audit" "mission_timeline" "mission_codex_ops" "mission_capability_usage"])
+
     (flow F9-project-init
       :desc "一步注册新项目 — path → 完整元数据 → DB + 历史回填 + 注册表热重载"
       :triggers ["mission_project(action=init, path, id?, slots?)"]
@@ -560,6 +916,10 @@
     (flow F-learned-permission
       :desc "auto-approve confirm dialog → 学 permission → 注入 settings.local.json"
       :triggers ["ManagerEvent::ConfirmRequired (99% 自动) 或 mission_pty_confirm (1% 手动)"]
+      :coverage-contract
+        (sources ["pty_event_worker ConfirmRequired" "manual mission_pty_confirm" "future CLI-specific confirm parser branches"]
+         invariant "任何会导致自动确认/手动确认的路径,都必须先经过 pattern extraction 或显式标记 no-learn"
+         validation "code-alignment 阶段 grep all ConfirmRequired / ConfirmResponse / trust-dialog branches,逐条标 covered/no-learn")
       :stages
         ((s1 detect-confirm
             :at "worker pillar :: worker-local :: pty_event_worker :: handle_confirm_required"
@@ -602,13 +962,345 @@
          (s7 response
             :at "tools pillar :: server.rs (JSON-RPC response)"
             :writes "tool_calls (audit 表)"))
-      :tools-backref "all 78 tools (meta-flow)"))
+      :tools-backref "all 83 tools (meta-flow)"))
+
+    (flow F-runtime-control-governance
+      :desc "运行时控制面 — ControlTree / worker registry / legacy gates / global pause"
+      :triggers ["mission_control(target_type, action)" "mission_worker(action=control)" "mission_pause(action)"]
+      :phase-C-verified "2026-04-25 — handlers/compute/worker.rs + handlers/sysinfra/misc.rs"
+      :stages
+        ((s1 parse-control-intent
+            :at "tools pillar :: compute/worker or sysinfra/misc handler"
+            :action "mission_control 读取 target_type/action/target_name; mission_worker remap control_action; mission_pause 读取 action")
+         (s2 status-read
+            :at "worker pillar :: control_manager + worker_registry + llm_gate"
+            :branch "status/list"
+            :reads ["ControlTree status_summary" "worker_registry list" "llm_gate status" "global_paused atomics"])
+         (s3 mutate-control-tree
+            :at "worker pillar :: control_manager"
+            :branch "mission_control pause/resume"
+            :action "set_global/provider/domain/worker/slot_role/project paused state")
+         (s4 sync-legacy-state
+            :at "worker pillar :: legacy compatibility gates"
+            :action "sync global_paused atomics, llm_gate provider state, Codex disable flag, worker_registry state")
+         (s5 active-slot-role-enforcement
+            :at "worker pillar :: PTY manager"
+            :condition "mission_control target_type=slot_role and action=pause"
+            :action "kill running PTY sessions whose slot role matches target_name")
+         (s6 global-pause-flag
+            :at "system-layer filesystem"
+            :branch "mission_pause"
+            :file-writes ["$MISSIOND_HOME/global_paused on pause"]
+            :file-deletes ["$MISSIOND_HOME/global_paused on resume"])
+         (s7 return-control-state
+            :returns "updated control_tree/status text/list json"))
+      :tools-backref ["mission_control" "mission_worker" "mission_pause"]
+      :ownership
+        (tools "MCP schema + action/target surface")
+        (worker "ControlTree, WorkerRegistry, LLM gates, PTY kill enforcement")
+        (system-layer "global pause flag file"))
 
   ;; ══════════════════════════════════════════════════════════
   ;; 7.6 Category: Workflow-Runtime Flows (flow-engine-v2)
   ;; ══════════════════════════════════════════════════════════
   (category workflow-runtime-flows
     :desc "flow-engine-v2 YAML declarative node 执行 — 唯一真正 flow orchestration 的 flow"
+
+    (flow F-directive-plan-workflow-compile
+      :desc "user utterance / directive request → directive record → approved plan → optional execution bridge → reusable workflow template"
+      :status "code-aligned partial; directive/plan/workflow MCP manager surfaces implemented, LLM compiler/distiller actors pending"
+      :triggers
+        ["mission_directive(action=compile|approve|list|get|archive|version_chain)"
+         "mission_plan(action=compile|approve|mark|supersede|execute|record_evidence)"
+         "mission_workflow(action=match|apply|distill|record_execution|compile_methodology|run_methodology)"
+         "intent-layer actor capture from user utterance"]
+      :ingress
+        (entry "utterance/source directive, optional conversation_id/project_id/board_task_id, approval/manual override intent")
+      :stages
+        ((s1 capture-source
+            :at "intent-layer pillar :: directive-plan-workflow-chain"
+            :action "collect utterance/system instruction/MCP request with project, conversation, constraints, and references")
+         (s2 directive-compile
+            :at "intent-layer pillar :: actor directive-compiler"
+            :action "LLM-assisted compile to directive sexp; compute version/provenance"
+            :code-alignment "actor pending; mission_directive(action=compile) currently dry-run preview, persist=true writes draft row")
+         (s3 directive-store
+            :at "memory pillar :: directive-layer :: directive table"
+            :writes "directive_insert(status=draft/refining, compiler_model, references_json, sexp_hash)")
+         (s4 directive-review-gate
+            :at "intent-layer + tools manager surface"
+            :action "approve/refine/archive through policy or human gate; future QuestionEvent when confirmation needed")
+         (s5 plan-compile
+            :at "intent-layer pillar :: actor plan-compiler"
+            :condition "directive status=approved"
+            :action "generate executable plan sexp DAG/FSM; select execution surface: board/flow-engine-v2/skill/pty/mixed"
+            :code-alignment "actor pending; mission_plan(action=compile) currently dry-run preview, persist=true writes draft row")
+         (s6 plan-store-and-bind
+            :at "memory pillar :: directive-layer + board"
+            :writes ["plan table with status=draft/awaiting_approval" "optional board_tasks.source_directive_id / plan binding"])
+         (s7 plan-approve-or-supersede
+            :at "memory pillar :: DirectiveLayerStore"
+            :action "approve plan, mark executing/succeeded/failed, or supersede old active plan for same board_task")
+         (s8 execution-bridge
+            :at "flow pillar dispatch boundary"
+            :action "route approved plan to F1 board lifecycle, F5 flow-engine-v2, F-skill-workflow-execution, or F-workflow-slot-full-lifecycle"
+            :code-alignment "mission_plan(action=execute) returns next_call descriptor for mission_execution / mission_task_delegate / mission_flow_run; caller executes next step")
+         (s9 workflow-distill
+            :at "intent-layer pillar :: actor workflow-distiller"
+            :condition "plan status=succeeded or successful execution evidence provided"
+            :action "normalize plan, derive match_rules, upsert reusable workflow or record execution"
+            :code-alignment "actor pending; mission_workflow(action=distill) dry-run preview or writes draft template with persist=true")
+         (s10 workflow-match-apply
+            :at "memory pillar :: directive-layer :: workflow table"
+            :action "workflow_find_by_match / workflow_list_top_n provides hints or reusable plan candidates for future directives")
+         (s11 manager-surface-return
+            :at "tools pillar :: mission_directive / mission_plan / mission_workflow"
+            :returns "directive/plan/workflow id, status, version chain, match/apply/distill result"))
+      :egress
+        (writes ["directive" "plan" "workflow" "optional board_tasks binding" "optional agent_questions"]
+         reads ["conversation/user utterance" "project registry" "kb context" "board_tasks" "successful plan history"]
+         downstream ["F1-board-task-main-lifecycle" "F5-flow-engine-v2-node-execution" "F-skill-workflow-execution" "F-workflow-slot-full-lifecycle"]
+         returns "directive/plan/workflow artifacts and execution bridge target")
+      :tools-backref ["mission_directive" "mission_plan" "mission_workflow"])
+
+    (flow F-intent-alignment-plan-execution-loop
+      :desc "MissionD 统一入口 canonical pipeline: message → intent-alignment.lisp → review → PLAN.lisp → review → MissionD-internal execution → evidence → workflow.lisp distillation"
+      :status "architecture-designed canonical unified entry; manager surfaces (mission_directive/mission_plan/mission_workflow/mission_execution) code-aligned partial; alignment-author / plan-runner / evidence-collector / workflow-distiller actors code-alignment pending"
+      :role "MissionD 长期运作的主线 — 不是 client 直连工位, 而是文件优先 + DB 镜像 + 双 review gate + MissionD plan-runner 内部调度 + 证据收集 + 沉淀复用"
+      :rationale "把当前'你我改 Lisp,再交给 ClaudeCode 实现'的人工闭环,升级成 MissionD 内部可自动化、可 flow 化、可复用的 directive/plan/workflow pipeline; 不依赖某个交互 client 私有调度能力"
+      :triggers
+        ["用户 message (来自任何 client / 会话)"
+         "external MCP client request (mission_directive/action=compile)"
+         "board task ingest (auto_execute=1 或人工指派)"
+         "architecture Lisp change set ready for implementation"
+         "mission_directive(action=compile, source=message|architecture_lisp_delta|user_request)"]
+      :ingress
+        (entry "user message / external MCP client / board task / architecture Lisp delta + project_id/conversation_id?/board_task_id?/topic? + approval/manual override intent")
+      :artifacts
+        ((intent-alignment-lisp
+            :path ".missiond/alignment/<topic>/intent-alignment.lisp"
+            :purpose "本轮 message/Lisp 差异凝结的对齐输入: objective / scope / affected pillars / implemented-vs-pending / non-goals / acceptance tests"
+            :review-gate "alignment-review-gate (human/Codex)"
+            :status-lifecycle "draft → reviewing → approved | rejected | superseded"
+            :ssot "file-first (DB directive row 是可查询镜像)")
+         (plan-lisp
+            :path ".missiond/plans/<topic>/PLAN.lisp"
+            :purpose "LLM 规划 + human/Codex review 后的可执行计划: files / phases / tasks / tests / risks / rollback"
+            :review-gate "plan-review-gate (human/Codex)"
+            :status-lifecycle "draft → reviewing → approved → executing → succeeded | failed | superseded"
+            :ssot "file-first (DB plan row 是可查询镜像)")
+         (plan-evidence-sidecar
+            :path ".missiond/v2/plans/<plan_id>.evidence.json"
+            :purpose "已执行 plan 的证据落盘: tool_calls / event_log refs / execution companion log refs / deviations / decisions / completions / test outputs / git diffs"
+            :writer "mission_plan(action=record_evidence) — code-aligned"
+            :future "可升级为 DB JSONB 列或专用 plan_evidence 表; 也是 workflow-distillation 的输入")
+         (workflow-lisp
+            :path ".missiond/workflows/<topic>.lisp"
+            :purpose "多次成功运行后的方法论沉淀; human/agent SSOT, 可由 F-methodology-to-executable-compile 生成 YAML"
+            :status-lifecycle "draft → published → deprecated"))
+      :stages
+        ((s1 message-intake
+            :at "tools pillar :: mission_directive (action=compile, source=message|architecture_lisp_delta|user_request) + intent-layer pillar :: message-intake-manager"
+            :reads ["user message / external MCP request / board_task ingestion" ".missiond/v2/*.lisp diff (when source=architecture_lisp_delta)" "project registry" "kb context"]
+            :writes ["directive draft row (when persist=true) or file-first alignment request stub"]
+            :code-alignment "manager surface partial via mission_directive(action=compile); compile is dry-run / draft persistence — directive-compiler actor pending"
+            :decision "选择 alignment topic + project_id; 决定走 file-first 还是 directive-mirror"
+            :no-new-tool "本阶段不引入 mission_message / mission_invoke; 统一入口由 mission_directive 充当管理面")
+         (s2 intent-alignment-authoring
+            :at "intent-layer pillar :: alignment-author (mode A: direct LLM, mode B: resident ClaudeCode lisp-architect slot)"
+            :reads ["directive draft" "user message" ".missiond/v2/*.lisp diff" "kb hints" "previous alignment topics"]
+            :writes [".missiond/alignment/<topic>/intent-alignment.lisp (status=draft)"]
+            :status "architecture-designed; code-alignment pending"
+            :note "alignment-author actor pending; 当前由 ClaudeCode 主会话或外部 LLM 手工产出 .missiond/alignment/<topic>/intent-alignment.lisp"
+            :workstation-preference "Lisp 架构改动优先复用常驻 ClaudeCode lisp-architect slot (resident-lisp-architect-session policy); 上下文 asset 已经预热, 不为单轮 alignment 重开 fresh session"
+            :workstation-cross-ref "worker pillar :: section claudecode-workstation-orchestration :: policy resident-lisp-architect-session")
+         (s3 alignment-review-gate
+            :at "human/Codex review loop + intent-layer pillar :: alignment-review-gate"
+            :reads [".missiond/alignment/<topic>/intent-alignment.lisp" "directive row mirror"]
+            :writes [".missiond/alignment/<topic>/intent-alignment.lisp (status: draft → reviewing → approved | rejected | superseded)" "directive table status update"]
+            :gate-rule "未通过 approval gate 不允许进入 plan-authoring; LLM 产物不能直接进 plan"
+            :code-alignment "manager surface partial via mission_directive(action=approve|archive|version_chain); auto QuestionEvent 触发待 actor")
+         (s4 plan-authoring
+            :at "intent-layer pillar :: plan-compiler (LLM planner — direct LLM 或 resident planning slot)"
+            :condition "intent-alignment.lisp status=approved"
+            :reads [".missiond/alignment/<topic>/intent-alignment.lisp (approved)" "repo state summary" "relevant Lisp snippets" "kb context"]
+            :writes [".missiond/plans/<topic>/PLAN.lisp (status=draft)" "optional plan draft row via mission_plan(action=compile, persist=true)"]
+            :model-policy "provider alias configurable (例: OPUS-4.7-class planner); 不硬编码可用性"
+            :status "architecture-designed; mission_plan(action=compile) currently dry-run/draft — 真正 LLM planner code-alignment pending"
+            :workstation-preference "若 PLAN 跨多文件且需要 cumulative repo 知识 → resident planning slot; 若单一目标项目可直接 fresh slot 草拟"
+            :workstation-cross-ref "worker pillar :: section claudecode-workstation-orchestration"
+            :plan-must-record "PLAN.lisp 节点应显式标记 :dispatch-strategy 字段 ∈ {resident-lisp / fresh-code-alignment / agent-team / prompt-fallback / mixed} 与 :target_project, 供 s6 plan-runner 直接消费")
+         (s5 plan-review-gate
+            :at "human/Codex review loop + intent-layer pillar :: plan-review-gate"
+            :reads [".missiond/plans/<topic>/PLAN.lisp" "plan row mirror"]
+            :writes [".missiond/plans/<topic>/PLAN.lisp (status: draft → reviewing → approved | rejected | superseded)" "plan table status update via mission_plan(action=approve|mark|supersede)"]
+            :gate-rule "未通过 approval gate 不允许进入 execution-runner"
+            :code-alignment "manager surface code-aligned via mission_plan; auto QuestionEvent 待 actor")
+         (s6 execution-runner
+            :at "MissionD plan-runner (architecture-designed) :: 内部消费 mission_execution / mission_task_delegate / mission_flow_run / mission_compute_slot / mission_pty_spawn"
+            :condition "PLAN.lisp status=approved"
+            :principle "不是 client 直接调工位, 而是 MissionD plan-runner 内部调度 — alignment 与 plan 的 review gate 已经把 LLM 产物收敛到可执行边界"
+            :current-implementation "mission_plan(action=execute) 当前只返回 next_call descriptor; plan-runner 自动 dispatch 待代码对齐 (architecture-designed; code-alignment pending)"
+            :substrate "execution substrate = mission_execution 12-action manager (open/list/claim/heartbeat/release/deviate/decide/issue/complete/status/audit/repair, F-execution-log-governance)"
+            :options-before-runner ["manual ClaudeCode handoff" "mission_execution + mission_task_delegate + mission_flow_run combination 由人工或上层 actor 拼"]
+            :dispatch-strategy
+              ((case lisp-only-architecture-task
+                  :strategy "resident-lisp-architect-session"
+                  :substrate "复用常驻 ClaudeCode lisp-architect slot (mission_pty_send / mission_task_delegate)"
+                  :rationale "保留架构上下文; 不为单次 Lisp 改动重开 fresh session"
+                  :status "operational-practice")
+               (case code-alignment-implementation-task
+                  :strategy "fresh-code-alignment-session"
+                  :substrate "mission_pty_spawn 新 slot, project-root cwd; 或 mission_compute_slot create dynamic slot"
+                  :rationale "任务 .md 自包含 + 隔离度好 + 可并发多个 slot"
+                  :status "operational-practice")
+               (case broad-independent-scan-or-refactor
+                  :strategy "fresh session + agent-team-hint"
+                  :substrate "在派给 ClaudeCode 的任务文字中明确写'使用 agent-team 提高效率'"
+                  :guardrail "并行子 agent 只读不写; 写入仍由主 agent 单点落笔"
+                  :status "operational-practice; plan-runner 自动加 hint 待 code-alignment")
+               (case project-bound-coding
+                  :strategy "spawn in target project root"
+                  :substrate "mission_pty_spawn / mission_compute_slot 显式 project_root, 进 sole-spawn-bottleneck"
+                  :rationale "project memory / JSONL / tool path / conversation.project_id 全靠 cwd 落地"
+                  :status "code-aligned for spawn cwd; 自动选路 pending")
+               (fallback prompt-mode
+                  :strategy "claude -p"
+                  :status "fallback / non-preferred"
+                  :rationale "无 PTY session / 无 evidence / 无 capability-usage 闭环; 仅在 daemon 不可用 / 真正 throwaway 查询时退化使用"
+                  :enforcement-future "plan-runner 默认禁止; 显式 dispatch_strategy=prompt-fallback 才允许"))
+            :workstation-cross-ref "worker pillar :: section claudecode-workstation-orchestration / flow pillar :: F-workstation-dispatch-policy / intent-layer pillar :: section unified-entry-pipeline :: workstation-dispatch-policy")
+         (s7 evidence-collection
+            :at "intent-layer pillar :: evidence-collector + memory/event-bus pillars"
+            :reads ["tool_calls" "event_log (DomainEvent stream)" "board_tasks" "execution companion log" "ExecutionEvent stream" "git diff" "test outputs"]
+            :writes [".missiond/v2/plans/<plan_id>.evidence.json (via mission_plan action=record_evidence — code-aligned)" "future plan_evidence DB JSONB"]
+            :status "architecture-designed; partial sidecar via mission_plan(record_evidence); auto evidence-collector actor pending"
+            :purpose "为 workflow-distillation 与 retrospective 提供输入")
+         (s8 workflow-distillation
+            :at "intent-layer pillar :: workflow-distiller"
+            :condition "plan status=succeeded 多次或 human 显式标 reusable"
+            :reads ["plan row + plan evidence sidecar" "successful plan history"]
+            :writes [".missiond/workflows/<topic>.lisp (file-first SSOT)" "workflow table mirror via mission_workflow(action=distill, persist=true)"]
+            :status "architecture-designed; mission_workflow(action=distill) currently dry-run preview — distiller actor code-alignment pending"
+            :downstream "machine execution 走 F-methodology-to-executable-compile → YAML → mission_flow_run"))
+      :egress
+        (writes [".missiond/alignment/<topic>/intent-alignment.lisp"
+                 ".missiond/plans/<topic>/PLAN.lisp"
+                 ".missiond/v2/plans/<plan_id>.evidence.json"
+                 ".missiond/workflows/<topic>.lisp"
+                 "optional directive / plan / workflow DB mirror rows"
+                 "optional ExecutionEvent + execution companion log entries"]
+         reads ["user message" "architecture Lisp diffs" "repo state" "run evidence"]
+         downstream ["F-directive-plan-workflow-compile" "F-execution-log-governance" "F-capability-usage-monitoring" "F-methodology-to-executable-compile"]
+         returns "reviewed alignment + reviewed plan + execution evidence + distilled reusable workflow")
+      :review-gates ["alignment-review-gate (s3)" "plan-review-gate (s5)"]
+      :file-vs-db-contract "file-first SSOT — alignment/plan/workflow .lisp 是 human/agent 真正 review 边界; directive/plan/workflow DB 行是可查询镜像 + 状态管理面"
+      :no-new-tool-decision "当前不新增 mission_message / mission_invoke; mission_directive(action=compile) 已是充分管理入口, 详 future-flows :: unified-entry-future-candidates"
+      :tools-backref ["mission_directive (statement intake + alignment管理面)"
+                      "mission_plan (PLAN.lisp 管理面 + execute bridge + record_evidence)"
+                      "mission_workflow (distill / methodology compile 管理面)"
+                      "mission_execution (execution substrate, 12-action coordination)"])
+
+    (flow F-workstation-dispatch-policy
+      :desc "MissionD 调度 ClaudeCode 工位的策略选择 — unified-entry pipeline s6 execution-runner 的子策略 narrative; 不重复 slot lifecycle 全文, 仅描述策略选择 → 派工口径"
+      :status "operational-practice (人工已用) + architecture-designed (Lisp 已声明); plan-runner 自动选路 code-alignment pending"
+      :role "把 worker pillar :: section claudecode-workstation-orchestration 的 5 条 policy 与 unified-entry pipeline 的 stage s2/s4/s6 连成一条 narrative; 是 cross-ref 中枢, 不是新执行路径"
+      :triggers
+        ["F-intent-alignment-plan-execution-loop :: s2 alignment-authoring (Lisp 改动)"
+         "F-intent-alignment-plan-execution-loop :: s4 plan-authoring (PLAN 起草)"
+         "F-intent-alignment-plan-execution-loop :: s6 execution-runner (PLAN 执行)"
+         "human request to dispatch a ClaudeCode workstation explicitly"]
+      :ingress
+        (entry "PLAN.lisp 节点 :dispatch-strategy + :target_project + :parallelism + 任务 .md 路径 (.missiond/claudecode/<topic>.md)")
+      :stages
+        ((s1 classify-task
+            :at "intent-layer pillar :: plan-runner (architecture-designed)"
+            :reads ["PLAN.lisp 节点 :dispatch-strategy" "节点改动文件清单 (Lisp / Rust / SQL / JS / 混合)" "节点 :parallelism 与 :target_project"]
+            :decision-table-ref "worker pillar :: section claudecode-workstation-orchestration :: dispatch-decision-matrix"
+            :outputs "strategy ∈ {resident-lisp / fresh-code-alignment / agent-team / mixed / prompt-fallback}")
+         (s2 select-substrate
+            :at "worker pillar :: section claudecode-workstation-orchestration"
+            :branches
+              ((resident-lisp        :substrate "复用现有 ClaudeCode lisp-architect slot via mission_pty_send / mission_task_delegate")
+               (fresh-code-alignment :substrate "mission_pty_spawn 新 slot 或 mission_compute_slot create dynamic slot, project-root cwd")
+               (agent-team           :substrate "fresh slot + 在任务 .md 中加入'使用 agent-team 提高效率'文字; ClaudeCode 主会话内并发 sub-agent")
+               (mixed                :substrate "拆 plan 分阶段: Lisp 阶段 → resident-lisp; 代码阶段 → fresh-code-alignment; 用 mission_execution 串接")
+               (prompt-fallback      :substrate "claude -p 一次性 prompt; 仅 daemon 不可用或 throwaway 查询时使用")))
+         (s3 enforce-cwd-and-context
+            :at "worker pillar :: section pty :: invariant project-root-spawn-cwd"
+            :enforcement "spawner::spawn_tracked_slot 强制 cwd = target_project_root; existing slot 复用前校验 slot.project_root == target_project_root"
+            :code-alignment "code-aligned for spawn cwd; 自动 mismatch detection 已存在")
+         (s4 record-strategy
+            :at "tools pillar :: mission_execution(action=open) (architecture-designed; schema 暂未含 dispatch_strategy 字段)"
+            :writes ["execution.dispatch_strategy" "execution companion log"]
+            :consumer "evidence-collector 落 evidence sidecar; capability-usage-monitor 后续统计策略命中率"
+            :status "architecture-designed; mission_execution schema 加 dispatch_strategy 字段待 code-alignment")
+         (s5 dispatch-and-monitor
+            :at "tools/worker pillars"
+            :substrate ["mission_pty_spawn / mission_pty_send / mission_pty_read"
+                        "mission_task_delegate (resident slot 上挂新任务)"
+                        "mission_compute_slot (动态 slot)"
+                        "mission_execution claim/heartbeat/release"]
+            :monitor "mission_pty_screenshot / mission_pty_status; PTY extractor anomaly; ControlTree pause cascade"))
+      :egress
+        (writes ["execution row (with dispatch_strategy field — future)"
+                 "PTY session log (via spawn substrate)"
+                 "tool_calls (via gen_gateway audit)"
+                 "evidence sidecar (via mission_plan record_evidence)"]
+         reads ["PLAN.lisp 节点 :dispatch-strategy" "worker pillar dispatch-decision-matrix" "ProjectRegistry"]
+         downstream ["F-intent-alignment-plan-execution-loop :: s7 evidence-collection"
+                     "F-execution-log-governance"
+                     "F-capability-usage-monitoring (后续统计)"]
+         returns "strategy choice + spawned/reused slot id + execution_id (when manager opened)")
+      :anti-patterns
+        ["不要为单次 Lisp 改动新开 fresh ClaudeCode slot — 浪费上下文"
+         "不要为代码同构复用常驻 Lisp slot — cwd 不对, 上下文污染"
+         "不要让多个并行 sub-agent 同时写同一 Lisp 块 — 结构漂移"
+         "不要默认走 claude -p — 无 evidence 闭环, 不可观测"]
+      :no-new-tool "本 flow 不引入新 tool; 全程复用 mission_pty_* / mission_compute_slot / mission_task_delegate / mission_execution / mission_plan"
+      :tools-backref ["mission_pty_spawn" "mission_pty_send" "mission_pty_read"
+                      "mission_compute_slot" "mission_task_delegate"
+                      "mission_execution" "mission_plan"])
+
+    (flow F-methodology-to-executable-compile
+      :desc "methodology Lisp SSOT → executable YAML artifact → flow-engine-v2 run"
+      :status "architecture-designed; code-alignment pending"
+      :architecture-decision "不先新增 direct mission_workflow_execute; methodology Lisp 保持人类/agent SSOT, 机器执行先编译为 YAML 再走既有 mission_flow_run"
+      :triggers
+        ["mission_workflow(action=compile_methodology|run_methodology)"
+         "mission_forge_build / mission_forge_lint extension"
+         "human requests to execute .missiond/workflows/<name>.lisp"]
+      :ingress
+        (entry "workflow_path or workflow_name + params + target_project + dry_run/run mode")
+      :stages
+        ((s1 load-methodology-lisp
+            :at "intent-layer pillar :: workflows :: kind methodology"
+            :source ".missiond/workflows/<name>.lisp"
+            :action "read methodology source, resolve project/global workflow search path, compute source_hash")
+         (s2 parse-methodology-contract
+            :at "intent-layer pillar :: workflow compiler (future actor)"
+            :action "extract phases, ordered steps, gates, anti-patterns, authority, required inputs, and expected artifacts")
+         (s3 map-to-flow-definition
+            :at "intent-layer + worker flow schema boundary"
+            :action "map methodology steps to FlowDefinition nodes: LlmCall / SlotTask / McpTool / DaemonAction / ParallelSlotTasks")
+         (s4 lint-generated-flow
+            :at "intent-layer forge lint + worker flow loader"
+            :action "validate node schema, tool names, params, variable references, slot requirements, and unsafe operations")
+         (s5 write-executable-yaml
+            :at "memory/filesystem boundary :: $MISSIOND_HOME/flows"
+            :writes "$MISSIOND_HOME/flows/<name>.yaml"
+            :metadata ["source_lisp" "source_hash" "compiler_version" "generated_at" "manual_review_required?"])
+         (s6 dry-run-or-run
+            :at "tools pillar :: mission_flow_run → worker pillar :: flow-engine-v2"
+            :action "dry-run returns compiled plan; run delegates to F5-flow-engine-v2-node-execution")
+         (s7 feedback-and-distill
+            :at "intent-layer pillar :: workflow-distiller"
+            :action "record compile/run feedback for future workflow template improvement"))
+      :egress
+        (writes ["generated executable YAML" "optional workflow compile record" "optional board/flow run state"]
+         reads ["methodology Lisp" "flow-engine-v2 schema" "tool registry"]
+         returns "compiled flow_id/path, lint result, optional mission_flow_run result")
+      :tools-backref ["mission_forge_build" "mission_forge_lint" "mission_flow_run" "mission_workflow"])
 
     (flow F5-flow-engine-v2-node-execution
       :desc "YAML flow 定义 → node-sequence 执行 → board_tasks.flow_context 持久化"
@@ -633,6 +1325,23 @@
                "McpTool → handlers::dispatch_tool"
                "DaemonAction → read_intent_lisp / close_flow 等"
                "ParallelSlotTasks → JoinSet + Arc<Semaphore>(effective) round-robin"])
+         (s3b parallel-slot-tasks-phase2
+            :at "worker pillar :: flow-engine-v2 :: ParallelSlotTasks handler"
+            :status "architecture-designed; code-alignment pending"
+            :ingress "ParallelSlotTasks node with task list, slot_selector, max_concurrency, join_policy, save_as"
+            :logic-core
+              ((step p1 "resolve eligible running non-excluded slots by role/project/capability; fail-fast if none")
+               (step p2 "expand each parallel item into SlotTaskDispatch{slot_id, prompt, vars, timeout, idempotency_key}")
+               (step p3 "schedule dispatches via JoinSet guarded by Arc<Semaphore>(max_concurrency); default round-robin over eligible slots")
+               (step p4 "each child writes child_result{task_id, slot_id, status, output_ref, error, started_at, finished_at}")
+               (step p5 "aggregate results by join_policy: all_success / best_effort / first_success / quorum(n)")
+               (step p6 "persist partial results after each child completion to board_tasks.flow_context[save_as], not only at final join")
+               (step p7 "on cancellation/timeout, interrupt only dispatched child tasks owned by this node; leave slots alive")
+               (step p8 "emit optional TaskEvent::Completed / IncidentEvent::Reported for failed child aggregate when event-bus implementation is wired"))
+            :egress
+              (writes ["board_tasks.flow_context.<save_as>.children" "completed_nodes when aggregate policy passes" "ctx.last_error when policy fails"]
+               emits ["future TaskEvent child result events" "IncidentEvent for systematic fan-out failure"]
+               returns "ParallelAggregate{children, success_count, failure_count, selected_output}"))
          (s4 per-node-save-and-persist
             :at "worker pillar :: flow-engine-v2 :: flow-runner-persist"
             :action "save_as → ctx.vars; completed_nodes.push; persist_context(ctx → board_tasks.flow_context)"
@@ -656,6 +1365,308 @@
       :tools-backref ["mission_flow_run"]
       :note "仅此 flow 是真正的 tool→flow→worker→memory 完整 5 跳链路. 其他 tools 当前 3 跳 (tool→handler→memory/worker) 无 flow 抽象")
 
+    (flow F-dynamic-slot-lifecycle
+      :desc "动态计算工位生命周期 — create/terminate/extend/list + async job + spawn_tracked_slot"
+      :triggers ["mission_compute_slot(action=create|terminate|extend|list)"]
+      :phase-C-verified "2026-04-25 — crates/missiond-daemon/src/handlers/compute/compute_slot.rs"
+      :stages
+        ((s1 action-dispatch
+            :at "tools pillar :: compute_slot handler"
+            :action "create/terminate/extend/list")
+         (s2 create-validate
+            :branch "create"
+            :at "worker pillar :: dynamic slot handler"
+            :guards ["template in coder/ops/researcher" "active dynamic slots < 5" "cwd resolves to registered target_project_root" "spawn cwd must equal project root" "TTL 5m..8h"])
+         (s3 persist-and-register
+            :branch "create"
+            :at "memory + worker"
+            :writes ["dynamic_slots active row" "SlotManager runtime dynamic slot"])
+         (s4 create-async-job
+            :branch "create"
+            :at "worker pillar :: job_store"
+            :writes "AsyncJob running mission_compute_slot:create")
+                 (s5 spawn-background-pty
+                    :branch "create"
+                    :at "worker pillar :: slot_orchestrator::spawner::spawn_tracked_slot"
+                    :action "init PTY slot with process cwd=target_project_root, inject permissions via bottleneck, wait_for_idle=60s, initial_prompt=objective")
+         (s6 complete-or-fail-job
+            :branch "create"
+            :at "job_store + memory"
+            :action "complete job with slot metadata or terminate DB row + unregister dynamic slot on spawn failure")
+         (s7 terminate
+            :branch "terminate"
+            :guards "slot_id must start slot-dyn-"
+            :action "kill PTY, mark dynamic_slots terminated, unregister SlotManager slot")
+         (s8 extend
+            :branch "extend"
+            :guards "additional_seconds <= 3600 and max extension count not exceeded"
+            :writes "dynamic_slots.expires_at")
+         (s9 list
+            :branch "list"
+            :reads ["dynamic_slots by optional status" "static SlotManager slots"]
+            :returns "static_slots + dynamic_slots + active count/limit"))
+      :tools-backref ["mission_compute_slot" "mission_job_poll"]
+      :downstream ["F-workflow-slot-full-lifecycle s2/s7" "F-task-delegate-autoprovision s3 when task_delegate auto-provisions"])
+
+    (flow F-task-delegate-autoprovision
+      :desc "声明式任务委派 → slot 选择/动态开槽 → board_task 入队 → 立即触发 dispatch"
+      :triggers ["mission_task_delegate(objective, intent, cwd, timeout_secs, priority, depends_on, context_hints)"]
+      :phase-C-verified "2026-04-25 — crates/missiond-daemon/src/handlers/compute/task_delegate.rs"
+              :stages
+                ((s1 validate-and-classify
+                    :at "tools pillar :: compute/task_delegate + daemon handler"
+                    :action "校验 objective 非空; intent ∈ code/ops/research/general; timeout clamp 60..7200s"
+                    :maps "intent → template: code=coder / ops=ops / research=researcher / general=coder")
+                 (s1b resolve-target-project-root
+                    :at "memory pillar :: project-management :: project-registry"
+                    :action "cwd/project_id/board context → target_project_root; requested subdir retained only as prompt/context"
+                    :fail-fast "unresolved project root or cwd outside registered project")
+                 (s2 reserve-idle-slot
+                    :at "worker pillar :: slot_dispatch::SlotAcquireGuard + PTY status"
+                    :action "遍历非 excluded roles, try_acquire_guard 后要求 SessionState::Idle and slot.project_root == target_project_root"
+                    :excludes ["jarvis" "memory" "supervisor" "decision"])
+         (s3 auto-provision-if-needed
+            :at "worker pillar :: handlers/compute/compute_slot.rs"
+            :action "无 idle slot 且非 ops 时, 委托 mission_compute_slot(action=create)"
+            :constraints "dynamic_slots active < 5; ttl=max(timeout+300,3600); spawn async job; autopilot 后续 pickup"
+            :flow-ref "F-workflow-slot-full-lifecycle :: s2-slot-provision")
+         (s4 context-hints
+            :at "worker-side computation + memory readers"
+            :reads ["kb_search(first 3)" "skills.search(first 3)"]
+            :limits "500 chars per entry, 2000 chars context block, 16000 chars final description")
+         (s5 create-board-task
+            :at "memory pillar :: module board"
+            :writes "board_tasks(title, description, priority, assignee?, auto_execute=true, depends_on?, timeout_secs, context_intent)"
+            :flow-ref "F1-board-task-main-lifecycle :: s1")
+         (s6 notify-dispatch
+            :at "worker pillar :: board_dispatch_notify"
+            :action "notify_one(), 不等 60s autopilot tick"
+            :downstream "F1-board-task-main-lifecycle :: s2 scan-decide / s3 claim / s4 execute"))
+      :tools-backref ["mission_task_delegate" "mission_compute_slot" "mission_board_query"]
+      :ownership
+        (tools "schema + MCP endpoint")
+        (worker "slot selection, guard, auto-provision, dispatch notify")
+        (memory "board_tasks + dynamic_slots/slot_sessions")
+        (flow "把 delegate 从一条 tool call 展开成 task lifecycle narrative"))
+
+    (flow F-task-submit-dispatch
+      :desc "legacy task submit → tasks queue → optional immediate PTY dispatch / auto-spawn → fallback queued"
+      :triggers ["mission_task_submit(action=async|sync, role, prompt|question, slotId?, timeoutMs?)"]
+      :phase-C-verified "2026-04-25 — crates/missiond-daemon/src/handlers/compute/task.rs :: handle_submit/handle_ask"
+      :stages
+        ((s1 action-dispatch
+            :at "tools pillar :: compute/task handler"
+            :action "action async → handle_submit; action sync → handle_ask (当前只建 task, 不阻塞等结果)"
+            :tools-consumed ["mission_task_submit"])
+         (s2 create-legacy-task
+            :at "memory pillar :: system-support legacy tasks"
+            :action "crate::state::submit_task(role, prompt|question)"
+            :writes "tasks row queued")
+         (s3 bind-target-slot
+            :at "task store"
+            :optional true
+            :action "若 slotId 指定, 写入 task.slot_id 作为 autopilot fallback")
+         (s4 select-candidates
+            :at "worker pillar :: slot registry"
+            :action "slotId 指定则单候选; 否则按 slot.config.role == role 过滤")
+         (s5 idle-immediate-dispatch
+            :at "worker pillar :: pty + slot_dispatch guard"
+            :action "若候选 slot Idle, send_fire_and_forget(prompt), 更新 tasks status=running/slot_id/session_id/started_at"
+            :emits "SlotEvent::TaskDispatched{purpose=submit}")
+         (s6 auto-spawn-exited-slot
+            :at "worker pillar :: slot_orchestrator::spawner::spawn_tracked_slot"
+            :action "若无 idle dispatch, 对 Exited/None 状态候选 wait_for_idle spawn 后再发 prompt"
+            :emits "SlotEvent::TaskDispatched{purpose=submit}")
+         (s7 fallback-queued
+            :at "event-bus pillar :: TaskEvent"
+            :action "若仍未 dispatch, 返回 dispatched=false 并发布 TaskEvent::Created"
+            :emits "TaskEvent::Created")
+         (s8 return-receipt
+            :at "tools pillar"
+            :returns "ToolResult json {taskId, dispatched, slotId?|hint?}"))
+      :tools-backref ["mission_task_submit"]
+      :ownership
+        (tools "schema + action dispatch")
+        (worker "slot guard / PTY send / auto-spawn mechanics")
+        (memory "legacy tasks queue")
+        (event-bus "TaskEvent::Created / SlotEvent::TaskDispatched")
+        (flow "把 legacy task queue 的 submit 分支同 board_task delegate 分开描述"))
+
+    (flow F-task-legacy-queue-control
+      :desc "legacy tasks queue 查询/追踪/确认/取消 — 非 board_tasks lifecycle"
+      :triggers ["mission_task_query(action=status|list|ack|track)" "mission_task_cancel(taskId)"]
+      :phase-C-verified "2026-04-25 — crates/missiond-daemon/src/handlers/compute/task.rs :: query/cancel/track"
+      :stages
+        ((s1 action-dispatch
+            :at "tools pillar :: compute/task handler"
+            :action "query: status/list/ack/track; cancel: handle_cancel"
+            :tools-consumed ["mission_task_query" "mission_task_cancel"])
+         (s2 status-or-list
+            :at "memory pillar :: system-support legacy tasks"
+            :branch "mission_task_query status/list"
+            :reads "get_task / get_tasks_by_status / get_all_tasks")
+         (s3 ack-completed
+            :at "memory pillar :: system-support legacy tasks"
+            :branch "mission_task_query ack"
+            :action "ack_completed_tasks(since)")
+         (s4 track-aggregate
+            :at "worker + memory"
+            :branch "mission_task_query track"
+            :reads ["task row" "PTY slot status" "slot_session" "conversation jsonl metadata" "slot_progress" "slot_last_responses"])
+         (s5 cancel-guarded-update
+            :at "memory pillar :: system-support legacy tasks"
+            :branch "mission_task_cancel"
+            :guards "only Queued or Running"
+            :writes "status=Cancelled + finished_at=now")
+         (s6 return-result
+            :at "tools pillar"
+            :returns "ToolResult json/json_pretty/error"))
+      :tools-backref ["mission_task_query" "mission_task_cancel"]
+      :ownership
+        (tools "schema + action dispatch")
+        (worker "PTY/progress aggregation for track")
+        (memory "legacy tasks queue state")
+        (flow "把 query/cancel 合并为 legacy queue control shared-flow"))
+
+    (flow F-execution-log-governance
+      :desc "mission_execution manager → execution companion log → claim/decision/deviation/completion governance"
+      :triggers ["mission_execution(action=...)" "multi-agent pillar/code-alignment work session"]
+      :status "code-aligned; 12-action manager + Domain::Execution / ExecutionEvent emission implemented"
+      :protocol "memory pillar :: board helper agent-execution-coordination v0.5.2"
+      :stages
+        ((s1 open-or-load-execution
+            :at "tools pillar mission_execution + worker pillar :: agent-execution-manager-interface"
+            :action "open creates meta/id-counters/phase-tracker; list/status/audit loads existing companion logs")
+         (s2 claim-scope
+            :at "worker manager + memory protocol"
+            :action "claim validates overlapping scope, allocates claim_id, sets lease_expires_at")
+         (s3 keepalive-or-release
+            :at "worker manager"
+            :action "heartbeat extends lease; release closes claim with optional summary")
+         (s4 record-operational-facts
+            :at "worker manager"
+            :action "deviate/decide/issue/complete allocate D/DC/I/COMP ids and append typed records")
+         (s5 update-derived-indexes
+            :at "execution companion log"
+            :writes "active_claims / open_issues / unresolved_deviations / latest_decisions / completed_phases")
+         (s6 audit-or-repair
+            :at "worker manager + architecture-lisp checker"
+            :checks ["paren balance" "ID monotonic/no duplicates" "claim overlap" "stale claims" "completed phase coverage" "open issue owners"]
+            :repair "dry-run first; apply may only mark stale claims / rebuild derived indexes / suggest renumber")
+         (s7 expose-status
+            :at "tools pillar response + optional board progress"
+            :returns "action receipt / status report / audit report"))
+      :egress
+        (:writes ["*-execution.lisp operational slots" "derived indexes"]
+         :reads ["parent design Lisp" "execution companion log"]
+         :emits ["ExecutionEvent::*" "optional BoardTaskStatusChanged when linked"]
+         :returns "mission_execution JSON result")
+      :tools-backref ["mission_execution"]
+      :cross-pillar
+        (memory "owns execution protocol + durable file shape")
+        (worker "owns manager mechanics, leases, audit/repair runtime")
+        (tools "owns future MCP schema")
+        (intent-layer "keeps methodology separate from operational execution state"))
+
+    (flow F-skill-knowledge-lifecycle
+      :desc "Skill registry/query/context/mutation → skill tables/files + embeddings + context bundle"
+      :triggers ["mission_skill_query(action=list|search|topics|actions|stats)" "mission_skill_context(action=build|resolve)" "mission_skill_mutate(action=upsert|record|render|rollback)"]
+      :phase-C-verified "2026-04-25 — crates/missiond-daemon/src/handlers/knowledge/skill.rs"
+      :stages
+        ((s1 action-dispatch
+            :at "tools pillar :: knowledge/skill handler"
+            :action "query/context/mutate 三个 consolidated tool 分派到 legacy inner handlers")
+         (s2 query-skill-hub
+            :at "memory pillar :: skill store + in-memory skill index"
+            :actions ["list skill metadata" "topics list" "actions parse workflow metadata" "stats read skill_executions"])
+         (s3 search-skills
+            :at "worker/memory retrieval"
+            :branch "mission_skill_query action=search"
+            :action "name/aka bonus + skill FTS + skill embedding cosine + RRF; record top topic hits")
+         (s4 build-context
+            :at "worker pillar :: context assembly"
+            :branch "mission_skill_context action=build"
+            :action "state.skills.build_context(query) + KB search budget block")
+         (s5 resolve-context
+            :at "worker pillar :: context assembly"
+            :branch "mission_skill_context action=resolve"
+            :action "primary skill selection, requires_json dependency expansion to 2 layers, infra/kb aggregation, optional board search")
+         (s6 mutate-skill-content
+            :at "memory pillar :: skill topic/block store + filesystem"
+            :branch "mission_skill_mutate upsert/record"
+            :writes ["skill_topics when auto-created" "skill_blocks" "SKILL.md materialized"])
+         (s7 refresh-skill-embedding
+            :at "worker pillar :: embedding-worker-loop"
+            :condition "upsert/record"
+            :action "embedding_tx.try_send(EmbeddingTask::ProcessSkillTopic)")
+         (s8 render-or-rollback
+            :at "filesystem + skill ingestion"
+            :branch "mission_skill_mutate render/rollback"
+            :action "materialize one/all topics; or restore version content and re-ingest skill directory")
+         (s9 return-result
+            :returns "query/context/mutation result; downstream F7 refreshes searchable skill embeddings"))
+      :tools-backref ["mission_skill_query" "mission_skill_context" "mission_skill_mutate"]
+      :downstream ["F7-embedding-pipeline when skill content changes" "F10-context-assembly consumes resolved skill context"])
+
+    (flow F-skill-workflow-execution
+      :desc "Skill action workflow → 顺序 MCP tool steps → skill_executions 审计"
+      :triggers ["mission_skill_exec(skill, action, dry_run?, params?)"]
+      :phase-C-verified "2026-04-25 — engine/intent_engine/workflow_executor.rs + handlers/knowledge/skill.rs"
+      :distinguish-from-flow-v2 "不是 flow-engine-v2 的别名; 它读取 skill 文件中的 ```workflow block, 以 MCP tool step 顺序执行"
+      :long-term-boundary "保留独立 runtime: skill_exec 是 skill-local action macro executor; flow-engine-v2 是 durable YAML orchestration. 未来只做 definition adapter, 不强行合并 executor"
+      :stages
+        ((s1 load-skill-topic
+            :at "memory pillar :: project-management/skill store + filesystem"
+            :reads "skill_topic_get(skill) → topic.file_path → read_to_string")
+         (s2 parse-workflow-block
+            :at "missiond_core::skill::parse_workflow_blocks"
+            :action "找 workflow.id == action; 解析 steps(tool, params, save_as, on_error)")
+         (s3 approval-or-preview
+            :at "workflow_executor"
+            :action "requires_approval 且非 dry_run → PendingApproval; dry_run → WorkflowStepPreview")
+         (s4 create-execution-log
+            :at "memory pillar :: project-management skill_executions"
+            :writes "skill_execution_insert(exec_id, skill, action, steps_total, triggered_by=manual)")
+         (s5 context-hooks
+            :at "worker pillar :: workflow_executor"
+            :action "执行 context_hooks, 每 hook 10s timeout, 输出 save_as 到 context")
+         (s6 run-steps
+            :at "worker pillar :: AppState::call_tool → handlers::dispatch_tool"
+            :action "逐 step resolve ${var}; call MCP tool with 30s timeout; save_as 写 context"
+            :error-policy "stop / skip / retry(exponential 1,2,4...) / fallback:step_id; MAX_STEP_VISITS=5; MAX_DEPTH=3")
+         (s7 persist-result
+            :at "memory pillar :: skill_executions"
+            :writes "status running/success/failed + steps_completed + context_json + error + duration_ms"))
+      :tools-backref ["mission_skill_exec"]
+      :design-decision "当前保留为 skill-local workflow runtime; 与 flow-engine-v2 的合并是未来产品决策, 不是代码真相")
+
+    (flow F-cc-swarm-pty-prompt
+      :desc "Claude Code teammate swarm prompt wrapper — 单 slot 内部并行, 非 daemon-owned ParallelSlotTasks"
+      :triggers ["mission_cc_swarm(slotId, tasks[], teammateCount?, timeoutMs?)"]
+      :phase-C-verified "2026-04-25 — crates/missiond-daemon/src/handlers/compute/cc_tasks.rs :: mission_cc_trigger_swarm"
+      :distinguish-from-flow-v2 "F5 的 ParallelSlotTasks 是 daemon flow node fan-out; mission_cc_swarm 只是构造 prompt 并调用 state.pty.send(slot_id, prompt, timeout_ms)"
+      :stages
+        ((s1 parse-args
+            :at "tools pillar :: cc_tasks handler"
+            :reads "slot_id, tasks[], teammate_count(default 3), timeout_ms(default 600000)"
+            :tools-consumed ["mission_cc_swarm"])
+         (s2 build-swarm-prompt
+            :at "cc_tasks handler"
+            :action "把 tasks[] 编号后拼成 'Plan 模式 + teammate 并行执行' prompt")
+         (s3 send-to-slot
+            :at "worker pillar :: pty transport"
+            :action "state.pty.send(slot_id, prompt, timeout_ms), 阻塞等待响应")
+         (s4 observe-via-cc-tasks
+            :at "worker/local conversation ingestion + cc_tasks watcher"
+            :optional true
+            :tools-consumed ["mission_cc_query"]
+            :reads "Claude Code session/task JSONL derived state"))
+      :tools-backref ["mission_cc_swarm" "mission_cc_query"]
+      :ownership
+        (tools "schema + consolidated cc_tasks action")
+        (worker "PTY send + cc_tasks watcher observation")
+        (flow "标明这是 prompt-level swarm, 不要误并入 flow-engine-v2 ParallelSlotTasks"))
+
     (flow F-workflow-slot-full-lifecycle
       :desc "通用 slot 全生命周期 E2E — 开工位 → 工位就绪 → 指挥执行 → 监控 → 完成检测 → 回收 → 审计. 覆盖 4 类 workflow 源"
       :triggers
@@ -670,13 +1681,14 @@
         (methodology-lisp
           :path ".missiond/workflows/*.lisp (intent-layer :: workflows :: methodology)"
           :example "pillar-refactor.lisp / bus-refactor.lisp"
-          :dispatch-status "⚠ GAP-1: 无直接执行 tool, 需包装 (见下)")
+          :dispatch-status "architecture-designed: F-methodology-to-executable-compile → mission_flow_run; code-alignment pending")
         (executable-yaml
           :path "$MISSIOND_HOME/flows/*.yaml (intent-layer :: workflows :: executable)"
           :dispatch "✓ mission_flow_run (flow-engine-v2) — 完整路径")
         (skill-workflow
           :path "kb_entries skill topic action block"
-          :dispatch "✓ mission_skill_exec — 30s/step + MAX_DEPTH=3")
+          :dispatch "✓ mission_skill_exec — 30s/step + MAX_DEPTH=3"
+          :flow-ref "F-skill-workflow-execution")
         (free-task
           :path "自然语言 prompt (ad-hoc)"
           :dispatch "✓ mission_task_submit / mission_task_delegate / mission_pty_send"))
@@ -684,34 +1696,43 @@
       :stages
 
         ;; ── Stage 1: 载入 workflow 定义 ──
-        ((s1-workflow-definition-load
+                ((s1-workflow-definition-load
             :at "tools pillar + intent-layer"
             :tools-alternatives
-              ((methodology  "⚠ GAP-1: mission_intent(read) 只读 <project>/.missiond/intent.lisp; .missiond/workflows/*.lisp 没有专门 read tool. 临时 workaround: 直接 Read file + 塞 prompt")
+              ((methodology  "architecture target: mission_workflow/forge compiler reads .missiond/workflows/*.lisp → generates executable YAML; current mission_workflow compile_methodology is dry-run preview")
                (executable   "✓ mission_flow_run(action=list|status) → loader.rs 从 $MISSIOND_HOME/flows/<id>.yaml 载入")
                (skill        "✓ mission_skill_query(action=list|get) + mission_skill_context(action=resolve)")
                (free         "无需定义载入"))
             :reads ["<project>/.missiond/intent.lisp (intent tool)" "$MISSIOND_HOME/flows/*.yaml (loader.rs)" "kb_entries (skill)"]
-            :writes [])
+                    :writes [])
 
-         ;; ── Stage 2: Slot Provision (5 种路径) ──
-         (s2-slot-provision
-            :at "worker pillar :: section pty :: subsection slot-orchestrator"
-            :worker-path "invariant sole-spawn-bottleneck (spawner.rs::spawn_tracked_slot — ALL 10 callers 经此, 0 direct pty.spawn)"
+                 ;; ── Stage 1.5: Resolve Target Project Root ──
+                 (s1b-target-project-root
+                    :at "memory pillar :: project-management :: project-registry"
+                    :action "resolve project_id/cwd/task context to canonical target_project_root before any slot spawn or slot reuse"
+                    :rules ["process cwd for ClaudeCode/Gemini/Codex must be target_project_root"
+                            "requested cwd below project root is prompt/context metadata, not spawn cwd"
+                            "existing slot reuse requires slot.project_root == target_project_root"
+                            "Gemini/Codex hard-fail when target root is unresolved"])
+
+                 ;; ── Stage 2: Slot Provision (5 种路径) ──
+                 (s2-slot-provision
+                    :at "worker pillar :: section pty :: subsection slot-orchestrator"
+                    :worker-path "invariant sole-spawn-bottleneck + project-root-spawn-cwd (spawner.rs::spawn_tracked_slot — ALL callers 经此, process cwd=target_project_root)"
             :tools-alternatives
               ((option-A-复用-persistent
                   :desc "复用 slots.yaml 里 auto_start=true 的 registered slot (4 种): arch-surveyor / strategy / gemini-router / lisp-surveyor"
                   :tool "无需开, mission_slots(list) 查现有 state, 直接 s4 dispatch"
                   :constraint "只适用 task_type 匹配 registered-task 的场景 (arch_maintenance / strategy_analyst / gemini_router / lisp_survey)")
-               (option-B-开固定-slotId
-                  :desc "按固定 slot_id 开 PTY session (如手动 spawn claude-code-opus)"
-                  :tool "mission_pty_spawn(slotId, waitForIdle?, timeoutSecs?, autoRestart?, mcpConfigPath?)"
-                  :worker-path "spawn_tracked_slot 经 perm-inject → tracking-env → pty-spawn → uuid-capture → initial-prompt")
+                       (option-B-开固定-slotId
+                          :desc "按固定 slot_id 开 PTY session (如手动 spawn claude-code-opus)"
+                          :tool "mission_pty_spawn(slotId, waitForIdle?, timeoutSecs?, autoRestart?, mcpConfigPath?)"
+                          :worker-path "spawn_tracked_slot 经 project-root resolution → perm-inject → tracking-env → pty-spawn(project_root) → uuid-capture → initial-prompt")
                (option-C-动态-TTL
-                  :desc "动态 compute_slot (5 active 上限, 4h default / 8h max TTL)"
-                  :tool "mission_compute_slot(action=create, template=coder|ops, objective, cwd, max_ttl)"
-                  :writes ["dynamic_slots (new row)" "slot_sessions"]
-                  :constraint "max 5 active; TTL 可 extend (action=extend, +3600s max 每次)")
+                          :desc "动态 compute_slot (5 active 上限, 4h default / 8h max TTL)"
+                          :tool "mission_compute_slot(action=create, template=coder|ops, objective, cwd, max_ttl)"
+                          :writes ["dynamic_slots (new row)" "slot_sessions"]
+                          :constraint "cwd must resolve to target_project_root; max 5 active; TTL 可 extend (action=extend, +3600s max 每次)")
                (option-D-声明式-委派
                   :desc "daemon 自主选 slot — 给 objective 让它挑"
                   :tool "mission_task_delegate(objective, intent=code|ops|research|general, cwd, timeout_secs≤7200, priority, depends_on)"
@@ -720,8 +1741,8 @@
                   :desc "创建 board_task 带 flow_template, autopilot 扫 + claim + 派发"
                   :tool "mission_board_create(title, flowTemplate, ...) + autopilot-tick claim"
                   :flow-ref "F1-board-task-main-lifecycle s1→s3"))
-            :writes ["slot_sessions" "dynamic_slots (若 option C)" "board_tasks (若 option E)"]
-            :via-bus ["SlotSessionChanged"])
+                    :writes ["slot_sessions" "dynamic_slots (若 option C)" "board_tasks (若 option E)"]
+                    :via-bus ["SlotSessionChanged"])
 
          ;; ── Stage 3: Slot Readiness (等 Idle) ──
          (s3-slot-readiness
@@ -740,11 +1761,10 @@
             :at "tools pillar + worker pillar 执行点"
             :tools-alternatives
               ((methodology-lisp
-                  :desc "⚠ GAP-1 无直接执行. 当前 workaround:"
-                  :option-1 "人工 Read .missiond/workflows/<name>.lisp → 塞内容到 mission_task_delegate(objective=lisp-content-summary)"
-                  :option-2 "mission_pty_send(slotId, message=lisp-content 拼 prompt) 直接塞 Claude Code"
-                  :future-option-3 "补 mission_workflow_execute(workflow_path, params) 新 tool"
-                  :future-option-4 "forge 冲压 methodology.lisp → executable.yaml 然后走 mission_flow_run")
+                  :desc "architecture target: methodology Lisp 作为 SSOT, 先编译为 executable YAML, 再走 mission_flow_run"
+                  :current-workaround "人工 Read .missiond/workflows/<name>.lisp → 塞内容到 mission_task_delegate 或 mission_pty_send"
+                  :target-flow "F-methodology-to-executable-compile"
+                  :code-alignment "mission_workflow compile_methodology dry-run surface code-aligned; forge extension / compiler actor pending")
                (executable-yaml
                   :desc "✓ 完整路径: 载入 YAML → run flow-engine-v2"
                   :tool "mission_flow_run(flow_id, params, action=run)"
@@ -752,7 +1772,8 @@
                (skill-workflow
                   :desc "✓ skill topic 的 action block 执行 (类似小 orchestrator)"
                   :tool "mission_skill_exec(skill, action, dry_run?, params?)"
-                  :worker-path "section engine-cluster :: intent-engine :: workflow-executor-runtime (30s/step MCP dispatch + MAX_DEPTH=3)")
+                  :worker-path "section engine-cluster :: intent-engine :: workflow-executor-runtime (30s/step MCP dispatch + MAX_DEPTH=3)"
+                  :flow-ref "F-skill-workflow-execution")
                (free-simple
                   :desc "直接塞 prompt, 阻塞等回复"
                   :tool "mission_pty_send(slotId, message, waitForResponse=true, timeoutMs?)")
@@ -762,13 +1783,15 @@
                (multi-agent-swarm
                   :desc "多 agent 并发 (适合大任务拆分)"
                   :tool "mission_cc_swarm(slotId, tasks[], teammateCount=3, timeoutMs?)"
-                  :cross-ref "flow-engine v2 的 ParallelSlotTasks 节点类型 (JoinSet + Arc<Semaphore>)"))
-            :worker-paths
-              ["section pty :: subsection slot-orchestrator :: claude-slot-dispatch (CC 类)"
-               "section pty :: subsection slot-orchestrator :: gemini-slot-dispatch (Gemini 类)"
-               "section engine-cluster :: flow-engine-v2 :: flow-node-handler-dispatch (YAML)"
-               "section engine-cluster :: intent-engine :: workflow-executor-runtime (skill)"]
-            :writes ["board_tasks (若走 flow_run 或 task_delegate)" "slot_tasks" "conversation_messages (prompt 进 CC JSONL)"]
+                  :flow-ref "F-cc-swarm-pty-prompt"
+                  :cross-ref "与 flow-engine-v2 ParallelSlotTasks 是两个不同实现路径; 当前 tool 只向单个 PTY slot 发 teammate prompt"))
+                    :worker-paths
+                      ["section pty :: subsection slot-orchestrator :: claude-slot-dispatch (CC 类)"
+                       "section pty :: subsection slot-orchestrator :: gemini-slot-dispatch (Gemini 类)"
+                       "section engine-cluster :: flow-engine-v2 :: flow-node-handler-dispatch (YAML)"
+                       "section engine-cluster :: intent-engine :: workflow-executor-runtime (skill)"]
+                    :slot-reuse-invariant "all project-bound dispatch must use a slot whose project_root equals target_project_root; otherwise provision a new slot in that root"
+                    :writes ["board_tasks (若走 flow_run 或 task_delegate)" "slot_tasks" "conversation_messages (prompt 进 CC JSONL)"]
             :via-bus ["ManagerEvent::TextComplete (on reply)" "LlmEvent::* (若走 LLM gateway)"])
 
          ;; ── Stage 5: Monitor Execution ──
@@ -851,11 +1874,11 @@
       ;; ── 覆盖率检查 ──
       :tools-coverage-check
         :spawn "✓ 5 options (persistent/fixed/dynamic/delegate/board) 齐备"
-        :dispatch "✓ 6 paths (methodology⚠ / executable / skill / free-simple / free-async / cc-swarm) — methodology 一条缺直接 tool"
+        :dispatch "✓ 6 paths architecturally covered (methodology compile target / executable / skill / free-simple / free-async / cc-swarm) — methodology code-alignment pending"
         :monitor "✓ 6 tools (pty_read/status/screenshot/task_query/job_poll/ManagerEvent) 齐备"
         :teardown "✓ 5 paths (persistent-保留/dynamic-terminate/force-kill/interrupt/auto-reap) 齐备"
         :audit "✓ 自动写 + 3 query tool 齐备"
-        :overall "95% 齐备 — 仅 GAP-1 (methodology 直接执行) 需补"
+        :overall "architecture complete for 6 dispatch paths; methodology compile implementation pending"
 
       :worker-coverage-check
         :spawn-bottleneck "✓ spawner::spawn_tracked_slot 10 callers 统一 (perm-inject + tracking-env + pty-spawn + uuid-capture + initial-prompt 5 stage)"
@@ -878,14 +1901,14 @@
       :gaps-identified
         ((GAP-1 (methodology-lisp-execution)
             :severity "medium"
-            :desc "'.missiond/workflows/*.lisp' (pillar-refactor / bus-refactor 等人类方法论) 无直接执行 tool. 当前只能人工读 + 塞 prompt 或包装成 task_delegate"
-            :options
-              ["(A) 新加 mission_workflow_execute(workflow_path, params) — 读 lisp + LLM 解析 phases + 逐 phase 派 slot (开发量中)"
-               "(B) forge 冲压 methodology.lisp → executable.yaml (workflows-kinds-split 的 future-possibility, 当前未做)"
-               "(C) 接受现状 — methodology 永远是'人看文档', 不机器执行"]
-            :recommendation "选 (A) — 补 tool, 从 intent-layer pillar 扩"
+            :status "architecture-designed-code-alignment-pending"
+            :desc "'.missiond/workflows/*.lisp' (pillar-refactor / bus-refactor 等人类方法论) 无直接执行 runtime. 架构决定: Lisp 保持 SSOT, 编译为 executable YAML, 再由 mission_flow_run 执行"
+            :selected-path "F-methodology-to-executable-compile"
+            :rejected-path "不优先做 direct mission_workflow_execute; 避免绕开已有 flow-engine-v2"
+            :implementation-needed ["methodology parser/compiler actor" "generated YAML metadata/source_hash" "mission_workflow run_methodology execution or forge compile surface"]
             :affects ["intent-layer :: workflows :: kind methodology 的 executability 字段"
-                      "tools pillar :: knowledge domain 加新 tool"])
+                      "tools pillar :: mission_workflow"
+                      "flow pillar :: F-methodology-to-executable-compile"])
          (GAP-2 (orchestration-path-overlap)
             :severity "low-medium"
             :desc "3 条 orchestration 路径并存, 每类 workflow 该走哪条不明确: skill_exec (30s MCP dispatch) vs flow_run (YAML node sequence) vs task_delegate (自然语言)"
@@ -926,10 +1949,61 @@
          "mission_pause + mission_worker (orthogonal control-tree pause/resume)"]
 
       :overall-conclusion
-        "✅ 工具面 + worker 执行 + memory 表 基本齐备 (95%). 唯一 medium-severity 缺口是 GAP-1 methodology lisp 无直接执行 tool. 其他 4 gap 是 low-severity 优化项."))
+        "工具面 + worker 执行 + memory 表 架构上已闭合; methodology Lisp 执行已选定 compile-to-YAML → mission_flow_run 路径, 代码对齐待实现. 其他 4 gap 是 low-severity 优化项."))
 
   ;; ══════════════════════════════════════════════════════════
-  ;; 7.7 Category: Forge Flows
+  ;; 7.7 Category: Cascade Flows
+  ;; ══════════════════════════════════════════════════════════
+  (category cascade-flows
+    :desc "Universe graph / cascade repair — 跨 service 依赖分析与级联修复"
+
+    (flow F-cascade-execution
+      :desc "manifest → universe graph → blast radius plan → optional repair execution → task events"
+      :triggers ["mission_universe_graph" "mission_cascade_plan" "mission_cascade_trigger" "mission_cascade_lint"]
+      :phase-C-verified "2026-04-25 — crates/missiond-daemon/src/handlers/knowledge/cascade.rs"
+      :stages
+        ((s1 resolve-manifest
+            :at "tools pillar :: knowledge/cascade handler"
+            :action "manifest_path 或 UNIVERSE_MANIFEST; canonicalize; 限制在 UNIVERSE_ROOT 或 /Users/jinchen/Projects")
+         (s2 build-universe-graph
+            :at "external forge_core::universe_graph"
+            :action "resolve_universe_graph(manifest_path)"
+            :tools-consumed ["mission_universe_graph"])
+         (s3 plan-blast-radius
+            :at "external forge_core::cascade"
+            :action "create_plan(graph, ServiceDelta{service, changed}, dry_run=true)"
+            :returns "phases + upstream_map"
+            :tools-consumed ["mission_cascade_plan"])
+         (s4 trigger-guard
+            :at "cascade handler"
+            :action "CASCADE_TRIGGER_ENABLED kill-switch + path whitelist"
+            :tools-consumed ["mission_cascade_trigger"])
+         (s5 emit-start
+            :at "event-bus pillar :: TaskEvent"
+            :emits "TaskEvent::CascadeTriggered{service, changed}")
+         (s6 execute-repair
+            :at "tokio::task::spawn_blocking + forge_core::cascade::execute_plan"
+            :action "外部命令式修复, max_repair_cycles 来自 max_cycles")
+         (s7 emit-complete
+            :at "event-bus pillar :: TaskEvent"
+            :emits "TaskEvent::CascadeCompleted{services_repaired, services_failed, hard_halted, duration_ms}")
+         (s8 lint-only
+            :at "forge_core::universe_graph::validate_universe_integrity"
+            :action "lint 不执行修复, 返回 clean/warnings/failed"
+            :tools-consumed ["mission_cascade_lint"]))
+      :tools-backref ["mission_universe_graph" "mission_cascade_plan" "mission_cascade_trigger" "mission_cascade_lint"]
+      :ownership
+        (tools "MCP schema + external trigger")
+        (worker "blocking execution wrapper + runtime guard")
+        (event-bus "CascadeTriggered / CascadeCompleted")
+        (intent-layer "未来可从 directive/plan 生成 cascade trigger")
+        (flow "把 forge_core 的 plan/execute/lint 串成系统级 narrative")
+      :open-questions
+        ["cascade 执行产物是否需要写 board_tasks 或 audit detail, 当前只返回 ToolResult + 发 TaskEvent"
+         "CASCADE_TRIGGER_ENABLED 当前 dev-mode 默认 allow, 生产策略待 system-layer/control-tree 决策"]))
+
+  ;; ══════════════════════════════════════════════════════════
+  ;; 7.8 Category: Forge Flows
   ;; ══════════════════════════════════════════════════════════
   (category forge-flows
     :desc "forge build / lint — intent-layer 编译器对外流"
@@ -964,13 +2038,13 @@
             :action "strict-codegen / descriptive / experimental 模式检查")
          (s4 violations-return
             :returns "violations_raw + 修复建议"))
-      :tools-backref ["mission_forge_lint" "mission_cascade_lint (借用 forge lint 模式)"]))
+      :tools-backref ["mission_forge_lint"]))
 
   ;; ══════════════════════════════════════════════════════════
-  ;; 7.8 Tool-Backed Flows Index — tools v0.1 :flow-ref 映射
+  ;; 7.9 Tool-Backed Flows Index — tools v0.1 :flow-ref 映射
   ;; ══════════════════════════════════════════════════════════
   (section tool-backed-flows-index
-    :desc "tools v0.1 的 78 个 :flow-ref pending 应填入的 flow 引用"
+    :desc "tools v0.7 的 83 个 :flow-ref 应填入的 flow 引用"
     :coverage "部分 tool 直接映射到单 flow; 多数 read/write tool 是 trivial-single-step (无 flow 抽象价值)"
 
     (flow-mapping
@@ -996,139 +2070,189 @@
       (mission_conversation_query     :flow "trivial-single-step")
 
       ;; KB & Embedding
-      (mission_kb_query            :flow "F10-context-assembly :: s3 (indirect)")
-      (mission_kb_remember         :flow "trivial-single-step + 触发 F7-embedding-pipeline")
-      (mission_kb_mutate           :flow "trivial-single-step")
-      (mission_kb_ops              :flow "F7 related (analyze/compact 可含 flow)")
-      (mission_embedding_ops       :flow "F7-embedding-pipeline")
-      (mission_code_search         :flow "F10 s3 retrieval-fusion")
-      (mission_beacon              :flow "trivial 或 F6 (ast_sync 间接)")
-      (mission_skill_context       :flow "F10-context-assembly")
-      (mission_skill_exec          :flow "F5-flow-engine-v2-node-execution (skill workflow 类似 flow)")
+      (mission_kb_query            :flow "F10-context-assembly :: s3 retrieval-fusion (search); trivial-single-step get/list")
+      (mission_kb_remember         :flow "F-kb-mutation-to-index + F7-embedding-pipeline when content changes")
+      (mission_kb_mutate           :flow "F-kb-mutation-to-index")
+      (mission_kb_ops              :flow "F-kb-governance-ops")
+      (mission_kb_batch_set_project :flow "F-kb-mutation-to-index :: s2 metadata update")
+      (mission_embedding_ops       :flow "F7-embedding-pipeline :: stats/backfill")
+      (mission_code_search         :flow "F10-context-assembly :: s3 retrieval-fusion (AST/code)")
+      (mission_beacon              :flow "architecture-designed; code-alignment pending: consolidated mission_beacon should map list/map/upsert to legacy mission_beacon_*; ast_sync indirect")
+      (mission_skill_query         :flow "F-skill-knowledge-lifecycle :: s2/s3/s9")
+      (mission_skill_context       :flow "F-skill-knowledge-lifecycle :: s4/s5 + F10-context-assembly")
+      (mission_skill_mutate        :flow "F-skill-knowledge-lifecycle :: s6/s7/s8 + F7-embedding-pipeline when content changes")
+      (mission_skill_exec          :flow "F-skill-workflow-execution (独立 skill workflow runtime)")
 
       ;; PTY & Slot
-      (mission_pty_spawn           :flow "sole-spawn-bottleneck invariant (non-flow) + F-daemon-bootstrap 若启动时")
-      (mission_pty_send            :flow "trivial-single-step")
-      (mission_pty_read            :flow "trivial-single-step")
-      (mission_pty_status          :flow "trivial-single-step")
-      (mission_pty_signal          :flow "trivial-single-step")
-      (mission_pty_confirm         :flow "F-learned-permission (手动 confirm 路径)")
-      (mission_pty_screenshot      :flow "trivial-single-step")
-      (mission_compute_slot        :flow "F-daemon-bootstrap (slot spawn 机制)")
+      (mission_pty_spawn           :flow "F-workflow-slot-full-lifecycle :: s2-slot-provision + s3-slot-readiness (via sole-spawn-bottleneck) / F-workstation-dispatch-policy :: s2 fresh-code-alignment substrate (preferred spawn over claude -p)")
+      (mission_pty_send            :flow "F-workflow-slot-full-lifecycle :: s4-dispatch-workflow / F-workstation-dispatch-policy :: s5 resident-lisp continuation")
+      (mission_pty_read            :flow "F-workflow-slot-full-lifecycle :: s5-monitor-execution / F-workstation-dispatch-policy :: s5 monitor")
+      (mission_pty_status          :flow "F-workflow-slot-full-lifecycle :: s3-slot-readiness + s5-monitor-execution + s6-completion-detection")
+      (mission_pty_signal          :flow "F-workflow-slot-full-lifecycle :: s7-teardown")
+      (mission_pty_confirm         :flow "F-learned-permission (manual confirm branch) + F-workflow-slot-full-lifecycle :: s5-monitor-execution")
+      (mission_pty_screenshot      :flow "F-workflow-slot-full-lifecycle :: s5-monitor-execution")
+      (mission_compute_slot        :flow "F-dynamic-slot-lifecycle + F-workflow-slot-full-lifecycle :: s2/s7 + F-task-delegate-autoprovision :: s3 / F-workstation-dispatch-policy :: s2 fresh-code-alignment substrate (dynamic slot variant)")
       (mission_slots               :flow "trivial-single-step")
       (mission_slot_history        :flow "trivial-single-step")
 
       ;; Task & Flow & Forge
-      (mission_task_submit         :flow "与 F1 或 skill workflow 相关")
-      (mission_task_query          :flow "trivial-single-step")
-      (mission_task_cancel         :flow "F1 中断")
-      (mission_task_delegate       :flow "F1 包装 (自主选 slot)")
+      (mission_task_submit         :flow "F-task-submit-dispatch")
+      (mission_task_query          :flow "F-task-legacy-queue-control :: status/list/ack/track")
+      (mission_task_cancel         :flow "F-task-legacy-queue-control :: cancel")
+      (mission_task_delegate       :flow "F-task-delegate-autoprovision / F-workstation-dispatch-policy :: s2 resident-lisp resume substrate (把任务挂到既有 slot)")
       (mission_flow_run            :flow "F5-flow-engine-v2-node-execution (primary)")
       (mission_forge_build         :flow "F-forge-build")
       (mission_forge_lint          :flow "F-forge-lint")
 
       ;; Worker & Control
-      (mission_worker              :flow "trivial-single-step (control-tree 查询)")
-      (mission_control             :flow "trivial-single-step (cascade 治理)")
-      (mission_pause               :flow "trivial-single-step (global kill-switch)")
+      (mission_worker              :flow "F-runtime-control-governance :: s2/s4")
+      (mission_control             :flow "F-runtime-control-governance")
+      (mission_pause               :flow "F-runtime-control-governance :: s1/s2/s6/s7")
 
       ;; Project
-      (mission_project             :flow "F9-project-init (init action); 其他 trivial")
-      (mission_intent              :flow "trivial-single-step (文件读)")
+      (mission_project             :flow "F9-project-init (init); registry/context/memories/vault/import/survey are direct project-management ops")
+      (mission_intent              :flow "trivial-single-step (project intent file read/path scan)")
 
       ;; Router & LLM
-      (mission_router_chat         :flow "F-strategy-analysis 类似 (gemini chat 模式)")
-      (mission_router_chat_manage  :flow "trivial-single-step")
+      (mission_router_chat         :flow "F-router-chat-session :: s1-s6")
+      (mission_router_chat_manage  :flow "F-router-chat-session :: s7/s8")
       (mission_sonnet_process      :flow "trivial-single-step (单 LLM 调用)")
       (mission_minimax_process     :flow "trivial-single-step (deprecated)")
 
       ;; Cascade
       (mission_cc_query            :flow "trivial-single-step")
-      (mission_cc_swarm            :flow "F5-flow-engine-v2 ParallelSlotTasks 模式")
-      (mission_universe_graph      :flow "trivial-single-step (memory 读)")
-      (mission_cascade_plan        :flow "待 cascade 具体 flow 设计")
-      (mission_cascade_trigger     :flow "待 cascade 具体 flow 设计")
-      (mission_cascade_lint        :flow "F-forge-lint 模式")
+      (mission_cc_swarm            :flow "F-cc-swarm-pty-prompt (非 F5 ParallelSlotTasks)")
+      (mission_universe_graph      :flow "F-cascade-execution :: s1/s2 (graph-only)")
+      (mission_cascade_plan        :flow "F-cascade-execution :: s1-s3")
+      (mission_cascade_trigger     :flow "F-cascade-execution :: s1-s7")
+      (mission_cascade_lint        :flow "F-cascade-execution :: s1/s2/s8")
 
       ;; Sysinfra
       (mission_sys_logs            :flow "trivial-single-step")
       (mission_sys_config          :flow "trivial-single-step")
-      (mission_daemon_update       :flow "F-daemon-bootstrap 重启类")
+      (mission_daemon_update       :flow "F-daemon-update-restart")
       (mission_infra_query         :flow "trivial-single-step")
-      (mission_infra_ops           :flow "trivial-single-step (health check)")
-      (mission_power_control       :flow "trivial-single-step")
+      (mission_infra_ops           :flow "F-infra-diagnostics")
+      (mission_power_control       :flow "trivial-single-step MVP wake/suspend request; status overlaps F-infra-diagnostics TCP probe")
       (mission_inbox               :flow "trivial-single-step")
-      (mission_incident            :flow "trivial 或 incident-reaction flow (future)")
+      (mission_incident            :flow "F-incident-reaction (test/list/get/remediate/status/close code-aligned)")
       (mission_gemini_auth         :flow "trivial-single-step")
-      (mission_permission_query    :flow "trivial-single-step")
-      (mission_permission_mutate   :flow "F-learned-permission 部分 step")
-      (mission_memory              :flow "trivial 或 F-extraction-pipeline (pending action)")
-      (mission_insight             :flow "trivial-single-step")
+      (mission_permission_query    :flow "F-learned-permission :: read/debug views + trivial static config read")
+      (mission_permission_mutate   :flow "F-learned-permission :: manual set/reload/revoke")
+      (mission_memory              :flow "F-extraction-pipeline :: pending read; F-runtime-control-governance :: memory pause; token_stats read model")
+      (mission_insight             :flow "trivial-single-step (strategic-state KB read model)")
       (mission_audit               :flow "trivial-single-step")
       (mission_llm_trace           :flow "trivial-single-step")
       (mission_timeline            :flow "trivial-single-step (event-bus pillar 读)")
       (mission_job_poll            :flow "trivial-single-step")
       (mission_agent               :flow "F-daemon-bootstrap 类 (spawn)")
-      (mission_codex_ops           :flow "trivial-single-step (读 codex_ingestion 产出)"))
+      (mission_codex_ops           :flow "trivial-single-step (recent/thread/tool_stats read model over codex_ingestion 产出)")
+      (mission_execution           :flow "F-execution-log-governance (open/list/claim/heartbeat/release/deviate/decide/issue/complete/status/audit/repair; code-aligned) — unified pipeline 的 execution substrate (s6 execution-runner)")
+      (mission_capability_usage    :flow "F-capability-usage-monitoring (snapshot/report/candidates/mark/ack; code-aligned partial)")
+      (mission_directive           :flow "F-intent-alignment-plan-execution-loop :: s1 message-intake + s3 alignment-review-gate (statement intake + alignment 管理面) / F-directive-plan-workflow-compile :: directive branch (manager surface code-aligned partial; compiler actor pending)")
+      (mission_plan                :flow "F-intent-alignment-plan-execution-loop :: s4 plan-authoring + s5 plan-review-gate + s6 execution-runner bridge + s7 evidence sidecar (manager surface code-aligned partial; compiler/runner actor pending; execute returns next_call) / F-directive-plan-workflow-compile :: plan branch")
+      (mission_workflow            :flow "F-intent-alignment-plan-execution-loop :: s8 workflow-distillation 管理面 / F-directive-plan-workflow-compile :: workflow branch + F-methodology-to-executable-compile (manager surface code-aligned partial; distiller/compiler actors pending)")
+      (mission_global_instruction  :flow "trivial-single-step read/edit/manual-reload (code-aligned; reload returns manual-reload-required)"))
+
+    (future-flow-mapping
+      :status "future surfaces backlog currently empty; current 83 tools all indexed; unified-entry-pipeline 不引入新 tool — 详 future-flows :: unified-entry-future-candidates")
 
     (index-summary
-      :total-tools 78
-      :non-trivial-flow-backed "约 20 tools (有独立或共享的 multi-stage flow)"
-      :trivial-single-step "约 58 tools (单 step, 无 flow 抽象价值)"
-      :future-cascade-flows "mission_cascade_plan/trigger 需独立 flow 设计 (未包含在 v0.1)"))
+      :total-tools 83
+      :non-trivial-flow-backed "约 25 tools (有独立或共享的 multi-stage flow; mission_execution + mission_capability_usage + mission_directive/plan/workflow 已提升为 actual surface; mission_global_instruction 是 trivial governance surface)"
+      :trivial-single-step "约 55-58 tools (单 step, 无 flow 抽象价值; 随 v0.2 把 task_delegate/skill/cascade 提升后略少)"
+      :first-wave-refined "v0.2 已提升 mission_task_delegate / mission_skill_exec / mission_universe_graph / mission_cascade_plan / mission_cascade_trigger / mission_cascade_lint 为 named flow"
+      :second-wave-refined "v0.2 补实 mission_board_decompose / mission_submit_phase_result / mission_cc_swarm, 并把 cc_swarm 从 flow-engine-v2 ParallelSlotTasks 中拆出"
+      :third-wave-refined "v0.3 补实 pty-session-control / kb-knowledge-lifecycle / skill-knowledge-lifecycle, pty 回挂 F-workflow-slot-full-lifecycle, KB 增 F-kb-mutation-to-index / F-kb-governance-ops"
+      :fourth-wave-refined "v0.4 补实 comm/router_chat session flow, codex_ops 真实 action, beacon consolidated dispatcher 作为后续代码对齐项记录"
+      :fifth-wave-refined "v0.5 补实 incident reaction + methodology Lisp compile-to-YAML 两条架构 flow"
+      :sixth-wave-refined "v0.6 补 capability usage monitoring,用于 tool/flow 调用热度治理与删合并候选生成"
+      :seventh-wave-refined "v0.7 补 directive/plan/workflow manager surfaces: compile/distill dry-run + read/control full + plan execute bridge"
+      :eighth-wave-refined "v0.7 标定 F-intent-alignment-plan-execution-loop 为 MissionD 统一入口 canonical pipeline (message → alignment → plan → execution → workflow); 8 stages + 双 review gate + plan-runner 内部调度 + evidence sidecar + workflow distillation; 不新增 tool"
+      :ninth-wave-refined "v0.7 补 F-workstation-dispatch-policy: ClaudeCode 工位调度策略 (resident-lisp / fresh-code-alignment / agent-team-hint / spawn-over-prompt-mode / project-root-cwd-contract); operational-practice + architecture-designed; 不新增 tool — 全部复用现有 mission_pty_* / mission_compute_slot / mission_task_delegate / mission_execution / mission_plan")
 
   ;; ══════════════════════════════════════════════════════════
   ;; Future Flows (未来补充)
   ;; ══════════════════════════════════════════════════════════
   (future-flows
-    (knowledge-mutation-to-index
-      :desc "knowledge 写入 → embedding → HNSW ready"
-      :partial-covered-by "F7-embedding-pipeline"
-      :future "补完整 index refresh + search availability")
+    (knowledge-index-hardening
+      :desc "knowledge 写入 → embedding → HNSW ready 的生产级可观测性/可用性保障"
+      :now-covered-by "F-kb-mutation-to-index + F7-embedding-pipeline"
+      :future "补 index refresh 完成回执、search availability SLA、失败重试/告警")
 
     (incident-reaction
       :desc "IncidentEvent → aiops / remediation"
       :trigger "worker pillar :: infra :: aiops 产 Incident"
-      :future "标准 remediation playbook")
+      :status "moved-to named flow"
+      :moved-to "category infrastructure-flows :: F-incident-reaction"
+      :code-alignment "code-aligned: get/remediate/status/close + board task linkage + close guard")
+
+    (methodology-to-executable-compile
+      :desc "methodology Lisp SSOT → generated executable YAML → mission_flow_run"
+      :status "moved-to named flow"
+      :moved-to "category workflow-runtime-flows :: F-methodology-to-executable-compile"
+      :code-alignment "mission_workflow compile_methodology dry-run/read surface code-aligned; YAML emitter actor / forge extension / run_methodology execution still pending")
 
     (execution-log-governance
       :desc "mission_execution claim/deviate/complete → board linkage"
-      :protocol "agent-execution-coordination v0.5.1 (memory pillar)"
-      :future "12 actions handler 实现后 (worker I007 / IL-T005)")
+      :protocol "agent-execution-coordination v0.5.2 (memory pillar)"
+      :status "moved-to named flow"
+      :moved-to "category workflow-runtime-flows :: F-execution-log-governance"
+      :code-alignment "code-aligned: 12 actions handler/tool + ExecutionEvent emission")
 
     (directive-plan-workflow-compile
       :desc "user utterance → directive → plan → workflow"
       :stages
         "intent-layer directive-compiler → plan-compiler → workflow-distiller"
-      :status "schema-ready-pending-implementation (intent-layer 5.10 actor 全 TBD)")
+      :status "moved-to named flow"
+      :moved-to "category workflow-runtime-flows :: F-directive-plan-workflow-compile"
+      :code-alignment "DirectiveLayerStore + mission_directive/mission_plan/mission_workflow MCP manager surfaces code-aligned; directive-compiler / plan-compiler / workflow-distiller actors still pending")
 
     (cascade-execution
       :desc "mission_cascade_plan / trigger → 多 agent / 多 session 并发执行"
       :cross-ref "worker pillar :: cascade-events (CascadeTriggered / CascadeCompleted)"
-      :future "完整 cascade orchestration 设计"))
+      :status "resolved-by-v0.2"
+      :moved-to "category cascade-flows :: F-cascade-execution"
+      :note "2026-04-25 code scan confirmed handler stages; remaining question is durable audit detail, not flow existence")
+
+    (unified-entry-future-candidates
+      :desc "未来若需要让 message intake 与 plan-runner 拥有专属 MCP surface 可考虑的候选; 当前 83 tools 内不计入"
+      :status "future-candidate-only; not counted in current 83 tools"
+      :rationale "当前 mission_directive(action=compile) 已能承载 message intake 管理面, mission_plan(action=execute) 已能 bridge 执行; 因此优先打磨现有 surface 的 actor/runner 实现, 而不是新增 tool 入口"
+      (candidate mission_message
+        :purpose "若未来希望统一 client 把 user message 直接送进 MissionD 入口, 而不通过 mission_directive(action=compile, source=message)"
+        :why-not-now "mission_directive 已是充分管理面; 引入新 tool 会与现有 directive 管理 surface 重复, 增加 actor 路由复杂度"
+        :counted-in-83 "no")
+      (candidate mission_invoke
+        :purpose "若未来希望统一 client 触发已 approved PLAN.lisp 的内部执行 (而非 mission_plan(action=execute) 返回 next_call descriptor 由 caller 自行执行)"
+        :why-not-now "等 plan-runner 自动调度落地后, mission_plan(action=execute) 自然演化成内部 dispatch, 不需要再开 tool 入口"
+        :counted-in-83 "no")))
 
   ;; ══════════════════════════════════════════════════════════
   ;; Need-more-ground-truth (F-T001…)
   ;; ══════════════════════════════════════════════════════════
   (need-more-ground-truth
-    (F-T001 :status "future-design"
-            :note "cascade flow (mission_cascade_plan/trigger) 具体 staging — 待 cascade 整体设计")
-    (F-T002 :status "awaiting-decision"
-            :note "mission_task_submit/query/cancel 与 skill_exec 可能重叠 — 职责分工决策")
-    (F-T003 :status "future-implementation"
-            :note "flow-engine-v2 ParallelSlotTasks Phase-2 reflow (当前 fire-and-forget POC)")
-    (F-T004 :status "partial-resolved"
+    (F-T001 :status RESOLVED :resolved-at "2026-04-25"
+            :finding "mission_cascade_plan/trigger/lint 真实 staging 已由 code scan 确认并落为 F-cascade-execution; trigger 会发 TaskEvent::CascadeTriggered/CascadeCompleted")
+    (F-T002 :status "architecture-decided"
+            :finding "mission_skill_exec 不是 flow-engine-v2 别名, 而是独立 skill workflow executor: parse skill workflow block → 30s MCP step dispatch → skill_executions 审计"
+            :decision "长期保留两个 runtime: skill_exec 负责 skill-local action macro; flow-engine-v2 负责 durable YAML orchestration. 未来可做 definition adapter, 不合并 executor")
+    (F-T003 :status "architecture-designed-code-alignment-pending"
+            :note "flow-engine-v2 ParallelSlotTasks Phase-2 已补 s3b parallel-slot-tasks-phase2: slot selection, semaphore fan-out, per-child persistence, join_policy, cancellation, aggregate result. 注意 mission_cc_swarm 仍是 PTY prompt wrapper, 不是该节点的 tool 入口")
+    (F-T004 :status "architecture-designed-code-alignment-pending"
             :phase-B-finding "aiops 自动 remediation 已实现 (详 phase-B-scan-findings § C.4): health 恢复自动 close Board task + 加 recovery note, health 失败建 Board task + incident, PtySlot incident 派 Opus slot. incident-reaction 作为完整 flow 的独立 narrative 仍待整理"
-            :remaining "把现有 remediation 逻辑整理为 flow narrative")
-    (F-T005 :status "awaiting-decision"
-            :note "methodology lisp → executable YAML 自动转换 pipeline — 未来可 forge 冲压")
+            :resolved-by "F-incident-reaction"
+            :remaining "代码对齐阶段补 full remediation playbook surface/event")
+    (F-T005 :status "architecture-designed-code-alignment-pending"
+            :note "methodology lisp → executable YAML 自动转换 pipeline 已定为 F-methodology-to-executable-compile; compiler/tool 实现待代码对齐")
     (F-T006 :status RESOLVED :resolved-at "2026-04-21"
-            :finding "autopilot.rs 60s tick (worker v0.3 path autopilot-tick 已确认, phase-B A.2 补: 60s 主编排脉搏 / 双内存槽管理 / 故障隔离). CAS claim 具体 @ memory pillar board state-machine")
-    (F-T007 :status "partial-resolved"
-            :phase-B-finding "SessionCompleted (及 NarrationSessionCompleted) 由 bus/v2_subscribers 路径 emit (phase-B B.3 发现 experience_harvester 经此路径激活). 完整 emit 机制待补"
-            :remaining "SessionCompleted emit 点完整清单 (pty_event_worker 还是别处?)")
-    (F-T008 :status "pending-phase-C"
-            :note "xjp-router 接入后 F7 embedding-pipeline 变化 — 需 xjp_router_client 实现后补 flow 迁移设计 (同 worker I006)")
-    (F-T009 :status "future-validation"
-            :note "F-learned-permission 100% 覆盖率验证 — 需 code audit 所有 ConfirmRequired 路径"))
+            :finding "autopilot.rs 60s tick (worker v0.4 path autopilot-tick 已确认, phase-B A.2 补: 60s 主编排脉搏 / 双内存槽管理 / 故障隔离). CAS claim 具体 @ memory pillar board state-machine")
+    (F-T007 :status "architecture-designed-code-alignment-pending"
+            :phase-B-finding "SessionCompleted (及 NarrationSessionCompleted) 由 bus/v2_subscribers 路径 emit (phase-B B.3 发现 experience_harvester 经此路径激活)"
+            :resolved-by "F-session-completion-event-chain + event-bus v1.3.2 session-completion-contract"
+            :remaining "代码对齐阶段 grep/verify 所有 emit 点并迁到 SessionEvent::Completed contract")
+    (F-T008 :status "architecture-designed-code-alignment-pending"
+            :note "xjp-router 接入后 F7 embedding-pipeline 变化已补为 xjp-router target; 代码对齐仍等 worker I006")
+    (F-T009 :status "architecture-designed-code-alignment-pending"
+            :note "F-learned-permission 已补 coverage-contract; 代码对齐阶段 grep all ConfirmRequired / ConfirmResponse / trust-dialog branches,逐条标 covered/no-learn"))
 )

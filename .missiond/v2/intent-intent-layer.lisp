@@ -1,21 +1,22 @@
 ;; ═════════════════════════════════════════════════════════════
-;; MissionD — Intent-Layer Pillar (phase-A first-draft v0.1)
+;; MissionD — Intent-Layer Pillar (phase-B recursive-contract v0.4)
 ;; 目标: 元层 — 系统如何描述自己 / 被指挥 / 演化 / 认知推理
 ;; 底稿: gptpro intent-intent-layer.lisp (159 行 starter) + v2/intent.lisp 占位
-;;       + worker v0.3 标的 intent-layer ownership 迁移项
+;;       + worker v0.4 标的 intent-layer ownership 迁移项
 ;; 大原则: prescription / 认知 / 元层 归本 pillar; facts / runtime 归 memory + worker
 ;; ═════════════════════════════════════════════════════════════
 
 (pillar intent-layer
-  :version "v0.1"
-  :status "phase-A first-draft 2026-04-21 — 本会话主驾"
+  :version "v0.4"
+  :status "phase-B recursive architecture contract 2026-04-25 — stimulus/directive → reasoning → prescription/output; methodology compile + capability governance designed; unified-entry-pipeline (message → alignment → plan → execution → workflow) architecture-designed with double review gate + plan-runner contract; workstation-dispatch-policy (resident-lisp / fresh-code-alignment / agent-team / spawn-over-prompt / project-root-cwd / task-md-self-contained / checker-not-substituted) operational-practice + architecture-designed; auto-selection by plan-runner code-alignment pending"
   :predecessor "drafts/gptpro/intent-intent-layer.lisp (159 行 starter)"
   :target-path ".missiond/v2/intent-intent-layer.lisp"
 
   :actual-state-sources
     [".missiond/v2/intent.lisp :: pillar intent-layer (v0.4.17+ 已有详细占位)"
-     ".missiond/v2/intent-worker.lisp v0.3 (DC014 决策: 7 sub learning-engine + flow-engine v1 迁入本 pillar)"
-     ".missiond/v2/intent-memory.lisp v0.5.1 frozen (module directive-layer schema)"
+     ".missiond/v2/intent-worker.lisp v0.5 (DC014 决策: 7 sub learning-engine + flow-engine v1 迁入本 pillar; project-root spawn cwd)"
+     ".missiond/v2/intent-memory.lisp v0.5.4 (directive-layer artifacts + execution protocol + capability usage read-model)"
+     ".missiond/v2/intent-flow.lisp v0.7 (methodology compile + execution governance + capability usage monitoring + project-root spawn cwd)"
      ".missiond/intent-pillar-engines.lisp :: learning-engine + flow-engine v1 (ground truth)"
      ".missiond/intent-pillar-state-machines.lisp :: engineering-phase + extraction-phase FSM"
      ".missiond/intent-pillar-event-workers.lisp :: lisp-survey-worker flow"
@@ -25,8 +26,8 @@
 
   :design-correction-sources
     ["drafts/gptpro/intent-intent-layer.lisp (继承 5 component / 4 egress 大框架)"
-     "worker v0.3 DC014 + dual-ownership 标注 (lisp_survey / arch_maintenance)"
-     "intent-memory.lisp v0.5.1 :: module directive-layer (schema owned by memory, writer 归本 pillar)"]
+     "worker v0.4 DC014 + dual-ownership 标注 (lisp_survey / arch_maintenance)"
+     "intent-memory.lisp v0.5.4 :: module directive-layer (schema/file artifacts owned by memory, writer 归本 pillar)"]
 
   :historical-footprint-sources
     ["旧 learning-engine 曾全部归 worker pillar engine-cluster — v0.3 拆分后本 pillar 接手认知推理逻辑, worker 留 BackgroundWorker 触发"
@@ -61,23 +62,23 @@
     (Q-IL4
       :question "双重归属 worker 如何标?"
       :decision "worker pillar = 触发 (event subscribe + BackgroundWorker impl); 本 pillar = 语义 ownership + 执行 prompt 内容"
-      :dual-owned ["lisp_survey_worker (worker v0.3 已标)"
-                   "arch_maintenance_worker (worker v0.3 已标)"]
+      :dual-owned ["lisp_survey_worker (worker v0.4 已标)"
+                   "arch_maintenance_worker (worker v0.4 已标)"]
       :cross-ref "每 dual-owned worker 在本 pillar 有独立 section, 详述 prompt/ slot / 产物 ownership; worker pillar 只描述触发点")
 
     (Q-IL5
       :question "directive-layer 3 表 (directive/plan/workflow) 当前 writer 是谁?"
-      :decision "schema-ready-pending-implementation — 当前无 writer, 未来 3 种候选: (a) 本 pillar actor (新建) / (b) worker pillar 某 BackgroundWorker / (c) MCP 工具直写"
-      :status "未来最可能 (a) — 创建独立 directive-compiler-actor")
+      :decision "store+manager code-aligned partial — memory 已有 DirectiveLayerStore trait + Pg impl; mission_directive/plan/workflow 管理面已实现; LLM writer actor 仍待实现"
+      :status "下一步: 本 pillar 新建 directive-compiler / plan-compiler / workflow-distiller 三 actor; MCP 工具继续作为管理面")
 
     (Q-IL6
       :question "global CLAUDE.md manager 当前 vs 未来?"
-      :decision "当前: Claude Code 自行读 ~/.claude/CLAUDE.md 作 system prompt, 无 daemon 侧 manager"
-      :future "补 mission_global_instruction MCP tool (read/edit/reload)")
+      :decision "当前: mission_global_instruction 提供 daemon 侧 read/edit 管理; Claude Code 仍只在会话启动读 ~/.claude/CLAUDE.md"
+      :status "code-aligned; reload 只能返回 manual-reload-required, 不伪造热重载")
 
     (Q-IL7
       :question "workflows methodology lisp 与 executable YAML 的关系?"
-      :decision "两种 kind 保留分离 (人类看 vs 机器跑), 未来可能 forge 冲压 (lisp 作 SSOT → yaml 副本), 当前不做"
+      :decision "两种 kind 保留分离: methodology Lisp 是人类/agent SSOT; 机器执行走 F-methodology-to-executable-compile 生成 YAML 副本, 再由 mission_flow_run 跑"
       :cross-ref "memory pillar :: project-management 曾有 workflow-lisp-templates + flow-yaml-templates 两 component, v0.4.5 合并为单 workflows component 分 2 kind")
 
     (Q-IL8
@@ -87,6 +88,14 @@
       :exception "worker::lisp_survey_worker 触发 本 pillar::lisp-survey-update 是双向 — 但只是 trigger, 不是数据反流"))
 
   (purpose "元层 — 系统自我描述 + 指挥规约 + 认知推理 + 代码演化的唯一 ownership 源")
+
+  (recursive-architecture-contract
+    :shape "pillar = ingress → logic-core → egress; cognitive-function = stimulus/directive ingress → reasoning steps → prescription/output egress"
+    :unit "directive/plan/workflow/action 是意识层原子链; learning/decision/extraction 是认知分子"
+    :rule-1 "intent-layer 只拥有 prescription / reasoning / self-description, 不拥有 durable schema 或 runtime mechanics"
+    :rule-2 "每个功能必须写清楚从什么刺激进入、经过哪些推理步骤、产出什么指令/文件/事件"
+    :rule-3 "worker 只触发本 pillar 的认知函数; 认知函数的语义 ownership 始终在本 pillar"
+    :rule-4 "凡是会派发执行的功能, egress 必须指向 tools/flow/worker 边界, 禁止暗调")
 
   (pillar-ingress
     (entry-1
@@ -122,15 +131,65 @@
       :mechanism "Claude Code 系统启动读取全局 CLAUDE.md 作 system prompt — 当前绕过 daemon"))
 
   (pillar-core
-    (core-1 "intent files = 系统自我描述语料 (27+ lisp 文件生态)")
-    (core-2 "forge = Lisp → IR → Rust 冲压器 (Generation Gap 隔离, 外部仓 ~/Projects/jarvis-forge)")
-    (core-3 "governance = 代码模式声明 + lint + 文件级约束")
-    (core-4 "action-instruction specs = directive / plan / workflow 三段 prescription 链 (schema 归 memory, writer 归本 pillar)")
-    (core-5 "learning-engine 7 sub = 认知/学习/分析核心 (decision / extraction / analysis)")
-    (core-6 "flow-engine v1 = project lifecycle phases 推进 (与 methodology workflows 同属元层)")
-    (core-7 "lisp-survey + arch-maintenance = 项目代码变化 → intent 文件演化感知器 (dual-owned with worker)")
-    (core-8 "workflows 双 kind: methodology-lisp (人类方法论) + executable-yaml (机器流水线)")
-    (core-9 "prescription 原则: 本 pillar 管'系统应该如何', memory 管'系统现在记得什么', worker 管'系统在跑什么'"))
+    :contract "intent-layer 把刺激/指令/代码变化转成系统 prescription, 再通过 tools/flow/worker/memory 边界落地"
+
+    (function self-description-governance
+      (ingress
+        :sources [".missiond/v2/*.lisp" "<project>/.missiond/intent.lisp" "CLAUDE.md" "architecture manifests"])
+      (logic-core
+        (step s1 "读取或接收自我描述文件变化")
+        (step s2 "按 pillar 边界判断 ownership 与 drift")
+        (step s3 "生成 lint/repair/survey/arch-maintenance prescription"))
+      (egress
+        :file-writes ["<project>/.missiond/intent.lisp" "managed CLAUDE.md sections" "arch manifest"]
+        :to-tools ["mission_intent" "mission_forge_lint" "mission_forge_build"]))
+
+    (function directive-plan-workflow-chain
+      (ingress
+        :sources ["user/directive utterance" "mission_directive / mission_plan / mission_workflow manager surfaces"])
+      (logic-core
+        (step s1 "directive: 解析用户意图与约束")
+        (step s2 "plan: 分解目标、风险、依赖、验收标准")
+        (step s3 "workflow: 选择 methodology/executable flow 或生成 action instructions")
+        (step s4 "dispatch: 把 prescription 交给 tools/flow/worker 边界"))
+      (egress
+        :writes "memory :: directive-layer tables"
+        :to-flow "named flow or methodology workflow"
+        :to-tools "MCP tool call plan"))
+
+    (function learning-and-decision-engine
+      (ingress
+        :sources ["new conversation/session" "agent question" "idle time" "historical backlog" "retrospective"])
+      (logic-core
+        (step s1 "extraction: 从会话/事件提取事实、主题、风险")
+        (step s2 "decision: 对问题/不确定性做级联判断")
+        (step s3 "analysis: 形成 user_intents / insights / retrospective actions")
+        (step s4 "feedback: 把学习产物写入 memory 并可触发后续 flow"))
+      (egress
+        :writes ["user_intents" "conversation_turns.intent_group_id" "agent_questions decisions"]
+        :emits "认知分析完成/decision 相关事件"))
+
+    (function project-lifecycle-prescription
+      (ingress
+        :sources ["board task flow_phase" "mission_submit_phase_result" "engineering-phase FSM"])
+      (logic-core
+        (step s1 "读取当前 engineering phase")
+        (step s2 "校验阶段产物与 gate")
+        (step s3 "决定下一阶段、是否拦截、是否要求人工审批"))
+      (egress
+        :to-memory "board_tasks.flow_phase / flow_context"
+        :to-event-bus "QuestionEvent::Created when gated"
+        :to-flow "F-board-submit-phase"))
+
+    (core-invariants
+      (core-1 "intent files = 系统自我描述语料 (27+ lisp 文件生态)")
+      (core-2 "forge = Lisp → IR → Rust 冲压器, 隔离 Generation Gap")
+      (core-3 "action-instruction specs = directive / plan / workflow 三段 prescription 链")
+      (core-4 "learning-engine 7 sub = 认知/学习/分析核心")
+      (core-5 "flow-engine v1 = project lifecycle phases 推进, 属元层")
+      (core-6 "lisp-survey + arch-maintenance = 项目代码变化 → intent 文件演化感知器")
+      (core-7 "workflows 双 kind: methodology-lisp + executable-yaml")
+      (core-8 "本 pillar 管'系统应该如何', memory 管'系统现在记得什么', worker 管'系统在跑什么'")))
 
   (pillar-egress
     (egress-1 "→ memory pillar: 写 directive-layer 3 表 (schema 归 memory, writer 归本) + user_intents + conversation_turns.intent_group_id (via intent_analyst)")
@@ -147,14 +206,14 @@
           ["intent_analyst → ConversationStore::insert_user_intent"
            "future directive-compiler → DirectiveLayerStore (pg/directive.rs 17 方法已存在)"]
         :tables-prescription-owned
-          ["directive (schema-ready-pending-implementation)"
-           "plan (schema-ready-pending-implementation)"
-           "workflow (schema-ready-pending-implementation)"]
+          ["directive (store-ready actor-pending)"
+           "plan (store-ready actor-pending)"
+           "workflow (store-ready actor-pending)"]
         :tables-cognitive-produced
           ["user_intents" "conversation_turns.intent_group_id"])
 
       (worker-migration-in
-        :principle "worker v0.3 DC014 决策: runtime-mechanics 留 worker, 认知/学习归本 pillar"
+        :principle "worker v0.4 DC014 决策: runtime-mechanics 留 worker, 认知/学习归本 pillar"
         :migrated-ownership
           [(learning-engine-7-sub "decision_engine / decision_harvest / extraction / historical_scanner / idle_explorer / intent_analyst / timeline_analyst — 代码文件仍在 crates/missiond-daemon/src/engine/learning_engine/, 但语义 primary-ownership 在此 pillar")
            (flow-engine-v1 "flow_engine.rs 的 board-phase-engine 推进逻辑")
@@ -311,11 +370,14 @@
 
     (component global-claudemd-manager
       :desc "daemon 侧全局 CLAUDE.md 读/写/reload 管理器"
-      :status "TBD — 当前无 daemon 侧 manager"
-      :future-actions ["read" "edit" "reload"]
-      :future-mcp-tool "mission_global_instruction (read/edit/reload)"
+      :status "code-aligned; read/edit full; reload manual"
+      :actions ["read" "edit" "reload"]
+      :mcp-tool "mission_global_instruction (read/edit/reload)"
+      :code ["crates/missiond-mcp/src/tools/sysinfra/global_instruction.rs"
+             "crates/missiond-daemon/src/handlers/sysinfra/global_instruction.rs"]
       :readers "Claude Code 每次会话启动 (当前绕 daemon)"
-      :writers "用户手动 / Claude Code Edit tool (文件层)"
+      :writers "mission_global_instruction(action=edit) / 用户手动 / Claude Code Edit tool (文件层)"
+      :reload-boundary "daemon_reload_supported=false; Claude Code reads global CLAUDE.md at session bootstrap, so reload returns manual-reload-required"
       :cross-ref "项目级 <project>/CLAUDE.md manager 在 memory :: project-management :: helper project-claudemd-manager (已实现)")
 
     (path global-claudemd-load
@@ -354,8 +416,8 @@
       :desc "user utterance → lisp 指令编译记录 — 三段式 pipeline 第一段"
       :table "directive"
       :schema-owned-by "memory :: module directive-layer :: plumbing directive-compilation"
-      :writer-owned-by "本 pillar (directive-compiler actor, TBD)"
-      :status "schema-ready-pending-implementation"
+      :writer-owned-by "本 pillar (directive-compiler actor, preferred future owner)"
+      :status "store+manager code-aligned partial — mission_directive read/control implemented; compile dry-run/persist writes draft; directive-compiler actor pending"
       :v0.4.19-rename "原名 intent 表 → directive 表 (避命名歧义: 和 <project>/.missiond/intent.lisp 代码画像文件区分)"
       :vs-per-project-intent "memory :: project-management :: <project>/.missiond/intent.lisp = factual 代码快照; 本表 = 'Jarvis 对用户话的 lisp 指令编译'")
 
@@ -363,44 +425,49 @@
       :desc "directive 编译出的执行 DAG — 绑 board_task + 版本 + FSM"
       :table "plan"
       :schema-owned-by "memory :: module directive-layer :: plumbing plan-execution"
-      :writer-owned-by "本 pillar (plan-compiler actor, TBD)"
-      :status "schema-ready-pending-implementation"
+      :writer-owned-by "本 pillar (plan-compiler actor, preferred future owner)"
+      :status "store+manager code-aligned partial — mission_plan read/control/execute-bridge/evidence implemented; compile dry-run/persist writes draft; plan compiler actor pending"
       :future-concerns ["plan 编译" "FSM 迁移" "supersede-chain 策略"])
 
     (component workflow-spec-db
       :desc "从成功 plan 蒸馏的可复用模板 — 带 match_rules + 统计"
       :table "workflow"
       :schema-owned-by "memory :: module directive-layer :: plumbing workflow-templates"
-      :writer-owned-by "本 pillar (workflow-distiller actor, TBD)"
-      :status "schema-ready-pending-implementation"
+      :writer-owned-by "本 pillar (workflow-distiller actor, preferred future owner)"
+      :status "store+manager code-aligned partial — mission_workflow list/get/match/apply/record implemented; distill/compile_methodology dry-run; workflow-distiller/YAML emitter actors pending"
       :future-concerns ["distillation 算法" "匹配阈值" "LRU 策略"])
 
     (path directive-plan-workflow-chain
-      :lifecycle-style "pending — 3 actor 全 TBD"
-      :status "schema-ready 但无运行时实现"
+      :lifecycle-style "store+manager code-aligned partial; actor-pending"
+      :status "memory store APIs and MCP manager surfaces implemented; runtime LLM compiler/distiller actors are not implemented"
+      :flow-ref "flow pillar :: F-directive-plan-workflow-compile"
       (ingress
         :source "用户 utterance (来自 Claude Code 对话) / 系统指令 / future actor / future sync worker"
-        :entry-components ["directive-spec-db" "plan-spec-db" "workflow-spec-db"])
+        :entry-components ["directive-spec-db" "plan-spec-db" "workflow-spec-db"]
+        :store-api "DirectiveLayerStore trait (directive 6 + plan 6 + workflow 5 methods)")
       (logic-core
-        (step s1 "directive: 把用户语言编译成系统可理解的 lisp-level prescription (LLM-assisted)")
-        (step s2 "plan: 从 directive 生成可执行 DAG / FSM / supersede chain")
-        (step s3 "workflow: 从成功 plan 蒸馏出可复用模板 + match_rules")
-        (step s4 "schema 存储由 memory :: directive-layer 持有 (pg/directive.rs 17 方法已存在 trait)")
-        (step s5 "writer TBD: 三种候选 — (a) 本 pillar actor (推荐新建 directive-compiler) / (b) worker pillar 某 BackgroundWorker / (c) MCP 工具直写"))
+        (step s1 "capture: 从用户 utterance / 系统指令 / 未来 MCP 请求收集原文、项目、会话、约束引用")
+        (step s2 "directive-compile: LLM-assisted 编译 lisp-level directive sexp, 写 directive_insert(status=draft/refining, compiler_model, references_json)")
+        (step s3 "directive-review: 人类或策略 gate approve/refine/archive, 通过 directive_update_status / directive_approve 迁移 FSM")
+        (step s4 "plan-compile: 从 approved directive 生成 plan sexp DAG/FSM, 绑定 board_task_id, 计算 sexp_hash, 写 plan_insert(status=draft|awaiting_approval)")
+        (step s5 "plan-execute-bridge: approval 后把 plan 适配到 board/flow/skill/pty 执行面, 用 plan_update_status 记录 approved/executing/succeeded/failed/superseded")
+        (step s6 "workflow-distill: 从 succeeded plan 抽取 reusable workflow sexp + match_rules, 写 workflow_insert 或 workflow_record_execution")
+        (step s7 "workflow-match: 对新 utterance 先 workflow_find_by_match / workflow_list_top_n, 命中后可作为 plan-compile hint 或直接 apply")
+        (step s8 "manager-surface: mission_directive/mission_plan/mission_workflow 提供 read/control/manual override; compile/distill remain dry-run until actors exist"))
       (egress
         :writes ["directive" "plan" "workflow (表, 未来)"]
-        :reads ["board_tasks"]
+        :reads ["board_tasks" "kb_entries/context" "project registry" "successful plan history"]
         :via-bus []
         :memory-cross-ref ["directive-layer"]
-        :returns "compiled prescription / reusable template"
-        :tools-surface-future "mission_directive / mission_plan / mission_workflow (MCP tools, TBD)")
+        :returns "compiled directive / executable plan / reusable workflow template"
+        :tools-surface "mission_directive / mission_plan / mission_workflow (MCP manager tools, code-aligned partial)")
 
     (specs-manager-status
       :desc "action/instruction specs 的 read/write/reload manager"
-      :actions ["read" "write" "reload" "sync-with-file"]
-      :status "mostly TBD — DB 3 表是 schema-only, 无 Rust writer 实现; 文件层已有 readers (mission_intent, flow-engine-v2 loader)"
+      :actions ["compile" "approve" "list" "get" "supersede" "match" "record-execution" "sync-with-file"]
+      :status "manager/tools code-aligned partial — mission_directive / mission_plan / mission_workflow implemented for read/control/draft persistence; LLM compile/distill actors and file sync remain pending"
       :cross-ref "memory :: project-management :: path project-code-snapshot (读 per-project 代码快照 FILE, 职责不同)"
-      :future-decision "要么实现 3 DB 表的 writer actor, 要么下次 migration DROP 以消除 dead schema"))
+      :future-decision "优先实现本 pillar writer actor + MCP read/control tools; 不建议 drop, 因 store/API 已成型"))
 
   ;; ══════════════════════════════════════════════════════════
   ;; 5.5 Workflows — methodology lisp + executable YAML
@@ -411,13 +478,13 @@
     :design-rationale "两 kind 形式差异大但概念一致 — 保留各自格式优势, 统一纳管"
 
     (kind methodology
-      :desc "Lisp 方法论模板 — 人类 / agent 参考, 非运行时执行"
+      :desc "Lisp 方法论模板 — 人类 / agent 参考的 SSOT; 机器执行需先编译成 executable YAML"
       :path ".missiond/workflows/*.lisp"
-      :consumers ["human" "mission_intent tool" "agent 参考"]
+      :consumers ["human" "mission_intent tool" "agent 参考" "future methodology compiler"]
       :granularity "抽象叙事 — phases / principles / anti-patterns / baseline-numbers / decision-authority"
       :examples ["pillar-refactor.lisp (335 行, 本会话凝结 memory pillar 重构方法论)"
                  "bus-refactor.lisp (11-phase 事件总线重构方法论)"]
-      :executability "✗ 非运行时执行, 纯文档"
+      :executability "human-readable source; machine execution via F-methodology-to-executable-compile → generated YAML → mission_flow_run"
       :owner "本 pillar")
 
     (kind executable
@@ -440,22 +507,268 @@
         (step s2 "executable-yaml: 具体机器节点序列 (flow-engine-v2 消费)")
         (step s3 "两者概念统一为 workflow, 按 受众 / 粒度 / 执行性 拆分")
         (step s4 "允许同名映射 (如 bus-refactor.lisp ↔ bus-refactor.yaml), 不强制 1:1")
-        (step s5 "未来若需, 可由 forge 把 methodology-lisp 冲压为 executable-yaml (SSOT Lisp + 冲压副本)"))
+        (step s5 "机器执行固定走 F-methodology-to-executable-compile: methodology-lisp → executable-yaml → mission_flow_run"))
       (egress
         :writes []
         :reads []
         :returns "human methodology / machine workflow"
-        :consumed-by ["flow pillar (SSOT 索引)" "worker::flow-engine-v2 (执行)" "human / agent review (方法论)"])
+        :consumed-by ["flow pillar (SSOT 索引)" "worker::flow-engine-v2 (执行)" "human / agent review (方法论)"]))
+
+    (path methodology-to-executable-compile
+      :lifecycle-style design-time-to-runtime
+      :status "code-aligned partial; mission_workflow compile_methodology dry-run exists, YAML emitter/runner pending"
+      :flow-ref "flow pillar :: F-methodology-to-executable-compile"
+      (ingress
+        :source ".missiond/workflows/<name>.lisp + params + target_project + dry_run/run mode"
+        :entry-components ["mission_workflow(action=compile_methodology|run_methodology)" "future forge compile extension"])
+      (logic-core
+        (step s1 "load methodology Lisp source and compute source_hash")
+        (step s2 "parse phases / steps / gates / anti-patterns / authority boundaries")
+        (step s3 "map steps to FlowDefinition node types (LlmCall / SlotTask / McpTool / DaemonAction / ParallelSlotTasks)")
+        (step s4 "lint generated YAML against flow-engine-v2 schema and tool registry")
+        (step s5 "write generated executable YAML with source_lisp/source_hash/compiler_version metadata")
+        (step s6 "for run mode, call mission_flow_run; for dry_run, return compiled plan only")
+        (step s7 "feed compile/run result to workflow-distiller for future reuse"))
+      (egress
+        :writes ["$MISSIOND_HOME/flows/<name>.yaml" "optional workflow compile/run feedback"]
+        :reads [".missiond/workflows/*.lisp" "tool registry" "flow-engine-v2 schema"]
+        :returns "compiled flow path/id + lint result + optional run result"))
 
     (relationship-between-kinds
       :overlap "都描述'多步工作流'"
       :split-axis "受众 (human vs machine) + 粒度 (抽象 vs 具体) + 执行性"
       :why-not-unify-format "Lisp 富元数据给人看, YAML 轻量 schema 给 flow-engine 消费; 硬统一两边都难用"
       :cross-ref-convention "可约定同名对照, 非强制"
-      :future-possibility "若需要, 可用 Forge 从 Lisp 冲压 YAML, 当前不做"))
+      :future-possibility "已升级为 architecture target: F-methodology-to-executable-compile; 当前代码对齐待实现"))
+
+    (path implementation-alignment-artifacts
+      :lifecycle-style "file-first-to-runtime"
+      :status "architecture-designed; code-alignment pending — 详细 8 logical-role 视图见 section unified-entry-pipeline"
+      :flow-ref "flow pillar :: F-intent-alignment-plan-execution-loop"
+      :see-also "section unified-entry-pipeline (本 pillar) — 8 logical roles + double review gate + plan-runner contract"
+      (ingress
+        :source "你我完成一轮 architecture Lisp 设计后,准备让 MissionD/ClaudeCode 做代码同构"
+        :entry-components [".missiond/v2/*.lisp diff" "human instructions" "architecture checker output"])
+      (logic-core
+        (step s1 "intent-alignment.lisp: 凝结本轮目标、边界、受影响 pillar、禁止事项、验收条件")
+        (step s2 "planner LLM: 读取 intent-alignment.lisp + 相关 Lisp snippet + repo summary,生成 PLAN.lisp")
+        (step s3 "PLAN.lisp: files/phases/tasks/tests/risks/rollback,供人类/Codex 修订")
+        (step s4 "execution: approved PLAN.lisp 进入 mission_execution / mission_task_delegate / mission_flow_run 或人工 ClaudeCode handoff")
+        (step s5 "evidence: 收集 tool_calls/event_log/board_tasks/execution log/test output")
+        (step s6 "workflow.lisp: 多次成功后由 workflow-distiller 抽象成可复用方法论")
+        (step s7 "需要机器执行时,workflow.lisp 再走 F-methodology-to-executable-compile 生成 YAML"))
+      (egress
+        :file-writes [".missiond/alignment/<topic>/intent-alignment.lisp"
+                      ".missiond/plans/<topic>/PLAN.lisp"
+                      ".missiond/workflows/<topic>.lisp"]
+        :db-writes ["optional directive / plan / workflow mirror rows"]
+        :returns "reviewed implementation plan or reusable workflow"))
 
   ;; ══════════════════════════════════════════════════════════
-  ;; 5.6 LispSurvey — 项目代码变化感知器 (dual-owned with worker)
+  ;; 5.5b Unified Entry Pipeline — MissionD canonical message → workflow 主线
+  ;; ══════════════════════════════════════════════════════════
+  (section unified-entry-pipeline
+    :desc "MissionD 长期运作 canonical 主线: message → intent-alignment.lisp → review → PLAN.lisp → review → MissionD-internal execution → evidence → workflow.lisp distillation"
+    :status "architecture-designed; manager surfaces (mission_directive/mission_plan/mission_workflow/mission_execution) code-aligned partial; alignment-author / plan-runner / evidence-collector / workflow-distiller actors code-alignment pending"
+    :flow-ref "flow pillar :: F-intent-alignment-plan-execution-loop"
+    :file-first-ssot ".missiond/alignment/<topic>/intent-alignment.lisp + .missiond/plans/<topic>/PLAN.lisp + .missiond/workflows/<topic>.lisp"
+    :db-mirror "memory pillar :: module directive-layer :: directive / plan / workflow tables (可查询镜像 + 状态管理面)"
+    :goal "可自动化、可 flow 化、可复用 — 不依赖某个交互 client 私有调度能力"
+    :anti-pattern "不允许 LLM 产物 (alignment 或 PLAN) 跳过 review gate 直接进入执行; 不允许 client 直连工位绕过 plan-runner"
+
+    (logical-roles
+      :desc "8 个 logical role 串成 unified pipeline; 各 role 的实现状态独立标注"
+
+      (role message-intake-manager
+        :desc "汇集来源不一的 message (用户对话 / external MCP client / board task / architecture Lisp delta), 决定走 file-first alignment 还是 directive-mirror"
+        :inputs ["user message" "external MCP request" "board_task ingestion" ".missiond/v2/*.lisp diff"]
+        :current-surface "mission_directive(action=compile, source=message|architecture_lisp_delta|user_request)"
+        :status "code-aligned partial — manager surface via mission_directive; compile is dry-run / persists draft only; directive-compiler actor pending"
+        :owner "tools schema 在 tools pillar; intake 决策语义在本 pillar; directive 行 schema 在 memory pillar")
+
+      (role alignment-author
+        :desc "把 message + Lisp delta + repo summary 编译成 .missiond/alignment/<topic>/intent-alignment.lisp"
+        :modes
+          ((mode-A direct-llm
+              :desc "本 pillar 直接调 LLM (sonnet / opus / 未来 xjp-router 路由) — 不经过 PTY, 适合无观测需求的纯 LLM 推理"
+              :status "architecture-designed; actor pending")
+           (mode-B resident-claudecode-slot
+              :desc "派给常驻 ClaudeCode lisp-architect slot 写 alignment file — 复用已加载的 .missiond/v2/*.lisp 上下文 asset, 减少重新定位成本"
+              :preferred-substrate "mission_pty_send / mission_task_delegate 把任务挂到既有 lisp-architect slot; 不为本轮 alignment 重开 fresh slot"
+              :workstation-cross-ref "worker pillar :: section claudecode-workstation-orchestration :: policy resident-lisp-architect-session"
+              :status "operational-practice (人工已用) + architecture-designed; slot 自动 dispatch pending"))
+        :status "operational-practice (人工运维) + architecture-designed (Lisp 已声明); 自动选择 mode A vs mode B 待 plan-runner code-alignment"
+        :default-mode "Lisp 架构改动默认走 mode B (resident-claudecode-slot); 短任务/无上下文需求可走 mode A (direct LLM)"
+        :writes ".missiond/alignment/<topic>/intent-alignment.lisp (status=draft)"
+        :review-gate-downstream "alignment-review-gate")
+
+      (role alignment-review-gate
+        :desc "human/Codex 修改 alignment 直到满意; 状态从 draft/reviewing 流转到 approved/rejected/superseded"
+        :gate-rule "未通过 approval gate 不允许生成 PLAN.lisp"
+        :owner "human/Codex (人工评审为主); 未来 actor 可发 QuestionEvent 触发人工 review"
+        :current-surface "mission_directive(action=approve|archive|version_chain)"
+        :status "code-aligned partial — manual gate via mission_directive control actions; auto QuestionEvent + 自动 review prompts pending")
+
+      (role plan-compiler
+        :desc "读取 approved intent-alignment.lisp, 调用 LLM planner 生成 .missiond/plans/<topic>/PLAN.lisp"
+        :inputs ["approved intent-alignment.lisp" "repo state summary" "kb context" "previous plan history"]
+        :writes [".missiond/plans/<topic>/PLAN.lisp (status=draft)" "optional plan draft row via mission_plan(action=compile, persist=true)"]
+        :current-surface "mission_plan(action=compile, persist=true) — dry-run / draft persistence"
+        :status "architecture-designed; code-alignment pending — 真正 LLM planner actor 未实现"
+        :model-policy "provider alias configurable (e.g. OPUS-4.7-class planner); 不硬编码可用性")
+
+      (role plan-review-gate
+        :desc "human/Codex 修改 PLAN 直到满意; approved PLAN 才能执行"
+        :gate-rule "未通过 approval gate 不允许进入 execution-runner"
+        :current-surface "mission_plan(action=approve|mark|supersede)"
+        :status "code-aligned partial — manual gate via mission_plan control actions; auto QuestionEvent gate pending")
+
+      (role plan-runner
+        :desc "MissionD 内部 plan 执行调度器 — 不是 client 直接调工位, 而是 plan-runner 内部消费 mission_execution / mission_task_delegate / mission_flow_run / mission_compute_slot / mission_pty_spawn"
+        :principle "review gate 已经把 LLM 产物收敛到可执行边界; plan-runner 在 daemon 内部按 PLAN.lisp 节点调度 + 工位策略调度 + execution coordination, 把执行从 client 私有逻辑里抽离"
+        :current-surface "mission_plan(action=execute) returns next_call descriptor"
+        :status "architecture-designed; code-alignment pending — 自动 dispatch 待 plan-runner actor 实现; 当前 caller (人或上层 actor) 自行执行 next_call"
+        :execution-substrate "mission_execution 12-action manager (open/list/claim/heartbeat/release/deviate/decide/issue/complete/status/audit/repair) — F-execution-log-governance"
+        :downstream-tools ["mission_execution" "mission_task_delegate" "mission_flow_run" "mission_compute_slot" "mission_pty_spawn" "mission_pty_send"]
+        :workstation-dispatch-responsibility "读取 PLAN.lisp 节点 :dispatch-strategy + :target_project, 按 dispatch-decision-matrix 选 resident-lisp / fresh-code-alignment / agent-team / mixed / prompt-fallback, 再 spawn/reuse 对应 slot"
+        :workstation-cross-ref "worker pillar :: section claudecode-workstation-orchestration / flow pillar :: F-workstation-dispatch-policy"
+        :anti-pattern "不允许把执行调度逻辑下沉给某个 client (例如 ClaudeCode CLI) 私有的 next_call 解析能力 — 那等于把 MissionD 主线绑死在某个 client")
+
+      (role evidence-collector
+        :desc "执行过程证据落盘 — git diff / tests / tool_calls / event_log refs / execution companion log refs / deviations / decisions / completions"
+        :reads ["tool_calls" "event_log (DomainEvent stream)" "ExecutionEvent stream" "board_tasks" "execution companion log" "test outputs" "git diff"]
+        :writes [".missiond/v2/plans/<plan_id>.evidence.json (sidecar — code-aligned via mission_plan(record_evidence))" "future plan_evidence DB JSONB 列或表"]
+        :current-surface "mission_plan(action=record_evidence)"
+        :status "architecture-designed; partial sidecar code-aligned via mission_plan(record_evidence); 自动 evidence-collector actor pending"
+        :purpose "为 workflow-distillation 与 retrospective 提供输入")
+
+      (role workflow-distiller
+        :desc "成功多次的 plan 沉淀成 .missiond/workflows/<topic>.lisp; 可继续走 F-methodology-to-executable-compile 编译为 YAML 供 mission_flow_run 执行"
+        :inputs ["succeeded plan + plan evidence sidecar" "repeated success history"]
+        :writes [".missiond/workflows/<topic>.lisp (file-first SSOT)" "workflow table mirror via mission_workflow(action=distill, persist=true)"]
+        :current-surface "mission_workflow(action=distill|record_execution|compile_methodology|run_methodology) — distill/compile_methodology dry-run; record_execution code-aligned"
+        :status "architecture-designed; code-alignment pending — distiller actor + YAML emitter 未实现"))
+
+    (review-gates
+      (alignment-review-gate
+        :artifact ".missiond/alignment/<topic>/intent-alignment.lisp"
+        :status-lifecycle "draft → reviewing → approved | rejected | superseded"
+        :owner "human/Codex"
+        :downstream "plan-compiler 仅在 status=approved 时启动")
+      (plan-review-gate
+        :artifact ".missiond/plans/<topic>/PLAN.lisp"
+        :status-lifecycle "draft → reviewing → approved → executing → succeeded | failed | superseded"
+        :owner "human/Codex"
+        :downstream "plan-runner 仅在 status=approved 时启动"))
+
+    (file-vs-db-contract
+      :ssot "file-first — alignment/plan/workflow .lisp 是真正的 review 边界 (人机协作格式), DB 行是可查询镜像 + 状态管理面"
+      :alignment-mirror ".missiond/alignment/<topic>/intent-alignment.lisp ↔ memory :: directive-layer :: directive table"
+      :plan-mirror ".missiond/plans/<topic>/PLAN.lisp ↔ memory :: directive-layer :: plan table"
+      :workflow-mirror ".missiond/workflows/<topic>.lisp ↔ memory :: directive-layer :: workflow table"
+      :evidence-mirror ".missiond/v2/plans/<plan_id>.evidence.json (sidecar) — 未来可升级到 plan_evidence DB JSONB")
+
+    (no-new-tool-decision
+      :rationale "当前 mission_directive(action=compile) 已是充分 message intake 管理面; mission_plan(action=execute) 已能 bridge 执行; mission_workflow 已能管理 distillation; 因此不新增 mission_message / mission_invoke 等 tool"
+      :future-candidates "见 flow pillar :: future-flows :: unified-entry-future-candidates (mission_message / mission_invoke); 仅作为未来候选, 不计入当前 83 tools"
+      :tool-count-invariant "本 section 不改变 83 actual tools 的总数")
+
+    (workstation-dispatch-policy
+      :desc "把 ClaudeCode 工位/会话的选择规则挂在 unified-entry-pipeline 的元层语义层 — 决策语义在本 pillar, runtime mechanics 在 worker pillar, narrative 在 flow pillar"
+      :status "operational-practice (人工已用) + architecture-designed (Lisp 已声明); plan-runner 自动选路 code-alignment pending"
+      :worker-pillar-cross-ref "worker pillar :: section claudecode-workstation-orchestration"
+      :flow-pillar-cross-ref "flow pillar :: F-workstation-dispatch-policy + F-intent-alignment-plan-execution-loop :: s2 / s4 / s6"
+      :tools-pillar-cross-ref "mission_pty_spawn / mission_pty_send / mission_compute_slot / mission_task_delegate / mission_execution / mission_plan"
+
+      (principle alignment-author-mode-selection
+        :rule "alignment-author 默认 mode B (resident ClaudeCode lisp-architect slot); 只在短任务无上下文需求时退到 mode A (direct LLM)"
+        :rationale "Lisp 架构改动需要 cumulative context — 已加载的 v2/*.lisp 文件结构是 asset, 重新定位成本高"
+        :status "operational-practice; mode 选择仍由人工决策, plan-runner 自动选 mode 待 code-alignment")
+
+      (principle plan-runner-dispatch-selection
+        :rule "plan-runner 读 PLAN.lisp 节点 :dispatch-strategy + :target_project, 按 worker pillar dispatch-decision-matrix 选策略"
+        :strategies
+          [(resident-lisp        "PLAN 仅改 .missiond/**/*.lisp / workflows/*.lisp → 复用常驻 lisp-architect slot")
+           (fresh-code-alignment "PLAN 改 Rust/SQL/JS/TS/Swift → spawn 新 slot, project-root cwd")
+           (agent-team           "PLAN 含独立可并行扫描/读取/验证步骤 → 在任务 .md 中加 'agent-team 提高效率' 提示")
+           (mixed                "PLAN 既改 Lisp 又改代码 → 拆 phase, 用 mission_execution 串接两类 slot")
+           (prompt-fallback      "fallback only — daemon 不可用 / throwaway 查询")]
+        :status "architecture-designed; plan-runner actor 待实现")
+
+      (principle task-md-self-contained-contract
+        :rule "fresh sessions 的任务由 .missiond/claudecode/<topic>.md 描述 — 必须 self-contained: scope / no-goals / acceptance / files / risks / 验收命令"
+        :owner "alignment-author 与 plan-compiler 联合产出 task .md, 写入边界来自 alignment-review-gate / plan-review-gate"
+        :status "operational-practice — 当前 .md 由人工/常驻 Lisp slot 协作产出; plan-compiler actor 自动生成 .md 待 code-alignment")
+
+      (principle resident-context-not-substitute-for-checker
+        :rule "常驻 Lisp 会话的上下文是 asset, 不能替代 checker 与 explicit task file"
+        :enforcement
+          ["每次 alignment / PLAN 写完必须运行 node scripts/check-architecture-lisp.mjs --all-v2"
+           "任务 .md 路径必须显式声明; 不允许靠常驻会话记忆代替"
+           "checker 失败必须先修, 不允许靠'下次会话再说'兜底"]
+        :status "operational-practice; checker 已 code-aligned; 自动 enforce 仍依赖 plan-runner 的 acceptance 验证"
+        :anti-pattern "不要因为常驻 slot 上下文好就跳过 checker 与任务文件 — 上下文漂移会让它认错")
+
+      (principle spawn-over-prompt-mode
+        :rule "默认通过 spawn / resident workstation 调度 ClaudeCode; 尽量少用 claude -p"
+        :rationale "spawn 工位有 cwd / MCP config / session logs / execution evidence / 可监控状态; -p 难纳入 evidence/workflow/capability-usage 闭环"
+        :enforcement "plan-runner 默认走 spawn 路径; 显式 dispatch_strategy=prompt-fallback 才允许"
+        :status "architecture-designed; runtime enforce 待 code-alignment")
+
+      (principle project-root-cwd-contract
+        :rule "fresh code-alignment 工位 cwd 必须 = target_project_root; 常驻 Lisp 会话 cwd = missiond 仓库根 (本仓 .missiond/v2/*.lisp 是工作面)"
+        :enforcement "spawner::spawn_tracked_slot 已强制 cwd 校验; reuse slot 必须 slot.project_root == target_project_root"
+        :status "code-aligned for spawn cwd enforcement; 任务 .md 中 :target_project 字段 plan-runner 消费 pending"))
+
+    (canonical-flow-cross-ref "flow pillar :: F-intent-alignment-plan-execution-loop — 8 stage 详细 narrative 在那里 / flow pillar :: F-workstation-dispatch-policy — 工位调度策略 narrative"))
+
+  ;; ══════════════════════════════════════════════════════════
+  ;; 5.6 Capability Evolution Governance — 工具/flow 使用度治理
+  ;; ══════════════════════════════════════════════════════════
+  (section capability-evolution-governance
+    :desc "能力使用度监控只给证据; 本 pillar 决定保留、合并、废弃、删除"
+    :status "policy-designed; mission_capability_usage now supplies evidence + mark/ack review state, semantic merge governance still human/Lisp-led"
+    :flow-ref "flow pillar :: F-capability-usage-monitoring"
+    :memory-ref "memory pillar :: system-support :: capability-usage-read-model"
+    :tool-ref "tools pillar :: mission_capability_usage"
+
+    (policy
+      :never-auto-delete true
+      :human-approval-required ["deprecate" "merge" "remove" "schema-breaking replacement"]
+      :protected-capabilities ["daemon bootstrap" "memory/event-bus repair" "mission_execution" "mission_intent" "mission_forge_*" "manual recovery tools"]
+      :quiet-threshold "no calls in 30d, but not enough for removal"
+      :stale-threshold "no calls in 90d or never-used after introduction grace window"
+      :replacement-required-for-merge "low usage alone only marks stale; merge/deprecate needs explicit better implementation or semantic overlap evidence")
+
+    (lifecycle-states
+      (active             :meaning "recently used or structurally required")
+      (quiet              :meaning "low/no recent usage; keep visible, monitor")
+      (stale-candidate    :meaning "长期未用; 进入 review report")
+      (shadowed-candidate :meaning "存在更好实现或 consolidated dispatcher 覆盖")
+      (merge-candidate    :meaning "语义重叠,可把 caller 或 docs 收敛到 target capability")
+      (deprecated         :meaning "人工批准后保留兼容窗口,返回替代建议")
+      (removed            :meaning "兼容窗口结束且代码/Forge/schema 同步清理完成"))
+
+    (path capability-lifecycle-review
+      :lifecycle-style periodic-governance
+      (ingress
+        :source "F-capability-usage-monitoring report / mission_capability_usage(action=report|candidates)"
+        :entry-components ["usage snapshot" "candidate list" "replacement evidence" "protected capability list"])
+      (logic-core
+        (step s1 "validate-evidence: check count windows, last_used_at, success/failure, caller diversity, and age since introduction")
+        (step s2 "apply-protection: mark critical bootstrap/repair/manual recovery surfaces as protected even if rarely used")
+        (step s3 "decide-class: assign active/quiet/stale/shadowed/merge/deprecated/remove proposal")
+        (step s4 "require-replacement: merge/deprecate only if target capability is named and has same-or-better flow coverage")
+        (step s5 "write-decision: record rationale in architecture Lisp or capability-usage-review.json sidecar; never rely on raw count alone")
+        (step s6 "schedule-code-alignment: approved decisions become PLAN.lisp / mission_execution tasks / Forge registry changes")
+        (step s7 "post-change-monitor: keep deprecated alias under observation through compatibility window"))
+      (egress
+        :writes ["architecture decision note" "optional board task / PLAN.lisp" "future workflow distillation evidence"]
+        :reads ["capability usage snapshot" "intent-tools registry" "intent-flow index" "memory/tool audit history"]
+        :returns "keep / monitor / merge / deprecate / remove-after-compat-window decision")))
+
+  ;; ══════════════════════════════════════════════════════════
+  ;; 5.7 LispSurvey — 项目代码变化感知器 (dual-owned with worker)
   ;; ══════════════════════════════════════════════════════════
   (section lisp-survey-dual-owned
     :desc "项目代码变化 → <project>/.missiond/intent.lisp 增量更新"
@@ -487,7 +800,7 @@
         :returns "survey result / NO_CHANGE / intent file update"))
 
   ;; ══════════════════════════════════════════════════════════
-  ;; 5.7 ArchMaintenance — 架构文档演化器 (dual-owned with worker)
+  ;; 5.8 ArchMaintenance — 架构文档演化器 (dual-owned with worker)
   ;; ══════════════════════════════════════════════════════════
   (section arch-maintenance-dual-owned
     :desc "代码 commit → architecture manifest 增量更新"
@@ -518,7 +831,7 @@
         :returns "slot dispatch result / arch manifest update"))
 
   ;; ══════════════════════════════════════════════════════════
-  ;; 5.8 Learning Engine — 7 sub-engine 认知/推理内核
+  ;; 5.9 Learning Engine — 7 sub-engine 认知/推理内核
   ;; ══════════════════════════════════════════════════════════
   (section learning-engine
     :desc "learning-engine 7 sub-engine — 从 worker pillar 迁入 (DC014 决策)"
@@ -652,7 +965,7 @@
       (path intent-analysis
         :lifecycle-style spawned
         :target "crates/missiond-daemon/src/engine/learning_engine/intent_analyst.rs"
-        :唯一明确写表 "本 sub-engine 是 learning-engine 7 个中唯一在 memory v0.5.1 frozen 有明确 writer 声明的"
+        :唯一明确写表 "本 sub-engine 是 learning-engine 7 个中唯一在 memory v0.5.2 有明确 writer 声明的"
         :memory-cross-ref-binds-to "memory :: module conversation-logs :: binds-to intent_analyst"
         (ingress
           :source "session / turn 分析触发 + autopilot get_recent_intents 也调"
@@ -772,41 +1085,112 @@
   ;; 5.10 Action-Instruction Actor (Future)
   ;; ══════════════════════════════════════════════════════════
   (section action-instruction-actor
-    :desc "directive / plan / workflow 编译器 actor — 当前全 TBD"
-    :status "schema-ready-pending-implementation"
+    :desc "directive / plan / workflow 编译器 actor — store API 已就绪, runtime actor 尚未实现"
+    :status "manager-surfaces-code-aligned; compiler/distiller actors pending"
 
     (actor directive-compiler
-      :status TBD
+      :status "architecture-designed; code-alignment pending"
       :desc "把用户 utterance (自然语言) 编译成 lisp-level directive prescription"
       :future-target "crates/missiond-daemon/src/intent_layer/directive_compiler.rs (TBD)"
       :input "用户话 / 系统指令"
       :output "directive record → directive 表 (memory :: directive-layer writer)"
-      :dependencies ["LLM (gemini/sonnet chat)" "context assembly" "KB (convention 查询)"])
+      :dependencies ["LLM (gemini/sonnet chat)" "context assembly" "KB (convention 查询)"]
+      (ingress
+        :source ["user utterance" "mission_directive(action=compile) dry-run/draft surface" "autopilot directive capture"]
+        :required-context ["project/session" "raw utterance" "references_json"])
+      (logic-core
+        (step s1 "assemble context from project, KB conventions, recent intents, and current board state")
+        (step s2 "ask LLM to emit lisp-level directive sexp plus references_json")
+        (step s3 "validate sexp reader balance and directive DSL shape")
+        (step s4 "insert directive(status=draft/refining, version=1, compiler_model)")
+        (step s5 "if confidence/high-trust policy allows, mark approved; otherwise create review question"))
+      (egress
+        :writes ["directive"]
+        :emits ["QuestionEvent::Created when approval needed (future)"]
+        :returns "directive id/version/status"))
 
     (actor plan-compiler
-      :status TBD
+      :status "architecture-designed; code-alignment pending"
       :desc "从 directive 生成可执行 DAG / FSM / supersede chain"
       :future-target "crates/missiond-daemon/src/intent_layer/plan_compiler.rs (TBD)"
       :input "directive record"
       :output "plan record → plan 表"
-      :dependencies ["directive-compiler 输出" "board_tasks 模板"])
+      :dependencies ["directive-compiler 输出" "board_tasks 模板"]
+      (ingress
+        :source ["directive status=approved" "mission_plan(action=compile) dry-run/draft surface" "board task requiring plan"]
+        :required-context ["directive id/version" "board_task_id or task draft" "available execution surfaces"])
+      (logic-core
+        (step s1 "load approved directive and optional board task")
+        (step s2 "choose target execution surface: board lifecycle, flow-engine-v2 YAML, skill workflow, pty slot, or mixed DAG")
+        (step s3 "compile executable plan sexp and compute sexp_hash")
+        (step s4 "if an older active plan exists for board_task_id, create new version and mark old plan superseded")
+        (step s5 "insert plan(status=draft/awaiting_approval, compiled_from=directive sexp_hash)")
+        (step s6 "approval gate moves plan to approved; execution adapter later updates executing/succeeded/failed"))
+      (egress
+        :writes ["plan" "board_tasks.source_directive_id when bound"]
+        :reads ["directive" "board_tasks" "workflow templates as hints"]
+        :returns "plan id/version/status/execution target"))
 
     (actor workflow-distiller
-      :status TBD
+      :status "architecture-designed; code-alignment pending"
       :desc "从成功 plan 蒸馏出可复用 workflow 模板"
       :future-target "crates/missiond-daemon/src/intent_layer/workflow_distiller.rs (TBD)"
       :input "已完成的 plan + outcome"
       :output "workflow record → workflow 表"
-      :dependencies ["plan 历史" "match_rules 算法"])
+      :dependencies ["plan 历史" "match_rules 算法"]
+      (matching-policy
+        :status "architecture-designed; code-alignment pending"
+        :match-rules-shape
+          ((intent-signature "normalized utterance intent + verbs + object type + affected pillars")
+           (scope-signature "project_id/global + repo language/framework + domain tags")
+           (execution-shape "preferred surface: board / flow-engine-v2 / skill / pty / mission_execution")
+           (constraints "risk level, required approvals, max runtime, allowed tools")
+           (negative-rules "anti-patterns / do-not-use surfaces / known failure contexts"))
+        :scoring
+          ((semantic-similarity 0.40)
+           (scope-match 0.20)
+           (success-rate 0.15)
+           (recency 0.10)
+           (cost-fit 0.10)
+           (human-pin 0.05))
+        :thresholds
+          ((auto-apply "score >= 0.86 and success_rate >= 0.8 and no approval-required constraint")
+           (suggest-only "0.62 <= score < 0.86")
+           (no-match "score < 0.62 or negative-rule hit"))
+        :lru-policy "evict or down-rank workflows with low score, old last_used_at, high avg_cost_usd, or repeated failure; never evict human-pinned workflows automatically")
+        :feedback-loop "record_execution updates executions/success_count/failure_count/avg_cost_usd/last_used_at and can adjust match_rules after human approval")
+      (ingress
+        :source ["plan status=succeeded" "mission_workflow(action=distill) dry-run/draft surface" "periodic top successful plan scan"]
+        :required-context ["plan sexp" "directive utterance" "execution outcome/cost"])
+      (logic-core
+        (step s1 "load succeeded plan, source directive, and observed outcome/cost")
+        (step s2 "normalize plan into reusable workflow sexp by removing task-specific constants")
+        (step s3 "derive match_rules: intent-signature, scope-signature, execution-shape, constraints, negative-rules")
+        (step s4 "score against existing workflows; upsert new template, merge into existing, or record execution")
+        (step s5 "apply LRU/down-rank policy after updating executions/success_count/failure_count/avg_cost_usd/last_used_at")
+        (step s6 "emit review question if automatic rule mutation would broaden a workflow's applicability"))
+      (egress
+        :writes ["workflow"]
+        :reads ["plan" "directive"]
+        :returns "workflow id/name/match_rules/stats"))
 
-    (mcp-tools-future
-      :mission_directive "TBD — directive 编译 / 查询 / 更新"
-      :mission_plan      "TBD — plan 查询 / 手动 supersede"
-      :mission_workflow  "TBD — workflow 模板管理")
+    (mcp-tools-manager-surface
+      :mission_directive
+        (:status "code-aligned partial; compile dry-run, list/get/approve/archive/version_chain full"
+         :actions ["compile" "list" "get" "approve" "archive" "version_chain"]
+         :owner "tools pillar shell + intent-layer directive-compiler actor")
+      :mission_plan
+        (:status "code-aligned partial; compile dry-run, list/get/by_task/approve/mark/supersede full, execute bridge, record_evidence sidecar"
+         :actions ["compile" "list" "get" "by_task" "approve" "mark" "supersede" "execute" "record_evidence"]
+         :owner "tools pillar shell + intent-layer plan-compiler/execution adapter")
+      :mission_workflow
+        (:status "code-aligned partial; list/get/match/record_execution full, apply read-only, distill/compile_methodology dry-run, run_methodology not_implemented"
+         :actions ["list" "get" "match" "apply" "distill" "record_execution" "compile_methodology" "run_methodology"]
+         :owner "tools pillar shell + intent-layer workflow-distiller actor"))
 
     (mcp-tools-existing-crossref
-      :mission_execution "worker v0.3 I007 相关 — 12 actions handler 实现 (agent-execution-coordination v0.5.1 manager-interface)"
-      :cross-ref-memory "memory v0.5.1 helper agent-execution-coordination"))
+      :mission_execution "worker v0.5 I007 相关 — 12 actions handler/tool 已实现 (agent-execution-coordination v0.5.2 manager-interface)"
+      :cross-ref-memory "memory v0.5.2 helper agent-execution-coordination"))
 
   ;; ══════════════════════════════════════════════════════════
   ;; 5.11 State Machines Owned — engineering-phase + extraction-phase
@@ -865,7 +1249,7 @@
     (principle-1 "intent-layer 管 prescriptive: 系统应该怎么做")
     (principle-2 "memory 管 factual: 系统现在记得什么 / 代码真实状态")
     (principle-3 "worker 管 runtime: 系统在跑什么 (timer / dispatch / event)")
-    (principle-4 "execution-log 属 operational state (memory v0.5.1 helper), 不和 methodology 混写")
+    (principle-4 "execution-log 属 operational state (memory v0.5.2 helper), 不和 methodology 混写")
     (principle-5 "forge + mission_intent = 本 pillar 对外两大出口")
     (principle-6 "双重归属 = 触发/语义 拆分 (lisp_survey / arch_maintenance 模式)")
     (principle-7 "认知/推理逻辑 归本 pillar; 运行时/调度 机制 归 worker pillar"))
@@ -876,25 +1260,25 @@
   (need-more-ground-truth
     (IL-T001 :status RESOLVED :resolved-at "2026-04-21"
              :finding "7 sub R/W 矩阵全 confirmed. 详 phase-B-scan-findings-2026-04-21.md § A.1 + learning-engine-contract-summary 已补 full matrix")
-    (IL-T002 :status "awaiting-decision"
-             :note "3 actor (directive-compiler / plan-compiler / workflow-distiller) 真实实现时机 — 指挥官决策")
-    (IL-T003 :status "awaiting-decision"
-             :note "mission_directive / mission_plan / mission_workflow MCP tool 实现时机")
-    (IL-T004 :status "awaiting-decision"
-             :note "global-claudemd-manager daemon 侧实现 (mission_global_instruction) 时机")
-    (IL-T005 :status "future-implementation"
-             :note "mission_execution (agent-execution-coordination v0.5.1, 12 actions) handler — 同步 worker I007")
+    (IL-T002 :status "architecture-designed-code-alignment-pending"
+             :note "3 actor (directive-compiler / plan-compiler / workflow-distiller) 架构已设计并挂到 F-directive-plan-workflow-compile; 真实实现排期进入代码对齐阶段")
+    (IL-T003 :status "code-aligned-manager-surfaces; actors-pending"
+             :note "mission_directive / mission_plan / mission_workflow 已挂到 F-directive-plan-workflow-compile; MCP surface/handler 已实现 read/control/draft persistence/execute bridge, LLM compiler/distiller actor 仍待代码对齐")
+    (IL-T004 :status "code-aligned"
+             :note "global-claudemd-manager + mission_global_instruction(read/edit/reload) 已代码同构; read/edit full, reload manual-reload-required")
+    (IL-T005 :status "code-aligned"
+             :note "mission_execution (agent-execution-coordination v0.5.2, 12 actions) 已由 4ab7994 代码对齐; ExecutionEvent 域与发射也已代码对齐")
     (IL-T006 :status "pending-external-scan"
              :note "forge-daemon/src/intent_graph.rs 在外部仓 ~/Projects/jarvis-forge, 本次 phase-B 未扫")
     (IL-T007 :status RESOLVED :resolved-at "2026-04-21"
              :finding "4 tier 全部已实现 (kb-lookup/gemini-consult/decision-slot/human-escalation). 详 § A.3 + decision-cascade path 已补 :status implemented")
-    (IL-T008 :status "future-design"
-             :note "workflow-distiller match_rules + LRU 策略 — actor 实现时设计")
+    (IL-T008 :status "architecture-designed-code-alignment-pending"
+             :note "workflow-distiller match_rules + LRU 策略已补 matching-policy: scoring/threshold/LRU/feedback loop; actor 实现待代码对齐")
     (IL-T009 :status RESOLVED :resolved-at "2026-04-21"
              :finding "flow-engine v1 EngineeringPhase 7 phase 全部实现 + 到 Finalize→Done 自动 trigger decision_harvest 形成闭环. 详 § A.4 + board-phase-engine path 已补 transitions-full-implementation 表")
-    (IL-T010 :status "awaiting-decision"
-             :note "未来 forge 冲压 methodology-lisp → executable-yaml (当前人工) — 决策")
-    (IL-T011 :status "future-design"
-             :note "本 pillar 独立 crate vs 嵌入 (当前嵌入 missiond-daemon)"))
+    (IL-T010 :status "architecture-designed-code-alignment-pending"
+             :note "methodology-lisp → executable-yaml 已定为 F-methodology-to-executable-compile: Lisp SSOT, 生成 YAML 副本, 再由 mission_flow_run 执行; compiler/tool 实现待代码对齐")
+    (IL-T011 :status "architecture-decided"
+             :note "当前继续嵌入 missiond-daemon,但按 intent_layer/* clean module boundary 实现; 只有当 forge/多进程复用成为现实需求时再抽独立 crate"))
   ;; close sections 5.2-5.11 (6 unclosed) + close pillar
-  ))))))))
+  ))))))

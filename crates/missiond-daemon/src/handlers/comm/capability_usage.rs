@@ -8,9 +8,12 @@
 //!   - intent-intent-layer.lisp :: capability-evolution-governance
 //!   - intent-tools.lisp :: future-surface mission_capability_usage
 //!
-//! ObservabilityEvent::CapabilityUsageSnapshot / CapabilityStaleCandidate are
-//! intentionally NOT emitted — they remain `planned-event-extensions` in
-//! intent-event-bus.lisp pending Domain::ALL extension. See TODO in `take_snapshot`.
+//! ObservabilityEvent::CapabilityUsageSnapshot is emitted by snapshot/report/
+//! candidates after the read-model finishes computing. CapabilityStaleCandidate
+//! fans out per non-active, non-protected row from `action=candidates` so
+//! review notifiers can react without scanning the full snapshot. Both events
+//! are ephemeral (per frozen lisp `:ephemeral-default true`); durable evidence
+//! remains in `conversation_tool_calls` / `board_tasks` and the JSON sidecar.
 //!
 //! Persistence model (mark / ack):
 //!   intent-memory.lisp suggests `daemon_state capability_usage_snapshot/v1` as
@@ -22,13 +25,24 @@
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use missiond_core::event::events::ObservabilityEvent;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 use crate::state::AppState;
+
+/// Forward an `ObservabilityEvent` and log (but never propagate) publish
+/// failures. Capability usage events are ephemeral observability — losing one
+/// must not block snapshot computation.
+async fn emit_observability_event(state: &AppState, ev: ObservabilityEvent) {
+    if let Err(e) = state.bus.publish_observability(ev).await {
+        warn!(error = %e, "failed to publish ObservabilityEvent (snapshot already returned)");
+    }
+}
 
 const REVIEW_FILE: &str = ".missiond/v2/capability-usage-review.json";
 
@@ -504,10 +518,16 @@ async fn take_snapshot(
         }
     }
 
+    let generated_at = iso(Utc::now());
+    let protected_count = protected_ids.len() as u32;
+    let candidate_count = rows
+        .iter()
+        .filter(|r| !r.protected && r.classification != "active" && r.classification != "protected")
+        .count() as u32;
     let snapshot = json!({
         "window": primary,
         "scope": scope,
-        "generated_at": iso(Utc::now()),
+        "generated_at": generated_at,
         "counts_by_capability": counts_by_capability,
         "last_used_at": last_used_at,
         "success_failure": success_failure,
@@ -515,10 +535,18 @@ async fn take_snapshot(
         "protected_ids": protected_ids,
     });
 
-    // TODO(capability-usage-event): emit ObservabilityEvent::CapabilityUsageSnapshot
-    // / CapabilityStaleCandidate once the planned-event-extensions in
-    // intent-event-bus.lisp lands. Current Domain::ALL has no Capability variants
-    // so adding one requires a separate event-bus batch.
+    emit_observability_event(
+        state,
+        ObservabilityEvent::CapabilityUsageSnapshot {
+            window: primary.to_string(),
+            scope: scope.to_string(),
+            generated_at: generated_at.clone(),
+            capability_count: rows.len() as u32,
+            protected_count,
+            candidate_count,
+        },
+    )
+    .await;
 
     Ok((snapshot, rows, coverage))
 }
@@ -569,11 +597,18 @@ async fn action_report(state: &AppState, args: &Value) -> Result<ToolResult> {
 // ───────────────────────────────────────────────────────────────────────
 
 async fn action_candidates(state: &AppState, args: &Value) -> Result<ToolResult> {
-    let (_, rows, _) = take_snapshot(state, args).await?;
+    let (snapshot, rows, _) = take_snapshot(state, args).await?;
     let include_protected = args
         .get("include_protected")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // Reuse the snapshot's generated_at so per-row events correlate to the
+    // CapabilityUsageSnapshot emitted by take_snapshot.
+    let snapshot_generated_at = snapshot
+        .get("generated_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
 
     // Read review state to surface "already marked / acked" candidates.
     let project_root = resolve_project_root(state, project_arg(args)).await?;
@@ -604,6 +639,17 @@ async fn action_candidates(state: &AppState, args: &Value) -> Result<ToolResult>
             })),
         });
         buckets.entry(r.classification.clone()).or_default().push(payload);
+        emit_observability_event(
+            state,
+            ObservabilityEvent::CapabilityStaleCandidate {
+                capability_id: r.capability_id.clone(),
+                kind: r.kind.clone(),
+                classification: r.classification.clone(),
+                last_used_at: r.last_used_at.clone(),
+                generated_at: snapshot_generated_at.clone(),
+            },
+        )
+        .await;
     }
 
     // Empty bucket placeholders for the 7 declared categories so callers can

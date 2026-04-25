@@ -10,19 +10,33 @@
 //! This handler owns id-counters / claims-with-lease / deviations / decisions /
 //! issues / completions / derived-indexes per the helper-recursive-contract.
 //!
-//! ExecutionEvent emission is intentionally NOT implemented here — see
-//! intent-event-bus.lisp :: planned-event-extensions :: ExecutionEvent
-//! (status: architecture-designed, code-alignment pending). Adding the
-//! Domain::Execution variant + bus wiring is a separate batch.
+//! ExecutionEvent emission: each mutating action emits the matching variant
+//! to the v2 event bus AFTER the durable companion log write succeeds. The
+//! file remains the source of truth (per `planned-event-extensions ::
+//! ExecutionEvent :: rationale`); the bus event is a non-authoritative live
+//! projection for status dashboards and audit consumers. Publish failures
+//! are logged but never abort the action — observability must never break
+//! durable-write semantics.
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
+use missiond_core::event::events::ExecutionEvent;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 use crate::state::AppState;
+
+/// Forward an `ExecutionEvent` to the v2 bus and log (but never propagate)
+/// publish failures. Companion-log writes are already durable on disk; the
+/// bus event is a live projection.
+async fn emit_execution_event(state: &AppState, ev: ExecutionEvent) {
+    if let Err(e) = state.bus.publish_execution(ev).await {
+        warn!(error = %e, "failed to publish ExecutionEvent (companion log already durable)");
+    }
+}
 
 const COMPANION_DIR: &str = ".missiond/v2";
 const DEFAULT_LEASE_SECS: i64 = 1800;
@@ -929,10 +943,17 @@ async fn action_open(state: &AppState, args: &Value) -> Result<ToolResult> {
     }
     std::fs::write(&path, body.as_bytes())?;
 
-    // TODO(execution-event): emit ExecutionEvent::Opened once the Domain
-    // extension declared in intent-event-bus.lisp :: planned-event-extensions
-    // lands. See feedback_intent_event_bus_locked — bus extension is a
-    // separate, lockable change.
+    emit_execution_event(
+        state,
+        ExecutionEvent::Opened {
+            execution_id: execution_id.to_string(),
+            parent_design: parent_design.to_string(),
+            scope: scope.to_string(),
+            owner: owner.to_string(),
+            path: path.display().to_string(),
+        },
+    )
+    .await;
 
     Ok(ToolResult::json_pretty(&json!({
         "status": "opened",
@@ -1122,6 +1143,19 @@ async fn action_claim(state: &AppState, args: &Value) -> Result<ToolResult> {
     touch_last_updated(&mut file)?;
     write_log_file(&path, &file)?;
 
+    emit_execution_event(
+        state,
+        ExecutionEvent::Claimed {
+            execution_id: execution_id.to_string(),
+            claim_id: claim_id.clone(),
+            claimer: claimer.to_string(),
+            scope: scope.to_string(),
+            phase: phase.to_string(),
+            lease_expires_at: expires.clone(),
+        },
+    )
+    .await;
+
     Ok(ToolResult::json_pretty(&json!({
         "status": "claimed",
         "claim_id": claim_id,
@@ -1200,6 +1234,18 @@ async fn action_heartbeat(state: &AppState, args: &Value) -> Result<ToolResult> 
     touch_last_updated(&mut file)?;
     write_log_file(&path, &file)?;
 
+    emit_execution_event(
+        state,
+        ExecutionEvent::Heartbeat {
+            execution_id: execution_id.to_string(),
+            claim_id: claim_id.to_string(),
+            claimer: claimer.to_string(),
+            heartbeat_at: now_s.clone(),
+            lease_expires_at: expires.clone(),
+        },
+    )
+    .await;
+
     Ok(ToolResult::json_pretty(&json!({
         "status": "heartbeat",
         "claim_id": claim_id,
@@ -1267,6 +1313,22 @@ async fn action_release(state: &AppState, args: &Value) -> Result<ToolResult> {
     }
     touch_last_updated(&mut file)?;
     write_log_file(&path, &file)?;
+
+    emit_execution_event(
+        state,
+        ExecutionEvent::Released {
+            execution_id: execution_id.to_string(),
+            claim_id: claim_id.to_string(),
+            claimer: claimer.to_string(),
+            released_at: now.clone(),
+            summary: if summary.is_empty() {
+                None
+            } else {
+                Some(summary.to_string())
+            },
+        },
+    )
+    .await;
 
     Ok(ToolResult::json_pretty(&json!({
         "status": "released",
@@ -1364,6 +1426,17 @@ async fn action_deviate(state: &AppState, args: &Value) -> Result<ToolResult> {
     touch_last_updated(&mut file)?;
     write_log_file(&path, &file)?;
 
+    emit_execution_event(
+        state,
+        ExecutionEvent::DeviationRecorded {
+            execution_id: execution_id.to_string(),
+            deviation_id: id.clone(),
+            phase: phase.to_string(),
+            approved_by: approved_by.to_string(),
+        },
+    )
+    .await;
+
     Ok(ToolResult::json_pretty(&json!({
         "status": "recorded",
         "deviation_id": id,
@@ -1414,6 +1487,17 @@ async fn action_decide(state: &AppState, args: &Value) -> Result<ToolResult> {
     touch_last_updated(&mut file)?;
     write_log_file(&path, &file)?;
 
+    emit_execution_event(
+        state,
+        ExecutionEvent::DecisionRecorded {
+            execution_id: execution_id.to_string(),
+            decision_id: id.clone(),
+            decided_by: decided_by.to_string(),
+            at: date.clone(),
+        },
+    )
+    .await;
+
     Ok(ToolResult::json_pretty(&json!({
         "status": "recorded",
         "decision_id": id,
@@ -1458,6 +1542,17 @@ async fn action_issue(state: &AppState, args: &Value) -> Result<ToolResult> {
     append_to_block(&mut file, "issues", &entry)?;
     touch_last_updated(&mut file)?;
     write_log_file(&path, &file)?;
+
+    emit_execution_event(
+        state,
+        ExecutionEvent::IssueRecorded {
+            execution_id: execution_id.to_string(),
+            issue_id: id.clone(),
+            severity: severity.to_string(),
+            owner: owner.to_string(),
+        },
+    )
+    .await;
 
     Ok(ToolResult::json_pretty(&json!({
         "status": "recorded",
@@ -1511,6 +1606,18 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
     append_to_block(&mut file, "completions", &entry)?;
     touch_last_updated(&mut file)?;
     write_log_file(&path, &file)?;
+
+    emit_execution_event(
+        state,
+        ExecutionEvent::Completed {
+            execution_id: execution_id.to_string(),
+            completion_id: id.clone(),
+            phase: phase.to_string(),
+            agent: agent.to_string(),
+            at: date.clone(),
+        },
+    )
+    .await;
 
     Ok(ToolResult::json_pretty(&json!({
         "status": "recorded",
@@ -1823,6 +1930,51 @@ async fn action_audit(state: &AppState, args: &Value) -> Result<ToolResult> {
             .unwrap_or(true)
     });
 
+    let error_count = findings
+        .iter()
+        .filter(|f| f.get("severity").and_then(|v| v.as_str()) == Some("error"))
+        .count() as u32;
+    emit_execution_event(
+        state,
+        ExecutionEvent::Audited {
+            execution_id: execution_id.to_string(),
+            ok,
+            findings_count: findings.len() as u32,
+            error_count,
+        },
+    )
+    .await;
+    for f in &findings {
+        if f.get("kind").and_then(|v| v.as_str()) != Some("stale-claim") {
+            continue;
+        }
+        let claim_id = f
+            .get("claim_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let claimer = f
+            .get("claimer")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let lease_expires_at = f
+            .get("lease_expires_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        emit_execution_event(
+            state,
+            ExecutionEvent::StaleClaim {
+                execution_id: execution_id.to_string(),
+                claim_id,
+                claimer,
+                lease_expires_at,
+            },
+        )
+        .await;
+    }
+
     Ok(ToolResult::json_pretty(&json!({
         "execution_id": execution_id,
         "path": path.display().to_string(),
@@ -1963,6 +2115,16 @@ async fn action_repair(state: &AppState, args: &Value) -> Result<ToolResult> {
         touch_last_updated(&mut file)?;
         write_log_file(&path, &file)?;
     }
+
+    emit_execution_event(
+        state,
+        ExecutionEvent::Repaired {
+            execution_id: execution_id.to_string(),
+            applied: mode == "apply",
+            action_count: actions.len() as u32,
+        },
+    )
+    .await;
 
     Ok(ToolResult::json_pretty(&json!({
         "execution_id": execution_id,

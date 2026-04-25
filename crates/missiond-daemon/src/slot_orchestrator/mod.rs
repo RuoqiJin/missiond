@@ -17,6 +17,7 @@ pub mod controller;
 pub mod gemini_cli;
 pub mod gemini_controller;
 pub mod perm_injector;
+pub mod project_root;
 pub mod spawner;
 pub mod types;
 

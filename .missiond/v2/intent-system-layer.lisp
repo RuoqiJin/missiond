@@ -1,5 +1,5 @@
 ;; ═════════════════════════════════════════════════════════════
-;; MissionD — System-Layer Pillar (phase-A first-draft v0.1)
+;; MissionD — System-Layer Pillar (phase-B recursive-contract v0.2)
 ;; 目标: 无业务语义的运行时底座 — 类型 / 进程 / 传输 / RPC / 工具
 ;; 底稿: gptpro intent-system-layer.lisp (163 行) + v2/intent.lisp 已有详细占位
 ;;       + intent-pillar-transport-bootstrap.lisp + intent-types.lisp 等老图
@@ -7,8 +7,8 @@
 ;; ═════════════════════════════════════════════════════════════
 
 (pillar system-layer
-  :version "v0.1"
-  :status "phase-A first-draft 2026-04-21 — 本会话主驾"
+  :version "v0.2"
+  :status "phase-B recursive architecture contract 2026-04-25 — runtime substrate → bootstrap/transport/type surfaces"
   :predecessor "drafts/gptpro/intent-system-layer.lisp (163 行 starter) + v2/intent.lisp 已有详细占位 (L745-832)"
   :target-path ".missiond/v2/intent-system-layer.lisp"
 
@@ -32,7 +32,7 @@
      "worker v0.3 + intent-layer v0.1 的 cross-pillar-notes 对齐"]
 
   :historical-footprint-sources
-    ["DB pool 与 observability 已迁 memory pillar v0.5.1 (原本在 system-layer)"
+    ["DB pool 与 observability 已迁 memory pillar v0.5.4 (原本在 system-layer)"
      "event-bus refactor v2 (commit e139ecf 2026-04-19) 独立成 pillar 四, 原 event_router demoted"
      "git-watcher (infra/git_watcher.rs) v65c8b59 删, 由 tagger_chunker commit detection 接手"]
 
@@ -77,6 +77,14 @@
 
   (purpose "无业务语义的运行时底座 — 类型 / 进程 / 传输 / RPC / 纯工具; DB 与 observability 已迁 memory")
 
+  (recursive-architecture-contract
+    :shape "pillar = ingress → logic-core → egress; runtime-function = process/transport/type ingress → ordered bootstrap or adapter steps → shared runtime surface"
+    :unit "runtime component 是系统层原子; bootstrap phase / transport adapter / type surface 是系统层分子"
+    :rule-1 "system-layer 只拥有无业务语义的底座: types / process bootstrap / transport / RPC protocol / pure utils / infra adapters"
+    :rule-2 "任何有业务语义的状态机 ownership 必须指向 memory/intent-layer/worker, 本 pillar 只做 overview"
+    :rule-3 "bootstrap 必须按 phase 顺序写, 不允许隐式依赖"
+    :rule-4 "RPC gateway 只做协议与错误归一, tool schema 归 tools pillar")
+
   (pillar-ingress
     (entry-1 "daemon 进程启动 (binary main)")
     (entry-2 "stdio JSON-RPC (MCP 协议) / IPC (daemon) / WebSocket (前端)")
@@ -84,14 +92,64 @@
     (entry-4 "infra 自发监控 (aiops / daemon_stats)"))
 
   (pillar-core
-    (core-1 "gen_types.rs = 跨 crate 单一类型真理源 (Forge 冲压)")
-    (core-2 "bootstrap = daemon 启动 6 phase 严格依赖序列 (不允许逆序)")
-    (core-3 "AppState = 运行时共享依赖 Arc<RwLock<...>> (启动后近只读)")
-    (core-4 "RPC gateway = tool_name → handler 数据驱动路由 + 统一 error code")
-    (core-5 "state machines overview = 合法生命周期迁移语义底板 (5 FSM 分散各 pillar)")
-    (core-6 "pure utils = 无 I/O 的确定性算法 (semantic helpers / string safety / token budget)")
-    (core-7 "infra = 基础设施 7 文件 (aiops / daemon_stats / ipc_handler / mcp_client / ingestion_router / message_handler / session_util)")
-    (core-8 "ws/ipc = 传输层 (mcp↔daemon + daemon↔frontend)"))
+    :contract "system-layer 负责把进程拉起来、把协议接进来、把共享类型和纯函数提供给上层, 不拥有业务动作"
+
+    (function daemon-bootstrap
+      (ingress
+        :source "missiond daemon binary main")
+      (logic-core
+        (step s1 "load config / env / project registry")
+        (step s2 "init DB pool and memory gateways")
+        (step s3 "init event-bus services")
+        (step s4 "construct AppState shared dependencies")
+        (step s5 "spawn supervised workers / runtime tasks")
+        (step s6 "expose RPC / IPC / WS transports"))
+      (egress
+        :returns "running daemon AppState"
+        :to-worker "worker bootstrap reader"
+        :to-tools "RPC gateway ready"))
+
+    (function rpc-transport-normalization
+      (ingress
+        :sources ["stdio JSON-RPC" "IPC" "WebSocket" "internal mcp_client"])
+      (logic-core
+        (step s1 "decode transport frame")
+        (step s2 "normalize request / error code / response envelope")
+        (step s3 "route tool_name or daemon command to gateway boundary"))
+      (egress
+        :to-tools "MCP tool dispatch"
+        :to-frontend "WS/IPC response"))
+
+    (function shared-types-and-pure-utils
+      (ingress
+        :sources ["Forge generated types" "pure helper callers"])
+      (logic-core
+        (step s1 "gen_types.rs 提供跨 crate type truth")
+        (step s2 "pure utils 执行无 I/O deterministic helper")
+        (step s3 "state-machines-overview 只指向各 owner pillar"))
+      (egress
+        :to-all-pillars "shared structs/enums/helpers"
+        :no-business-ownership true))
+
+    (function infra-adapters
+      (ingress
+        :sources ["aiops" "daemon_stats" "ipc_handler" "mcp_client" "ingestion_router" "message_handler" "session_util"])
+      (logic-core
+        (step s1 "接入底层系统/外部进程/内部桥接")
+        (step s2 "把无业务语义的信号转成上层可消费 adapter output")
+        (step s3 "业务副作用交给 memory/worker/tools owner"))
+      (egress
+        :to-worker "data-plane bridge"
+        :to-memory "incidents / stats only through owner APIs"))
+
+    (core-invariants
+      (core-1 "gen_types.rs = 跨 crate 单一类型真理源")
+      (core-2 "bootstrap = daemon 启动 6 phase 严格依赖序列")
+      (core-3 "AppState = 运行时共享依赖 Arc/RwLock 聚合, 启动后近只读")
+      (core-4 "RPC gateway = protocol + error normalization; tool schema belongs to tools")
+      (core-5 "state machines overview 只做指路, ownership 分散各 pillar")
+      (core-6 "pure utils = 无 I/O 的确定性算法")
+      (core-7 "ws/ipc = 传输层, 不携带业务语义")))
 
   (pillar-egress
     (egress-1 "把 AppState / 传输 / 共享类型 暴露给 worker + tools + intent-layer")
@@ -207,7 +265,7 @@
         ((p1 infrastructure       "DB pool + embed_model + event_bus")
          (p1.5 project-registry   "ProjectRegistry 从 PG 加载 (commit e18d0bf, 必须早于 slot_manager)")
          (p2 core-modules         "PTYManager + SlotManager + MissionControl")
-         (p3 gateways             "LLM gateways: sonnet / gemini / codex / (minimax optional) + future xjp_router_client")
+         (p3 gateways             "LLM gateways: sonnet / gemini / codex / (minimax optional) + xjp_router_client embedding")
          (p4 pipelines            "Context pipeline + WorkerRegistry + ControlTree")
          (p5 workers-spawn        "17 BackgroundWorker spawn (main.rs L1007-1385)")
          (p6 engines-and-io       "autopilot + ipc-handler + ws-server"))
@@ -438,7 +496,7 @@
 
     (dispatch-mechanism
       :rule "数据驱动: tool_name → handler 映射, 非硬编码 match"
-      :scope "78 tools × 4 group (schema 归 tools pillar, handler 散各 pillar)"
+      :scope "79 tools × 4 domain (schema 归 tools pillar, handler 散各 pillar)"
       :forge-role "gen_gateway.rs 由 Forge 冲压, 源在 intent-mcp-defs.lisp + intent-pillar-mcp-dispatch.lisp")
 
     (error-codes
@@ -598,5 +656,5 @@
     (SL-T007 :status RESOLVED :resolved-at "2026-04-21"
              :finding "详见 § C.7. 599 行. ExtractionPhase enum + ExtractionState struct + 15% graceful / 3% emergency 阈值. Restart 策略: graceful(Idle 时 restart) / emergency(强 kill 立即) / recovery(requeue+release+sleep 3s+respawn). 独立于 ControlTree")
     (SL-T008 :status RESOLVED :resolved-at "2026-04-21"
-             :finding "详见 § C.8. 25+ env vars 全列 (MISSIOND_HOME/FORGE_BIN/MISSION_IPC_SOCKET/MISSION_PG_URL/OLLAMA_HOST 等). 关键: xjp_router_endpoint + xjp_router_auth_token **代码中不存在**, 确认 worker v0.3 I006 为真 — phase-C 施工项"))
+             :finding "详见 § C.8. 25+ env vars 全列 (MISSIOND_HOME/FORGE_BIN/MISSION_IPC_SOCKET/MISSION_PG_URL/OLLAMA_HOST 等). xjp-router endpoint/auth 已在 worker I006 代码对齐批次补齐为 MISSION_XJP_ROUTER_ENDPOINT / MISSION_XJP_ROUTER_AUTH_TOKEN"))
 )

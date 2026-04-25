@@ -81,6 +81,37 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
 
     let cwd = args.get("cwd").and_then(|v| v.as_str());
 
+    // Resolve target_project_root (intent-flow.lisp ::
+    // F-task-delegate-autoprovision :: s1b). When cwd is supplied, reject
+    // if it does not resolve under a registered project. When cwd is absent,
+    // we leave target_project_root as None and the auto-provision branch will
+    // surface the issue (compute_slot create requires a registered cwd).
+    let target_project_root = if let Some(cwd_val) = cwd {
+        match crate::slot_orchestrator::project_root::resolve_target_project_root(
+            None,
+            Some(std::path::Path::new(cwd_val)),
+            None,
+            &state.project_registry,
+        )
+        .await
+        {
+            Ok(r) => Some(r.project_root.to_string_lossy().to_string()),
+            Err(e) => {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(
+                        "PROJECT_ROOT_UNRESOLVED",
+                        format!("task_delegate cwd unresolved: {}", e),
+                    )
+                    .with_suggestion(
+                        "register the project via mission_project(action=\"init\") or pass cwd inside an existing project",
+                    ),
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
     // Intent → template mapping
     let template = match intent {
         "code" => "coder",
@@ -89,8 +120,10 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         _ => "coder",
     };
 
-    // Phase 6.1: Find idle slot with RAII guard (atomic check+reserve)
-    let guard = find_and_reserve_slot(state, template).await;
+    // Phase 6.1: Find idle slot with RAII guard (atomic check+reserve).
+    // intent-flow.lisp F-task-delegate-autoprovision :: s2 requires
+    // slot.project_root == target_project_root for reuse.
+    let guard = find_and_reserve_slot(state, template, target_project_root.as_deref()).await;
     let assignee = guard
         .as_ref()
         .map(|g| g.slot_id().to_string())
@@ -188,9 +221,15 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
 
 /// Phase 6.1: Find an idle slot and atomically reserve it via RAII guard.
 /// Returns a SlotAcquireGuard that auto-releases on drop.
+///
+/// Slot reuse honors `intent-worker.lisp :: invariant project-root-spawn-cwd`:
+/// when `target_project_root` is supplied, reject any candidate whose
+/// `SlotConfig.project_root` (or fallback `cwd`) does not match. Mismatched
+/// slots auto-release their guard immediately and the loop continues.
 async fn find_and_reserve_slot<'a>(
     state: &'a AppState,
     template: &str,
+    target_project_root: Option<&str>,
 ) -> Option<SlotAcquireGuard<'a>> {
     let target_role = match template {
         "coder" | "researcher" => "coder",
@@ -206,6 +245,19 @@ async fn find_and_reserve_slot<'a>(
         }
         if slot.config.role != target_role {
             continue;
+        }
+        // Project-root reuse check. Prefer the resolved project_root field;
+        // fall back to cwd (legacy slots still set cwd directly).
+        if let Some(target) = target_project_root {
+            let slot_root = slot
+                .config
+                .project_root
+                .as_deref()
+                .or(slot.config.cwd.as_deref());
+            match slot_root {
+                Some(root) if root == target => {}
+                _ => continue, // mismatch — do not reuse
+            }
         }
         // Atomically: acquire guard → check idle
         let guard = match state.slot_dispatch.try_acquire_guard(&slot.config.id) {

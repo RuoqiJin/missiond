@@ -202,8 +202,9 @@ impl Default for TopicRegistryBuilder {
 mod tests {
     use super::*;
     use crate::event::events::{
-        BoardEvent, IncidentEvent, LlmEvent, MemoryEvent, MessageEvent, ObservabilityEvent,
-        QuestionEvent, SessionEvent, SlotEvent, SystemEvent, TaskEvent, WorkerEvent,
+        BoardEvent, ExecutionEvent, IncidentEvent, LlmEvent, MemoryEvent, MessageEvent,
+        ObservabilityEvent, QuestionEvent, SessionEvent, SlotEvent, SystemEvent, TaskEvent,
+        WorkerEvent,
     };
     use std::time::Duration;
 
@@ -221,13 +222,14 @@ mod tests {
             .register::<SystemEvent>()
             .register::<ObservabilityEvent>()
             .register::<IncidentEvent>()
+            .register::<ExecutionEvent>()
             .build()
     }
 
     #[test]
-    fn register_12_domains_covers_all() {
+    fn register_all_domains_covers_every_domain() {
         let reg = build_full_registry();
-        assert_eq!(reg.len(), 12);
+        assert_eq!(reg.len(), Domain::ALL.len());
         for d in Domain::ALL {
             assert!(reg.any_topic(d).is_some(), "missing {:?}", d);
         }

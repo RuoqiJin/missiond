@@ -146,10 +146,32 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 .find(|s| s.config.id == slot_id)
                 .ok_or_else(|| anyhow!("Slot not found: {}", slot_id))?;
 
+            // Resolve target_project_root for project-bound CLI spawn
+            // (intent-worker.lisp :: invariant project-root-spawn-cwd). For
+            // ClaudeCode unresolved we preserve the slot's cwd (lisp-surveyor
+            // is a non-project-bound meta agent), the spawner re-checks. For
+            // Gemini/Codex unresolved, the spawner returns a structured error.
+            let cwd_path = slot.config.cwd.as_deref().map(PathBuf::from);
+            let resolved_cwd = if let Some(ref cwd) = cwd_path {
+                match crate::slot_orchestrator::project_root::resolve_target_project_root(
+                    None,
+                    Some(cwd),
+                    None,
+                    &state.project_registry,
+                )
+                .await
+                {
+                    Ok(r) => Some(r.project_root),
+                    Err(_) => Some(cwd.clone()), // spawner enforces engine policy
+                }
+            } else {
+                None
+            };
+
             let pty_slot = missiond_core::PTYSlot {
                 id: slot.config.id.clone(),
                 role: slot.config.role.clone(),
-                cwd: slot.config.cwd.as_deref().map(PathBuf::from),
+                cwd: resolved_cwd,
                 engine: slot.config.engine,
             };
 
