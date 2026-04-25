@@ -166,7 +166,7 @@
   ;; ──────────────────────────────────────────────────
   (source-index v2
     :scope "missiond-v2"
-    :version "v0.3 — section-id baseline + precompression coverage expansion 2026-04-26"
+    :version "v0.4 — wave 13 execution status backfill (evidence-collector / PLAN DAG runtime v2 / unified-entry pipeline v0) 2026-04-26"
     :status-taxonomy-ref "architecture-dsl.lisp :: status-taxonomy"
     :section-id-policy-ref "architecture-dsl.lisp :: section-id-policy"
     :section-entry-extended-ref "architecture-dsl.lisp :: section-entry-extended (wave 12 task 06)"
@@ -802,7 +802,7 @@
         :local-path "pillar intent-layer :: section unified-entry-pipeline :: :file-first-ssot"
         :status code-aligned-partial
         :compression-safe? true
-        :cross-ref ["memory.directive-layer.file-first-artifacts" "flow.unified-entry-pipeline"]
+        :cross-ref ["memory.directive-layer.file-first-artifacts" "flow.unified-entry-pipeline" "intent-layer.unified-entry-pipeline.run-pipeline-helper"]
         :note "writer 当前在 directive/plan/workflow handler 内联; foundation helper handlers/knowledge/file_artifacts.rs (wave11 task 完成) — status 段可压缩, 内容/路径不动")
 
       (section-entry
@@ -863,33 +863,37 @@
         :title "actor plan-dag-scheduler (full DAG architecture)"
         :source-file ".missiond/v2/intent-intent-layer.lisp"
         :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler"
-        :status architecture-designed
+        :status code-aligned-partial
         :compression-safe? false
         :implements
           ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
            "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
         :cross-ref ["memory.helper.agent-execution-coordination"
                     "memory.directive-layer.file-first-artifacts"
-                    "flow.execution-runner-dag-scheduler"]
-        :note "v0 plan-runner 单节点 dispatch 已 code-aligned; v1 完整 11-stage / per-node FSM / claim-lease 复用 agent-execution-coordination, 协议正文不压缩")
+                    "flow.execution-runner-dag-scheduler"
+                    "intent-layer.plan-dag-runtime-v2"]
+        :note "wave 13 task 02 (commit 8bb6110): plan_dag.rs runtime v2 已 code-aligned partial — max_parallel_nodes 参数 (default=1=v1 行为) + tokio::JoinSet 并发 dispatch; node lifecycle 6 状态 (pending/ready/running/succeeded/failed/skipped) + 3 skip 子分类 (upstream_failed / fail_fast_aborted / condition_gated); failure-policy fail-fast vs continue 已实现; per-node evidence transition 写 evidence collector. 单节点 fast-path 保留. 完整 11-stage 协议 (claim-lease 接入 agent-execution-coordination / per-node retry / rollback compensate / acceptance evaluator / review-gate paused) 仍 architecture-designed pending — 协议正文不压缩")
 
       (section-entry
         :section-id "flow.execution-runner-dag-scheduler"
         :title "F-intent-alignment-plan-execution-loop :: s6 execution-runner :: dag-scheduler"
         :source-file ".missiond/v2/intent-flow.lisp"
         :local-path "pillar flow :: F-intent-alignment-plan-execution-loop :: s6 execution-runner :: dag-scheduler"
-        :status architecture-designed
+        :status code-aligned-partial
         :compression-safe? false
-        :note "11-stage logic-core + node schema + node FSM + claim-lease + anti-patterns + open-questions; 协议契约段不压缩")
+        :cross-ref ["intent-layer.plan-dag-runtime-v2" "intent-layer.actor.plan-dag-scheduler"]
+        :note "wave 13 task 02 (commit 8bb6110): runtime v2 (max_parallel_nodes / lifecycle / failure-policy / per-node evidence) code-aligned partial; 完整 11-stage logic-core + node schema + node FSM + claim-lease + anti-patterns + open-questions 协议契约段不压缩")
 
       (section-entry
         :section-id "memory.directive-layer.plan-node-state-projection"
         :title "artifact plan-node-state-projection (DAG evidence sidecar)"
         :source-file ".missiond/v2/intent-memory.lisp"
         :local-path "pillar memory :: module directive-layer :: file-first-artifacts :: artifact plan-node-state-projection"
-        :status architecture-designed
+        :status code-aligned-partial
         :compression-safe? false
-        :note "evidence sidecar nodes[<node_id>] block: per-node attempts/claim_id/start-end/inner_result/acceptance_pass/rollback_path; v0 plan_runner_dispatch entry shape 必须向后兼容")
+        :cross-ref ["intent-layer.plan-dag-runtime-v2" "intent-layer.evidence-collector-typed-helper"]
+        :note "wave 13 task 02 (commit 8bb6110): per-node state projection 由 plan_dag runtime v2 写入 — pending/ready/running/succeeded/failed + 3 skip 子分类 (upstream_failed / fail_fast_aborted / condition_gated) 已落 evidence sidecar; v0 plan_runner_dispatch entry shape 向后兼容; per-node attempts (retry) / claim_id (复用 mission_execution claim-lease) / acceptance_pass / rollback_path 仍 architecture-designed pending — 配合完整 11-stage scheduler 落地")
 
       ;; ── 区域 5 · methodology compiler / semantic lifting ──
       (section-entry
@@ -940,8 +944,9 @@
            "crates/missiond-mcp/src/tools/comm/capability_usage.rs"]
         :cross-ref ["flow.capability-usage-monitoring"
                     "tools.surface.mission-capability-usage"
-                    "memory.system-support.capability-usage-read-model"]
-        :note "5 sources + lisp hint merge-candidate 已 code-aligned; semantic merge 自动决策 / DispatcherEvent / WorkerEvent / ExecutionEvent 聚合 / workflow stats 仍 pending — pending 块可压缩")
+                    "memory.system-support.capability-usage-read-model"
+                    "intent-layer.evidence-collector-typed-helper"]
+        :note "5 sources + lisp hint merge-candidate 已 code-aligned; semantic merge 自动决策 / DispatcherEvent / WorkerEvent / ExecutionEvent 聚合 (typed EvidenceEntry 已就位但 capability_usage 尚未消费) / workflow stats 仍 pending — pending 块可压缩")
 
       (section-entry
         :section-id "memory.system-support.capability-usage-read-model"
@@ -1004,35 +1009,250 @@
                     "flow.workstation-dispatch-policy"]
         :note "narrative 段, 重复 rationale 文本可压缩 (compression-policy.allowed.compress-redundant-pointers)"))
 
+    ;; ──────────────────────────────────────────────────
+    ;; v0.4 (wave 13 task 04) — execution status backfill
+    ;; ──────────────────────────────────────────────────
+    ;; 目的:
+    ;;   - 把 wave 13 task 01/02/03 三件 commit 的真实代码状态回填到 source-index
+    ;;   - 不做 L1/L2/L3 压缩, 不拆 shard (wave 13 task 05 才做 L1 安全压缩)
+    ;;   - 新 entry 在 wave 12 task 06 v0.3 baseline 上扩展, 不重复已有 section-id
+    ;; wave 13 已完成 commit (anchor):
+    ;;   - 88568a9 feat(plan): route runner evidence through collector
+    ;;   - 8bb6110 feat(plan): run ready DAG nodes with bounded concurrency
+    ;;   - 9759675 feat(intent): add unified entry pipeline helper
+    ;; 状态升级摘要 (本批次直接修改的现有 entry, 未列出仅指向新 entry 的 cross-ref 增补):
+    ;;   - intent-layer.actor.plan-dag-scheduler             architecture-designed → code-aligned-partial
+    ;;   - flow.execution-runner-dag-scheduler               architecture-designed → code-aligned-partial
+    ;;   - memory.directive-layer.plan-node-state-projection architecture-designed → code-aligned-partial
+    ;; ──────────────────────────────────────────────────
+    (wave-13-backfill v0.4
+      :date "2026-04-26"
+      :decided-by "wave 13 / task 04 lisp backfill session"
+      :scope "回填 wave 13 task 01/02/03 的真实代码状态; 新增 4 anchor entry, 已升级 3 现有 entry status"
+      :non-goal "本任务不真正压缩主 Lisp、不拆 shard (那是 wave 13 task 05)"
+      :commits
+        [(commit-1 :hash "88568a9" :title "route runner evidence through collector"
+                   :primary-targets ["crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs"
+                                     "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+                                     "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"]
+                   :tests "+7 evidence_collector / plan / plan_dag tests")
+         (commit-2 :hash "8bb6110" :title "run ready DAG nodes with bounded concurrency"
+                   :primary-targets ["crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+                                     "crates/missiond-mcp/src/tools/knowledge/plan.rs (schema only)"]
+                   :tests "+17 lifecycle / fail-fast / continue / wave / max_parallel_nodes=1 v1 等同 sequential tests")
+         (commit-3 :hash "9759675" :title "add unified entry pipeline helper"
+                   :primary-targets ["crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs (新建 891 行)"
+                                     "crates/missiond-daemon/src/handlers/knowledge/mod.rs"]
+                   :tests "+21 plan_pipeline / run_pipeline / decorator / stage routing tests")]
+
+      ;; ── 区域 8 · evidence-collector typed helper integration ──
+      (section-entry
+        :section-id "intent-layer.evidence-collector-typed-helper"
+        :title "evidence-collector typed EvidenceEntry helper (wave 13 task 01)"
+        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: role evidence-collector"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"]
+        :cross-ref ["memory.directive-layer.plan-evidence-sidecar"
+                    "memory.directive-layer.plan-node-state-projection"
+                    "intent-layer.actor.plan-dag-scheduler"
+                    "intent-layer.evidence-collector-event-ref"]
+        :wave "13 task 01 (commit 88568a9)"
+        :note "typed EvidenceEntry (源/kind/schema_version 三段 canonical 字段) 接入 plan.rs::action_execute_internal (plan_runner_dispatch entry) + plan_dag.rs::每节点 dispatch (plan_dag_node_dispatch entry); legacy mission_plan(action=record_evidence) 走 with_extra flat-top byte-for-byte 兼容; sidecar 写失败仍走现有 partial / status_update_error 语义, 不静默吞错; bus subscription 仍 pending — execution_event ref 用 EventRef::unavailable(\"...\") 占位; 升级到 plan_evidence DB JSONB 仍 pending — 契约段不压缩")
+
+      (section-entry
+        :section-id "intent-layer.evidence-collector-event-ref"
+        :title "EventRef placeholder shape (bus subscription pending)"
+        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: role evidence-collector :: event-ref placeholder"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements ["crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs"]
+        :cross-ref ["intent-layer.evidence-collector-typed-helper"
+                    "event-bus.section.egress"]
+        :wave "13 task 01 (commit 88568a9)"
+        :note "EventRef::unavailable(reason) 占位 — plan-runner v0 / plan_dag runtime v2 当前无法在 dispatch 同步取得 live ExecutionEvent id; sidecar 字段 unavailable=true + reason 字符串保留; 升级到 live ExecutionEvent ref 必须等 bus subscription 接入 (event-bus pillar :: section egress); 占位本身是契约 (unavailable=true + reason 必填), 不压缩")
+
+      (section-entry
+        :section-id "tools.surface.mission-plan.record-evidence-typed"
+        :title "mission_plan(action=record_evidence) typed wrap path"
+        :source-file ".missiond/v2/intent-tools.lisp"
+        :local-path "pillar tools :: section mcp-surface-lifecycle :: implemented-surface mission_plan :: record_evidence typed wrap"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-mcp/src/tools/knowledge/plan.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs"]
+        :cross-ref ["intent-layer.evidence-collector-typed-helper"
+                    "memory.directive-layer.plan-evidence-sidecar"]
+        :wave "13 task 01 (commit 88568a9)"
+        :note "wire 兼容: evidence_kind/source 都缺省时输出与旧 record_evidence 兼容 (legacy passthrough); 任一字段出现则走 typed EvidenceEntry wrap (canonical source/kind/schema_version + with_extra flat-top); 写失败 → status_update_error 暴露, 不静默兜底 — 契约段不压缩")
+
+      ;; ── 区域 9 · PLAN DAG runtime v2 (concurrency + lifecycle) ──
+      (section-entry
+        :section-id "intent-layer.plan-dag-runtime-v2"
+        :title "PLAN DAG runtime v2 — bounded concurrency + node lifecycle"
+        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler :: runtime v2"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+           "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+        :cross-ref ["intent-layer.actor.plan-dag-scheduler"
+                    "flow.execution-runner-dag-scheduler"
+                    "memory.directive-layer.plan-node-state-projection"
+                    "intent-layer.evidence-collector-typed-helper"
+                    "intent-layer.plan-dag-runtime-v2.execution-event-decision"]
+        :wave "13 task 02 (commit 8bb6110)"
+        :note "wave-based scheduler driven by tokio::JoinSet — 每 wave drain up to max_parallel_nodes (default=1=v1 sequential 行为) ready nodes; max_parallel_nodes=1 等同 v1 顺序; failure-policy fail-fast 与 continue 已实现; evidence 写串行化避免文件 race; dry_run 返回 DAG + concurrency_plan 不 dispatch; node lifecycle 6 主状态 (pending/ready/running/succeeded/failed/skipped) + 3 skip 子分类 (upstream_failed / fail_fast_aborted / condition_gated); response 含 scheduler_mode / node_count / max_parallel_nodes / node_results[] / skipped_nodes[] / aggregate_status; full 11-stage scheduler / claim-lease / per-node retry-N / acceptance evaluator / rollback compensate / review-gate paused 仍 architecture-designed pending — 协议契约段不压缩")
+
+      (section-entry
+        :section-id "intent-layer.plan-dag-runtime-v2.node-lifecycle"
+        :title "PLAN DAG node lifecycle 6 状态 + 3 skip variants"
+        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler :: runtime v2 :: node-lifecycle"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements ["crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"]
+        :cross-ref ["intent-layer.plan-dag-runtime-v2"
+                    "memory.directive-layer.plan-node-state-projection"]
+        :wave "13 task 02 (commit 8bb6110)"
+        :note "6 主状态 enum NodeState: pending / ready / running / succeeded / failed / skipped; skip 子分类 3 种枚举: skipped_upstream_failed (含 failed_dep 字段) / skipped_condition (condition gated) / skipped_fail_fast_abort (含 aborter 字段); 每次 transition 写 evidence sidecar plan_dag_node_dispatch entry, 含 skip_reason + skip_detail; 与 actor plan-dag-scheduler 节点 FSM enum (pending/ready/claimed/running/succeeded/failed/skipped/retrying/rolling-back/paused) 对齐 — runtime v2 仅实现非-claim/非-retry/非-rollback 子集; 子集枚举本身是契约不压缩")
+
+      (section-entry
+        :section-id "intent-layer.plan-dag-runtime-v2.failure-policy"
+        :title "PLAN DAG failure-policy: fail-fast vs continue"
+        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler :: runtime v2 :: failure-policy"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements ["crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"]
+        :cross-ref ["intent-layer.plan-dag-runtime-v2"
+                    "intent-layer.actor.plan-dag-scheduler"]
+        :wave "13 task 02 (commit 8bb6110)"
+        :note "fail-fast: 节点失败时 scheduler 停止后续 wave, 未 drain 的 ready 节点标 skipped_fail_fast_abort + aborter; continue: 失败节点的下游子树标 skipped_upstream_failed + failed_dep, 无依赖的其他 ready 节点继续; retry-N / route-to-rollback 仍 architecture-designed pending — 决策表本身是契约不压缩")
+
+      (section-entry
+        :section-id "intent-layer.plan-dag-runtime-v2.execution-event-decision"
+        :title "ExecutionEvent extension deferred (rationale)"
+        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler :: runtime v2 :: ExecutionEvent decision"
+        :status pending
+        :compression-safe? true
+        :cross-ref ["intent-layer.plan-dag-runtime-v2"
+                    "intent-layer.evidence-collector-event-ref"
+                    "worker.section.claudecode-workstation-orchestration.execution-strategy-record"]
+        :wave "13 task 02 (commit 8bb6110)"
+        :note "wave 13 task 02 决议: scheduler runtime 与 bus subscription 正交 — 不扩 ExecutionEvent variant; 理由: 加 variant 会逼 consumer 处理还没 emit 的 variant; 待 bus subscription / 完整 11-stage scheduler 落地后再扩 ExecutionEvent::PlanNodeStateChanged + dispatch_strategy/target_project/requested_cwd 字段; rationale 段可压缩")
+
+      ;; ── 区域 10 · unified entry pipeline v0 ──
+      (section-entry
+        :section-id "intent-layer.unified-entry-pipeline.run-pipeline-helper"
+        :title "unified-entry-pipeline run_pipeline internal helper v0"
+        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: helper run_pipeline (internal)"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/mod.rs"]
+        :cross-ref ["intent-layer.unified-entry-pipeline.file-first-ssot"
+                    "intent-layer.unified-entry-pipeline.alignment-review-gate"
+                    "intent-layer.unified-entry-pipeline.plan-review-gate"
+                    "flow.unified-entry-pipeline"
+                    "intent-layer.unified-entry-pipeline.no-new-tool-decision"
+                    "intent-layer.unified-entry-pipeline.v0-non-goals"]
+        :wave "13 task 03 (commit 9759675)"
+        :note "internal helper 不新增 MCP tool — 仅 daemon 内部 run_pipeline + 纯函数 plan_pipeline (testable); 复用现有 mission_directive / mission_plan / mission_workflow 管理面 surface; 7 步 pipeline: s1_message_intake → s3_alignment_review_gate → s4_plan_authoring → s5_plan_review_gate → s6_execution_runner; 每 response 携带 pipeline_stage / next_step / flow_ref / expects_next_inputs / next_call (适用时); MCP tool 数量保持 83 不变; +21 tests (plan_pipeline / run_pipeline / decorator / stage routing); 完整 actor / autonomous review answer / live execution 仍 pending — 契约段不压缩")
+
+      (section-entry
+        :section-id "intent-layer.unified-entry-pipeline.no-new-tool-decision"
+        :title "unified-entry no-new-tool decision (v0)"
+        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: no-new-tool-decision"
+        :status code-aligned
+        :compression-safe? true
+        :cross-ref ["intent-layer.unified-entry-pipeline.run-pipeline-helper"
+                    "tools.section.tool-governance"]
+        :wave "13 task 03 (commit 9759675)"
+        :note "wave 13 task 03 决议: 不新增 mission_message / mission_invoke; 复用 mission_directive(action=compile) + mission_plan(action=compile|approve|execute) + mission_workflow(action=distill|record_execution) 管理面 surface; tool_count_invariant=83 不变; rationale 段可压缩")
+
+      (section-entry
+        :section-id "intent-layer.unified-entry-pipeline.v0-non-goals"
+        :title "unified-entry pipeline v0 non-goals (4 项)"
+        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: v0-non-goals"
+        :status pending
+        :compression-safe? true
+        :implements ["crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs"]
+        :cross-ref ["intent-layer.unified-entry-pipeline.run-pipeline-helper"
+                    "intent-layer.unified-entry-pipeline.alignment-review-gate"
+                    "intent-layer.unified-entry-pipeline.plan-review-gate"
+                    "worker.section.claudecode-workstation-orchestration"]
+        :wave "13 task 03 (commit 9759675)"
+        :v0-non-goals
+          ["auto_approve_directive — 不允许 LLM 产物自动越过 alignment-review-gate"
+           "auto_approve_plan — 不允许 LLM 产物自动越过 plan-review-gate"
+           "auto_answer_review_question — 不替人/Codex 答 QuestionEvent (人工 gate)"
+           "autonomous_workstation_dispatch — 不自动 spawn ClaudeCode 工位执行 plan"]
+        :surface-rule "每一步 response 在 meta.v0_non_goals 显式 surface 这 4 项, 让 caller 不会误以为系统有自动决策能力"
+        :note "v0 non-goals 是契约段, 列表本身不压缩; rationale narrative 可压缩")
+
+      ;; ── 区域 11 · flow / tools cross-references for unified-entry v0 ──
+      (section-entry
+        :section-id "flow.unified-entry-pipeline.run-pipeline-stages"
+        :title "F-intent-alignment-plan-execution-loop :: run_pipeline 7 step mapping"
+        :source-file ".missiond/v2/intent-flow.lisp"
+        :local-path "pillar flow :: F-intent-alignment-plan-execution-loop :: run_pipeline stage mapping"
+        :status code-aligned-partial
+        :compression-safe? true
+        :implements ["crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs"]
+        :cross-ref ["intent-layer.unified-entry-pipeline.run-pipeline-helper"
+                    "flow.alignment-review-gate-stage"
+                    "flow.plan-review-gate-stage"
+                    "flow.execution-runner-dag-scheduler"]
+        :wave "13 task 03 (commit 9759675)"
+        :note "stage 字符串映射: s1_message_intake (mission_directive compile) → s3_alignment_review_gate (mission_directive approve) → s4_plan_authoring (mission_plan compile) → s5_plan_review_gate (mission_plan approve) → s6_execution_runner (mission_plan execute internal); 不新增 tool, 复用现有管理面; flow_ref 在每 response surface — narrative 段可压缩, stage 名映射 (契约) 不动"))
+
     ;; ── 已声明但本次未细化的 section, 后续再补 ──
     (deferred-coverage
-      :reason "v0.2 baseline 覆盖 7 pillar 顶层; v0.3 (wave 12 task 06) 扩了 7 高变动语义区; 仍有以下未细化项, 等后续 wave 再补"
+      :reason "v0.2 baseline 覆盖 7 pillar 顶层; v0.3 (wave 12 task 06) 扩了 7 高变动语义区; v0.4 (wave 13 task 04) 回填 evidence-collector / PLAN DAG runtime v2 / unified-entry pipeline v0 共 +11 entry; 仍有以下未细化项, 等后续 wave 再补"
       :scope-deferred
         ["pillar memory 内 cross-cutting / pillar-interfaces 的 5 surface 矩阵"
          "pillar worker section workers 内 19 worker 的 per-worker entry"
-         "pillar tools 83 tool 的 per-tool section-id (现仅按 section 分组, capability_usage 已有专项)"
+         "pillar tools 83 tool 的 per-tool section-id (现仅按 section 分组, capability_usage / mission_plan record_evidence 已有专项)"
          "pillar intent-layer 各 actor 内部 step (directive-compiler / plan-compiler / workflow-distiller 内部)"
          "pillar event-bus 4 表内部字段索引 (frozen 文件, 不强行细化)"
          "pillar flow 其他 ~17 个非主线 flow (F9-project-init / F-incident-reaction / F-execution-log-governance 等)"
          "scoped-commit-handoff 的 daemon enforce step-level entry (待 daemon 实现后回填)"
-         "PLAN DAG scheduler 内部 11 stage 的 per-stage entry (待 v1 plan-runner 实现后回填)"]))
+         "PLAN DAG scheduler 完整 11-stage 的 per-stage entry — runtime v2 已覆盖 dispatch/lifecycle/failure-policy/condition-gate, 仍 deferred: claim-lease (s5) / per-node retry-N (s9) / rollback compensate (s9) / acceptance evaluator (s7) / review-gate paused (s9) / mark-plan-final (s10) / trigger-record-execution-distill (s11)"
+         "unified-entry pipeline 升级到 actor 后的 4 自动化 non-goal 实现 (auto_approve_directive / auto_approve_plan / auto_answer_review_question / autonomous_workstation_dispatch)"
+         "ExecutionEvent extension (PlanNodeStateChanged + dispatch_strategy/target_project/requested_cwd 字段) — 等 bus subscription / 完整 scheduler 落地"
+         "EventRef::unavailable → live event_id 升级 — 等 bus live subscription 接入"]))
 
   ;; ──────────────────────────────────────────────────
   ;; Part 3 · 当前判断与下一步路径
   ;; ──────────────────────────────────────────────────
   (judgement-now
     :date "2026-04-26"
-    :decided-by "wave 11 lisp-source-index-precompression + wave 12 task 06 source-index-expansion sessions"
-    :wave12-task-06-non-goal
-      ["本任务不真正压缩主 Lisp"
+    :decided-by "wave 11 lisp-source-index-precompression + wave 12 task 06 source-index-expansion + wave 13 task 04 execution-status-backfill sessions"
+    :wave13-task-04-non-goal
+      ["本任务不真正压缩主 Lisp (那是 wave 13 task 05 L1 安全压缩)"
        "本任务不拆任何 shard (拆 shard 仍要等 split-policy.wait-for-conditions 全满足之后)"
-       "本任务只扩 stable section-id / source-index 覆盖面, 让未来压缩有锚点"]
+       "本任务只在 v0.3 baseline 上扩 status / +11 entry, 不重复已有 section-id"]
     :why-no-main-compression-yet
       ["主大 lisp 正文是其他并行会话 (file-first writer / review gate / PLAN DAG) 的 anchor"
        "若现在压缩, 那些会话的 cross-ref 会失锚, 出现回退成本"
-       "压缩需要的 section-id / status taxonomy / split rule 必须先冻结 — 这正是 wave 11 + wave 12 task 06 的工作"]
+       "压缩需要的 section-id / status taxonomy / split rule 必须先冻结 — 这正是 wave 11 + wave 12 task 06 + wave 13 task 04 的工作"]
     :pre-compression-checklist
-      ["section-id 在 source index 已落 (wave 11 完成 7 pillar baseline; wave 12 task 06 扩 7 高变动语义区, 共 +22 entry, 含 :compression-safe? 标注)"
+      ["section-id 在 source index 已落 (wave 11 完成 7 pillar baseline; wave 12 task 06 扩 7 高变动语义区 +22 entry; wave 13 task 04 扩 evidence-collector / PLAN DAG runtime v2 / unified-entry pipeline v0 共 +11 entry, 全部含 :compression-safe? 标注)"
        "status-taxonomy 已在 architecture-dsl.lisp 冻结 7 值"
        "split-policy 已写明 wait-for-conditions"
        "compression-policy 已写明 forbidden 红线 (ingress/logic-core/egress 不动)"
@@ -1040,11 +1260,13 @@
        "checker phase-3-precompression 已写入 architecture-dsl.lisp (待 checker 升级实现)"
        "wave 12 新增 checker phase-3.1: section-id 唯一性 / file+local-path+status 必填 (待 checker 升级实现)"]
     :unblock-conditions-for-real-compression
-      ["条件 1 — file-first writer (alignment.lisp / PLAN.lisp / workflow.lisp) 落地"
-       "条件 2 — review gate 能基于 artifact 自动出 QuestionEvent"
-       "条件 3 — PLAN DAG scheduler 跑过最小闭环 + ExecutionEvent dispatch metadata code-aligned"]
+      ["条件 1 — file-first writer (alignment.lisp / PLAN.lisp / workflow.lisp) 落地 — 仍 pending"
+       "条件 2 — review gate 能基于 artifact 自动出 QuestionEvent — 仍 pending (manager surface code-aligned, auto QuestionEvent 未启用)"
+       "条件 3 — PLAN DAG scheduler 跑过最小闭环 + ExecutionEvent dispatch metadata code-aligned — runtime v2 已 code-aligned partial (commit 8bb6110: 6 lifecycle 状态 + 3 skip 子分类 + max_parallel_nodes + failure-policy fail-fast/continue + per-node evidence); ExecutionEvent dispatch metadata 仍 pending (wave 13 task 02 决议: scheduler runtime 与 bus subscription 正交, 不扩 ExecutionEvent variant 直到 bus subscription 落地)"
+       "条件 4 (wave 13 新增) — unified-entry pipeline v0 internal helper 已 code-aligned partial (commit 9759675); 不新增 tool, 复用 mission_directive/mission_plan/mission_workflow 管理面; 4 项 v0 non-goal (auto_approve_directive / auto_approve_plan / auto_answer_review_question / autonomous_workstation_dispatch) 在每 response surface, 仍 pending"
+       "条件 5 (wave 13 新增) — evidence collector typed helper 已 code-aligned partial (commit 88568a9): plan.rs::action_execute_internal + plan_dag.rs 每节点 dispatch 走 typed EvidenceEntry; legacy passthrough byte-for-byte 兼容; live ExecutionEvent ref 仍用 EventRef::unavailable 占位 (bus subscription pending)"]
     :next-step
-      ["条件全满足后, 由 lisp-review skill 牵头, 按 compression-policy.allowed 三类做批量压缩"
+      ["条件全满足后, 由 lisp-review skill 牵头, 按 compression-policy.allowed 三类做批量压缩 (wave 13 task 05 L1 安全压缩先行)"
        "压缩 PR 必须带 git diff --check + checker --all-v2 + 对应 *-execution.lisp D-deviation"
        "物理 split (拆 shard) 是压缩之后的事, 不和压缩混在一起"
        "压缩前以 :compression-safe? 字段做白名单过滤 — false 的 section 即使在 compression-policy.allowed 之内也保留正文"]))

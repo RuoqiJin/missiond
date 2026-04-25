@@ -2073,9 +2073,9 @@
 
     (dispatch-decision-matrix
       :desc "plan-runner 选择策略的决策表 — 当前由人/上层 actor 手动应用; 未来由 plan-runner 读取 PLAN.lisp 自动应用"
-      :status "architecture-designed; code-alignment pending"
-      :dag-scheduler-cross-ref "intent-layer pillar :: section action-instruction-actor :: actor plan-dag-scheduler — 节点 schema :dispatch-strategy / :target-project / :parallelism 字段是本 matrix 的输入; scheduler s6 dispatch-ready-nodes 按本 matrix 路由 substrate"
-      :flow-cross-ref "flow pillar :: F-intent-alignment-plan-execution-loop :: s6 :: dag-scheduler — 完整 11-stage 协议正文"
+      :status "architecture-designed; runtime v2 已能消费 PLAN.lisp 节点 :dispatch-strategy / :target-project / :parallelism (mission_plan execute_mode=internal 路径), 但完整 PLAN.lisp 自动推断 strategy 仍 code-alignment pending"
+      :dag-scheduler-cross-ref "intent-layer pillar :: section action-instruction-actor :: actor plan-dag-scheduler — runtime v2 已 code-aligned partial (wave 13 task 02 commit 8bb6110: handlers/knowledge/plan_dag.rs wave-based concurrency + 6 lifecycle + 3 skip 子分类 + failure-policy fail-fast/continue + per-node evidence; max_parallel_nodes 字段已通到 schema); 节点 schema :dispatch-strategy / :target-project / :parallelism 字段是本 matrix 的输入; scheduler s6 dispatch-ready-nodes 按本 matrix 路由 substrate"
+      :flow-cross-ref "flow pillar :: F-intent-alignment-plan-execution-loop :: s6 :: dag-scheduler — 完整 11-stage 协议正文 (runtime v2 已实现 dispatch + lifecycle + failure-policy fail-fast/continue 子集)"
       (rule lisp-architecture-task
         :pattern "PLAN.lisp 仅修改 .missiond/v2/*.lisp / .missiond/intent-*.lisp / .missiond/workflows/*.lisp"
         :strategy "resident-lisp-architect-session — 复用常驻 slot, 不另开"
@@ -2100,20 +2100,23 @@
     (execution-strategy-record
       :desc "把 plan-runner 选择的策略写进 mission_execution 协调面, 让 evidence-collector 与 capability-usage-monitor 能事后回放"
       :field "execution.dispatch_strategy ∈ {resident-lisp / fresh-code-alignment / agent-team / mixed / prompt-fallback / unknown} (companion log meta) — 未知值归一化为 unknown"
-      :writer "mission_execution(action=open) 接收 dispatch_strategy/target_project/requested_cwd 写入 companion log meta; 由 plan-runner v0 (mission_plan execute_mode=internal target=mission_execution) 自动转发"
-      :consumer "evidence-collector 落到 evidence sidecar plan_runner_dispatch entry; mission_execution(list/status) 暴露给 capability-usage-monitor 与回放"
-      :status "code-aligned partial — mission_execution schema 已含 dispatch_strategy/target_project/requested_cwd 字段, 写 companion log meta + list/status graceful read; ExecutionEvent::Opened 扩展 dispatch metadata 仍 code-alignment pending (companion log durable only)"
+      :writer "mission_execution(action=open) 接收 dispatch_strategy/target_project/requested_cwd 写入 companion log meta; 由 plan-runner v0 (mission_plan execute_mode=internal target=mission_execution) 自动转发; plan_dag.rs runtime v2 (wave 13 task 02 commit 8bb6110) 在 wave-based 并发下沿用同样的 evidence transition + companion log 写串行化"
+      :consumer "evidence-collector 落到 evidence sidecar plan_runner_dispatch / plan_dag_node_dispatch entry (typed EvidenceEntry — wave 13 task 01 commit 88568a9); mission_execution(list/status) 暴露给 capability-usage-monitor 与回放"
+      :status "code-aligned partial — mission_execution schema 已含 dispatch_strategy/target_project/requested_cwd 字段, 写 companion log meta + list/status graceful read; plan_dag runtime v2 已 code-aligned partial 跨节点 evidence sidecar 保留 dispatch_strategy/target_project/requested_cwd; ExecutionEvent::Opened 扩展 dispatch metadata 仍 code-alignment pending (companion log durable only; wave 13 task 02 决议: scheduler runtime 与 bus subscription 正交, 不扩 ExecutionEvent variant 直到 bus subscription / 完整 11-stage scheduler 落地)"
       :durability-cross-ref "scoped-commit-handoff policy — completion 必须最终带 commit_hash 或 commit_status=blocked, 否则 audit 标记 durability gap"
       :implementation-targets ["crates/missiond-mcp/src/tools/knowledge/agent_execution.rs (open schema)"
                                "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs (action_open meta render + list/status graceful)"
                                "crates/missiond-daemon/src/handlers/knowledge/plan.rs (execute_mode=internal forwarding to mission_execution)"
-                               "crates/missiond-core/src/event/events/execution.rs (ExecutionEvent — 字段扩展 pending)"]
-      :pending ["ExecutionEvent::Opened 扩展 dispatch_strategy/target_project/requested_cwd"
-                "ExecutionEvent::PlanNodeStateChanged 新增 (per-node FSM 转移广播 — 配合 actor plan-dag-scheduler)"
+                               "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs (runtime v2 — wave 13 task 02 commit 8bb6110: per-node evidence transition typed EvidenceEntry 串行化)"
+                               "crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs (typed EvidenceEntry — wave 13 task 01 commit 88568a9; EventRef::unavailable 占位)"
+                               "crates/missiond-core/src/event/events/execution.rs (ExecutionEvent — 字段扩展 pending; wave 13 task 02 决议不扩 variant)"]
+      :pending ["ExecutionEvent::Opened 扩展 dispatch_strategy/target_project/requested_cwd (wave 13 task 02 决议: 不扩 variant 直到 bus subscription)"
+                "ExecutionEvent::PlanNodeStateChanged 新增 (per-node FSM 转移广播 — 配合 actor plan-dag-scheduler 完整 11-stage; runtime v2 暂用 evidence sidecar plan_dag_node_dispatch entry 替代)"
                 "timeline / 其他查询面暴露 dispatch_strategy"
                 "plan-runner 自动从 PLAN.lisp DAG 推断 strategy (auto-selection v1 已支持保守 hint, 完整推断 pending)"
-                "完整 PLAN DAG scheduler 跑通后 per-node companion log 写入路径 (claim/heartbeat/release/complete 由 scheduler s5/s8 调用) — 复用 mission_execution 12-action manager, 不新增 action"])
-      :dag-scheduler-cross-ref "intent-layer pillar :: section action-instruction-actor :: actor plan-dag-scheduler — scheduler 必须经 mission_execution(action=claim) 申请节点 scope=plan/<plan_id>/node/<node_id> claim_id, 不允许自建 ID 池 (D010 教训)")
+                "完整 PLAN DAG scheduler 跑通后 per-node companion log 写入路径 (claim/heartbeat/release/complete 由 scheduler s5/s8 调用) — 复用 mission_execution 12-action manager, 不新增 action"
+                "EventRef::unavailable → live ExecutionEvent id (等 bus live subscription 接入)"])
+      :dag-scheduler-cross-ref "intent-layer pillar :: section action-instruction-actor :: actor plan-dag-scheduler — runtime v2 已 code-aligned partial (handlers/knowledge/plan_dag.rs); 完整 11-stage scheduler 必须经 mission_execution(action=claim) 申请节点 scope=plan/<plan_id>/node/<node_id> claim_id, 不允许自建 ID 池 (D010 教训) — 仍 architecture-designed pending")
 
   ;; ══════════════════════════════════════════════════════════
   ;; 2.8 Worker-side Computation (retrieval + forge)
